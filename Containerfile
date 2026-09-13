@@ -16,7 +16,7 @@ WORKDIR /app
 # non-root even when the image is run without a passwd entry or with a custom
 # rootless user namespace.
 RUN mkdir -p /etc/status-page
-COPY --chown=65532:65532 status_api.py /app/status_api.py
+COPY --chown=65532:65532 status_api.py healthcheck.py /app/
 COPY --chown=65532:65532 web /app/web
 COPY --chown=65532:65532 LICENSE THIRD_PARTY_NOTICES.md /app/
 COPY --chown=65532:65532 licenses /app/licenses
@@ -27,6 +27,6 @@ EXPOSE 8080
 # This probes the application itself, rather than a process or socket.  It is
 # also useful when the image is run behind the compose reverse proxy.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
-    CMD ["python3", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2); raise SystemExit(0 if response.status == 200 else 1)"]
+    CMD ["python3", "/app/healthcheck.py"]
 
 ENTRYPOINT ["python3", "/app/status_api.py"]

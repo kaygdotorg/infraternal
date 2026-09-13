@@ -9,3 +9,5 @@
 !THIRD_PARTY_NOTICES.md
 !licenses/
 !licenses/**
+
+!healthcheck.py
