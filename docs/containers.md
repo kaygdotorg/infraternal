@@ -8,7 +8,8 @@ upstream timeouts, and response buffering before forwarding the small
 same-origin surface to the application.
 
 The default Compose port is bound to `127.0.0.1`. The application has no host
-port and is reachable only from the proxy network. A deployment that needs to
+port and is reachable from containers on its attached proxy and metrics
+networks. Keep membership in both networks controlled. A deployment that needs to
 serve the page publicly must put a trusted TLS terminator in front of this
 loopback listener, or extend the proxy configuration with its own certificate
 and TLS policy. Do not publish the application container directly.
@@ -43,7 +44,7 @@ The public client and any internet-facing TLS ingress are untrusted. NGINX
 limits their request size, header size, idle time, connection count, and
 per-address rate before the bounded Python worker and upstream-query pools are
 used. A malformed or unexpectedly large Prometheus response is rejected by
-the application, and public errors contain only a generic status. The
+the application, and upstream/query failures return a generic public error. The
 read-only root filesystem, dropped capabilities, no-new-privileges setting,
 rootless engine, and resource caps limit the impact of an application or proxy
 fault inside its container namespace.
@@ -204,19 +205,21 @@ an address reachable by that ingress and an unused private port, then use the
 same documented Podman commands:
 
 ```sh
-export STATUS_BIND_ADDRESS="${STATUS_INGRESS_ADDRESS}"
-export STATUS_HTTP_PORT="${STATUS_INGRESS_PORT}"
+# Example for an ingress running on the same host. For a containerized ingress,
+# choose a private host address reachable from its network instead of loopback.
+export STATUS_BIND_ADDRESS=127.0.0.1
+export STATUS_HTTP_PORT=8080
 BUILDAH_FORMAT=docker podman compose -f compose.yaml -f deploy/compose.podman.yaml build app
 podman compose -f compose.yaml -f deploy/compose.podman.yaml up -d
 ```
 
 Only the NGINX proxy is published on that private bind; the application keeps
-no host port. Configure the existing ingress to proxy the public root and the
-candidate's client-side service routes to this NGINX listener. If the public
-site has a prefix such as `/preview`, strip that prefix once at the existing
-ingress before proxying. Keep the exact legacy API route on its existing
-service while cached frontend assets transition to the package's
-`/api/v1/status` path. Remove any older ingress CSP/header override so the
+no host port. Route the public root, service pages, static assets, configuration
+and status API to this NGINX listener. If an ingress accepts a prefix such as
+`/preview`, strip it once before proxying and also route the root-relative asset
+and API URLs: the browser uses `/config.json` and `/api/v1/status` at the origin
+root. A prefix alone is not a fully isolated subpath deployment.
+Remove conflicting ingress CSP/header overrides so the
 backend headers remain authoritative. The upstream TLS policy and public HSTS
 belong at the trusted ingress.
 
@@ -247,6 +250,11 @@ podman run --rm --read-only \
   --volume "$STATUS_CONFIG_FILE:/etc/status-page/config.json:ro" \
   status-page:local
 ```
+
+This smoke test assumes authentication is disabled in its synthetic config.
+For authenticated metrics, mount the configured credential file read-only at
+its container path as in the Compose deployment. Never disable authentication
+on a production datasource to run a smoke test.
 
 This direct command is for local inspection only; use the NGINX service for a
 production deployment. If SELinux labels prevent a bind mount on a host that
