@@ -226,6 +226,12 @@ resource, secret, and read-only settings. Future source updates should rebuild
 the image from this canonical package; production configuration, credentials,
 and private static assets remain external read-only mounts.
 
+After pulling an update, use your same Compose files and environment with
+`up -d --build --force-recreate`. Recreating also refreshes individual bind
+mounts: Git can replace a configuration file's inode, leaving a running
+container attached to the old contents even after a process reload. Validate
+the new proxy configuration and health endpoints after the update.
+
 The equivalent isolated application smoke test, useful when inspecting an
 image without starting the reverse proxy, is:
 
