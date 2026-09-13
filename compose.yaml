@@ -1,0 +1,104 @@
+name: status-page
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: status-page:local
+    environment:
+      STATUS_CONFIG: /etc/status-page/config.json
+      LISTEN_HOST: 0.0.0.0
+      PORT: "8080"
+      # The edge proxy applies the client admission limit.  Keep this bounded
+      # aggregate budget high enough for a trusted reverse proxy that collapses
+      # all client addresses into one upstream connection.
+      RATE_LIMIT_REQUESTS: "6000"
+      RATE_LIMIT_WINDOW: "60"
+    volumes:
+      - type: bind
+        source: ${STATUS_CONFIG_FILE:-./config/status.example.json}
+        target: /etc/status-page/config.json
+        read_only: true
+    secrets:
+      - source: prometheus-secret
+        target: metrics-token
+        mode: "0440"
+    # Rootless Docker maps container group 0 to the daemon user's host group.
+    # This supplementary group lets a host 0640 private-group file remain
+    # readable without making the application root or the host file public.
+    group_add:
+      - "0"
+    expose:
+      - "8080"
+    networks:
+      - metrics
+      - proxy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    restart: unless-stopped
+    stop_grace_period: 20s
+    # Keep the dependency gate explicit for Podman/Buildah builds that do not
+    # preserve Dockerfile HEALTHCHECK metadata unless Docker format is chosen.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2); raise SystemExit(0 if response.status == 200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
+  proxy:
+    image: docker.io/nginxinc/nginx-unprivileged:1.30.3-alpine@sha256:b3f2436575bd5be7386518084d842dac414ab4962712afa31e99e0942a56e3b2
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${STATUS_BIND_ADDRESS:-127.0.0.1}:${STATUS_HTTP_PORT:-8080}:8080"
+    volumes:
+      - type: bind
+        source: ./deploy/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+    networks:
+      - proxy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.50
+    restart: unless-stopped
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+networks:
+  # The proxy network is deliberately isolated from external egress.  The
+  # application also joins metrics, which supplies only its Prometheus egress.
+  proxy:
+    internal: true
+  metrics:
+    driver: bridge
+
+secrets:
+  # This is a host path, never a token value.  Replace the synthetic file with
+  # a private 0640 file (owned by the rootless user's private group) before
+  # configuring bearer_token_file or basic_auth.password_file in the JSON.
+  prometheus-secret:
+    file: ${PROMETHEUS_TOKEN_FILE:-./deploy/metrics-token.example}

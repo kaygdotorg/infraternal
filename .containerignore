@@ -1,0 +1,10 @@
+# Podman/Buildah equivalent of .dockerignore.  Keep only the runtime files in
+# the application build context; operator configuration never enters a layer.
+**
+!status_api.py
+!web/
+!web/**
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!licenses/
+!licenses/**

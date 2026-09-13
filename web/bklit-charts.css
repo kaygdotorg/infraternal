@@ -1,0 +1,320 @@
+/*
+ * The status page does not ship Tailwind. Keep the Bklit surface styles
+ * isolated under .bklit-mount so the copied registry components can render
+ * without changing the rest of the vanilla application.
+ */
+.bklit-mount {
+  --chart-background: transparent;
+  --chart-foreground: var(--text, #edf0f1);
+  --chart-foreground-muted: var(--muted, #969fa7);
+  --chart-label: var(--muted, #969fa7);
+  --chart-line-primary: var(--accent, #55d6ad);
+  --chart-line-secondary: color-mix(in srgb, var(--accent, #55d6ad) 55%, var(--text, #edf0f1));
+  --chart-line-failure: var(--bad, #f18484);
+  --chart-line-unknown: var(--unknown, var(--muted, #969fa7));
+  --chart-crosshair: color-mix(in srgb, var(--text, #edf0f1) 68%, transparent);
+  --chart-grid: color-mix(in srgb, var(--border, #292e32) 84%, transparent);
+  --chart-tooltip-background: color-mix(in srgb, var(--surface, #141719) 38%, transparent);
+  --chart-tooltip-foreground: var(--text, #edf0f1);
+  --chart-tooltip-muted: var(--muted, #969fa7);
+  --chart-marker-background: var(--surface, #141719);
+  --chart-marker-border: var(--border, #292e32);
+  --chart-marker-foreground: var(--text, #edf0f1);
+  --chart-marker-badge-background: var(--text, #edf0f1);
+  --chart-marker-badge-foreground: var(--bg, #0d0f11);
+  --chart-segment-background: color-mix(in srgb, var(--text, #edf0f1) 8%, transparent);
+  --chart-segment-line: color-mix(in srgb, var(--text, #edf0f1) 24%, transparent);
+  --chart-brush-border: var(--border, #292e32);
+  --chart-indicator-color: var(--accent, #55d6ad);
+  --chart-indicator-secondary-color: var(--bad, #f18484);
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  color: var(--chart-foreground);
+  font-family: inherit;
+  isolation: isolate;
+  outline: none;
+  touch-action: pan-y;
+}
+
+.bklit-mount:focus-visible {
+  outline: 2px solid var(--accent, #55d6ad);
+  outline-offset: 5px;
+  border-radius: var(--radius-inner, 8px);
+}
+
+.bklit-mount.bklit-mini {
+  height: 96px;
+  min-height: 92px;
+}
+
+.bklit-mount.bklit-availability {
+  height: 28px;
+  min-height: 28px;
+}
+
+.bklit-mount.bklit-detail {
+  height: 258px;
+  min-height: 238px;
+}
+
+.bklit-mount .bklit-series {
+  position: relative;
+  width: 100%;
+  height: 100% !important;
+  min-height: 0 !important;
+  aspect-ratio: auto !important;
+  overflow: visible;
+}
+
+.bklit-mount .bklit-series > div,
+.bklit-mount .bklit-series > svg,
+.bklit-mount .bklit-series svg {
+  display: block;
+  max-width: 100%;
+}
+
+.bklit-mount .bklit-series > div:not(.bklit-tooltip-panel) {
+  width: 100%;
+  height: 100%;
+}
+
+/* Official Bklit Grid/XAxis/YAxis layers use these small Tailwind utility
+   names. Keep their portal layers positioned without shipping Tailwind. */
+.bklit-mount .bklit-series .absolute {
+  position: absolute;
+}
+
+.bklit-mount .bklit-series > .inset-0 {
+  inset: 0;
+}
+
+.bklit-mount .bklit-series .top-0 {
+  top: 0;
+}
+
+.bklit-mount .bklit-series .bottom-0 {
+  bottom: 0;
+}
+
+.bklit-mount .bklit-series .left-0 {
+  left: 0;
+}
+
+.bklit-mount .bklit-series .right-0 {
+  right: 0;
+}
+
+.bklit-mount .bklit-series .flex {
+  display: flex;
+}
+
+.bklit-mount .bklit-series .items-center {
+  align-items: center;
+}
+
+.bklit-mount .bklit-series .justify-end {
+  justify-content: flex-end;
+}
+
+.bklit-mount .bklit-series .pr-2 {
+  padding-right: 0.5rem;
+}
+
+.bklit-mount .bklit-series .whitespace-nowrap {
+  white-space: nowrap;
+}
+
+.bklit-mount .bklit-series .pointer-events-none {
+  pointer-events: none;
+}
+
+.bklit-mount .bklit-series .text-chart-label {
+  color: var(--chart-label);
+}
+
+.bklit-mount .bklit-series .text-xs {
+  font-size: 0.6875rem;
+  line-height: 1.2;
+}
+
+.bklit-mount .bklit-series > div > svg,
+.bklit-mount .bklit-series > svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.bklit-mount .bklit-series svg text {
+  fill: var(--chart-foreground-muted);
+  font-family: inherit;
+  font-size: 0.6875rem;
+}
+
+.bklit-mount .bklit-series svg [stroke="var(--chart-line-primary)"] {
+  vector-effect: non-scaling-stroke;
+}
+
+/* Availability bars are single-state segments inside a stacked chart. The
+   vendor stack rounds only its final series, so apply the same small radius to
+   every state without introducing a vertical stack gap. */
+.bklit-mount.bklit-availability .bklit-series svg g[class^="bar-series-"] rect {
+  rx: 2px;
+  ry: 2px;
+}
+
+.bklit-mount .bklit-series svg .pointer-events-none {
+  pointer-events: none;
+}
+
+.bklit-mount .bklit-tooltip-panel {
+  position: absolute;
+  z-index: 20;
+  pointer-events: none;
+  width: max-content;
+  height: max-content;
+  max-width: min(250px, calc(100% - 16px));
+  color: var(--chart-tooltip-foreground);
+}
+
+.bklit-mount .bklit-tooltip-panel > div {
+  /* Size to the readout instead of reserving space for longer labels. */
+  min-width: 0;
+  width: max-content;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--text, #edf0f1) 24%, transparent);
+  border-radius: var(--radius-inner, 8px);
+  background: var(--chart-tooltip-background);
+  box-shadow: 0 10px 32px color-mix(in srgb, #000 22%, transparent);
+  -webkit-backdrop-filter: blur(40px) saturate(160%);
+  backdrop-filter: blur(40px) saturate(160%);
+}
+
+.bklit-mount .bklit-tooltip-content {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.bklit-mount .bklit-tooltip-content time {
+  color: var(--chart-tooltip-muted);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.bklit-mount .bklit-tooltip-content strong {
+  color: var(--chart-tooltip-foreground);
+  font-family: "Space Mono", ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.bklit-mount .bklit-tooltip-content span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent, #55d6ad);
+  font-size: 0.6875rem;
+}
+
+.bklit-mount .bklit-tooltip-content span.is-failed {
+  color: var(--bad, #f18484);
+}
+
+.bklit-mount .bklit-tooltip-content span.is-unknown {
+  color: var(--chart-tooltip-muted);
+}
+
+.bklit-mount .bklit-tooltip-content i {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.bklit-mount .bklit-keyboard-readout {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 15;
+  max-width: calc(100% - 16px);
+  overflow: hidden;
+  padding: 4px 8px;
+  border: 1px solid var(--border, #292e32);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface, #141719) 84%, transparent);
+  color: var(--muted, #969fa7);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  pointer-events: none;
+  text-overflow: ellipsis;
+  transform: translateY(-3px);
+  transition: opacity 140ms ease, transform 180ms ease;
+  white-space: nowrap;
+}
+
+.bklit-mount:focus-within .bklit-keyboard-readout {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.bklit-mount .bklit-empty {
+  display: grid;
+  height: 100%;
+  min-height: inherit;
+  place-items: center;
+  color: var(--muted, #969fa7);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  .bklit-mount .bklit-tooltip-panel > div,
+  .bklit-mount .bklit-keyboard-readout {
+    background: var(--surface, #141719);
+  }
+}
+
+@media (max-width: 600px) {
+  .bklit-mount.bklit-detail {
+    height: 234px;
+    min-height: 220px;
+  }
+
+  .bklit-mount .bklit-tooltip-content {
+    padding: 9px 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bklit-mount *,
+  .bklit-mount *::before,
+  .bklit-mount *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .bklit-mount .bklit-keyboard-readout {
+    transition: none;
+  }
+}
+
+.bklit-mount .text-chart-label{white-space:nowrap}
+
+/* Feather only the overview's plot SVG, leaving tooltip layers and labels crisp. */
+.bklit-mount.bklit-mini .bklit-series > div:not(.bklit-tooltip-panel) > svg {
+  -webkit-mask-image: linear-gradient(to right, transparent 10px, #000 22px, #000 calc(100% - 22px), transparent calc(100% - 10px));
+  mask-image: linear-gradient(to right, transparent 10px, #000 22px, #000 calc(100% - 22px), transparent calc(100% - 10px));
+}
+
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) {
+ .bklit-mount .bklit-tooltip-panel > div {background:var(--surface,#242424)}
+}

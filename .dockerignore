@@ -1,0 +1,11 @@
+# Keep the application build context allowlisted.  Configuration, tests,
+# documentation, deployment files, and chart sources are mounted or handled
+# outside the application image.
+**
+!status_api.py
+!web/
+!web/**
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!licenses/
+!licenses/**

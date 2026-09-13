@@ -1,0 +1,13 @@
+# Operator configuration and credentials are never source assets.
+.env
+.env.*
+config/*.json
+!config/status.example.json
+secrets/
+private/
+*.pem
+*.key
+__pycache__/
+*.py[cod]
+node_modules/
+.DS_Store

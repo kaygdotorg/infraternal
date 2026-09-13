@@ -1,0 +1,46 @@
+{
+  "site": {
+    "brand": "Example Status",
+    "title": "Example Status",
+    "description": "Live availability and observed response times for public services.",
+    "public_url": "https://status.example.com",
+    "social_image": "/favicon.svg"
+  },
+  "prometheus": {
+    "url": "https://prometheus.example.com",
+    "bearer_token_file": null,
+    "basic_auth": null,
+    "allow_insecure_http": false
+  },
+  "probe": {
+    "job_label": "job",
+    "service_label": "service",
+    "job": "blackbox",
+    "success_metric": "probe_success",
+    "duration_metric": "probe_duration_seconds",
+    "freshness_seconds": 90,
+    "matchers": {
+      "environment": "public"
+    }
+  },
+  "services": [
+    {
+      "slug": "website",
+      "name": "Website",
+      "group": "Public services",
+      "selector": "probe_website"
+    },
+    {
+      "slug": "api",
+      "name": "API",
+      "group": "Public services",
+      "selector": "probe_api"
+    },
+    {
+      "slug": "dns",
+      "name": "DNS",
+      "group": "Core services",
+      "selector": "probe_dns"
+    }
+  ]
+}

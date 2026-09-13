@@ -1,0 +1,8 @@
+# Rootless Podman needs an explicit keep-id mapping when a bind-mounted file
+# is read by an image that declares a non-root USER.  Docker rootless users
+# should use compose.yaml without this override.
+services:
+  app:
+    userns_mode: "keep-id:uid=65532,gid=65532"
+  proxy:
+    userns_mode: "keep-id:uid=101,gid=101"

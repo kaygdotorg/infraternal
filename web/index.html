@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <title>__STATUS_TITLE__</title>
+    <meta
+      name="description"
+      content="__STATUS_DESCRIPTION__"
+    />
+    <meta name="theme-color" content="#171717" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="__STATUS_TITLE__" />
+    <meta
+      property="og:description"
+      content="__STATUS_DESCRIPTION__"
+    />
+    <meta property="og:url" content="__STATUS_PUBLIC_URL__" />
+    <meta property="og:image" content="__STATUS_SOCIAL_IMAGE__" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="__STATUS_TITLE__" />
+    <meta
+      name="twitter:description"
+      content="__STATUS_DESCRIPTION__"
+    />
+    <meta name="twitter:image" content="__STATUS_SOCIAL_IMAGE__" />
+    <script src="/theme-catalog.js"></script>
+    <script src="/theme.js"></script>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/palettes.css" />
+    <link rel="stylesheet" href="/theme-backgrounds.css" />
+    <link rel="stylesheet" href="/safe-areas.css" />
+    <link rel="stylesheet" href="/surfaces.css" />
+    <script src="/theme-backgrounds.js" defer></script>
+    <link rel="stylesheet" href="/bklit-charts.css" />
+    <script type="module" src="/app.js"></script>
+    <script src="/interactions.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="masthead">
+        <a
+          class="brand"
+          href="/"
+          data-home
+          aria-label="Status page home"
+          ><span class="monogram" aria-hidden="true"
+            ><svg
+              viewBox="0 0 24 24"
+              width="22"
+              height="22"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+            >
+              <path d="M4 18V6m5 12V10m5 8V4m5 14v-7" /></svg></span
+          ><span id="brand-name">__STATUS_BRAND__</span></a
+        >
+        <div class="appearance-controls">
+          <a
+            id="source-link"
+            class="surface-pill source-link"
+            href="#"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="View source code"
+            title="View source code"
+            hidden
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M12 2.25a9.75 9.75 0 0 0-3.08 19c.49.09.67-.21.67-.47v-1.69c-2.73.59-3.31-1.16-3.31-1.16-.44-1.1-1.06-1.39-1.06-1.39-.87-.59.07-.58.07-.58.96.07 1.47.98 1.47.98.86 1.47 2.26 1.05 2.81.8.09-.62.34-1.05.61-1.29-2.18-.25-4.47-1.09-4.47-4.85 0-1.07.38-1.94 1-2.62-.1-.25-.43-1.25.1-2.59 0 0 .81-.26 2.67 1a9.16 9.16 0 0 1 4.86 0c1.85-1.26 2.66-1 2.66-1 .53 1.34.2 2.34.1 2.59.62.68 1 1.55 1 2.62 0 3.77-2.3 4.6-4.49 4.84.35.3.65.88.65 1.78v2.64c0 .26.18.57.68.47A9.75 9.75 0 0 0 12 2.25Z"
+              />
+            </svg>
+          </a>
+          <button
+            id="mode-toggle"
+            class="surface-pill theme-toggle"
+            type="button"
+            aria-label="Switch mode"
+          ></button>
+          <div class="theme-picker">
+            <button
+              class="surface-pill theme-toggle"
+              id="theme-toggle"
+              type="button"
+              aria-label="Switch colour theme"
+            >
+              <span aria-hidden="true" id="theme-icon">◐</span
+              ><span id="theme-label">Theme</span>
+            </button>
+            <div id="theme-menu" class="theme-menu" hidden></div>
+          </div>
+        </div>
+      </header>
+      <main>
+        <section
+          id="status-summary"
+          class="status-summary"
+          aria-labelledby="summary-heading"
+          aria-describedby="summary-state"
+        >
+          <div class="summary-main">
+            <div class="summary-copy">
+              <h1 id="summary-heading">
+                <button
+                  id="summary-toggle"
+                  class="summary-toggle"
+                  type="button"
+                  aria-pressed="false"
+                  aria-label="Show services currently down"
+                  title="Show services currently down"
+                >
+                  <span id="summary-up" class="summary-count" aria-live="off"
+                    >—</span
+                  ><span id="summary-heading-label"> services operational</span>
+                </button>
+              </h1>
+              <div class="summary-meta" aria-label="Status freshness">
+                <button
+                  id="summary-meta-toggle"
+                  class="summary-meta-toggle"
+                  type="button"
+                  aria-pressed="false"
+                  aria-label="Checks every minute. Show latest update time."
+                  title="Show latest update time"
+                >
+                  <span id="summary-meta-text">Checks every minute</span>
+                </button>
+              </div>
+            </div>
+            <p id="summary-state" class="summary-state" hidden>
+              <span id="summary-state-count" class="summary-state-count"></span
+              ><span id="summary-state-label"></span>
+            </p>
+          </div>
+        </section>
+        <div id="fetch-error" class="notice" role="status" hidden></div>
+
+        <section class="service-section" aria-label="Service charts">
+          <div class="section-heading">
+            <div class="global-controls">
+              <div id="global-chart-switch"></div>
+              <div
+                class="surface-pill range-control"
+                aria-label="History period"
+              >
+                <button data-hours="0.25" aria-pressed="false">15m</button
+                ><button data-hours="1" aria-pressed="false">1h</button
+                ><button data-hours="6" aria-pressed="false">6h</button
+                ><button data-hours="24" aria-pressed="true">24h</button
+                ><button data-hours="168" aria-pressed="false">7d</button
+                ><button data-hours="720" aria-pressed="false">30d</button
+                ><button data-hours="2160" aria-pressed="false">3mo</button
+                ><button data-hours="4320" aria-pressed="false">6mo</button
+                ><button data-hours="8760" aria-pressed="false">1y</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="services" class="service-groups" aria-busy="true">
+            <div class="initial-state">
+              <span class="loading-line"></span>
+              <p>Loading services…</p>
+            </div>
+          </div>
+          <div class="legend">
+            <span><i class="swatch up"></i>Operational</span
+            ><span><i class="swatch down"></i>Failed check</span
+            ><span><i class="swatch unknown"></i>No observation</span>
+          </div>
+          <p class="history-note">
+            Uptime is based on recorded checks. Grey segments mean no
+            observation; they do not count as uptime.
+          </p>
+        </section>
+      </main>
+      <footer>
+        <span id="footer-brand">__STATUS_BRAND__</span
+        ><span
+          >Checked every minute <span class="footer-separator">/</span> Times
+          shown locally</span
+        ></footer
+      >
+    </div>
+  </body>
+</html>

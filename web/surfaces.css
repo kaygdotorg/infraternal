@@ -1,0 +1,212 @@
+/*
+ * Shared surface primitives for the status preview.
+ *
+ * This file is loaded after the palette and theme-background layers and before
+ * chart styles. It owns surface appearance; component files keep layout and
+ * content rules. The neutral base keeps theme accents available to graphs,
+ * status dots, and icons without tinting every card or control.
+ */
+
+/* Low-opacity glass cards; pills receive a slightly stronger neutral tint. */
+:root {
+  --surface-card-ink: #f5f5f5;
+  --surface-card-muted: #d1d1d1;
+  --surface-card-dim: #b8b8b8;
+  --surface-card-bg: rgba(24, 24, 24, 0.28);
+  --surface-card-fallback: #242424;
+  --surface-card-border: rgba(255, 255, 255, 0.18);
+  --surface-ink: #fff;
+  --surface-muted: #f2f2f2;
+  --surface-pill-bg: rgba(18, 18, 18, 0.4);
+  --surface-pill-fallback: #242424;
+  --surface-pill-border: rgba(255, 255, 255, 0.22);
+  --surface-pill-active: rgba(255, 255, 255, 0.2);
+  --surface-pill-hover: rgba(255, 255, 255, 0.12);
+}
+
+:root[data-theme$="-light"] {
+  --surface-card-ink: #202020;
+  --surface-card-muted: #3f3f3f;
+  --surface-card-dim: #565656;
+  --surface-card-bg: rgba(255, 255, 255, 0.35);
+  --surface-card-fallback: #fafafa;
+  --surface-card-border: rgba(0, 0, 0, 0.14);
+  --surface-ink: #101010;
+  --surface-muted: #202020;
+  --surface-pill-bg: rgba(255, 255, 255, 0.5);
+  --surface-pill-fallback: #fafafa;
+  --surface-pill-border: rgba(0, 0, 0, 0.18);
+  --surface-pill-active: rgba(0, 0, 0, 0.12);
+  --surface-pill-hover: rgba(0, 0, 0, 0.08);
+}
+
+/*
+ * Card primitive. The opaque fallback is intentional: it preserves readable
+ * text in browsers without backdrop-filter and gives the translucent layer a
+ * stable contrast floor over each theme's background.
+ */
+.surface-card {
+  --text: var(--surface-card-ink);
+  --muted: var(--surface-card-muted);
+  --dim: var(--surface-card-dim);
+  --surface: var(--surface-card-fallback);
+  --raised: color-mix(
+    in srgb,
+    var(--surface-card-fallback) 88%,
+    var(--surface-card-ink)
+  );
+  --border: color-mix(in srgb, var(--surface-card-ink) 28%, transparent);
+  --subtle: color-mix(in srgb, var(--surface-card-fallback) 84%, var(--bg));
+  --hover: color-mix(
+    in srgb,
+    var(--surface-card-fallback) 82%,
+    var(--surface-card-ink)
+  );
+  color: var(--text);
+  background: var(--surface-card-fallback);
+  border: 1px solid var(--surface-card-border);
+  border-radius: 17px;
+  box-shadow: 0 10px 32px #0003;
+  -webkit-backdrop-filter: blur(28px) saturate(110%);
+  backdrop-filter: blur(28px) saturate(110%);
+}
+
+/* Blur is one layer per card, rather than a filter over the full service list. */
+@supports (
+  (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))
+) {
+  .surface-card {
+    background: var(--surface-card-bg);
+  }
+}
+@supports not (
+  (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))
+) {
+  .surface-card {
+    background: var(--surface-card-fallback);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/* The service list keeps its existing outer frame; child rows do not stack chrome. */
+#services.service-groups {
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+#services.service-groups .service-group-items > .service.surface-card {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/*
+ * Pill primitive. All status, info, range, chart, and theme controls use this
+ * neutral appearance. Variants below provide layout or semantic icon color;
+ * they do not introduce component-specific surfaces.
+ */
+.surface-pill {
+  color: var(--surface-ink);
+  background: var(--surface-pill-bg);
+  border: 1px solid var(--surface-pill-border);
+  border-radius: 9999px;
+  box-shadow: 0 1px 2px #0003;
+  -webkit-backdrop-filter: var(
+    --surface-pill-backdrop,
+    blur(14px) saturate(110%)
+  );
+  backdrop-filter: var(--surface-pill-backdrop, blur(14px) saturate(110%));
+}
+.surface-pill:hover {
+  color: var(--surface-ink);
+  background: var(--surface-pill-hover);
+}
+.surface-pill > button {
+  color: var(--surface-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 9999px;
+}
+.surface-pill > button:hover {
+  color: var(--surface-ink);
+  background: var(--surface-pill-hover);
+}
+.surface-pill > button[aria-pressed="true"] {
+  color: var(--surface-ink);
+  background: var(--surface-pill-active);
+  border-color: var(--surface-pill-border);
+}
+
+/* Status variants change only the indicator semantics, never the pill surface. */
+.surface-pill.status-pill .dot {
+  background: var(--accent);
+}
+.surface-pill.status-pill.down .dot {
+  background: var(--bad);
+}
+.surface-pill.status-pill.unknown .dot {
+  background: var(--surface-card-dim);
+}
+
+/* Shared neutral focus keeps controls legible in every theme. */
+.surface-pill:focus-visible,
+.surface-pill > button:focus-visible {
+  outline: 2px solid var(--surface-ink);
+  outline-offset: 3px;
+  border-radius: 9999px;
+}
+
+/* Component variants retain the magnetic capsule and scrolling geometry in style.css. */
+.surface-pill.chart-switch,
+.surface-pill.range-control {
+  isolation: isolate;
+}
+
+@supports not (
+  (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))
+) {
+  .surface-pill {
+    background: var(--surface-pill-fallback);
+  }
+}
+
+/* Compact selector geometry: 28px targets remain above the 24px minimum;
+   icon size changes less than the shell height so symbols feel less inset. */
+.surface-pill.chart-switch,
+.surface-pill.range-control {
+  padding: 2px;
+}
+.surface-pill.chart-switch > button,
+.surface-pill.range-control > button {
+  min-height: 28px;
+  height: 28px;
+  padding-block: 2px;
+}
+.surface-pill.chart-switch > button {
+  min-width: 36px;
+  width: 36px;
+  padding-inline: 6px;
+}
+.surface-pill.chart-switch > button svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* A scrollable table already sits on the shared frosted card. Reusing that
+ * backdrop avoids allocating a live blur surface for every status badge while
+ * preserving the same pill tint, border, typography, and status semantics. */
+.check-table {
+  --surface-pill-backdrop: none;
+}
+
+/* Offscreen chart slots retain geometry but release React and GPU work. The
+ * descendant is owned by Bklit, so this survives shell reconciliation without
+ * a second visibility-state attribute. Browsers without :has keep the normal
+ * glass fallback. A generous observer margin restores glass before it appears. */
+@supports selector(:has(*)) {
+  #services.service-groups .service-group-items > .service.surface-card:not(:has([data-bklit-chart])) {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
