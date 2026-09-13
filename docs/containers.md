@@ -297,6 +297,16 @@ References: [Docker rootless mode](https://docs.docker.com/engine/security/rootl
 [Podman rootless mode](https://docs.podman.io/en/latest/markdown/podman-run.1.html),
 and the [NGINX unprivileged image](https://github.com/nginx/docker-nginx-unprivileged).
 
+### Rootless Podman after reboot
+
+For an unattended host, enable lingering for the service account with
+`loginctl enable-linger "$USER"` (administrator authorization may be needed),
+then run `systemctl --user enable podman-restart.service`. The packaged
+`unless-stopped` restart policy handles process exits; this user service
+restores eligible containers after reboot. Verify both the user service and
+container health after a planned reboot. Enabling the service applies to all
+containers with restart policies owned by that account.
+
 ### Rate limits behind another proxy
 
 The bundled application sees NGINX as its client; its 6,000-request/minute
