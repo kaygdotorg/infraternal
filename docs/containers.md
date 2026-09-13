@@ -296,6 +296,9 @@ and the [NGINX unprivileged image](https://github.com/nginx/docker-nginx-unprivi
 The bundled application sees NGINX as its client; its 6,000-request/minute
 budget is aggregate admission control, not an end-user limit. If a TLS ingress
 sits before NGINX, NGINX likewise sees that ingress address. Apply true per-client
-limits at the trusted outermost ingress. Do not trust arbitrary forwarded IP
+limits at the trusted outermost ingress. NGINX permits 100 requests/second,
+a 200-request burst and 48 active requests per source address, accommodating
+concurrent page loads through that shared hop while keeping admission bounded.
+Do not trust arbitrary forwarded IP
 headers. Internal concurrency, memory, connection and upstream-query caps
 remain enforced independently of those edge limits.
