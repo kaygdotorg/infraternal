@@ -59,6 +59,22 @@ class StatusApiTests(unittest.TestCase):
         path.write_text(json.dumps(value))
         return directory, path
 
+    def test_group_heading_setting(self):
+        directory, path = self.write_config(self.make_config())
+        self.addCleanup(directory.cleanup)
+        self.assertIs(status_api.browser_config(status_api.load_config(path))["site"]["showGroupHeadings"], True)
+        for value in (True, False, "false"):
+            raw = self.make_config()
+            raw["site"]["show_group_headings"] = value
+            directory, path = self.write_config(raw)
+            self.addCleanup(directory.cleanup)
+            if isinstance(value, bool):
+                config = status_api.load_config(path)
+                self.assertIs(status_api.browser_config(config)["site"]["showGroupHeadings"], value)
+            else:
+                with self.assertRaises(status_api.ConfigError):
+                    status_api.load_config(path)
+
     def test_public_config_excludes_private_selector_and_credentials(self):
         directory, path = self.write_config(self.make_config(), token="secret-value")
         self.addCleanup(directory.cleanup)

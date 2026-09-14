@@ -269,7 +269,7 @@ def load_config(path: str | Path, environ: dict[str, str] | None = None) -> dict
     site = raw.get("site")
     if not isinstance(site, dict):
         raise ConfigError("site must be an object")
-    if set(site) - {"brand", "title", "description", "public_url", "source_url", "social_image"}:
+    if set(site) - {"brand", "title", "description", "public_url", "source_url", "social_image", "show_group_headings"}:
         raise ConfigError("unknown site configuration field")
     brand = _env_override(env.get("STATUS_BRAND"), "STATUS_BRAND") or site.get("brand")
     title = _env_override(env.get("STATUS_TITLE"), "STATUS_TITLE") or site.get("title")
@@ -285,6 +285,9 @@ def load_config(path: str | Path, environ: dict[str, str] | None = None) -> dict
     social_image = _env_override(env.get("STATUS_SOCIAL_IMAGE"), "STATUS_SOCIAL_IMAGE")
     if social_image is None:
         social_image = site.get("social_image")
+    show_group_headings = site.get("show_group_headings", True)
+    if not isinstance(show_group_headings, bool):
+        raise ConfigError("site.show_group_headings must be a boolean")
     brand = _bounded_string(brand, "site.brand")
     title = _bounded_string(title, "site.title")
     description = _bounded_string(description, "site.description")
@@ -423,6 +426,7 @@ def load_config(path: str | Path, environ: dict[str, str] | None = None) -> dict
             "public_url": public_url,
             "source_url": source_url,
             "social_image": social_image,
+            "show_group_headings": show_group_headings,
         },
         "prometheus_url": prometheus_url,
         "bearer_token": token,
@@ -455,6 +459,7 @@ def browser_config(config: dict[str, Any]) -> dict[str, Any]:
         "title": site["title"],
         "description": site["description"],
         "publicUrl": site["public_url"],
+        "showGroupHeadings": site.get("show_group_headings", True),
     }
     if site.get("source_url"):
         public_site["sourceUrl"] = site["source_url"]

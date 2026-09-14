@@ -3009,7 +3009,7 @@ footer,
 
 /* Shared segmented-pill motion: selection stretches horizontally, then settles
    with a damped spring. Transform-only frames avoid layout work in the charts.
-   Attribute selection also covers keyboard activation and both page layouts. */
+   The delegated activation class covers keyboard input and both page layouts. */
 @keyframes pill-selection-spring {
   0% { transform: scale(.94, .94); }
   32% { transform: scale(1.065, .965); }

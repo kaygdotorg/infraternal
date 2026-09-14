@@ -13,6 +13,7 @@ memory. Restarting the process discards caches, not monitoring history.
 | `status_api.py` | Configuration validation, fixed queries, projection, caches, bounded HTTP server and HTML metadata |
 | `web/app.js` | Public config validation, routing, service views, shared surface helpers, chart lifecycle and refresh |
 | `web/style.css` | Shared card/pill surfaces, typography, layout and responsive styles |
+| `web/interactions.js` | Shared pill activation, container pulses, hover feedback and range-strip scrolling |
 | `web/theme.js` | Theme and color-mode selection |
 | `charts/src/bklit-charts.tsx` | React adapter for compact/detail latency and availability charts |
 | `charts/src/vendor/` | Vendored Bklit source and license |

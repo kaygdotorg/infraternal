@@ -67,12 +67,14 @@ function applyConfig(payload) {
   if (
     Object.keys(site).some(
       (key) =>
-        !["brand", "title", "description", "publicUrl", "sourceUrl"].includes(
+        !["brand", "title", "description", "publicUrl", "sourceUrl", "showGroupHeadings"].includes(
           key,
         ),
     )
   )
     throw new Error("Unknown site config");
+  const showGroupHeadings = site.showGroupHeadings === undefined ? true : site.showGroupHeadings;
+  if (typeof showGroupHeadings !== "boolean") throw new Error("Invalid group heading setting");
   const brand = configText(site.brand, "site.brand");
   const title = configText(site.title, "site.title");
   const description = configText(site.description, "site.description");
@@ -177,7 +179,7 @@ function applyConfig(payload) {
   if (apiPath !== "/api/v1/status") throw new Error("Invalid status API path");
 
   CONFIG = {
-    site: { brand, title, description, publicUrl, sourceUrl },
+    site: { brand, title, description, publicUrl, sourceUrl, showGroupHeadings },
     serviceBySlug,
   };
   GROUPS = grouped;
@@ -890,7 +892,7 @@ function renderHome() {
         a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
       );
     return rows.length
-      ? `<section class="service-group"><h2 class="service-group-title">${esc(group)}</h2><div class="service-group-items">${rows.map(serviceRow).join("")}</div></section>`
+      ? `<section class="service-group">${CONFIG.site.showGroupHeadings ? `<h2 class="service-group-title">${esc(group)}</h2>` : ""}<div class="service-group-items">${rows.map(serviceRow).join("")}</div></section>`
       : "";
   }).join("");
   setChartHTML($("services"), groups);

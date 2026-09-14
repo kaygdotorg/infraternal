@@ -110,3 +110,11 @@ nonnumeric `REQUEST_TIMEOUT` falls back to 20 seconds.
 
 These limits do not replace the proxy's connection, body and header limits.
 See [container deployment](containers.md) for aggregate limits behind ingress.
+
+## Group headings
+
+`site.show_group_headings` defaults to `true`. Set it to `false` in your external
+instance configuration to hide the overview's group titles (for example, a
+redundant “Services” title on a single-group page). Groups, ordering and service
+data remain intact. The public display configuration exposes this boolean as
+`site.showGroupHeadings`; no instance-specific styling fork is needed.
