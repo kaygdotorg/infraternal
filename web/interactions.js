@@ -130,3 +130,35 @@
     attributeFilter: ["hidden"],
   });
 })();
+
+// Bounce only after activation, never after background refresh recreates a
+// selected button. Resolve controls after the app's synchronous render.
+(() => {
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)");
+  const selector = ".chart-switch button, .range-control button";
+  let pending = 0;
+  function clear() {
+    cancelAnimationFrame(pending);
+    document.querySelectorAll(".pill-settling").forEach((item) => item.classList.remove("pill-settling"));
+  }
+  reduced.addEventListener("change", clear);
+  document.addEventListener("animationend", (event) => {
+    if (event.animationName === "pill-selection-spring") event.target.classList.remove("pill-settling");
+  });
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest(selector);
+    if (!button) return;
+    clear();
+    if (reduced.matches) return;
+    const mode = button.dataset.chartMode;
+    const hours = button.dataset.hours;
+    pending = requestAnimationFrame(() => {
+      if (reduced.matches) return;
+      document.querySelectorAll(selector).forEach((item) => {
+        if (!item.getClientRects().length || item.getAttribute("aria-pressed") !== "true") return;
+        if (mode ? item.dataset.chartMode !== mode : item.dataset.hours !== hours) return;
+        item.classList.add("pill-settling");
+      });
+    });
+  }, true);
+})();

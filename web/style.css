@@ -3006,3 +3006,33 @@ footer,
     margin-block: 24px 12px;
   }
 }
+
+/* Shared segmented-pill motion: selection stretches horizontally, then settles
+   with a damped spring. Transform-only frames avoid layout work in the charts.
+   Attribute selection also covers keyboard activation and both page layouts. */
+@keyframes pill-selection-spring {
+  0% { transform: scale(.94, .94); }
+  32% { transform: scale(1.065, .965); }
+  56% { transform: scale(.98, 1.025); }
+  78% { transform: scale(1.008, .995); }
+  100% { transform: scale(1); }
+}
+.chart-switch button.pill-settling,
+.range-control button.pill-settling {
+  animation: pill-selection-spring 420ms ease-out;
+  transform-origin: center;
+}
+.chart-switch button:active,
+.range-control button:active {
+  /* Stop the selection animation while held so the press remains immediate. */
+  animation: none;
+  transform: scale(.93, .9);
+}
+@media (prefers-reduced-motion: reduce) {
+  .chart-switch button,
+  .range-control button {
+    animation: none !important;
+    transform: none !important;
+    transition: none !important;
+  }
+}
