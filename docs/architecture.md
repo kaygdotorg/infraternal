@@ -101,3 +101,9 @@ Local gradients scroll with the document rather than forming a fixed layer at
 the viewport edge. Physical Safari controls still require device testing.
 
 See [verification scope](verification.md) for measured bounds and limitations.
+
+Shared pill activation pulses the outer surface as well as selected segmented
+items. The same container feedback applies to pill padding and single-value
+statistics; it adds no action or keyboard focus to informational text. Motion
+is transform-only, is not triggered by refresh, and is cancelled or skipped
+when reduced motion is requested.

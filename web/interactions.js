@@ -137,15 +137,43 @@
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
   const selector = ".chart-switch button, .range-control button";
   let pending = 0;
+  const shellAnimations = new Map();
+  // The whole island responds, including its padding and noninteractive
+  // statistic pills. WAAPI restarts without a forced synchronous layout read.
+  // Calternal uses a restrained grouped-shell pulse and a stronger single-pill
+  // pulse. Keep those envelopes distinct so nested controls don't over-expand.
+  function pulseShell(shell) {
+    shellAnimations.get(shell)?.cancel();
+    const grouped = shell.matches(".chart-switch, .range-control");
+    const animation = shell.animate([
+      { transform: "scale(1)", offset: 0 },
+      { transform: grouped ? "scale(1.04)" : "scale(1.1)", offset: grouped ? .34 : .32 },
+      { transform: grouped ? "scale(.99)" : "scale(.97)", offset: grouped ? .64 : .62 },
+      { transform: "scale(1)", offset: 1 },
+    ], { duration: 420, easing: "cubic-bezier(.34,1.56,.64,1)" });
+    shellAnimations.set(shell, animation);
+    const release = () => {
+      if (shellAnimations.get(shell) === animation) shellAnimations.delete(shell);
+    };
+    animation.onfinish = release;
+    animation.oncancel = release;
+  }
   function clear() {
     cancelAnimationFrame(pending);
     document.querySelectorAll(".pill-settling").forEach((item) => item.classList.remove("pill-settling"));
   }
-  reduced.addEventListener("change", clear);
+  reduced.addEventListener("change", () => {
+    clear();
+    for (const animation of shellAnimations.values()) animation.cancel();
+    shellAnimations.clear();
+  });
   document.addEventListener("animationend", (event) => {
     if (event.animationName === "pill-selection-spring") event.target.classList.remove("pill-settling");
   });
   document.addEventListener("click", (event) => {
+    const shell = event.target.closest(".surface-pill");
+    if (!shell || event.target.closest(":disabled, [aria-disabled='true']")) return;
+    if (!reduced.matches) pulseShell(shell);
     const button = event.target.closest(selector);
     if (!button) return;
     clear();
