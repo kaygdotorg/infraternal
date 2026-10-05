@@ -210,3 +210,22 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 - Whether KCP is worth adding for server ↔ agent (decided by benchmark).
 - Pure state-diff resume against snapshot resume (decided by benchmark).
 - Details of S1, which needs another grill before it starts.
+
+## S1 (grill of 2026-10-05, issue #5)
+
+48. **Dogfood instance.** The owner's own server runs at
+    `infraternal.kayg.org` on monitor01, as the user `kayg`. Only the owner
+    uses it. It is redeployed from `dev`.
+49. **Self-installing binary.** `infraternal server install` and
+    `infraternal agent install` write and enable their own service (systemd
+    system or user unit, other init systems per contracts/bootstrap.md). No
+    install scripts.
+50. **Sessions belong to the user,** not to the device. Each of a user's
+    devices can see and attach to their live sessions.
+51. **Agent install asks once per host.** The probe proposes a mode, and the
+    user confirms with one tap. Auto-install for managed peers comes later.
+52. **S1 terminal scope.** Tabs, splits, scrollback search, copy and paste,
+    clickable links, the mobile key bar and resume. File transfer and
+    broadcast input come in S1.5.
+53. **No insecure dev mode.** The first deploy already has real auth: the
+    setup token, the owner's passkey and the recovery key.
