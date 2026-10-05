@@ -229,3 +229,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     broadcast input come in S1.5.
 53. **No insecure dev mode.** The first deploy already has real auth: the
     setup token, the owner's passkey and the recovery key.
+54. **Friendly first.** The product must be very user friendly: setup
+    wizards, friendly nudges and a pretty UI. The first run is a wizard:
+    network → hosts → agents → done.
+55. **Shell exit.** A clean exit (0) closes the tab. A non-zero exit or a
+    signal keeps the tab, with its scrollback and a restart prompt.
+56. **Session reaping.** A session that no one has viewed for 7 days (you
+    can change this for each user) gets a warning and is then reaped.
+    Attached sessions are never reaped.
+57. **Notify when done.** With shell integration (OSC 133), you get a
+    notification (web push for the installed PWA, or ntfy) when a long command
+    ends in a tab that you are not looking at. This is in S1.
+58. **Keys.** All keys go to the focused terminal. App shortcuts use cmd (mac)
+    or ctrl+shift. A tmux-style prefix key is an option.
+59. **History and snippets.** Command history for each user comes from shell
+    integration. Search over it must be very fast. You switch it on for each
+    host, and it is encrypted at rest. Saved snippets for each host or tag.
