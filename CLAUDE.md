@@ -20,8 +20,9 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
   when it could mean either.
 - Reuse first. Before you create a component or helper, look for an existing
   one in `packages/ui` and extend it. Do not create basic UI from nothing.
-  bits-ui is for headless primitives only. Pick components from
-  sveltebits.xyz when they fit.
+  bits-ui is for headless primitives only. Use sveltebits.xyz only as a
+  visual reference. Never copy its code: its license (MIT + Commons Clause)
+  is not compatible with AGPL.
 - Review UI from screenshots of a real production build. Codex jobs attach the
   screenshots. They do not judge their own visual quality.
 - Code explains itself. Use module docs and comments for choices and
