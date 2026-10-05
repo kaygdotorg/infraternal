@@ -1,0 +1,9 @@
+# The stable Rust interface shared by compiled first-party plugins.
+[package]
+name = "infraternal-plugin-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
