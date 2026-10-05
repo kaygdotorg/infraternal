@@ -245,3 +245,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 59. **History and snippets.** Command history for each user comes from shell
     integration. Search over it must be very fast. You switch it on for each
     host, and it is encrypted at rest. Saved snippets for each host or tag.
+60. **No danger levels per host.** The owner did not find them useful. Tags
+    stay for permissions and grouping.
+61. **Mesh APIs in the wizard.** Import hosts from NetBird (the official cloud
+    and self-hosted management) and from Tailscale (the official API and
+    Headscale's own API). The wizard probes the chosen hosts in parallel and
+    shows the results in a live grid.
+62. **Own visual identity.** infraternal is not a consumer product. It must
+    look different from calternal. A visual grill with mockups that Claude
+    builds comes before the first UI lane.
