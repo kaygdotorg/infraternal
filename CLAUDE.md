@@ -29,6 +29,23 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
 - No secrets in the repo, in logs or in argv. No prices in the repo.
 - Do not push or deploy unless the task tells you to.
 
+## History and tracking (owner rule)
+
+- Atomic commits: each commit makes one logical change, builds, and passes its
+  gate. Do not mix refactors, features and formatting.
+- A commit message says what changed and why: the problem, the choice made,
+  and the alternatives you rejected. Put the decision number or the issue
+  (`#N`) in it. A reader must understand the commit without this session.
+- Code comments are the documentation. Each module starts with a doc comment
+  that explains its role. Non-obvious code explains its invariants and the
+  reason for it, not only what it does.
+- Forgejo issues (`kayg/infraternal` on git.kayg.org, through `scripts/fj`)
+  record every request, decision and piece of work. Open an issue before you
+  start work. Comment when you start (branch and base SHA), for each finding
+  (with evidence), when you are blocked, and when you finish (head SHA and the
+  gate output, verbatim). Jobs never close issues. Memory tools such as Honcho
+  are a convenience, not the record.
+
 ## Gates
 
 Before you report that work is done, run `scripts/verify fast` and quote its
