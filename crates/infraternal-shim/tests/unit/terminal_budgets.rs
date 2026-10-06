@@ -1,5 +1,15 @@
 //! Terminal performance measurements against contract §5 [5][41].
 use super::*;
+
+// A wire Snapshot begins with RIS. Keep faithful-repaint fixtures in that
+// canonical context; fresh C initialization has a distinct redraw default,
+// covered by an explicit rejection regression rather than normalized away.
+fn reset_terminal(cols: u16, rows: u16) -> std::io::Result<Terminal> {
+    let mut terminal = Terminal::new(cols, rows)?;
+    terminal.process(b"\x1bc");
+    Ok(terminal)
+}
+
 #[cfg(test)]
 mod budgets {
     //! Exercises terminal invariants against real data and frozen expectations.
@@ -7,7 +17,7 @@ mod budgets {
     #[test]
     #[ignore = "performance measurement; run release on the perf host"]
     fn snapshot_200x60() {
-        let mut terminal = Terminal::new(200, 60).unwrap();
+        let mut terminal = reset_terminal(200, 60).unwrap();
         terminal.process(&b"\x1b[32m1234567890 abcdefghijklmnopqrstuvwxyz\r\n".repeat(10060));
         let mut times = Vec::new();
         let mut len = 0;
@@ -36,7 +46,7 @@ mod throughput {
     #[ignore = "VT observer and history throughput measurement"]
     fn measured_parser() {
         let data = b"1234567890 abcdefghijklmnopqrstuvwxyz\r\n".repeat(10060);
-        let mut terminal = Terminal::new(200, 60).unwrap();
+        let mut terminal = reset_terminal(200, 60).unwrap();
         let start = std::time::Instant::now();
         for _ in 0..100 {
             terminal.process(&data);
@@ -79,7 +89,7 @@ mod memory {
         let data = b"1234567890 abcdefghijklmnopqrstuvwxyz\r\n".repeat(10060);
         std::hint::black_box(&data);
         let before = resident_kib();
-        let mut terminal = Terminal::new(200, 60).unwrap();
+        let mut terminal = reset_terminal(200, 60).unwrap();
         let idle = resident_kib();
         terminal.process(&data);
         let first_rows = terminal.engine.history_rows();

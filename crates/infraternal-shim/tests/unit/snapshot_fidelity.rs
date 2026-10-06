@@ -1,6 +1,15 @@
 //! Differential replay checks for future-output state, with deterministic case IDs [13][40].
 use super::*;
 
+// A wire Snapshot begins with RIS. Keep faithful-repaint fixtures in that
+// canonical context; fresh C initialization has a distinct redraw default,
+// covered by an explicit rejection regression rather than normalized away.
+fn reset_terminal(cols: u16, rows: u16) -> std::io::Result<Terminal> {
+    let mut terminal = Terminal::new(cols, rows)?;
+    terminal.process(b"\x1bc");
+    Ok(terminal)
+}
+
 fn replay(name: &str, prefix: &[u8], cols: u16, rows: u16) {
     check_replay(name, prefix, None, cols, rows).unwrap_or_else(|error| panic!("{name}: {error}"));
 }
@@ -12,9 +21,9 @@ fn check_replay(
     cols: u16,
     rows: u16,
 ) -> std::io::Result<()> {
-    let mut a = Terminal::new(cols, rows).unwrap();
+    let mut a = reset_terminal(cols, rows).unwrap();
     a.process(prefix);
-    let mut b = Terminal::new(cols, rows).unwrap();
+    let mut b = reset_terminal(cols, rows).unwrap();
     let snapshot = a.snapshot()?;
     b.process(&snapshot);
     assert_eq!(
@@ -187,13 +196,13 @@ fn fidelity_rejects_unrepresentable_rep_without_mutating_source() {
     // saved wrap anchor cannot be reconstructed using ordinary VT alone.
     let mut prefix = b"A".repeat(60);
     prefix.extend_from_slice(b"\x1b[?47hX\x1b[?47l");
-    let mut a = Terminal::new(12, 5).unwrap();
+    let mut a = reset_terminal(12, 5).unwrap();
     a.process(&prefix);
     let Err(rejection) = a.snapshot() else {
         panic!("API gap must reject the snapshot");
     };
     assert_eq!(rejection.kind(), std::io::ErrorKind::Unsupported);
-    let mut control = Terminal::new(12, 5).unwrap();
+    let mut control = reset_terminal(12, 5).unwrap();
     control.process(&prefix);
     a.process(b"\x1b[2b");
     control.process(b"\x1b[2b");
@@ -202,7 +211,7 @@ fn fidelity_rejects_unrepresentable_rep_without_mutating_source() {
     // remains available: rejecting the gap never damages live terminal state.
     a.process(&b"\r\n".repeat(6));
     a.process(b"X");
-    let mut restored = Terminal::new(12, 5).unwrap();
+    let mut restored = reset_terminal(12, 5).unwrap();
     restored.process(&a.snapshot().unwrap());
     assert_eq!(a.engine.state_difference(&restored.engine), 0);
 }
@@ -288,9 +297,9 @@ fn fidelity_variation_wrap_attributes() {
 
 #[test]
 fn fidelity_saved_modes_future_restore() {
-    let mut a = Terminal::new(80, 24).unwrap();
+    let mut a = reset_terminal(80, 24).unwrap();
     a.process(b"\x1b[?1000h\x1b[?1000s\x1b[?1000lX");
-    let mut b = Terminal::new(80, 24).unwrap();
+    let mut b = reset_terminal(80, 24).unwrap();
     b.process(&a.snapshot().unwrap());
     a.process(b"\x1b[?1000r");
     b.process(b"\x1b[?1000r");
@@ -305,11 +314,11 @@ fn fidelity_saved_modes_future_restore() {
 #[ignore = "R3 red regression; enable with semantic-state rejection"]
 fn fidelity_prompt_resize_requires_explicit_rejection() {
     let prefix = b"\x1b]133;A;redraw=1\x07$ hello";
-    let mut a = Terminal::new(80, 24).unwrap();
+    let mut a = reset_terminal(80, 24).unwrap();
     a.process(prefix);
     match a.snapshot() {
         Ok(snapshot) => {
-            let mut b = Terminal::new(80, 24).unwrap();
+            let mut b = reset_terminal(80, 24).unwrap();
             b.process(&snapshot);
             a.resize(40, 24).unwrap();
             b.resize(40, 24).unwrap();
@@ -322,7 +331,7 @@ fn fidelity_prompt_resize_requires_explicit_rejection() {
         }
         Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::Unsupported),
     }
-    let mut control = Terminal::new(80, 24).unwrap();
+    let mut control = reset_terminal(80, 24).unwrap();
     control.process(prefix);
     a.resize(40, 24).unwrap();
     control.resize(40, 24).unwrap();
