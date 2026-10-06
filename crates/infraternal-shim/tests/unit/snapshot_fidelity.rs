@@ -586,7 +586,6 @@ fn fidelity_inherited_protection_off_mode_is_explicitly_rejected() {
 }
 
 #[test]
-#[ignore = "history-tail red regression; enable with exact retained-tail painting"]
 fn fidelity_snapshot_history_tail_contains_no_padding_rows() {
     for lines in [7, 1005] {
         let mut source = reset_terminal(12, 5).unwrap();
@@ -608,7 +607,6 @@ fn fidelity_snapshot_history_tail_contains_no_padding_rows() {
 }
 
 #[test]
-#[ignore = "history oracle red regression; enable after retained-tail comparison"]
 fn fidelity_oracle_observes_archived_cells_with_equal_active_screens() {
     let mut a = reset_terminal(12, 5).unwrap();
     let mut b = reset_terminal(12, 5).unwrap();

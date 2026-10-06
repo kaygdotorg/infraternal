@@ -87,6 +87,13 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     const history = primary.pages.total_rows - t.rows;
     const count = @min(history, tail);
     if (count != 0) {
+        // A truncated first row cannot inherit wrap from a discarded predecessor.
+        const first_history = primary.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(history - count) } }).?;
+        if (first_history.rowAndCell().row.wrap_continuation) return error.Unrepresentable;
+        // Inactive-screen restoration copies cursor state and leaves global
+        // margins/styles live. Start history in an absolute, neutral context;
+        // otherwise its first row can wrap or scroll only an interior region.
+        try w.writeAll("\x1b(B\x1b*B\x1b+B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H\x1b[0m\x1b[0\"q\x1b]8;;\x1b\\");
         // Each lookup resolves one row, never one cell through full history.
         var skip_first = false;
         for (history - count..history) |y| {
@@ -94,7 +101,11 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             skip_first = try row(w, p, skip_first);
             if (!p.rowAndCell().row.wrap) try w.writeAll("\x1b[0m\r\n");
         }
-        try w.print("\x1b[{d}S", .{t.rows});
+        // CRLF has already scrolled the earlier rows. Push only the remaining
+        // painted rows, excluding the trailing blank cursor row; SU zero means
+        // one on VT, so omit it rather than creating padding history.
+        const remaining = @min(count, @as(usize, t.rows) - 1);
+        if (remaining != 0) try w.print("\x1b[{d}S", .{remaining});
     }
     try paint(w, t, primary);
     if (t.screens.active_key == .alternate) {
@@ -547,24 +558,32 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
             const sb = b.screens.get(key);
             if ((sa == null) != (sb == null)) return 6000004;
             if (sa != null and sb != null) {
+                if (strict and key == .primary) {
+                    const ha = sa.?.pages.total_rows - a.rows;
+                    const hb = sb.?.pages.total_rows - b.rows;
+                    if (hb > ha) return 6500000;
+                    // Snapshot intentionally bounds/truncates history. Compare
+                    // every retained destination row within the 256-row contract;
+                    // older source rows are omitted, not certified equal.
+                    const retained = @min(@min(ha, hb), 256);
+                    for (0..retained) |y| {
+                        const pa = sa.?.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(ha - retained + y) } }).?;
+                        const pb = sb.?.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(hb - retained + y) } }).?;
+                        for (pa.cells(.all), pb.cells(.all)) |*ca, *cb| {
+                            if (!cellEqual(pa, pb, ca, cb, true)) return 6500001 + y;
+                        }
+                        const ra = pa.rowAndCell().row;
+                        const rb = pb.rowAndCell().row;
+                        if (ra.wrap != rb.wrap or ra.wrap_continuation != rb.wrap_continuation or ra.semantic_prompt != rb.semantic_prompt) return 6500001 + y;
+                    }
+                }
                 for (0..a.rows) |y| {
                     const pa = sa.?.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
                     const pb = sb.?.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
                     const cells_a = pa.cells(.all);
                     const cells_b = pb.cells(.all);
                     for (cells_a, cells_b, 0..) |*ca, *cb, x| {
-                        const cpa = if (ca.codepoint() == 0) ' ' else ca.codepoint();
-                        const cpb = if (cb.codepoint() == 0) ' ' else cb.codepoint();
-                        if ((strict and ca.semantic_content != cb.semantic_content) or ca.hasText() != cb.hasText() or cpa != cpb or ca.wide != cb.wide or ca.protected != cb.protected or !std.meta.eql(effectiveStyle(pa, ca), effectiveStyle(pb, cb))) {
-                            return 1 + y * a.cols + x;
-                        }
-                        const ga = pa.grapheme(ca) orelse &.{};
-                        const gb = pb.grapheme(cb) orelse &.{};
-                        if (!std.mem.eql(u21, ga, gb)) return 1 + y * a.cols + x;
-                        if (!std.mem.eql(u8, cellUri(pa, ca), cellUri(pb, cb))) return 1 + y * a.cols + x;
-                        var id_a: [64]u8 = undefined;
-                        var id_b: [64]u8 = undefined;
-                        if (!std.mem.eql(u8, linkKey(pa, ca, &id_a), linkKey(pb, cb, &id_b))) return 1 + y * a.cols + x;
+                        if (!cellEqual(pa, pb, ca, cb, strict)) return 1 + y * a.cols + x;
                     }
                     if (strict and pa.rowAndCell().row.semantic_prompt != pb.rowAndCell().row.semantic_prompt) return 6200000 + y;
                     if (pa.rowAndCell().row.wrap != pb.rowAndCell().row.wrap) return 2000000 + y;
@@ -724,4 +743,17 @@ fn approximateCell(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell, s
             try w.writeAll("\x1b[?2027l");
         }
     } else try w.writeAll(" ");
+}
+
+// One field inventory serves active cells and the retained-history oracle, so
+// adding a metadata check cannot accidentally leave archived cells unchecked.
+fn cellEqual(pa: vt.PageList.Pin, pb: vt.PageList.Pin, ca: *const vt.page.Cell, cb: *const vt.page.Cell, strict: bool) bool {
+    const cpa = if (ca.codepoint() == 0) ' ' else ca.codepoint();
+    const cpb = if (cb.codepoint() == 0) ' ' else cb.codepoint();
+    if ((strict and ca.semantic_content != cb.semantic_content) or ca.hasText() != cb.hasText() or cpa != cpb or ca.wide != cb.wide or ca.protected != cb.protected or !std.meta.eql(effectiveStyle(pa, ca), effectiveStyle(pb, cb))) return false;
+    if (!std.mem.eql(u21, pa.grapheme(ca) orelse &.{}, pb.grapheme(cb) orelse &.{})) return false;
+    if (!std.mem.eql(u8, cellUri(pa, ca), cellUri(pb, cb))) return false;
+    var id_a: [64]u8 = undefined;
+    var id_b: [64]u8 = undefined;
+    return std.mem.eql(u8, linkKey(pa, ca, &id_a), linkKey(pb, cb, &id_b));
 }
