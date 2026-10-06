@@ -39,6 +39,8 @@ export interface TerminalConfig {
   status: HTMLElement;
   hooks?: TerminalHooks;
   traceMockServer?: boolean;
+  /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
+  scrollbackLimit?: number;
 }
 
 interface ResumeCredentials {
@@ -157,7 +159,7 @@ export class TerminalClient {
     this.terminal = terminal;
     this.screen = config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
-    this.terminal.options.scrollback = 10_000;
+    this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
     this.resizeObserver = new ResizeObserver(() => this.scheduleFit());
     this.resizeObserver.observe(config.host);
     window.visualViewport?.addEventListener("resize", this.onViewportChange);
@@ -185,7 +187,7 @@ export class TerminalClient {
       fontSize: matchMedia("(pointer: coarse)").matches ? 13 : 14,
       cursorBlink: true,
       cursorStyle: "bar",
-      scrollback: 10_000,
+      scrollback: config.scrollbackLimit ?? 10_000,
       theme: {
         background: "#101113",
         foreground: "#e6e7e9",
@@ -200,6 +202,32 @@ export class TerminalClient {
   get outputSequence(): bigint { return this.lastOutSeq; }
   get inputSequence(): bigint { return this.nextInSeq; }
   get inputAcknowledged(): bigint { return this.ackedInSeq; }
+
+  /** Exposes renderer allocation counters only through the explicit test-double hook. */
+  get rendererMetrics(): {
+    cols: number;
+    rows: number;
+    cellWidth: number;
+    cellHeight: number;
+    configuredScrollback: number;
+    outputSequence: string;
+    scrollbackRows: number;
+    wasmMemoryBytes: number;
+  } {
+    const wasmTerm = this.terminal.wasmTerm;
+    const memory = (wasmTerm as unknown as { memory?: WebAssembly.Memory } | undefined)?.memory;
+    const cell = this.cellMetrics();
+    return {
+      cols: this.terminal.cols,
+      rows: this.terminal.rows,
+      cellWidth: cell.width,
+      cellHeight: cell.height,
+      configuredScrollback: this.terminal.options.scrollback ?? 10_000,
+      outputSequence: this.lastOutSeq.toString(),
+      scrollbackRows: wasmTerm?.getScrollbackLength() ?? 0,
+      wasmMemoryBytes: memory?.buffer.byteLength ?? 0,
+    };
+  }
 
   /** Returns bounded renderer text for the explicitly marked test-double page. */
   readScreenText(): string {

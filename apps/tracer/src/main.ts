@@ -13,6 +13,16 @@ declare global {
     __tracerTestDouble?: {
       isConnected: () => boolean;
       screenText: () => string;
+      rendererMetrics: () => {
+        cols: number;
+        rows: number;
+        cellWidth: number;
+        cellHeight: number;
+        configuredScrollback: number;
+        outputSequence: string;
+        scrollbackRows: number;
+        wasmMemoryBytes: number;
+      } | undefined;
       trace: () => ProbeTraceSample[];
     };
   }
@@ -169,6 +179,7 @@ function showTerminal(): void {
   const query = new URLSearchParams(location.search);
   const mockMode = query.get("mock") === "1";
   const probeMode = query.get("probe") === "1";
+  const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   app.innerHTML = `
     <section class="terminal-screen" aria-label="Terminal">
       <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal"></div>
@@ -196,6 +207,7 @@ function showTerminal(): void {
     host: mustGet<HTMLElement>("#terminal-host"),
     status: mustGet<HTMLElement>("#connection-status"),
     traceMockServer: probeMode && mockMode,
+    ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
     ...(hooks ? { hooks } : {}),
   })).then((client) => {
     currentTerminal = client;
@@ -204,6 +216,7 @@ function showTerminal(): void {
       window.__tracerTestDouble = {
         isConnected: () => currentTerminal?.isConnected === true,
         screenText: () => currentTerminal?.readScreenText() ?? "",
+        rendererMetrics: () => currentTerminal?.rendererMetrics,
         trace: () => performanceProbe?.traceSamples() ?? [],
       };
     }
@@ -211,6 +224,12 @@ function showTerminal(): void {
     const status = document.querySelector<HTMLElement>("#connection-status");
     if (status) status.textContent = safeMessage(error);
   });
+}
+
+function testScrollbackLimit(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  const limit = Number(value);
+  return Number.isInteger(limit) && limit >= 0 && limit <= 100_000 ? limit : undefined;
 }
 
 function probeCount(value: string | null): number {
