@@ -1,0 +1,35 @@
+# Standalone cargo-fuzz workspace for the wire protocol parser.
+[package]
+name = "infraternal-protocol-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+infraternal-protocol = { path = "../crates/infraternal-protocol" }
+libfuzzer-sys.workspace = true
+
+[[bin]]
+name = "wire_frame_decode"
+path = "fuzz_targets/wire_frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_stream_decode"
+path = "fuzz_targets/wire_stream_decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+
+[workspace.dependencies]
+# Provides cargo-fuzz's coverage-guided harness runtime.
+libfuzzer-sys = "0.4"
