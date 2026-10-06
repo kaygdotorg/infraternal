@@ -1873,3 +1873,129 @@ async fn public_status_and_discoverable_http_login() {
     .unwrap();
     assert_eq!(f.auth.session(token, now).await.unwrap().user_id, f.user);
 }
+
+/// Release-only scale evidence; no authenticator signing cost is included in server finish latency.
+#[tokio::test]
+#[ignore = "run --release --ignored --nocapture without concurrent builds"]
+async fn discoverable_latency_at_pending_capacity() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let second = Software::new();
+    let add = f.auth.add_start(&f.session, NOW).await.unwrap();
+    f.auth
+        .registration_finish(
+            str_field(&add, "ceremony"),
+            second.registration(&add, ORIGIN, true),
+            browser_wrap(&second.prf(&add), &f.dek, &f.user, "passkey"),
+            None,
+            NOW,
+        )
+        .await
+        .unwrap();
+    println!(
+        "auth scale: owners=1 passkeys=2 pending_limit=1024 arch={} load={}",
+        std::env::consts::ARCH,
+        std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+    );
+    let mut now = NOW;
+    for identified in [true, false] {
+        for prefill in [0, 824] {
+            now += CEREMONY + 1;
+            for _ in 0..prefill {
+                benchmark_start(&f, identified, now).await;
+            }
+            let rss_before = resident_kib();
+            let mut samples = Vec::with_capacity(200);
+            for _ in 0..200 {
+                let clock = Instant::now();
+                benchmark_start(&f, identified, now).await;
+                samples.push(clock.elapsed());
+            }
+            let (p50, p99) = latency_us(&mut samples);
+            println!(
+                "challenge mode={} pending={}..{} n=200 p50_us={p50} p99_us={p99} rss_before_kib={rss_before} rss_after_kib={}",
+                if identified {
+                    "identified"
+                } else {
+                    "discoverable"
+                },
+                prefill,
+                prefill + 200,
+                resident_kib()
+            );
+            assert_eq!(f.auth.pending.lock().await.logins.len(), prefill + 200);
+            if !identified {
+                assert!(
+                    p99 < 1000,
+                    "discoverable challenge exceeded local 1 ms budget"
+                );
+            }
+            if prefill == 824 {
+                assert!(
+                    f.auth.discoverable_login_start(now).await.is_err(),
+                    "pending capacity must fail closed"
+                );
+            }
+        }
+    }
+    println!(
+        "pending inline bytes/unit={} bytes/1024={} (excludes heap/hash-table allocations)",
+        std::mem::size_of::<Login>(),
+        1024 * std::mem::size_of::<Login>()
+    );
+    now += CEREMONY + 1;
+    for _ in 0..1023 {
+        f.auth.discoverable_login_start(now).await.unwrap();
+    }
+    let mut samples = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let start = f.auth.discoverable_login_start(now).await.unwrap();
+        let mut proof = f.software.login(&start, ORIGIN, true);
+        proof["response"]["userHandle"] =
+            json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+        let clock = Instant::now();
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "benchmark", now)
+            .await
+            .unwrap();
+        samples.push(clock.elapsed());
+    }
+    let (p50, p99) = latency_us(&mut samples);
+    println!(
+        "signed discoverable finish pending=1024 n=200 p50_us={p50} p99_us={p99} (SQLite memory + real ES256 verifier)"
+    );
+    assert!(
+        p99 < 10_000,
+        "discoverable finish exceeded local 10 ms budget"
+    );
+}
+
+/// Measure either retained identified admission or the new identity-free path through the same facade.
+async fn benchmark_start(f: &Fixture, identified: bool, now: i64) {
+    if identified {
+        f.auth.login_start(&f.user, now).await.unwrap();
+    } else {
+        f.auth.discoverable_login_start(now).await.unwrap();
+    }
+}
+
+/// Nearest-rank percentiles from monotonic durations, sorted outside the timed section.
+fn latency_us(samples: &mut [Duration]) -> (u128, u128) {
+    samples.sort_unstable();
+    let rank = |percent: usize| samples[(samples.len() * percent).div_ceil(100) - 1].as_micros();
+    (rank(50), rank(99))
+}
+
+/// Whole-process resident memory, not an isolated allocation measurement.
+fn resident_kib() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
