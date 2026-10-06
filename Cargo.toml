@@ -43,6 +43,8 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 serde_cbor_2 = "0.13"
 tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 libghostty-vt = { version = "0.2.2", default-features = false }
 libfuzzer-sys = "0.4"
 vt100 = "0.16"

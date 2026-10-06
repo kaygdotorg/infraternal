@@ -38,3 +38,5 @@ aes-gcm.workspace = true
 hkdf.workspace = true
 serde_cbor_2.workspace = true
 tower.workspace = true
+http-body-util.workspace = true
+tokio-tungstenite.workspace = true
