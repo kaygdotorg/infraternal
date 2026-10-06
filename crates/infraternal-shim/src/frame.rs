@@ -69,9 +69,30 @@ impl Frame {
     /// Encode one complete frame.
     /// # Errors
     /// Rejects frames larger than the frozen limit.
-    #[allow(clippy::too_many_lines)]
     pub fn encode(&self) -> io::Result<Vec<u8>> {
-        let mut body = Vec::new();
+        let mut wire = Vec::new();
+        self.encode_into(&mut wire)?;
+        Ok(wire)
+    }
+    /// Encode into reusable storage, rejecting oversized payloads before growth.
+    /// # Errors
+    /// Rejects frames beyond the frozen limit without changing the buffer.
+    #[allow(clippy::too_many_lines)]
+    pub fn encode_into(&self, wire: &mut Vec<u8>) -> io::Result<()> {
+        let size = match self {
+            Self::Input(bytes) => 1 + bytes.len(),
+            Self::Output(_, bytes) | Self::Snapshot(_, bytes) | Self::SequencedInput(_, bytes) => {
+                9 + bytes.len()
+            }
+            Self::Error(_, message) => 3 + message.len(),
+            _ => 59,
+        };
+        if size > MAX_FRAME {
+            return Err(invalid());
+        }
+        wire.clear();
+        wire.resize(4, 0);
+        let body = wire;
         macro_rules! put {
             ($value:expr) => {
                 body.extend_from_slice(&$value.to_le_bytes())
@@ -165,16 +186,9 @@ impl Frame {
                 body.extend_from_slice(message.as_bytes());
             }
         }
-        let size = body.len();
-        if size > MAX_FRAME {
-            return Err(invalid());
-        }
-        let mut wire = u32::try_from(size)
-            .map_err(|_| invalid())?
-            .to_le_bytes()
-            .to_vec();
-        wire.extend(body);
-        Ok(wire)
+        let size = u32::try_from(body.len() - 4).map_err(|_| invalid())?;
+        body[..4].copy_from_slice(&size.to_le_bytes());
+        Ok(())
     }
     /// Decode a complete type plus payload (without the length prefix).
     /// # Errors
