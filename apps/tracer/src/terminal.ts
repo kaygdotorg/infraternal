@@ -1,5 +1,5 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
-import { init, Terminal } from "ghostty-web";
+import { init, Terminal } from "../vendor/ghostty-web";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
