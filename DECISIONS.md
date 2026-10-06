@@ -414,3 +414,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 98. **Sign-in:** one usernameless "Continue with passkey" button, plus a quiet
     secondary "use a different passkey…" that opens the browser's QR or
     security-key flow. Typing a username is never required.
+99. **One tick, everywhere.** Each checkmark (checkboxes, stepper steps,
+    completed bootstrap steps, "copied") uses one shared spring-tick
+    primitive, reimplemented from the sveltebits spring-check behaviour: one
+    spring (0.2 s, bounce 0.2) drives the fill, the overshoot swell and the
+    draw-on. Pointer toggles animate. Keyboard toggles are instant. The same
+    rule applies to every repeated interaction: one primitive, reused.
