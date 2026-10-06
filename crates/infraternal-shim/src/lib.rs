@@ -17,3 +17,6 @@ mod pty;
 pub fn detach() -> std::io::Result<bool> {
     pty::detach()
 }
+// Repaint state becomes reachable through the following session implementation.
+#[allow(dead_code)]
+mod terminal;
