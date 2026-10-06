@@ -2,7 +2,7 @@
 //!
 //! Each terminal owns one pending output frame. Commands have eight slots;
 //! a full queue retires only that stream, cancelling its shim link. Unacknowledged
-//! input is replayed on attachment using shim-owned cursors. The writer has eight slots
+//! input is replayed on attachment using shim-owned per-writer cursors. The writer has eight slots
 //! and awaits capacity, applying transport backpressure. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! snapshot (one bounded repaint may borrow credit). Unviewed sessions stay disconnected so their PTYs keep progressing.
@@ -29,7 +29,6 @@ enum Command {
 }
 // Dropping cancellation retires a stalled handshake as well as queued commands.
 struct Stream {
-    id: [u8; 16],
     commands: mpsc::Sender<Command>,
     _cancel: oneshot::Sender<()>,
 }
@@ -183,14 +182,14 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                             }
                         }
                         Frame::AttachTerm {session_id, last_out_seq, last_in_seq} if stream != 0 => {
-                            if streams.len() >= sessions::MAX_SESSIONS || streams.contains_key(&stream) || streams.values().any(|entry| &entry.id == session_id) {
+                            if streams.len() >= sessions::MAX_SESSIONS || streams.contains_key(&stream) {
                                 return Err(sessions::invalid("terminal stream already attached or limit reached"));
                             }
                             let path = registry.get(session_id).ok_or_else(|| sessions::invalid("unknown terminal session"))?.clone();
                             let id = *session_id;
                             let (commands, rx) = mpsc::channel(8);
                             let (cancel, cancelled) = oneshot::channel();
-                            streams.insert(stream, Stream { id, commands, _cancel: cancel });
+                            streams.insert(stream, Stream { commands, _cancel: cancel });
                             let tx = tx.clone();
                             jobs.spawn(async move {
                                 let result = tokio::select! {
@@ -237,9 +236,9 @@ struct Link {
     reader: Reader,
 }
 impl Link {
-    async fn connect(path: PathBuf, id: [u8; 16]) -> io::Result<Self> {
+    async fn connect(path: PathBuf, id: [u8; 16], writer: u32) -> io::Result<Self> {
         Ok(Self {
-            session: sessions::connect_sequenced(path, id).await?,
+            session: sessions::connect_writer(path, id, writer).await?,
             transmit: Vec::new(),
             reader: Reader::default(),
         })
@@ -288,7 +287,7 @@ async fn terminal(
     mut commands: mpsc::Receiver<Command>,
     tx: mpsc::Sender<Message>,
 ) -> io::Result<()> {
-    let mut session = Some(Link::connect(path.clone(), id).await?);
+    let mut session = Some(Link::connect(path.clone(), id, stream).await?);
     if session
         .as_ref()
         .is_none_or(|s| s.session.caps & SEQUENCED_INPUT == 0)
@@ -378,7 +377,7 @@ async fn terminal(
             }
         }
         if output.needs_snapshot() && session.is_none() {
-            let mut next = Link::connect(path.clone(), id).await?;
+            let mut next = Link::connect(path.clone(), id, stream).await?;
             let written = input_state(&mut next).await?;
             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
             next.send(&Shim::SnapshotRequest).await?;
@@ -393,7 +392,7 @@ async fn terminal(
                     other => {
                         let detached = session.is_none();
                         if detached {
-                            let mut next = Link::connect(path.clone(), id).await?;
+                            let mut next = Link::connect(path.clone(), id, stream).await?;
                                             input_state(&mut next).await?;
                             session = Some(next);
                         }
