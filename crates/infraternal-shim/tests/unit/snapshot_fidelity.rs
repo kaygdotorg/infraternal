@@ -36,12 +36,22 @@ fn fidelity_f1_rep() {
 #[test]
 #[ignore = "red regression: enable after cursor fix"]
 fn fidelity_cursor() {
-    replay("cursor-after-rep", b"last\x1b[2;4H", 12, 5);
+    replay(
+        "saved-origin-outside-region",
+        "\x1b[?6h\x1b7\x1b[2;4r\x1b8🙂".as_bytes(),
+        12,
+        5,
+    );
 }
 #[test]
 #[ignore = "red regression: enable after line-edge fix"]
 fn fidelity_edge() {
-    replay("line-edge-wide", "\x1b[1;12H界".as_bytes(), 12, 5);
+    replay(
+        "wrapped-head-before-region-change",
+        "\x1b[?6h\x1b[1;12H\x1b[?2027h👩‍💻\x1b[2;4r\x1b[31;4:3mabc".as_bytes(),
+        12,
+        5,
+    );
 }
 
 #[test]
