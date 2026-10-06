@@ -14,3 +14,6 @@ unsafe_code = "deny"
 pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
+
+[dependencies]
+nix.workspace = true
