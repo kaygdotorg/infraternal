@@ -55,9 +55,24 @@ impl Auth {
 
     /// Activate only a still-live pending cookie after the browser confirms successful unwrap.
     /// The server never receives the plaintext DEK; this is a client completion signal.
-    pub async fn unlock_finish(&self, token: &str, now: i64) -> Result<()> {
+    pub async fn unlock_finish(&self, token: &str, transaction: &str, now: i64) -> Result<()> {
+        require_pending_transaction(token, transaction)?;
         let changed = sqlx::query("UPDATE sessions SET unlocked=1,expires=? WHERE token_hash=? AND unlocked=0 AND expires>?")
             .bind(now + SESSION).bind(hash(token)).bind(now).execute(&self.pool).await?.rows_affected();
+        if changed != 1 {
+            return Err(Error::Denied);
+        }
+        Ok(())
+    }
+
+    /// Failed local unwrap may revoke only the exact still-pending login from this page.
+    pub(super) async fn logout_pending(&self, token: &str, transaction: &str) -> Result<()> {
+        require_pending_transaction(token, transaction)?;
+        let changed = sqlx::query("DELETE FROM sessions WHERE token_hash=? AND unlocked=0")
+            .bind(hash(token))
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
         if changed != 1 {
             return Err(Error::Denied);
         }
@@ -134,5 +149,20 @@ pub(super) async fn insert_session(
         .bind(now)
         .execute(&mut **tx)
         .await?;
+    Ok(())
+}
+
+/// Domain separation keeps this page-memory id distinct from the `HttpOnly` cookie and its stored hash.
+/// The pending flag consumes it atomically; no extra table or per-login heap state is needed.
+pub(super) fn pending_transaction(token: &str) -> String {
+    hash(&format!("infraternal/unlock/v1|{token}"))
+}
+fn require_pending_transaction(token: &str, transaction: &str) -> Result<()> {
+    let expected = pending_transaction(token);
+    if transaction.len() != expected.len()
+        || !openssl::memcmp::eq(transaction.as_bytes(), expected.as_bytes())
+    {
+        return Err(Error::Denied);
+    }
     Ok(())
 }

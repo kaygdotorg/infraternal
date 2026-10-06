@@ -3,7 +3,6 @@ use super::*;
 use crate::auth::http::Ingress;
 
 #[tokio::test]
-#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
 async fn review3_unwrap_cannot_be_skipped() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
@@ -38,7 +37,7 @@ async fn review3_unwrap_cannot_be_skipped() {
             .0,
         axum::http::StatusCode::UNAUTHORIZED
     );
-    // Neither unwrap nor envelope retrieval occurs. Empty completion must not prove DEK possession.
+    // Neither unwrap nor envelope retrieval occurs. Empty completion cannot identify its pending transaction; no DEK proof is claimed.
     let activate = http_post_json_with_cookie(&app, "unlock-finish", json!({}), cookie)
         .await
         .0;
@@ -54,7 +53,7 @@ async fn review3_unwrap_cannot_be_skipped() {
     assert_eq!(
         session,
         axum::http::StatusCode::UNAUTHORIZED,
-        "unperformed unwrap granted full session authority"
+        "unbound completion granted full session authority"
     );
 }
 
@@ -441,7 +440,6 @@ async fn review3_busy_expiry() {
 
 /// A tab's completion and cleanup must leave the replacement cookie's pending row untouched.
 #[tokio::test]
-#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
 async fn review3_completion_and_cleanup_are_transaction_bound() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;

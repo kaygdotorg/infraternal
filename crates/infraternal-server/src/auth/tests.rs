@@ -1920,7 +1920,10 @@ async fn public_status_and_discoverable_http_login() {
         f.auth.unlock_session(token, now).await.unwrap().user_id,
         f.user
     );
-    f.auth.unlock_finish(token, now).await.unwrap();
+    f.auth
+        .unlock_finish(token, &super::sessions::pending_transaction(token), now)
+        .await
+        .unwrap();
     assert_eq!(f.auth.session(token, now).await.unwrap().user_id, f.user);
 }
 
@@ -2343,7 +2346,16 @@ async fn pending_unlock_expires_without_terminal_authority() {
     assert!(f.auth.session(&token, NOW).await.is_err());
     assert!(f.auth.fresh_session(&token, NOW).await.is_err());
     assert!(f.auth.wraps(&token, NOW + CEREMONY - 1).await.is_ok());
-    assert!(f.auth.unlock_finish(&token, NOW + CEREMONY).await.is_err());
+    assert!(
+        f.auth
+            .unlock_finish(
+                &token,
+                &super::sessions::pending_transaction(&token),
+                NOW + CEREMONY
+            )
+            .await
+            .is_err()
+    );
     assert!(f.auth.unlock_session(&token, NOW + CEREMONY).await.is_err());
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash=?")
         .bind(hash(&token))

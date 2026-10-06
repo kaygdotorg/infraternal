@@ -39,6 +39,16 @@ struct User {
 struct Empty {}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Unlock {
+    pending_transaction: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Logout {
+    pending_transaction: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Register {
     ceremony: String,
     proof: Value,
@@ -175,6 +185,8 @@ async fn dispatch(
     response
 }
 
+// Keep typed action dispatch together so capability and response rules can be reviewed in one place.
+#[allow(clippy::too_many_lines)]
 async fn execute(
     auth: &Auth,
     action: &str,
@@ -205,11 +217,14 @@ async fn execute(
         "login-finish" => {
             let b: Login = body(value)?;
             auth.require_ceremony_binding(&b.ceremony, headers).await?;
-            return session_response(
-                &auth
-                    .pending_login_finish(&b.ceremony, b.proof, &b.device, now)
-                    .await?,
-            );
+            let token = auth
+                .pending_login_finish(&b.ceremony, b.proof, &b.device, now)
+                .await?;
+            let mut response = session_response(&token)?;
+            *response.body_mut() = axum::body::Body::from(serde_json::to_vec(&json!({
+                "ok": true, "pending_transaction": super::sessions::pending_transaction(&token)
+            }))?);
+            return Ok(response);
         }
         "add-start" => auth.add_start(cookie(headers)?, now).await?,
         "wraps" => auth.wraps(cookie(headers)?, now).await?,
@@ -218,8 +233,9 @@ async fn execute(
             return Ok(Json(auth.unlock_session(cookie(headers)?, now).await?).into_response());
         }
         "unlock-finish" => {
-            let _: Empty = body(value)?;
-            auth.unlock_finish(cookie(headers)?, now).await?;
+            let b: Unlock = body(value)?;
+            auth.unlock_finish(cookie(headers)?, &b.pending_transaction, now)
+                .await?;
             return session_response(cookie(headers)?);
         }
         "session" => {
@@ -265,7 +281,12 @@ async fn execute(
             json!({"ok":true})
         }
         "logout" => {
-            auth.logout(cookie(headers)?).await?;
+            let b: Logout = body(value)?;
+            if let Some(transaction) = b.pending_transaction {
+                auth.logout_pending(cookie(headers)?, &transaction).await?;
+            } else {
+                auth.logout(cookie(headers)?).await?;
+            }
             let mut response = Json(json!({"ok":true})).into_response();
             response.headers_mut().insert(
                 header::SET_COOKIE,

@@ -136,7 +136,7 @@ try {
         const stored = entry.wrap;
         const clear = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: decode(stored.nonce), additionalData: aad }, await derive(loginPrf), decode(stored.ciphertext));
         check(encode(clear) === encode(dek), 'DEK changed across login');
-        check((await post('unlock-finish', {})).status === 200, 'unlock completion rejected');
+        check((await post('unlock-finish', { pending_transaction: logged.body.pending_transaction })).status === 200, 'unlock completion rejected');
         // A real browser response with a tampered origin/UV must fail server verification.
         const wrongOrigin = await post('login-start', {});
         const fresh = await navigator.credentials.get({ publicKey: options(wrongOrigin.body, false) });
