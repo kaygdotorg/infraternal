@@ -292,6 +292,20 @@ fn isolated(program: &Path) -> Command {
     command
 }
 
+// bind emits IN_CREATE before listen, so a refused early connection must
+// also wake on chmod. The shim chmods to 0600 only after listen succeeds.
+fn socket_readiness(state: &Path) -> io::Result<tokio::io::unix::AsyncFd<Watch>> {
+    let watch =
+        Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).map_err(io::Error::from)?;
+    watch
+        .add_watch(
+            state.join("sessions").as_path(),
+            AddWatchFlags::IN_CREATE | AddWatchFlags::IN_ATTRIB,
+        )
+        .map_err(io::Error::from)?;
+    tokio::io::unix::AsyncFd::new(Watch(watch))
+}
+
 /// Launch the same binary in an independent scope, or the shim's double fork.
 /// Socket readiness is signaled by inotify, never by periodic connect retries.
 /// # Errors
@@ -316,12 +330,7 @@ pub async fn launch(
     let id = uuid::Uuid::new_v4();
     let name = id.simple().to_string();
     let path = state.join("sessions").join(format!("{name}.sock"));
-    let watch =
-        Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).map_err(io::Error::from)?;
-    watch
-        .add_watch(state.join("sessions").as_path(), AddWatchFlags::IN_CREATE)
-        .map_err(io::Error::from)?;
-    let watch = tokio::io::unix::AsyncFd::new(Watch(watch))?;
+    let watch = socket_readiness(state)?;
     let mut command = if matches!(manager, Manager::Detached) {
         isolated(exe)
     } else {
