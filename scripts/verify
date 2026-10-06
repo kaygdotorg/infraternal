@@ -43,7 +43,13 @@ case "$1" in
         # Nightly uses optimized Rust/native code for all 20k deterministic
         # cases, with safe console output even when an assertion fails.
         vt_nightly_corpus() {
-            cargo test --release --locked -p infraternal-shim --lib fidelity_seeded_nightly \
+            # Fresh C and RIS differ in prompt-redraw state in the pinned API.
+            # Report both contexts; never hide that difference by normalization.
+            for initial in RIS fresh-c; do
+                VT_SNAPSHOT_INITIAL="$initial" cargo test --release --locked -p infraternal-shim --lib fidelity_seeded_nightly \
+                    -- --ignored --nocapture --test-threads=1 2>&1 | tr -c '[:print:]\n' '.' || return $?
+            done
+            VT_SNAPSHOT_INITIAL=RIS cargo test --release --locked -p infraternal-shim --lib fidelity_extended_nightly \
                 -- --ignored --nocapture --test-threads=1 2>&1 | tr -c '[:print:]\n' '.'
         }
         rust_run_gate "VT nightly corpus" vt_nightly_corpus
