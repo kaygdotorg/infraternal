@@ -432,7 +432,7 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      that, a count-up shows real progress when known, otherwise elapsed
      seconds. Never fake progress, and no spinners. One shared loading()
      primitive.
-103. **Copy feedback:** the copied region pixelates, a springy pill with a
-     clipboard icon and "copied" pops over it, holds, the icon and pill fade,
-     and the region depixelates. One shared copyFeedback() primitive for
-     every copy action.
+103. **Copy feedback:** the copied region pixelates while a lone clipboard
+     icon blooms over it (one spring drives both, so they stay in sync), then
+     both resolve together, faster than they came. One shared copyFeedback()
+     primitive for every copy action.
