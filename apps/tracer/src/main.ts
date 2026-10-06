@@ -1,10 +1,12 @@
 /** Renders first-run and login screens, then hands an authenticated user to the terminal. */
 import { AuthError, checkSession, loginWithPasskey, registerOwner } from "./auth";
+import { TerminalClient } from "./terminal";
 
 const app = document.querySelector<HTMLElement>("#app") ?? missingMount();
 
 let activeUserId: string | undefined;
 let checkingResume = false;
+let currentTerminal: TerminalClient | undefined;
 
 void start();
 
@@ -13,7 +15,7 @@ async function start(): Promise<void> {
     const session = await checkSession();
     if (session) {
       activeUserId = session.user_id;
-      showTerminalPlaceholder();
+      showTerminal();
     } else {
       renderAccess(new URLSearchParams(location.search).get("setup") === "1");
     }
@@ -87,7 +89,7 @@ async function submitLogin(form: HTMLFormElement, error: HTMLElement): Promise<v
     const userId = await loginWithPasskey(String(data.get("username") ?? ""), String(data.get("device") ?? ""));
     saveLocal("tracer.user-id", userId);
     activeUserId = userId;
-    showTerminalPlaceholder();
+    showTerminal();
   } catch (cause: unknown) {
     setDisabled(form, false);
     error.textContent = safeMessage(cause);
@@ -106,7 +108,7 @@ async function submitSetup(form: HTMLFormElement, error: HTMLElement): Promise<v
     );
     saveLocal("tracer.user-id", userId);
     activeUserId = userId;
-    showTerminalPlaceholder();
+    showTerminal();
   } catch (cause: unknown) {
     renderAccess(true, safeMessage(cause));
   }
@@ -146,13 +148,25 @@ function showRecoveryWords(words: string, userId: string): Promise<void> {
   return new Promise((resolve) => finish.addEventListener("click", () => resolve(), { once: true }));
 }
 
-function showTerminalPlaceholder(): void {
+function showTerminal(): void {
+  currentTerminal?.dispose();
+  currentTerminal = undefined;
   app.innerHTML = `
     <section class="terminal-screen" aria-label="Terminal">
       <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal"></div>
       <p id="connection-status" class="connection-status" role="status">Starting terminal…</p>
+      <span id="test-double-badge" class="test-double-badge" hidden>TEST DOUBLE</span>
     </section>`;
-  void activeUserId;
+  mustGet("#test-double-badge").hidden = new URLSearchParams(location.search).get("mock") !== "1";
+  void TerminalClient.open({
+    host: mustGet("#terminal-host"),
+    status: mustGet("#connection-status"),
+  }).then((client) => {
+    currentTerminal = client;
+  }).catch((error: unknown) => {
+    const status = document.querySelector<HTMLElement>("#connection-status");
+    if (status) status.textContent = safeMessage(error);
+  });
 }
 
 async function checkForegroundSession(): Promise<void> {
@@ -161,6 +175,8 @@ async function checkForegroundSession(): Promise<void> {
   try {
     const session = await checkSession();
     if (!session) {
+      currentTerminal?.dispose();
+      currentTerminal = undefined;
       activeUserId = undefined;
       renderAccess(false, "Your session ended. Sign in again to reconnect.");
     }
