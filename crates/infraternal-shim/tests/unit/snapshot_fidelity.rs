@@ -613,3 +613,21 @@ fn fidelity_screen_entry_consumes_inherited_shift_before_saving() {
         check_replay("screen-entry saved charset", prefix.as_bytes(), None, 12, 5).unwrap();
     }
 }
+
+#[test]
+#[ignore = "red regression: semantic validation must use the exported history extent"]
+fn fidelity_semantic_validation_matches_exported_history_extent() {
+    for lines in [20, 400] {
+        // OSC 133 B tags input without marking the screen as a seen prompt.
+        // C returns the live cursor to output. Only archived cell metadata
+        // differs; old rows outside the bounded Snapshot tail are omitted.
+        let mut prefix = b"\x1b]133;B\x07INPUT\x1b]133;C\x07\r\n".to_vec();
+        prefix.extend_from_slice(&b"output\r\n".repeat(lines));
+        if lines < 256 {
+            let error = check_replay("retained semantic input", &prefix, None, 12, 5).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        } else {
+            check_replay("omitted older semantic input", &prefix, None, 12, 5).unwrap();
+        }
+    }
+}
