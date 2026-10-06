@@ -205,7 +205,12 @@ struct Fixture {
     dek: [u8; 32],
 }
 async fn empty() -> (Auth, String) {
+    // SQLx may discard a connection if checkout is cancelled during its ping await.
+    // This fixture has one in-memory connection: losing it loses the entire database.
+    // Omit checkout ping (not auth checks) as SQLx 0.8.6 Pool::acquire documents;
+    // there are no before_acquire/after_connect hooks. Production uses a disk database.
     let pool = SqlitePoolOptions::new()
+        .test_before_acquire(false)
         .max_connections(1)
         .connect("sqlite::memory:")
         .await

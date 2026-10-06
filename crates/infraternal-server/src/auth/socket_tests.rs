@@ -143,6 +143,16 @@ async fn expired_handshake_releases_user_permits() {
         held.push(socket);
     }
     tokio::time::sleep(Duration::from_millis(5250)).await;
+    let schema_live: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')",
+    )
+    .fetch_one(&f.auth.pool)
+    .await
+    .unwrap();
+    assert!(
+        schema_live,
+        "cancelled acquire dropped the fixture's sole in-memory database connection"
+    );
     let reopened = connect_async(test_ws_request(address, &cookie)).await;
     let status = match &reopened {
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => response.status().as_u16(),
