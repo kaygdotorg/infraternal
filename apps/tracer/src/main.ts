@@ -106,7 +106,7 @@ function renderUnavailable(message: string): void {
 
 function renderAuth(setupRequired: boolean, message = ""): void {
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName) => {
-    saveLocal("tracer.user-id", userId);
+    saveBrowserId("tracer.user-id", userId);
     activeUserId = userId;
     if (firstSetup) showWelcome(welcomeName ?? "");
     else showTerminal();
@@ -202,13 +202,27 @@ function showTerminal(): void {
   const probePanel = mustGet<HTMLElement>("#probe-panel");
   probePanel.hidden = !probeMode;
   if (probeMode) performanceProbe = new PerformanceProbe(probePanel, probeCount(query.get("n")));
-  const hooks = performanceProbe?.hooks();
+  const sessionKey = activeUserId ? `tracer.session.${activeUserId}` : undefined;
+  const initialSessionId = query.get("session") ?? (sessionKey ? loadTabSession(sessionKey) : undefined);
+  const hooks = {
+    ...performanceProbe?.hooks(),
+    onSessionCreated: (sessionId: string): void => {
+      // Public session ids are scoped to the authenticated owner, not input
+      // writers. The server still authorizes every attachment [50]. No pending
+      // keystrokes or bearer resume credentials enter tab storage or the URL.
+      if (sessionKey) saveBrowserId(sessionKey, sessionId, true);
+      const url = new URL(location.href);
+      url.searchParams.set("session", sessionId);
+      history.replaceState(null, "", url);
+    },
+  };
   void import("./terminal").then(({ TerminalClient }) => TerminalClient.open({
     host: mustGet<HTMLElement>("#terminal-host"),
     status: mustGet<HTMLElement>("#connection-status"),
     traceMockServer: probeMode && mockMode,
     ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
-    ...(hooks ? { hooks } : {}),
+    ...(initialSessionId ? { initialSessionId } : {}),
+    hooks,
   })).then((client) => {
     currentTerminal = client;
     performanceProbe?.bind(client);
@@ -260,8 +274,14 @@ async function checkForegroundSession(): Promise<void> {
   }
 }
 
-function saveLocal(key: string, value: string): void {
-  try { localStorage.setItem(key, value); } catch { /* account id is a convenience, not a secret */ }
+function saveBrowserId(key: string, value: string, tab = false): void {
+  try { (tab ? sessionStorage : localStorage).setItem(key, value); }
+  catch { /* public identifiers are conveniences; authorization stays on the server */ }
+}
+
+function loadTabSession(key: string): string | undefined {
+  try { return sessionStorage.getItem(key) ?? undefined; }
+  catch { return undefined; }
 }
 
 function safeMessage(error: unknown): string {
