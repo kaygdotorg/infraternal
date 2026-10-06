@@ -431,3 +431,58 @@ async fn setup_expiry_single_announcement_and_parallel_redemption() {
         .unwrap();
     assert_eq!(owners, 1);
 }
+
+#[tokio::test]
+async fn review_old_words_race_rotation() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let first = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    let pause = Arc::new(RecoveryPause::default());
+    *f.auth.recovery_pause.lock().await = Some(pause.clone());
+    let auth = f.auth.clone();
+    let user = f.user.clone();
+    let old_words = f.words.clone();
+    let request =
+        tokio::spawn(async move { auth.recovery_start(&user, old_words, NOW + DAY).await });
+    // Pause after actual Argon2 verification, then commit the complete replacement.
+    pause.verified.notified().await;
+    let start = f.auth.recovery_ready(&first, NOW + DAY).await.unwrap();
+    let replacement = Software::new();
+    let words = str_field(&start, "recovery_words").to_owned();
+    f.auth
+        .registration_finish(
+            str_field(&start, "ceremony"),
+            replacement.registration(&start, ORIGIN, true),
+            browser_wrap(&replacement.prf(&start), &f.dek, &f.user, "passkey"),
+            Some(browser_wrap(
+                &recovery_ikm(&words),
+                &f.dek,
+                &f.user,
+                "recovery",
+            )),
+            NOW + DAY,
+        )
+        .await
+        .unwrap();
+    pause.resume.notify_one();
+    assert!(
+        matches!(request.await.unwrap(), Err(Error::Denied)),
+        "revoked recovery words created an authorized request after replacement"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM recovery")
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(f.auth.session(&f.session, NOW + DAY).await.is_err());
+    assert!(
+        f.auth
+            .recovery_start(&f.user, words, NOW + DAY)
+            .await
+            .is_ok()
+    );
+}

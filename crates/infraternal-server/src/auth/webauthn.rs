@@ -141,6 +141,21 @@ impl Auth {
                     return Err(Error::Denied);
                 }
             }
+            Authority::Recovery(token) => {
+                if sqlx::query("DELETE FROM recovery WHERE user_id=? AND token_hash=? AND ready<=? AND expires>?")
+                    .bind(&registration.user).bind(token).bind(now).bind(now).execute(&mut *tx).await?.rows_affected() != 1 { return Err(Error::Denied); }
+                for table in ["sessions", "api_keys", "approvals", "passkeys", "wraps"] {
+                    sqlx::query(&format!("DELETE FROM {table} WHERE user_id=?"))
+                        .bind(&registration.user)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                sqlx::query("UPDATE users SET recovery_hash=? WHERE id=?")
+                    .bind(registration.recovery_hash.as_ref().ok_or(Error::Invalid)?)
+                    .bind(&registration.user)
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
         sqlx::query("INSERT INTO passkeys(id,user_id,credential) VALUES (?,?,?)")
             .bind(&key_id)
