@@ -269,7 +269,7 @@ fn codepoint(w: *Writer, cp: u21) Writer.Error!void {
 
 // Read-only fixture oracle: compare visible state through actual Ghostty cells,
 // not bytes from our serializer. Normalise empty cells to displayed spaces.
-pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal) callconv(lib.calling_conv) usize {
+pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callconv(lib.calling_conv) usize {
     const a = c.zigTerminal(a_handle) orelse return 9999999;
     const b = c.zigTerminal(b_handle) orelse return 9999999;
     if (a.rows != b.rows or a.cols != b.cols) return 1000000;
@@ -304,6 +304,14 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal) callconv(lib.calling_
         if (!(tag.value == 47 or tag.value == 1047 or tag.value == 1049 or tag.value == 1048 or tag.value == 2026)) {
             if (a.modes.get(mode) != b.modes.get(mode)) return 4000000 + @as(usize, tag.value);
         }
+    }
+    if (strict) {
+        if (a.previous_char != b.previous_char) return 6000000;
+        for (0..a.cols) |x| {
+            if (a.tabstops.get(@intCast(x)) != b.tabstops.get(@intCast(x))) return 6000001;
+        }
+        if (!std.meta.eql(sa.saved_cursor, sb.saved_cursor)) return 6000002;
+        if (sa.cursor.cursor_style != sb.cursor.cursor_style) return 6000003;
     }
     if (!std.meta.eql(a.colors.palette.current, b.colors.palette.current)) return 5000000;
     if (!std.meta.eql(a.scrolling_region, b.scrolling_region)) return 5000001;

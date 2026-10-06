@@ -23,7 +23,7 @@ unsafe extern "C" {
         height: u32,
     ) -> i32;
     #[cfg(test)]
-    fn infraternal_vt_compare(a: *mut c_void, b: *mut c_void) -> usize;
+    fn infraternal_vt_compare(a: *mut c_void, b: *mut c_void, strict: bool) -> usize;
     #[cfg(test)]
     fn ghostty_terminal_get(terminal: *mut c_void, tag: i32, out: *mut c_void) -> i32;
     fn infraternal_vt_snapshot(
@@ -90,7 +90,12 @@ impl Engine {
     pub fn difference(&self, other: &Self) -> usize {
         // SAFETY: both uniquely owned live terminals are borrowed read-only for
         // the call. The oracle retains no references and does not mutate them.
-        unsafe { infraternal_vt_compare(self.0.as_ptr(), other.0.as_ptr()) }
+        unsafe { infraternal_vt_compare(self.0.as_ptr(), other.0.as_ptr(), false) }
+    }
+    #[cfg(test)]
+    pub fn state_difference(&self, other: &Self) -> usize {
+        // SAFETY: read-only oracle borrows live handles synchronously and retains nothing.
+        unsafe { infraternal_vt_compare(self.0.as_ptr(), other.0.as_ptr(), true) }
     }
     #[cfg(test)]
     pub fn history_rows(&self) -> usize {

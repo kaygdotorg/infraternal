@@ -131,3 +131,7 @@ mod checks;
 #[cfg(test)]
 #[path = "../tests/unit/terminal_budgets.rs"]
 mod measurements;
+
+#[cfg(test)]
+#[path = "../tests/unit/snapshot_fidelity.rs"]
+mod fidelity;
