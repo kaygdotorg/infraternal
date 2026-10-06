@@ -233,6 +233,7 @@ export class TerminalClient {
     cellWidth: number;
     cellHeight: number;
     configuredScrollback: number;
+    receivedSequence: string;
     outputSequence: string;
     scrollbackRows: number;
     wasmMemoryBytes: number;
@@ -246,6 +247,7 @@ export class TerminalClient {
       cellWidth: cell.width,
       cellHeight: cell.height,
       configuredScrollback: this.terminal.options.scrollback ?? 10_000,
+      receivedSequence: this.receivedOutSeq.toString(),
       outputSequence: this.lastOutSeq.toString(),
       scrollbackRows: wasmTerm?.getScrollbackLength() ?? 0,
       wasmMemoryBytes: memory?.buffer.byteLength ?? 0,
@@ -627,6 +629,8 @@ export class TerminalClient {
     this.pendingSnapshot?.bytes.fill(0);
     this.pendingSnapshot = { outSeq: sequence, bytes: bytes.slice() };
 
+    // Drop queued raw bytes that this repaint supersedes. Output received after
+    // this point starts at `sequence` and must survive older write callbacks.
     const keep = this.outputWriteInFlight ? this.outputWriteLength : 0;
     const dropped = this.outputQueue.discardAfter(keep);
     if (dropped > 0) this.returnCredit(dropped);
@@ -652,10 +656,6 @@ export class TerminalClient {
         this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq);
         snapshot.bytes.fill(0);
         this.returnCredit(snapshot.bytes.byteLength);
-        if (this.pendingSnapshot) {
-          const dropped = this.outputQueue.discardAfter(0);
-          if (dropped > 0) this.returnCredit(dropped);
-        }
         this.drainOutput();
         this.tryAttach();
       });

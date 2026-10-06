@@ -12,6 +12,7 @@ declare global {
   interface Window {
     __tracerTestDouble?: {
       isConnected: () => boolean;
+      dropConnection: () => void;
       screenText: () => string;
       rendererMetrics: () => {
         cols: number;
@@ -19,6 +20,7 @@ declare global {
         cellWidth: number;
         cellHeight: number;
         configuredScrollback: number;
+        receivedSequence: string;
         outputSequence: string;
         scrollbackRows: number;
         wasmMemoryBytes: number;
@@ -255,6 +257,7 @@ async function showTerminal(serverHostname?: string): Promise<void> {
     if (mockMode) {
       window.__tracerTestDouble = {
         isConnected: () => currentTerminal?.isConnected === true,
+        dropConnection: () => currentTerminal?.forceDrop(),
         screenText: () => currentTerminal?.readScreenText() ?? "",
         rendererMetrics: () => currentTerminal?.rendererMetrics,
         trace: () => performanceProbe?.traceSamples() ?? [],
