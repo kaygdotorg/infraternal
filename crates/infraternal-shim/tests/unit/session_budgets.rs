@@ -36,7 +36,7 @@ mod budgets {
             exited_sent: false,
             request: None,
         };
-        let mut terminal = Terminal::new(200, 60);
+        let mut terminal = Terminal::new(200, 60).unwrap();
         let ring = Ring::new(DEFAULT_CAPACITY);
         let mut config = Config::new([0; 16], Uid::effective().as_raw());
         let mut input = VecDeque::new();

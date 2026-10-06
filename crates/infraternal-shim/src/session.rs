@@ -206,7 +206,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
             .as_millis(),
     )
     .map_err(io::Error::other)?;
-    let mut terminal = Terminal::new(config.cols, config.rows);
+    let mut terminal = Terminal::new(config.cols, config.rows)?;
     let mut ring = Ring::new(config.ring_capacity);
     let mut input = VecDeque::new();
     let mut cursors = InputCursors::default();

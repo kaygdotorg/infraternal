@@ -7,7 +7,7 @@ mod budgets {
     #[test]
     #[ignore = "performance measurement; run release on the perf host"]
     fn snapshot_200x60() {
-        let mut terminal = Terminal::new(200, 60);
+        let mut terminal = Terminal::new(200, 60).unwrap();
         terminal.process(&b"\x1b[32m1234567890 abcdefghijklmnopqrstuvwxyz\r\n".repeat(10060));
         let mut times = Vec::new();
         let mut len = 0;
@@ -36,7 +36,7 @@ mod throughput {
     #[ignore = "VT observer and history throughput measurement"]
     fn measured_parser() {
         let data = b"1234567890 abcdefghijklmnopqrstuvwxyz\r\n".repeat(10060);
-        let mut terminal = Terminal::new(200, 60);
+        let mut terminal = Terminal::new(200, 60).unwrap();
         let start = std::time::Instant::now();
         for _ in 0..100 {
             terminal.process(&data);

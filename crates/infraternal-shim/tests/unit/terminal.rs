@@ -10,9 +10,9 @@ mod tests {
             let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
             let bytes = std::fs::read(dir.join(format!("{name}.vt"))).unwrap();
             let continuation = std::fs::read(dir.join(format!("{name}.continue.vt"))).unwrap();
-            let mut original = Terminal::new(200, 60);
+            let mut original = Terminal::new(200, 60).unwrap();
             original.process(&bytes);
-            let mut restored = Terminal::new(200, 60);
+            let mut restored = Terminal::new(200, 60).unwrap();
             restored.process(&original.snapshot().unwrap());
             compare(&original, &restored, name);
             original.process(&continuation);
@@ -25,12 +25,12 @@ mod tests {
         for mode in [47, 1047, 1049] {
             for nested in [false, true] {
                 let prefix = format!("PRIMARY\x1b[?{mode}hALTERNATE");
-                let mut a = Terminal::new(200, 60);
+                let mut a = Terminal::new(200, 60).unwrap();
                 a.process(prefix.as_bytes());
                 if nested {
                     a.process(b"\x1b[?1049hNESTED\x1b[?47l\x1b[?1047l");
                 }
-                let mut b = Terminal::new(200, 60);
+                let mut b = Terminal::new(200, 60).unwrap();
                 b.process(&a.snapshot().unwrap());
                 compare(&a, &b, "alternate variant immediate");
                 let suffix = format!("\x1b[?{mode}lX\x1b[?1049lY");
@@ -42,9 +42,9 @@ mod tests {
     }
     #[test]
     fn margins_tabs_charsets_and_modes_continue() {
-        let mut a = Terminal::new(200, 60);
+        let mut a = Terminal::new(200, 60).unwrap();
         a.process(b"PRIMARY\r\n\x1b[?1049h\x1b[3;50r\x1b[?6h\x1b[?2004h\x1b[?1006h\x1b[?1003h\x1b[5 q\x1b[3g\x1b[4;12H\x1bH\x1b(0lqqk\x1b7\x1b[10;1H");
-        let mut b = Terminal::new(200, 60);
+        let mut b = Terminal::new(200, 60).unwrap();
         b.process(&a.snapshot().unwrap());
         compare(&a, &b, "modes");
         let suffix = b"\x1b8x\tqq\x1b[49;1Hlast\nscroll\x1b[?1049l";
@@ -86,9 +86,9 @@ mod tests {
             (b"hello\x1b[\n31", b"mX"),
             (b"\x1b]4;1;rgb:ff/00/00\x1b", b"\\X"),
         ] {
-            let mut a = Terminal::new(200, 60);
+            let mut a = Terminal::new(200, 60).unwrap();
             a.process(prefix);
-            let mut b = Terminal::new(200, 60);
+            let mut b = Terminal::new(200, 60).unwrap();
             b.process(&a.snapshot().unwrap());
             a.process(suffix);
             b.process(suffix);

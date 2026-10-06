@@ -139,9 +139,15 @@ pub struct Terminal {
     tabs: Vec<bool>,
 }
 impl Terminal {
-    pub fn new(cols: u16, rows: u16) -> Self {
+    pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
+        if cols == 0 || rows == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "terminal dimensions must be nonzero",
+            ));
+        }
         let size = Size { cols, rows };
-        Self {
+        Ok(Self {
             term: Term::new(
                 Config {
                     scrolling_history: SCROLLBACK,
@@ -158,7 +164,7 @@ impl Terminal {
             margins: (1, rows),
             size,
             tabs: (0..cols).map(|col| col % 8 == 0).collect(),
-        }
+        })
     }
     pub fn process(&mut self, bytes: &[u8]) {
         let mut parsed = 0;
