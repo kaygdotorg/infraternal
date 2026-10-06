@@ -84,7 +84,7 @@ export async function registerOwner(
     if (!(created instanceof PublicKeyCredential)) throw new AuthError("Passkey registration was cancelled.");
     const creationOutputs = credentialOutputs(created);
     if (creationOutputs.prf?.enabled !== true) {
-      throw new AuthError("This passkey does not support the required PRF extension.");
+      throw new AuthError("This passkey cannot protect your account key. Choose another passkey.");
     }
 
     prf = prfFrom(created);
@@ -118,7 +118,7 @@ export async function registerOwner(
 }
 
 /** Completes a UV-required passkey login and verifies its DEK envelope locally. */
-export async function loginWithPasskey(device: string, legacyDevice?: string): Promise<string> {
+export async function loginWithPasskey(device: string): Promise<string> {
   const start = await post<AuthStart>("login-start", {});
   const publicKey = requestOptions(start.options.publicKey);
   let prf: Uint8Array | undefined;
@@ -130,7 +130,7 @@ export async function loginWithPasskey(device: string, legacyDevice?: string): P
     await post("login-finish", {
       ceremony: requiredString(start.ceremony, "login ceremony"),
       proof: credentialProof(assertion),
-      device: (legacyDevice ?? device).slice(0, 128),
+      device: device.slice(0, 128),
     });
 
     try {
@@ -140,13 +140,13 @@ export async function loginWithPasskey(device: string, legacyDevice?: string): P
       const keyId = base64url(new Uint8Array(assertion.rawId));
       const entry = stored.find((entry) => entry.kind === "passkey" && entry.key_id === keyId);
       const envelope = entry?.wrap;
-      if (!envelope) throw new AuthError("The passkey key envelope is missing.");
+      if (!envelope) throw new AuthError("Your account key is unavailable on the server. Try again.");
       const first = decodeBase64url(requiredString(entry?.prf_input, "passkey input"));
       try {
         prf = await credentialPrf(assertion, publicKey.rpId, first);
       } finally { first.fill(0); }
       const dek = await unwrapDek(prf, envelope, userId, "passkey");
-      if (dek.byteLength !== 32) throw new AuthError("The passkey key envelope is invalid.");
+      if (dek.byteLength !== 32) throw new AuthError("Your account key could not be unlocked. Try again.");
       dek.fill(0);
     } catch (error: unknown) {
       await post("logout", {}).catch(() => undefined);
@@ -182,7 +182,7 @@ async function post<Result = unknown>(action: string, body: unknown): Promise<Re
   try {
     return (await response.json()) as Result;
   } catch {
-    throw new AuthError(`The server returned an invalid ${action} response.`);
+    throw new AuthError("The server sent a response this browser could not use. Try again.");
   }
 }
 
@@ -227,7 +227,7 @@ function prfInputFrom(options: PublicKeyCredentialCreationOptions | PublicKeyCre
     prf?: { eval?: { first?: BufferSource } };
   }) | undefined;
   const first = extensions?.prf?.eval?.first;
-  if (!first) throw new AuthError("The server omitted the passkey key-wrapping input.");
+  if (!first) throw new AuthError("The server could not prepare your account key. Try again.");
   return first instanceof ArrayBuffer
     ? new Uint8Array(first)
     : new Uint8Array(first.buffer, first.byteOffset, first.byteLength);
@@ -249,7 +249,7 @@ async function credentialPrf(
   });
   if (!(result instanceof PublicKeyCredential)) throw new AuthError("The passkey key proof was cancelled.");
   const prf = prfFrom(result);
-  if (!prf) throw new AuthError("This passkey did not return its key-wrapping proof.");
+  if (!prf) throw new AuthError("This passkey could not unlock your account key. Try again or choose another passkey.");
   return prf;
 }
 
@@ -261,7 +261,7 @@ function prfFrom(credential: PublicKeyCredential): Uint8Array | undefined {
   const first = credentialOutputs(credential).prf?.results?.first;
   if (!first) return undefined;
   const result = copyBytes(first);
-  if (result.byteLength !== 32) throw new AuthError("The passkey returned an invalid key-wrapping proof.");
+  if (result.byteLength !== 32) throw new AuthError("Your passkey could not unlock your account key. Try again.");
   return result;
 }
 
@@ -278,7 +278,7 @@ function credentialProof(credential: PublicKeyCredential): Record<string, unknow
     fields.signature = base64url(new Uint8Array(response.signature));
     fields.userHandle = response.userHandle ? base64url(new Uint8Array(response.userHandle)) : null;
   } else {
-    throw new AuthError("The browser returned an unsupported passkey proof.");
+    throw new AuthError("This browser could not use your passkey. Try another browser.");
   }
 
   // PRF output is local key material. Remove the whole extension before serialization.
@@ -312,7 +312,7 @@ async function unwrapDek(ikm: Uint8Array, wrap: Wrap, userId: string, kind: "pas
   const nonce = decodeBase64url(wrap.nonce);
   const ciphertext = decodeBase64url(wrap.ciphertext);
   if (salt.byteLength !== 32 || nonce.byteLength !== 12 || ciphertext.byteLength !== 48) {
-    throw new AuthError("The passkey key envelope has invalid lengths.");
+    throw new AuthError("The server sent an unusable account key. Try again.");
   }
   const aad = encoder.encode(`${KEY_CONTEXT}|${userId}|${kind}`);
   const key = await deriveWrappingKey(ikm, salt, aad);
