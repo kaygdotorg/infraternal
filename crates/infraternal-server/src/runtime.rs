@@ -1,0 +1,524 @@
+//! Starts the trusted HTTP control plane with private SQLite storage, pinned passkey origin, and optional TLS [8][19][24][26].
+
+use crate::auth::{self, Auth};
+use axum::{
+    Json, Router,
+    extract::{ConnectInfo, State},
+    http::{Request, StatusCode, header},
+    middleware::{Next, from_fn_with_state},
+    response::{IntoResponse, Response},
+    routing::get,
+};
+use axum_server::tls_openssl::OpenSSLConfig;
+use serde_json::json;
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
+};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{net::TcpListener, sync::Mutex};
+use tower_http::services::{ServeDir, ServeFile};
+use tracing_subscriber::EnvFilter;
+
+/// A CIDR network whose peers are permitted to supply `X-Forwarded-For` [keywrap.md].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProxyNetwork {
+    address: IpAddr,
+    prefix: u8,
+}
+
+impl ProxyNetwork {
+    /// Return whether an address falls within this configured proxy network.
+    #[must_use]
+    pub fn contains(&self, candidate: IpAddr) -> bool {
+        match (self.address, candidate) {
+            (IpAddr::V4(network), IpAddr::V4(candidate)) => {
+                let mask = if self.prefix == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - self.prefix)
+                };
+                u32::from(network) & mask == u32::from(candidate) & mask
+            }
+            (IpAddr::V6(network), IpAddr::V6(candidate)) => {
+                let mask = if self.prefix == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - self.prefix)
+                };
+                u128::from(network) & mask == u128::from(candidate) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for ProxyNetwork {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let max_prefix = if self.address.is_ipv4() { 32 } else { 128 };
+        if self.prefix == max_prefix {
+            write!(formatter, "{}", self.address)
+        } else {
+            write!(formatter, "{}/{}", self.address, self.prefix)
+        }
+    }
+}
+
+impl FromStr for ProxyNetwork {
+    type Err = ProxyNetworkError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (address, prefix) = match value.split_once('/') {
+            Some((address, prefix)) => (
+                address.parse::<IpAddr>().map_err(|_| ProxyNetworkError)?,
+                Some(prefix.parse::<u8>().map_err(|_| ProxyNetworkError)?),
+            ),
+            None => (
+                value.parse::<IpAddr>().map_err(|_| ProxyNetworkError)?,
+                None,
+            ),
+        };
+        let max_prefix = if address.is_ipv4() { 32 } else { 128 };
+        let prefix = prefix.unwrap_or(max_prefix);
+        if prefix > max_prefix {
+            return Err(ProxyNetworkError);
+        }
+        Ok(Self { address, prefix })
+    }
+}
+
+/// Parse failure for a proxy network, without retaining untrusted input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProxyNetworkError;
+
+impl std::fmt::Display for ProxyNetworkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("proxy network must be an IP address or CIDR")
+    }
+}
+
+impl std::error::Error for ProxyNetworkError {}
+
+/// Certificate and private key files for a standalone HTTPS listener.
+#[derive(Clone, Debug)]
+pub struct TlsFiles {
+    /// PEM certificate chain.
+    pub certificate: PathBuf,
+    /// PEM private key.
+    pub private_key: PathBuf,
+}
+
+/// Inputs for the server process. The public origin is always explicit to `WebAuthn`.
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    /// Address on which the HTTP service accepts connections.
+    pub listen: SocketAddr,
+    /// Private directory containing the SQLite database.
+    pub data_dir: PathBuf,
+    /// Public HTTPS origin used for `WebAuthn` and CSRF checks.
+    pub public_origin: String,
+    /// Optional static web build directory.
+    pub web_root: Option<PathBuf>,
+    /// Optional standalone TLS files. Without them, `behind_proxy` must be enabled.
+    pub tls: Option<TlsFiles>,
+    /// Trust forwarding metadata only from configured proxy peers.
+    pub behind_proxy: bool,
+    /// Explicit peer networks allowed to provide forwarded client addresses.
+    pub trusted_proxies: Vec<ProxyNetwork>,
+}
+
+/// Startup errors intentionally avoid printing filesystem paths, keys, or request data.
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    /// The command-line options cannot provide a safe serving configuration.
+    #[error("invalid server configuration")]
+    InvalidConfiguration,
+    /// The server could not prepare private storage.
+    #[error("server storage initialization failed")]
+    Storage(#[source] sqlx::Error),
+    /// The server database schema could not be migrated.
+    #[error("server database migration failed")]
+    Migration(#[source] sqlx::migrate::MigrateError),
+    /// Passkey/authentication initialization failed.
+    #[error("auth initialization failed")]
+    Auth(#[source] auth::Error),
+    /// The configured certificate or private key could not be loaded.
+    #[error("TLS configuration failed")]
+    TlsConfiguration,
+    /// The configured web root is missing or is not a directory.
+    #[error("web root is unavailable")]
+    WebRoot,
+    /// The listener could not bind or serve.
+    #[error("server listener failed")]
+    Listener(#[source] std::io::Error),
+    /// System time predates the Unix epoch or does not fit the auth API.
+    #[error("system clock is invalid")]
+    Clock,
+}
+
+/// Initialize SQLite, mount auth and health routes, and serve HTTP or HTTPS until shutdown.
+///
+/// # Errors
+///
+/// Returns a sanitized startup, storage, migration, TLS, or listener error.
+pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
+    init_logging();
+    let app = router(config.clone()).await?;
+    tracing::info!(
+        listen = %config.listen,
+        public_origin = %config.public_origin,
+        behind_proxy = config.behind_proxy,
+        "infraternal server started"
+    );
+
+    if let Some(tls) = config.tls {
+        let tls_config = OpenSSLConfig::from_pem_file(tls.certificate, tls.private_key)
+            .map_err(|_| ServerError::TlsConfiguration)?;
+        axum_server::bind_openssl(config.listen, tls_config)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .map_err(ServerError::Listener)
+    } else {
+        let listener = TcpListener::bind(config.listen)
+            .await
+            .map_err(ServerError::Listener)?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .map_err(ServerError::Listener)
+    }
+}
+
+/// Build the production router after applying the same migrations and owner bootstrap as `serve`.
+pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
+    validate_config(&config)?;
+    if let Some(web_root) = &config.web_root
+        && !web_root.is_dir()
+    {
+        return Err(ServerError::WebRoot);
+    }
+
+    let pool = open_database(&config.data_dir).await?;
+    let origin =
+        url::Url::parse(&config.public_origin).map_err(|_| ServerError::InvalidConfiguration)?;
+    let rp_id = origin.host_str().ok_or(ServerError::InvalidConfiguration)?;
+    let auth = Auth::new(pool.clone(), rp_id, &config.public_origin)
+        .await
+        .map_err(ServerError::Auth)?;
+    let now = unix_seconds()?;
+    auth.bootstrap(now, |banner| {
+        tracing::info!(target: "infraternal::setup", setup_token_banner = %banner, "initial owner setup is required");
+    })
+    .await
+    .map_err(ServerError::Auth)?;
+
+    let app = Router::new()
+        .route("/healthz", get(health))
+        .with_state(pool)
+        .merge(auth::router(auth));
+    let app = if let Some(web_root) = config.web_root {
+        let fallback = ServeFile::new(web_root.join("index.html"));
+        app.fallback_service(
+            ServeDir::new(web_root)
+                .append_index_html_on_directories(true)
+                .fallback(fallback),
+        )
+    } else {
+        app
+    };
+    let admission = SourceAdmission {
+        behind_proxy: config.behind_proxy,
+        trusted_proxies: config.trusted_proxies,
+        buckets: Arc::default(),
+    };
+    Ok(app.layer(from_fn_with_state(admission, source_admission)))
+}
+
+async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerError> {
+    std::fs::create_dir_all(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
+    set_private_directory(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
+    let database = data_dir.join("infraternal.sqlite");
+    let options = SqliteConnectOptions::new()
+        .filename(database)
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(8)
+        .connect_with(options)
+        .await
+        .map_err(ServerError::Storage)?;
+    set_private_file(&data_dir.join("infraternal.sqlite"))
+        .map_err(|_| ServerError::InvalidConfiguration)?;
+    Ok(pool)
+}
+
+fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
+    if config.behind_proxy == config.trusted_proxies.is_empty() {
+        return Err(ServerError::InvalidConfiguration);
+    }
+    if config.tls.is_none() && !config.behind_proxy {
+        return Err(ServerError::InvalidConfiguration);
+    }
+    let origin =
+        url::Url::parse(&config.public_origin).map_err(|_| ServerError::InvalidConfiguration)?;
+    if origin.scheme() != "https"
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+        || origin.host_str().is_none()
+    {
+        return Err(ServerError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+fn unix_seconds() -> Result<i64, ServerError> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ServerError::Clock)?
+            .as_secs(),
+    )
+    .map_err(|_| ServerError::Clock)
+}
+
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(filter)
+        .try_init();
+}
+
+async fn health(State(pool): State<SqlitePool>) -> Response {
+    match sqlx::query("SELECT 1").execute(&pool).await {
+        Ok(_) => Json(json!({"status":"ok"})).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status":"unavailable"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Per-source auth admission runs before JSON extraction and trusts forwarding data only from configured peers.
+#[derive(Clone)]
+struct SourceAdmission {
+    behind_proxy: bool,
+    trusted_proxies: Vec<ProxyNetwork>,
+    buckets: Arc<Mutex<HashMap<(IpAddr, bool), SourceBucket>>>,
+}
+
+struct SourceBucket {
+    window: i64,
+    requests: u8,
+}
+
+async fn source_admission(
+    State(policy): State<SourceAdmission>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if !path.starts_with("/auth/") {
+        return next.run(request).await;
+    }
+    let device = matches!(
+        path.trim_start_matches("/auth/"),
+        "device-start" | "device-redeem"
+    );
+    let Some(peer) = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|address| address.0.ip())
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "request address unavailable",
+        )
+            .into_response();
+    };
+    let source = if policy.behind_proxy
+        && policy
+            .trusted_proxies
+            .iter()
+            .any(|network| network.contains(peer))
+    {
+        match request.headers().get("x-forwarded-for") {
+            Some(value) => match value.to_str().ok().and_then(|value| value.parse().ok()) {
+                Some(address) => address,
+                None => {
+                    return (StatusCode::BAD_REQUEST, "invalid forwarded address").into_response();
+                }
+            },
+            None => peer,
+        }
+    } else {
+        peer
+    };
+    let Ok(now) = unix_seconds() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let mut buckets = policy.buckets.lock().await;
+    buckets.retain(|_, bucket| now - bucket.window < 60);
+    let limit = if device { 10 } else { 30 };
+    let bucket = if let Some(bucket) = buckets.get_mut(&(source, device)) {
+        if now - bucket.window >= 60 {
+            *bucket = SourceBucket {
+                window: now,
+                requests: 0,
+            };
+        }
+        bucket
+    } else if buckets.len() < 4096 {
+        buckets.insert(
+            (source, device),
+            SourceBucket {
+                window: now,
+                requests: 0,
+            },
+        );
+        // The just-inserted key cannot disappear while this mutex is held.
+        if let Some(bucket) = buckets.get_mut(&(source, device)) {
+            bucket
+        } else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    } else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "source admission capacity exhausted",
+        )
+            .into_response();
+    };
+    if bucket.requests >= limit {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "60")],
+            "too many requests",
+        )
+            .into_response();
+    }
+    bucket.requests += 1;
+    drop(buckets);
+    next.run(request).await
+}
+
+#[cfg(unix)]
+fn set_private_directory(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_directory(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_file(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Verifies startup storage and trusted-proxy validation without binding a listener.
+
+    use super::{ProxyNetwork, ServerConfig, TlsFiles, router};
+    use axum::{body::Body, http::Request};
+    use std::{net::SocketAddr, path::PathBuf, str::FromStr};
+    use tower::ServiceExt;
+
+    fn temp_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("infraternal-server-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn config(data_dir: PathBuf) -> ServerConfig {
+        ServerConfig {
+            listen: SocketAddr::from(([127, 0, 0, 1], 47361)),
+            data_dir,
+            public_origin: "https://localhost:47361".to_owned(),
+            web_root: None,
+            tls: Some(TlsFiles {
+                certificate: PathBuf::from("unused.crt"),
+                private_key: PathBuf::from("unused.key"),
+            }),
+            behind_proxy: false,
+            trusted_proxies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn proxy_networks_match_only_their_address_family_and_prefix() {
+        let ipv4 = ProxyNetwork::from_str("10.69.69.9/24").expect("valid IPv4 network");
+        assert!(ipv4.contains("10.69.69.125".parse().expect("valid IP")));
+        assert!(!ipv4.contains("10.69.70.125".parse().expect("valid IP")));
+        assert!(!ipv4.contains("::1".parse().expect("valid IP")));
+
+        let ipv6 = ProxyNetwork::from_str("2001:db8::/32").expect("valid IPv6 network");
+        assert!(ipv6.contains("2001:db8:1::1".parse().expect("valid IP")));
+        assert!(ProxyNetwork::from_str("10.0.0.1/33").is_err());
+    }
+
+    #[tokio::test]
+    async fn router_migrates_private_storage_and_serves_health() {
+        let data_dir = temp_dir();
+        let app = router(config(data_dir.clone()))
+            .await
+            .expect("server router startup");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("health request"),
+            )
+            .await
+            .expect("health response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(data_dir.join("infraternal.sqlite").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&data_dir)
+                .expect("data directory metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700);
+            let mode = std::fs::metadata(data_dir.join("infraternal.sqlite"))
+                .expect("database metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    #[tokio::test]
+    async fn proxy_mode_requires_an_explicit_peer_allowlist() {
+        let mut config = config(temp_dir());
+        config.tls = None;
+        config.behind_proxy = true;
+        assert!(router(config).await.is_err());
+    }
+}
