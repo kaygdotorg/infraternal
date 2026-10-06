@@ -846,7 +846,7 @@ async fn recovery_expiry_revocation_and_cross_user_isolation() {
             .is_err()
     );
     let other = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES (?,'other',0,'unused')")
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,'other',0,'unused','other','Other')")
         .bind(&other)
         .execute(&f.auth.pool)
         .await
@@ -1872,6 +1872,99 @@ async fn public_status_and_discoverable_http_login() {
     )
     .unwrap();
     assert_eq!(f.auth.session(token, now).await.unwrap().user_id, f.user);
+}
+
+/// The account identity migration adds persisted, unique usernames and display names.
+#[tokio::test]
+async fn account_identity_schema_has_unique_usernames_and_display_names() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let _auth = Auth::new(pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+
+    let columns: Vec<String> = sqlx::query("PRAGMA table_info(users)")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get("name"))
+        .collect();
+    assert!(columns.iter().any(|column| column == "username"));
+    assert!(columns.iter().any(|column| column == "display_name"));
+
+    let username_index: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_index_list('users') WHERE name='users_username_unique'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(username_index, 1);
+}
+
+/// Existing labels stay visible while invalid and duplicate names receive stable identities.
+#[tokio::test]
+async fn account_identity_migration_backfills_legacy_users() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner INTEGER NOT NULL, recovery_hash TEXT NOT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let legacy = [
+        ("11111111-1111-4111-8111-111111111111", "Ada".to_owned()),
+        ("22222222-2222-4222-8222-222222222222", "ADA".to_owned()),
+        (
+            "33333333-3333-4333-8333-333333333333",
+            "bad name!".to_owned(),
+        ),
+        ("44444444-4444-4444-8444-444444444444", "x".repeat(70)),
+    ];
+    for (id, name) in &legacy {
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES (?, ?, 0, 'unused')")
+            .bind(id)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    sqlx::raw_sql(include_str!("../../migrations/0006_user_identity.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rows = sqlx::query("SELECT id,username,display_name FROM users ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let usernames: Vec<String> = rows.iter().map(|row| row.get("username")).collect();
+    assert_eq!(usernames.len(), 4);
+    assert_eq!(
+        usernames
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        4
+    );
+    assert!(
+        usernames
+            .iter()
+            .all(|username| (2..=32).contains(&username.len())
+                && username.bytes().all(|byte| byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'_' | b'-')))
+    );
+    assert_eq!(rows[0].get::<String, _>("display_name"), "Ada");
+    assert_eq!(rows[1].get::<String, _>("display_name"), "ADA");
+    assert_eq!(rows[3].get::<String, _>("display_name").chars().count(), 64);
 }
 
 /// Release-only scale evidence; no authenticator signing cost is included in server finish latency.
