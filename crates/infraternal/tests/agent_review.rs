@@ -36,3 +36,8 @@ fn repeated_tiny_credit_snapshots_preserve_shell_progress() {
 fn two_writers_keep_independent_ack_and_exact_input_after_restart() {
     probe("scripts/verify-agent-multi.py");
 }
+
+#[test]
+fn last_typist_selects_its_own_real_pty_dimensions() {
+    probe("scripts/verify-agent-writer-size.py");
+}
