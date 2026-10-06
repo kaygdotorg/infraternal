@@ -432,10 +432,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      that, a count-up shows real progress when known, otherwise elapsed
      seconds. Never fake progress, and no spinners. One shared loading()
      primitive.
-103. **Copy feedback:** the copied region softly blurs and dims while a lone
-     clipboard icon appears over it, then both resolve, faster than they came
-     (200 ms in, a short hold, 150 ms out, strong ease-out). This is a
-     non-literal pixelation: a mosaic was tried and rejected as artificial.
-     It runs on WAAPI and animates transform, opacity and blur only.
-     Reduced motion is opacity only. One shared copyFeedback() primitive
-     for every copy action.
+103. **Copy feedback:** minimal. The copy button's own icon turns into a
+     tick (the D99 path, drawn on) and back: 200 ms in, a 1.4 s hold, 150 ms
+     out, with strong ease-out CSS transitions, so a re-tap retargets. Nothing
+     else on the page moves. A region blur and a pixel mosaic were tried and
+     rejected as maximal. Reduced motion is opacity only. One shared
+     copyFeedback() primitive for every copy action.
