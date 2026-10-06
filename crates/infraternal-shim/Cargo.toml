@@ -22,3 +22,11 @@ nix.workspace = true
 
 [dev-dependencies]
 vt100.workspace = true
+
+# Opt-in candidate only: native Ghostty build requires Zig and fetched sources.
+[features]
+bench-ghostty = ["dep:libghostty-vt"]
+
+[dependencies.libghostty-vt]
+workspace = true
+optional = true
