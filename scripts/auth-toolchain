@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Fetch the checksum-pinned Zig C compiler for vendored OpenSSL/SQLite musl builds [7,20].
+set -euo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+case "$(uname -m)" in
+    x86_64) host=x86_64; checksum=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239 ;;
+    aarch64) host=aarch64; checksum=958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f ;;
+    *) printf 'unsupported Zig build host\n' >&2; exit 1 ;;
+esac
+version=0.15.2
+destination="$root/target/auth-tools/zig"
+if [[ -x "$destination/zig" && "$("$destination/zig" version)" == "$version" ]]; then
+    exit 0
+fi
+mkdir -p "$root/target/auth-tools"
+# A failed download or checksum never becomes the executable used by a build.
+staging="$(mktemp -d "$root/target/auth-tools/download.XXXXXX")"
+trap 'rm -rf -- "$staging"' EXIT
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+    "https://ziglang.org/download/$version/zig-$host-linux-$version.tar.xz" -o "$staging/zig.tar.xz"
+printf '%s  %s\n' "$checksum" "$staging/zig.tar.xz" | sha256sum --check --status
+tar -xJf "$staging/zig.tar.xz" --strip-components=1 -C "$staging"
+rm "$staging/zig.tar.xz"
+rm -rf -- "$destination"
+mv "$staging" "$destination"

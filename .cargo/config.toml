@@ -6,3 +6,10 @@ rustflags = ["-C", "target-feature=+crt-static"]
 [target.aarch64-unknown-linux-musl]
 linker = ".cargo/rust-lld.sh"
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# cc-rs and openssl-src both honor these target-qualified compiler/archive settings.
+[env]
+CC_x86_64_unknown_linux_musl = { value = ".cargo/musl-cc.sh", relative = true }
+CC_aarch64_unknown_linux_musl = { value = ".cargo/musl-cc.sh", relative = true }
+AR_x86_64_unknown_linux_musl = { value = ".cargo/musl-ar.sh", relative = true }
+AR_aarch64_unknown_linux_musl = { value = ".cargo/musl-ar.sh", relative = true }

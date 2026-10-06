@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Run port-free real-browser auth verification with an isolated SQLite IPC fixture [40].
+set -euo pipefail
+cargo build --locked --package infraternal-server --example browser_auth
+bun install --cwd scripts/browser-auth --frozen-lockfile
+mkdir -p target/auth-rework
+bun build scripts/browser-auth/entropy.mjs --target browser --outfile target/auth-rework/entropy.js
+bun run scripts/browser-auth/check.mjs

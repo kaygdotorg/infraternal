@@ -1,0 +1,11 @@
+{
+  "name": "infraternal-auth-browser-gate",
+  "description": "Pipe-only Chromium virtual-passkey and native WebCrypto verification for auth [40].",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "devDependencies": {
+    "playwright": "1.61.1",
+    "@scure/bip39": "2.2.0"
+  }
+}
