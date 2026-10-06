@@ -398,20 +398,38 @@ pub fn run(mut config: Config) -> io::Result<()> {
         }
         if ready.2.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) && !drained {
             let mut bytes = [0; CHUNK];
-            match pty
-                .master
-                .read(&mut bytes[..CHUNK.min(config.ring_capacity)])
-            {
-                Ok(0) => drained = true,
-                Ok(n) => {
-                    terminal.process(&bytes[..n]);
-                    ring.append(&bytes[..n])?;
+            let limit = CHUNK.min(config.ring_capacity);
+            let mut used = 0;
+            // Linux PTYs commonly return ~4 KiB despite a 16 KiB destination.
+            // Drain immediately-ready bytes, but never wait to fill a batch.
+            // Both byte and syscall bounds preserve input/resize/socket fairness.
+            for _ in 0..16 {
+                match pty.master.read(&mut bytes[used..limit]) {
+                    Ok(0) => {
+                        drained = true;
+                        break;
+                    }
+                    Ok(n) => {
+                        used += n;
+                        if used == limit {
+                            break;
+                        }
+                    }
+                    Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => {
+                        drained = true;
+                        break;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
                 }
-                Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => drained = true,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e),
+            }
+            if used > 0 {
+                terminal.process(&bytes[..used]);
+                ring.append(&bytes[..used])?;
             }
         }
+
         let mut disconnect = ready.3.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL);
         if let Some(p) = &mut peer {
             if ready.3.contains(PollFlags::POLLOUT) && p.flush().is_err() {
