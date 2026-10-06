@@ -4,7 +4,8 @@
 Owner DECISIONS 94 replaces the Alacritty terminal-state engine. This checkout's
 `DECISIONS.md` ends at 86; 94 is supplied by the owner's job and recorded on #22.
 This document supplements the historical [S1 shim comparison](S1-SHIM.md).
-DECISIONS 7, 13, 20, 40 and 41 still apply. No frozen frame changes are needed.
+DECISIONS 7, 13, 20, 40 and 41 still apply. Frozen v1 frame layouts remain
+unchanged; an additive recovery capability is documented below.
 
 ## Build and production dependencies
 
@@ -329,3 +330,248 @@ python3 crates/infraternal-shim/tests/vt_flood.py --binary target/x86_64-unknown
 ```
 
 Forgejo #22 contains the final HEAD and verbatim final fast summary table.
+
+ ## Second-review corrections (#26, supersedes earlier oracle claims)
+
+The second review found accepted snapshots omitted saved DEC modes, semantic
+prompt state, and the remembered ISO/DEC protection mode. The native oracle now
+compares saved mode values; live charset, protection and hyperlink; complete
+keyboard stacks for both screens; dynamic color defaults/overrides and palette
+masks; retained-tail cell and row metadata; semantic rows/cells in the exported
+extent and prompt/redraw fields. Independent continuation branches include
+erase, saved-mode restore, keyboard pop, and shrink/grow resize. A source
+rejected by the faithful path remains unchanged. Older history outside the
+returned tail is intentionally omitted by the frozen v1 contract; its metadata
+is outside the oracle scope, never certified equal. Semantic validation now
+walks exactly the exported tail and both visible screens. Live semantic
+screen/cursor/redraw fields remain mandatory regardless of tail length. An
+isolated regression keeps input-semantic cells inside the tail Unsupported and
+permits exact retained-tail replay when those cells are in omitted older rows.
+
+Saved DEC modes and ISO/DEC protection modes are restored. Semantic prompt state
+in the exported extent and live screen/cursor state is explicitly rejected:
+printing VT cannot import arbitrary semantic cell/row metadata without
+triggering actions. The pinned C constructor sets `shell_redraws_prompt=false`,
+whereas RIS sets it true. Production initialization is unchanged; fresh-C states
+with that default cannot be certified faithful. Canonical painter fixtures start
+after RIS and their counts are reported separately from fresh-C fixtures. This
+is a material construction gap, not a claim that these states are equal.
+
+RIS also preserves prior viewer palette/dynamic overrides. Both painters now
+reset overrides before restoring source colors. History construction excludes
+padding rows and starts from neutral cursor/margins/styles after inactive-screen
+restoration. The oracle compares every returned history row up to the 256-row
+bound, using the active-cell field inventory; intentionally discarded older
+history is outside this bounded repaint scope, not certified equal.
+
+Additional minimized cases exposed transient single-shift charset mapping of REP
+seeds, ISO protection retaining a temporary REP seed, wide mapped spaces,
+protection inherited into an off-mode screen, and an inherited single shift
+being accidentally stored in a reconstructed saved cursor. Identity-mapped
+transient charsets and erasable REP scratch state fix the first two. Mapped wide
+spaces and inherited off-mode protection are explicit bounded-painter
+rejections. Nonprinting DECRC before cursor construction fixes the saved-shift
+case, including a null terminal-global REP source. Exact VT could potentially
+construct them; this adapter does not claim a universal impossibility.
+
+Reconnect always asks for retained raw bytes first, including after returned
+credit. Only a ring gap needs a repaint. Capability bit 1 negotiates additive
+`SnapshotWithFlags` (0x1B), keeping the frozen 0x15 and leg-B Snapshot layouts.
+An ordered `terminal.snapshot` JSON Event announces approximation before the
+leg-B repaint. The bounded visible fallback may clip content and omit hidden
+state, history, semantic state and oversized parser carry. The process metric
+`infraternal_agent::daemon::approximate_snapshots_total()` counts successfully
+written approximate repaints; it retains no terminal content. Detached
+input/resize waits for an ordered InputState reply before its shim peer is
+replaced, confirming acceptance/handling. Legacy Snapshot limits produce
+`terminal.snapshot_unavailable` and park a live stream until credit/input/resize
+retries recovery. They do not send Close or busy-loop.
+
+
+### Second-review state inventory
+
+| Previously unchecked item | Faithful Snapshot behavior and oracle |
+| --- | --- |
+| Saved DEC modes | Restore saved values separately from live values; compare the packed saved record and branch through DECRM. |
+| Live charset and single shift | Restore all slots, GL/GR and the transient shift after painting; compare live/saved records. Mapped wide spaces and unsupported wrap/REP combinations explicitly reject. |
+| Live protection and ISO/DEC mode | Restore live protection and remembered erase mode independently; compare both and branch through ECH. Protected state inherited into an off-mode screen explicitly rejects. |
+| Live hyperlink | Restore URI and explicit/implicit group identity; compare identity, not pointers. |
+| Both keyboard stacks | Restore complete eight-entry rings and indices; compare each screen and branch through pops on both. |
+| Dynamic colors | Clear stale viewer overrides, then restore source palette/dynamic overrides; compare defaults, values and override masks. |
+| Semantic content | Compare screen/cursor/redraw scalars plus cells/rows in the exported extent. Nondefault live semantics or exported semantic metadata explicitly reject. Older omitted history is outside the bounded fidelity scope. |
+
+The real-engine wrapped-output and controlled `less` capture regression proves
+retained replay through credit starvation, one ordered approximation notice on
+a ring gap, and a live legacy limitation followed by faithful reset recovery.
+The retained fixture has 2,160,005 printable characters after reset. The final
+`less` recovery replays 1,203,378 retained bytes; its forced gap starts at
+3,303,620 and emits approximation at head 11,692,228. Terminal server relay and
+browser product are absent here, so this is shim/infraternal-agent E2E evidence.
+
+## engine-level state export/import
+
+Lossless recovery needs a versioned native/WASM state boundary rather than
+additional printing tricks. Ghostty would need bounded, validated export and
+transactional nonprinting import covering:
+
+- Both screens and the required history extent: cell text absence, Unicode
+  scalars/graphemes, width/spacer metadata, styles, protection, hyperlink group
+  identity, row wrap/continuation and semantic row/cell content.
+- Live and saved cursors, pending wrap, all charset slots and single shifts,
+  sticky protected-area mode, live/saved/default DEC and ANSI modes, margins,
+  tabs, mouse reporting/encoding derived state and complete keyboard stacks.
+- Palette defaults, current values and override mask; dynamic color defaults
+  and overrides; semantic prompt/redraw/clear-eol and interaction state; the
+  exact REP source independently of printed cells.
+- Incremental parser and UTF-8 state, partial OSC/DCS/APC strings and bounded
+  carry; title, working directory, status/graphics state wherever enabled by
+  the shared native and viewer configuration.
+
+Import must set these values without printing cells, scrolling, copying cursors,
+resetting semantic state, selecting sticky protection, or executing terminal
+replies. Ownership and lifetime rules must prevent borrowed page pointers
+escaping an engine operation. Unknown versions, invalid dimensions and resource
+limits must fail atomically without changing the destination. Native and WASM
+consumers need the same schema and continuation behavior. A genuinely complete
+retained history may exceed the frozen 1 MiB frame; chunking/state transport
+would need its own additive contract, while this job's bounded painter
+intentionally includes only a tail. Getters alone are not an import API. The
+owner decides whether to pursue this upstream; this job adds no foundational
+engine choice or upstream promise.
+
+## Second-review final corpus, performance and scale (#26)
+
+The release nightly uses seed `0x22601006`, 24 operations per case, 25 original
+or 45 expanded tokens, 12×5 initial geometry, and independent continuation and
+shrink/grow resize branches for every accepted Snapshot. Expanded tokens include
+saved modes, charsets, both protection modes, keyboard stacks, dynamic colors,
+hyperlinks and semantic shell state. Rejected states are not faithful replays.
+These synthetic counts are not a probability for a real application.
+
+| 20,000-case context | Faithful | Rejected | Divergent |
+| --- | ---: | ---: | ---: |
+| Original, RIS | 19,864 | 136 | 0 |
+| Expanded, RIS | 4,815 | 15,185 | 0 |
+| Original, fresh C | 0 | 20,000 | 0 |
+| Expanded, fresh C | 0 | 20,000 | 0 |
+
+Final shim unit gate: **50 passed / 0 failed / 7 ignored**. The Snapshot measurement
+and both nightlies were executed separately. Parser, direct-input and isolated
+terminal-RSS unit measurements above are historical; the diagnostic-only
+fixture test remains opt-in. Four tracked captures and their independent recorded
+continuations pass; restored stress coverage is still zero. The real terminal
+reconnect gate passes in debug and in the final static release binary.
+
+2026-10-06, infraternal-dev, Linux 6.12.111+deb13-amd64, Intel Core i9-9900K,
+eight CPUs. This is an unisolated development host, not the pinned perf VM.
+Own native builds and corpus work completed before final serial measurements.
+Three real PTY/shim/infraternal-agent credited trials per pattern, 50 MiB each,
+explicitly require zero Snapshot substitutions and more than 10 decimal MB/s:
+
+| Raw flood | Median, MB/s | Range, MB/s |
+| --- | ---: | ---: |
+| LF | 14.143 | 12.522–14.335 |
+| CRLF | 16.585 | 16.508–18.434 |
+| Printable | 71.948 | 71.900–73.600 |
+
+Every trial has `snapshots=0` and passes the 10 MB/s budget. Starting load
+averages were 3.40–3.71 / 4.31–4.35 / 5.55–5.57. These lower rates than the
+historical single trials above cannot establish a causal throughput difference
+without a contemporary control; the steady parser path did not change here.
+They establish the actual credited raw-byte rate, not sequence advancement via
+approximate repaint. Flood timing is single-session; simultaneous 128-session
+output throughput is not certified by these trials.
+
+| Snapshot measurement, full ~10k-row history at 200×60 | p50, ms | p99, ms | Samples |
+| --- | ---: | ---: | ---: |
+| Final serializer, 256-row tail (27,522 bytes) | 0.611 | 1.259 | 1,000 |
+| Socket, default scheduling (23,581 bytes) | 0.729 | 3.375 | 1,000 |
+| Socket repeat, client CPU 1 / shim CPU 2 | 0.645 | 1.673 | 1,000 |
+| Serial socket requests over 128 full sessions | 0.844 | 1.526 | 128 |
+
+Serializer p99 passes the unchanged 2 ms guard. Socket timing also includes
+framing, allocation, scheduling, transfer and Python decode. The default
+scheduling sample exceeds 2 ms; it is retained, not replaced by the repeat.
+Affinity is not CPU isolation. Socket-repeat starting load was
+3.66 / 4.32 / 5.53; the default sample started at 3.89 / 5.22 / 6.16.
+These measurements do not guarantee a bound under arbitrary contention.
+
+The first all-history validation measured serializer p50 **2.749 ms / p99
+13.518 ms** and failed the 2 ms guard. A packed row reduction still failed
+(p50 2.745 ms / p99 7.468 ms; affinity repeat 2.137 / 3.538 ms). Native-only
+measurement isolated all-history validation plus visible painting at p50
+1.688 ms with no exported tail. Validating the exported extent instead, as
+permitted by frozen v1 history truncation, passed at p50 0.519 / p99 0.844 ms
+before the final serial measurement. Live semantic state remains mandatory,
+and the boundary regression rejects semantic cells inside the returned tail.
+No threshold or production initialization was changed.
+
+### Full resident state at the 128-session registry limit
+
+Each real shim is 200×60, with its full 17 MiB page-storage budget and lazy
+8 MiB replay ring filled by more than 9 MiB of CRLF output before timing.
+Expected session count is 128, so the page/ring capacities alone are
+128 × 25 MiB = **3,200 MiB**, plus native metadata, allocators and code pages.
+Measured aggregate RSS includes shared pages more than once; PSS accounts for
+sharing.
+
+| Resident-state measurement | Result |
+| --- | ---: |
+| Full shim RSS per session, minimum–maximum | 31,016–33,576 KiB |
+| Sum of 128 shim RSS values | 4,047,200 KiB |
+| Sum of 128 shim PSS values | 3,555,936 KiB |
+| Infraternal agent RSS with 128 sessions | 4,260 KiB |
+| Simultaneous recovery, 10 bursts × 128 replies | p99 39.178 ms; maximum 39.389 ms |
+
+The recovery burst passes decision 41's 300 ms budget; infraternal agent RSS
+is below 15 MiB. Load was 3.89 / 5.22 / 6.16 initially and
+4.85 / 5.27 / 6.13 after filling all sessions. A separate static shim socket
+trial measured idle/full RSS 4,716 / 32,868 KiB; the affinity repeat measured
+4,712 / 31,416 KiB. The historical 4 MiB idle shim canary remains a known
+failure, previously reproduced on both engines; its threshold is unchanged.
+This job does not claim that supplemental budget passed.
+
+### Evidence, self-review and reproduction
+
+All logs below are in `target/review-vt2-fixes/`. Raw terminal payloads and
+native diagnostics stay in files; console reads select sanitized summaries.
+
+- Ordering and final real reconnect: `run2-reconnect.log`,
+  `detached-controls-fast.log`, `run2-bounded-final-reconnect.log`.
+- Saved charset regression: `minimized-case-1027.vt`,
+  `run2-saved-shift-red.log`, `run2-saved-shift-green.log`,
+  `saved-shift-{test,fix}-fast.log`.
+- Semantic extent and failed timing evidence: `run2-semantic-tail-{red,green}.log`,
+  `run2-snapshot.log`, `run2-snapshot-reduction.log`,
+  `run2-snapshot-affinity.log`, `run2-profile.log`,
+  `run2-snapshot-bounded.log`, `semantic-tail-{test,fix}-fast.log`.
+- Final nightly: `run2-final-nightly.log`, `run2-final-expanded-fresh-c.log`.
+- Raw floods: `run2-raw-flood-{1,2,3}.log`, `run2-raw-flood-summary.json`.
+- Final serializer/socket/scale: `run2-final-snapshot.log`,
+  `run2-final-socket.log`, `run2-socket-affinity.log`, `run2-final-scale.log`.
+- Parser fuzz from run 1: `fuzz-no-lto.log`, 1,110,160 ASan runs in 61 seconds,
+  no failures, coverage 512 / features 1,364. Harness-only LTO was disabled;
+  production profiles are unchanged. No parser changes followed this run.
+- Final docs fast gate: `run2-final-docs-fast.log`.
+
+Self-review checked capability intersection, v1 layouts and reserved flags,
+bounded frame/carry/painter lengths, ordered notices and input-state replies,
+source preservation on rejection, complete oracle fields and independent
+continuations, FFI ownership/lifetimes, compatible licenses, and the measured
+budgets above. This is the required implementation self-review; independent
+FFI review and pinned perf-VM validation remain separate reviewer work.
+
+The eight continuation commits each pass exact fast independently. #26 records
+the base/head, findings, each completed step and final verbatim gate summary.
+No push, deployment or issue closure is part of this job. Scratch build caches
+are removed after the gate; evidence logs and final binaries remain in this
+worktree under `target/review-vt2-fixes/`.
+
+```sh
+nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify fast > target/review-vt2-fixes/reproduce-1.log 2>&1
+nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify nightly > target/review-vt2-fixes/reproduce-2.log 2>&1
+python3 scripts/verify-vt-reconnect.py --binary target/review-vt2-fixes/final-infraternal-x86_64 > target/review-vt2-fixes/reproduce-3.log 2>&1
+python3 crates/infraternal-shim/tests/vt_flood.py --binary target/review-vt2-fixes/final-infraternal-x86_64 > target/review-vt2-fixes/reproduce-4.log 2>&1
+python3 crates/infraternal-shim/tests/vt_memory.py --binary target/review-vt2-fixes/final-infraternal-x86_64 > target/review-vt2-fixes/reproduce-5.log 2>&1
+python3 crates/infraternal-shim/tests/vt_scale.py --binary target/review-vt2-fixes/final-infraternal-x86_64 --sessions 128 > target/review-vt2-fixes/reproduce-6.log 2>&1
+```
