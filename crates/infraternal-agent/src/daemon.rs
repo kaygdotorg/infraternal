@@ -329,6 +329,19 @@ async fn terminal(
                         .map_err(|_| sessions::invalid("output gap"))?;
                     let length = range.len();
                     if length > 0 {
+                        // Whole frames transfer their payload ownership to the
+                        // writer. Only partial credit/overlap needs a suffix copy.
+                        if range.start == 0 && range.end == bytes.len() {
+                            emit(
+                                &tx,
+                                Message::Shim(stream, Shim::Output(output.cursor(), bytes)),
+                            )
+                            .await?;
+                            output
+                                .forward(length)
+                                .map_err(|_| sessions::invalid("output credit invariant"))?;
+                            continue;
+                        }
                         emit(
                             &tx,
                             Message::Shim(

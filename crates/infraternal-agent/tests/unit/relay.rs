@@ -119,3 +119,27 @@ fn initial_ring_wrap_repaint_with_insufficient_credit_obeys_debt() {
     output.grant(1).unwrap();
     assert_eq!(output.suffix(12_000_000, 1), Ok(0..1));
 }
+
+#[test]
+#[ignore = "release ownership versus payload-copy measurement"]
+fn output_payload_move_measurement() {
+    use std::{hint::black_box, time::Instant};
+    let n = 100_000;
+    for (label, copy) in [("forward-clone", true), ("forward-move", false)] {
+        let start = Instant::now();
+        for _ in 0..n {
+            // Both paths receive an owned shim payload. Only the old relay
+            // allocates and copies it again when creating the writer message.
+            let payload = vec![42; 16_384];
+            if copy {
+                black_box(payload.clone());
+            } else {
+                black_box(payload);
+            }
+        }
+        println!(
+            "{label}: n={n} ns/frame={:.1}",
+            start.elapsed().as_secs_f64() * 1e9 / f64::from(n)
+        );
+    }
+}
