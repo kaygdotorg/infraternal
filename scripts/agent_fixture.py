@@ -56,6 +56,8 @@ class Binary:
         self.entered = 0
         self.acked = 0
         self.data = bytearray()
+        self.credit_batch = 64 * 1024
+        self.credit_pending = 0
         self.events = []
         self.snapshots = []
         self.start()
@@ -107,6 +109,7 @@ class Binary:
         assert (stream, kind) == (0, 0x31) and body[4] == 1, body
         self.id = uuid.UUID(json.loads(body[5:])['session_id'])
         self.out = self.entered = self.acked = 0
+        self.credit_pending = 0
         self.data.clear()
         return self.id
 
@@ -129,7 +132,12 @@ class Binary:
             self.out += len(body) - 8
             self.data.extend(body[8:])
             if credit:
-                self.send(1, 0x14, struct.pack('<I', len(body) - 8))
+                # Refund in bounded batches to avoid one scheduling round per
+                # tiny PTY read. Initial credit covers the unrefunded suffix.
+                self.credit_pending += len(body) - 8
+                if self.credit_pending >= self.credit_batch:
+                    self.send(1, 0x14, struct.pack('<I', self.credit_pending))
+                    self.credit_pending = 0
         elif kind == 0x13:
             ack = struct.unpack('<Q', body)[0]
             assert ack >= self.acked

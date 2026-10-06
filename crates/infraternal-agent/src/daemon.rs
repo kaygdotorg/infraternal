@@ -1,7 +1,8 @@
 //! Inherited leg-B dispatcher and bounded session registry for the tracer bullet [9][13][41].
 //!
 //! Each terminal owns one pending output frame. Commands have eight slots;
-//! a full queue pauses leg-B reads until capacity returns. The writer has eight slots
+//! a full queue retires only that stream, cancelling its shim link. Unacknowledged
+//! input is replayed on attachment using shim-owned cursors. The writer has eight slots
 //! and awaits capacity, applying transport backpressure. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! snapshot. Unviewed sessions stay disconnected so their PTYs keep progressing.
@@ -16,12 +17,21 @@ use infraternal_shim::frame::{Frame as Shim, SEQUENCED_INPUT};
 use serde::Deserialize;
 use std::{collections::HashMap, io, path::PathBuf, time::Instant};
 use tokio::io::AsyncWriteExt;
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
 
 enum Command {
     Input(u64, Vec<u8>),
     Credit(u32),
     Resize(u16, u16, u16, u16),
+}
+// Dropping cancellation retires a stalled handshake as well as queued commands.
+struct Stream {
+    id: [u8; 16],
+    commands: mpsc::Sender<Command>,
+    _cancel: oneshot::Sender<()>,
 }
 enum Message {
     Shim(u32, Shim),
@@ -130,7 +140,7 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     let (tx, rx) = mpsc::channel(8);
     let dispatch = async {
         let mut receive = Receive::default();
-        let mut streams: HashMap<u32, ([u8; 16], mpsc::Sender<Command>)> = HashMap::new();
+        let mut streams: HashMap<u32, Stream> = HashMap::new();
         let mut jobs: JoinSet<(u32, io::Result<()>)> = JoinSet::new();
         let mut opens: JoinSet<(u32, u32, io::Result<Session>)> = JoinSet::new();
         loop {
@@ -139,7 +149,7 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                     let (stream, result) = result.ok_or_else(|| sessions::invalid("missing relay task"))?.map_err(io::Error::other)?;
                     // Close/re-attach may reuse a stream before the old task exits.
                     // Its completion must not remove the replacement's live sender.
-                    if streams.get(&stream).is_some_and(|(_, sender)| sender.is_closed()) {
+                    if streams.get(&stream).is_some_and(|entry| entry.commands.is_closed()) {
                         streams.remove(&stream);
                         if result.is_err() {
                             emit(&tx, Message::Close(stream, "terminal shim disconnected")).await?;
@@ -173,16 +183,21 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                             }
                         }
                         Frame::AttachTerm {session_id, last_out_seq, last_in_seq} if stream != 0 => {
-                            if streams.len() >= sessions::MAX_SESSIONS || streams.contains_key(&stream) || streams.values().any(|(id, _)| id == session_id) {
+                            if streams.len() >= sessions::MAX_SESSIONS || streams.contains_key(&stream) || streams.values().any(|entry| &entry.id == session_id) {
                                 return Err(sessions::invalid("terminal stream already attached or limit reached"));
                             }
                             let path = registry.get(session_id).ok_or_else(|| sessions::invalid("unknown terminal session"))?.clone();
                             let id = *session_id;
                             let (commands, rx) = mpsc::channel(8);
-                            streams.insert(stream, (id, commands));
+                            let (cancel, cancelled) = oneshot::channel();
+                            streams.insert(stream, Stream { id, commands, _cancel: cancel });
                             let tx = tx.clone();
                             jobs.spawn(async move {
-                                (stream, terminal(path, id, stream, last_out_seq, last_in_seq, rx, tx).await)
+                                let result = tokio::select! {
+                                    result = terminal(path, id, stream, last_out_seq, last_in_seq, rx, tx) => result,
+                                    _ = cancelled => Ok(()),
+                                };
+                                (stream, result)
                             });
                         }
                         frame => {
@@ -193,14 +208,16 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                                 Frame::Close {..} => { streams.remove(&stream); continue; }
                                 _ => return Err(sessions::invalid("unexpected leg-B request")),
                             };
-                            // Await capacity without reading another leg-B frame: at
-                            // most eight queued commands plus this bounded frame.
-                            // The writer runs independently, so draining output
-                            // remains possible while the source is backpressured.
-                            if let Some((_, sender)) = streams.get(&stream) {
-                                // A closed receiver is retired when its task
-                                // joins, emitting Close once for an IO failure.
-                                let _ = sender.send(command).await;
+                            // Never await a session's capacity in shared dispatch.
+                            // Retire overload before accepting this command. Drop the
+                            // cancellation sender to release even a stalled handshake;
+                            // shim-owned accepted/written cursors make input replay safe.
+                            let overloaded = streams.get(&stream).is_some_and(|entry| {
+                                matches!(entry.commands.try_send(command), Err(mpsc::error::TrySendError::Full(_)))
+                            });
+                            if overloaded {
+                                streams.remove(&stream);
+                                emit(&tx, Message::Close(stream, "terminal command queue full; reattach and replay unacknowledged input")).await?;
                             }
                             // Frames already in flight after a stream closes are
                             // ignored; the terminal task emits its own Close.
