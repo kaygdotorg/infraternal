@@ -87,6 +87,7 @@ the PTY output stream since the session started.
 | 0x18 | shim → agent | `InputAck` | u64 exclusive written input offset (cap bit 0) |
 | 0x19 | agent → shim | `InputStateRequest` | empty (cap bit 0) |
 | 0x1A | shim → agent | `InputState` | u64 exclusive written offset, u64 exclusive accepted offset (cap bit 0) |
+| 0x1B | shim → agent | `SnapshotWithFlags` | u64 seq, u8 flags, bytes VT (cap bit 1; see additive section) |
 | 0x20 | shim → agent  | `Exited`   | i32 status or −signal, u64 final_seq |
 | 0x21 | agent → shim  | `ExitAck`  | (empty). The shim deletes its socket and exits. |
 | 0x7F | both          | `Error`    | u16 code, utf-8 message |
@@ -160,3 +161,39 @@ Exit is a wire Event on the terminal mux stream, sub_id 0, JSON
 "final_seq": u64 }`. The embedded infraternal agent uses the inherited
 socketpair for leg B; its trusted spawning server owns the channel. This
 introduces no listener or mTLS bypass.
+
+### Capability bit 1: APPROXIMATE_SNAPSHOT (#26)
+
+A supporting shim advertises bit 1 in Hello; Attach selects it. The additive
+frame `0x1B SnapshotWithFlags` is shim → infraternal agent and contains
+`u64 seq, u8 flags, bytes VT repaint`. Bit 0 of flags means approximate; all
+other flag bits are reserved and must be zero. The type, sequence, flags and
+VT payload together remain within the frozen 1 MiB frame limit. `Snapshot`
+0x15 and every other v1 layout remain unchanged. Never send 0x1B unless bit 1
+was selected; receiving it without selection is a protocol error.
+
+Recovery sends `ReadFrom(last_forwarded_seq)` first. If that offset remains in
+the ring, replay it exactly once, including after credit starvation; do not
+replace retained bytes with a Snapshot. If the ring no longer covers it, try
+the faithful bounded Snapshot. If it cannot be represented or fit, a selected
+peer gets a bounded best-effort visible repaint with flags bit 0 set. It may
+omit history, inactive screen, semantic content, hidden modes, links, parser
+carry or cells beyond the bound. The sequence is the same captured head used
+for the repaint, and subsequent raw output starts there. Approximation must
+never be described as lossless. A Snapshot limitation never closes the live
+session's relay stream.
+
+Caps-zero/bit-0-only peers continue to receive Error(1) for capacity limits or
+Error(2) for faithful restoration gaps, with an accurate UTF-8 reason. The
+infraternal agent parks a legacy limited reconnect and reports availability;
+credit or terminal input/resize can retry it without a spin loop or Close.
+No approximation is sent to an unnegotiated peer.
+
+On leg B, before forwarding an approximate repaint in the existing Snapshot
+frame, send an ordered Event (sub_id 0):
+`{"type":"terminal.snapshot","session_id":"UUID","seq":u64,"approximate":true}`.
+This is additive JSON event data; the binary Snapshot layout is unchanged.
+Count each actually forwarded approximate repaint in the process counter
+`approximate_snapshots_total`; a pending repaint does not increment it twice.
+Legacy rejection is reported as a `terminal.snapshot_unavailable` Event with
+session identity and sequence, preserving the live mux stream.
