@@ -1,6 +1,7 @@
 # infraternal agent contract
 
-Before you start any work, read `DECISIONS.md` and `docs/ARCHITECTURE.md`.
+Before you start any work, read `DECISIONS.md`, `docs/ARCHITECTURE.md` and
+`docs/PROCESS.md` (how work is built, reviewed and merged).
 Decisions are referenced by their number. Only the owner (kayg) can change one.
 
 ## Priorities
