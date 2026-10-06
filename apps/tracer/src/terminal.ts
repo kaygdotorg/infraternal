@@ -254,9 +254,10 @@ export class TerminalClient {
     this.attachRequested = false;
 
     socket.onopen = () => {
-      const hello: WireFrame = { type: "Hello", version: VERSION, caps: 0n, clientInfo: "infraternal-tracer/0.1" };
-      let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
       const resumable = this.sessionId !== undefined && this.resumeCredentials !== undefined && Date.now() < this.resumeCredentials.deadline;
+      // RESUME_NEXT tells the server to wait for the adjacent Resume before issuing Welcome.
+      const hello: WireFrame = { type: "Hello", version: VERSION, caps: resumable ? 1n : 0n, clientInfo: "infraternal-tracer/0.1" };
+      let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
       this.connectionIsResume = this.sessionId !== undefined;
       if (resumable && this.resumeCredentials) {
         length += encodeMuxedFrameInto(CONTROL_STREAM, {

@@ -48,6 +48,7 @@ interface Connection {
   attached: boolean;
   welcomed: boolean;
   resumeAccepted: boolean;
+  resumeExpected: boolean;
   welcomeTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
@@ -96,6 +97,7 @@ webSockets.on("connection", (socket, request) => {
     attached: false,
     welcomed: false,
     resumeAccepted: false,
+    resumeExpected: false,
     welcomeTimer: undefined,
   };
   socket.on("message", (raw, binary) => {
@@ -306,10 +308,15 @@ function handleWire(connection: Connection, streamId: number, frame: WireFrame, 
 function handleControlFrame(connection: Connection, frame: WireFrame): void {
   switch (frame.type) {
     case "Hello":
+      connection.resumeExpected = (frame.caps & 1n) !== 0n;
       sendFrame(connection.socket, 0, { type: "Hello", version: 1, caps: 0n, clientInfo: "infraternal-mock-test-double/0.1" });
       connection.welcomeTimer = setTimeout(() => sendWelcome(connection), 0);
       return;
     case "Resume":
+      if (!connection.resumeExpected) {
+        connection.socket.close(1002, "Resume without RESUME_NEXT");
+        return;
+      }
       if (!bytesEqual(frame.connectionId, connection.session.connectionId)
         || !bytesEqual(frame.resumeToken, connection.session.resumeToken)) {
         connection.socket.close(1008, "invalid test-double resume token");
