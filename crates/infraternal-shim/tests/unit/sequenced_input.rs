@@ -70,3 +70,21 @@ fn coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss
     assert!(queue.is_empty());
     assert_eq!((cursors.written, cursors.accepted), (3, 3));
 }
+
+#[test]
+fn reusable_encoder_retains_capacity_and_refuses_growth_before_mutation() {
+    let mut bytes = Vec::with_capacity(256);
+    let capacity = bytes.capacity();
+    let frame = Frame::SequencedInput(7, b"reuse".to_vec());
+    frame.encode_into(&mut bytes).unwrap();
+    assert_eq!(bytes, frame.encode().unwrap());
+    assert_eq!(bytes.capacity(), capacity);
+    let saved = bytes.clone();
+    assert!(
+        Frame::SequencedInput(0, vec![0; MAX_FRAME])
+            .encode_into(&mut bytes)
+            .is_err()
+    );
+    assert_eq!(bytes, saved);
+    assert_eq!(bytes.capacity(), capacity);
+}
