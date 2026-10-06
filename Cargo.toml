@@ -32,6 +32,10 @@ url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 webauthn-rs = { version = "=0.5.5", default-features = false }
 openssl = { version = "0.10", features = ["vendored"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+serde_cbor_2 = "0.13"
+tower = { version = "0.5", features = ["util"] }
 clap = { version = "4.5", features = ["derive"] }
 
 [workspace.lints.rust]

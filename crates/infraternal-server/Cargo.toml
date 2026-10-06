@@ -25,3 +25,8 @@ uuid.workspace = true
 webauthn-rs.workspace = true
 openssl.workspace = true
 
+[dev-dependencies]
+aes-gcm.workspace = true
+hkdf.workspace = true
+serde_cbor_2.workspace = true
+tower.workspace = true
