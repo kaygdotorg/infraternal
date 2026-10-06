@@ -1,24 +1,29 @@
 # Contract: wire protocol (leg A and leg B)
 
-Status: draft for #10. Implements DECISIONS 10, 11, 12, 17 and 41. The
+Status: draft for #10. Implements DECISIONS 10, 11, 12, 17, 41, 63 and 64. The
 numbers come from the transport spike (#12, `spikes/transport/RESULTS.md`).
 
 ## 1. Transports
 
-| leg | first choice | fallback | stream multiplexing |
-|-----|-------------|----------|---------------------|
-| A (browser ↔ server) | WebTransport (HTTP/3) | WebSocket (WSS) | WT: one QUIC stream per logical stream. WS: our mux (§3). |
-| B (server ↔ agent)   | QUIC (quinn, BBR), mTLS | TCP + TLS 1.3, mTLS | QUIC: native streams. TCP: our mux. |
+| leg | transport | stream multiplexing |
+|-----|-----------|---------------------|
+| A (browser ↔ server) | WebSocket (WSS, or WS behind a TLS-terminating reverse proxy) | our mux (§3) |
+| B (server ↔ agent)   | QUIC (quinn, BBR), mTLS; TCP + TLS 1.3 mTLS fallback | QUIC: native streams. TCP: our mux. |
 
-- With 1% loss, the spike measured WT burst p99 at 216 ms and WS at 489 ms
-  (TCP head-of-line blocking). Native QUIC streams also keep a flood in one
-  terminal from delaying keystrokes in another.
-- Auto mode on leg A: try WT. If the connection or the first stream does not
-  open in 5 s, use WS. Remember the result for each origin for 24 h. (Safari
-  26.4 has a bidi-stream report; see #12.)
-- **WT and passkeys need a secure context.** The page must be served over
-  HTTPS with a certificate that the browser trusts. The `serverCertificateHashes`
-  pin is only a dev convenience. The TLS story is an S1 grill item.
+- Leg A is WebSocket only (DECISIONS 63). WebTransport only helped on lossy
+  links (#12: burst p99 216 ms against 489 ms at 1% loss). It would cost a
+  public certificate in the app, a UDP port for browsers and Safari risk.
+  The codec and the mux do not depend on the transport, so WebTransport can
+  come back later without changes to the frames.
+- Ports (DECISIONS 64): leg B uses one server port (default 7443, UDP for
+  QUIC and TCP for the fallback). Leg A uses the reverse proxy, or the same
+  port with the server's own certificate when there is no proxy. Managed
+  hosts open no inbound ports.
+- Passkeys need a secure context, so leg A is always HTTPS for the browser.
+  A reverse proxy can do the TLS.
+- Head-of-line blocking on leg A is a known cost. Predictive local echo
+  (in the SSH plugin) hides the round trip, and §6 catch-up keeps a stalled
+  stream from replaying a flood.
 
 ## 2. Frame codec
 
@@ -38,7 +43,7 @@ u8      type
   code `FRAME_TOO_LARGE`.
 - The fuzz target `wire_frame_decode` covers the decoder (DECISIONS 40).
 
-## 3. Mux (only on WS and TCP)
+## 3. Mux (leg A, and leg B over TCP)
 
 On a transport that has no native streams, each frame is wrapped:
 
@@ -47,7 +52,7 @@ varint  stream_id
 frame   (§2)
 ```
 
-Stream 0 is the control stream. Odd ids are opened by the client, and even
+On leg A every stream is muxed. Stream 0 is the control stream. Odd ids are opened by the client, and even
 ids by the server. On WT and QUIC, the native stream gives the id, and frames
 are not wrapped.
 
@@ -111,7 +116,7 @@ frames are binary, because they carry each keystroke and each output chunk.
 
 ## 7. Authentication
 
-- Leg A: the HTTP upgrade (WS) or the CONNECT (WT) carries the session cookie
+- Leg A: the WebSocket upgrade carries the session cookie
   or a device API key. The server checks the key before it accepts `Hello`.
   Every `Call` is then authorized for each action (contracts/plugin.md §4).
 - Leg B: mTLS. The agent pins the server CA, and the server checks the agent
