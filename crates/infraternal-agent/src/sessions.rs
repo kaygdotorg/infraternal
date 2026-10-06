@@ -4,7 +4,7 @@
 //! with a two-second handshake deadline; a nonresponsive shim cannot serialize
 //! recovery of healthy sessions. Only refused sockets are removed as stale.
 
-use infraternal_shim::frame::{Frame, MAX_FRAME};
+use infraternal_shim::frame::{Frame, MAX_FRAME, SEQUENCED_INPUT};
 use nix::{
     sys::inotify::{AddWatchFlags, InitFlags, Inotify},
     unistd::Uid,
@@ -83,6 +83,8 @@ pub struct Session {
     pub peer: UnixStream,
     pub head: u64,
     pub pid: u32,
+    /// Selected capabilities, never inferred from the binary version.
+    pub caps: u64,
 }
 
 /// Reusable receive storage, bounded by the frozen shim frame limit.
@@ -184,6 +186,17 @@ pub fn state(path: Option<PathBuf>) -> io::Result<PathBuf> {
 /// # Errors
 /// Rejects a mismatched identity, unsupported version, or malformed Hello.
 pub async fn connect(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
+    connect_with(path, id, 0).await
+}
+
+/// Select restart-safe input when advertised; expose caps-zero limitations.
+/// # Errors
+/// Returns the same authentication and framing failures as `connect`.
+pub async fn connect_sequenced(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
+    connect_with(path, id, SEQUENCED_INPUT).await
+}
+
+async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result<Session> {
     timeout(HANDSHAKE, async {
         let mut peer = UnixStream::connect(&path).await?;
         let uid = peer.peer_cred()?.uid();
@@ -197,6 +210,7 @@ pub async fn connect(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
             head,
             start,
             pid,
+            caps,
             ..
         } = hello
         else {
@@ -205,13 +219,15 @@ pub async fn connect(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
         if session != id || start > head {
             return Err(invalid("shim identity or ring range mismatch"));
         }
-        send(&mut peer, &Frame::Attach(0)).await?;
+        let caps = caps & requested;
+        send(&mut peer, &Frame::Attach(caps)).await?;
         Ok(Session {
             id,
             path,
             peer,
             head,
             pid,
+            caps,
         })
     })
     .await
