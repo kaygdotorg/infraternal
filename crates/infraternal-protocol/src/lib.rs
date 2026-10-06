@@ -2,6 +2,9 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+#[cfg(test)]
+mod stream_tests;
+
 /// Maximum length of a frame's type byte and body, as specified by wire §2.
 pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
 
@@ -352,6 +355,268 @@ pub fn encode_muxed_frame_into(
     write_varint(stream_id, output);
     append_frame(frame, frame_len, output)?;
     Ok(output.len())
+}
+
+/// Incrementally decodes unwrapped frames from arbitrary stream chunks.
+pub struct FrameStreamDecoder {
+    inner: StreamDecoder,
+}
+
+impl Default for FrameStreamDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FrameStreamDecoder {
+    /// Creates an empty incremental frame decoder.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            inner: StreamDecoder::new(false),
+        }
+    }
+
+    /// Returns the number of bytes retained from an incomplete frame.
+    #[must_use]
+    pub fn buffered_len(&self) -> usize {
+        self.inner.buffer.len()
+    }
+
+    /// Feeds a chunk and invokes `on_frame` for each complete decoded frame.
+    ///
+    /// The callback's payload references are valid only until it returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed decode error when the buffered stream contains malformed
+    /// data or a frame over the protocol limit.
+    pub fn feed<F>(&mut self, input: &[u8], mut on_frame: F) -> Result<(), DecodeError>
+    where
+        F: FnMut(Frame<'_>),
+    {
+        self.inner.feed(input, |_, frame| on_frame(frame))
+    }
+}
+
+/// Incrementally decodes mux envelopes from leg-A or TCP leg-B stream chunks.
+///
+/// Fragmented bytes are copied into private storage. Callback borrows cannot be
+/// sent to asynchronous tasks; transports needing retained zero-copy dispatch
+/// should own their receive buffer and use `decode_muxed_frame` directly.
+pub struct MuxStreamDecoder {
+    inner: StreamDecoder,
+}
+
+impl Default for MuxStreamDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MuxStreamDecoder {
+    /// Creates an empty incremental mux decoder.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            inner: StreamDecoder::new(true),
+        }
+    }
+
+    /// Returns the number of bytes retained from an incomplete mux envelope.
+    #[must_use]
+    pub fn buffered_len(&self) -> usize {
+        self.inner.buffer.len()
+    }
+
+    /// Feeds a chunk and invokes `on_frame` for each complete muxed frame.
+    ///
+    /// The callback's payload references are valid only until it returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed decode error when the buffered stream contains malformed
+    /// data or a frame over the protocol limit.
+    pub fn feed<F>(&mut self, input: &[u8], mut on_frame: F) -> Result<(), DecodeError>
+    where
+        F: FnMut(u32, Frame<'_>),
+    {
+        self.inner.feed(input, |stream_id, frame| {
+            if let Some(stream_id) = stream_id {
+                on_frame(stream_id, frame);
+            }
+        })
+    }
+}
+
+struct StreamDecoder {
+    muxed: bool,
+    buffer: Vec<u8>,
+}
+
+impl StreamDecoder {
+    const fn new(muxed: bool) -> Self {
+        Self {
+            muxed,
+            buffer: Vec::new(),
+        }
+    }
+
+    fn feed<F>(&mut self, input: &[u8], mut on_frame: F) -> Result<(), DecodeError>
+    where
+        F: FnMut(Option<u32>, Frame<'_>),
+    {
+        // Header-only buffering stays capped until a valid length has passed the
+        // 4 MiB check; body bytes are reserved only up to that checked length.
+        let mut offset = 0;
+        while offset < input.len() || self.has_complete_buffered_frame()? {
+            if self.buffer.is_empty() {
+                let remaining = input.get(offset..).ok_or(DecodeError::Incomplete)?;
+                match self.decode_one(remaining) {
+                    Ok((stream_id, decoded, wire_len)) => {
+                        on_frame(stream_id, decoded);
+                        offset = offset
+                            .checked_add(wire_len)
+                            .ok_or(DecodeError::VarintOverflow)?;
+                    }
+                    Err(DecodeError::Incomplete) => {
+                        self.retain_incomplete(remaining)?;
+                        offset = input.len();
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                let Some(expected_len) = wire_frame_len(&self.buffer, self.muxed)? else {
+                    let remaining = input.get(offset..).ok_or(DecodeError::Incomplete)?;
+                    let missing_header =
+                        max_header_len(self.muxed).saturating_sub(self.buffer.len());
+                    // Read only one header byte before checking the length again.
+                    // A maximum-size refill can swallow the next short envelope.
+                    let copy_len = remaining.len().min(missing_header).min(1);
+                    if copy_len == 0 {
+                        self.buffer.clear();
+                        return Err(DecodeError::VarintTooLong);
+                    }
+                    let bytes = remaining.get(..copy_len).ok_or(DecodeError::Incomplete)?;
+                    self.buffer_bytes(bytes, max_header_len(self.muxed))?;
+                    offset = offset
+                        .checked_add(copy_len)
+                        .ok_or(DecodeError::VarintOverflow)?;
+                    continue;
+                };
+
+                if self.buffer.len() < expected_len {
+                    let remaining = input.get(offset..).ok_or(DecodeError::Incomplete)?;
+                    let missing = expected_len - self.buffer.len();
+                    let copy_len = remaining.len().min(missing);
+                    let bytes = remaining.get(..copy_len).ok_or(DecodeError::Incomplete)?;
+                    self.buffer_bytes(bytes, expected_len)?;
+                    offset = offset
+                        .checked_add(copy_len)
+                        .ok_or(DecodeError::VarintOverflow)?;
+                    if copy_len == 0 {
+                        break;
+                    }
+                    continue;
+                }
+
+                match self.decode_one(&self.buffer) {
+                    Ok((stream_id, decoded, _)) => {
+                        on_frame(stream_id, decoded);
+                        self.buffer.clear();
+                    }
+                    Err(error) => {
+                        self.buffer.clear();
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_one<'a>(
+        &self,
+        input: &'a [u8],
+    ) -> Result<(Option<u32>, Frame<'a>, usize), DecodeError> {
+        if self.muxed {
+            let decoded = decode_muxed_frame(input)?;
+            Ok((Some(decoded.stream_id), decoded.frame, decoded.wire_len))
+        } else {
+            let decoded = decode_frame(input)?;
+            Ok((None, decoded.frame, decoded.wire_len))
+        }
+    }
+
+    fn retain_incomplete(&mut self, input: &[u8]) -> Result<(), DecodeError> {
+        if let Some(expected_len) = wire_frame_len(input, self.muxed)? {
+            self.buffer_bytes(input, expected_len)?;
+        } else {
+            let header_len = max_header_len(self.muxed);
+            let copy_len = input.len().min(header_len);
+            let bytes = input.get(..copy_len).ok_or(DecodeError::Incomplete)?;
+            self.buffer_bytes(bytes, header_len)?;
+        }
+        Ok(())
+    }
+
+    fn buffer_bytes(&mut self, bytes: &[u8], max_capacity: usize) -> Result<(), DecodeError> {
+        let needed = self
+            .buffer
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(DecodeError::VarintOverflow)?;
+        if needed > max_capacity {
+            return Err(DecodeError::BufferLimitExceeded);
+        }
+        if needed > self.buffer.capacity() {
+            // Geometric growth avoids copying every partial network chunk while
+            // the validated total keeps capacity within the frame's bound.
+            let doubled_capacity = self.buffer.capacity().saturating_mul(2);
+            let target_capacity = needed.max(doubled_capacity).min(max_capacity);
+            let additional = target_capacity - self.buffer.len();
+            self.buffer
+                .try_reserve_exact(additional)
+                .map_err(|_| DecodeError::AllocationFailed)?;
+        }
+        self.buffer.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn has_complete_buffered_frame(&self) -> Result<bool, DecodeError> {
+        Ok(wire_frame_len(&self.buffer, self.muxed)?
+            .is_some_and(|wire_len| self.buffer.len() >= wire_len))
+    }
+}
+
+fn max_header_len(muxed: bool) -> usize {
+    MAX_VARINT_BYTES * if muxed { 2 } else { 1 }
+}
+
+fn wire_frame_len(input: &[u8], muxed: bool) -> Result<Option<usize>, DecodeError> {
+    let (frame_offset, mux_prefix) = if muxed {
+        match read_varint(input, 0) {
+            Ok((_, prefix_len)) => (prefix_len, prefix_len),
+            Err(DecodeError::Incomplete) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    } else {
+        (0, 0)
+    };
+    let (frame_length, frame_prefix) = match read_frame_length(input, frame_offset) {
+        Ok(decoded) => decoded,
+        Err(DecodeError::Incomplete) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if frame_length == 0 {
+        return Err(DecodeError::EmptyFrame);
+    }
+    let frame_length = usize::try_from(frame_length).map_err(|_| DecodeError::VarintOverflow)?;
+    mux_prefix
+        .checked_add(frame_prefix)
+        .and_then(|prefix| prefix.checked_add(frame_length))
+        .map(Some)
+        .ok_or(DecodeError::VarintOverflow)
 }
 
 #[inline]
