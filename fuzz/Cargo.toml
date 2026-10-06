@@ -1,0 +1,17 @@
+# Decoder fuzzing harness for frozen local v1 framing [12][40].
+[package]
+name = "infraternal-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys.workspace = true
+infraternal-shim.workspace = true
+
+[lints]
+workspace = true

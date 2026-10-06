@@ -12,6 +12,8 @@ allow = [
     "AGPL-3.0-only",
     "Apache-2.0",
     "MIT",
+    # LLVM libFuzzer: permissive and AGPL-compatible, harness only.
+    "NCSA",
     "Unicode-3.0",
 ]
 confidence-threshold = 0.8
