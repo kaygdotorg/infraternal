@@ -96,7 +96,6 @@ fn expired_credit_resumes_retained_bytes_at_the_same_cursor() {
 }
 
 #[test]
-#[ignore = "T1 red regression; explicitly run before the unaffordable-frame fix"]
 fn positive_insufficient_credit_arms_a_one_shot_deadline() {
     let mut output = Output::attach(0);
     output.forward(1024 * 1024 - 1).unwrap();
@@ -106,6 +105,11 @@ fn positive_insufficient_credit_arms_a_one_shot_deadline() {
     assert_eq!(output.pending(now), Some(now + STARVATION));
     assert_eq!(
         output.pending(now + Duration::from_millis(100)),
+        Some(now + STARVATION)
+    );
+    output.grant(1).unwrap();
+    assert_eq!(
+        output.pending(now + Duration::from_millis(200)),
         Some(now + STARVATION)
     );
     assert!(output.expire(now + STARVATION));

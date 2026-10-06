@@ -98,6 +98,7 @@ pub struct Output {
     credit: u64,
     stalled: Option<Instant>,
     snapshot: bool,
+    required: u64,
 }
 
 impl Output {
@@ -109,6 +110,7 @@ impl Output {
             credit: 1024 * 1024,
             stalled: None,
             snapshot: false,
+            required: 1,
         }
     }
 
@@ -120,7 +122,7 @@ impl Output {
             .credit
             .checked_add(u64::from(bytes))
             .ok_or(Error::Overflow)?;
-        if bytes > 0 {
+        if self.credit >= self.required {
             self.stalled = None;
         }
         Ok(())
@@ -157,10 +159,10 @@ impl Output {
         Ok(())
     }
 
-    /// Record pending output with no credit; callers arm this one-shot deadline.
+    /// Record an unaffordable pending frame; callers arm this one-shot deadline.
     /// Calling again does not postpone catch-up.
     pub fn pending(&mut self, now: Instant) -> Option<Instant> {
-        if self.credit == 0 && !self.snapshot {
+        if self.credit < self.required && !self.snapshot {
             let start = *self.stalled.get_or_insert(now);
             Some(start + STARVATION)
         } else {
@@ -183,7 +185,7 @@ impl Output {
     /// Whether returned credit requires reattachment for replay or a repaint.
     #[must_use]
     pub const fn needs_snapshot(&self) -> bool {
-        self.snapshot && self.credit > 0
+        self.snapshot && self.credit >= self.required
     }
 
     /// Resume raw replay at the unchanged cursor after a successful `ReadFrom`.
@@ -191,6 +193,7 @@ impl Output {
     pub fn resume_replay(&mut self) {
         self.snapshot = false;
         self.stalled = None;
+        self.required = 1;
     }
 
     /// Park/retry catch-up without keeping a payload or starting an idle timer.
@@ -201,12 +204,20 @@ impl Output {
 
     /// Commit a repaint; its byte length consumes credit but never advances seq.
     /// # Errors
-    /// Rejects regression, overflow and insufficient credit without mutation.
+    /// Rejects regression/overflow without mutation. Insufficient credit records
+    /// the minimum repaint credit, without changing the cursor or consuming credit.
     pub fn repaint(&mut self, seq: u64, len: usize) -> Result<(), Error> {
         let bytes = u64::try_from(len).map_err(|_| Error::Overflow)?;
-        if seq < self.cursor || bytes > self.credit {
+        if seq < self.cursor {
             return Err(Error::OutOfRange);
         }
+        if bytes > self.credit {
+            // Remember the frame cost after detaching, so unchanged or still
+            // insufficient credit cannot repeatedly request native serialization.
+            self.required = bytes;
+            return Err(Error::OutOfRange);
+        }
+        self.required = 1;
         self.cursor = seq;
         self.credit -= bytes;
         self.snapshot = false;
