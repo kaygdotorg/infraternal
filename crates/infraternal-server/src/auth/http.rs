@@ -191,22 +191,7 @@ async fn execute(
     ingress(auth, action, headers, now).await?;
     let payload = match action {
         "status" => public_status(auth, value).await?,
-        "setup-start" => {
-            let b: Setup = body(value)?;
-            match (b.name, b.username, b.display_name) {
-                (Some(name), None, None) => auth.setup_start(&b.token, &name, now).await?,
-                (None, Some(username), display_name) => {
-                    auth.setup_start_with_identity(
-                        &b.token,
-                        &username,
-                        display_name.as_deref(),
-                        now,
-                    )
-                    .await?
-                }
-                _ => return Err(Error::Invalid),
-            }
-        }
+        "setup-start" => setup_start(auth, value, now).await?,
         "registration-finish" => {
             let b: Register = body(value)?;
             return session_response(
@@ -288,6 +273,19 @@ async fn execute(
         _ => return Err(Error::Invalid),
     };
     Ok(Json(payload).into_response())
+}
+
+/// Accept the legacy label form or the additive username/display-name form.
+async fn setup_start(auth: &Auth, value: Value, now: i64) -> super::Result<Value> {
+    let b: Setup = body(value)?;
+    match (b.name, b.username, b.display_name) {
+        (Some(name), None, None) => auth.setup_start(&b.token, &name, now).await,
+        (None, Some(username), display_name) => {
+            auth.setup_start_with_identity(&b.token, &username, display_name.as_deref(), now)
+                .await
+        }
+        _ => Err(Error::Invalid),
+    }
 }
 
 async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> super::Result<()> {

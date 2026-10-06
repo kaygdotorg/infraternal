@@ -92,22 +92,12 @@ impl Auth {
         if registration.expires <= now {
             return Err(Error::Denied);
         }
-        reject_prf(&proof)?;
-        passkey_wrap.validate()?;
-        if let Some(w) = &recovery_wrap {
-            w.validate()?;
-        }
-        if registration.recovery_hash.is_some() != recovery_wrap.is_some() {
-            return Err(Error::Invalid);
-        }
-        let proof: RegisterPublicKeyCredential = serde_json::from_value(proof)?;
-        if proof.type_ != "public-key" {
-            return Err(Error::Denied);
-        }
-        let key = self
-            .webauthn
-            .finish_passkey_registration(&proof, &registration.state)
-            .map_err(|_| Error::Webauthn)?;
+        let key = self.validated_registration(
+            &registration,
+            proof,
+            &passkey_wrap,
+            recovery_wrap.as_ref(),
+        )?;
         let mut tx = self.pool.begin().await?;
         // A write first obtains SQLite's writer lock before any security-sensitive read.
         sqlx::query("UPDATE setup SET expires=expires WHERE singleton=1")
@@ -185,6 +175,31 @@ impl Auth {
         insert_session(&mut tx, &token, &registration.user, "enrollment", now).await?;
         tx.commit().await?;
         Ok(token)
+    }
+
+    /// Validate proof and envelope shapes before any database mutation.
+    fn validated_registration(
+        &self,
+        registration: &Registration,
+        proof: Value,
+        passkey_wrap: &Wrap,
+        recovery_wrap: Option<&Wrap>,
+    ) -> Result<Passkey> {
+        reject_prf(&proof)?;
+        passkey_wrap.validate()?;
+        if let Some(w) = recovery_wrap {
+            w.validate()?;
+        }
+        if registration.recovery_hash.is_some() != recovery_wrap.is_some() {
+            return Err(Error::Invalid);
+        }
+        let proof: RegisterPublicKeyCredential = serde_json::from_value(proof)?;
+        if proof.type_ != "public-key" {
+            return Err(Error::Denied);
+        }
+        self.webauthn
+            .finish_passkey_registration(&proof, &registration.state)
+            .map_err(|_| Error::Webauthn)
     }
 
     pub(super) async fn passkeys(&self, user: &str) -> Result<Vec<Passkey>> {
