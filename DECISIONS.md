@@ -420,3 +420,7 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     spring (0.2 s, bounce 0.2) drives the fill, the overshoot swell and the
     draw-on. Pointer toggles animate. Keyboard toggles are instant. The same
     rule applies to every repeated interaction: one primitive, reused.
+100. **No font swap, ever.** Each page preloads the fonts that its first
+     view uses. Font faces use `font-display: block`, and a view renders once
+     its font is ready (with a short cap). The first frame is the final frame.
+     This applies to the app, the website and the docs.
