@@ -206,6 +206,12 @@ fn restoreRep(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
 }
 
 fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotError!void {
+    // Screen entry copies the inactive screen's pending single shift. The
+    // destination has no reconstructed saved cursor yet, so DECRC restores
+    // its default charset without printing or changing terminal-global REP.
+    // Clear the inherited shift before constructing the source DECSC record;
+    // charset designation alone cannot cancel it when the saved shift is null.
+    try w.writeAll("\x1b8");
     try w.writeAll("\x1b(B\x1b*B\x1b+B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
     if (screen.saved_cursor) |saved| {
         // A saved cursor can lie outside margins changed after DECSC. Use

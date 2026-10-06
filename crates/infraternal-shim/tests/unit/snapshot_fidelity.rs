@@ -603,7 +603,6 @@ fn fidelity_snapshot_resets_stale_viewer_color_overrides() {
 }
 
 #[test]
-#[ignore = "red regression: inherited single shift changes saved cursor charset"]
 fn fidelity_screen_entry_consumes_inherited_shift_before_saving() {
     // Primary retains its unconsumed shift while alternate text consumes its
     // copy. Repaint must not inherit that shift into alternate DECSC state.
