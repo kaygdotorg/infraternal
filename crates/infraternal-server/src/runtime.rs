@@ -604,6 +604,98 @@ mod tests {
         std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
     }
 
+    /// Recreate the real runtime/router over one file database and replace its stale control socket.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_serves_fresh_setup_token_and_completes_owner_enrollment() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::UnixStream,
+        };
+        // A relative pathname stays in the package worktree and fits Unix SUN_LEN.
+        let data_dir = PathBuf::from("target").join(format!("restart-{}", uuid::Uuid::new_v4()));
+        let mut configuration = config(data_dir.clone());
+        configuration.public_origin = "https://auth.example.test".to_owned();
+        let (socket, _peer) = UnixStream::pair().expect("initial infraternal agent socketpair");
+        let (app, first) = super::build_router(
+            configuration.clone(),
+            Some(EmbeddedAgent::from_test_socket(socket)),
+        )
+        .await
+        .expect("initial startup");
+        let path = data_dir.join("setup-token.sock");
+        start_setup_token_socket(path.clone(), first.expect("initial setup capability"))
+            .expect("initial private control socket");
+        let mut client = UnixStream::connect(&path)
+            .await
+            .expect("initial CLI control connection");
+        client
+            .write_all(b"GET\n")
+            .await
+            .expect("initial CLI request");
+        let mut old = String::new();
+        client
+            .read_to_string(&mut old)
+            .await
+            .expect("initial CLI capability response");
+        drop(app);
+        // A crashed process leaves this pathname behind. Startup must unlink it before binding.
+        assert!(path.exists());
+        let (socket, _peer) = UnixStream::pair().expect("restart infraternal agent socketpair");
+        let (app, next) = super::build_router(
+            configuration.clone(),
+            Some(EmbeddedAgent::from_test_socket(socket)),
+        )
+        .await
+        .expect("restart against existing database");
+        start_setup_token_socket(path.clone(), next.expect("rotated setup capability"))
+            .expect("replace stale private socket");
+        let mut client = UnixStream::connect(&path)
+            .await
+            .expect("restart CLI control connection");
+        client
+            .write_all(b"GET\n")
+            .await
+            .expect("restart CLI request");
+        let mut token = String::new();
+        client
+            .read_to_string(&mut token)
+            .await
+            .expect("restart CLI capability response");
+        assert!(
+            old != token,
+            "restart must rotate the capability without logging it"
+        );
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let auth = crate::auth::Auth::new(
+            pool.clone(),
+            "auth.example.test",
+            &configuration.public_origin,
+        )
+        .await
+        .expect("inspection auth");
+        let now = super::unix_seconds().expect("current time");
+        assert!(auth.setup_start(old.trim(), "owner", now).await.is_err());
+        crate::auth::tests::register_over_http(&app, token.trim()).await;
+        assert!(auth.setup_start(token.trim(), "owner", now).await.is_err());
+        let owners: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE owner=1")
+            .fetch_one(&pool)
+            .await
+            .expect("owner count");
+        assert_eq!(owners, 1);
+        let mut announced = false;
+        auth.bootstrap(now, |_| announced = true)
+            .await
+            .expect("post-setup startup");
+        assert!(!announced, "completed setup must never mint another token");
+        drop(app);
+        pool.close().await;
+        drop(auth);
+        std::fs::remove_dir_all(data_dir).expect("remove restart fixture");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn setup_token_socket_is_private_and_requires_explicit_request() {

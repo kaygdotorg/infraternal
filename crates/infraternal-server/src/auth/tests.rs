@@ -424,7 +424,7 @@ async fn setup_restart_rotation_expiry_and_parallel_redemption() {
         !token.is_empty(),
         "restart must issue a fresh setup capability"
     );
-    assert_ne!(token, old_token);
+    assert!(token != old_token, "setup capability must rotate");
     assert!(auth.setup_start(&old_token, "owner", NOW).await.is_err());
     assert!(auth.setup_start(&token, "owner", NOW + DAY).await.is_err());
     let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
@@ -1269,7 +1269,7 @@ async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
     std::fs::remove_dir_all(data_dir).expect("remove temporary server data");
 }
 
-async fn register_over_http(app: &axum::Router, setup_token: &str) -> (String, String) {
+pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) -> (String, String) {
     let (status, _, start) = http_post_json(
         app,
         "setup-start",
@@ -1816,9 +1816,9 @@ async fn authenticated_prf_metadata_preserves_legacy_envelopes() {
         .unwrap();
     assert_eq!(entry["prf_input"], prf_salt(None));
     let wrap: Wrap = serde_json::from_value(entry["wrap"].clone()).unwrap();
-    assert_eq!(
-        unwrap_browser(&f.software.prf(&login), &wrap, &f.user, "passkey").unwrap(),
-        f.dek
+    assert!(
+        unwrap_browser(&f.software.prf(&login), &wrap, &f.user, "passkey").unwrap() == f.dek,
+        "legacy envelope must unwrap the original key"
     );
 }
 
