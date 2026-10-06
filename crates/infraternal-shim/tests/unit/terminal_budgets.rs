@@ -44,7 +44,10 @@ mod throughput {
         let rate = f64::from(u32::try_from(data.len()).unwrap()) * 100.0
             / start.elapsed().as_secs_f64()
             / 1e6;
-        println!("shim VT including observer: {rate:.2} MB/s, 10,000-line retention");
+        println!(
+            "shim Ghostty VT including carry: {rate:.2} MB/s, {SCROLLBACK_BYTES}-byte history budget, {} retained rows",
+            terminal.engine.history_rows()
+        );
         assert!(rate > 10.0);
     }
 }

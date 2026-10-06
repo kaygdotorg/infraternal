@@ -53,30 +53,11 @@ mod tests {
         compare(&a, &b, "continued modes");
     }
     fn compare(a: &Terminal, b: &Terminal, name: &str) {
-        for line in 0..60 {
-            for col in 0..200 {
-                let x = &a.term.grid()[Line(line)][Column(col)];
-                let y = &b.term.grid()[Line(line)][Column(col)];
-                assert_eq!(
-                    (x.c, x.fg, x.bg, x.flags),
-                    (y.c, y.fg, y.bg, y.flags),
-                    "{name} {line}:{col}"
-                );
-            }
-        }
         assert_eq!(
-            a.term.grid().cursor.point,
-            b.term.grid().cursor.point,
-            "{name}"
+            a.engine.difference(&b.engine),
+            0,
+            "{name}: native cell/style/cursor/mode difference"
         );
-        assert_eq!(a.term.mode(), b.term.mode(), "{name}");
-        for index in 0..=258 {
-            assert_eq!(
-                a.term.colors()[index],
-                b.term.colors()[index],
-                "{name} palette {index}"
-            );
-        }
     }
     #[test]
     fn partial_csi_and_utf8_continue() {
