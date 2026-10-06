@@ -51,3 +51,49 @@ mod throughput {
         assert!(rate > 10.0);
     }
 }
+
+#[cfg(test)]
+mod memory {
+    //! Linux process RSS isolates native terminal storage from the PTY/ring.
+    use super::*;
+
+    fn resident_kib() -> usize {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore = "RSS measurement; run this filter alone in a fresh release process"]
+    fn measured_terminal_rss() {
+        // Allocate the input before the baseline: report terminal growth, not
+        // a reusable emitter buffer. A fresh process avoids allocator residue
+        // from unrelated tests and previous terminal instances.
+        let data = b"1234567890 abcdefghijklmnopqrstuvwxyz\r\n".repeat(10060);
+        std::hint::black_box(&data);
+        let before = resident_kib();
+        let mut terminal = Terminal::new(200, 60).unwrap();
+        let idle = resident_kib();
+        terminal.process(&data);
+        let first_rows = terminal.engine.history_rows();
+        let first = resident_kib();
+        for _ in 0..10 {
+            terminal.process(&data);
+        }
+        let full = resident_kib();
+        println!(
+            "Ghostty terminal 200x60: baseline={before} KiB idle={idle} KiB first={first} KiB ({first_rows} rows) full={full} KiB ({} rows); first_delta={} KiB full_delta={} KiB budget={SCROLLBACK_BYTES} bytes",
+            terminal.engine.history_rows(),
+            first.saturating_sub(before),
+            full.saturating_sub(before)
+        );
+        assert!((5000..20000).contains(&terminal.engine.history_rows()));
+    }
+}
