@@ -8,6 +8,10 @@ pub const MAX_FRAME: usize = 1024 * 1024;
 /// Capability bit 0 selects shim-owned input deduplication and PTY-write cursors.
 pub const SEQUENCED_INPUT: u64 = 1;
 
+/// Capability bit 1 selects independent writer cursors and concurrent viewers.
+/// It requires `SEQUENCED_INPUT`; a selected writer identity survives peer loss.
+pub const MULTI_WRITER: u64 = 2;
+
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
@@ -39,6 +43,7 @@ pub enum Frame {
     InputAck(u64),
     InputStateRequest,
     InputState(u64, u64),
+    SelectWriter(u32),
     Exited(i32, u64),
     ExitAck,
     Error(u16, String),
@@ -235,6 +240,10 @@ impl Frame {
                 put!(written);
                 put!(accepted);
             }
+            Self::SelectWriter(writer) => {
+                body.push(0x1b);
+                put!(writer);
+            }
             Self::Exited(status, seq) => {
                 body.push(0x20);
                 put!(status);
@@ -289,6 +298,7 @@ impl Frame {
             0x18 => Self::InputAck(p.u64()?),
             0x19 => Self::InputStateRequest,
             0x1a => Self::InputState(p.u64()?, p.u64()?),
+            0x1b => Self::SelectWriter(u32::from_le_bytes(p.take()?)),
             0x20 => Self::Exited(i32::from_le_bytes(p.take()?), p.u64()?),
             0x21 => Self::ExitAck,
             0x7f => Self::Error(
