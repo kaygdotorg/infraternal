@@ -31,6 +31,15 @@ Prompt cancellation, invalid setup input and server failure have separate guidan
 The optional `host` query parameter selects a lowercase UUID host, for example
 `?host=00000000-0000-4000-8000-000000000001`.
 
+## Renderer source pin (#36)
+
+The tracer loads the MIT `ghostty-web` source build pinned to the crash fix in
+upstream #180. `RENDERER-VERIFICATION.md` records the exact source and Ghostty
+SHAs, reproducible build and checksums, deferred bundle-size delta, Chromium
+crash corpus, scrollback/RSS measurements for one and eight sessions, and the
+matched 500-key latency comparison with 0.4.0. The renderer remains dynamically
+loaded after sign-in.
+
 ## Onboarding and account identity (#32)
 
 First enrollment is a four-step flow: setup token, username and display name,
