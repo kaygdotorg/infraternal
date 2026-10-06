@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure 50 MiB LF/CRLF/printable through real shim and infraternal agent [41]."""
+"""Gate credited raw 50 MiB floods through real shim and infraternal agent [41]."""
 import argparse
 import os
 from pathlib import Path
@@ -23,7 +23,7 @@ def run(binary):
             # count exact without leaving a partial control sequence per chunk.
             script=f'import os; p=b"{pattern}"; d=(p*(32768//len(p))).ljust(32768,b"x"); [os.write(1,d) for _ in range(1600)]'
             command=f"python3 -c '{script}'; printf 'VT_%s' DONE\n".encode()
-            start=time.perf_counter();initial=client.out;client.input(command)
+            start=time.perf_counter();initial=client.out;initial_snapshots=len(client.snapshots);client.input(command)
             # Credit every real mux output frame, retaining only a bounded
             # suffix for completion detection rather than buffering the flood.
             while b'VT_DONE' not in client.data:
@@ -31,7 +31,13 @@ def run(binary):
                 if len(client.data)>32768: del client.data[:-32768]
             elapsed=time.perf_counter()-start;count=client.out-initial
             assert count>=50*1024*1024
-            print(f'{label}: bytes={count} seconds={elapsed:.6f} MB/s={count/elapsed/1e6:.3f} MiB/s={count/elapsed/1024/1024:.3f}',flush=True)
+            snapshots=len(client.snapshots)-initial_snapshots
+            # Snapshot sequence advancement must never count as delivered flood
+            # bytes. Keep the throughput evidence strictly raw and credited.
+            assert snapshots==0, 'credited flood must not substitute a Snapshot'
+            rate=count/elapsed/1e6
+            print(f'{label}: bytes={count} seconds={elapsed:.6f} MB/s={rate:.3f} MiB/s={count/elapsed/1024/1024:.3f} snapshots={snapshots}',flush=True)
+            assert rate>10.0, 'credited raw flood must exceed decision 41 10 MB/s'
             client.wait_ack();client.send(1,0x0f,struct.pack('<H',0)+varint(4)+b'done')
     finally:
         client.kill();cleanup(state)
