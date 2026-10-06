@@ -1821,3 +1821,55 @@ async fn authenticated_prf_metadata_preserves_legacy_envelopes() {
         f.dek
     );
 }
+
+/// Public status reveals exactly one flag; HTTP resident login establishes the resolved session.
+#[tokio::test]
+async fn public_status_and_discoverable_http_login() {
+    let _guard = SERIAL.lock().await;
+    let (auth, _) = empty().await;
+    let app = router(auth);
+    let (status, headers, body) = http_post_json(&app, "status", json!({})).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body, json!({"setup_required":true}));
+    assert_eq!(headers[axum::http::header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        http_post_json(&app, "status", json!({"extra":true}))
+            .await
+            .0,
+        axum::http::StatusCode::BAD_REQUEST
+    );
+    let mut f = fixture().await;
+    let app = router(f.auth.clone());
+    assert_eq!(
+        http_post_json(&app, "status", json!({})).await.2,
+        json!({"setup_required":false})
+    );
+    let (status, _, start) = http_post_json(&app, "login-start", json!({})).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(start["options"]["publicKey"]["allowCredentials"], json!([]));
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    let (status, headers, _) = http_post_json(
+        &app,
+        "login-finish",
+        json!({"ceremony":start["ceremony"],"proof":proof,"device":"resident browser"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let cookie = headers[axum::http::header::SET_COOKIE].to_str().unwrap();
+    let token = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("__Host-infraternal=")
+        .unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    assert_eq!(f.auth.session(token, now).await.unwrap().user_id, f.user);
+}

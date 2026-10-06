@@ -30,8 +30,11 @@ struct Setup {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct User {
-    user_id: String,
+    user_id: Option<String>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Empty {}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Register {
@@ -180,6 +183,7 @@ async fn execute(
     .map_err(|_| Error::Invalid)?;
     ingress(auth, action, headers, now).await?;
     let payload = match action {
+        "status" => public_status(auth, value).await?,
         "setup-start" => {
             let b: Setup = body(value)?;
             auth.setup_start(&b.token, &b.name, now).await?
@@ -194,7 +198,10 @@ async fn execute(
         }
         "login-start" => {
             let b: User = body(value)?;
-            auth.login_start(&b.user_id, now).await?
+            match b.user_id {
+                Some(user) => auth.login_start(&user, now).await?,
+                None => auth.discoverable_login_start(now).await?,
+            }
         }
         "login-finish" => {
             let b: Login = body(value)?;
@@ -298,6 +305,15 @@ pub(super) struct Ingress {
     window: i64,
     browser: u32,
     devices: u32,
+}
+
+/// Keep the unauthenticated response boundary explicit: exactly one setup flag.
+async fn public_status(auth: &Auth, value: Value) -> super::Result<Value> {
+    let _: Empty = body(value)?;
+    let required: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM users WHERE owner=1)")
+        .fetch_one(&auth.pool)
+        .await?;
+    Ok(json!({"setup_required":required}))
 }
 
 #[cfg(test)]
