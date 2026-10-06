@@ -232,7 +232,11 @@ fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
     try w.writeAll("\x1b]8;;\x1b\\");
     const values = p.cells(.all);
     const edge = &values[values.len - 1];
-    if (p.rowAndCell().row.wrap and !edge.hasText() and (edge.wide == .narrow or edge.wide == .spacer_head)) {
+    if (!p.rowAndCell().row.wrap) return;
+    const next = p.down(1) orelse return error.WriteFailed;
+    const next_continues = next.rowAndCell().row.wrap_continuation;
+    if (!edge.hasText() and (edge.wide == .narrow or edge.wide == .spacer_head)) {
+        if (edge.wide == .spacer_head and next_continues and next.cells(.all)[0].wide != .wide) return error.WriteFailed;
         // Construct a spacer head with its own attributes before painting
         // the next row: that row's first wide glyph may have a different style
         // or hyperlink. If the original head had narrowed, overwrite the
@@ -246,6 +250,13 @@ fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
         try w.writeAll("\x1b[2D");
         if (edge.wide == .narrow) try w.writeAll(" \x1b[1D");
         try w.writeAll("\x1b]8;;\x1b\\");
+        if (!next_continues) try w.writeAll("\x1b[M");
+    } else if (!next_continues) {
+        // Region scrolling can retain this row's wrap/head while replacing
+        // its following row. Remove the temporary following row before its
+        // repaint so no wide-cell erase can clear the retained head.
+        try codepoint(w, '界');
+        try w.writeAll("\x1b[2D\x1b[M");
     }
 }
 
