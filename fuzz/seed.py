@@ -25,3 +25,20 @@ for target in ['wire_frame_decode', 'wire_stream_decode']:
                 (corpus / f'{vector.stem}-{stream}-twice').write_bytes(mux + mux)
     (corpus / 'split-close').write_bytes(bytes([0, 3, 15, 0, 0] * 2))
     (corpus / 'split-credit-close').write_bytes(bytes([0, 5, 20, 1, 0, 0, 0, 0, 3, 15, 0, 0]))
+
+# Shim capability bit 0: seed every additive frame and overflow/duplicate input.
+shim = root / 'corpus' / 'shim_frame_decode'
+shim.mkdir(parents=True, exist_ok=True)
+for kind, payload in [
+    (0x17, (0).to_bytes(8, 'little') + b'abc'),
+    (0x17, (0xffffffffffffffff).to_bytes(8, 'little') + b'xx'),
+    (0x18, (3).to_bytes(8, 'little')),
+    (0x19, b''),
+    (0x1a, (3).to_bytes(8, 'little') + (5).to_bytes(8, 'little')),
+]:
+    raw = bytes([kind]) + payload
+    name = f'cap0-{kind:x}-{len(payload)}'
+    (shim / name).write_bytes(raw)
+    framed = len(raw).to_bytes(4, 'little') + raw
+    (shim / f'{name}-framed').write_bytes(framed)
+    (shim / f'{name}-twice').write_bytes(framed + framed)

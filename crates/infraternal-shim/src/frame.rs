@@ -5,6 +5,9 @@ use std::io;
 /// Maximum type plus payload length, excluding the four-byte prefix.
 pub const MAX_FRAME: usize = 1024 * 1024;
 
+/// Capability bit 0 selects shim-owned input deduplication and PTY-write cursors.
+pub const SEQUENCED_INPUT: u64 = 1;
+
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
@@ -32,6 +35,10 @@ pub enum Frame {
     SnapshotRequest,
     Snapshot(u64, Vec<u8>),
     Signal(u8),
+    SequencedInput(u64, Vec<u8>),
+    InputAck(u64),
+    InputStateRequest,
+    InputState(u64, u64),
     Exited(i32, u64),
     ExitAck,
     Error(u16, String),
@@ -62,6 +69,7 @@ impl Frame {
     /// Encode one complete frame.
     /// # Errors
     /// Rejects frames larger than the frozen limit.
+    #[allow(clippy::too_many_lines)]
     pub fn encode(&self) -> io::Result<Vec<u8>> {
         let mut body = Vec::new();
         macro_rules! put {
@@ -130,6 +138,21 @@ impl Frame {
                 body.push(0x16);
                 body.push(*signal);
             }
+            Self::SequencedInput(seq, bytes) => {
+                body.push(0x17);
+                put!(seq);
+                body.extend_from_slice(bytes);
+            }
+            Self::InputAck(seq) => {
+                body.push(0x18);
+                put!(seq);
+            }
+            Self::InputStateRequest => body.push(0x19),
+            Self::InputState(written, accepted) => {
+                body.push(0x1a);
+                put!(written);
+                put!(accepted);
+            }
             Self::Exited(status, seq) => {
                 body.push(0x20);
                 put!(status);
@@ -187,6 +210,10 @@ impl Frame {
             0x14 => Self::SnapshotRequest,
             0x15 => Self::Snapshot(p.u64()?, p.bytes()),
             0x16 => Self::Signal(p.take::<1>()?[0]),
+            0x17 => Self::SequencedInput(p.u64()?, p.bytes()),
+            0x18 => Self::InputAck(p.u64()?),
+            0x19 => Self::InputStateRequest,
+            0x1a => Self::InputState(p.u64()?, p.u64()?),
             0x20 => Self::Exited(i32::from_le_bytes(p.take()?), p.u64()?),
             0x21 => Self::ExitAck,
             0x7f => Self::Error(

@@ -1,7 +1,7 @@
 //! Single-threaded bounded PTY/socket pump; replay precedes live output at one cursor.
 #![forbid(unsafe_code)]
 use crate::{
-    frame::{Decoder, Frame, MAX_FRAME},
+    frame::{Decoder, Frame, MAX_FRAME, SEQUENCED_INPUT},
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
     terminal::Terminal,
@@ -68,10 +68,17 @@ enum Request {
     Read(u64),
     Snapshot,
 }
+#[derive(Clone, Copy)]
+enum InputReply {
+    Ack,
+    State,
+}
 struct Peer {
     stream: UnixStream,
     decoder: Decoder,
     attached: bool,
+    caps: u64,
+    input_reply: Option<InputReply>,
     cursor: Option<u64>,
     pending: Vec<u8>,
     written: usize,
@@ -202,6 +209,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
     let mut terminal = Terminal::new(config.cols, config.rows);
     let mut ring = Ring::new(config.ring_capacity);
     let mut input = VecDeque::new();
+    let mut cursors = InputCursors::default();
     let mut peer: Option<Peer> = None;
     let mut exit = None;
     let mut drained = false;
@@ -214,6 +222,15 @@ pub fn run(mut config: Config) -> io::Result<()> {
                     .code()
                     .unwrap_or_else(|| -status.signal().unwrap_or(1)),
             );
+        }
+        if let Some(p) = &mut peer
+            && p.pending.is_empty()
+            && let Some(reply) = p.input_reply.take()
+        {
+            p.queue(&match reply {
+                InputReply::State => Frame::InputState(cursors.written, cursors.accepted),
+                InputReply::Ack => Frame::InputAck(cursors.written),
+            })?;
         }
         if let Some(p) = &mut peer
             && p.pending.is_empty()
@@ -289,7 +306,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
             } else {
                 None
             };
-            match poll(&mut fds, 1000_u16) {
+            match poll(&mut fds, None::<u16>) {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => return Err(e.into()),
@@ -322,6 +339,8 @@ pub fn run(mut config: Config) -> io::Result<()> {
                             stream,
                             decoder: Decoder::default(),
                             attached: false,
+                            caps: 0,
+                            input_reply: None,
                             cursor: None,
                             pending: Vec::new(),
                             written: 0,
@@ -330,7 +349,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
-                            caps: 0,
+                            caps: SEQUENCED_INPUT,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -354,6 +373,13 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 match pty.master.write(bytes) {
                     Ok(n) => {
                         input.drain(..n);
+                        cursors.written += n as u64;
+                        if let Some(p) = &mut peer
+                            && p.caps & SEQUENCED_INPUT != 0
+                            && p.input_reply.is_none()
+                        {
+                            p.input_reply = Some(InputReply::Ack);
+                        }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                     Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => {
@@ -399,6 +425,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
                                     &ring,
                                     &mut config,
                                     &mut input,
+                                    &mut cursors,
                                     exit.is_some() && drained,
                                 ) {
                                     Ok(true) => return Ok(()),
@@ -431,6 +458,7 @@ fn handle(
     ring: &Ring,
     config: &mut Config,
     input: &mut VecDeque<u8>,
+    cursors: &mut InputCursors,
     exited: bool,
 ) -> io::Result<bool> {
     let invalid = || {
@@ -439,28 +467,50 @@ fn handle(
             "invalid shim request ordering or payload",
         )
     };
-    if let Frame::Attach(_) = frame {
+    if let Frame::Attach(caps) = frame {
         if p.attached {
             return Err(invalid());
         }
         p.attached = true;
+        p.caps = caps & SEQUENCED_INPUT;
         return Ok(false);
     }
     if !p.attached {
         return Err(invalid());
     }
     match frame {
-        Frame::Input(bytes) if !exited => {
+        Frame::InputStateRequest if p.caps & SEQUENCED_INPUT != 0 => {
+            p.input_reply = Some(InputReply::State);
+        }
+        Frame::SequencedInput(seq, bytes) if !exited && p.caps & SEQUENCED_INPUT != 0 => {
+            cursors.accept(seq, &bytes, input)?;
+            if p.input_reply.is_none() {
+                p.input_reply = Some(InputReply::Ack);
+            }
+            let (first, _) = input.as_slices();
+            if !first.is_empty() {
+                match pty.master.write(first) {
+                    Ok(n) => {
+                        input.drain(..n);
+                        cursors.written += n as u64;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Frame::Input(bytes) if !exited && p.caps == 0 => {
             if input.len() + bytes.len() > MAX_FRAME {
                 return Err(invalid());
             }
             // Try the PTY immediately: poll scheduling never adds a round trip
             // to the common keystroke path. Retain partial writes in order.
-            input.extend(bytes);
+            cursors.accept(cursors.accepted, &bytes, input)?;
             let (first, _) = input.as_slices();
             match pty.master.write(first) {
                 Ok(n) => {
                     input.drain(..n);
+                    cursors.written += n as u64;
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(e),
@@ -495,3 +545,40 @@ fn handle(
 #[cfg(test)]
 #[path = "../tests/unit/session_budgets.rs"]
 mod measurements;
+
+/// Survives peer replacement; accepted bytes are retained until a successful write.
+#[derive(Default)]
+struct InputCursors {
+    written: u64,
+    accepted: u64,
+}
+impl InputCursors {
+    fn accept(&mut self, seq: u64, bytes: &[u8], queue: &mut VecDeque<u8>) -> io::Result<()> {
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid input range or full queue",
+            )
+        };
+        let end = seq.checked_add(bytes.len() as u64).ok_or_else(invalid)?;
+        if seq > self.accepted {
+            return Err(invalid());
+        }
+        if end <= self.accepted {
+            return Ok(());
+        }
+        let skip = usize::try_from(self.accepted - seq).map_err(|_| invalid())?;
+        let suffix = &bytes[skip..];
+        // Full policy is refusal before mutation, never silent input loss.
+        if queue.len() + suffix.len() > MAX_FRAME {
+            return Err(invalid());
+        }
+        queue.extend(suffix);
+        self.accepted = end;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/sequenced_input.rs"]
+mod sequenced_checks;

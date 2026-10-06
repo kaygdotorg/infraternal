@@ -28,6 +28,8 @@ mod budgets {
             stream,
             decoder: Decoder::default(),
             attached: true,
+            caps: 0,
+            input_reply: None,
             cursor: None,
             pending: Vec::new(),
             written: 0,
@@ -38,6 +40,7 @@ mod budgets {
         let ring = Ring::new(DEFAULT_CAPACITY);
         let mut config = Config::new([0; 16], Uid::effective().as_raw());
         let mut input = VecDeque::new();
+        let mut cursors = InputCursors::default();
         let mut samples = Vec::new();
         let wire = Frame::Input(vec![b'x']).encode().unwrap();
         for _ in 0..10000 {
@@ -52,6 +55,7 @@ mod budgets {
                     &ring,
                     &mut config,
                     &mut input,
+                    &mut cursors,
                     false,
                 )
                 .unwrap();
