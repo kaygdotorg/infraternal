@@ -235,6 +235,48 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       output_sequence: String(session.outputLength),
     });
   }
+  if (request.method === "POST" && url.pathname === "/__mock/unicode-case") {
+    const body = await readJson(request);
+    const mode = body?.mode;
+    if (mode !== "single" && mode !== "utf8-split" && mode !== "grapheme-split" && mode !== "snapshot") {
+      return sendJson(response, 400, { error: "unknown Unicode write mode" });
+    }
+    if (session.outputLength !== 0) return sendJson(response, 409, { error: "Unicode probe requires a fresh terminal" });
+    const connection = [...connections].find((candidate) => candidate.session === session && candidate.attached && isSocketOpen(candidate.socket));
+    if (!connection) return sendJson(response, 409, { error: "Unicode probe requires an attached terminal" });
+
+    // Place one protocol boundary inside the skin-tone scalar or between the
+    // base emoji and modifier while leaving the UTF-8 bytes unchanged.
+    const paddingLength = mode === "utf8-split" ? MAX_MESSAGE - 7 : mode === "grapheme-split" ? MAX_MESSAGE - 4 : 0;
+    const text = `${"a".repeat(paddingLength)}👩🏽‍💻 👨‍👩‍👧‍👦 🧑🏾‍🚀 🇩🇪 🇺🇳\r\n`;
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.byteLength > connection.credit) return sendJson(response, 409, { error: "Unicode probe exceeds current terminal credit" });
+    session.fixtureOutput = bytes;
+    session.ringStartSequence = 0n;
+    session.snapshotFrames = [];
+    session.snapshotCount = 0;
+    session.output.fill(0);
+    session.echoOutputLength = 0;
+    session.outputLength = bytes.byteLength;
+    session.writtenInput = 0n;
+    session.acceptedInputBytes = 0;
+    session.echoedText = "";
+
+    if (mode === "snapshot") {
+      sendFrame(connection.socket, 1, { type: "Snapshot", outSeq: BigInt(bytes.byteLength), bytes });
+      connection.outputCursor = BigInt(bytes.byteLength);
+      connection.credit -= bytes.byteLength;
+      session.snapshotCount += 1;
+    } else {
+      for (let offset = 0; offset < bytes.byteLength; offset += MAX_MESSAGE) {
+        const chunk = bytes.subarray(offset, Math.min(offset + MAX_MESSAGE, bytes.byteLength));
+        sendFrame(connection.socket, 1, { type: "Output", outSeq: BigInt(offset), bytes: chunk });
+        connection.outputCursor = BigInt(offset + chunk.byteLength);
+        connection.credit -= chunk.byteLength;
+      }
+    }
+    return sendJson(response, 200, { mode, bytes: bytes.byteLength, output_sequence: String(session.outputLength) });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/canary") {
     const fixtureLength = session.fixtureOutput.byteLength;
     const readers = [...connections].filter((connection) => connection.session === session && connection.attached);

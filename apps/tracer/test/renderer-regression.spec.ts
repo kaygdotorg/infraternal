@@ -88,6 +88,13 @@ for (const fixture of terminalFixtures) {
     const fixtureMetrics = await waitForFixturePaint();
     expect(fixtureMetrics, "the complete fixture must reach a painted output callback").toBeDefined();
     console.log(`${fixture.name} before canary: grid=${fixtureMetrics?.cols}x${fixtureMetrics?.rows}, configuredScrollback=${fixtureMetrics?.configuredScrollback}, retainedRows=${fixtureMetrics?.scrollbackRows}, wasm=${fixtureMetrics?.wasmMemoryBytes} B`);
+    if (fixture.name === "behemoth.txt") {
+      const graphemes = await page.evaluate(() => window.__tracerTestDouble?.graphemeText() ?? "");
+      for (const cluster of ["👩🏽‍💻", "👨‍👩‍👧‍👦", "🧑🏾‍🚀", "🇩🇪", "🇺🇳"]) {
+        expect(graphemes, `raw behemoth output retains ${cluster}`).toContain(cluster);
+      }
+      console.log("behemoth raw stream: all five Unicode clusters remain in Ghostty's grapheme buffer");
+    }
 
     const waitForCanaryDelivery = async (): Promise<boolean> => {
       const deadline = Date.now() + 5 * 60_000;

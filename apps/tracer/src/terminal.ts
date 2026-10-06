@@ -266,6 +266,35 @@ export class TerminalClient {
     return lines.join("\n");
   }
 
+  /** Reads renderer graphemes from the test-only tail, including ZWJ and modifier codepoints. */
+  readGraphemeText(): string {
+    const buffer = this.terminal.buffer.active;
+    const first = Math.max(0, buffer.length - this.terminal.rows - 256);
+    const wasmTerm = this.terminal.wasmTerm;
+    const scrollbackRows = wasmTerm?.getScrollbackLength() ?? 0;
+    const lines: string[] = [];
+    for (let row = first; row < buffer.length; row += 1) {
+      const line = buffer.getLine(row);
+      if (!line) continue;
+      let text = "";
+      for (let col = 0; col < line.length; col += 1) {
+        const cell = line.getCell(col);
+        if (!cell || cell.getWidth() === 0) continue;
+        if (cell.getCodepoint() === 0) {
+          text += " ";
+        } else if (wasmTerm && row < scrollbackRows) {
+          text += wasmTerm.getScrollbackGraphemeString(row, col);
+        } else if (wasmTerm) {
+          text += wasmTerm.getGraphemeString(row - scrollbackRows, col);
+        } else {
+          text += cell.getChars();
+        }
+      }
+      lines.push(text.trimEnd());
+    }
+    return lines.join("\n");
+  }
+
   /** Injects probe input through Ghostty's normal input event path. */
   injectInput(data: string): void {
     if (this.closed || this.inputPaused) throw new Error("terminal input is paused");

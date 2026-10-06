@@ -14,6 +14,7 @@ declare global {
       isConnected: () => boolean;
       dropConnection: () => void;
       screenText: () => string;
+      graphemeText: () => string;
       rendererMetrics: () => {
         cols: number;
         rows: number;
@@ -259,6 +260,7 @@ async function showTerminal(serverHostname?: string): Promise<void> {
         isConnected: () => currentTerminal?.isConnected === true,
         dropConnection: () => currentTerminal?.forceDrop(),
         screenText: () => currentTerminal?.readScreenText() ?? "",
+        graphemeText: () => currentTerminal?.readGraphemeText() ?? "",
         rendererMetrics: () => currentTerminal?.rendererMetrics,
         trace: () => performanceProbe?.traceSamples() ?? [],
       };
