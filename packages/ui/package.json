@@ -16,6 +16,7 @@
     "./color": "./src/color.ts",
     "./themes": "./src/themes.ts",
     "./backdrop": "./src/backdrop.ts",
+    "./branched": "./src/branched.ts",
     "./styles.css": "./styles.css"
   }
 }
