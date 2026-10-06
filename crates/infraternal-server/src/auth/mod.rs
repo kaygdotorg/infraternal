@@ -47,6 +47,8 @@ pub enum Error {
     Invalid,
     #[error("username already exists")]
     Conflict,
+    #[error("owner setup is no longer available")]
+    SetupClosed,
     #[error("storage unavailable")]
     Storage(#[from] sqlx::Error),
     #[error("migration failed")]
