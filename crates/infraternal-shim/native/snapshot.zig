@@ -559,6 +559,9 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
                 if (strict) {
                     if (!std.meta.eql(sa.?.semantic_prompt, sb.?.semantic_prompt) or sa.?.cursor.semantic_content != sb.?.cursor.semantic_content or sa.?.cursor.semantic_content_clear_eol != sb.?.cursor.semantic_content_clear_eol) return 6200001;
                     if (sa.?.protected_mode != sb.?.protected_mode or sa.?.cursor.protected != sb.?.cursor.protected) return 6300000;
+                    if (!charsetEqual(sa.?.charset, sb.?.charset)) return 6400000;
+                    if (!cursorLinkEqual(sa.?.cursor.hyperlink, sb.?.cursor.hyperlink)) return 6400001;
+                    if (!std.meta.eql(sa.?.kitty_keyboard, sb.?.kitty_keyboard)) return 6400002;
                     if (!savedEqual(sa.?.saved_cursor, sb.?.saved_cursor)) return 6000002;
                     if (sa.?.cursor.cursor_style != sb.?.cursor.cursor_style) return 6000003;
                 }
@@ -574,6 +577,10 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
         }
     }
     if (strict) {
+        inline for (.{ "foreground", "background", "cursor" }) |name| {
+            if (!std.meta.eql(@field(a.colors, name), @field(b.colors, name))) return 6400003;
+        }
+        if (!std.meta.eql(a.colors.palette.mask, b.colors.palette.mask)) return 6400004;
         if (a.flags.shell_redraws_prompt != b.flags.shell_redraws_prompt) return 6200002;
         if (!std.meta.eql(a.modes.saved, b.modes.saved)) return 6100000;
         if (a.previous_char != b.previous_char) return 6000000;
@@ -626,4 +633,33 @@ fn savedEqual(a: ?vt.Screen.SavedCursor, b: ?vt.Screen.SavedCursor) bool {
         if (bb.charset.charsets.get(slot) == .utf8) bb.charset.charsets.set(slot, .ascii);
     }
     return std.meta.eql(aa, bb);
+}
+
+// Default UTF-8 and explicit ASCII share the same mapping in this pinned
+// engine. Every other live/single-shift charset field remains significant.
+fn charsetEqual(a: anytype, b: @TypeOf(a)) bool {
+    var aa = a;
+    var bb = b;
+    inline for (.{ vt.CharsetSlot.G0, vt.CharsetSlot.G1, vt.CharsetSlot.G2, vt.CharsetSlot.G3 }) |slot| {
+        if (aa.charsets.get(slot) == .utf8) aa.charsets.set(slot, .ascii);
+        if (bb.charsets.get(slot) == .utf8) bb.charsets.set(slot, .ascii);
+    }
+    return std.meta.eql(aa, bb);
+}
+
+fn cursorLinkEqual(a: ?*@import("terminal/hyperlink.zig").Hyperlink, b: ?*@import("terminal/hyperlink.zig").Hyperlink) bool {
+    const aa = a orelse return b == null;
+    const bb = b orelse return false;
+    if (!std.mem.eql(u8, aa.uri, bb.uri)) return false;
+    var a_buf: [64]u8 = undefined;
+    var b_buf: [64]u8 = undefined;
+    const a_key = switch (aa.id) {
+        .explicit => |v| v,
+        .implicit => |v| std.fmt.bufPrint(&a_buf, "infraternal-implicit-{d}", .{v}) catch unreachable,
+    };
+    const b_key = switch (bb.id) {
+        .explicit => |v| v,
+        .implicit => |v| std.fmt.bufPrint(&b_buf, "infraternal-implicit-{d}", .{v}) catch unreachable,
+    };
+    return std.mem.eql(u8, a_key, b_key);
 }

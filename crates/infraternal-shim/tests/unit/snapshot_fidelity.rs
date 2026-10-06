@@ -366,7 +366,6 @@ fn fidelity_iso_protection_erase() {
 }
 
 #[test]
-#[ignore = "oracle completeness red probes; enable with independent state checks"]
 fn fidelity_oracle_detects_hidden_state() {
     // Pair real engines directly: these probes test observation independently
     // of Snapshot construction, so a serializer bug cannot define equality.
@@ -381,8 +380,8 @@ fn fidelity_oracle_detects_hidden_state() {
         ),
         (
             "inactive keyboard ring",
-            b"\x1b[?47h\x1b[>1u\x1b[>2u\x1b[<u\x1b[?47l",
-            b"\x1b[?47h\x1b[>1u\x1b[>3u\x1b[<u\x1b[?47l",
+            b"\x1b[?47h\x1b[>1u\x1b[>2u\x1b[?47l",
+            b"\x1b[?47h\x1b[>3u\x1b[>2u\x1b[?47l",
         ),
         ("foreground color", b"\x1b]10;rgb:12/34/56\x07", b""),
         ("background color", b"\x1b]11;rgb:12/34/56\x07", b""),
