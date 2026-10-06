@@ -17,7 +17,14 @@ enum Command {
     /// Run the trusted control plane.
     Server,
     /// Run the per-host infraternal agent.
-    Agent,
+    Agent {
+        /// Trusted socketpair inherited from the spawning server.
+        #[arg(long)]
+        fd: Option<i32>,
+        /// Override the private runtime state directory.
+        #[arg(long)]
+        state: Option<std::path::PathBuf>,
+    },
     /// Internal session owner; not a public CLI interface.
     #[command(name = "__shim", hide = true)]
     Shim {
@@ -83,9 +90,27 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Command::Agent => {
-            eprintln!("not implemented");
-            ExitCode::from(2)
+        Command::Agent { fd, state } => {
+            let Some(fd) = fd else {
+                eprintln!("not implemented");
+                return ExitCode::from(2);
+            };
+            // One reactor suffices for bounded async IO. The shim arm above
+            // remains synchronous because its detached process model forks.
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                eprintln!("could not start the async runtime");
+                return ExitCode::FAILURE;
+            };
+            match runtime.block_on(infraternal_agent::daemon::run(fd, state)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("infraternal agent failed: {error}");
+                    ExitCode::FAILURE
+                }
+            }
         }
     }
 }

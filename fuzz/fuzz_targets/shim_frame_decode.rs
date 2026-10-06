@@ -1,9 +1,13 @@
 //! Fuzz complete payloads and fragmented/coalesced stream framing [12][40].
 #![no_main]
 #![forbid(unsafe_code)]
-use infraternal_shim::frame::{Decoder, Frame};
+use infraternal_shim::frame::{Decoder, Frame, FrameRef};
 use libfuzzer_sys::fuzz_target;
 fuzz_target!(|bytes: &[u8]| {
+    assert_eq!(
+        FrameRef::decode(bytes).map(FrameRef::into_owned).ok(),
+        Frame::decode(bytes).ok()
+    );
     if let Ok(frame) = Frame::decode(bytes)
         && let Ok(wire) = frame.encode()
     {

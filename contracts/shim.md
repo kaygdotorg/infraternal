@@ -1,3 +1,4 @@
+<!-- Frozen local shim protocol and additive restart-safe input negotiation [13][17][41]. -->
 # Contract: session shim ↔ infraternal agent
 
 Status: draft for #10. Implements DECISIONS 13 and 17.
@@ -82,6 +83,10 @@ the PTY output stream since the session started.
 | 0x14 | agent → shim  | `SnapshotRequest` | (empty) |
 | 0x15 | shim → agent  | `Snapshot` | u64 seq, bytes: VT sequences that repaint screen, scrollback tail, cursor and modes, valid at seq |
 | 0x16 | agent → shim  | `Signal`   | u8 signal (allow-list: INT, TERM, HUP, KILL, WINCH) |
+| 0x17 | agent → shim | `SequencedInput` | u64 input offset, bytes (cap bit 0) |
+| 0x18 | shim → agent | `InputAck` | u64 exclusive written input offset (cap bit 0) |
+| 0x19 | agent → shim | `InputStateRequest` | empty (cap bit 0) |
+| 0x1A | shim → agent | `InputState` | u64 exclusive written offset, u64 exclusive accepted offset (cap bit 0) |
 | 0x20 | shim → agent  | `Exited`   | i32 status or −signal, u64 final_seq |
 | 0x21 | agent → shim  | `ExitAck`  | (empty). The shim deletes its socket and exits. |
 | 0x7F | both          | `Error`    | u16 code, utf-8 message |
@@ -124,3 +129,34 @@ Rules:
 - An unknown frame type from a peer that announced no caps is a protocol
   error.
 - Removing or changing a v1 frame is not allowed.
+
+### Capability bit 0: SEQUENCED_INPUT (#20)
+
+A supporting shim advertises bit 0 in Hello; Attach selects it. Frames
+0x17–0x1A are valid only after selection. Existing v1 layouts stay unchanged.
+With bit 0 selected, legacy Input is refused: mixing unsequenced bytes would
+make the input cursors ambiguous. Caps-zero Attach retains legacy behaviour.
+
+The shim owns exclusive accepted and written input cursors and its bounded
+input queue (at most 1 MiB; a request exceeding available space disconnects
+without accepting bytes). Check offset + byte length for u64 overflow before
+mutation. Trim bytes below accepted, refuse gaps, and advance accepted only
+when queueing the remaining suffix. Duplicate requests return the current
+written acknowledgment without queueing again. Advance written only by actual
+successful PTY writes. Ack may coalesce to the latest written offset; it needs
+no unbounded queue. State requests return both cursors. Cursors and queued
+input survive peer loss; reconnecting infraternal agents query state and replay
+safely, including after a crash between input send and Ack. This guarantee
+does not cover a shim or host crash. Caps-zero shims cannot give PTY-write
+acknowledgments; the infraternal agent must expose that limitation.
+
+### Approved leg-B terminal boundary (#20)
+
+`terminal.open` input is `{ "uid": u32, "cols": u16, "rows": u16 }`;
+output is `{ "session_id": "UUID" }`. Reject zero dimensions, more than
+200,000 cells, and a different uid in rootless mode before launching a shim.
+Exit is a wire Event on the terminal mux stream, sub_id 0, JSON
+`{ "type": "terminal.exited", "session_id": "UUID", "status": i32,
+"final_seq": u64 }`. The embedded infraternal agent uses the inherited
+socketpair for leg B; its trusted spawning server owns the channel. This
+introduces no listener or mTLS bypass.

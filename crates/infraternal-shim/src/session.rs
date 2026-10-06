@@ -1,7 +1,7 @@
 //! Single-threaded bounded PTY/socket pump; replay precedes live output at one cursor.
 #![forbid(unsafe_code)]
 use crate::{
-    frame::{Decoder, Frame, MAX_FRAME},
+    frame::{Decoder, Frame, FrameRef, MAX_FRAME, SEQUENCED_INPUT},
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
     terminal::Terminal,
@@ -68,10 +68,17 @@ enum Request {
     Read(u64),
     Snapshot,
 }
+#[derive(Clone, Copy)]
+enum InputReply {
+    Ack,
+    State,
+}
 struct Peer {
     stream: UnixStream,
     decoder: Decoder,
     attached: bool,
+    caps: u64,
+    input_reply: Option<InputReply>,
     cursor: Option<u64>,
     pending: Vec<u8>,
     written: usize,
@@ -80,7 +87,7 @@ struct Peer {
 }
 impl Peer {
     fn queue(&mut self, frame: &Frame) -> io::Result<()> {
-        self.pending = frame.encode()?;
+        frame.encode_into(&mut self.pending)?;
         self.written = 0;
         Ok(())
     }
@@ -202,6 +209,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
     let mut terminal = Terminal::new(config.cols, config.rows);
     let mut ring = Ring::new(config.ring_capacity);
     let mut input = VecDeque::new();
+    let mut cursors = InputCursors::default();
     let mut peer: Option<Peer> = None;
     let mut exit = None;
     let mut drained = false;
@@ -214,6 +222,15 @@ pub fn run(mut config: Config) -> io::Result<()> {
                     .code()
                     .unwrap_or_else(|| -status.signal().unwrap_or(1)),
             );
+        }
+        if let Some(p) = &mut peer
+            && p.pending.is_empty()
+            && let Some(reply) = p.input_reply.take()
+        {
+            p.queue(&match reply {
+                InputReply::State => Frame::InputState(cursors.written, cursors.accepted),
+                InputReply::Ack => Frame::InputAck(cursors.written),
+            })?;
         }
         if let Some(p) = &mut peer
             && p.pending.is_empty()
@@ -253,30 +270,36 @@ pub fn run(mut config: Config) -> io::Result<()> {
                     p.pending.is_empty() && p.cursor.is_some_and(|seq| seq == ring.head())
                 });
             let has_input = !input.is_empty();
-            let mut fds = vec![
+            // At most four borrowed descriptors. Stack storage avoids a heap
+            // allocation on every readiness turn and is dropped before mutation.
+            let mut fds = [
                 PollFd::new(listener.as_fd(), PollFlags::POLLIN),
                 PollFd::new(signals.as_fd(), PollFlags::POLLIN),
-                PollFd::new(
+                PollFd::new(listener.as_fd(), PollFlags::empty()),
+                PollFd::new(listener.as_fd(), PollFlags::empty()),
+            ];
+            let mut count = 2;
+            // Omit a disabled PTY: level-triggered HUP would otherwise spin.
+            let pty_index = if can_read || has_input {
+                fds[count] = PollFd::new(
                     pty.master.as_fd(),
                     (if can_read {
                         PollFlags::POLLIN
                     } else {
                         PollFlags::empty()
-                    }) | if has_input {
+                    }) | (if has_input {
                         PollFlags::POLLOUT
                     } else {
                         PollFlags::empty()
-                    },
-                ),
-            ];
-            // A disabled fd must be omitted: PTY HUP is level-triggered and
-            // would otherwise spin while waiting for a stalled socket to drain.
-            if !can_read && !has_input {
-                fds.pop();
-            }
-            let pty_index = if fds.len() == 3 { Some(2) } else { None };
+                    }),
+                );
+                count += 1;
+                Some(2)
+            } else {
+                None
+            };
             let peer_index = if let Some(p) = &peer {
-                let index = fds.len();
+                let index = count;
                 let mut flags = PollFlags::empty();
                 if input.len() < MAX_FRAME {
                     flags |= PollFlags::POLLIN;
@@ -284,12 +307,13 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 if !p.pending.is_empty() {
                     flags |= PollFlags::POLLOUT;
                 }
-                fds.push(PollFd::new(p.stream.as_fd(), flags));
+                fds[index] = PollFd::new(p.stream.as_fd(), flags);
+                count += 1;
                 Some(index)
             } else {
                 None
             };
-            match poll(&mut fds, 1000_u16) {
+            match poll(&mut fds[..count], None::<u16>) {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => return Err(e.into()),
@@ -322,6 +346,8 @@ pub fn run(mut config: Config) -> io::Result<()> {
                             stream,
                             decoder: Decoder::default(),
                             attached: false,
+                            caps: 0,
+                            input_reply: None,
                             cursor: None,
                             pending: Vec::new(),
                             written: 0,
@@ -330,7 +356,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
-                            caps: 0,
+                            caps: SEQUENCED_INPUT,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -354,6 +380,13 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 match pty.master.write(bytes) {
                     Ok(n) => {
                         input.drain(..n);
+                        cursors.written += n as u64;
+                        if let Some(p) = &mut peer
+                            && p.caps & SEQUENCED_INPUT != 0
+                            && p.input_reply.is_none()
+                        {
+                            p.input_reply = Some(InputReply::Ack);
+                        }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                     Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => {
@@ -365,20 +398,38 @@ pub fn run(mut config: Config) -> io::Result<()> {
         }
         if ready.2.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) && !drained {
             let mut bytes = [0; CHUNK];
-            match pty
-                .master
-                .read(&mut bytes[..CHUNK.min(config.ring_capacity)])
-            {
-                Ok(0) => drained = true,
-                Ok(n) => {
-                    terminal.process(&bytes[..n]);
-                    ring.append(&bytes[..n])?;
+            let limit = CHUNK.min(config.ring_capacity);
+            let mut used = 0;
+            // Linux PTYs commonly return ~4 KiB despite a 16 KiB destination.
+            // Drain immediately-ready bytes, but never wait to fill a batch.
+            // Both byte and syscall bounds preserve input/resize/socket fairness.
+            for _ in 0..16 {
+                match pty.master.read(&mut bytes[used..limit]) {
+                    Ok(0) => {
+                        drained = true;
+                        break;
+                    }
+                    Ok(n) => {
+                        used += n;
+                        if used == limit {
+                            break;
+                        }
+                    }
+                    Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => {
+                        drained = true;
+                        break;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
                 }
-                Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => drained = true,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e),
+            }
+            if used > 0 {
+                terminal.process(&bytes[..used]);
+                ring.append(&bytes[..used])?;
             }
         }
+
         let mut disconnect = ready.3.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL);
         if let Some(p) = &mut peer {
             if ready.3.contains(PollFlags::POLLOUT) && p.flush().is_err() {
@@ -388,30 +439,35 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 let mut bytes = [0; CHUNK];
                 match p.stream.read(&mut bytes) {
                     Ok(0) => disconnect = true,
-                    Ok(n) => match p.decoder.feed(&bytes[..n]) {
-                        Ok(frames) => {
-                            for frame in frames {
-                                match handle(
-                                    frame,
-                                    p,
-                                    &mut pty,
-                                    &mut terminal,
-                                    &ring,
-                                    &mut config,
-                                    &mut input,
-                                    exit.is_some() && drained,
-                                ) {
-                                    Ok(true) => return Ok(()),
-                                    Ok(false) => {}
-                                    Err(_) => {
-                                        disconnect = true;
-                                        break;
-                                    }
-                                }
+                    Ok(n) => {
+                        // Temporarily move only decoder ownership so the callback
+                        // can mutate Peer while borrowing its reusable frame bytes.
+                        let mut decoder = std::mem::take(&mut p.decoder);
+                        let mut acknowledged_exit = false;
+                        let result = decoder.feed_with(&bytes[..n], |frame| {
+                            if acknowledged_exit {
+                                return Ok(());
                             }
+                            acknowledged_exit = handle(
+                                frame,
+                                p,
+                                &mut pty,
+                                &mut terminal,
+                                &ring,
+                                &mut config,
+                                &mut input,
+                                &mut cursors,
+                                exit.is_some() && drained,
+                            )?;
+                            Ok(())
+                        });
+                        p.decoder = decoder;
+                        if result.is_err() {
+                            disconnect = true;
+                        } else if acknowledged_exit {
+                            return Ok(());
                         }
-                        Err(_) => disconnect = true,
-                    },
+                    }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                     Err(_) => disconnect = true,
                 }
@@ -423,14 +479,15 @@ pub fn run(mut config: Config) -> io::Result<()> {
     }
 }
 #[allow(clippy::too_many_arguments)]
-fn handle(
-    frame: Frame,
+fn handle<'a>(
+    frame: impl Into<FrameRef<'a>>,
     p: &mut Peer,
     pty: &mut Pty,
     terminal: &mut Terminal,
     ring: &Ring,
     config: &mut Config,
     input: &mut VecDeque<u8>,
+    cursors: &mut InputCursors,
     exited: bool,
 ) -> io::Result<bool> {
     let invalid = || {
@@ -439,32 +496,48 @@ fn handle(
             "invalid shim request ordering or payload",
         )
     };
-    if let Frame::Attach(_) = frame {
+    let frame = frame.into();
+    if let FrameRef::Owned(Frame::Attach(caps)) = frame {
         if p.attached {
             return Err(invalid());
         }
         p.attached = true;
+        p.caps = caps & SEQUENCED_INPUT;
         return Ok(false);
     }
     if !p.attached {
         return Err(invalid());
     }
-    match frame {
-        Frame::Input(bytes) if !exited => {
-            if input.len() + bytes.len() > MAX_FRAME {
-                return Err(invalid());
-            }
-            // Try the PTY immediately: poll scheduling never adds a round trip
-            // to the common keystroke path. Retain partial writes in order.
-            input.extend(bytes);
-            let (first, _) = input.as_slices();
+    if let Some((offset, bytes)) = frame.input() {
+        if exited || (offset.is_some() != (p.caps & SEQUENCED_INPUT != 0)) {
+            return Err(invalid());
+        }
+        cursors.accept(offset.unwrap_or(cursors.accepted), bytes, input)?;
+        if offset.is_some() && p.input_reply.is_none() {
+            p.input_reply = Some(InputReply::Ack);
+        }
+        // The only input copy is into the surviving bounded queue. Try the PTY
+        // immediately so batching output never adds a keystroke round trip.
+        let (first, _) = input.as_slices();
+        if !first.is_empty() {
             match pty.master.write(first) {
                 Ok(n) => {
                     input.drain(..n);
+                    cursors.written += n as u64;
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(e),
             }
+        }
+        return Ok(false);
+    }
+    // Output/Snapshot are invalid peer requests. Refuse without allocating.
+    let FrameRef::Owned(frame) = frame else {
+        return Err(invalid());
+    };
+    match frame {
+        Frame::InputStateRequest if p.caps & SEQUENCED_INPUT != 0 => {
+            p.input_reply = Some(InputReply::State);
         }
         Frame::Resize {
             cols,
@@ -495,3 +568,40 @@ fn handle(
 #[cfg(test)]
 #[path = "../tests/unit/session_budgets.rs"]
 mod measurements;
+
+/// Survives peer replacement; accepted bytes are retained until a successful write.
+#[derive(Default)]
+struct InputCursors {
+    written: u64,
+    accepted: u64,
+}
+impl InputCursors {
+    fn accept(&mut self, seq: u64, bytes: &[u8], queue: &mut VecDeque<u8>) -> io::Result<()> {
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid input range or full queue",
+            )
+        };
+        let end = seq.checked_add(bytes.len() as u64).ok_or_else(invalid)?;
+        if seq > self.accepted {
+            return Err(invalid());
+        }
+        if end <= self.accepted {
+            return Ok(());
+        }
+        let skip = usize::try_from(self.accepted - seq).map_err(|_| invalid())?;
+        let suffix = &bytes[skip..];
+        // Full policy is refusal before mutation, never silent input loss.
+        if queue.len() + suffix.len() > MAX_FRAME {
+            return Err(invalid());
+        }
+        queue.extend(suffix);
+        self.accepted = end;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/sequenced_input.rs"]
+mod sequenced_checks;

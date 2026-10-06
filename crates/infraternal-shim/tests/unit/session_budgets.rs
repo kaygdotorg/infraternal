@@ -28,6 +28,8 @@ mod budgets {
             stream,
             decoder: Decoder::default(),
             attached: true,
+            caps: 0,
+            input_reply: None,
             cursor: None,
             pending: Vec::new(),
             written: 0,
@@ -38,6 +40,7 @@ mod budgets {
         let ring = Ring::new(DEFAULT_CAPACITY);
         let mut config = Config::new([0; 16], Uid::effective().as_raw());
         let mut input = VecDeque::new();
+        let mut cursors = InputCursors::default();
         let mut samples = Vec::new();
         let wire = Frame::Input(vec![b'x']).encode().unwrap();
         for _ in 0..10000 {
@@ -52,6 +55,7 @@ mod budgets {
                     &ring,
                     &mut config,
                     &mut input,
+                    &mut cursors,
                     false,
                 )
                 .unwrap();
@@ -73,5 +77,37 @@ mod budgets {
         let _ = pty.signal(nix::libc::SIGKILL.try_into().unwrap());
         let _ = pty.child.kill();
         let _ = pty.child.wait();
+    }
+}
+
+#[test]
+#[ignore = "release poll-storage allocation measurement"]
+fn poll_storage_measurement() {
+    use std::{hint::black_box, time::Instant};
+    let (peer, _) = UnixStream::pair().unwrap();
+    let n = 1_000_000;
+    for (label, heap) in [("poll-heap", true), ("poll-stack", false)] {
+        let start = Instant::now();
+        for _ in 0..n {
+            if heap {
+                black_box(vec![
+                    PollFd::new(peer.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLOUT),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLOUT),
+                ]);
+            } else {
+                black_box([
+                    PollFd::new(peer.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLOUT),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLOUT),
+                ]);
+            }
+        }
+        println!(
+            "{label}: n={n} ns/turn={:.1}",
+            start.elapsed().as_secs_f64() * 1e9 / f64::from(n)
+        );
     }
 }
