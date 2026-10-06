@@ -128,3 +128,14 @@ fn fidelity_seeded_smoke() {
 fn fidelity_seeded_nightly() {
     generated(20_000);
 }
+
+#[test]
+#[ignore = "red regression: enable after spacer-head fix"]
+fn fidelity_spacer_head_attributes() {
+    replay(
+        "spacer-head-independent-attributes",
+        "\x1b[1;12H界\x1b[31;4:3m\x1b]8;id=edge;https://example.org\x1b\\\x1b[2;1H界".as_bytes(),
+        12,
+        5,
+    );
+}
