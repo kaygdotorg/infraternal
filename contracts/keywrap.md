@@ -87,7 +87,7 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | registration-finish | `{ceremony,proof,passkey_wrap,recovery_wrap}` | secure session cookie |
 | status | `{}` | `{setup_required: bool}` only |
 | login-start | `{}` (legacy `{user_id}` supported) | `{ceremony,options}` |
-| login-finish | `{ceremony,proof,device}` | secure session cookie |
+| login-finish | `{ceremony,proof,device}` | restricted secure session cookie and `pending_transaction` |
 | session | `{}` | `{user_id,username,display_name,device,fresh}` and refreshed cookie |
 | add-start | `{}` + session | enrollment options; recovery_words=null |
 | wraps | `{}` + session | `[{kind,key_id,wrap}]` for the session user |
@@ -220,17 +220,44 @@ Max-Age=300. Pending state stores its hash. Finish requires the starting browser
 binding before consuming state; unrelated clients cannot drain a valid proof.
 
 HTTP login-finish creates a restricted pending-unlock session, with a fixed
-five-minute database expiry. Only `unlock-session` identity and `wraps` reads
-are allowed; ordinary `session`, WebSocket upgrade and all other authenticated
-actions deny pending authority. After local AES-GCM unwrap succeeds, the browser
-calls `unlock-finish` to activate the cookie and begin the normal sliding expiry.
-The server receives a completion signal, never the DEK. It cannot independently
-observe the browser's AES-GCM failure; instead abandonment or failed cleanup
-never grants terminal authority, and expired pending rows are deleted on the
-auth path. Failed unwrap attempts logout and surfaces failure. Exact-Origin
-logout bypasses both admission layers, so public request exhaustion cannot
-prevent revocation. Idle live sockets wake on committed logout/recovery and
-terminate on their actual expiry deadline without idle polling.
+five-minute database expiry, and returns `pending_transaction` once. This id is
+SHA256(`infraternal/unlock/v1|<opaque session cookie>`) encoded as unpadded URL-safe
+base64. Domain separation keeps it distinct from the cookie and stored token hash;
+no additional schema or pending allocation is needed. The browser keeps it only
+in the current page call, never local/session storage, URLs or logs.
+
+Only `unlock-session` identity and `wraps` reads are allowed; ordinary `session`,
+WebSocket upgrade and all other authenticated actions deny pending authority.
+After local AES-GCM unwrap succeeds, the browser calls `unlock-finish` with
+`{pending_transaction}`. The server requires both the exact cookie and its id,
+then atomically consumes the pending flag and begins normal sliding expiry.
+Missing ids fail closed; mismatched, stale, replayed or expired ids return 401
+without activating/deleting another pending row or replacing its cookie.
+Failed-login cleanup sends `logout` with the same id and deletes only that exact
+pending login. Ordinary authenticated logout still accepts `{}`. Exact-Origin
+logout bypasses both admission layers, so exhaustion cannot prevent revocation.
+
+Owner boundary (#29): this id binds a completion to its login; it is not a proof
+of DEK possession. A client holding its matching cookie/id can claim completion
+without actually unwrapping. The passkey authenticates the user; the server
+receives a client consistency signal, never plaintext DEK/PRF. The owner explicitly
+deferred a server-verifiable unwrap proof. Abandonment/failed cleanup does not
+activate authority, and expired pending rows are deleted on the auth path.
+
+Socket authority covers server Hello, client Hello/Resume, all nested pending
+frame/backend/database/writer awaits and terminal output. Each operation enters
+with one authoritative SQLite read; its expiry snapshot and the committed
+revocation generation are rechecked after waits. Backend/persistence boundaries
+also read actual authority before success frames; SQLite writer locks and mutation
+predicates order commits with logout/recovery. Revocation interrupts
+pending operations; backend reply waits are bounded to five seconds. Expiry is
+checked every 25 ms only during pending operations, including handshakes; idle live
+sockets keep event-driven revocation and actual deadline checks without polling.
+Authority reads and shutdown writes have 25 ms deadlines and fail closed.
+Handshake reads never renew expiry. Already dispatched host work may complete;
+revoked sockets receive no late success and no terminal row is inserted for its
+late result. Cancelling work already accepted by the host requires a separate
+backend protocol; this fix does not invent one.
 
 Before owner enrollment, each restart rotates the token and replaces a stale
 private setup-token.sock. The token remains only in process memory and the
