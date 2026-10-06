@@ -552,24 +552,24 @@ export class TerminalClient {
       this.pendingSnapshot = undefined;
       this.snapshotWriteInFlight = true;
       this.terminal.reset();
+      this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
       this.terminal.write(snapshot.bytes, () => {
         const callbackAt = performance.now();
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "writeCallback", callbackAt);
-        requestAnimationFrame((at) => {
-          const paintedAt = performance.now();
-          this.lastOutSeq = snapshot.outSeq;
-          this.snapshotWriteInFlight = false;
-          this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "paint", paintedAt);
-          this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq);
-          snapshot.bytes.fill(0);
-          this.returnCredit(snapshot.bytes.byteLength);
-          if (this.pendingSnapshot) {
-            const dropped = this.outputQueue.discardAfter(0);
-            if (dropped > 0) this.returnCredit(dropped);
-          }
-          this.drainOutput();
-          this.tryAttach();
-        });
+        // Ghostty calls this from the rAF after its render loop draws the write; another rAF adds a full frame.
+        const paintedAt = performance.now();
+        this.lastOutSeq = snapshot.outSeq;
+        this.snapshotWriteInFlight = false;
+        this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "paint", paintedAt);
+        this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq);
+        snapshot.bytes.fill(0);
+        this.returnCredit(snapshot.bytes.byteLength);
+        if (this.pendingSnapshot) {
+          const dropped = this.outputQueue.discardAfter(0);
+          if (dropped > 0) this.returnCredit(dropped);
+        }
+        this.drainOutput();
+        this.tryAttach();
       });
       return;
     }
@@ -587,19 +587,18 @@ export class TerminalClient {
       this.terminal.write(region, () => {
         const callbackAt = performance.now();
         this.traceRange(writeSequence, this.outputWriteLength, "writeCallback", callbackAt);
-        requestAnimationFrame((at) => {
-          const paintedAt = performance.now();
-          const consumed = this.outputWriteLength;
-          this.lastOutSeq += BigInt(consumed);
-          this.traceRange(writeSequence, consumed, "paint", paintedAt);
-          this.config.hooks?.onPaintedOutput?.(region.subarray(0, consumed), paintedAt, writeSequence);
-          this.outputQueue.consume(consumed);
-          this.outputWriteLength = 0;
-          this.outputWriteInFlight = false;
-          this.returnCredit(consumed);
-          this.drainOutput();
-          this.tryAttach();
-        });
+        // The callback is ordered after Ghostty's render-loop callback in the same animation frame.
+        const paintedAt = performance.now();
+        const consumed = this.outputWriteLength;
+        this.lastOutSeq += BigInt(consumed);
+        this.traceRange(writeSequence, consumed, "paint", paintedAt);
+        this.config.hooks?.onPaintedOutput?.(region.subarray(0, consumed), paintedAt, writeSequence);
+        this.outputQueue.consume(consumed);
+        this.outputWriteLength = 0;
+        this.outputWriteInFlight = false;
+        this.returnCredit(consumed);
+        this.drainOutput();
+        this.tryAttach();
       });
       return;
     }
