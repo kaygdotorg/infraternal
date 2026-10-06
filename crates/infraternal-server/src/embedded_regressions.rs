@@ -268,3 +268,66 @@ async fn stream_close_must_not_restart_all_sessions() {
     assert!(attachments.is_empty());
     assert!(routes.is_empty());
 }
+
+#[tokio::test]
+async fn real_agent_open_uses_uid_and_character_dimensions() {
+    let (mut link, mut peer) = connection();
+    let (reply, _result) = oneshot::channel();
+    assert!(
+        process_command(
+            Command::Open {
+                size: TerminalSize {
+                    cols: 80,
+                    rows: 24,
+                    px_w: 800,
+                    px_h: 600
+                },
+                reply
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await
+    );
+    let mut bytes = [0; 4096];
+    let count = peer.read(&mut bytes).await.unwrap();
+    let decoded = decode_muxed_frame(&bytes[..count]).unwrap();
+    let Frame::Call {
+        action_id,
+        input_json,
+        ..
+    } = decoded.frame
+    else {
+        panic!("missing open Call");
+    };
+    assert_eq!(action_id, "terminal.open");
+    let input: serde_json::Value = serde_json::from_slice(input_json).unwrap();
+    assert_eq!(
+        input,
+        serde_json::json!({"uid":nix::unistd::Uid::effective().as_raw(),"cols":80,"rows":24})
+    );
+}
+
+#[tokio::test]
+async fn real_agent_canonical_uuid_result_is_accepted() {
+    let (mut link, _peer) = connection();
+    let (reply, result) = oneshot::channel();
+    let mut pending = HashMap::from([(1, PendingCall { reply })]);
+    assert!(
+        process_incoming(
+            Incoming::Result {
+                call_id: 1,
+                ok: true,
+                json: br#"{"session_id":"01010101-0101-0101-0101-010101010101"}"#.to_vec()
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut pending,
+        )
+        .await
+    );
+    assert_eq!(result.await.unwrap(), Ok([1; 16]));
+}
