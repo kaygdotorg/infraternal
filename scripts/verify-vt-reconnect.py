@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import socket
+import select
 import struct
 import sys
 import time
@@ -65,6 +66,8 @@ def run_case(binary, name, fixture):
         head, start, frame = local(state, client.id, 0, 0x14)
         assert start == 0, 'first fixture must retain every raw byte'
         assert frame[0] == 0x7f, 'fixture must exercise faithful Snapshot rejection'
+        assert struct.unpack('<H', frame[1:3])[0] == 2, 'restoration gap must be distinguished from capacity'
+        assert b'overflow' not in frame[3:], 'Unsupported reason must not claim frame overflow'
         client.start(); client.out = 0; client.data.clear()
         client.send(1, 0x16, client.id.bytes + struct.pack('<QQ', 0, client.acked))
         while client.out < 1024 * 1024:
@@ -110,10 +113,17 @@ def run_case(binary, name, fixture):
         print(f'reconnect {name}: legacy limitation parks live stream; Ping PASS', flush=True)
         release(hold)
         client.input(b"printf '\\033cLIVE_%s\\n' RESET\n")
-        time.sleep(.1)
-        client.send(1, 0x14, struct.pack('<I', 1024 * 1024))
+        # Input can trigger a retry before the PTY has produced its reset.
+        # The real shim has one peer, so probing it would replace the daemon.
+        # Keep the live stream and issue bounded explicit credit retries while
+        # draining availability events; never abandon a partially read frame.
+        deadline = time.monotonic() + 10
         while not client.snapshots:
-            client.process()
+            assert time.monotonic() < deadline, 'legacy reset never recovered'
+            if select.select([client.sock], [], [], .05)[0]:
+                client.process()
+            else:
+                client.send(1, 0x14, struct.pack('<I', 1024 * 1024))
         assert not any(event.get('approximate') for event in client.events), 'legacy retry must remain faithful'
         client.input(b"printf 'LIVE_%s\\n' AFTER\n"); client.until(b'LIVE_AFTER\n'); client.wait_ack()
         print(f'reconnect {name}: legacy retry and subsequent live output PASS', flush=True)

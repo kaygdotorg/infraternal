@@ -3,7 +3,6 @@
 use std::{fs, path::PathBuf, process::Command};
 
 #[test]
-#[ignore = "R1 red reconnect regression; enable after negotiated recovery fixes"]
 fn snapshot_limits_never_close_live_reconnect() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
