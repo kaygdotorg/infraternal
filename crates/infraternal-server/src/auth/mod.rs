@@ -4,6 +4,7 @@
 //! Restarting invalidates pending ceremonies, never credentials. SQLite transactions serialize
 //! owner creation, recovery replacement, passkey limits and capability redemption.
 
+mod binding;
 mod crypto;
 mod devices;
 mod http;
@@ -13,13 +14,14 @@ mod setup;
 mod webauthn;
 mod wraps;
 
-use crypto::{hash, prf_salt, random, recovery_hash, verify_recovery};
+pub(crate) use crypto::hash;
+use crypto::{constant_prf_input, prf_salt, random, recovery_hash, verify_recovery};
 pub use sessions::Session;
 use sessions::{insert_session, require_session_tx};
 pub use wraps::Wrap;
 use wraps::put_wrap;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,8 @@ pub enum Error {
     Denied,
     #[error("invalid request")]
     Invalid,
+    #[error("username already exists")]
+    Conflict,
     #[error("storage unavailable")]
     Storage(#[from] sqlx::Error),
     #[error("migration failed")]
@@ -65,20 +69,26 @@ type Result<T> = std::result::Result<T, Error>;
 struct Registration {
     state: PasskeyRegistration,
     user: String,
-    name: String,
+    username: String,
+    display_name: String,
     authority: Authority,
     recovery_hash: Option<String>,
     expires: i64,
+    binding: Option<String>,
 }
 enum Authority {
     Setup(String),
     Add(String),
     Recovery(String),
 }
+enum LoginState {
+    Identified(PasskeyAuthentication, String),
+    Discoverable(DiscoverableAuthentication),
+}
 struct Login {
-    state: PasskeyAuthentication,
-    user: String,
+    state: LoginState,
     expires: i64,
+    binding: Option<String>,
 }
 #[derive(Default)]
 struct Pending {
@@ -94,6 +104,7 @@ pub struct Auth {
     origin: String,
     pending: Arc<Mutex<Pending>>,
     ingress: Arc<Mutex<http::Ingress>>,
+    revocations: Arc<tokio::sync::watch::Sender<()>>,
     #[cfg(test)]
     recovery_pause: Arc<Mutex<Option<Arc<RecoveryPause>>>>,
 }
@@ -132,6 +143,7 @@ impl Auth {
             origin: url.origin().ascii_serialization(),
             pending: Arc::default(),
             ingress: Arc::default(),
+            revocations: Arc::new(tokio::sync::watch::channel(()).0),
             #[cfg(test)]
             recovery_pause: Arc::default(),
         })

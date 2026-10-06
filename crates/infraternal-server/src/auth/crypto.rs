@@ -6,11 +6,20 @@ use sha2::{Digest, Sha256};
 pub(super) fn random() -> String {
     B64.encode(rand::random::<[u8; 32]>())
 }
-pub(super) fn hash(value: &str) -> String {
+pub(crate) fn hash(value: &str) -> String {
     B64.encode(Sha256::digest(value.as_bytes()))
 }
-pub(super) fn prf_salt() -> String {
-    B64.encode(Sha256::digest(b"infraternal/keywrap/prf/v1"))
+pub(super) fn prf_salt(user: Option<&str>) -> String {
+    // Stored v1/v2 envelopes keep their original input; never relabel ciphertext.
+    let context = user.map_or_else(
+        || "infraternal/keywrap/prf/v1".to_owned(),
+        |user| format!("infraternal/keywrap/prf/v2|{user}"),
+    );
+    B64.encode(Sha256::digest(context.as_bytes()))
+}
+/// Stable public input [D108]: credential PRF secrets remain distinct; envelope AAD is unchanged.
+pub(super) fn constant_prf_input() -> String {
+    B64.encode(Sha256::digest(b"infraternal/keywrap/prf/v3"))
 }
 static ARGON_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 pub(super) async fn recovery_hash(words: String) -> Result<String> {

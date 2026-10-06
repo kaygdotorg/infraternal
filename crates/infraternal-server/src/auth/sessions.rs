@@ -5,6 +5,8 @@ use super::{Auth, Error, FRESH, Result, Row, SESSION, Serialize, hash};
 #[derive(Serialize)]
 pub struct Session {
     pub user_id: String,
+    pub username: String,
+    pub display_name: String,
     pub device: String,
     pub fresh: i64,
 }
@@ -21,13 +23,60 @@ impl Session {
 impl Auth {
     /// Slide a live session by 30 days, never resurrecting an expired or revoked record.
     pub async fn session(&self, token: &str, now: i64) -> Result<Session> {
-        let row = sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=? AND expires>? RETURNING user_id,device,fresh")
-            .bind(now + SESSION).bind(hash(token)).bind(now).fetch_optional(&self.pool).await?.ok_or(Error::Denied)?;
+        self.read_session(token, now, false).await
+    }
+
+    /// Restricted login cookies can read identity/wraps while awaiting local DEK unwrap.
+    /// Reads never extend their five-minute expiry; expired rows are revoked here.
+    pub async fn unlock_session(&self, token: &str, now: i64) -> Result<Session> {
+        self.read_session(token, now, true).await
+    }
+
+    async fn read_session(&self, token: &str, now: i64, pending: bool) -> Result<Session> {
+        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name")
+            .bind(now + SESSION).bind(hash(token)).bind(now).bind(pending).fetch_optional(&self.pool).await?;
+        let Some(row) = row else {
+            // Successful sessions keep the original single write; cleanup runs only on denial.
+            sqlx::query("DELETE FROM sessions WHERE token_hash=? AND unlocked=0 AND expires<=?")
+                .bind(hash(token))
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+            return Err(Error::Denied);
+        };
         Ok(Session {
             user_id: row.get("user_id"),
+            username: row.get("username"),
+            display_name: row.get("display_name"),
             device: row.get("device"),
             fresh: row.get("fresh"),
         })
+    }
+
+    /// Activate only a still-live pending cookie after the browser confirms successful unwrap.
+    /// The server never receives the plaintext DEK; this is a client completion signal.
+    pub async fn unlock_finish(&self, token: &str, transaction: &str, now: i64) -> Result<()> {
+        require_pending_transaction(token, transaction)?;
+        let changed = sqlx::query("UPDATE sessions SET unlocked=1,expires=? WHERE token_hash=? AND unlocked=0 AND expires>?")
+            .bind(now + SESSION).bind(hash(token)).bind(now).execute(&self.pool).await?.rows_affected();
+        if changed != 1 {
+            return Err(Error::Denied);
+        }
+        Ok(())
+    }
+
+    /// Failed local unwrap may revoke only the exact still-pending login from this page.
+    pub(super) async fn logout_pending(&self, token: &str, transaction: &str) -> Result<()> {
+        require_pending_transaction(token, transaction)?;
+        let changed = sqlx::query("DELETE FROM sessions WHERE token_hash=? AND unlocked=0")
+            .bind(hash(token))
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if changed != 1 {
+            return Err(Error::Denied);
+        }
+        Ok(())
     }
 
     /// Authenticate a device and require a passkey tap within five minutes for destructive UI actions [28].
@@ -39,11 +88,41 @@ impl Auth {
 
     /// Revoke the current session immediately.
     pub async fn logout(&self, token: &str) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+        let changed = sqlx::query("DELETE FROM sessions WHERE token_hash=?")
             .bind(hash(token))
             .execute(&self.pool)
-            .await?;
+            .await?
+            .rows_affected();
+        if changed != 0 {
+            self.revocations.send_replace(());
+        }
         Ok(())
+    }
+
+    /// Wake live sockets on committed revocation without periodic idle database polling.
+    pub(crate) fn revocation_events(&self) -> tokio::sync::watch::Receiver<()> {
+        self.revocations.subscribe()
+    }
+
+    /// Recheck every hot-path event with a read, renewing active sessions at most once a minute.
+    /// Return the resulting expiry so a watchdog can reuse this exact authority read.
+    pub(crate) async fn socket_activity(&self, token: &str, user: &str, now: i64) -> Result<i64> {
+        let expiry = self.live_expiry(token, user, now).await?;
+        if expiry < now + SESSION - 60 {
+            let changed = sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
+                .bind(now + SESSION).bind(hash(token)).bind(user).bind(now).execute(&self.pool).await?.rows_affected();
+            if changed != 1 {
+                return Err(Error::Denied);
+            }
+            return Ok(now + SESSION);
+        }
+        Ok(expiry)
+    }
+
+    /// Read a socket's actual deadline without sliding it during idle checks.
+    pub(crate) async fn live_expiry(&self, token: &str, user: &str, now: i64) -> Result<i64> {
+        sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
+            .bind(hash(token)).bind(user).bind(now).fetch_optional(&self.pool).await?.ok_or(Error::Denied)
     }
 }
 
@@ -53,7 +132,7 @@ pub(super) async fn require_session_tx(
     user: &str,
     now: i64,
 ) -> Result<()> {
-    if sqlx::query("SELECT user_id FROM sessions WHERE token_hash=? AND user_id=? AND expires>? AND fresh>? AND fresh<=?")
+    if sqlx::query("SELECT user_id FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>? AND fresh>? AND fresh<=?")
         .bind(token_hash).bind(user).bind(now).bind(now - FRESH).bind(now).fetch_optional(&mut **tx).await?.is_none() { return Err(Error::Denied); }
     Ok(())
 }
@@ -72,5 +151,20 @@ pub(super) async fn insert_session(
         .bind(now)
         .execute(&mut **tx)
         .await?;
+    Ok(())
+}
+
+/// Domain separation keeps this page-memory id distinct from the `HttpOnly` cookie and its stored hash.
+/// The pending flag consumes it atomically; no extra table or per-login heap state is needed.
+pub(super) fn pending_transaction(token: &str) -> String {
+    hash(&format!("infraternal/unlock/v1|{token}"))
+}
+fn require_pending_transaction(token: &str, transaction: &str) -> Result<()> {
+    let expected = pending_transaction(token);
+    if transaction.len() != expected.len()
+        || !openssl::memcmp::eq(transaction.as_bytes(), expected.as_bytes())
+    {
+        return Err(Error::Denied);
+    }
     Ok(())
 }

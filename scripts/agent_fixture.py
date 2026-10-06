@@ -77,6 +77,11 @@ class Binary:
         stream, kind, _ = self.read()
         assert (stream, kind) == (0, 0)
         self.send(0, 0, struct.pack('<HQ', 1, 0) + varint(6) + b'tracer')
+        # Hello is an inbound startup request. Fence it with a real Pong before
+        # the scheduler canary starts; otherwise its wakeup is counted as idle.
+        self.send(0, 0x08, struct.pack('<QQ', 0, 0))
+        stream, kind, _ = self.read()
+        assert (stream, kind) == (0, 0x09)
 
     def send(self, stream, kind, body=b''):
         self.sock.sendall(varint(stream) + varint(1 + len(body)) + bytes([kind]) + body)

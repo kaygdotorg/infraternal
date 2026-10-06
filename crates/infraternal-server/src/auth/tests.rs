@@ -1,11 +1,19 @@
 //! Defensive tests with a real ES256 software authenticator and a browser-side PRF/keywrap double.
 //! No verifier is mocked: CBOR attestation, client data, flags and signatures enter webauthn-rs.
 use super::*;
+use crate::{
+    embedded::EmbeddedAgent,
+    runtime::{ServerConfig, TlsFiles, router_with_agent},
+};
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, Payload},
 };
+use bytes::{Bytes, BytesMut};
+use futures_util::{SinkExt, Stream, StreamExt};
 use hkdf::Hkdf;
+use http_body_util::BodyExt;
+use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use openssl::{
     bn::{BigNum, BigNumContext},
     ec::{EcGroup, EcKey},
@@ -16,8 +24,21 @@ use openssl::{
 };
 use serde_cbor_2::Value as Cbor;
 use sha2::{Digest, Sha256};
-use sqlx::sqlite::SqlitePoolOptions;
-use std::{collections::BTreeMap, time::Instant};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, UnixStream},
+};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
+};
 use tower::ServiceExt;
 
 static SERIAL: Mutex<()> = Mutex::const_new(());
@@ -184,7 +205,12 @@ struct Fixture {
     dek: [u8; 32],
 }
 async fn empty() -> (Auth, String) {
+    // SQLx may discard a connection if checkout is cancelled during its ping await.
+    // This fixture has one in-memory connection: losing it loses the entire database.
+    // Omit checkout ping (not auth checks) as SQLx 0.8.6 Pool::acquire documents;
+    // there are no before_acquire/after_connect hooks. Production uses a disk database.
     let pool = SqlitePoolOptions::new()
+        .test_before_acquire(false)
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
@@ -392,12 +418,19 @@ async fn rejected_origin_uv_challenge_signature_prf_and_expired_ceremonies() {
 }
 
 #[tokio::test]
-async fn setup_expiry_single_announcement_and_parallel_redemption() {
+async fn setup_restart_rotation_expiry_and_parallel_redemption() {
     let _guard = SERIAL.lock().await;
-    let (auth, token) = empty().await;
-    auth.bootstrap(NOW, |_| panic!("setup token announced twice"))
+    let (auth, old_token) = empty().await;
+    let mut token = String::new();
+    auth.bootstrap(NOW, |banner| token = banner.lines().nth(1).unwrap().into())
         .await
         .unwrap();
+    assert!(
+        !token.is_empty(),
+        "restart must issue a fresh setup capability"
+    );
+    assert!(token != old_token, "setup capability must rotate");
+    assert!(auth.setup_start(&old_token, "owner", NOW).await.is_err());
     assert!(auth.setup_start(&token, "owner", NOW + DAY).await.is_err());
     let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
     let b = auth.setup_start(&token, "owner", NOW).await.unwrap();
@@ -437,6 +470,7 @@ async fn setup_expiry_single_announcement_and_parallel_redemption() {
 async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
+    let events = f.auth.revocation_events();
     assert!(
         f.auth
             .recovery_start(
@@ -489,6 +523,16 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         .unwrap();
     let start = f.auth.recovery_ready(&token, NOW + 2 * DAY).await.unwrap();
     let session = finish_replacement(&f, &start, &second, NOW + 2 * DAY).await;
+    assert!(
+        events.has_changed().unwrap(),
+        "recovery failed to wake live sockets"
+    );
+    assert!(
+        f.auth
+            .live_expiry(&f.session, &f.user, NOW + 2 * DAY)
+            .await
+            .is_err()
+    );
     assert!(f.auth.session(&f.session, NOW + 2 * DAY).await.is_err());
     assert!(f.auth.recovery_ready(&token, NOW + 2 * DAY).await.is_err());
     assert!(
@@ -818,7 +862,7 @@ async fn recovery_expiry_revocation_and_cross_user_isolation() {
             .is_err()
     );
     let other = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES (?,'other',0,'unused')")
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,'other',0,'unused','other','Other')")
         .bind(&other)
         .execute(&f.auth.pool)
         .await
@@ -967,7 +1011,7 @@ async fn review_invalid_device_polling_exhausts_browser_budget() {
         .header("Origin", ORIGIN)
         .header("Content-Type", "application/json")
         .body(axum::body::Body::from(
-            serde_json::to_vec(&json!({"user_id":f.user})).unwrap(),
+            serde_json::to_vec(&json!({})).unwrap(),
         ))
         .unwrap();
     assert_eq!(
@@ -976,3 +1020,1409 @@ async fn review_invalid_device_polling_exhausts_browser_budget() {
         "unauthenticated CLI polling denied a legitimate browser login"
     );
 }
+
+/// Drives setup, passkey registration, both wire legs, and a dropped/resumed browser connection.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
+    let _guard = SERIAL.lock().await;
+    let data_dir = std::env::temp_dir().join(format!("infraternal-ws-{}", rand::random::<u64>()));
+    let (server_agent_socket, agent_socket) = UnixStream::pair().expect("agent socketpair");
+    let input_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stub_count = input_count.clone();
+    let stub = tokio::spawn(test_leg_b_agent(agent_socket, stub_count));
+    let (app, setup_token) = router_with_agent(
+        ServerConfig {
+            listen: "127.0.0.1:0".parse().expect("listen address"),
+            data_dir: data_dir.clone(),
+            public_origin: ORIGIN.to_owned(),
+            web_root: None,
+            tls: Some(TlsFiles {
+                certificate: PathBuf::from("unused.crt"),
+                private_key: PathBuf::from("unused.key"),
+            }),
+            behind_proxy: false,
+            trusted_proxies: Vec::new(),
+        },
+        EmbeddedAgent::from_test_socket(server_agent_socket),
+    )
+    .await
+    .expect("server router");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener");
+    let address = listener.local_addr().expect("listener address");
+    let serving_app = app.clone();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            serving_app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
+    });
+    let unauthenticated = match connect_async(test_ws_request_without_cookie(address)).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => response.status(),
+        Err(error) => panic!("unexpected unauthenticated websocket error: {error}"),
+        Ok(_) => panic!("unauthenticated websocket upgraded"),
+    };
+    assert_eq!(unauthenticated, axum::http::StatusCode::UNAUTHORIZED);
+    let (user_id, cookie) = register_over_http(&app, &setup_token).await;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(data_dir.join("infraternal.sqlite")))
+        .await
+        .expect("test database connection");
+
+    let (mut first, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .expect("first websocket");
+    assert_server_hello(&mut first).await;
+    client_ws_send(
+        &mut first,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "software-authenticator-test",
+        },
+    )
+    .await;
+    let (connection_id, resume_token) = read_welcome(&mut first).await;
+    client_ws_send(
+        &mut first,
+        0,
+        &Frame::Call {
+            call_id: 7,
+            action_id: "terminal.open",
+            input_json: br#"{"cols":80,"rows":24,"px_w":0,"px_h":0}"#,
+        },
+    )
+    .await;
+    let open = read_client_frame(&mut first).await;
+    let decoded = decode_muxed_frame(&open).expect("terminal.open result frame");
+    let session_id = match decoded.frame {
+        Frame::Result {
+            call_id: 7,
+            ok: true,
+            json,
+        } => decode_test_session_id(str_field(
+            &serde_json::from_slice(json).expect("terminal.open result JSON"),
+            "session_id",
+        )),
+        _ => panic!("server did not return terminal.open result"),
+    };
+    assert_eq!(
+        decode_muxed_frame(&open).expect("result frame").stream_id,
+        0
+    );
+
+    client_ws_send(
+        &mut first,
+        1,
+        &Frame::AttachTerm {
+            session_id: &session_id,
+            last_out_seq: 0,
+            last_in_seq: 0,
+        },
+    )
+    .await;
+    let attached = read_client_frame(&mut first).await;
+    assert!(matches!(
+        decode_muxed_frame(&attached)
+            .expect("attach acknowledgement")
+            .frame,
+        Frame::Ack { in_seq_acked: 0 }
+    ));
+    client_ws_send(&mut first, 1, &Frame::Credit { bytes: 4 }).await;
+    client_ws_send(
+        &mut first,
+        1,
+        &Frame::Input {
+            in_seq: 0,
+            bytes: b"echo hi\n",
+        },
+    )
+    .await;
+    let (first_output, input_acknowledged) = read_partial_terminal(&mut first).await;
+    assert_eq!(first_output, b"echo");
+    assert!(input_acknowledged);
+    drop(first);
+    wait_connection_inactive(&pool, &connection_id).await;
+    let acked_bytes: Vec<u8> = sqlx::query_scalar(
+        "SELECT input_acked_u64 FROM terminal_sessions WHERE user_id=? AND id=?",
+    )
+    .bind(&user_id)
+    .bind(session_id.as_slice())
+    .fetch_one(&pool)
+    .await
+    .expect("persisted terminal input offset");
+    assert_eq!(
+        u64::from_be_bytes(acked_bytes.try_into().expect("eight-byte offset")),
+        8
+    );
+
+    let (mut resumed, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .expect("resumed websocket");
+    assert_server_hello(&mut resumed).await;
+    client_ws_send(
+        &mut resumed,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 1,
+            client_info: "software-authenticator-test",
+        },
+    )
+    .await;
+    client_ws_send(
+        &mut resumed,
+        0,
+        &Frame::Resume {
+            connection_id: &connection_id,
+            resume_token: &resume_token,
+        },
+    )
+    .await;
+    let (resumed_id, rotated_token) = read_welcome(&mut resumed).await;
+    assert_eq!(resumed_id, connection_id);
+    assert_ne!(rotated_token, resume_token);
+    client_ws_send(
+        &mut resumed,
+        1,
+        &Frame::AttachTerm {
+            session_id: &session_id,
+            last_out_seq: 4,
+            last_in_seq: 8,
+        },
+    )
+    .await;
+    let attached = read_client_frame(&mut resumed).await;
+    assert!(matches!(
+        decode_muxed_frame(&attached)
+            .expect("resumed attach acknowledgement")
+            .frame,
+        Frame::Ack { in_seq_acked: 8 }
+    ));
+    client_ws_send(&mut resumed, 1, &Frame::Credit { bytes: 1024 }).await;
+    client_ws_send(
+        &mut resumed,
+        1,
+        &Frame::Input {
+            in_seq: 0,
+            bytes: b"echo hi\n",
+        },
+    )
+    .await;
+    let remaining = read_terminal_output(&mut resumed).await;
+    let mut complete_output = first_output;
+    complete_output.extend_from_slice(&remaining);
+    assert_eq!(complete_output, b"echo hi\r\nhi\r\n");
+    assert_eq!(input_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    client_ws_send(
+        &mut resumed,
+        1,
+        &Frame::Close {
+            code: 1000,
+            reason: "detach",
+        },
+    )
+    .await;
+
+    let logout = axum::http::Request::builder()
+        .method("POST")
+        .uri("/auth/logout")
+        .header(axum::http::header::ORIGIN, ORIGIN)
+        .header(axum::http::header::COOKIE, &cookie)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from("{}"))
+        .expect("logout request");
+    let mut logout = logout;
+    logout
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    assert_eq!(
+        app.clone()
+            .oneshot(logout)
+            .await
+            .expect("logout response")
+            .status(),
+        axum::http::StatusCode::OK
+    );
+    let ended = tokio::time::timeout(Duration::from_millis(1500), resumed.next()).await;
+    assert!(
+        ended.is_ok(),
+        "logout did not invalidate live terminal socket"
+    );
+    if let Some(Ok(Message::Binary(bytes))) = ended.unwrap() {
+        assert!(matches!(
+            decode_muxed_frame(&bytes).unwrap().frame,
+            Frame::Close { .. }
+        ));
+    }
+
+    drop(resumed);
+    server.abort();
+    let _ = server.await;
+    stub.abort();
+    let _ = stub.await;
+    drop(app);
+    pool.close().await;
+    std::fs::remove_dir_all(data_dir).expect("remove temporary server data");
+}
+
+pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) -> (String, String) {
+    let (status, start_headers, start) = http_post_json(
+        app,
+        "setup-start",
+        json!({"token":setup_token,"name":"owner"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let user_id = str_field(&start, "user_id").to_owned();
+    let words = str_field(&start, "recovery_words").to_owned();
+    let software = Software::new();
+    let dek = rand::random::<[u8; 32]>();
+    let passkey_wrap = browser_wrap(&software.prf(&start), &dek, &user_id, "passkey");
+    let recovery_wrap = browser_wrap(&recovery_ikm(&words), &dek, &user_id, "recovery");
+    let proof = software.registration(&start, ORIGIN, true);
+    let binding = start_headers[axum::http::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let (status, headers, _) = http_post_json_with_cookie(
+        app,
+        "registration-finish",
+        json!({
+            "ceremony":start["ceremony"],
+            "proof":proof,
+            "passkey_wrap":passkey_wrap,
+            "recovery_wrap":recovery_wrap,
+        }),
+        binding,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let cookie = headers
+        .get(axum::http::header::SET_COOKIE)
+        .expect("registered session cookie")
+        .to_str()
+        .expect("cookie header")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_owned();
+    (user_id, cookie)
+}
+
+async fn http_post_json(
+    app: &axum::Router,
+    action: &str,
+    value: Value,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
+    http_post_json_with_optional_cookie(app, action, value, None).await
+}
+
+async fn http_post_json_with_cookie(
+    app: &axum::Router,
+    action: &str,
+    value: Value,
+    cookie: &str,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
+    http_post_json_with_optional_cookie(app, action, value, Some(cookie)).await
+}
+
+async fn http_post_json_with_optional_cookie(
+    app: &axum::Router,
+    action: &str,
+    value: Value,
+    cookie: Option<&str>,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
+    let mut builder = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/auth/{action}"))
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ORIGIN, ORIGIN);
+    if let Some(cookie) = cookie {
+        builder = builder.header(axum::http::header::COOKIE, cookie);
+    }
+    let mut request = builder
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&value).expect("HTTP JSON"),
+        ))
+        .expect("auth HTTP request");
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("auth HTTP response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("auth HTTP body")
+        .to_bytes();
+    let value = serde_json::from_slice(&body).expect("auth JSON response");
+    (status, headers, value)
+}
+
+fn test_ws_request(
+    address: SocketAddr,
+    cookie: &str,
+) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    let mut request = format!("ws://{address}/v1/ws")
+        .into_client_request()
+        .expect("websocket request");
+    request.headers_mut().insert(
+        axum::http::header::ORIGIN,
+        axum::http::HeaderValue::from_static(ORIGIN),
+    );
+    request.headers_mut().insert(
+        axum::http::header::COOKIE,
+        axum::http::HeaderValue::from_str(cookie).expect("session cookie"),
+    );
+    request
+}
+
+fn test_ws_request_without_cookie(
+    address: SocketAddr,
+) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    let mut request = format!("ws://{address}/v1/ws")
+        .into_client_request()
+        .expect("unauthenticated websocket request");
+    request.headers_mut().insert(
+        axum::http::header::ORIGIN,
+        axum::http::HeaderValue::from_static(ORIGIN),
+    );
+    request
+}
+
+async fn assert_server_hello<S>(socket: &mut S)
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let wire = read_client_frame(socket).await;
+    let decoded = decode_muxed_frame(&wire).expect("server Hello frame");
+    assert_eq!(decoded.stream_id, 0);
+    assert!(matches!(decoded.frame, Frame::Hello { version: 1, .. }));
+}
+
+async fn read_welcome<S>(socket: &mut S) -> ([u8; 16], [u8; 32])
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let wire = read_client_frame(socket).await;
+    let decoded = decode_muxed_frame(&wire).expect("Welcome frame");
+    assert_eq!(decoded.stream_id, 0);
+    match decoded.frame {
+        Frame::Welcome {
+            connection_id,
+            resume_token,
+            resume_window_seconds,
+        } => {
+            assert_eq!(resume_window_seconds, 120);
+            (*connection_id, *resume_token)
+        }
+        _ => panic!("server did not send Welcome"),
+    }
+}
+
+async fn client_ws_send<S>(socket: &mut S, stream_id: u32, frame: &Frame<'_>)
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Debug,
+{
+    let mut encoded = Vec::with_capacity(128);
+    encode_muxed_frame_into(stream_id, frame, &mut encoded).expect("encode websocket frame");
+    socket
+        .send(Message::Binary(Bytes::from(encoded)))
+        .await
+        .expect("send websocket frame");
+}
+
+async fn read_client_frame<S>(socket: &mut S) -> Bytes
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    loop {
+        match socket
+            .next()
+            .await
+            .expect("websocket message")
+            .expect("websocket frame")
+        {
+            Message::Binary(bytes) => return bytes,
+            Message::Ping(bytes) => socket
+                .send(Message::Pong(bytes))
+                .await
+                .expect("websocket pong"),
+            Message::Pong(_) | Message::Frame(_) => {}
+            Message::Close(_) => panic!("server closed websocket unexpectedly"),
+            Message::Text(_) => panic!("server sent a text websocket message"),
+        }
+    }
+}
+
+async fn read_partial_terminal<S>(socket: &mut S) -> (Vec<u8>, bool)
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let mut output = Vec::new();
+    let mut input_acknowledged = false;
+    while output.is_empty() || !input_acknowledged {
+        let wire = read_client_frame(socket).await;
+        let decoded = decode_muxed_frame(&wire).expect("terminal response frame");
+        match decoded.frame {
+            Frame::Ack { in_seq_acked: 8 } => input_acknowledged = true,
+            Frame::Output { out_seq: 0, bytes } => output.extend_from_slice(bytes),
+            _ => {}
+        }
+    }
+    (output, input_acknowledged)
+}
+
+async fn read_terminal_output<S>(socket: &mut S) -> Vec<u8>
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    loop {
+        let wire = read_client_frame(socket).await;
+        let decoded = decode_muxed_frame(&wire).expect("resumed terminal frame");
+        if let Frame::Output { out_seq: 4, bytes } = decoded.frame {
+            return bytes.to_vec();
+        }
+    }
+}
+
+fn decode_test_session_id(value: &str) -> [u8; 16] {
+    assert_eq!(value.len(), 32);
+    let mut session = [0_u8; 16];
+    for (index, byte) in session.iter_mut().enumerate() {
+        let offset = index * 2;
+        *byte = u8::from_str_radix(&value[offset..offset + 2], 16).expect("session id hex");
+    }
+    session
+}
+
+async fn wait_connection_inactive(pool: &sqlx::SqlitePool, id: &[u8; 16]) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let active: Option<i64> =
+            sqlx::query_scalar("SELECT active FROM websocket_connections WHERE connection_id=?")
+                .bind(id.as_slice())
+                .fetch_optional(pool)
+                .await
+                .expect("resume row query");
+        if active == Some(0) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "socket did not enter resume state"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Test-only leg-B implementation: it returns one deterministic session and resumes a fixed PTY transcript.
+#[allow(clippy::too_many_lines)]
+async fn test_leg_b_agent(
+    mut socket: UnixStream,
+    input_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    const OUTPUT: &[u8] = b"echo hi\r\nhi\r\n";
+    let mut receive = BytesMut::with_capacity(1024);
+    let hello = read_leg_b_frame(&mut socket, &mut receive)
+        .await
+        .expect("server Hello");
+    assert!(matches!(
+        decode_muxed_frame(&hello).expect("Hello frame").frame,
+        Frame::Hello { version: 1, .. }
+    ));
+    leg_b_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "test-agent-stub",
+        },
+    )
+    .await;
+
+    let session_id = [0x42; 16];
+    let session_id_json = "42".repeat(16);
+    let mut terminal_stream = None;
+    let mut output_cursor = 0_usize;
+    let mut input_acked = 0_u64;
+    let mut credit = 0_u64;
+    let mut command_seen = false;
+    loop {
+        let Some(wire) = read_leg_b_frame(&mut socket, &mut receive).await else {
+            return;
+        };
+        let Ok(decoded) = decode_muxed_frame(&wire) else {
+            return;
+        };
+        let stream_id = decoded.stream_id;
+        match decoded.frame {
+            Frame::Call {
+                call_id,
+                action_id: "terminal.open",
+                ..
+            } => {
+                let json = serde_json::to_vec(&json!({"session_id":session_id_json}))
+                    .expect("stub result JSON");
+                leg_b_send(
+                    &mut socket,
+                    0,
+                    &Frame::Result {
+                        call_id,
+                        ok: true,
+                        json: &json,
+                    },
+                )
+                .await;
+            }
+            Frame::AttachTerm {
+                session_id: received,
+                last_out_seq,
+                last_in_seq,
+            } => {
+                assert_eq!(*received, session_id);
+                terminal_stream = Some(stream_id);
+                output_cursor = usize::try_from(last_out_seq).expect("output offset");
+                input_acked = input_acked.max(last_in_seq);
+                credit = 0;
+            }
+            Frame::Credit { bytes } => {
+                credit = credit.saturating_add(u64::from(bytes));
+                stub_flush_output(
+                    &mut socket,
+                    terminal_stream,
+                    &mut output_cursor,
+                    &mut credit,
+                    command_seen,
+                    OUTPUT,
+                )
+                .await;
+            }
+            Frame::Input { in_seq, bytes } => {
+                input_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let end = in_seq + u64::try_from(bytes.len()).expect("input length");
+                if end > input_acked {
+                    assert!(in_seq <= input_acked);
+                    input_acked = end;
+                    command_seen = true;
+                }
+                leg_b_send(
+                    &mut socket,
+                    stream_id,
+                    &Frame::Ack {
+                        in_seq_acked: input_acked,
+                    },
+                )
+                .await;
+                stub_flush_output(
+                    &mut socket,
+                    terminal_stream,
+                    &mut output_cursor,
+                    &mut credit,
+                    command_seen,
+                    OUTPUT,
+                )
+                .await;
+            }
+            Frame::Close { .. } if terminal_stream == Some(stream_id) => {
+                terminal_stream = None;
+                credit = 0;
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn stub_flush_output(
+    socket: &mut UnixStream,
+    stream: Option<u32>,
+    cursor: &mut usize,
+    credit: &mut u64,
+    command_seen: bool,
+    output: &[u8],
+) {
+    let Some(stream) = stream else {
+        return;
+    };
+    if !command_seen || *credit == 0 || *cursor >= output.len() {
+        return;
+    }
+    let available = usize::try_from(*credit).unwrap_or(usize::MAX);
+    let end = cursor.saturating_add(available).min(output.len());
+    let start_seq = u64::try_from(*cursor).expect("stub output sequence");
+    let bytes = &output[*cursor..end];
+    leg_b_send(
+        socket,
+        stream,
+        &Frame::Output {
+            out_seq: start_seq,
+            bytes,
+        },
+    )
+    .await;
+    *credit -= u64::try_from(bytes.len()).expect("stub output length");
+    *cursor = end;
+}
+
+async fn read_leg_b_frame(socket: &mut UnixStream, receive: &mut BytesMut) -> Option<Bytes> {
+    let mut scratch = [0_u8; 4096];
+    loop {
+        match decode_muxed_frame(receive) {
+            Ok(decoded) => return Some(receive.split_to(decoded.wire_len).freeze()),
+            Err(infraternal_protocol::DecodeError::Incomplete) => {}
+            Err(_) => return None,
+        }
+        let read = socket.read(&mut scratch).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        receive.extend_from_slice(&scratch[..read]);
+    }
+}
+
+async fn leg_b_send(socket: &mut UnixStream, stream_id: u32, frame: &Frame<'_>) {
+    let mut encoded = Vec::with_capacity(128);
+    encode_muxed_frame_into(stream_id, frame, &mut encoded).expect("encode leg-B frame");
+    socket.write_all(&encoded).await.expect("write leg-B frame");
+}
+
+/// New enrollments share a public input; credential PRF and UUID AAD retain key isolation.
+#[tokio::test]
+async fn enrollment_prf_input_matches_discoverable_login() {
+    let _guard = SERIAL.lock().await;
+    let (auth, token) = empty().await;
+    let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let b = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    assert_ne!(a["user_id"], b["user_id"]);
+    assert_eq!(
+        a["options"]["publicKey"]["extensions"]["prf"],
+        b["options"]["publicKey"]["extensions"]["prf"],
+        "new enrollments must use the public discoverable PRF input"
+    );
+    let login = auth.discoverable_login_start(NOW).await.unwrap();
+    assert_eq!(
+        login["options"]["publicKey"]["extensions"]["prf"],
+        a["options"]["publicKey"]["extensions"]["prf"]
+    );
+}
+
+/// Resident assertions bind the discovered handle to a live credential and latest counter.
+#[tokio::test]
+async fn discoverable_login_handle_credential_counter_and_replay() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let start = f.auth.discoverable_login_start(NOW).await.unwrap();
+    assert_eq!(start["options"]["publicKey"]["allowCredentials"], json!([]));
+    assert_eq!(
+        start["options"]["publicKey"]["extensions"]["prf"]["eval"]["first"],
+        constant_prf_input()
+    );
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    let token = f
+        .auth
+        .login_finish(
+            str_field(&start, "ceremony"),
+            proof.clone(),
+            "resident",
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.auth.session(&token, NOW).await.unwrap().user_id, f.user);
+    assert!(
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "resident", NOW)
+            .await
+            .is_err()
+    );
+    for handle in [
+        Value::Null,
+        json!(B64.encode([1_u8; 15])),
+        json!(B64.encode(Uuid::new_v4().as_bytes())),
+    ] {
+        let start = f.auth.discoverable_login_start(NOW).await.unwrap();
+        let mut proof = f.software.login(&start, ORIGIN, true);
+        proof["response"]["userHandle"] = handle;
+        assert!(
+            f.auth
+                .login_finish(str_field(&start, "ceremony"), proof, "resident", NOW)
+                .await
+                .is_err()
+        );
+    }
+    let start = f.auth.discoverable_login_start(NOW).await.unwrap();
+    let mut stranger = Software::new();
+    let mut proof = stranger.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    assert!(
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "resident", NOW)
+            .await
+            .is_err()
+    );
+    // A new challenge with the same nonzero counter must fail against current storage.
+    f.software.counter = 0;
+    let start = f.auth.discoverable_login_start(NOW).await.unwrap();
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    assert!(
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "resident", NOW)
+            .await
+            .is_err()
+    );
+}
+
+/// Legacy ciphertext retains v1 while new credentials expose their exact constant input.
+#[tokio::test]
+async fn authenticated_prf_metadata_preserves_legacy_envelopes() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let wraps = f.auth.wraps(&f.session, NOW).await.unwrap();
+    let entries = wraps.as_array().unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry["kind"] == "passkey")
+            .unwrap()["prf_input"],
+        constant_prf_input()
+    );
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry["kind"] == "recovery")
+            .unwrap()["prf_input"]
+            .is_null()
+    );
+    let legacy_start =
+        json!({"options":{"publicKey":{"extensions":{"prf":{"eval":{"first":prf_salt(None)}}}}}});
+    let old_wrap = browser_wrap(&f.software.prf(&legacy_start), &f.dek, &f.user, "passkey");
+    sqlx::query("UPDATE passkeys SET prf_input=NULL WHERE user_id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE wraps SET blob=? WHERE user_id=? AND kind='passkey'")
+        .bind(serde_json::to_string(&old_wrap).unwrap())
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let login = f.auth.login_start(&f.user, NOW).await.unwrap();
+    assert_eq!(
+        login["options"]["publicKey"]["extensions"]["prf"]["eval"]["first"],
+        prf_salt(None)
+    );
+    let wraps = f.auth.wraps(&f.session, NOW).await.unwrap();
+    let entry = wraps
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "passkey")
+        .unwrap();
+    assert_eq!(entry["prf_input"], prf_salt(None));
+    let wrap: Wrap = serde_json::from_value(entry["wrap"].clone()).unwrap();
+    assert!(
+        unwrap_browser(&f.software.prf(&login), &wrap, &f.user, "passkey").unwrap() == f.dek,
+        "legacy envelope must unwrap the original key"
+    );
+}
+
+/// Public status reveals exactly one flag; HTTP resident login establishes the resolved session.
+#[tokio::test]
+async fn public_status_and_discoverable_http_login() {
+    let _guard = SERIAL.lock().await;
+    let (auth, _) = empty().await;
+    let app = router(auth);
+    let (status, headers, body) = http_post_json(&app, "status", json!({})).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body, json!({"setup_required":true}));
+    assert_eq!(headers[axum::http::header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        http_post_json(&app, "status", json!({"extra":true}))
+            .await
+            .0,
+        axum::http::StatusCode::BAD_REQUEST
+    );
+    let mut f = fixture().await;
+    let app = router(f.auth.clone());
+    assert_eq!(
+        http_post_json(&app, "status", json!({})).await.2,
+        json!({"setup_required":false})
+    );
+    let (status, start_headers, start) = http_post_json(&app, "login-start", json!({})).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(start["options"]["publicKey"]["allowCredentials"], json!([]));
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    let binding = start_headers[axum::http::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let (status, headers, _) = http_post_json_with_cookie(
+        &app,
+        "login-finish",
+        json!({"ceremony":start["ceremony"],"proof":proof,"device":"resident browser"}),
+        binding,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let cookie = headers[axum::http::header::SET_COOKIE].to_str().unwrap();
+    let token = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("__Host-infraternal=")
+        .unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    assert!(f.auth.session(token, now).await.is_err());
+    assert_eq!(
+        f.auth.unlock_session(token, now).await.unwrap().user_id,
+        f.user
+    );
+    f.auth
+        .unlock_finish(token, &super::sessions::pending_transaction(token), now)
+        .await
+        .unwrap();
+    assert_eq!(f.auth.session(token, now).await.unwrap().user_id, f.user);
+}
+
+/// New setup callers identify the passkey separately from the human-facing label.
+#[tokio::test]
+async fn setup_start_accepts_username_and_display_name() {
+    let (auth, setup_token) = empty().await;
+    let app = router(auth.clone());
+    let (status, _, default_body) = http_post_json(
+        &app,
+        "setup-start",
+        json!({"token":setup_token,"username":"ada_default"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(
+        default_body["options"]["publicKey"]["user"]["displayName"],
+        "ada_default"
+    );
+
+    let (status, start_headers, body) = http_post_json(
+        &app,
+        "setup-start",
+        json!({
+            "token":setup_token,
+            "username":"ada",
+            "display_name":"Ada Lovelace"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body["options"]["publicKey"]["user"]["name"], "ada");
+    assert_eq!(
+        body["options"]["publicKey"]["user"]["displayName"],
+        "Ada Lovelace"
+    );
+
+    let user_id = str_field(&body, "user_id").to_owned();
+    let words = str_field(&body, "recovery_words").to_owned();
+    let software = Software::new();
+    let dek = rand::random::<[u8; 32]>();
+    let passkey_wrap = browser_wrap(&software.prf(&body), &dek, &user_id, "passkey");
+    let recovery_wrap = browser_wrap(&recovery_ikm(&words), &dek, &user_id, "recovery");
+    let binding = start_headers[axum::http::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let (status, headers, _) = http_post_json_with_cookie(
+        &app,
+        "registration-finish",
+        json!({
+            "ceremony":body["ceremony"],
+            "proof":software.registration(&body, ORIGIN, true),
+            "passkey_wrap":passkey_wrap,
+            "recovery_wrap":recovery_wrap
+        }),
+        binding,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let cookie = headers[axum::http::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let (status, _, session) =
+        http_post_json_with_cookie(&app, "session", json!({}), &cookie).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(session["user_id"], user_id);
+    assert_eq!(session["username"], "ada");
+    assert_eq!(session["display_name"], "Ada Lovelace");
+}
+
+/// Enrollment rejects invalid usernames, overlong labels and an account-name collision.
+#[tokio::test]
+async fn setup_identity_validation_and_uniqueness() {
+    let (auth, setup_token) = empty().await;
+    for username in ["a", "Ada", "ada.name", "has space", "ümlaut"] {
+        assert!(matches!(
+            auth.setup_start_with_identity(&setup_token, username, None, NOW)
+                .await,
+            Err(Error::Invalid)
+        ));
+    }
+    let too_long = "x".repeat(33);
+    assert!(matches!(
+        auth.setup_start_with_identity(&setup_token, &too_long, None, NOW)
+            .await,
+        Err(Error::Invalid)
+    ));
+    let too_many_display_chars = "é".repeat(65);
+    assert!(matches!(
+        auth.setup_start_with_identity(&setup_token, "ada", Some(&too_many_display_chars), NOW)
+            .await,
+        Err(Error::Invalid)
+    ));
+
+    let other = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?, 'taken', 0, 'unused', 'taken', 'Taken')")
+        .bind(other)
+        .execute(&auth.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        auth.setup_start_with_identity(&setup_token, "taken", None, NOW)
+            .await,
+        Err(Error::Conflict)
+    ));
+}
+
+/// The account identity migration adds persisted, unique usernames and display names.
+#[tokio::test]
+async fn account_identity_schema_has_unique_usernames_and_display_names() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let _auth = Auth::new(pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+
+    let columns: Vec<String> = sqlx::query("PRAGMA table_info(users)")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get("name"))
+        .collect();
+    assert!(columns.iter().any(|column| column == "username"));
+    assert!(columns.iter().any(|column| column == "display_name"));
+
+    let username_index: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_index_list('users') WHERE name='users_username_unique'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(username_index, 1);
+}
+
+/// Existing labels stay visible while invalid and duplicate names receive stable identities.
+#[tokio::test]
+async fn account_identity_migration_backfills_legacy_users() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner INTEGER NOT NULL, recovery_hash TEXT NOT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let legacy = [
+        ("11111111-1111-4111-8111-111111111111", "Ada".to_owned()),
+        ("22222222-2222-4222-8222-222222222222", "ADA".to_owned()),
+        (
+            "33333333-3333-4333-8333-333333333333",
+            "bad name!".to_owned(),
+        ),
+        ("44444444-4444-4444-8444-444444444444", "x".repeat(70)),
+    ];
+    for (id, name) in &legacy {
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES (?, ?, 0, 'unused')")
+            .bind(id)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    sqlx::raw_sql(include_str!("../../migrations/0006_user_identity.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rows = sqlx::query("SELECT id,username,display_name FROM users ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let usernames: Vec<String> = rows.iter().map(|row| row.get("username")).collect();
+    assert_eq!(usernames.len(), 4);
+    assert_eq!(
+        usernames
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        4
+    );
+    assert!(
+        usernames
+            .iter()
+            .all(|username| (2..=32).contains(&username.len())
+                && username.bytes().all(|byte| byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'_' | b'-')))
+    );
+    assert_eq!(rows[0].get::<String, _>("display_name"), "Ada");
+    assert_eq!(rows[1].get::<String, _>("display_name"), "ADA");
+    assert_eq!(rows[3].get::<String, _>("display_name").chars().count(), 64);
+}
+
+/// Release-only scale evidence; no authenticator signing cost is included in server finish latency.
+#[tokio::test]
+#[ignore = "run --release --ignored --nocapture without concurrent builds"]
+#[allow(clippy::too_many_lines)]
+async fn discoverable_latency_at_pending_capacity() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let second = Software::new();
+    let add = f.auth.add_start(&f.session, NOW).await.unwrap();
+    f.auth
+        .registration_finish(
+            str_field(&add, "ceremony"),
+            second.registration(&add, ORIGIN, true),
+            browser_wrap(&second.prf(&add), &f.dek, &f.user, "passkey"),
+            None,
+            NOW,
+        )
+        .await
+        .unwrap();
+    println!(
+        "auth scale: owners=1 passkeys=2 pending_limit=1024 arch={} load={}",
+        std::env::consts::ARCH,
+        std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+    );
+    let mut now = NOW;
+    for identified in [true, false] {
+        for prefill in [0, 824] {
+            now += CEREMONY + 1;
+            for _ in 0..prefill {
+                benchmark_start(&f, identified, now).await;
+            }
+            let rss_before = resident_kib();
+            let mut samples = Vec::with_capacity(200);
+            for _ in 0..200 {
+                let clock = Instant::now();
+                benchmark_start(&f, identified, now).await;
+                samples.push(clock.elapsed());
+            }
+            let (p50, p99) = latency_us(&mut samples);
+            println!(
+                "challenge mode={} pending={}..{} n=200 p50_us={p50} p99_us={p99} rss_before_kib={rss_before} rss_after_kib={}",
+                if identified {
+                    "identified"
+                } else {
+                    "discoverable"
+                },
+                prefill,
+                prefill + 200,
+                resident_kib()
+            );
+            assert_eq!(f.auth.pending.lock().await.logins.len(), prefill + 200);
+            if !identified {
+                assert!(
+                    p99 < 1000,
+                    "discoverable challenge exceeded local 1 ms budget"
+                );
+            }
+            if prefill == 824 {
+                assert!(
+                    f.auth.discoverable_login_start(now).await.is_err(),
+                    "pending capacity must fail closed"
+                );
+            }
+        }
+    }
+    println!(
+        "pending inline bytes/unit={} bytes/1024={} (excludes heap/hash-table allocations)",
+        std::mem::size_of::<Login>(),
+        1024 * std::mem::size_of::<Login>()
+    );
+    now += CEREMONY + 1;
+    for _ in 0..1023 {
+        benchmark_start(&f, false, now).await;
+    }
+    let mut samples = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let start = f.auth.discoverable_login_start(now).await.unwrap();
+        let binding = f
+            .auth
+            .bind_ceremony(str_field(&start, "ceremony"), &axum::http::HeaderMap::new())
+            .await
+            .unwrap();
+        let headers = axum::http::HeaderMap::from_iter([(axum::http::header::COOKIE, binding)]);
+        let mut proof = f.software.login(&start, ORIGIN, true);
+        proof["response"]["userHandle"] =
+            json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+        let clock = Instant::now();
+        f.auth
+            .require_ceremony_binding(str_field(&start, "ceremony"), &headers)
+            .await
+            .unwrap();
+        let token = f
+            .auth
+            .pending_login_finish(str_field(&start, "ceremony"), proof, "benchmark", now)
+            .await
+            .unwrap();
+        // Include the completion id issued by HTTP, not just the verifier/SQLite path.
+        std::hint::black_box(super::sessions::pending_transaction(&token));
+        samples.push(clock.elapsed());
+    }
+    let (p50, p99) = latency_us(&mut samples);
+    println!(
+        "signed discoverable finish pending=1024 n=200 p50_us={p50} p99_us={p99} (browser binding + pending unlock transaction/id + SQLite memory + real ES256 verifier)"
+    );
+    assert!(
+        p99 < 10_000,
+        "discoverable finish exceeded local 10 ms budget"
+    );
+}
+
+/// Measure either retained identified admission or the new identity-free path through the same facade.
+async fn benchmark_start(f: &Fixture, identified: bool, now: i64) {
+    let start = if identified {
+        f.auth.login_start(&f.user, now).await.unwrap()
+    } else {
+        f.auth.discoverable_login_start(now).await.unwrap()
+    };
+    f.auth
+        .bind_ceremony(str_field(&start, "ceremony"), &axum::http::HeaderMap::new())
+        .await
+        .unwrap();
+}
+
+/// Nearest-rank percentiles from monotonic durations, sorted outside the timed section.
+fn latency_us(samples: &mut [Duration]) -> (u128, u128) {
+    samples.sort_unstable();
+    let rank = |percent: usize| samples[(samples.len() * percent).div_ceil(100) - 1].as_micros();
+    (rank(50), rank(99))
+}
+
+/// Whole-process resident memory, not an isolated allocation measurement.
+fn resident_kib() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Known UUIDs must not turn the public front door into a credential directory.
+#[tokio::test]
+async fn audit_no_public_credential_listing() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = router(f.auth.clone());
+    let known = http_post_json(&app, "login-start", json!({"user_id":f.user})).await;
+    let unknown = http_post_json(
+        &app,
+        "login-start",
+        json!({"user_id":Uuid::new_v4().to_string()}),
+    )
+    .await;
+    assert_eq!(known.0, axum::http::StatusCode::UNAUTHORIZED);
+    assert_eq!(known.0, unknown.0);
+    assert_eq!(known.2, unknown.2);
+    assert_eq!(
+        http_post_json(&app, "login-start", json!({})).await.2["options"]["publicKey"]["allowCredentials"],
+        json!([])
+    );
+}
+
+/// Independent audit: revocation of an incomplete unlock cannot be denied by admission.
+#[tokio::test]
+async fn audit_logout_survives_admission_exhaustion() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = router(f.auth.clone());
+    for _ in 0..120 {
+        assert_eq!(
+            http_post_json(&app, "status", json!({})).await.0,
+            axum::http::StatusCode::OK
+        );
+    }
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/auth/logout")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ORIGIN, ORIGIN)
+        .header(
+            axum::http::header::COOKIE,
+            format!("__Host-infraternal={}", f.session),
+        )
+        .body(axum::body::Body::from("{}"))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let still_live = f.auth.session(&f.session, NOW).await.is_ok();
+    println!(
+        "120 browser actions then authenticated logout → expected 200/revoked → actual {} live_session={still_live}",
+        response.status()
+    );
+    assert!(
+        !still_live,
+        "admission exhaustion blocks mandatory revocation"
+    );
+}
+
+/// Abandoned unlocks cannot slide, authorize a device, or revive after their deadline.
+#[tokio::test]
+async fn pending_unlock_expires_without_terminal_authority() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let start = f.auth.discoverable_login_start(NOW).await.unwrap();
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    let token = f
+        .auth
+        .pending_login_finish(str_field(&start, "ceremony"), proof, "pending", NOW)
+        .await
+        .unwrap();
+    assert!(f.auth.session(&token, NOW).await.is_err());
+    assert!(f.auth.fresh_session(&token, NOW).await.is_err());
+    assert!(f.auth.wraps(&token, NOW + CEREMONY - 1).await.is_ok());
+    assert!(
+        f.auth
+            .unlock_finish(
+                &token,
+                &super::sessions::pending_transaction(&token),
+                NOW + CEREMONY
+            )
+            .await
+            .is_err()
+    );
+    assert!(f.auth.unlock_session(&token, NOW + CEREMONY).await.is_err());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash=?")
+        .bind(hash(&token))
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "server did not revoke expired incomplete unlock");
+}
+/// Independent audit: browser-bound ceremonies cannot be redeemed in another cookie context.
+#[tokio::test]
+async fn audit_ceremony_browser_binding() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let app = router(f.auth.clone());
+    let (_, start_headers, start) = http_post_json(&app, "login-start", json!({})).await;
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    // HTTP helper supplies no Cookie at all: an independent browser context.
+    let (status, _, _) = http_post_json(
+        &app,
+        "login-finish",
+        json!({"ceremony":start["ceremony"],"proof":proof.clone(),"device":"different browser"}),
+    )
+    .await;
+    println!(
+        "start in A / signed finish in cookie-free B → expected 401 → actual {status}; binding cookie issued={}",
+        start_headers.contains_key(axum::http::header::SET_COOKIE)
+    );
+    assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    let binding = start_headers[axum::http::header::SET_COOKIE]
+        .to_str()
+        .unwrap();
+    for flag in [
+        "Secure",
+        "HttpOnly",
+        "SameSite=Strict",
+        "Path=/",
+        "Max-Age=300",
+    ] {
+        assert!(binding.contains(flag));
+    }
+    let original = http_post_json_with_cookie(
+        &app,
+        "login-finish",
+        json!({"ceremony":start["ceremony"],"proof":proof,"device":"starting browser"}),
+        binding.split(';').next().unwrap(),
+    )
+    .await;
+    assert_eq!(
+        original.0,
+        axum::http::StatusCode::OK,
+        "foreign finish drained original ceremony"
+    );
+}
+
+#[path = "socket_tests.rs"]
+mod socket_tests;
+
+#[path = "review3_tests.rs"]
+mod review3_tests;

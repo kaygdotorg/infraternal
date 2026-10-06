@@ -12,6 +12,7 @@ sqlx.workspace = true
 tokio.workspace = true
 infraternal-shim.workspace = true
 infraternal-agent = { path = "../infraternal-agent", version = "0.1.0" }
+thiserror.workspace = true
 
 [lints]
 workspace = true

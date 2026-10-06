@@ -25,12 +25,27 @@ pub fn router(auth: Auth) -> Router {
 #[serde(deny_unknown_fields)]
 struct Setup {
     token: String,
-    name: String,
+    name: Option<String>,
+    username: Option<String>,
+    display_name: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct User {
-    user_id: String,
+    user_id: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Empty {}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Unlock {
+    pending_transaction: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Logout {
+    pending_transaction: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,6 +152,11 @@ async fn dispatch(
             Json(json!({"error":"invalid request"})),
         )
             .into_response(),
+        Err(Error::Conflict) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"username already exists"})),
+        )
+            .into_response(),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error":"auth unavailable"})),
@@ -165,6 +185,8 @@ async fn dispatch(
     response
 }
 
+// Keep typed action dispatch together so capability and response rules can be reviewed in one place.
+#[allow(clippy::too_many_lines)]
 async fn execute(
     auth: &Auth,
     action: &str,
@@ -180,32 +202,42 @@ async fn execute(
     .map_err(|_| Error::Invalid)?;
     ingress(auth, action, headers, now).await?;
     let payload = match action {
-        "setup-start" => {
-            let b: Setup = body(value)?;
-            auth.setup_start(&b.token, &b.name, now).await?
-        }
+        "status" => public_status(auth, value).await?,
+        "setup-start" => setup_start(auth, value, now).await?,
         "registration-finish" => {
             let b: Register = body(value)?;
+            auth.require_ceremony_binding(&b.ceremony, headers).await?;
             return session_response(
                 &auth
                     .registration_finish(&b.ceremony, b.proof, b.passkey_wrap, b.recovery_wrap, now)
                     .await?,
             );
         }
-        "login-start" => {
-            let b: User = body(value)?;
-            auth.login_start(&b.user_id, now).await?
-        }
+        "login-start" => login_start(auth, headers, value, now).await?,
         "login-finish" => {
             let b: Login = body(value)?;
-            return session_response(
-                &auth
-                    .login_finish(&b.ceremony, b.proof, &b.device, now)
-                    .await?,
-            );
+            auth.require_ceremony_binding(&b.ceremony, headers).await?;
+            let token = auth
+                .pending_login_finish(&b.ceremony, b.proof, &b.device, now)
+                .await?;
+            let mut response = session_response(&token)?;
+            *response.body_mut() = axum::body::Body::from(serde_json::to_vec(&json!({
+                "ok": true, "pending_transaction": super::sessions::pending_transaction(&token)
+            }))?);
+            return Ok(response);
         }
         "add-start" => auth.add_start(cookie(headers)?, now).await?,
         "wraps" => auth.wraps(cookie(headers)?, now).await?,
+        "unlock-session" => {
+            let _: Empty = body(value)?;
+            return Ok(Json(auth.unlock_session(cookie(headers)?, now).await?).into_response());
+        }
+        "unlock-finish" => {
+            let b: Unlock = body(value)?;
+            auth.unlock_finish(cookie(headers)?, &b.pending_transaction, now)
+                .await?;
+            return session_response(cookie(headers)?);
+        }
         "session" => {
             let token = cookie(headers)?;
             let session = auth.session(token, now).await?;
@@ -249,7 +281,12 @@ async fn execute(
             json!({"ok":true})
         }
         "logout" => {
-            auth.logout(cookie(headers)?).await?;
+            let b: Logout = body(value)?;
+            if let Some(transaction) = b.pending_transaction {
+                auth.logout_pending(cookie(headers)?, &transaction).await?;
+            } else {
+                auth.logout(cookie(headers)?).await?;
+            }
             let mut response = Json(json!({"ok":true})).into_response();
             response.headers_mut().insert(
                 header::SET_COOKIE,
@@ -261,7 +298,64 @@ async fn execute(
         }
         _ => return Err(Error::Invalid),
     };
-    Ok(Json(payload).into_response())
+    ceremony_response(auth, action, headers, payload).await
+}
+
+/// Attach browser transaction state only to successful ceremony starts.
+async fn ceremony_response(
+    auth: &Auth,
+    action: &str,
+    headers: &HeaderMap,
+    payload: Value,
+) -> super::Result<Response> {
+    let binding = if matches!(
+        action,
+        "setup-start" | "login-start" | "add-start" | "recovery-ready"
+    ) {
+        Some(
+            auth.bind_ceremony(payload["ceremony"].as_str().ok_or(Error::Invalid)?, headers)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let mut response = Json(payload).into_response();
+    if let Some(binding) = binding {
+        response.headers_mut().insert(header::SET_COOKIE, binding);
+    }
+    Ok(response)
+}
+
+/// The identified path is an authenticated fresh tap, never a public directory.
+async fn login_start(
+    auth: &Auth,
+    headers: &HeaderMap,
+    value: Value,
+    now: i64,
+) -> super::Result<Value> {
+    let b: User = body(value)?;
+    match b.user_id {
+        Some(user) => {
+            if auth.session(cookie(headers)?, now).await?.user_id != user {
+                return Err(Error::Denied);
+            }
+            auth.login_start(&user, now).await
+        }
+        None => auth.discoverable_login_start(now).await,
+    }
+}
+
+/// Accept the legacy label form or the additive username/display-name form.
+async fn setup_start(auth: &Auth, value: Value, now: i64) -> super::Result<Value> {
+    let b: Setup = body(value)?;
+    match (b.name, b.username, b.display_name) {
+        (Some(name), None, None) => auth.setup_start(&b.token, &name, now).await,
+        (None, Some(username), display_name) => {
+            auth.setup_start_with_identity(&b.token, &username, display_name.as_deref(), now)
+                .await
+        }
+        _ => Err(Error::Invalid),
+    }
 }
 
 async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> super::Result<()> {
@@ -270,6 +364,10 @@ async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> su
         && headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(auth.origin())
     {
         return Err(Error::Denied);
+    }
+    // Revocation remains available when public request capacity is exhausted.
+    if action == "logout" {
+        return Ok(());
     }
     // Two fixed partitions keep the aggregate ceiling at 180/minute. No device
     // caller can spend the 120 browser slots; IP/proxy headers are never trusted.
@@ -298,6 +396,15 @@ pub(super) struct Ingress {
     window: i64,
     browser: u32,
     devices: u32,
+}
+
+/// Keep the unauthenticated response boundary explicit: exactly one setup flag.
+async fn public_status(auth: &Auth, value: Value) -> super::Result<Value> {
+    let _: Empty = body(value)?;
+    let required: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM users WHERE owner=1)")
+        .fetch_one(&auth.pool)
+        .await?;
+    Ok(json!({"setup_required":required}))
 }
 
 #[cfg(test)]

@@ -63,6 +63,30 @@ On leg A every stream is muxed. Stream 0 is the control stream. Odd ids are open
 ids by the server. On leg B over QUIC, the native stream gives the id, and frames
 are not wrapped.
 
+### 3.1 Embedded agent over a local socketpair (S1, issue #19)
+
+The server starts its own infraternal agent as `<self> agent --fd 3` and passes
+one endpoint of a Unix socketpair as descriptor 3. This is a local process
+channel, not a network leg: the inherited socketpair is its trust boundary,
+so it does not use mTLS. Both processes still exchange the v1 `Hello` frame
+and use the shared codec. Because a Unix socketpair is a byte stream, frames
+use the leg-B mux envelope: stream 0 is control, and the server opens even
+terminal stream ids. The protocol remains transport independent.
+
+On leg A, the server sends Hello first and then receives the client's Hello on
+stream 0. A new client leaves caps bit 0 clear; the server sends a fresh
+Welcome. A client resuming a connection sets caps bit 0 (`RESUME_NEXT`), sends
+Resume immediately after Hello on stream 0, and receives a refreshed Welcome
+only after the token is validated. No other Hello capability bit changes this
+ordering. This removes ambiguity between a new connection and a resume request.
+
+The core `terminal.open` action is a control-stream `Call` whose JSON input is
+`{"cols":u16,"rows":u16,"px_w":u16,"px_h":u16}` and whose successful JSON
+result is `{"session_id":"<32 lowercase hexadecimal characters>"}`. The
+server records the returned session id for the authenticated user before it
+returns the result to the browser. A terminal `AttachTerm` then names that
+session on a server-opened even stream to the embedded infraternal agent.
+
 ## 4. Frames
 
 Ranges: `0x00–0x0F` connection, `0x10–0x2F` terminal hot path, `0x30–0x3F`
@@ -89,6 +113,10 @@ leg B only, contracts/bootstrap.md §4).
 | 0x32 | `Subscribe` | u32 sub_id, JSON filter | events (contracts/plugin.md §5) |
 | 0x33 | `Event` | u32 sub_id, JSON event | |
 
+`Close` on stream 0 closes the connection. On a nonzero mux stream it retires
+only that logical stream; code 1000 is a normal detach. This lets a socketpair
+peer release one terminal attachment while keeping the user's session alive.
+
 Bodies of control frames are JSON. They are not on the hot path, and JSON
 lets the HTTP API, CLI, MCP and the wire share one schema per action. Terminal
 frames are binary, because they carry each keystroke and each output chunk.
@@ -108,6 +136,19 @@ frames are binary, because they carry each keystroke and each output chunk.
   resume, it resends from the server's `in_seq_acked`. The server drops
   bytes below the offset that it already wrote. Thus, a keystroke is never
   lost and never typed two times.
+- **Writer authority (#28).** Input ranges belong to a durable pair of
+  authenticated connection id and odd client stream id, pinned to one owned
+  session. Distinct devices can start at zero without sharing acknowledgements.
+  SQLite retains each writer's full unsigned Ack. A monotonic, never-reused even
+  leg-B stream id represents that writer across connection/supervision reconnects;
+  output offsets still belong to the session. The backend must deduplicate by
+  writer identity and return its authoritative Ack on AttachTerm before replay.
+  A connection retains at most 32 writer identities, including detached streams.
+  The current implementation preserves this identity only during connection
+  resume. After the resume window, pending input needs a separate durable writer
+  capability: blindly replaying it with a new writer can duplicate accepted input.
+  This longer-drop contract gap is recorded on #28; production daemon/PTY proof
+  is blocked by the currently unimplemented host daemon.
 - **Window.** A connection can resume for `resume window seconds` (default
   120). After that, the client opens a new connection and attaches by
   session id. The session itself lives in the shim, without a time limit.
@@ -140,11 +181,25 @@ frames are binary, because they carry each keystroke and each output chunk.
   with Close, cancel its shim link, and keep dispatching sibling/control frames.
   The viewer reattaches and replays unacknowledged Input using shim-owned
   accepted/written cursors (§5); a refused command never implies acceptance.
+- The embedded actor retains unspent credit, subtracting accepted Output and
+  Snapshot payload bytes. After a leg-B reconnect it sends AttachTerm and then
+  restores only the remaining credit. Snapshot repaint bytes do not advance the
+  output sequence.
+- A full attachment output queue retires that attachment (Close 1013), allowing
+  the browser to reconnect from its last consumed offset. It never waits for a
+  stalled reader in the shared actor. Stream Close remains local even when its
+  consumer has already dropped; control Close is echoed normally.
 - Leg B uses QUIC flow control plus the same credit idea between the server
   and the agent.
 
 ## 7. Authentication
 
+- WebSocket admission reserves the 16-per-user and 256-global permits at
+  upgrade, including sockets without Hello. Hello/Resume and incomplete wire
+  frames have five-second completion deadlines; transport reads have a
+  thirty-second liveness deadline and writes are bounded at one second.
+  Disconnect releases permits. Revocation wakes idle sockets without polling;
+  each dispatch checks current session authority and expiration.
 - Leg A: the WebSocket upgrade carries the session cookie
   or a device API key. The server checks the key before it accepts `Hello`.
   Every `Call` is then authorized for each action (contracts/plugin.md §4).

@@ -56,6 +56,11 @@ pub struct ActionDef {
 }
 ```
 
+Core transport actions are defined by the wire contract rather than a plugin
+descriptor. In S1, `terminal.open` uses the schema in wire.md §3.1 and is
+authorized for the authenticated user before the request reaches an
+infraternal agent.
+
 Rules:
 
 - `Effect::Destructive` requires `DryRun::Required` (DECISIONS 28).

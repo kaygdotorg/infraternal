@@ -53,7 +53,7 @@ try {
           for (const field of ['allowCredentials', 'excludeCredentials']) {
             if (p[field]) p[field] = p[field].map(c => ({ ...c, id: decode(c.id) }));
           }
-          p.extensions.prf.eval.first = decode(p.extensions.prf.eval.first);
+          if (p.extensions?.prf) p.extensions.prf.eval.first = decode(p.extensions.prf.eval.first);
           return p;
         };
         const proof = (credential) => {
@@ -66,7 +66,8 @@ try {
           delete extensions.prf;
           return { id: credential.id, rawId: encode(credential.rawId), type: credential.type, response, extensions };
         };
-        const start = await post('setup-start', { token, name: 'browser owner' });
+        check(JSON.stringify((await post('status', {})).body) === JSON.stringify({setup_required:true}), 'initial public status');
+        const start = await post('setup-start', { token, username: 'browser_owner', display_name: 'Browser owner' });
         check(start.status === 200, 'setup options');
         let credential;
         try {
@@ -114,26 +115,39 @@ try {
         const recoveryWrap = { salt: encode(recoverySalt), nonce: encode(recoveryNonce), ciphertext: encode(recoveryCiphertext) };
         const finish = await post('registration-finish', { ceremony: start.body.ceremony, proof: proof(credential), passkey_wrap: wrap, recovery_wrap: recoveryWrap });
         check(finish.status === 200, 'registration finish');
+        check(JSON.stringify((await post('status', {})).body) === JSON.stringify({setup_required:false}), 'completed public status');
         check((await post('wraps', {})).status === 200, 'secure cookie unavailable');
-        const login = await post('login-start', { user_id: user });
+        const login = await post('login-start', {});
         check(login.status === 200, 'login options');
         const assertion = await navigator.credentials.get({ publicKey: options(login.body, false) });
-        const loginPrf = assertion.getClientExtensionResults().prf?.results?.first;
         const logged = await post('login-finish', { ceremony: login.body.ceremony, proof: proof(assertion), device: 'Chromium virtual passkey' });
         check(logged.status === 200, 'login finish');
-        const stored = (await post('wraps', {})).body.find(w => w.kind === 'passkey').wrap;
+        check(login.body.options.publicKey.allowCredentials.length === 0, 'discoverable allow-list not empty');
+        check((await post('session', {})).status === 401, 'pending unlock granted authority');
+        check((await post('unlock-session', {})).body.user_id === user, 'resident handle resolved wrong user');
+        const entry = (await post('wraps', {})).body.find(w => w.kind === 'passkey');
+        const local = await navigator.credentials.get({ publicKey: {
+          challenge: crypto.getRandomValues(new Uint8Array(32)), rpId: 'auth.example.test',
+          allowCredentials: [{ type: 'public-key', id: assertion.rawId }], userVerification: 'required',
+          extensions: { prf: { eval: { first: decode(entry.prf_input) } } }
+        } });
+        const loginPrf = local.getClientExtensionResults().prf?.results?.first;
+        check(loginPrf?.byteLength === 32, 'authenticated PRF unavailable');
+        const stored = entry.wrap;
         const clear = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: decode(stored.nonce), additionalData: aad }, await derive(loginPrf), decode(stored.ciphertext));
         check(encode(clear) === encode(dek), 'DEK changed across login');
+        check((await post('unlock-finish', { pending_transaction: logged.body.pending_transaction })).status === 200, 'unlock completion rejected');
         // A real browser response with a tampered origin/UV must fail server verification.
-        const wrongOrigin = await post('login-start', { user_id: user });
+        const wrongOrigin = await post('login-start', {});
         const fresh = await navigator.credentials.get({ publicKey: options(wrongOrigin.body, false) });
         const bad = proof(fresh);
         const client = JSON.parse(new TextDecoder().decode(decode(bad.response.clientDataJSON)));
         client.origin = 'https://evil.example.test';
         bad.response.clientDataJSON = encode(enc.encode(JSON.stringify(client)));
         check((await post('login-finish', { ceremony: wrongOrigin.body.ceremony, proof: bad, device: 'tampered' })).status === 401, 'wrong origin accepted');
-        globalThis.authUser = user;
-        return 'supported: resident UV passkey, PRF fallback get, stripped proofs, native HKDF/AES-GCM, login DEK roundtrip, wrong origin rejected';
+        globalThis.authCredentialId = credential.id;
+        globalThis.authHandle = start.body.options.publicKey.user.id;
+        return 'supported: discoverable resident UV passkey, PRF fallback get, stripped proofs, native HKDF/AES-GCM, login DEK roundtrip, wrong origin rejected';
       }, { mode, token: initial.setup_token });
       if (mode === 'supported') {
         await cdp.send('WebAuthn.setUserVerified', { authenticatorId, isUserVerified: false });
@@ -141,17 +155,19 @@ try {
           const decode = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
           const encode = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
           const post = async (action, body) => fetch('/auth/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-          const start = await (await post('login-start', { user_id: globalThis.authUser })).json();
+          const start = await (await post('login-start', {})).json();
           const p = start.options.publicKey;
           p.challenge = decode(p.challenge);
-          p.allowCredentials = p.allowCredentials.map(c => ({ ...c, id: decode(c.id) }));
+          // A hostile client may add a known credential allow-list to obtain a non-UV
+          // assertion; the server must retain its original discoverable UV policy.
+          p.allowCredentials = [{type: 'public-key', id: decode(globalThis.authCredentialId)}];
           delete p.extensions;
           // The client weakens the request but the server's stored UV policy remains required.
           p.userVerification = 'discouraged';
           const credential = await navigator.credentials.get({ publicKey: p });
           const r = credential.response;
           const proof = { id: credential.id, rawId: encode(credential.rawId), type: 'public-key', extensions: {},
-            response: { clientDataJSON: encode(r.clientDataJSON), authenticatorData: encode(r.authenticatorData), signature: encode(r.signature), userHandle: r.userHandle === null ? null : encode(r.userHandle) } };
+            response: { clientDataJSON: encode(r.clientDataJSON), authenticatorData: encode(r.authenticatorData), signature: encode(r.signature), userHandle: globalThis.authHandle } };
           if ((await post('login-finish', { ceremony: start.ceremony, proof, device: 'UV bypass' })).status !== 401) throw new Error('server accepted browser assertion without UV');
         });
         console.log('supported: server rejected native browser assertion without UV');

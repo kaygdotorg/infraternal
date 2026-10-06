@@ -1,8 +1,9 @@
 //! Single-use registration/login ceremonies, ownership and writer-locked counters [24,28].
 use super::{
-    Auth, Authority, B64, CEREMONY, Engine, Error, Login, Passkey, Pending, PublicKeyCredential,
-    RegisterPublicKeyCredential, Registration, Result, Row, Uuid, Value, Wrap, hash,
-    insert_session, json, prf_salt, put_wrap, random, recovery_hash, require_session_tx,
+    Auth, Authority, B64, CEREMONY, Engine, Error, Login, LoginState, Passkey, Pending,
+    PublicKeyCredential, RegisterPublicKeyCredential, Registration, Result, Row, Uuid, Value, Wrap,
+    constant_prf_input, hash, insert_session, json, prf_salt, put_wrap, random, recovery_hash,
+    require_session_tx, setup::valid_username,
 };
 
 #[allow(clippy::missing_errors_doc)]
@@ -10,12 +11,13 @@ impl Auth {
     pub(super) async fn registration(
         &self,
         user: String,
-        name: &str,
+        username: &str,
+        display_name: &str,
         authority: Authority,
         rotate: bool,
         now: i64,
     ) -> Result<Value> {
-        if name.is_empty() || name.len() > 128 {
+        if !valid_username(username) || display_name.chars().count() > 64 {
             return Err(Error::Invalid);
         }
         let keys = self.passkeys(&user).await?;
@@ -26,8 +28,8 @@ impl Auth {
             .webauthn
             .start_passkey_registration(
                 Uuid::parse_str(&user).map_err(|_| Error::Invalid)?,
-                name,
-                name,
+                username,
+                display_name,
                 Some(keys.iter().map(|k| k.cred_id().clone()).collect()),
             )
             .map_err(|_| Error::Webauthn)?;
@@ -36,7 +38,7 @@ impl Auth {
         // UV, RP, origin, challenge, signature and counters are enforced by webauthn-rs.
         options["publicKey"]["authenticatorSelection"]["residentKey"] = json!("required");
         options["publicKey"]["authenticatorSelection"]["requireResidentKey"] = json!(true);
-        options["publicKey"]["extensions"]["prf"] = json!({"eval":{"first":prf_salt()}});
+        options["publicKey"]["extensions"]["prf"] = json!({"eval":{"first":constant_prf_input()}});
         let words = if rotate {
             Some(
                 bip39::Mnemonic::generate_in(bip39::Language::English, 24)
@@ -61,10 +63,12 @@ impl Auth {
             Registration {
                 state,
                 user: user.clone(),
-                name: name.into(),
+                username: username.into(),
+                display_name: display_name.into(),
                 authority,
                 recovery_hash,
                 expires: now + CEREMONY,
+                binding: None,
             },
         );
         Ok(json!({"ceremony":id,"user_id":user,"options":options,"recovery_words":words}))
@@ -89,23 +93,12 @@ impl Auth {
         if registration.expires <= now {
             return Err(Error::Denied);
         }
-        reject_prf(&proof)?;
-        passkey_wrap.validate()?;
-        if let Some(w) = &recovery_wrap {
-            w.validate()?;
-        }
-        if registration.recovery_hash.is_some() != recovery_wrap.is_some() {
-            return Err(Error::Invalid);
-        }
-        let proof: RegisterPublicKeyCredential = serde_json::from_value(proof)?;
-        if proof.type_ != "public-key" {
-            return Err(Error::Denied);
-        }
-        let key = self
-            .webauthn
-            .finish_passkey_registration(&proof, &registration.state)
-            .map_err(|_| Error::Webauthn)?;
-        let key_id = B64.encode(key.cred_id().as_ref());
+        let key = self.validated_registration(
+            &registration,
+            proof,
+            &passkey_wrap,
+            recovery_wrap.as_ref(),
+        )?;
         let mut tx = self.pool.begin().await?;
         // A write first obtains SQLite's writer lock before any security-sensitive read.
         sqlx::query("UPDATE setup SET expires=expires WHERE singleton=1")
@@ -123,10 +116,20 @@ impl Auth {
                 {
                     return Err(Error::Denied);
                 }
-                sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES (?,?,1,?)")
+                let username_exists: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username=?)")
+                        .bind(&registration.username)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if username_exists {
+                    return Err(Error::Conflict);
+                }
+                sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,?,1,?,?,?)")
                     .bind(&registration.user)
-                    .bind(&registration.name)
+                    .bind(&registration.display_name)
                     .bind(registration.recovery_hash.as_ref().ok_or(Error::Invalid)?)
+                    .bind(&registration.username)
+                    .bind(&registration.display_name)
                     .execute(&mut *tx)
                     .await?;
             }
@@ -157,12 +160,7 @@ impl Auth {
                     .await?;
             }
         }
-        sqlx::query("INSERT INTO passkeys(id,user_id,credential) VALUES (?,?,?)")
-            .bind(&key_id)
-            .bind(&registration.user)
-            .bind(serde_json::to_string(&key)?)
-            .execute(&mut *tx)
-            .await?;
+        let key_id = store_passkey(&mut tx, &registration.user, &key).await?;
         put_wrap(
             &mut tx,
             &registration.user,
@@ -177,7 +175,35 @@ impl Auth {
         let token = random();
         insert_session(&mut tx, &token, &registration.user, "enrollment", now).await?;
         tx.commit().await?;
+        if matches!(registration.authority, Authority::Recovery(_)) {
+            self.revocations.send_replace(());
+        }
         Ok(token)
+    }
+
+    /// Validate proof and envelope shapes before any database mutation.
+    fn validated_registration(
+        &self,
+        registration: &Registration,
+        proof: Value,
+        passkey_wrap: &Wrap,
+        recovery_wrap: Option<&Wrap>,
+    ) -> Result<Passkey> {
+        reject_prf(&proof)?;
+        passkey_wrap.validate()?;
+        if let Some(w) = recovery_wrap {
+            w.validate()?;
+        }
+        if registration.recovery_hash.is_some() != recovery_wrap.is_some() {
+            return Err(Error::Invalid);
+        }
+        let proof: RegisterPublicKeyCredential = serde_json::from_value(proof)?;
+        if proof.type_ != "public-key" {
+            return Err(Error::Denied);
+        }
+        self.webauthn
+            .finish_passkey_registration(&proof, &registration.state)
+            .map_err(|_| Error::Webauthn)
     }
 
     pub(super) async fn passkeys(&self, user: &str) -> Result<Vec<Passkey>> {
@@ -192,12 +218,38 @@ impl Auth {
 
     /// Begin a UV-required login (also the fresh-tap ceremony).
     pub async fn login_start(&self, user: &str, now: i64) -> Result<Value> {
+        // One read binds each allowed credential to its wrapping input. Separate reads
+        // could race enrollment/recovery and also add an unnecessary storage round trip.
+        let inputs = sqlx::query("SELECT id,credential,prf_input FROM passkeys WHERE user_id=?")
+            .bind(user)
+            .fetch_all(&self.pool)
+            .await?;
+        let keys: Vec<Passkey> = inputs
+            .iter()
+            .map(|row| serde_json::from_str(row.get("credential")).map_err(Error::from))
+            .collect::<Result<_>>()?;
         let (options, state) = self
             .webauthn
-            .start_passkey_authentication(&self.passkeys(user).await?)
+            .start_passkey_authentication(&keys)
             .map_err(|_| Error::Denied)?;
         let mut options = serde_json::to_value(options)?;
-        options["publicKey"]["extensions"] = json!({"prf":{"eval":{"first":prf_salt()}}});
+        let evaluations: serde_json::Map<String, Value> = inputs
+            .iter()
+            .map(|row| {
+                let input = row
+                    .get::<Option<String>, _>("prf_input")
+                    .unwrap_or_else(|| prf_salt(None));
+                (row.get("id"), json!({"first":input}))
+            })
+            .collect();
+        let first = evaluations.values().next().ok_or(Error::Denied)?;
+        let prf = if evaluations.values().all(|input| input == first) {
+            json!({"eval":first})
+        } else {
+            // With an identified allow-list WebAuthn permits credential-specific inputs.
+            json!({"evalByCredential":evaluations})
+        };
+        options["publicKey"]["extensions"] = json!({"prf":prf});
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
@@ -207,9 +259,40 @@ impl Auth {
         pending.logins.insert(
             id.clone(),
             Login {
-                state,
-                user: user.into(),
+                state: LoginState::Identified(state, user.into()),
                 expires: now + CEREMONY,
+                binding: None,
+            },
+        );
+        Ok(json!({"ceremony":id,"options":options}))
+    }
+
+    /// Start identity-free UV authentication without publishing any credential list.
+    pub async fn discoverable_login_start(&self, now: i64) -> Result<Value> {
+        let (options, state) = self
+            .webauthn
+            .start_discoverable_authentication()
+            .map_err(|_| Error::Webauthn)?;
+        let mut options = serde_json::to_value(options)?;
+        // A button-triggered ceremony uses the normal browser prompt, not conditional UI.
+        options
+            .as_object_mut()
+            .ok_or(Error::Json)?
+            .remove("mediation");
+        options["publicKey"]["allowCredentials"] = json!([]);
+        options["publicKey"]["extensions"] = json!({"prf":{"eval":{"first":constant_prf_input()}}});
+        let id = random();
+        let mut pending = self.pending.lock().await;
+        prune(&mut pending, now);
+        if pending.registrations.len() + pending.logins.len() >= 1024 {
+            return Err(Error::Denied);
+        }
+        pending.logins.insert(
+            id.clone(),
+            Login {
+                state: LoginState::Discoverable(state),
+                expires: now + CEREMONY,
+                binding: None,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))
@@ -223,6 +306,28 @@ impl Auth {
         device: &str,
         now: i64,
     ) -> Result<String> {
+        self.finish_login(id, proof, device, now, false).await
+    }
+
+    /// HTTP login grants only envelope access until a successful local unwrap is confirmed.
+    pub(super) async fn pending_login_finish(
+        &self,
+        id: &str,
+        proof: Value,
+        device: &str,
+        now: i64,
+    ) -> Result<String> {
+        self.finish_login(id, proof, device, now, true).await
+    }
+
+    async fn finish_login(
+        &self,
+        id: &str,
+        proof: Value,
+        device: &str,
+        now: i64,
+        pending_unlock: bool,
+    ) -> Result<String> {
         let login = self
             .pending
             .lock()
@@ -235,31 +340,49 @@ impl Auth {
         }
         reject_prf(&proof)?;
         let proof: PublicKeyCredential = serde_json::from_value(proof)?;
-        if proof.type_ != "public-key"
-            || proof.get_user_unique_id().is_some_and(|handle| {
-                Uuid::parse_str(&login.user).map_or(true, |user| handle != user.as_bytes())
-            })
-        {
+        if proof.type_ != "public-key" {
             return Err(Error::Denied);
         }
+        let user = match &login.state {
+            LoginState::Identified(_, user) => {
+                if proof.get_user_unique_id().is_some_and(|handle| {
+                    Uuid::parse_str(user).map_or(true, |id| handle != id.as_bytes())
+                }) {
+                    return Err(Error::Denied);
+                }
+                user.clone()
+            }
+            LoginState::Discoverable(_) => self
+                .webauthn
+                .identify_discoverable_authentication(&proof)
+                .map_err(|_| Error::Denied)?
+                .0
+                .to_string(),
+        };
         let mut tx = self.pool.begin().await?;
         sqlx::query("UPDATE users SET name=name WHERE id=?")
-            .bind(&login.user)
+            .bind(&user)
             .execute(&mut *tx)
             .await?;
-        // Verify the original server challenge, then compare against the latest database
-        // counter while holding the writer lock to reject concurrent stale assertions.
-        let result = self
-            .webauthn
-            .finish_passkey_authentication(&proof, &login.state)
-            .map_err(|_| Error::Denied)?;
+        // The unsigned handle selects a candidate only. Under the writer lock require
+        // this exact credential to belong to that user before verifying its signature.
         let row = sqlx::query("SELECT id,credential FROM passkeys WHERE user_id=? AND id=?")
-            .bind(&login.user)
-            .bind(B64.encode(result.cred_id().as_ref()))
+            .bind(&user)
+            .bind(B64.encode(proof.get_credential_id()))
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(Error::Denied)?;
         let mut key: Passkey = serde_json::from_str(row.get("credential"))?;
+        let result = match login.state {
+            LoginState::Identified(state, _) => {
+                self.webauthn.finish_passkey_authentication(&proof, &state)
+            }
+            LoginState::Discoverable(state) => {
+                self.webauthn
+                    .finish_discoverable_authentication(&proof, state, &[(&key).into()])
+            }
+        }
+        .map_err(|_| Error::Denied)?;
         // Nonzero counters are monotonic; synced authenticators legitimately use zero.
         // The pinned verifier serializes this private counter under cred.counter; a schema
         // change fails closed here and must pass the stale-counter regression test.
@@ -275,7 +398,14 @@ impl Auth {
             .execute(&mut *tx)
             .await?;
         let token = random();
-        insert_session(&mut tx, &token, &login.user, device, now).await?;
+        insert_session(&mut tx, &token, &user, device, now).await?;
+        if pending_unlock {
+            sqlx::query("UPDATE sessions SET unlocked=0,expires=? WHERE token_hash=?")
+                .bind(now + CEREMONY)
+                .bind(hash(&token))
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(token)
     }
@@ -284,13 +414,14 @@ impl Auth {
     pub async fn add_start(&self, token: &str, now: i64) -> Result<Value> {
         let session = self.session(token, now).await?;
         session.require_fresh(now)?;
-        let name: String = sqlx::query_scalar("SELECT name FROM users WHERE id=?")
+        let identity = sqlx::query("SELECT username,display_name FROM users WHERE id=?")
             .bind(&session.user_id)
             .fetch_one(&self.pool)
             .await?;
         self.registration(
             session.user_id,
-            &name,
+            identity.get("username"),
+            identity.get("display_name"),
             Authority::Add(hash(token)),
             false,
             now,
@@ -347,4 +478,21 @@ pub(super) fn reject_prf(proof: &Value) -> Result<()> {
         return Err(Error::Invalid);
     }
     Ok(())
+}
+
+/// Persist the verifier-owned credential and the exact input used to wrap its DEK.
+async fn store_passkey(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user: &str,
+    key: &Passkey,
+) -> Result<String> {
+    let id = B64.encode(key.cred_id().as_ref());
+    sqlx::query("INSERT INTO passkeys(id,user_id,credential,prf_input) VALUES (?,?,?,?)")
+        .bind(&id)
+        .bind(user)
+        .bind(serde_json::to_string(key)?)
+        .bind(constant_prf_input())
+        .execute(&mut **tx)
+        .await?;
+    Ok(id)
 }
