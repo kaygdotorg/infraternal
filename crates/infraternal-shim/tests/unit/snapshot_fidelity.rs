@@ -535,3 +535,33 @@ fn fidelity_iso_protection_does_not_keep_rep_scratch() {
     )
     .unwrap();
 }
+
+#[test]
+#[ignore = "charset-mapped wide-space red regression; enable with explicit rejection"]
+fn fidelity_charset_mapped_wide_space_is_explicitly_rejected() {
+    let prefix = "\x1b*0\x1bN界".as_bytes();
+    let mut a = reset_terminal(12, 5).unwrap();
+    a.process(prefix);
+    match a.snapshot() {
+        Ok(snapshot) => {
+            let mut b = reset_terminal(12, 5).unwrap();
+            b.process(&snapshot);
+            assert_eq!(
+                a.engine.state_difference(&b.engine),
+                0,
+                "charset-mapped wide-space state"
+            );
+            panic!("bounded painter must explicitly reject unconstructed wide-space metadata");
+        }
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::Unsupported),
+    }
+    let mut control = reset_terminal(12, 5).unwrap();
+    control.process(prefix);
+    a.process(b"Z");
+    control.process(b"Z");
+    assert_eq!(
+        a.engine.state_difference(&control.engine),
+        0,
+        "rejection leaves source intact"
+    );
+}
