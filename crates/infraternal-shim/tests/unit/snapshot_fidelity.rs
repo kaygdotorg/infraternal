@@ -43,7 +43,6 @@ fn fidelity_cursor() {
     );
 }
 #[test]
-#[ignore = "red regression: enable after line-edge fix"]
 fn fidelity_edge() {
     replay(
         "wrapped-head-before-region-change",

@@ -73,7 +73,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) Writer.Error!void {
 }
 
 fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Error!void {
-    try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
+    try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
     var wrap = false;
     for (0..t.rows) |y| {
         if (!wrap) try w.print("\x1b[{d};1H", .{y + 1});
@@ -230,6 +230,19 @@ fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
     }
     try emptyCells(w, &empty);
     try w.writeAll("\x1b]8;;\x1b\\");
+    const values = p.cells(.all);
+    const edge = &values[values.len - 1];
+    if (p.rowAndCell().row.wrap and edge.wide == .narrow and !edge.hasText()) {
+        // Wrapping a wide character makes a styled spacer head. Overwriting
+        // that wide character on the next row narrows the head without losing
+        // its SGR/link/protection. ECH would discard those empty-cell attributes.
+        // Leave the cursor at the next row's start for its ordinary repaint.
+        try w.print("\x1b[{d}G", .{values.len});
+        try cellLink(w, p, edge);
+        try w.print("\x1b[{d}\"q{f}", .{ @as(u8, if (edge.protected) 1 else 0), effectiveStyle(p, edge).formatterVt() });
+        try codepoint(w, '界');
+        try w.writeAll("\x1b[2D \x1b[1D\x1b]8;;\x1b\\");
+    }
 }
 
 fn emptyCells(w: *Writer, count: *usize) Writer.Error!void {
