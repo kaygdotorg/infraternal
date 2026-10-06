@@ -18,6 +18,8 @@ const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const encoder = new TextEncoder();
 
 export interface TerminalHooks {
+  /** Only a public session id; writer/resume capabilities remain in memory. */
+  onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
   onDisconnected?: (forced: boolean) => void;
   onInput?: (data: string, at: number, sequence: bigint) => boolean | void;
@@ -39,6 +41,8 @@ export interface TerminalConfig {
   status: HTMLElement;
   hooks?: TerminalHooks;
   traceMockServer?: boolean;
+  /** Reattach this tab's owned session using a new writer after a page reload. */
+  initialSessionId?: string;
   /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
   scrollbackLimit?: number;
 }
@@ -173,6 +177,12 @@ export class TerminalClient {
     this.terminal.onScroll((offset) => {
       config.host.dataset.scrolled = String(offset !== 0);
     });
+    if (config.initialSessionId && isCanonicalUuid(config.initialSessionId)) {
+      // A page reload has no pending-input buffer or writer capability. Start
+      // a fresh writer at zero, replay output from zero, and let server-owned
+      // session authorization validate this nonsecret convenience identifier.
+      this.sessionId = uuidBytes(config.initialSessionId);
+    }
     this.scheduleFit();
     this.connect();
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
@@ -373,7 +383,9 @@ export class TerminalClient {
         try {
           const result = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.json)) as unknown;
           const record = asRecord(result);
-          this.sessionId = uuidBytes(requireString(record.session_id));
+          const sessionId = requireString(record.session_id);
+          this.sessionId = uuidBytes(sessionId);
+          this.config.hooks?.onSessionCreated?.(sessionId);
           this.attachRequested = true;
           this.tryAttach();
         } catch {
