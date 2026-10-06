@@ -3,10 +3,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { entropyToMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
+import { terminalFixtures } from "./terminal-fixtures";
 
 const HOST = "localhost";
 const PORT = 4173;
@@ -31,7 +33,9 @@ interface MockSession {
   sessionIdText: string;
   connectionId: Uint8Array;
   resumeToken: Uint8Array;
+  fixtureOutput: Uint8Array;
   output: Uint8Array;
+  echoOutputLength: number;
   outputLength: number;
   writtenInput: bigint;
   acceptedInputBytes: number;
@@ -65,11 +69,13 @@ let setupToken = newToken();
 let pendingRegistration: { ceremony: string; userId: string; username: string; displayName: string; recoveryWords: string; rpId: string; prfInput: string } | undefined;
 let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
+let selectedFixture: Uint8Array | undefined;
 let session = createSession();
 const traceEvents: TraceEvent[] = [];
 
 const server = createServer((request, response) => { void routeHttp(request, response); });
 const webSockets = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
+const connections = new Set<Connection>();
 
 server.on("upgrade", (request, socket, head) => {
   const path = new URL(request.url ?? "/", `http://${request.headers.host ?? `${HOST}:${PORT}`}`).pathname;
@@ -100,6 +106,7 @@ webSockets.on("connection", (socket, request) => {
     resumeExpected: false,
     welcomeTimer: undefined,
   };
+  connections.add(connection);
   socket.on("message", (raw, binary) => {
     const receivedAt = connection.traceEnabled ? process.hrtime.bigint() : 0n;
     if (!binary) {
@@ -115,6 +122,7 @@ webSockets.on("connection", (socket, request) => {
   });
   socket.on("close", () => {
     if (connection.welcomeTimer) clearTimeout(connection.welcomeTimer);
+    connections.delete(connection);
   });
 });
 
@@ -132,6 +140,62 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   }
   if (request.method === "GET" && url.pathname === "/__mock/setup-token") {
     return sendJson(response, 200, { setup_token: setupToken });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/open-terminal") {
+    owner = {
+      userId: randomUuid(),
+      username: "renderer_test",
+      displayName: "Renderer test",
+      credentialId: newToken(),
+      passkeyWrap: {},
+      prfInput: newToken(),
+    };
+    activeAuthCookie = newToken();
+    setAuthCookie(response, activeAuthCookie);
+    return sendJson(response, 200, { ok: true });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/fixture") {
+    const body = await readJson(request);
+    const name = body?.name;
+    const fixture = terminalFixtures.find((entry) => entry.name === name);
+    if (!fixture) return sendJson(response, 400, { error: "unknown renderer fixture" });
+    try {
+      const compressed = await readFile(resolve(import.meta.dirname, "fixtures", fixture.path));
+      const bytes = fixture.encoding === "gzip" ? gunzipSync(compressed) : compressed;
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      if (bytes.byteLength !== fixture.bytes || digest !== fixture.sha256) {
+        return sendJson(response, 500, { error: "renderer fixture checksum mismatch" });
+      }
+      const targets = [...new Set([...connections].map((connection) => connection.session))];
+      if (targets.length === 0) targets.push(session);
+      if (targets.some((target) => target.outputLength !== 0 || target.echoOutputLength !== 0)) {
+        return sendJson(response, 409, { error: "renderer fixture requires a fresh terminal session" });
+      }
+      selectedFixture = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      for (const target of targets) {
+        target.fixtureOutput = selectedFixture;
+        target.outputLength = selectedFixture.byteLength;
+      }
+      for (const connection of connections) {
+        if (connection.attached && targets.includes(connection.session)) flushOutput(connection);
+      }
+      return sendJson(response, 200, { bytes: fixture.bytes, sha256: digest });
+    } catch {
+      return sendJson(response, 500, { error: "renderer fixture could not be loaded" });
+    }
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/canary") {
+    const fixtureLength = session.fixtureOutput.byteLength;
+    const readers = [...connections].filter((connection) => connection.session === session && connection.attached);
+    if (readers.length === 0 || readers.some((connection) => connection.outputCursor < BigInt(fixtureLength))) {
+      return sendJson(response, 409, { error: "fixture output is still in flight" });
+    }
+    const canary = new TextEncoder().encode("\u001bc\r\n__TRACER_CANARY__\r\n");
+    session.output.set(canary, session.echoOutputLength);
+    session.echoOutputLength += canary.byteLength;
+    session.outputLength += canary.byteLength;
+    for (const connection of readers) flushOutput(connection);
+    return sendJson(response, 200, { bytes: canary.byteLength });
   }
   if (request.method === "GET" && url.pathname === "/__mock/state") {
     return sendJson(response, 200, {
@@ -332,7 +396,7 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
         return;
       }
       // A fresh open gets fresh terminal state; only Resume reuses an existing session.
-      connection.session = session = createSession(connection.session);
+      connection.session = session = createSession(connection.session, selectedFixture);
       sendFrame(connection.socket, 0, {
         type: "Result",
         callId: frame.callId,
@@ -395,11 +459,12 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
   const duplicateBytes = Math.min(bytes.byteLength, alreadyWritten);
   const fresh = bytes.subarray(duplicateBytes);
   if (fresh.byteLength > 0) {
-    if (connection.session.outputLength + fresh.byteLength > MAX_MOCK_OUTPUT) {
+    if (connection.session.echoOutputLength + fresh.byteLength > MAX_MOCK_OUTPUT) {
       connection.socket.close(1011, "test-double output limit reached");
       return;
     }
-    connection.session.output.set(fresh, connection.session.outputLength);
+    connection.session.output.set(fresh, connection.session.echoOutputLength);
+    connection.session.echoOutputLength += fresh.byteLength;
     connection.session.outputLength += fresh.byteLength;
     connection.session.writtenInput += BigInt(fresh.byteLength);
     connection.session.acceptedInputBytes += fresh.byteLength;
@@ -418,9 +483,13 @@ function flushOutput(connection: Connection): void {
   if (!connection.attached || !isSocketOpen(connection.socket)) return;
   const availableEnd = BigInt(connection.session.outputLength);
   while (connection.credit > 0 && connection.outputCursor < availableEnd) {
-    const offset = Number(connection.outputCursor);
-    const length = Math.min(MAX_MESSAGE, connection.credit, connection.session.outputLength - offset);
-    const bytes = connection.session.output.subarray(offset, offset + length);
+    const absoluteOffset = Number(connection.outputCursor);
+    const fixtureLength = connection.session.fixtureOutput.byteLength;
+    const source = absoluteOffset < fixtureLength ? connection.session.fixtureOutput : connection.session.output;
+    const offset = absoluteOffset < fixtureLength ? absoluteOffset : absoluteOffset - fixtureLength;
+    const sourceEnd = absoluteOffset < fixtureLength ? fixtureLength : fixtureLength + connection.session.echoOutputLength;
+    const length = Math.min(MAX_MESSAGE, connection.credit, sourceEnd - absoluteOffset);
+    const bytes = source.subarray(offset, offset + length);
     sendFrame(connection.socket, 1, { type: "Output", outSeq: connection.outputCursor, bytes },
       connection.traceEnabled ? connection.outputCursor : undefined, length);
     connection.outputCursor += BigInt(length);
@@ -520,11 +589,12 @@ function resetMockState(): void {
   pendingRegistration = undefined;
   pendingLogin = undefined;
   dropNextAck = false;
+  selectedFixture = undefined;
   traceEvents.length = 0;
   session = createSession();
 }
 
-function createSession(resumeFrom?: MockSession): MockSession {
+function createSession(resumeFrom?: MockSession, fixtureOutput: Uint8Array = new Uint8Array()): MockSession {
   const sessionIdText = randomUuid();
   return {
     sessionId: uuidBytes(sessionIdText),
@@ -532,8 +602,10 @@ function createSession(resumeFrom?: MockSession): MockSession {
     // The resume token belongs to the authenticated websocket connection, not a fresh PTY.
     connectionId: resumeFrom?.connectionId ?? randomBytes(16),
     resumeToken: resumeFrom?.resumeToken ?? randomBytes(32),
+    fixtureOutput,
     output: new Uint8Array(MAX_MOCK_OUTPUT),
-    outputLength: 0,
+    echoOutputLength: 0,
+    outputLength: fixtureOutput.byteLength,
     writtenInput: 0n,
     acceptedInputBytes: 0,
     echoedText: "",
