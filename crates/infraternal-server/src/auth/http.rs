@@ -25,7 +25,9 @@ pub fn router(auth: Auth) -> Router {
 #[serde(deny_unknown_fields)]
 struct Setup {
     token: String,
-    name: String,
+    name: Option<String>,
+    username: Option<String>,
+    display_name: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,6 +142,11 @@ async fn dispatch(
             Json(json!({"error":"invalid request"})),
         )
             .into_response(),
+        Err(Error::Conflict) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"username already exists"})),
+        )
+            .into_response(),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error":"auth unavailable"})),
@@ -186,7 +193,19 @@ async fn execute(
         "status" => public_status(auth, value).await?,
         "setup-start" => {
             let b: Setup = body(value)?;
-            auth.setup_start(&b.token, &b.name, now).await?
+            match (b.name, b.username, b.display_name) {
+                (Some(name), None, None) => auth.setup_start(&b.token, &name, now).await?,
+                (None, Some(username), display_name) => {
+                    auth.setup_start_with_identity(
+                        &b.token,
+                        &username,
+                        display_name.as_deref(),
+                        now,
+                    )
+                    .await?
+                }
+                _ => return Err(Error::Invalid),
+            }
         }
         "registration-finish" => {
             let b: Register = body(value)?;

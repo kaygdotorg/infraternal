@@ -67,12 +67,13 @@ impl Auth {
 
     /// Release the old recovery envelope only after the delay, then enroll a replacement passkey.
     pub async fn recovery_ready(&self, token: &str, now: i64) -> Result<Value> {
-        let row = sqlx::query("SELECT users.id,users.name,wraps.blob FROM recovery JOIN users ON users.id=recovery.user_id JOIN wraps ON wraps.user_id=users.id AND wraps.kind='recovery' WHERE recovery.token_hash=? AND recovery.ready<=? AND recovery.expires>?")
+        let row = sqlx::query("SELECT users.id,users.username,users.display_name,wraps.blob FROM recovery JOIN users ON users.id=recovery.user_id JOIN wraps ON wraps.user_id=users.id AND wraps.kind='recovery' WHERE recovery.token_hash=? AND recovery.ready<=? AND recovery.expires>?")
             .bind(hash(token)).bind(now).bind(now).fetch_optional(&self.pool).await?.ok_or(Error::Denied)?;
         let mut registration = self
             .registration(
                 row.get("id"),
-                row.get("name"),
+                row.get("username"),
+                row.get("display_name"),
                 Authority::Recovery(hash(token)),
                 true,
                 now,

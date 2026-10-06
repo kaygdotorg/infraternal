@@ -43,6 +43,8 @@ pub enum Error {
     Denied,
     #[error("invalid request")]
     Invalid,
+    #[error("username already exists")]
+    Conflict,
     #[error("storage unavailable")]
     Storage(#[from] sqlx::Error),
     #[error("migration failed")]
@@ -65,7 +67,8 @@ type Result<T> = std::result::Result<T, Error>;
 struct Registration {
     state: PasskeyRegistration,
     user: String,
-    name: String,
+    username: String,
+    display_name: String,
     authority: Authority,
     recovery_hash: Option<String>,
     expires: i64,

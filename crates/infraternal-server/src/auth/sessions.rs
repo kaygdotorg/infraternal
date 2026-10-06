@@ -5,6 +5,8 @@ use super::{Auth, Error, FRESH, Result, Row, SESSION, Serialize, hash};
 #[derive(Serialize)]
 pub struct Session {
     pub user_id: String,
+    pub username: String,
+    pub display_name: String,
     pub device: String,
     pub fresh: i64,
 }
@@ -21,10 +23,12 @@ impl Session {
 impl Auth {
     /// Slide a live session by 30 days, never resurrecting an expired or revoked record.
     pub async fn session(&self, token: &str, now: i64) -> Result<Session> {
-        let row = sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=? AND expires>? RETURNING user_id,device,fresh")
+        let row = sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=? AND expires>? RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name")
             .bind(now + SESSION).bind(hash(token)).bind(now).fetch_optional(&self.pool).await?.ok_or(Error::Denied)?;
         Ok(Session {
             user_id: row.get("user_id"),
+            username: row.get("username"),
+            display_name: row.get("display_name"),
             device: row.get("device"),
             fresh: row.get("fresh"),
         })

@@ -3,6 +3,7 @@ use super::{
     Auth, Authority, B64, CEREMONY, Engine, Error, Login, LoginState, Passkey, Pending,
     PublicKeyCredential, RegisterPublicKeyCredential, Registration, Result, Row, Uuid, Value, Wrap,
     hash, insert_session, json, prf_salt, put_wrap, random, recovery_hash, require_session_tx,
+    setup::valid_username,
 };
 
 #[allow(clippy::missing_errors_doc)]
@@ -10,12 +11,13 @@ impl Auth {
     pub(super) async fn registration(
         &self,
         user: String,
-        name: &str,
+        username: &str,
+        display_name: &str,
         authority: Authority,
         rotate: bool,
         now: i64,
     ) -> Result<Value> {
-        if name.is_empty() || name.len() > 128 {
+        if !valid_username(username) || display_name.chars().count() > 64 {
             return Err(Error::Invalid);
         }
         let keys = self.passkeys(&user).await?;
@@ -26,8 +28,8 @@ impl Auth {
             .webauthn
             .start_passkey_registration(
                 Uuid::parse_str(&user).map_err(|_| Error::Invalid)?,
-                name,
-                name,
+                username,
+                display_name,
                 Some(keys.iter().map(|k| k.cred_id().clone()).collect()),
             )
             .map_err(|_| Error::Webauthn)?;
@@ -61,7 +63,8 @@ impl Auth {
             Registration {
                 state,
                 user: user.clone(),
-                name: name.into(),
+                username: username.into(),
+                display_name: display_name.into(),
                 authority,
                 recovery_hash,
                 expires: now + CEREMONY,
@@ -122,10 +125,20 @@ impl Auth {
                 {
                     return Err(Error::Denied);
                 }
-                sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES (?,?,1,?)")
+                let username_exists: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username=?)")
+                        .bind(&registration.username)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if username_exists {
+                    return Err(Error::Conflict);
+                }
+                sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,?,1,?,?,?)")
                     .bind(&registration.user)
-                    .bind(&registration.name)
+                    .bind(&registration.display_name)
                     .bind(registration.recovery_hash.as_ref().ok_or(Error::Invalid)?)
+                    .bind(&registration.username)
+                    .bind(&registration.display_name)
                     .execute(&mut *tx)
                     .await?;
             }
@@ -351,13 +364,14 @@ impl Auth {
     pub async fn add_start(&self, token: &str, now: i64) -> Result<Value> {
         let session = self.session(token, now).await?;
         session.require_fresh(now)?;
-        let name: String = sqlx::query_scalar("SELECT name FROM users WHERE id=?")
+        let identity = sqlx::query("SELECT username,display_name FROM users WHERE id=?")
             .bind(&session.user_id)
             .fetch_one(&self.pool)
             .await?;
         self.registration(
             session.user_id,
-            &name,
+            identity.get("username"),
+            identity.get("display_name"),
             Authority::Add(hash(token)),
             false,
             now,

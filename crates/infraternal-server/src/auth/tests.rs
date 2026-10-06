@@ -1313,11 +1313,33 @@ async fn http_post_json(
     action: &str,
     value: Value,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
-    let mut request = axum::http::Request::builder()
+    http_post_json_with_optional_cookie(app, action, value, None).await
+}
+
+async fn http_post_json_with_cookie(
+    app: &axum::Router,
+    action: &str,
+    value: Value,
+    cookie: &str,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
+    http_post_json_with_optional_cookie(app, action, value, Some(cookie)).await
+}
+
+async fn http_post_json_with_optional_cookie(
+    app: &axum::Router,
+    action: &str,
+    value: Value,
+    cookie: Option<&str>,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
+    let mut builder = axum::http::Request::builder()
         .method("POST")
         .uri(format!("/auth/{action}"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .header(axum::http::header::ORIGIN, ORIGIN)
+        .header(axum::http::header::ORIGIN, ORIGIN);
+    if let Some(cookie) = cookie {
+        builder = builder.header(axum::http::header::COOKIE, cookie);
+    }
+    let mut request = builder
         .body(axum::body::Body::from(
             serde_json::to_vec(&value).expect("HTTP JSON"),
         ))
@@ -1872,6 +1894,111 @@ async fn public_status_and_discoverable_http_login() {
     )
     .unwrap();
     assert_eq!(f.auth.session(token, now).await.unwrap().user_id, f.user);
+}
+
+/// New setup callers identify the passkey separately from the human-facing label.
+#[tokio::test]
+async fn setup_start_accepts_username_and_display_name() {
+    let (auth, setup_token) = empty().await;
+    let app = router(auth.clone());
+    let (status, _, default_body) = http_post_json(
+        &app,
+        "setup-start",
+        json!({"token":setup_token,"username":"ada_default"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(
+        default_body["options"]["publicKey"]["user"]["displayName"],
+        "ada_default"
+    );
+
+    let (status, _, body) = http_post_json(
+        &app,
+        "setup-start",
+        json!({
+            "token":setup_token,
+            "username":"ada",
+            "display_name":"Ada Lovelace"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body["options"]["publicKey"]["user"]["name"], "ada");
+    assert_eq!(
+        body["options"]["publicKey"]["user"]["displayName"],
+        "Ada Lovelace"
+    );
+
+    let user_id = str_field(&body, "user_id").to_owned();
+    let words = str_field(&body, "recovery_words").to_owned();
+    let software = Software::new();
+    let dek = rand::random::<[u8; 32]>();
+    let passkey_wrap = browser_wrap(&software.prf(&body), &dek, &user_id, "passkey");
+    let recovery_wrap = browser_wrap(&recovery_ikm(&words), &dek, &user_id, "recovery");
+    let (status, headers, _) = http_post_json(
+        &app,
+        "registration-finish",
+        json!({
+            "ceremony":body["ceremony"],
+            "proof":software.registration(&body, ORIGIN, true),
+            "passkey_wrap":passkey_wrap,
+            "recovery_wrap":recovery_wrap
+        }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let cookie = headers[axum::http::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let (status, _, session) =
+        http_post_json_with_cookie(&app, "session", json!({}), &cookie).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(session["user_id"], user_id);
+    assert_eq!(session["username"], "ada");
+    assert_eq!(session["display_name"], "Ada Lovelace");
+}
+
+/// Enrollment rejects invalid usernames, overlong labels and an account-name collision.
+#[tokio::test]
+async fn setup_identity_validation_and_uniqueness() {
+    let (auth, setup_token) = empty().await;
+    for username in ["a", "Ada", "ada.name", "has space", "ümlaut"] {
+        assert!(matches!(
+            auth.setup_start_with_identity(&setup_token, username, None, NOW)
+                .await,
+            Err(Error::Invalid)
+        ));
+    }
+    let too_long = "x".repeat(33);
+    assert!(matches!(
+        auth.setup_start_with_identity(&setup_token, &too_long, None, NOW)
+            .await,
+        Err(Error::Invalid)
+    ));
+    let too_many_display_chars = "é".repeat(65);
+    assert!(matches!(
+        auth.setup_start_with_identity(&setup_token, "ada", Some(&too_many_display_chars), NOW)
+            .await,
+        Err(Error::Invalid)
+    ));
+
+    let other = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?, 'taken', 0, 'unused', 'taken', 'Taken')")
+        .bind(other)
+        .execute(&auth.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        auth.setup_start_with_identity(&setup_token, "taken", None, NOW)
+            .await,
+        Err(Error::Conflict)
+    ));
 }
 
 /// The account identity migration adds persisted, unique usernames and display names.
