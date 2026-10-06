@@ -141,3 +141,7 @@ impl Drop for Engine {
         unsafe { ghostty_terminal_free(self.0.as_ptr()) }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/allocation.rs"]
+mod allocation;
