@@ -18,8 +18,10 @@ export default defineConfig({
         ? ["--disable-renderer-backgrounding"]
         : process.env.TRACER_CHROMIUM_FLAGS.split(/\s+/).filter(Boolean),
     },
-    trace: "retain-on-failure",
-    screenshot: "only-on-failure",
+    // Ceremonies contain capabilities and recovery words. Capture only explicit
+    // access/terminal screenshots, never network traces or arbitrary failure pages.
+    trace: "off",
+    screenshot: "off",
   },
   webServer: {
     command: "bun run build && bun run test/mock-server.ts",
