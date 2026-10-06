@@ -51,8 +51,11 @@ impl Terminal {
     pub fn process(&mut self, bytes: &[u8]) {
         self.engine.process(bytes);
         for &byte in bytes {
-            // ASCII in ground state cannot change unfinished-parser carry.
-            if (0x20..0x7f).contains(&byte) && self.pending.is_empty() {
+            // Only ESC can start a sequence among ground-state ASCII/C0.
+            // LF/CR/TAB and charset shifts are already handled by Ghostty;
+            // feeding them to the carry parser adds work to output floods.
+            // Inside a pending sequence, still parse C0 execution/cancellation.
+            if byte != 0x1b && byte < 0x80 && self.pending.is_empty() {
                 continue;
             }
             let string = self
