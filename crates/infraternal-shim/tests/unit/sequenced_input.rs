@@ -24,6 +24,7 @@ fn new_frames_roundtrip_and_refuse_noncanonical_payloads() {
         Frame::InputAck(10),
         Frame::InputStateRequest,
         Frame::InputState(10, 12),
+        Frame::SelectWriter(0x01020304),
     ] {
         let wire = frame.encode().unwrap();
         for split in 0..wire.len() {
@@ -33,7 +34,14 @@ fn new_frames_roundtrip_and_refuse_noncanonical_payloads() {
             assert_eq!(frames, vec![frame.clone()]);
         }
     }
-    for bytes in [&[0x17][..], &[0x18][..], &[0x19, 0][..], &[0x1a, 0][..]] {
+    for bytes in [
+        &[0x17][..],
+        &[0x18][..],
+        &[0x19, 0][..],
+        &[0x1a, 0][..],
+        &[0x1b][..],
+        &[0x1b, 1, 2, 3, 4, 5][..],
+    ] {
         assert!(Frame::decode(bytes).is_err());
     }
 }
@@ -90,4 +98,12 @@ fn reusable_encoder_retains_capacity_and_refuses_growth_before_mutation() {
     );
     assert_eq!(bytes, saved);
     assert_eq!(bytes.capacity(), capacity);
+}
+
+#[test]
+fn writer_selection_has_a_frozen_little_endian_layout() {
+    assert_eq!(
+        Frame::SelectWriter(0x01020304).encode().unwrap(),
+        [5, 0, 0, 0, 0x1b, 4, 3, 2, 1]
+    );
 }

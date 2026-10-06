@@ -89,3 +89,44 @@ impl Inputs {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Verify writer ownership at actual partial-write boundaries and retained identity limits.
+    use super::*;
+    #[test]
+    fn partial_writes_credit_only_the_owner_and_replay_trims_per_writer() {
+        let mut inputs = Inputs::default();
+        inputs.select(7).unwrap();
+        inputs.select(9).unwrap();
+        let mut queue = VecDeque::new();
+        inputs.accept(7, 0, b"abc", &mut queue).unwrap();
+        inputs.accept(9, 0, b"de", &mut queue).unwrap();
+        inputs.advance(4).unwrap();
+        assert_eq!(inputs.get(Some(7)).unwrap().written, 3);
+        assert_eq!(inputs.get(Some(9)).unwrap().written, 1);
+        assert_eq!(inputs.get(Some(9)).unwrap().accepted, 2);
+        for _ in 0..4 {
+            queue.pop_front();
+        }
+        inputs.accept(7, 0, b"abc", &mut queue).unwrap();
+        inputs.accept(9, 1, b"ef", &mut queue).unwrap();
+        assert_eq!(queue.iter().copied().collect::<Vec<_>>(), b"ef");
+        inputs.advance(2).unwrap();
+        assert_eq!(inputs.get(Some(9)).unwrap().written, 3);
+        assert!(inputs.accept(7, 4, b"gap", &mut queue).is_err());
+        assert!(inputs.accept(9, u64::MAX, b"overflow", &mut queue).is_err());
+        assert_eq!(inputs.get(Some(7)).unwrap().accepted, 3);
+    }
+    #[test]
+    fn identity_cap_preserves_all_existing_cursors() {
+        let mut inputs = Inputs::default();
+        for writer in 1..=512 {
+            inputs.select(writer).unwrap();
+        }
+        assert!(inputs.select(513).is_err());
+        inputs.select(512).unwrap();
+        assert!(inputs.get(Some(513)).is_err());
+        assert_eq!(inputs.get(Some(512)).unwrap().written, 0);
+    }
+}
