@@ -341,3 +341,13 @@ fn fidelity_prompt_resize_requires_explicit_rejection() {
         "rejection leaves prompt resize intact"
     );
 }
+
+#[test]
+#[ignore = "R3 fresh-C-default red regression; enable with explicit rejection"]
+fn fidelity_fresh_c_redraw_default_is_explicitly_rejected() {
+    let a = Terminal::new(80, 24).unwrap();
+    assert!(
+        matches!(a.snapshot(), Err(e) if e.kind() == std::io::ErrorKind::Unsupported),
+        "RIS changes the fresh C redraw default; faithful snapshot must reject"
+    );
+}
