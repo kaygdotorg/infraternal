@@ -209,8 +209,15 @@ frames are binary, because they carry each keystroke and each output chunk.
 
 - WebSocket admission reserves the 16-per-user and 256-global permits at
   upgrade, including sockets without Hello. Hello/Resume and incomplete wire
-  frames have five-second completion deadlines; transport reads have a
-  thirty-second liveness deadline and writes are bounded at one second.
+  frames have five-second completion deadlines; writes are bounded at one
+  second. After Hello, an empty receive buffer waits without a liveness timer:
+  healthy idle terminals have zero scheduler activations [41]. The former
+  thirty-second idle-read deadline caused periodic disconnect/reconnect work.
+  Axum reassembles RFC WebSocket fragments internally; unseen post-Hello
+  fragments are bounded by the 4 MiB message/frame limit, admission permits,
+  and live authority expiry/revocation, rather than an idle-read timer. A begun
+  mux frame retains its five-second deadline across transport pings and select
+  cancellation. Pre-Hello/Resume remains bounded even for unseen fragments.
   Disconnect releases permits. Revocation wakes idle sockets without polling;
   each dispatch checks current session authority and expiration.
 - Leg A: the WebSocket upgrade carries the session cookie
