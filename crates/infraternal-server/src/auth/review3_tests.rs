@@ -625,3 +625,142 @@ async fn review3_backend_reply_has_a_deadline() {
     );
     server.abort();
 }
+
+/// Resume must not rotate a capability after the authenticating session has been revoked.
+#[tokio::test]
+#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
+async fn review3_revoked_resume_must_not_welcome() {
+    let _guard = SERIAL.lock().await;
+    let (f, addr, server, _peer) = review3_socket().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut first, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
+    assert_server_hello(&mut first).await;
+    client_ws_send(
+        &mut first,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "original",
+        },
+    )
+    .await;
+    let (id, token) = read_welcome(&mut first).await;
+    first.close(None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let inactive: bool = sqlx::query_scalar(
+                "SELECT active=0 FROM websocket_connections WHERE connection_id=?",
+            )
+            .bind(id.as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+            if inactive {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 1,
+            client_info: "resume",
+        },
+    )
+    .await;
+    f.auth.logout(&f.session).await.unwrap();
+    let mut wire = Vec::new();
+    encode_muxed_frame_into(
+        0,
+        &Frame::Resume {
+            connection_id: &id,
+            resume_token: &token,
+        },
+        &mut wire,
+    )
+    .unwrap();
+    let _ = socket.send(Message::Binary(wire.into())).await;
+    let start = Instant::now();
+    let next = tokio::time::timeout(Duration::from_millis(100), socket.next()).await;
+    assert!(next.is_ok(), "revoked Resume did not close promptly");
+    assert!(
+        !matches!(next, Ok(Some(Ok(Message::Binary(ref wire)))) if matches!(decode_muxed_frame(wire).unwrap().frame, Frame::Welcome { .. })),
+        "revoked Resume minted Welcome"
+    );
+    println!(
+        "revoked Resume close={}us; no Welcome",
+        start.elapsed().as_micros()
+    );
+    server.abort();
+}
+
+/// Revocation interrupts the pre-Hello wait itself; a client need not send another frame.
+#[tokio::test]
+#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
+async fn review3_waiting_handshake_loses_authority() {
+    let _guard = SERIAL.lock().await;
+    let (f, addr, server, _peer) = review3_socket().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
+    assert_server_hello(&mut socket).await;
+    f.auth.logout(&f.session).await.unwrap();
+    let start = Instant::now();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), socket.next())
+            .await
+            .is_ok(),
+        "pre-Hello wait retained revoked authority"
+    );
+    println!("revoked pre-Hello close={}us", start.elapsed().as_micros());
+    server.abort();
+}
+
+/// A stored expiry transition between upgrade and Hello cannot mint connection state.
+#[tokio::test]
+#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
+async fn review3_expired_handshake_must_not_welcome() {
+    let _guard = SERIAL.lock().await;
+    let (f, addr, server, _peer) = review3_socket().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
+    assert_server_hello(&mut socket).await;
+    let now = crate::websocket::now_seconds().unwrap();
+    sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=?")
+        .bind(now - 1)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let mut wire = Vec::new();
+    encode_muxed_frame_into(
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "expired",
+        },
+        &mut wire,
+    )
+    .unwrap();
+    let _ = socket.send(Message::Binary(wire.into())).await;
+    let next = tokio::time::timeout(Duration::from_millis(100), socket.next()).await;
+    assert!(next.is_ok());
+    assert!(
+        !matches!(next, Ok(Some(Ok(Message::Binary(ref wire)))) if matches!(decode_muxed_frame(wire).unwrap().frame, Frame::Welcome { .. })),
+        "expired Hello minted Welcome"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM websocket_connections")
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    server.abort();
+}
