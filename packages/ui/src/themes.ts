@@ -69,10 +69,40 @@ function mix(left: string, right: string, amount: number): string {
   return `#${from.map((value, index) => Math.round(value + ((to[index] ?? value) - value) * amount).toString(16).padStart(2, "0")).join("")}`;
 }
 
+export interface OverlayMaterial {
+  overlay: string;
+  overlaySolid: string;
+  overlayLine: string;
+  shadow: string;
+  surface: string;
+}
+
+/** Keeps dark glass close to its palette and computes the same alpha composite used by the contrast audit. */
+export function overlayMaterial(active: Theme): OverlayMaterial {
+  const tinted = mix(active.bg, "#ffffff", active.dark ? 0.06 : 0.6);
+  const opacity = active.dark ? 0.68 : 0.72;
+  const channels = (hex: string) => [1, 3, 5].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
+  const rgb = (hex: string) => channels(hex).join(" ");
+  const tint = channels(tinted);
+  const background = channels(active.bg);
+  const surface = `#${tint.map((channel, index) => Math.round(channel * opacity + background[index]! * (1 - opacity)).toString(16).padStart(2, "0")).join("")}`;
+
+  return {
+    overlay: `rgb(${rgb(tinted)} / ${opacity})`,
+    overlaySolid: mix(active.bg, "#ffffff", active.dark ? 0.07 : 0.7),
+    overlayLine: `rgb(${rgb(active.fg)} / 0.09)`,
+    shadow: active.dark
+      ? "0 1px 1px rgb(0 0 0 / 0.3), 0 12px 32px -8px rgb(0 0 0 / 0.6)"
+      : "0 1px 1px rgb(0 0 0 / 0.04), 0 8px 24px -6px rgb(0 0 0 / 0.12)",
+    surface,
+  };
+}
+
 /** Applies UI tokens and mesh source hues; derived surfaces stay coherent with the theme. */
 export function applyTheme(active: Theme, root: HTMLElement): void {
   const style = root.style;
   const rgb = (hex: string) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16)).join(" ");
+  const overlay = overlayMaterial(active);
   style.setProperty("--bg", active.bg);
   style.setProperty("--fg", active.fg);
   style.setProperty("--fg-2", active.fg2);
@@ -81,9 +111,10 @@ export function applyTheme(active: Theme, root: HTMLElement): void {
   style.setProperty("--accent-soft", `rgb(${rgb(active.accent)} / 0.16)`);
   style.setProperty("--accent-fg", active.dark ? active.bg : "#ffffff");
   style.setProperty("--ok", active.ok);
-  style.setProperty("--overlay", `rgb(${rgb(mix(active.bg, "#ffffff", active.dark ? 0.06 : 0.6))} / ${active.dark ? 0.68 : 0.72})`);
-  style.setProperty("--overlay-solid", mix(active.bg, "#ffffff", active.dark ? 0.07 : 0.7));
-  style.setProperty("--overlay-line", `rgb(${rgb(active.fg)} / 0.09)`);
+  style.setProperty("--overlay", overlay.overlay);
+  style.setProperty("--overlay-solid", overlay.overlaySolid);
+  style.setProperty("--overlay-line", overlay.overlayLine);
+  style.setProperty("--shadow", overlay.shadow);
   style.setProperty("--line", `rgb(${rgb(active.fg)} / 0.07)`);
   style.setProperty("--hover", `rgb(${rgb(active.fg)} / 0.06)`);
   root.style.colorScheme = active.dark ? "dark" : "light";
