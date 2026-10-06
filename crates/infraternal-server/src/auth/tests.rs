@@ -1766,3 +1766,58 @@ async fn discoverable_login_handle_credential_counter_and_replay() {
             .is_err()
     );
 }
+
+/// Legacy ciphertext retains v1 while new credentials expose their exact user-bound input.
+#[tokio::test]
+async fn authenticated_prf_metadata_preserves_legacy_envelopes() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let wraps = f.auth.wraps(&f.session, NOW).await.unwrap();
+    let entries = wraps.as_array().unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry["kind"] == "passkey")
+            .unwrap()["prf_input"],
+        prf_salt(Some(&f.user))
+    );
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry["kind"] == "recovery")
+            .unwrap()["prf_input"]
+            .is_null()
+    );
+    let legacy_start =
+        json!({"options":{"publicKey":{"extensions":{"prf":{"eval":{"first":prf_salt(None)}}}}}});
+    let old_wrap = browser_wrap(&f.software.prf(&legacy_start), &f.dek, &f.user, "passkey");
+    sqlx::query("UPDATE passkeys SET prf_input=NULL WHERE user_id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE wraps SET blob=? WHERE user_id=? AND kind='passkey'")
+        .bind(serde_json::to_string(&old_wrap).unwrap())
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let login = f.auth.login_start(&f.user, NOW).await.unwrap();
+    assert_eq!(
+        login["options"]["publicKey"]["extensions"]["prf"]["eval"]["first"],
+        prf_salt(None)
+    );
+    let wraps = f.auth.wraps(&f.session, NOW).await.unwrap();
+    let entry = wraps
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "passkey")
+        .unwrap();
+    assert_eq!(entry["prf_input"], prf_salt(None));
+    let wrap: Wrap = serde_json::from_value(entry["wrap"].clone()).unwrap();
+    assert_eq!(
+        unwrap_browser(&f.software.prf(&login), &wrap, &f.user, "passkey").unwrap(),
+        f.dek
+    );
+}
