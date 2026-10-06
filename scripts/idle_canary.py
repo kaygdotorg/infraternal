@@ -45,7 +45,7 @@ def _schedstat_slices(pid):
     return slices
 
 
-def measure_scheduled_slices(pid, duration_seconds, sample_interval=0.1):
+def measure_scheduled_slices(pid, duration_seconds, sample_interval=0.1, on_activation=None):
     """Count task schedule-ins through procfs without waking the target process.
 
     The monitor sleeps between read-only procfs snapshots. A timer in the
@@ -67,6 +67,8 @@ def measure_scheduled_slices(pid, duration_seconds, sample_interval=0.1):
             before = previous.get(tid)
             delta = slices if before is None else max(0, slices - before)
             per_thread[tid] = per_thread.get(tid, 0) + delta
+            if delta and on_activation is not None:
+                on_activation(time.monotonic() - started, tid, delta)
         previous = current
 
     current = _schedstat_slices(pid)
@@ -74,13 +76,15 @@ def measure_scheduled_slices(pid, duration_seconds, sample_interval=0.1):
         before = previous.get(tid)
         delta = slices if before is None else max(0, slices - before)
         per_thread[tid] = per_thread.get(tid, 0) + delta
+        if delta and on_activation is not None:
+            on_activation(time.monotonic() - started, tid, delta)
     elapsed = time.monotonic() - started
     return ScheduledSlices(elapsed, per_thread)
 
 
-def assert_process_idle(pid, label, duration_seconds=2.2):
+def assert_process_idle(pid, label, duration_seconds=2.2, on_activation=None):
     """Require zero scheduled task activations over the requested window."""
-    measurement = measure_scheduled_slices(pid, duration_seconds)
+    measurement = measure_scheduled_slices(pid, duration_seconds, on_activation=on_activation)
     if measurement.total_slices:
         threads = []
         for tid, slices in sorted(measurement.per_thread.items()):
@@ -120,12 +124,19 @@ def session_shim_pid(session_id):
 def main():
     """Observe an explicitly supplied daemon/server PID without probing its API."""
     import argparse
+    import sys
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pid', type=int, required=True)
     parser.add_argument('--label', default='infraternal process')
     parser.add_argument('--seconds', type=float, default=10.0)
+    parser.add_argument('--events', action='store_true', help='timestamp positive activations on stderr')
     args = parser.parse_args()
-    measurement = assert_process_idle(args.pid, args.label, args.seconds)
+    def report_activation(elapsed, tid, count):
+        print(f'{args.label}: +{count} activation(s) at {elapsed:.3f}s; tid={tid}',
+              file=sys.stderr, flush=True)
+
+    measurement = assert_process_idle(args.pid, args.label, args.seconds,
+                                      report_activation if args.events else None)
     status = Path(f'/proc/{args.pid}/status').read_text().splitlines()
     rss = next(line.split()[1] for line in status if line.startswith('VmRSS:'))
     print(f'{args.label}: {measurement.total_slices} scheduler activations / '
