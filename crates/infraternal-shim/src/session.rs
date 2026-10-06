@@ -526,7 +526,7 @@ fn handle(
                 return Err(invalid());
             }
             pty.resize(cols, rows, px_w, px_h)?;
-            terminal.resize(cols, rows);
+            terminal.resize(cols, rows)?;
             config.cols = cols;
             config.rows = rows;
         }

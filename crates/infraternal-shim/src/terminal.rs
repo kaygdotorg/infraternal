@@ -245,7 +245,13 @@ impl Terminal {
         }
         self.parser.advance(&mut self.term, &bytes[parsed..]);
     }
-    pub fn resize(&mut self, cols: u16, rows: u16) {
+    pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
+        if cols == 0 || rows == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "terminal dimensions must be nonzero",
+            ));
+        }
         let old_cols = self.size.cols;
         self.tabs.resize(usize::from(cols), false);
         for col in old_cols..cols {
@@ -257,6 +263,7 @@ impl Terminal {
         if let Some(primary) = &mut self.primary {
             primary.resize(true, usize::from(rows), usize::from(cols));
         }
+        Ok(())
     }
     #[allow(clippy::too_many_lines)]
     pub fn snapshot(&self) -> io::Result<Vec<u8>> {
