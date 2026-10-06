@@ -300,3 +300,35 @@ fn fidelity_saved_modes_future_restore() {
         "saved mouse mode restore"
     );
 }
+
+#[test]
+#[ignore = "R3 red regression; enable with semantic-state rejection"]
+fn fidelity_prompt_resize_requires_explicit_rejection() {
+    let prefix = b"\x1b]133;A;redraw=1\x07$ hello";
+    let mut a = Terminal::new(80, 24).unwrap();
+    a.process(prefix);
+    match a.snapshot() {
+        Ok(snapshot) => {
+            let mut b = Terminal::new(80, 24).unwrap();
+            b.process(&snapshot);
+            a.resize(40, 24).unwrap();
+            b.resize(40, 24).unwrap();
+            assert_eq!(
+                a.engine.state_difference(&b.engine),
+                0,
+                "semantic resize continuation"
+            );
+            panic!("semantic state requires explicit rejection until lossless restore exists");
+        }
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::Unsupported),
+    }
+    let mut control = Terminal::new(80, 24).unwrap();
+    control.process(prefix);
+    a.resize(40, 24).unwrap();
+    control.resize(40, 24).unwrap();
+    assert_eq!(
+        a.engine.state_difference(&control.engine),
+        0,
+        "rejection leaves prompt resize intact"
+    );
+}
