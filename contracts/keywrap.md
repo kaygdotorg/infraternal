@@ -83,7 +83,8 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | --- | --- | --- |
 | setup-start | `{token,name}` | `{ceremony,user_id,options,recovery_words}` |
 | registration-finish | `{ceremony,proof,passkey_wrap,recovery_wrap}` | secure session cookie |
-| login-start | `{user_id}` | `{ceremony,options}` |
+| status | `{}` | `{setup_required: bool}` only |
+| login-start | `{}` (legacy `{user_id}` supported) | `{ceremony,options}` |
 | login-finish | `{ceremony,proof,device}` | secure session cookie |
 | session | `{}` | `{user_id,device,fresh}` and refreshed cookie |
 | add-start | `{}` + session | enrollment options; recovery_words=null |
@@ -112,8 +113,9 @@ by this lane. Action adapters must require the separate dry-run contract [28].
 Ceremonies expire in five minutes and are consumed before validation, including
 failed validation. Retries start a new ceremony. Challenges stay on the server;
 a restart invalidates pending ceremonies. `bootstrap(now, announce)` creates a
-setup token only if no owner exists, stores its hash, and calls the announcer
-once with the clear banner. A lost/expired token is not silently regenerated.
+fresh setup token on every process start if no owner exists, replaces any prior
+hash, and calls the announcer with the clear banner. Rotation invalidates earlier
+setup ceremonies at their transaction authority check.
 A host integration must invoke bootstrap at startup with its log writer.
 The setup token is consumed atomically only upon successful owner enrollment;
 all parallel enrollments then fail. Exactly one owner is enforced in storage.
@@ -164,3 +166,33 @@ for example, at most 30 browser actions/minute/source and 10 device actions/
 minute/source, beneath the global partitions. Enforce body limits and admission
 before JSON parsing there. This policy is a deployment requirement; this library
 cannot infer a trusted source from arbitrary HTTP headers or invent a proxy list.
+
+## Discoverable sign-in and PRF input transition (#19, #21)
+
+Discoverable login requires no account UUID. Its allowCredentials is empty and
+its response must contain a 16-byte UUID userHandle. The server locates that
+user's exact credential, verifies UV/signature and advances the latest stored
+counter under the writer lock. Missing, unknown or mismatched handles fail closed.
+Status is public within the existing exact-Origin and admission policy and
+reveals only whether an owner exists.
+
+New registrations evaluate base64url(SHA256(UTF8(
+`infraternal/keywrap/prf/v2|<canonical user UUID>`))). A nullable passkey
+prf_input column preserves the original v1 input for existing envelopes: changing
+it would strand their encrypted DEKs. Authenticated wraps adds prf_input to each
+passkey entry (recovery entries carry null). Identified login uses the stored
+input when all enrolled passkeys share one input.
+
+Discoverable login does not request PRF until the signed login establishes a
+session. The browser reads session and wraps, then performs a local UV-required
+credentials.get for the chosen credential with its prf_input. This adds a second
+passkey prompt but avoids disclosing credential IDs or users publicly. It uses a
+fresh random local challenge and never sends that local assertion or PRF output
+to the server. Failure to unwrap revokes the newly issued session. evalByCredential
+requires a nonempty allowCredentials list under WebAuthn and therefore cannot
+be combined with a truly discoverable challenge. Recovery words and envelope
+AAD remain unchanged.
+
+Before owner enrollment, each restart rotates the token and replaces a stale
+private setup-token.sock. The token remains only in process memory and the
+private CLI socket; runtime logs do not disclose it. Enrollment consumes it once.
