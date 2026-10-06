@@ -43,6 +43,67 @@ pub enum Frame {
     ExitAck,
     Error(u16, String),
 }
+/// Borrowed payload decoding for frame-scoped consumers; scalar layouts reuse
+/// the frozen owned codec. No payload allocation precedes frame validation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FrameRef<'a> {
+    Input(&'a [u8]),
+    Output(u64, &'a [u8]),
+    Snapshot(u64, &'a [u8]),
+    SequencedInput(u64, &'a [u8]),
+    Owned(Frame),
+}
+impl<'a> FrameRef<'a> {
+    /// Decode without copying hot-path payloads.
+    /// # Errors
+    /// Rejects exactly the same malformed layouts as `Frame::decode`.
+    pub fn decode(body: &'a [u8]) -> io::Result<Self> {
+        if body.len() > MAX_FRAME {
+            return Err(invalid());
+        }
+        let (&kind, bytes) = body.split_first().ok_or_else(invalid)?;
+        if kind == 0x10 {
+            return Ok(Self::Input(bytes));
+        }
+        if matches!(kind, 0x11 | 0x15 | 0x17) {
+            let mut payload = Payload(bytes);
+            let seq = payload.u64()?;
+            return Ok(match kind {
+                0x11 => Self::Output(seq, payload.0),
+                0x15 => Self::Snapshot(seq, payload.0),
+                _ => Self::SequencedInput(seq, payload.0),
+            });
+        }
+        Frame::decode(body).map(Self::Owned)
+    }
+    /// Cross an ownership boundary explicitly; immediate consumers stay borrowed.
+    #[must_use]
+    pub fn into_owned(self) -> Frame {
+        match self {
+            Self::Input(bytes) => Frame::Input(bytes.to_vec()),
+            Self::Output(seq, bytes) => Frame::Output(seq, bytes.to_vec()),
+            Self::Snapshot(seq, bytes) => Frame::Snapshot(seq, bytes.to_vec()),
+            Self::SequencedInput(seq, bytes) => Frame::SequencedInput(seq, bytes.to_vec()),
+            Self::Owned(frame) => frame,
+        }
+    }
+    /// Input slices, including owned compatibility requests, without cloning.
+    #[must_use]
+    pub fn input(&self) -> Option<(Option<u64>, &[u8])> {
+        match self {
+            Self::Input(bytes) => Some((None, bytes)),
+            Self::SequencedInput(seq, bytes) => Some((Some(*seq), bytes)),
+            Self::Owned(Frame::Input(bytes)) => Some((None, bytes)),
+            Self::Owned(Frame::SequencedInput(seq, bytes)) => Some((Some(*seq), bytes)),
+            _ => None,
+        }
+    }
+}
+impl From<Frame> for FrameRef<'_> {
+    fn from(frame: Frame) -> Self {
+        Self::Owned(frame)
+    }
+}
 fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid shim v1 frame")
 }
@@ -253,10 +314,39 @@ impl Decoder {
     /// Rejects invalid frames and storage beyond one maximum-sized frame.
     pub fn feed(&mut self, bytes: &[u8]) -> io::Result<Vec<Frame>> {
         let mut frames = Vec::new();
-        // Process bytewise to bound storage even for many coalesced frames. Socket
-        // reads are capped at 16 KiB; this never allocates using untrusted lengths.
-        for &byte in bytes {
-            self.bytes.push(byte);
+        self.feed_with(bytes, |frame| {
+            frames.push(frame.into_owned());
+            Ok(())
+        })?;
+        Ok(frames)
+    }
+
+    /// Consume complete frames before reusing bounded receive storage. The
+    /// callback cannot retain borrowed payloads across the next frame.
+    /// # Errors
+    /// Returns framing or callback errors; callers disconnect on either.
+    pub fn feed_with(
+        &mut self,
+        bytes: &[u8],
+        mut consume: impl FnMut(FrameRef<'_>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        // Copy contiguous runs rather than repeatedly parsing the same length
+        // for every payload byte. At most one validated frame is retained.
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let target = if self.bytes.len() < 4 {
+                4
+            } else {
+                let length =
+                    u32::from_le_bytes(self.bytes[..4].try_into().map_err(|_| invalid())?) as usize;
+                if length == 0 || length > MAX_FRAME {
+                    return Err(invalid());
+                }
+                length + 4
+            };
+            let count = (target - self.bytes.len()).min(rest.len());
+            self.bytes.extend_from_slice(&rest[..count]);
+            rest = &rest[count..];
             if self.bytes.len() >= 4 {
                 let length =
                     u32::from_le_bytes(self.bytes[..4].try_into().map_err(|_| invalid())?) as usize;
@@ -264,12 +354,12 @@ impl Decoder {
                     return Err(invalid());
                 }
                 if self.bytes.len() == length + 4 {
-                    frames.push(Frame::decode(&self.bytes[4..])?);
+                    consume(FrameRef::decode(&self.bytes[4..])?)?;
                     self.bytes.clear();
                 }
             }
         }
-        Ok(frames)
+        Ok(())
     }
 }
 

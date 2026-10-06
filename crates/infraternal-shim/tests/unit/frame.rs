@@ -129,3 +129,116 @@ mod golden {
         );
     }
 }
+
+#[test]
+fn borrowed_and_owned_decoders_agree_at_every_fragment_boundary() {
+    use super::{Decoder, Frame, FrameRef, MAX_FRAME};
+    for frame in [
+        Frame::Input(vec![1; 100]),
+        Frame::SequencedInput(3, vec![2; 100]),
+        Frame::Output(4, vec![3; 100]),
+        Frame::Snapshot(5, vec![4; 100]),
+        Frame::InputState(6, 7),
+        Frame::Error(1, "reason".into()),
+    ] {
+        let wire = frame.encode().unwrap();
+        assert_eq!(FrameRef::decode(&wire[4..]).unwrap().into_owned(), frame);
+        for split in 0..=wire.len() {
+            let mut decoder = Decoder::default();
+            let mut frames = Vec::new();
+            for part in [&wire[..split], &wire[split..]] {
+                decoder
+                    .feed_with(part, |f| {
+                        frames.push(f.into_owned());
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            assert_eq!(frames, vec![frame.clone()]);
+        }
+    }
+    for body in [&[][..], &[0x11], &[0x17, 1, 2], &[0x1a, 0], &[0xff]] {
+        assert_eq!(
+            FrameRef::decode(body).is_err(),
+            Frame::decode(body).is_err()
+        );
+    }
+    assert!(FrameRef::decode(&vec![0x10; MAX_FRAME + 1]).is_err());
+    let body = Frame::SequencedInput(0, vec![42; 100]).encode().unwrap();
+    let borrowed = FrameRef::decode(&body[4..]).unwrap();
+    let (_, bytes) = borrowed.input().unwrap();
+    assert_eq!(bytes.as_ptr(), body[13..].as_ptr());
+    let mut decoder = Decoder::default();
+    let mut calls = 0;
+    let mut doubled = body.clone();
+    doubled.extend_from_slice(&body);
+    decoder
+        .feed_with(&doubled, |_| {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(calls, 2);
+}
+
+#[test]
+#[ignore = "release codec and allocation-path measurement"]
+fn codec_reuse_measurement() {
+    use super::{Decoder, Frame, FrameRef};
+    use std::{hint::black_box, time::Instant};
+    let frame = Frame::Output(7, vec![42; 16_384]);
+    let wire = frame.encode().unwrap();
+    let n = 100_000;
+    for round in 0..7 {
+        for (label, reuse) in [("encode-owned", false), ("encode-reused", true)] {
+            let mut scratch = Vec::new();
+            let start = Instant::now();
+            for _ in 0..n {
+                if reuse {
+                    frame.encode_into(&mut scratch).unwrap();
+                    black_box(&scratch);
+                } else {
+                    black_box(frame.encode().unwrap());
+                }
+            }
+            println!(
+                "{label}: round={round} n={n} ns/frame={:.1}",
+                start.elapsed().as_secs_f64() * 1e9 / f64::from(n)
+            );
+        }
+        for (label, borrowed) in [("decode-owned", false), ("decode-borrowed", true)] {
+            let start = Instant::now();
+            for _ in 0..n {
+                if borrowed {
+                    black_box(FrameRef::decode(black_box(&wire[4..])).unwrap());
+                } else {
+                    black_box(Frame::decode(black_box(&wire[4..])).unwrap());
+                }
+            }
+            println!(
+                "{label}: round={round} n={n} ns/frame={:.1}",
+                start.elapsed().as_secs_f64() * 1e9 / f64::from(n)
+            );
+        }
+        for (label, borrowed) in [("feed-owned", false), ("feed-borrowed", true)] {
+            let mut decoder = Decoder::default();
+            let start = Instant::now();
+            for _ in 0..n {
+                if borrowed {
+                    decoder
+                        .feed_with(&wire, |f| {
+                            black_box(f);
+                            Ok(())
+                        })
+                        .unwrap();
+                } else {
+                    black_box(decoder.feed(&wire).unwrap());
+                }
+            }
+            println!(
+                "{label}: round={round} n={n} ns/frame={:.1}",
+                start.elapsed().as_secs_f64() * 1e9 / f64::from(n)
+            );
+        }
+    }
+}
