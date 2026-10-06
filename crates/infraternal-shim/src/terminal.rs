@@ -96,6 +96,33 @@ impl Terminal {
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         self.engine.resize(cols, rows)
     }
+    /// Bounded visible fallback; fidelity gaps and clipping are explicitly
+    /// announced by the negotiated frame, never substituted for a faithful VT.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "Staged bounded API is consumed by the next session-module commit (#26)"
+    )]
+    pub fn approximate_snapshot(&self) -> Vec<u8> {
+        let budget = MAX_FRAME - 10;
+        // Preserve unfinished syntax only when the entire carry and a useful
+        // repaint fit. Never trim a control string or UTF-8 scalar in half.
+        let carry = if !self.carry_overflow && self.pending.len() <= budget - 256 {
+            self.pending.as_slice()
+        } else {
+            &[]
+        };
+        let mut out = vec![0; budget - carry.len()];
+        let len = self.engine.approximate_snapshot(&mut out);
+        out.truncate(len);
+        if out.is_empty() {
+            // Allocation succeeded and the engine is live. This defensive
+            // fallback still gives a valid, explicitly approximate reset.
+            out.extend_from_slice(b"\x1bc");
+        }
+        out.extend_from_slice(carry);
+        out
+    }
     pub fn snapshot(&self) -> io::Result<Vec<u8>> {
         if self.carry_overflow {
             return Err(io::Error::other(

@@ -26,6 +26,11 @@ unsafe extern "C" {
     fn infraternal_vt_compare(a: *mut c_void, b: *mut c_void, strict: bool) -> usize;
     #[cfg(test)]
     fn ghostty_terminal_get(terminal: *mut c_void, tag: i32, out: *mut c_void) -> i32;
+    #[allow(
+        dead_code,
+        reason = "Staged bounded API is consumed by the next session-module commit (#26)"
+    )]
+    fn infraternal_vt_approximate(terminal: *mut c_void, data: *mut u8, len: usize) -> usize;
     fn infraternal_vt_snapshot(
         terminal: *mut c_void,
         data: *mut u8,
@@ -107,6 +112,18 @@ impl Engine {
         }
         rows
     }
+    #[allow(
+        dead_code,
+        reason = "Staged bounded API is consumed by the next session-module commit (#26)"
+    )]
+    pub fn approximate_snapshot(&self, data: &mut [u8]) -> usize {
+        // SAFETY: read-only live handle and writable bounded slice remain valid
+        // synchronously. The adapter rolls back complete cell operations on
+        // clipping, reserves a footer, and retains neither pointer.
+        let len =
+            unsafe { infraternal_vt_approximate(self.0.as_ptr(), data.as_mut_ptr(), data.len()) };
+        if len <= data.len() { len } else { 0 }
+    }
     pub fn try_snapshot(&self, data: &mut [u8], tail: usize) -> io::Result<Option<usize>> {
         // SAFETY: live terminal and writable slice remain valid throughout the
         // synchronous call. The adapter uses Writer.fixed and returns at most
@@ -119,7 +136,7 @@ impl Engine {
         if len == usize::MAX {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Ghostty state requires nonprinting cell, cursor, REP or row-wrap restore APIs",
+                "Ghostty state is not representable by the bounded faithful Snapshot painter",
             ));
         }
         Ok((len != 0 && len <= data.len()).then_some(len))
