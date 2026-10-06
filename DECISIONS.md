@@ -433,7 +433,7 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      seconds. Never fake progress, and no spinners. One shared loading()
      primitive.
 103. **Copy feedback:** minimal. The copy button's own icon turns into a
-     tick (the D99 path, drawn on) and back: 200 ms in, a 1.4 s hold, 150 ms
+     tick (the D99 path, drawn on) and back: 200 ms in, a 0.9 s hold, 150 ms
      out, with strong ease-out CSS transitions, so a re-tap retargets. Nothing
      else on the page moves. A region blur and a pixel mosaic were tried and
      rejected as maximal. Reduced motion is opacity only. One shared
