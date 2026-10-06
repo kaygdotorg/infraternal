@@ -4,7 +4,7 @@
  * region blur read as maximal. One shared primitive for every such action, so copy
  * and download confirm the same way (owner: download had no feedback).
  *
- * Motion lives in CSS (onboarding.css, `.copy-swap`): this file only toggles
+ * Motion lives in the shared styles.css (`.swap`): this file only toggles
  * `data-done`. Transitions, not keyframes, so a second tap mid-way retargets from the
  * current state instead of restarting. The swap is Emil Kowalski's icon pattern: both
  * glyphs share one cell; the outgoing one fades, shrinks and blurs slightly while the
@@ -46,8 +46,14 @@ export function confirmAction(button: HTMLElement, doneLabel: string): void {
   }, HOLD));
 }
 
-/** Copies `text` and confirms on `button`. */
-export function copyFeedback(button: HTMLElement, text: string): void {
-  void navigator.clipboard?.writeText(text);
-  confirmAction(button, "Copied");
+/** Copies `text` and confirms on `button` only after the clipboard accepts it. */
+export async function copyFeedback(button: HTMLElement, text: string): Promise<boolean> {
+  try {
+    if (!navigator.clipboard) return false;
+    await navigator.clipboard.writeText(text);
+    confirmAction(button, "Copied");
+    return true;
+  } catch {
+    return false;
+  }
 }

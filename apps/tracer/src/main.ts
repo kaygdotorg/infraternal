@@ -1,8 +1,11 @@
-/** Renders first-run and login screens, then hands an authenticated user to the terminal. */
-import { AuthError, checkStatus, checkSession, loginWithPasskey, registerOwner } from "./auth";
+/** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
+import { AuthError, checkStatus, checkSession } from "./auth";
+import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
+import { glitchText } from "../../../packages/ui/src/glitch";
+import { installTooltips } from "../../../packages/ui/src/tooltip";
+import { mountOnboarding } from "./onboarding";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
-// The terminal (ghostty-web with its WASM, ~640 KB) loads only after sign-in, so the
-// sign-in screen paints at once. A static import made every visitor wait for it.
+// Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
 
 declare global {
@@ -21,22 +24,55 @@ let activeUserId: string | undefined;
 let checkingResume = false;
 let currentTerminal: TerminalClient | undefined;
 let performanceProbe: PerformanceProbe | undefined;
+let backdrop: FaultyTerminal | undefined;
+let welcomeEffect: ReturnType<typeof glitchText> | undefined;
+let welcomeTimer = 0;
+let foregroundListenerInstalled = false;
+let backdropTimer = 0;
 
 void start();
 
 async function start(): Promise<void> {
+  installForegroundListener();
+  const fontsReady = Promise.race([
+    document.fonts.load('450 14px "Geist Mono"').then(() => undefined),
+    new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
+  ]).catch(() => undefined);
   try {
-    const setupRequired = await checkStatus();
-    const session = setupRequired ? undefined : await checkSession();
-    if (session) {
-      activeUserId = session.user_id;
-      showTerminal();
-    } else {
-      renderAccess(setupRequired);
-    }
+    const [setupRequired] = await Promise.all([
+      checkStatus(),
+      fontsReady,
+    ]);
+    installTooltips();
+    await showAuthState(setupRequired);
+  } catch (error: unknown) {
+    await fontsReady;
+    installTooltips();
+    renderUnavailable(safeMessage(error));
+  }
+}
+
+async function refreshAuth(): Promise<void> {
+  try {
+    await showAuthState(await checkStatus());
   } catch (error: unknown) {
     renderUnavailable(safeMessage(error));
   }
+}
+
+async function showAuthState(setupRequired: boolean): Promise<void> {
+  const session = setupRequired ? undefined : await checkSession();
+  if (session) {
+    activeUserId = session.user_id;
+    showTerminal();
+  } else {
+    renderAuth(setupRequired);
+  }
+}
+
+function installForegroundListener(): void {
+  if (foregroundListenerInstalled) return;
+  foregroundListenerInstalled = true;
   let wasHidden = document.hidden;
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
@@ -49,100 +85,83 @@ async function start(): Promise<void> {
 }
 
 function renderUnavailable(message: string): void {
-  app.innerHTML = '<section class="access"><h1>infraternal</h1><p id="status-error" role="alert"></p><button id="retry-status" class="primary" type="button">Try again</button></section>';
-  mustGet("#status-error").textContent = message;
-  mustGet("#retry-status").addEventListener("click", () => { void start(); }, { once: true });
+  app.innerHTML = `<section class="auth-screen"><section class="auth-card auth-signin">
+    <div class="auth-mark">infraternal</div><h1>Could not reach the server</h1>
+    <p id="status-error" class="auth-message" role="alert"></p>
+    <button id="retry-status" class="auth-primary" type="button">Try again</button></section></section>`;
+  mustGet<HTMLElement>("#status-error").textContent = message;
+  mustGet<HTMLButtonElement>("#retry-status").addEventListener("click", () => { void refreshAuth(); }, { once: true });
+  scheduleBackdrop();
 }
 
-function renderAccess(showSetup: boolean, message = ""): void {
-  app.replaceChildren();
-  app.innerHTML = `
-    <section class="access" aria-label="Sign in">
-      <h1>infraternal</h1>
-      <p class="lead">Open your terminal.</p>
-      ${showSetup ? `
-      <form id="setup-form" autocomplete="off">
-        <label for="setup-token">One-time setup token</label>
-        <input id="setup-token" name="token" type="password" autocomplete="off" required />
-        <label for="owner-name">Your name</label>
-        <input id="owner-name" name="name" autocomplete="name" maxlength="128" required />
-        <button class="primary" type="submit">Register a passkey</button>
-      </form>` : `
-      <form id="login-form">
-        <button class="primary" type="submit">Continue with passkey</button>
-      </form>`}
-      <p id="auth-error" class="message" role="status" aria-live="polite"></p>
-    </section>`;
-
-  const error = mustGet<HTMLElement>("#auth-error");
-  error.textContent = message;
-  const form = mustGet<HTMLFormElement>(showSetup ? "#setup-form" : "#login-form");
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void (showSetup ? submitSetup(form, error) : submitLogin(form, error));
-  });
-}
-
-async function submitLogin(form: HTMLFormElement, error: HTMLElement): Promise<void> {
-  setDisabled(form, true);
-  error.textContent = "Touch your passkey to continue…";
-  try {
-    const userId = await loginWithPasskey(deviceName());
+function renderAuth(setupRequired: boolean, message = ""): void {
+  mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName) => {
     saveLocal("tracer.user-id", userId);
     activeUserId = userId;
-    showTerminal();
-  } catch (cause: unknown) {
-    setDisabled(form, false);
-    error.textContent = safeMessage(cause);
-  }
-}
-
-async function submitSetup(form: HTMLFormElement, error: HTMLElement): Promise<void> {
-  const data = new FormData(form);
-  setDisabled(form, true);
-  error.textContent = "Preparing your passkey…";
-  try {
-    const userId = await registerOwner(
-      String(data.get("token") ?? ""),
-      String(data.get("name") ?? ""),
-      showRecoveryWords,
-    );
-    saveLocal("tracer.user-id", userId);
-    activeUserId = userId;
-    showTerminal();
-  } catch (cause: unknown) {
-    renderAccess(true, safeMessage(cause));
-  }
-}
-
-function showRecoveryWords(words: string, userId: string): Promise<void> {
-  app.innerHTML = `
-    <section class="access recovery" aria-label="Recovery key">
-      <h1>Save your recovery key</h1>
-      <p class="lead">These 24 words are shown once. Keep them somewhere private and offline.</p>
-
-      <pre id="recovery-words" class="recovery-words"></pre>
-      <button id="copy-recovery" class="quiet" type="button">Copy recovery key</button>
-      <label class="check-row"><input id="recovery-saved" type="checkbox" /> I saved these words somewhere safe</label>
-      <button id="finish-recovery" class="primary" type="button" disabled>Finish setup</button>
-      <p id="recovery-message" class="message" role="status"></p>
-    </section>`;
-  mustGet<HTMLElement>("#recovery-words").textContent = words;
-  const saved = mustGet<HTMLInputElement>("#recovery-saved");
-  const finish = mustGet<HTMLButtonElement>("#finish-recovery");
-  saved.addEventListener("change", () => { finish.disabled = !saved.checked; });
-
-  mustGet("#copy-recovery").addEventListener("click", () => {
-    void navigator.clipboard?.writeText(words).then(() => {
-      mustGet<HTMLElement>("#recovery-message").textContent = "Copied. Store the words somewhere private.";
-    }).catch(() => {
-      mustGet<HTMLElement>("#recovery-message").textContent = "Copy is unavailable here. Select and copy the words.";
-    });
+    if (firstSetup) showWelcome(welcomeName ?? "");
+    else showTerminal();
   });
-  return new Promise((resolve) => finish.addEventListener("click", () => resolve(), { once: true }));
+  scheduleBackdrop();
+}
+
+function showWelcome(displayName: string): void {
+  window.clearTimeout(welcomeTimer);
+  welcomeEffect?.destroy();
+  app.innerHTML = `<section class="auth-screen auth-welcome" aria-live="polite"><div class="welcome-copy"><h1 id="welcome-title"></h1><p></p></div></section>`;
+  mustGet<HTMLElement>(".welcome-copy p").textContent = `signed in as ${displayName}`;
+  welcomeEffect = glitchText(mustGet<HTMLElement>("#welcome-title"), "Welcome to infraternal", { speed: 0.5, settleAfter: 1600 });
+  welcomeTimer = window.setTimeout(() => {
+    welcomeEffect?.destroy();
+    welcomeEffect = undefined;
+    showTerminal();
+  }, 2600);
+}
+
+function startBackdrop(): void {
+  let canvas = document.querySelector<HTMLCanvasElement>("#faulty-field");
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    canvas.id = "faulty-field";
+    canvas.setAttribute("aria-hidden", "true");
+    app.before(canvas);
+  }
+  canvas.style.opacity = "1";
+  canvas.style.transition = "none";
+  backdrop?.destroy();
+  backdrop = mountFaultyTerminal(canvas);
+  canvas.dataset.ready = "true";
+}
+
+function scheduleBackdrop(): void {
+  if (backdrop || backdropTimer) return;
+  // Keep WebGL shader compilation off the auth screenshot/first-paint path. The field
+  // begins its 1.2 s intro reveal after 600 ms, while setup is still in progress.
+  backdropTimer = window.setTimeout(() => {
+    backdropTimer = 0;
+    if (app.querySelector(".auth-screen")) startBackdrop();
+  }, 600);
+}
+
+function stopBackdrop(): void {
+  window.clearTimeout(backdropTimer);
+  backdropTimer = 0;
+  const canvas = document.querySelector<HTMLCanvasElement>("#faulty-field");
+  if (!canvas) return;
+  canvas.style.transition = "opacity 400ms ease";
+  canvas.style.opacity = "0";
+  const stopped = backdrop;
+  backdrop = undefined;
+  window.setTimeout(() => {
+    stopped?.destroy();
+    if (canvas === document.querySelector("#faulty-field")) canvas.remove();
+  }, 450);
 }
 
 function showTerminal(): void {
+  window.clearTimeout(welcomeTimer);
+  welcomeEffect?.destroy();
+  welcomeEffect = undefined;
+  stopBackdrop();
   currentTerminal?.dispose();
   performanceProbe?.dispose();
   currentTerminal = undefined;
@@ -168,16 +187,14 @@ function showTerminal(): void {
         <p id="probe-message" role="status"></p>
       </aside>
     </section>`;
-  mustGet("#test-double-badge").hidden = !mockMode;
-  const probePanel = mustGet("#probe-panel");
+  mustGet<HTMLElement>("#test-double-badge").hidden = !mockMode;
+  const probePanel = mustGet<HTMLElement>("#probe-panel");
   probePanel.hidden = !probeMode;
-  if (probeMode) {
-    performanceProbe = new PerformanceProbe(probePanel, probeCount(query.get("n")));
-  }
+  if (probeMode) performanceProbe = new PerformanceProbe(probePanel, probeCount(query.get("n")));
   const hooks = performanceProbe?.hooks();
   void import("./terminal").then(({ TerminalClient }) => TerminalClient.open({
-    host: mustGet("#terminal-host"),
-    status: mustGet("#connection-status"),
+    host: mustGet<HTMLElement>("#terminal-host"),
+    status: mustGet<HTMLElement>("#connection-status"),
     traceMockServer: probeMode && mockMode,
     ...(hooks ? { hooks } : {}),
   })).then((client) => {
@@ -214,7 +231,7 @@ async function checkForegroundSession(): Promise<void> {
       performanceProbe = undefined;
       delete window.__tracerTestDouble;
       activeUserId = undefined;
-      renderAccess(false, "Your session ended. Sign in again to reconnect.");
+      renderAuth(false, "Your session ended. Sign in again to reconnect.");
     }
   } catch (error: unknown) {
     const status = document.querySelector<HTMLElement>("#connection-status");
@@ -224,20 +241,8 @@ async function checkForegroundSession(): Promise<void> {
   }
 }
 
-function deviceName(): string {
-  try {
-    return localStorage.getItem("tracer.device-name") || `${navigator.platform || "Browser"} device`;
-  } catch {
-    return "Browser device";
-  }
-}
-
 function saveLocal(key: string, value: string): void {
   try { localStorage.setItem(key, value); } catch { /* account id is a convenience, not a secret */ }
-}
-
-function setDisabled(form: HTMLFormElement, disabled: boolean): void {
-  form.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input").forEach((item) => { item.disabled = disabled; });
 }
 
 function safeMessage(error: unknown): string {

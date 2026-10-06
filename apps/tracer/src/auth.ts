@@ -14,8 +14,10 @@ interface AuthStart {
 
 interface AuthSession {
   user_id: string;
+  username: string;
+  display_name: string;
   device: string;
-  fresh: boolean;
+  fresh: number;
 }
 
 interface Wrap {
@@ -68,10 +70,11 @@ export async function checkSession(): Promise<AuthSession | undefined> {
 /** Creates the owner, pauses for recovery-key acknowledgement, then commits both wraps. */
 export async function registerOwner(
   token: string,
-  name: string,
-  showRecoveryWords: (words: string, userId: string) => Promise<void>,
+  username: string,
+  displayName: string,
+  showRecoveryWords: (words: string, finishRegistration: () => Promise<void>) => Promise<void>,
 ): Promise<string> {
-  const start = await post<AuthStart>("setup-start", { token, name });
+  const start = await post<AuthStart>("setup-start", { token, username, display_name: displayName });
   const userId = canonicalUuid(start.user_id, "setup user id");
   const recoveryWords = requiredString(start.recovery_words, "recovery words");
   const publicKey = creationOptions(start.options.publicKey);
@@ -99,12 +102,22 @@ export async function registerOwner(
       dek = crypto.getRandomValues(new Uint8Array(32));
       const passkeyWrap = await wrapDek(prf, dek, userId, "passkey");
       const recoveryWrap = await wrapDek(recoveryEntropy, dek, userId, "recovery");
-      await showRecoveryWords(recoveryWords, userId);
-      await post("registration-finish", {
-        ceremony: requiredString(start.ceremony, "registration ceremony"),
-        proof: credentialProof(created),
-        passkey_wrap: passkeyWrap,
-        recovery_wrap: recoveryWrap,
+      let finishPromise: Promise<void> | undefined;
+      await showRecoveryWords(recoveryWords, () => {
+        // Keep a single ceremony response if the confirmation button is activated twice.
+        if (!finishPromise) {
+          finishPromise = post("registration-finish", {
+            ceremony: requiredString(start.ceremony, "registration ceremony"),
+            proof: credentialProof(created),
+            passkey_wrap: passkeyWrap,
+            recovery_wrap: recoveryWrap,
+          }).then(() => undefined).catch((error: unknown) => {
+            // A transient rejection can be retried with the same ceremony proof.
+            finishPromise = undefined;
+            throw error;
+          });
+        }
+        return finishPromise;
       });
       return userId;
     } finally {
@@ -175,6 +188,7 @@ async function post<Result = unknown>(action: string, body: unknown): Promise<Re
     const message = response.status >= 500 ? "The server could not complete the request. Try again."
       : response.status === 429 ? "Too many attempts. Wait a minute and try again."
       : action === "setup-start" && response.status === 401 ? "The setup token is invalid or expired. Get the current token from the server."
+      : action === "setup-start" && response.status === 409 ? "That username is already in use. Choose another username."
       : action === "login-finish" ? "This passkey could not sign in. Try your registered passkey."
       : "The request could not be accepted. Check your details and try again.";
     throw new AuthError(message, response.status);

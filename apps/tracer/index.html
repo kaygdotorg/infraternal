@@ -6,12 +6,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#101113" />
     <title>infraternal</title>
+    <link rel="preload" href="./fonts/GeistMono-Variable.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./ui.css" />
+    <link rel="stylesheet" href="./auth.css" />
   </head>
   <body>
     <!-- No interim "loading" text: the page stays a calm empty surface for the few
          milliseconds before the sign-in screen mounts. If the script fails to start,
          a quiet message explains it instead of an endless loading state. -->
+    <canvas id="faulty-field" aria-hidden="true"></canvas>
     <main id="app" aria-live="polite"></main>
     <noscript><p class="boot-error">infraternal needs JavaScript.</p></noscript>
     <script>

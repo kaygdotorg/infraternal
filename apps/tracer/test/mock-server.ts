@@ -19,6 +19,8 @@ const TEST_DOUBLE_HEADER = "X-Infraternal-Test-Double";
 
 interface MockOwner {
   userId: string;
+  username: string;
+  displayName: string;
   credentialId: string;
   passkeyWrap: unknown;
   prfInput: string;
@@ -58,7 +60,7 @@ interface TraceEvent {
 let owner: MockOwner | undefined;
 let activeAuthCookie: string | undefined;
 let setupToken = newToken();
-let pendingRegistration: { ceremony: string; userId: string; recoveryWords: string; rpId: string; prfInput: string } | undefined;
+let pendingRegistration: { ceremony: string; userId: string; username: string; displayName: string; recoveryWords: string; rpId: string; prfInput: string } | undefined;
 let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
 let session = createSession();
@@ -130,6 +132,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   }
   if (request.method === "GET" && url.pathname === "/__mock/state") {
     return sendJson(response, 200, {
+      ...(owner ? { username: owner.username, display_name: owner.displayName } : {}),
       echoed_text: session.echoedText,
       written_input: session.writtenInput.toString(),
       accepted_input_bytes: session.acceptedInputBytes,
@@ -182,22 +185,27 @@ async function authAction(
       return sendJson(response, 200, { setup_required: !owner });
     case "session":
       if (!isAuthenticated(request) || !owner) return sendJson(response, 401, { error: "authorization failed" });
-      return sendJson(response, 200, { user_id: owner.userId, device: "test-double", fresh: true });
+      return sendJson(response, 200, { user_id: owner.userId, username: owner.username, display_name: owner.displayName, device: "test-double", fresh: 1 });
     case "setup-start": {
-      if (owner || body.token !== setupToken || typeof body.name !== "string" || body.name.length === 0) {
-        process.stdout.write(`test-double setup denied: owner=${Boolean(owner)} token-match=${body.token === setupToken} name-valid=${typeof body.name === "string" && body.name.length > 0}\n`);
+      const username = body.username;
+      const suppliedDisplayName = body.display_name;
+      const usernameValid = typeof username === "string" && /^[a-z0-9_-]{2,32}$/.test(username);
+      const displayNameValid = suppliedDisplayName === undefined || (typeof suppliedDisplayName === "string" && [...suppliedDisplayName].length <= 64);
+      if (owner || body.token !== setupToken || !usernameValid || !displayNameValid || Object.keys(body).some((key) => !["token", "username", "display_name"].includes(key))) {
+        process.stdout.write(`test-double setup denied: owner=${Boolean(owner)} token-match=${body.token === setupToken} username-valid=${usernameValid} display-name-valid=${displayNameValid}\n`);
         return sendJson(response, 401, { error: "authorization failed" });
       }
       const rpId = request.headers.host?.split(":")[0] ?? HOST;
       const userId = randomUuid();
       const ceremony = newToken();
+      const displayName = typeof suppliedDisplayName === "string" && suppliedDisplayName.trim() ? suppliedDisplayName : username;
       const recoveryWords = entropyToMnemonic(randomBytes(32), wordlist);
       const prfInput = createHash("sha256").update(`infraternal/keywrap/prf/v2|${userId}`).digest("base64url");
-      pendingRegistration = { ceremony, userId, recoveryWords, rpId, prfInput };
+      pendingRegistration = { ceremony, userId, username, displayName, recoveryWords, rpId, prfInput };
       const publicKey = {
         challenge: randomBytes(32).toString("base64url"),
         rp: { name: "infraternal test double", id: rpId },
-        user: { id: Buffer.from(uuidBytes(userId)).toString("base64url"), name: body.name, displayName: body.name },
+        user: { id: Buffer.from(uuidBytes(userId)).toString("base64url"), name: username, displayName },
         pubKeyCredParams: [{ type: "public-key", alg: -7 }],
         timeout: 60_000,
         attestation: "none",
@@ -221,7 +229,14 @@ async function authAction(
       if (!credentialId || !asRecord(body.passkey_wrap) || !asRecord(body.recovery_wrap)) {
         return sendJson(response, 400, { error: "invalid request" });
       }
-      owner = { userId: pendingRegistration.userId, credentialId, passkeyWrap: body.passkey_wrap, prfInput: pendingRegistration.prfInput };
+      owner = {
+        userId: pendingRegistration.userId,
+        username: pendingRegistration.username,
+        displayName: pendingRegistration.displayName,
+        credentialId,
+        passkeyWrap: body.passkey_wrap,
+        prfInput: pendingRegistration.prfInput,
+      };
       pendingRegistration = undefined;
       activeAuthCookie = newToken();
       setAuthCookie(response, activeAuthCookie);
