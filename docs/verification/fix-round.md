@@ -109,3 +109,11 @@ which writer accepted it. This limitation and the requested additive contract
 choice are recorded on #28. Physical Safari/iPhone testing and independent
 security/visual review remain external. No green gate is claimed as proof of
 these missing integrations.
+
+## Merged-dev follow-up (#34)
+
+The missing-daemon statements above describe this standalone fix-round checkout.
+Merged dev now contains the real inherited-socket daemon and independent shim
+writers; real shared-device PTY deduplication/crash replay and native browser
+acceptance are recorded in [integration.md](integration.md). The beyond-120s
+writer-capability choice and physical-device/independent review boundaries remain.
