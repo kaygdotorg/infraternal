@@ -186,16 +186,7 @@ fn main() -> ExitCode {
                 eprintln!("not implemented");
                 return ExitCode::from(2);
             };
-            // One reactor suffices for bounded async IO. The shim arm above
-            // remains synchronous because its detached process model forks.
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                eprintln!("could not start the async runtime");
-                return ExitCode::FAILURE;
-            };
-            match runtime.block_on(infraternal_agent::daemon::run(fd, state)) {
+            match infraternal_agent::run_embedded(fd, state) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("infraternal agent failed: {error}");
