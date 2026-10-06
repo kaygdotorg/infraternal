@@ -432,7 +432,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      that, a count-up shows real progress when known, otherwise elapsed
      seconds. Never fake progress, and no spinners. One shared loading()
      primitive.
-103. **Copy feedback:** the copied region pixelates while a lone clipboard
-     icon blooms over it (one spring drives both, so they stay in sync), then
-     both resolve together, faster than they came. One shared copyFeedback()
-     primitive for every copy action.
+103. **Copy feedback:** the copied region softly blurs and dims while a lone
+     clipboard icon appears over it, then both resolve, faster than they came
+     (200 ms in, a short hold, 150 ms out, strong ease-out). This is a
+     non-literal pixelation: a mosaic was tried and rejected as artificial.
+     It runs on WAAPI and animates transform, opacity and blur only.
+     Reduced motion is opacity only. One shared copyFeedback() primitive
+     for every copy action.
