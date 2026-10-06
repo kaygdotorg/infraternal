@@ -42,7 +42,8 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
 
   await expect(page.getByRole("heading", { name: "Save your recovery key" })).toBeVisible();
   const recoveryWords = (await page.locator("#recovery-words").textContent())?.trim().split(/\s+/) ?? [];
-  expect(recoveryWords).toHaveLength(24);
+  // Failed assertions must never print the actual recovery phrase.
+  expect(recoveryWords.length).toBe(24);
   await page.locator("#recovery-saved").check();
   await page.getByRole("button", { name: "Finish setup" }).click();
   await expect(page.getByText("TEST DOUBLE")).toBeVisible();
