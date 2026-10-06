@@ -107,9 +107,6 @@ impl Engine {
         }
         rows
     }
-    pub fn snapshot(&self, data: &mut [u8], tail: usize) -> Option<usize> {
-        self.try_snapshot(data, tail).ok().flatten()
-    }
     pub fn try_snapshot(&self, data: &mut [u8], tail: usize) -> io::Result<Option<usize>> {
         // SAFETY: live terminal and writable slice remain valid throughout the
         // synchronous call. The adapter uses Writer.fixed and returns at most

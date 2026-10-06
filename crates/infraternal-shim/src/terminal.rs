@@ -108,7 +108,7 @@ impl Terminal {
         // even those exceed the frozen 1 MiB frame limit.
         let mut tail = 256;
         loop {
-            if let Some(len) = self.engine.snapshot(&mut out, tail) {
+            if let Some(len) = self.engine.try_snapshot(&mut out, tail)? {
                 out.truncate(len);
                 out.extend_from_slice(&self.pending);
                 return Ok(out);
