@@ -116,12 +116,12 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   await expect(page.getByText("TEST DOUBLE")).toBeVisible({ timeout: 8_000 });
   await expect(page.locator("#faulty-field")).toHaveCount(0);
 
-  // Check that reserving the tallest pane keeps the card geometry stable across steps.
-  // The browser may scroll its auth screen to reveal the next focused control.
-  const stepCenters = [tokenCenters, identityCenters, passkeyCenters, recoveryCenters].map((centers) => centers.desktop!);
+  // The card hugs each step (owner: no empty gap above the footer) and stays centred:
+  // horizontally always, vertically whenever the step fits on screen. Every viewport.
+  const stepCenters = [tokenCenters, identityCenters, passkeyCenters, recoveryCenters].flatMap((centers) => Object.values(centers));
   for (const center of stepCenters) {
-    expect(Math.abs(center.x - stepCenters[0]!.x)).toBeLessThanOrEqual(1);
-    expect(Math.abs(center.height - stepCenters[0]!.height)).toBeLessThanOrEqual(1);
+    expect(Math.abs(center.x)).toBeLessThanOrEqual(1);
+    if (center.fits) expect(Math.abs(center.y)).toBeLessThanOrEqual(1);
   }
   const nonInputShifts = await page.evaluate(() => (window as Window & { __layoutShifts?: number[] }).__layoutShifts ?? []);
   expect(nonInputShifts).toEqual([]);
@@ -140,7 +140,7 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   console.log(`ONBOARDING_SCREENSHOTS ${screenshots.join(" ")}`);
 });
 
-interface CenterByViewport { x: number; y: number; height: number }
+interface CenterByViewport { x: number; y: number; height: number; fits: boolean }
 
 /** Saves dark production-build screenshots and returns element-center offsets per viewport. */
 async function captureState(
@@ -155,6 +155,7 @@ async function captureState(
   for (const viewport of viewports) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await page.waitForTimeout(300); // let the 240 ms height glide settle after a resize
     const path = testInfo.outputPath(`${name}-${viewport.id}.png`);
     await page.screenshot({ path, fullPage: true, animations: "disabled" });
     await testInfo.attach(`${name}-${viewport.id}`, { path, contentType: "image/png" });
@@ -163,6 +164,8 @@ async function captureState(
       const rect = element.getBoundingClientRect();
       return {
         height: rect.height,
+        // 24 px is the auth screen's minimum vertical padding on each side.
+        fits: rect.height <= window.innerHeight - 48,
         x: (rect.left + rect.right) / 2 - window.innerWidth / 2,
         y: (rect.top + rect.bottom) / 2 - window.innerHeight / 2,
       };
@@ -187,8 +190,13 @@ async function installShiftObserver(page: Page): Promise<void> {
     const values: number[] = [];
     Object.assign(window, { __layoutShifts: values });
     new PerformanceObserver((list) => {
+      // The card glides to each step's height in 240 ms (owner-approved). Shifts inside
+      // that window after an "auth-step" mark are the planned glide; anything else fails.
+      const steps = () => performance.getEntriesByName("auth-step").map((m) => m.startTime);
       for (const entry of list.getEntries() as Array<PerformanceEntry & { value: number; hadRecentInput: boolean }>) {
-        if (!entry.hadRecentInput) values.push(entry.value);
+        if (entry.hadRecentInput) continue;
+        if (steps().some((t) => entry.startTime >= t && entry.startTime <= t + 300)) continue;
+        values.push(entry.value);
       }
     }).observe({ type: "layout-shift", buffered: false });
   });

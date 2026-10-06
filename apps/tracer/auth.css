@@ -111,10 +111,7 @@
 .auth-steps .tick { width: 24px; height: 24px; border-radius: 50%; box-shadow: none; }
 .auth-steps .tick-fill { background: var(--fg); }
 
-.auth-viewport { position: relative; overflow: hidden; margin: 0 -6px; padding: 0 6px; }
-.auth-measure { position: absolute; inset: 0 6px auto; visibility: hidden; pointer-events: none; animation: none !important; transition: none !important; }
-.auth-measure h1 { font-size: 23px; }
-.auth-measure .auth-words { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.auth-viewport { position: relative; overflow: hidden; margin: 0 -6px; padding: 0 6px; transition: height 240ms var(--ease); }
 .auth-pane { min-width: 0; transition: opacity 240ms var(--ease), transform 240ms var(--ease), filter 240ms var(--ease); }
 .auth-pane[data-direction="forward"] { animation: auth-pane-forward 240ms var(--ease) both; }
 .auth-pane[data-direction="back"] { animation: auth-pane-back 240ms var(--ease) both; }
@@ -123,6 +120,7 @@
 @keyframes auth-pane-back { from { opacity: 0; transform: translateX(-24px); filter: blur(2px); } }
 .auth-footer { display: flex; min-height: 42px; justify-content: space-between; align-items: center; gap: 12px; margin-top: 26px; }
 .auth-primary {
+  margin-left: auto; /* stays right on step 1, where there is no back button */
   display: inline-flex;
   min-width: 140px;
   height: 42px;
@@ -188,4 +186,5 @@
 @media (prefers-reduced-motion: reduce) {
   .auth-card, .auth-pane, .auth-welcome p { animation: none; }
   .auth-pane { transition: opacity 200ms var(--ease); }
+  .auth-viewport { transition: none; }
 }

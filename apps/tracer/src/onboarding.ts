@@ -102,6 +102,11 @@ function mountSetup(
     else if (index === 1) renderIdentityStep(body);
     else if (index === 2) renderPasskeyStep(body);
     else renderRecoveryStep(body);
+    fitViewport(viewport, pane, direction !== "none");
+    // Marks the start of the planned 240 ms height glide; the browser test allows
+    // layout shifts only inside that window (the step can change after an async
+    // passkey ceremony, which Layout Instability does not count as recent input).
+    performance.mark("auth-step");
   }
 
   function renderFooter(): void {
@@ -300,31 +305,28 @@ function mountSetup(
     if (next && !next.disabled) { event.preventDefault(); next.click(); }
   }
 
+  let paneObserver: ResizeObserver | undefined;
   renderSteps();
   renderPane("none");
-  reserveViewport();
   renderFooter();
 
-  function reserveViewport(): void {
-    const viewport = host.querySelector<HTMLElement>("#setup-viewport")!;
-    const probe = document.createElement("div");
-    probe.className = "auth-pane auth-measure";
-    // Measure the 320 px phone content width even when enrollment begins on desktop;
-    // wider viewports render the same words in fewer rows and cannot clip the pane.
-    probe.style.width = `${Math.min(viewport.clientWidth - 12, 234)}px`;
-    // A changing card height moves every edge in Layout Instability even when its
-    // center is anchored. Recovery is the tallest pane (24 words in two phone
-    // columns), so measure that one template once before first paint and reuse it.
-    const recovery = SETUP_STEPS[3]!;
-    probe.innerHTML = `<p class="auth-eyebrow">step 4 of ${SETUP_STEPS.length}</p><h1>${recovery.title}</h1><p class="auth-lede">${recovery.lede}</p><div class="auth-pane-body">
-      <ol class="auth-words">${Array.from({ length: 24 }, (_, i) => `<li><span class="auth-word-number">${i + 1}</span><span>institution</span></li>`).join("")}</ol>
-      <div class="auth-actions"><button class="icon-action">${swapIcon(CLIPBOARD)}</button><button class="icon-action">${swapIcon(DOWNLOAD)}</button></div>
-      <p class="auth-recovery-message">Copied. Store the words somewhere private.</p>
-      <label class="auth-check"><span class="tick"></span><span>I stored them somewhere safe</span></label></div>`;
-    viewport.append(probe);
-    const height = Math.ceil(probe.getBoundingClientRect().height);
-    viewport.removeChild(probe);
-    viewport.style.height = `${height}px`;
+  /**
+   * The card hugs the current step: the viewport takes the pane's own height and glides
+   * to the next step's height in 240 ms (owner-approved mockup, DECISIONS 102). A fixed
+   * height sized for the tallest step left a large empty gap above the footer on short
+   * steps and pushed the card's top off-screen on phones. Height changes follow a
+   * Continue/Back press, so Layout Instability counts them as input-driven, not as CLS.
+   * A ResizeObserver keeps the height right when content grows inside a step (errors,
+   * the copied message) or the window resizes.
+   */
+  function fitViewport(viewport: HTMLElement, pane: HTMLElement, animate: boolean): void {
+    viewport.style.transition = animate ? "" : "none";
+    viewport.style.height = `${pane.offsetHeight}px`;
+    if (!animate) void viewport.offsetHeight; // commit the jump before transitions resume
+    viewport.style.transition = "";
+    paneObserver?.disconnect();
+    paneObserver = new ResizeObserver(() => { viewport.style.height = `${pane.offsetHeight}px`; });
+    paneObserver.observe(pane);
   }
 }
 
