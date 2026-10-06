@@ -166,8 +166,9 @@ invite/role management remains outside this lane.
 ## Admission and trusted ingress
 
 HTTP admission has fixed 60-second partitions: 120 browser actions and 60 CLI
-approval/polling actions. All actions in each partition count, including
-cookie-authenticated reads; the aggregate ceiling is 180/minute. Device callers
+approval/polling actions. All admitted actions in each partition count, including
+cookie-authenticated reads; logout is exempt so revocation remains available.
+The admitted-action ceiling is 180/minute. Device callers
 cannot consume browser capacity. Throttling returns 429 and `Retry-After: 60`;
 authentication failures remain 401. Wrong browser Origins are rejected before
 spending browser capacity. Request bodies are bounded at 32 KiB.
@@ -194,22 +195,42 @@ counter under the writer lock. Missing, unknown or mismatched handles fail close
 Status is public within the existing exact-Origin and admission policy and
 reveals only whether an owner exists.
 
-New registrations evaluate base64url(SHA256(UTF8(
-`infraternal/keywrap/prf/v2|<canonical user UUID>`))). A nullable passkey
-prf_input column preserves the original v1 input for existing envelopes: changing
-it would strand their encrypted DEKs. Authenticated wraps adds prf_input to each
-passkey entry (recovery entries carry null). Identified login uses the stored
-input when all enrolled passkeys share one input.
+New registrations and discoverable assertions evaluate the server-wide public
+constant base64url(SHA256(UTF8(`infraternal/keywrap/prf/v3`))) [D108, #30].
+The assertion carries `prf.eval` with an empty allowCredentials list. PRF remains
+credential-specific, and the browser strips the entire PRF extension before
+submitting its signed proof. HKDF info and envelope AAD stay exactly
+`infraternal/keywrap/v1|<canonical UUID>|<kind>`.
 
-Discoverable login does not request PRF until the signed login establishes a
-session. The browser reads session and wraps, then performs a local UV-required
-credentials.get for the chosen credential with its prf_input. This adds a second
-passkey prompt but avoids disclosing credential IDs or users publicly. It uses a
-fresh random local challenge and never sends that local assertion or PRF output
-to the server. Failure to unwrap revokes the newly issued session. evalByCredential
-requires a nonempty allowCredentials list under WebAuthn and therefore cannot
-be combined with a truly discoverable challenge. Recovery words and envelope
-AAD remain unchanged.
+Stored metadata is authoritative: NULL retains v1
+(SHA256(`infraternal/keywrap/prf/v1`)); v2 retains its UUID-derived input
+(SHA256(`infraternal/keywrap/prf/v2|<canonical UUID>`)). When the stored input
+differs from the first assertion input, or that assertion has no PRF result,
+the browser uses the existing local second prompt for the selected credential.
+It does not transmit that second assertion or PRF output. We choose fallback,
+without automatic rewrap: neither existing ciphertext nor metadata is relabeled.
+This preserves old DEKs without a new envelope write/rotation transaction.
+
+HTTP identified login is an authenticated fresh tap for the matching user;
+unauthenticated known/unknown UUIDs receive the same 401. Public discoverable
+login publishes no credential list. Every HTTP ceremony start (setup, login,
+additional passkey, recovery replacement) binds to a random host-only
+`__Host-infraternal-ceremony` cookie, Secure/HttpOnly/SameSite=Strict/Path=/,
+Max-Age=300. Pending state stores its hash. Finish requires the starting browser
+binding before consuming state; unrelated clients cannot drain a valid proof.
+
+HTTP login-finish creates a restricted pending-unlock session, with a fixed
+five-minute database expiry. Only `unlock-session` identity and `wraps` reads
+are allowed; ordinary `session`, WebSocket upgrade and all other authenticated
+actions deny pending authority. After local AES-GCM unwrap succeeds, the browser
+calls `unlock-finish` to activate the cookie and begin the normal sliding expiry.
+The server receives a completion signal, never the DEK. It cannot independently
+observe the browser's AES-GCM failure; instead abandonment or failed cleanup
+never grants terminal authority, and expired pending rows are deleted on the
+auth path. Failed unwrap attempts logout and surfaces failure. Exact-Origin
+logout bypasses both admission layers, so public request exhaustion cannot
+prevent revocation. Idle live sockets wake on committed logout/recovery and
+terminate on their actual expiry deadline without idle polling.
 
 Before owner enrollment, each restart rotates the token and replaces a stale
 private setup-token.sock. The token remains only in process memory and the
