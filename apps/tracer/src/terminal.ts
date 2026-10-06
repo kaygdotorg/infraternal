@@ -20,14 +20,25 @@ const encoder = new TextEncoder();
 export interface TerminalHooks {
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
   onDisconnected?: (forced: boolean) => void;
-  onInput?: (data: string, at: number) => void;
-  onPaintedOutput?: (bytes: Uint8Array, at: number) => void;
+  onInput?: (data: string, at: number, sequence: bigint) => boolean | void;
+  onTrace?: (keyId: string, hop: TerminalTraceHop, at: number) => void;
+  onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint) => void;
 }
+
+export type TerminalTraceHop =
+  | "encode"
+  | "wsSend"
+  | "wsMessage"
+  | "decode"
+  | "termWrite"
+  | "writeCallback"
+  | "paint";
 
 export interface TerminalConfig {
   host: HTMLElement;
   status: HTMLElement;
   hooks?: TerminalHooks;
+  trace?: boolean;
 }
 
 interface ResumeCredentials {
@@ -234,7 +245,8 @@ export class TerminalClient {
     if (this.closed) return;
     this.setStatus(this.sessionId ? "Connection lost; resuming…" : "Connecting…");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${location.host}/v1/ws`);
+    const traceQuery = this.config.trace ? "?trace=1" : "";
+    const socket = new WebSocket(`${protocol}//${location.host}/v1/ws${traceQuery}`);
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     this.decoder = new WebSocketFrameDecoder();
@@ -262,13 +274,14 @@ export class TerminalClient {
       }
     };
     socket.onmessage = (event: MessageEvent<ArrayBuffer>) => {
+      const receivedAt = performance.now();
       if (!(event.data instanceof ArrayBuffer)) {
         this.protocolFailure("server sent a non-binary frame");
         return;
       }
       try {
         const message = new Uint8Array(event.data);
-        this.decoder?.feed(message, (streamId, frame) => this.handleFrame(streamId, frame, message));
+        this.decoder?.feed(message, (streamId, frame) => this.handleFrame(streamId, frame, message, receivedAt));
       } catch {
         this.protocolFailure("server sent an invalid wire frame");
       }
@@ -288,7 +301,7 @@ export class TerminalClient {
     };
   }
 
-  private handleFrame(streamId: number, frame: WireFrame, message: Uint8Array): void {
+  private handleFrame(streamId: number, frame: WireFrame, message: Uint8Array, receivedAt: number): void {
     if (streamId !== CONTROL_STREAM && streamId !== TERMINAL_STREAM) {
       this.protocolFailure("server used an unexpected stream id");
       return;
@@ -296,7 +309,7 @@ export class TerminalClient {
     if (streamId === CONTROL_STREAM) {
       this.handleControlFrame(frame);
     } else {
-      this.handleTerminalFrame(frame, message);
+      this.handleTerminalFrame(frame, message, receivedAt);
     }
   }
 
@@ -350,7 +363,7 @@ export class TerminalClient {
     }
   }
 
-  private handleTerminalFrame(frame: WireFrame, message: Uint8Array): void {
+  private handleTerminalFrame(frame: WireFrame, message: Uint8Array, receivedAt: number): void {
     if (!this.attached) {
       this.protocolFailure("server sent terminal data before AttachTerm");
       return;
@@ -360,9 +373,13 @@ export class TerminalClient {
         this.acknowledgeInput(frame.inSeqAcked);
         return;
       case "Output":
+        this.traceRange(frame.outSeq, frame.bytes.byteLength, "wsMessage", receivedAt);
+        this.traceRange(frame.outSeq, frame.bytes.byteLength, "decode", performance.now());
         this.acceptOutput(frame.outSeq, frame.bytes, message);
         return;
       case "Snapshot":
+        this.traceRange(frame.outSeq, frame.bytes.byteLength, "wsMessage", receivedAt);
+        this.traceRange(frame.outSeq, frame.bytes.byteLength, "decode", performance.now());
         this.acceptSnapshot(frame.outSeq, frame.bytes);
         return;
       case "Ping":
@@ -436,7 +453,7 @@ export class TerminalClient {
   private handleInput(data: string): void {
     if (this.closed || !data) return;
     const at = performance.now();
-    this.config.hooks?.onInput?.(data, at);
+    const traceInput = this.config.hooks?.onInput?.(data, at, this.nextInSeq) === true;
     let encoded = this.encoderIntoScratch(data);
     if (encoded === undefined) {
       // Large paste events take the slow path; ordinary key events reuse inputScratch.
@@ -459,7 +476,7 @@ export class TerminalClient {
           type: "Input",
           inSeq: firstSequence + BigInt(offset),
           bytes: encoded.subarray(offset, offset + length),
-        });
+        }, traceInput ? firstSequence + BigInt(offset) : undefined, traceInput ? length : 0);
         offset += length;
       }
     }
@@ -536,10 +553,14 @@ export class TerminalClient {
       this.snapshotWriteInFlight = true;
       this.terminal.reset();
       this.terminal.write(snapshot.bytes, () => {
+        const callbackAt = performance.now();
+        this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "writeCallback", callbackAt);
         requestAnimationFrame((at) => {
+          const paintedAt = performance.now();
           this.lastOutSeq = snapshot.outSeq;
           this.snapshotWriteInFlight = false;
-          this.config.hooks?.onPaintedOutput?.(snapshot.bytes, at);
+          this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "paint", paintedAt);
+          this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq);
           snapshot.bytes.fill(0);
           this.returnCredit(snapshot.bytes.byteLength);
           if (this.pendingSnapshot) {
@@ -561,11 +582,17 @@ export class TerminalClient {
       }
       this.outputWriteInFlight = true;
       this.outputWriteLength = region.byteLength;
+      const writeSequence = this.lastOutSeq;
+      this.traceRange(writeSequence, region.byteLength, "termWrite", performance.now());
       this.terminal.write(region, () => {
+        const callbackAt = performance.now();
+        this.traceRange(writeSequence, this.outputWriteLength, "writeCallback", callbackAt);
         requestAnimationFrame((at) => {
+          const paintedAt = performance.now();
           const consumed = this.outputWriteLength;
           this.lastOutSeq += BigInt(consumed);
-          this.config.hooks?.onPaintedOutput?.(region.subarray(0, consumed), at);
+          this.traceRange(writeSequence, consumed, "paint", paintedAt);
+          this.config.hooks?.onPaintedOutput?.(region.subarray(0, consumed), paintedAt, writeSequence);
           this.outputQueue.consume(consumed);
           this.outputWriteLength = 0;
           this.outputWriteInFlight = false;
@@ -643,14 +670,26 @@ export class TerminalClient {
     }, delay);
   }
 
-  private sendFrame(streamId: number, frame: WireFrame): void {
+  private sendFrame(streamId: number, frame: WireFrame, traceStart?: bigint, traceLength = 0): void {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     try {
       const length = encodeMuxedFrameInto(streamId, frame, this.sendScratch);
+      const encodedAt = performance.now();
+      if (traceStart !== undefined) this.traceRange(traceStart, traceLength, "encode", encodedAt);
       socket.send(this.sendScratch.subarray(0, length));
+      if (traceStart !== undefined) this.traceRange(traceStart, traceLength, "wsSend", performance.now());
     } catch {
       this.protocolFailure("could not encode an infraternal wire frame");
+    }
+  }
+
+  /** Maps byte-stream sequence numbers to probe key IDs without changing wire frames. */
+  private traceRange(start: bigint, length: number, hop: TerminalTraceHop, at: number): void {
+    const onTrace = this.config.hooks?.onTrace;
+    if (!onTrace) return;
+    for (let offset = 0; offset < length; offset += 1) {
+      onTrace((start + BigInt(offset)).toString(), hop, at);
     }
   }
 
