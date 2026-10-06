@@ -116,12 +116,8 @@ pub(crate) fn with_refusing_engine(step: usize, run: impl FnOnce(Engine)) {
 }
 
 #[test]
-#[ignore = "allocation matrix; production ReleaseFast steps 0-11 exercised separately"]
 fn resize_allocation_refusal_retires_native_handle() {
-    let step = std::env::var("VT_ALLOCATION_STEP")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let step = std::env::var("VT_ALLOCATION_STEP").map_or(2, |value| value.parse().unwrap());
     with_refusing_engine(step, |mut engine| {
         if engine.resize(20_000, 2).is_err() {
             let mut buffer = vec![0; 1024 * 1024];

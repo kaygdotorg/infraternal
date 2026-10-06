@@ -11,7 +11,6 @@ impl Drop for ChildGuard {
 }
 
 #[test]
-#[ignore = "T3 session red probe; enable after error and recovery ordering are fixed"]
 fn native_resize_refusal_preserves_peer_and_pty() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let evidence = root.join("target/review-vt3-fixes");

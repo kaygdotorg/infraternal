@@ -237,3 +237,11 @@ mod measurements;
 #[cfg(test)]
 #[path = "../tests/unit/snapshot_fidelity.rs"]
 mod fidelity;
+
+#[cfg(test)]
+#[path = "../tests/unit/resize_recovery.rs"]
+mod resize_recovery;
+
+#[cfg(test)]
+#[path = "../tests/unit/recovery_bench.rs"]
+mod recovery_measurements;
