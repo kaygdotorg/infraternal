@@ -328,3 +328,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     performance. Before any code, the feature gets a budget: idle CPU (zero
     by default), memory, and what runs on the server and what runs in the
     client. Features ship at the highest polish or not at all.
+82. **The key toolbar auto-hides** while you scroll back, so you can read on
+    the full screen. It returns when you type or when the keyboard opens. The
+    prompt is never hidden under it.
+83. **Backgrounds come from our own shader:** a mesh gradient with fine
+    grain, painted from the active theme's colors. Very curated and very
+    performant: rendered once to a still image (zero idle CPU), and rendered
+    again only when the theme or the window size changes. Slow drift is
+    opt-in. Your own photo stays on your device. Unsplash is an optional
+    integration only when the server admin adds a key. Paper Shaders cannot
+    be used (PolyForm Shield is not compatible with AGPL).
+84. **Zoom changes the text, not the UI.** On touch devices, page zoom is
+    off. A pinch changes the terminal font size. Inputs are 16 px, so iOS
+    never zooms when one takes focus. The safe areas follow the theme.
