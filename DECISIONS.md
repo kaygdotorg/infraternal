@@ -360,3 +360,21 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     the about 230 ns that the JS decode itself takes. Performance is
     measured from the UI, end to end (keystroke → paint), as the main S1
     gate.
+89. **Search across sessions** (S1–S4 of #18). Scrollback search fans out to
+    the agents: each shim scans its own in-memory scrollback, results stream
+    back, and there is no central copy of the output. Command history (from
+    shell integration) has a small central index that also works when hosts
+    are offline. Budget: results from 50 sessions in < 100 ms, bounded by
+    the slowest host's round trip. The fastest default is always chosen, and
+    the engine stays fast with very large scrollback.
+90. **Binary output** is detected in the shim (thresholds calibrated by the
+    #18 stress test, so that emoji, CJK and combining text never count as
+    binary). It is shown live, kept out of search, and collapsed to a marker
+    in scrollback that can be expanded on request.
+91. **How far back search reaches:** live scrollback always. Closed sessions
+    are kept read-only for 7 days. Command history is kept for 90 days,
+    opt-in for each host. Hits open the session at the line, with the match
+    highlighted.
+92. **Order after S1: VNC next.** When SSH is complete, the next slice is
+    VNC and RDP, ahead of metrics and Docker (this changes the order in
+    decision 34).
