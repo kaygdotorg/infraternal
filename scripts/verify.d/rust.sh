@@ -87,6 +87,8 @@ rust_static_build_check() {
         fi
     done
 
+    scripts/auth-toolchain || return $?
+
     for target in "${targets[@]}"; do
         cargo build --locked --release --package infraternal --target "$target" || return $?
         rust_check_static_binary "$target" || return $?
