@@ -2402,3 +2402,6 @@ async fn audit_ceremony_browser_binding() {
 
 #[path = "socket_tests.rs"]
 mod socket_tests;
+
+#[path = "review3_tests.rs"]
+mod review3_tests;
