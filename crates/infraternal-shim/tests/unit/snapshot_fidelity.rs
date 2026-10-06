@@ -285,3 +285,19 @@ fn fidelity_variation_wrap_attributes() {
     replay("variation-wrap-direct", "\x1b[?2027h\x1b[1;12H❤\x1b[38;2;12;34;56;48;2;65;43;21;4:3m\x1b]8;id=tail;https://example.org/tail\x1b\\\u{fe0f}".as_bytes(), 12, 5);
     replay("variation-wrap-with-prior-combining", "\x1b[?2027h\x1b[1;12H❤\u{301}\x1b[38;2;12;34;56;48;2;65;43;21;4:3m\x1b]8;id=tail;https://example.org/tail\x1b\\\u{fe0f}".as_bytes(), 12, 5);
 }
+
+#[test]
+#[ignore = "R2 red regression; enable with saved-mode restoration"]
+fn fidelity_saved_modes_future_restore() {
+    let mut a = Terminal::new(80, 24).unwrap();
+    a.process(b"\x1b[?1000h\x1b[?1000s\x1b[?1000lX");
+    let mut b = Terminal::new(80, 24).unwrap();
+    b.process(&a.snapshot().unwrap());
+    a.process(b"\x1b[?1000r");
+    b.process(b"\x1b[?1000r");
+    assert_eq!(
+        a.engine.state_difference(&b.engine),
+        0,
+        "saved mouse mode restore"
+    );
+}
