@@ -217,3 +217,66 @@ mod tests {
         compare(&a, &b, "active implicit link continuation");
     }
 }
+
+#[test]
+fn approximate_repaint_is_bounded_clips_at_complete_cells_and_preserves_source() {
+    let mut source = Terminal::new(1000, 200).unwrap();
+    let mut control = Terminal::new(1000, 200).unwrap();
+    let line = format!(
+        "{}e\u{301}X",
+        "\x1b[38;2;123;234;45m界\x1b[38;2;67;89;101m色".repeat(249)
+    );
+    let input = format!(
+        "\x1bc{}",
+        std::iter::repeat_n(line, 200)
+            .collect::<Vec<_>>()
+            .join("\r\n")
+    );
+    source.process(input.as_bytes());
+    control.process(input.as_bytes());
+    assert!(
+        matches!(source.snapshot(), Err(error) if error.kind() != std::io::ErrorKind::Unsupported),
+        "alternating-color maximum-size screen must exercise frame capacity fallback"
+    );
+    let output = source.approximate_snapshot();
+    assert!(
+        output.len() <= MAX_FRAME - 10,
+        "negotiated bound includes flags and sequence"
+    );
+    assert!(
+        std::str::from_utf8(&output).is_ok(),
+        "clipping never splits UTF-8"
+    );
+    let mut viewer = Terminal::new(1000, 200).unwrap();
+    viewer.process(&output);
+    assert!(
+        viewer.pending.is_empty(),
+        "clipped repaint ends in parser ground state"
+    );
+    viewer.process(b"\x1b[1;1HCLIP_CONTINUATION");
+    source.process(b"\x1b[2bX");
+    control.process(b"\x1b[2bX");
+    assert_eq!(
+        source.engine.state_difference(&control.engine),
+        0,
+        "approximation leaves the live source untouched"
+    );
+}
+
+#[test]
+fn approximate_repaint_keeps_complete_pending_syntax_or_omits_it_whole() {
+    let mut source = Terminal::new(12, 5).unwrap();
+    source.process(b"\x1bc\x1b]2;unfinished");
+    let output = source.approximate_snapshot();
+    assert!(
+        output.ends_with(b"\x1b]2;unfinished"),
+        "bounded pending syntax survives fallback"
+    );
+    source.process(&b"x".repeat(MAX_FRAME));
+    let output = source.approximate_snapshot();
+    assert!(output.len() <= MAX_FRAME - 10);
+    assert!(
+        !output.ends_with(b"unfinished"),
+        "oversized control string is omitted as one unit"
+    );
+}
