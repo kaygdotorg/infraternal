@@ -1,10 +1,11 @@
 //! Inherited leg-B dispatcher and bounded session registry for the tracer bullet [9][13][41].
 //!
 //! Each terminal owns one pending output frame. Commands have eight slots;
-//! overflow closes leg B rather than losing input. The writer has eight slots
+//! a full queue pauses leg-B reads until capacity returns. The writer has eight slots
 //! and awaits capacity, applying transport backpressure. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! snapshot. Unviewed sessions stay disconnected so their PTYs keep progressing.
+//! A closed shim or failed terminal task closes only its mux stream.
 use crate::{
     relay,
     sessions::{self, Manager, Reader, Session},
@@ -130,11 +131,21 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     let dispatch = async {
         let mut receive = Receive::default();
         let mut streams: HashMap<u32, ([u8; 16], mpsc::Sender<Command>)> = HashMap::new();
-        let mut jobs: JoinSet<io::Result<()>> = JoinSet::new();
+        let mut jobs: JoinSet<(u32, io::Result<()>)> = JoinSet::new();
         let mut opens: JoinSet<(u32, u32, io::Result<Session>)> = JoinSet::new();
         loop {
             tokio::select! {
-                result = jobs.join_next(), if !jobs.is_empty() => { result.ok_or_else(|| sessions::invalid("missing relay task"))?.map_err(io::Error::other)??; }
+                result = jobs.join_next(), if !jobs.is_empty() => {
+                    let (stream, result) = result.ok_or_else(|| sessions::invalid("missing relay task"))?.map_err(io::Error::other)?;
+                    // Close/re-attach may reuse a stream before the old task exits.
+                    // Its completion must not remove the replacement's live sender.
+                    if streams.get(&stream).is_some_and(|(_, sender)| sender.is_closed()) {
+                        streams.remove(&stream);
+                        if result.is_err() {
+                            emit(&tx, Message::Close(stream, "terminal shim disconnected")).await?;
+                        }
+                    }
+                }
                 result = opens.join_next(), if !opens.is_empty() => {
                     let (stream, call_id, result) = result.ok_or_else(|| sessions::invalid("missing launch task"))?.map_err(io::Error::other)?;
                     match result {
@@ -170,7 +181,9 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                             let (commands, rx) = mpsc::channel(8);
                             streams.insert(stream, (id, commands));
                             let tx = tx.clone();
-                            jobs.spawn(async move { terminal(path, id, stream, last_out_seq, last_in_seq, rx, tx).await });
+                            jobs.spawn(async move {
+                                (stream, terminal(path, id, stream, last_out_seq, last_in_seq, rx, tx).await)
+                            });
                         }
                         frame => {
                             let command = match frame {
@@ -180,8 +193,17 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                                 Frame::Close {..} => { streams.remove(&stream); continue; }
                                 _ => return Err(sessions::invalid("unexpected leg-B request")),
                             };
-                            streams.get(&stream).ok_or_else(|| sessions::invalid("terminal stream is not attached"))?.1.try_send(command)
-                                .map_err(|_| sessions::invalid("terminal command queue full or closed"))?;
+                            // Await capacity without reading another leg-B frame: at
+                            // most eight queued commands plus this bounded frame.
+                            // The writer runs independently, so draining output
+                            // remains possible while the source is backpressured.
+                            if let Some((_, sender)) = streams.get(&stream) {
+                                // A closed receiver is retired when its task
+                                // joins, emitting Close once for an IO failure.
+                                let _ = sender.send(command).await;
+                            }
+                            // Frames already in flight after a stream closes are
+                            // ignored; the terminal task emits its own Close.
                         }
                     }
                 }
