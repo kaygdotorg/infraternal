@@ -44,9 +44,10 @@ default build (`target/vt-ghostty/production-dependencies.log`).
 `src/terminal_native.rs` owns one opaque C terminal handle. Its audited unsafe
 boundary covers creation, synchronous input, resize, serialization and free;
 test-only queries compare cells and count history. It lends no grid references
-to Rust and has no callbacks. Initialization and resize errors propagate through
-the session API in separate commits. Independent review of that boundary is
-still required; these measurements are implementation evidence.
+to Rust and has no callbacks. Initialization errors propagate to the session
+API; returned resize errors permanently retire the handle and reconstruct at
+the last good size as documented in the third-review section below. Independent
+review of that boundary is still required; these measurements are implementation evidence.
 
 `native/snapshot.zig` reads Ghostty's actual screen/page/cell state. It streams
 VT into the caller's bounded buffer and does not use the built-in terminal
@@ -575,3 +576,163 @@ python3 crates/infraternal-shim/tests/vt_flood.py --binary target/review-vt2-fix
 python3 crates/infraternal-shim/tests/vt_memory.py --binary target/review-vt2-fixes/final-infraternal-x86_64 > target/review-vt2-fixes/reproduce-5.log 2>&1
 python3 crates/infraternal-shim/tests/vt_scale.py --binary target/review-vt2-fixes/final-infraternal-x86_64 --sessions 128 > target/review-vt2-fixes/reproduce-6.log 2>&1
 ```
+
+## Third-review corrections T1–T3 (#26)
+
+T1 now arms the existing 250 ms one-shot output-pause deadline whenever an
+indivisible repaint exceeds available credit, including positive credit.
+Expiry detaches the shim peer and preserves the delivered output cursor.
+The required repaint cost survives detachment: unchanged or still insufficient
+credit parks recovery rather than repeatedly serializing the same state.
+Approximation notices are queued only after the repaint is credit-admitted;
+the process counter increments only after the flagged frame reaches the socket.
+
+T2 restores effective mouse event and format after boolean mode construction.
+Those effective fields depend on the last-written mode, including false mode
+writes. The painter emits a compatible final mode write or explicitly rejects
+an unconstructible combination. The strict native oracle now compares both
+fields independently of the booleans. Public C encoder continuations cover
+1000, 1003+1006, and 1003 followed by 1000; all three pass.
+
+T3: resize returns an error and the engine handle must not be reused. Rust
+permanently removes native ownership on every returned resize error. Input,
+queries, Snapshot, another resize, and Drop cannot call the retired handle.
+A fresh engine is constructed at the last successful geometry. Exact replay
+borrows both retained-ring fragments without a second 8 MiB allocation, but
+requires origin coverage and no prior geometry change. Otherwise the engine
+starts with a clean screen and retains approximate-recovery provenance.
+The real PTY is restored to the last good size; the peer, input acknowledgments,
+and subsequent PTY output remain usable. Pending output reads receive recovery;
+control-only peers retain the ordered InputState fence before replacement.
+A later peer requesting even the current head still receives the approximation
+notice. Legacy peers retain their explicit limitation response.
+
+### Transactional resize candidate for our fork (#37)
+
+The pinned native implementation does not guarantee transactional resize.
+The required upstream invariant is: any returned allocation error leaves both
+screens, dimensions, tab stops, page ownership and cursor pins internally valid,
+with input, queries, Snapshot and destruction safe at the old geometry.
+Construction should prepare all replacement ownership before committing it.
+This is a candidate for our fork, not a change to the selected engine or
+owner decision 94.
+
+Until that invariant exists, retired native allocations are held until shim
+exit: invoking the native destructor would inspect the same invalid state.
+Repeated refused resizes can therefore retain additional native memory;
+ordinary page/ring budgets do not bound that accumulated retention.
+The upstream C allocation probe still fails at four of twelve refusal points.
+Our production ReleaseFast wrapper passes all twelve retirement probes and
+the real-PTY refusal fixture. ReleaseSafe refusal points 4 and 5 encounter
+native invalid-state checks before resize returns, so the wrapper cannot
+establish its returned-error guarantee there. Native diagnostics stay in
+`target/review-vt3-fixes/t3-upstream-native/` and `t3-boundary-green-*.log`.
+This is an upstream limitation, not evidence of a transactional native engine.
+
+### Reproduction and self-review
+
+All evidence below is under `target/review-vt3-fixes/`. Public probe diagnostics
+and terminal bytes stay in files. The default fast gate includes all four
+faithful/approximate × 1-byte/16-KiB credit probes, the public mouse encoder,
+production allocator retirement, and five isolated real-PTY ordering cases.
+Each fix had a failing regression before its implementation.
+
+The four 20,000-case corpora have zero accepted divergence: RIS original
+19,864 accepted / 136 rejected; RIS expanded 4,815 / 15,185; both fresh-C
+runs 0 / 20,000. Rejection is explicit and does not prove representability.
+Tracked vim/htop/less/Unicode captures pass their independent continuations.
+Fresh real-program captures at 200×60 sampled every 64 bytes accept all
+48 vim, 39 htop, and 34 less boundaries with zero divergence; each includes
+recorded continuation plus independent future-output and resize branches.
+The original reviewer credit probes complete in 120.9, 121.1 and 141.3 ms,
+with zero premature notices or repaints. Final wrapped-output and real less
+reconnect cases pass, including negotiated and legacy recovery.
+
+Self-review checked unique non-Send native ownership and synchronous slice
+lifetimes, no native call or destructor after returned resize errors, bounded
+Snapshot lengths and sentinels, effective mouse fields and public encodings,
+unchanged recovery cursor and one-shot deadline, parked serialization,
+credit-admitted approximation ordering, retained provenance across peers,
+geometry coverage, frozen v1 layouts, capability intersection, compatible
+licenses, and the measurements below. No protocol parser changed; its existing
+fuzz targets and the recorded second-review 1,110,160-run result remain valid.
+`docs/PROCESS.md` is absent in this checkout; this records the applicable
+review checks directly. Independent review remains separate from this work.
+
+### Final latency, throughput and scale
+
+Serial trials used an Intel Core i9-9900K at 3.60 GHz, eight exposed logical
+CPUs, x86_64 Linux 6.12.111+deb13-amd64. This is the shared host, not a pinned
+performance VM. Flood starting load averages ranged from
+11.11 / 5.42 / 4.30 to 13.57 / 6.38 / 4.64; serializer/reconstruction started
+at 13.57 / 6.61 / 4.73. Our measurements ran serially after our builds and
+corpora, but other host work remained active. These trials establish current
+budgets without establishing a causal performance delta from the previous
+review's measurements. Simultaneous 128-session flood throughput is unmeasured.
+
+| Real credited 50 MiB flood, three trials | Median MB/s | Range MB/s |
+| --- | ---: | ---: |
+| LF | 11.103 | 10.232–11.816 |
+| CRLF | 14.649 | 11.957–15.523 |
+| Printable | 37.189 | 34.557–43.643 |
+
+All nine trials pass 10 MB/s, with zero Snapshot substitutions.
+
+| 200×60 latency measurement | Samples | p50 ms | p99 ms |
+| --- | ---: | ---: | ---: |
+| Serializer, full history + 256-row tail (27,535 bytes) | 1,000 | 0.613 | 1.066 |
+| Real static shim socket Snapshot (23,594 bytes) | 1,000 | 0.675 | 3.288 |
+| Serial socket Snapshots over 128 full sessions | 128 | 0.883 | 5.865 |
+| Full origin-ring fresh-engine constructor/replay | 50 | 78.767 | 101.708 |
+| Simultaneous socket recovery over 128 full sessions | 1,280 | — | 51.720 |
+
+The serializer passes the unchanged 2 ms guard. Socket timing includes
+scheduling, framing, transfer and Python decode; its 3.288 ms p99 is retained,
+not described as passing that serializer-only budget. Full-ring reconstruction
+uses 8,388,595 bytes per session, or **1,073,740,160 bytes across 128 sessions**.
+Multiplying its per-unit p99 service time by 128 gives 13,018.624 ms of serialized
+reconstruction work; this multiplication is capacity evidence, not a joint p99.
+That test measures the same fresh-engine constructor/replay component while
+old healthy handles permit cleanup. Actual native refusal and retirement have
+separate allocator and PTY tests. It does not certify latency when all 128
+sessions simultaneously require full native reconstruction.
+
+The scale fixture fills both native history and the 8 MiB ring in every real
+shim at 200×60 before timing. Expected count is 128: page/ring capacities alone
+are 128 × 25 MiB = 3,200 MiB, excluding metadata and retired allocations.
+Measured per-shim RSS is **30,944–35,956 KiB**, aggregate RSS **4,089,300 KiB**,
+aggregate PSS **3,597,524 KiB**, and infraternal agent RSS **4,264 KiB**.
+A separate static shim measures idle/full RSS **4,712 / 31,256 KiB**; the
+historical supplemental 4 MiB idle canary remains unmet. Ten simultaneous
+128-reply recovery bursts measure p99 **51.720 ms**, maximum **51.970 ms**,
+passing decision 41's 300 ms guard. Existing-state Snapshot recovery uses
+existing native state, unlike the full-ring rebuild component above. Scale
+starting/ending load averages are 13.36 / 6.69 / 4.77 and
+12.59 / 7.50 / 5.14. The retained-allocation limitation under repeated resize
+refusal is not included in these ordinary resident-state totals.
+
+Reproduction from this worktree (all command output must remain in files):
+
+```sh
+nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify fast > target/review-vt3-fixes/reproduce-fast.log 2>&1
+nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib fidelity_seeded_nightly -- --ignored --nocapture --test-threads=1 > target/review-vt3-fixes/reproduce-original.log 2>&1
+nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib fidelity_extended_nightly -- --ignored --nocapture --test-threads=1 > target/review-vt3-fixes/reproduce-expanded.log 2>&1
+python3 scripts/verify-vt-reconnect.py --binary target/x86_64-unknown-linux-musl/release/infraternal > target/review-vt3-fixes/reproduce-reconnect.log 2>&1
+python3 crates/infraternal-shim/tests/vt_flood.py --binary target/x86_64-unknown-linux-musl/release/infraternal > target/review-vt3-fixes/reproduce-flood.log 2>&1
+nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib snapshot_200x60 -- --ignored --nocapture --test-threads=1 > target/review-vt3-fixes/reproduce-snapshot.log 2>&1
+nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib measured_full_ring_reconstruction -- --ignored --nocapture --test-threads=1 > target/review-vt3-fixes/reproduce-reconstruction.log 2>&1
+python3 crates/infraternal-shim/tests/vt_scale.py --binary target/x86_64-unknown-linux-musl/release/infraternal --sessions 128 > target/review-vt3-fixes/reproduce-scale.log 2>&1
+```
+
+Use `VT_SNAPSHOT_INITIAL=fresh-c` to reproduce constructor-context rejection
+counts; both contexts' logs are `final-fidelity*-{RIS,fresh-c}.log`. Fresh capture
+bytes are in `fresh-captures/`; the opt-in `fidelity_fresh_real_program_captures`
+test takes `VT_CAPTURE_DIR` and reports sampled coverage in
+`final-fresh-captures.log`. Final benchmarks are `final-flood-{1,2,3}.log`,
+`final-snapshot.log`, `final-reconstruction.log`, `final-socket-snapshot.log`
+and `final-scale-128.log`; machine and per-trial load are recorded in
+`final-machine.json` and `final-measurement-status.json`. Original reviewer
+probes are `final-reviewer-credit*_probe.log`; public mouse and upstream
+allocation diagnostics are in `t2-gate-public/` and `t3-upstream-native/`.
+Final exact gate output is `final-docs-fast.log`. #26 records each atomic
+commit and its gate; this job neither pushes nor deploys.

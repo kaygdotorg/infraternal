@@ -185,8 +185,8 @@ impl Terminal {
         let len = self.engine.approximate_snapshot(&mut out);
         out.truncate(len);
         if out.is_empty() {
-            // Allocation succeeded and the engine is live. This defensive
-            // fallback still gives a valid, explicitly approximate reset.
+            // A pending rebuild has no live handle; a bounded painter may
+            // also return nothing. Both use an explicitly approximate reset.
             out.extend_from_slice(b"\x1bc");
         }
         out.extend_from_slice(carry);
