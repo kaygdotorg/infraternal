@@ -5,6 +5,8 @@ import { expect, test } from "playwright/test";
 test("first run, passkey login, terminal resume, and the latency probe", async ({ page }, testInfo) => {
   const context = page.context();
   await context.request.post("/__mock/reset");
+  const authRequests: string[] = [];
+  page.on("request", (request) => { if (new URL(request.url()).pathname.startsWith("/auth/")) authRequests.push(new URL(request.url()).pathname); });
   const cdp = await context.newCDPSession(page);
   await cdp.send("WebAuthn.enable");
   await cdp.send("WebAuthn.addVirtualAuthenticator", {
@@ -21,7 +23,17 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   });
 
   await page.goto("/?mock=1");
-  await page.getByRole("button", { name: "Set up the first owner" }).click();
+  await expect(page.locator("#setup-form")).toBeVisible();
+  await expect(page.locator("#login-form")).toHaveCount(0);
+  expect(authRequests[0]).toBe("/auth/status");
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme });
+    await page.setViewportSize({ width: 390, height: 844 });
+    const path = testInfo.outputPath(`setup-${colorScheme}.png`);
+    await page.screenshot({ path });
+    await testInfo.attach(`setup-${colorScheme}`, { path, contentType: "image/png" });
+  }
+  await page.setViewportSize({ width: 1280, height: 720 });
   const setupResponse = await context.request.get("/__mock/setup-token");
   const setupBody = await setupResponse.json() as { setup_token: string };
   await page.locator("#setup-token").fill(setupBody.setup_token);
@@ -31,18 +43,27 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   await expect(page.getByRole("heading", { name: "Save your recovery key" })).toBeVisible();
   const recoveryWords = (await page.locator("#recovery-words").textContent())?.trim().split(/\s+/) ?? [];
   expect(recoveryWords).toHaveLength(24);
-  const userId = await page.locator("#account-id-value").textContent();
-  expect(userId).toMatch(/^[0-9a-f-]{36}$/);
   await page.locator("#recovery-saved").check();
   await page.getByRole("button", { name: "Finish setup" }).click();
   await expect(page.getByText("TEST DOUBLE")).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
 
-  // Keep the virtual authenticator and account UUID, but remove the session cookie to exercise login.
+  // Keep only the resident credential; identity must come from the authenticator.
   await context.clearCookies();
+  await page.evaluate(() => localStorage.clear());
   await page.reload();
   await expect(page.locator("#login-form")).toBeVisible();
-  await expect(page.locator("#account-id")).toHaveValue(userId ?? "");
+  await expect(page.locator("#account-id")).toHaveCount(0);
+  await expect(page.locator("#device-name")).toHaveCount(0);
+  await expect(page.locator("#setup-form")).toHaveCount(0);
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme });
+    await page.setViewportSize({ width: 390, height: 844 });
+    const path = testInfo.outputPath(`signin-${colorScheme}.png`);
+    await page.screenshot({ path });
+    await testInfo.attach(`signin-${colorScheme}`, { path, contentType: "image/png" });
+  }
+  await page.setViewportSize({ width: 1280, height: 720 });
   await page.getByRole("button", { name: "Continue with passkey" }).click();
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
 
@@ -226,3 +247,34 @@ function percentile(sorted: number[], fraction: number): number {
   const rank = Math.max(0, Math.ceil(sorted.length * fraction) - 1);
   return sorted[rank] ?? 0;
 }
+
+/** Access failures must not expose a guessed form or browser exception details. */
+test("status failure, invalid setup token, and cancelled passkey have distinct guidance", async ({ page }) => {
+  await page.context().request.post("/__mock/reset");
+  await page.route("**/auth/status", (route) => route.fulfill({ status: 503, json: {} }));
+  await page.goto("/");
+  await expect(page.getByRole("alert")).toHaveText("The server could not complete the request. Try again.");
+  await expect(page.locator("form")).toHaveCount(0);
+  await page.unroute("**/auth/status");
+  await page.getByRole("button", { name: "Try again" }).click();
+  await page.locator("#setup-token").fill("invalid-input");
+  await page.locator("#owner-name").fill("Owner");
+  await page.getByRole("button", { name: "Register a passkey" }).click();
+  await expect(page.locator("#auth-error")).toContainText("The setup token is invalid or expired.");
+  await page.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: false } }));
+  await page.route("**/auth/login-start", (route) => route.fulfill({ json: {
+    ceremony: "cancel-test", options: { publicKey: {
+      challenge: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", rpId: "localhost",
+      allowCredentials: [], userVerification: "required", extensions: {},
+    } },
+  } }));
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator.credentials, "get", { value: async () => {
+      throw new DOMException("browser internal diagnostic", "NotAllowedError");
+    } });
+  });
+  await page.goto("/?setup=1");
+  await expect(page.locator("#setup-form")).toHaveCount(0);
+  await page.getByRole("button", { name: "Continue with passkey" }).click();
+  await expect(page.locator("#auth-error")).toHaveText("The passkey prompt was cancelled or timed out. Try again when you are ready.");
+});
