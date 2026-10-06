@@ -30,7 +30,6 @@ fn replay(name: &str, prefix: &[u8], cols: u16, rows: u16) {
 }
 
 #[test]
-#[ignore = "red regression: enable after screen-order fix"]
 fn fidelity_f1_rep() {
     replay("F1-alternate-rep", b"\x1b[?47hALT\x1b[?47lMAIN", 12, 5);
 }

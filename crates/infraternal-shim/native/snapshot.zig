@@ -23,6 +23,15 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) Writer.Error!void {
         if (@field(t.colors, entry[0]).override) |rgb| try w.print("\x1b]{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{ entry[1], rgb.r, rgb.g, rgb.b });
     }
     const primary = t.screens.get(.primary).?;
+    // Printing changes the terminal-global REP source. Reconstruct the
+    // inactive screen first so its final character cannot win on replay.
+    if (t.screens.active_key == .primary) {
+        if (t.screens.get(.alternate)) |alt| {
+            try w.writeAll("\x1b[?47h");
+            try paint(w, t, alt);
+            try w.writeAll("\x1b[?47l");
+        }
+    }
     const history = primary.pages.total_rows - t.rows;
     const count = @min(history, tail);
     if (count != 0) {
@@ -35,16 +44,13 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) Writer.Error!void {
         try w.print("\x1b[{d}S", .{t.rows});
     }
     try paint(w, t, primary);
-    if (t.screens.get(.alternate)) |alt| {
+    if (t.screens.active_key == .alternate) {
+        const alt = t.screens.get(.alternate).?;
         // 47 preserves saved cursors and content, unlike 1049 which saves and
         // clears on every set, including nested sets. Continuations retain
         // their original 47/1047/1049 behavior in the real engine.
         try w.writeAll("\x1b[?47h");
         try paint(w, t, alt);
-        if (t.screens.active_key == .primary) {
-            try w.writeAll("\x1b[?47l");
-            try liveCursor(w, t, primary, false);
-        }
     }
     // Modes with screen-switching or reset side effects are represented by
     // the screen construction above, rather than dispatched a second time.
