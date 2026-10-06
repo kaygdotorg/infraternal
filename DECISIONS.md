@@ -378,3 +378,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 92. **Order after S1: VNC next.** When SSH is complete, the next slice is
     VNC and RDP, ahead of metrics and Docker (this changes the order in
     decision 34).
+93. **Terminal images: kitty graphics in S1.5.** We implement them
+    ourselves: the kitty graphics protocol is intercepted before ghostty-web,
+    images are drawn on a layer locked to the character cells, and the shim
+    stores them per session so that they survive resume. Sixel and iTerm
+    come only on request. ghostty-web 0.4 and alacritty_terminal have no
+    image support.
