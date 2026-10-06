@@ -37,7 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 futures-util = "0.3"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
-webauthn-rs = { version = "=0.5.5", default-features = false }
+webauthn-rs = { version = "=0.5.5", default-features = false, features = ["conditional-ui"] }
 openssl = { version = "0.10", features = ["vendored"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
