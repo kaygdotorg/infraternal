@@ -523,3 +523,16 @@ fn fidelity_diagnostic_fixture() {
 fn fidelity_single_shift_survives_rep_seed() {
     check_replay_branched("single-shift after ASCII", b"abc\x1b*0\x1bN", None, 12, 5).unwrap();
 }
+
+#[test]
+#[ignore = "ISO scratch-seed red regression; enable with transient protection reset"]
+fn fidelity_iso_protection_does_not_keep_rep_scratch() {
+    check_replay_branched(
+        "protected DEC charset REP seed",
+        b"\x1bV\x1b(0t",
+        None,
+        12,
+        5,
+    )
+    .unwrap();
+}
