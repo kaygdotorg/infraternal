@@ -38,7 +38,7 @@ export interface TerminalConfig {
   host: HTMLElement;
   status: HTMLElement;
   hooks?: TerminalHooks;
-  trace?: boolean;
+  traceMockServer?: boolean;
 }
 
 interface ResumeCredentials {
@@ -245,7 +245,7 @@ export class TerminalClient {
     if (this.closed) return;
     this.setStatus(this.sessionId ? "Connection lost; resuming…" : "Connecting…");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const traceQuery = this.config.trace ? "?trace=1" : "";
+    const traceQuery = this.config.traceMockServer ? "?trace=1" : "";
     const socket = new WebSocket(`${protocol}//${location.host}/v1/ws${traceQuery}`);
     socket.binaryType = "arraybuffer";
     this.socket = socket;

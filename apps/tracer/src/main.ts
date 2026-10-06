@@ -196,7 +196,7 @@ function showTerminal(): void {
   void TerminalClient.open({
     host: mustGet("#terminal-host"),
     status: mustGet("#connection-status"),
-    trace: probeMode,
+    traceMockServer: probeMode && mockMode,
     ...(hooks ? { hooks } : {}),
   }).then((client) => {
     currentTerminal = client;
