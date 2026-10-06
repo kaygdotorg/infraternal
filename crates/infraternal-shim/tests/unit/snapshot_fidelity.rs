@@ -621,3 +621,19 @@ fn fidelity_oracle_observes_archived_cells_with_equal_active_screens() {
         "archived cells are part of the retained-tail oracle scope"
     );
 }
+
+#[test]
+#[ignore = "warm viewer colors red regression; enable after override reset"]
+fn fidelity_snapshot_resets_stale_viewer_color_overrides() {
+    let mut source = reset_terminal(12, 5).unwrap();
+    source.process(b"SOURCE");
+    let snapshot = source.snapshot().unwrap();
+    let mut viewer = reset_terminal(12, 5).unwrap();
+    viewer.process(b"\x1b]4;3;rgb:11/22/33\x1b\\\x1b]10;rgb:44/55/66\x1b\\\x1b]11;rgb:77/88/99\x1b\\\x1b]12;rgb:aa/bb/cc\x1b\\");
+    viewer.process(&snapshot);
+    assert_eq!(
+        source.engine.state_difference(&viewer.engine),
+        0,
+        "fresh source must clear stale palette and dynamic overrides in an existing viewer"
+    );
+}
