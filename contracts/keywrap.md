@@ -234,7 +234,12 @@ then atomically consumes the pending flag and begins normal sliding expiry.
 Missing ids fail closed; mismatched, stale, replayed or expired ids return 401
 without activating/deleting another pending row or replacing its cookie.
 Failed-login cleanup sends `logout` with the same id and deletes only that exact
-pending login. Ordinary authenticated logout still accepts `{}`. Exact-Origin
+pending login. Completion, authenticated action responses and logout never emit
+`Set-Cookie`, including on success: a response may arrive after another tab has
+replaced the shared cookie. Database expiry still slides; the browser cookie's
+30-day lifetime is measured from issuance and is not refreshed by identity reads.
+Ordinary authenticated logout still accepts `{}` and revokes its exact database
+row without clearing the shared cookie jar. Exact-Origin
 logout bypasses both admission layers, so exhaustion cannot prevent revocation.
 
 Owner boundary (#29): this id binds a completion to its login; it is not a proof
@@ -250,7 +255,9 @@ with one authoritative SQLite read; its expiry snapshot and the committed
 revocation generation are rechecked after waits. Backend/persistence boundaries
 also read actual authority before success frames; SQLite writer locks and mutation
 predicates order commits with logout/recovery. Revocation interrupts
-pending operations; backend reply waits are bounded to five seconds. Expiry is
+pending operations independently of connect deadlines. Terminal open has a
+60-second connect budget (#29 owner-task fallback; no earlier SSH connect budget
+was specified); attachment reply waits remain bounded to five seconds. Expiry is
 checked every 25 ms only during pending operations, including handshakes; idle live
 sockets keep event-driven revocation and actual deadline checks without polling.
 Authority reads and shutdown writes have 25 ms deadlines and fail closed.

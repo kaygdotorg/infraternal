@@ -39,6 +39,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const PARTIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 const BACKEND_TIMEOUT: Duration = Duration::from_secs(5);
+// SSH/terminal connection work can legitimately take tens of seconds. No prior
+// connect budget exists; #29 sets 60s. Authority interruption remains independent.
+const TERMINAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 // Stored expiry changes do not publish revocations; poll only during pending work, never idle.
 const BUSY_AUTHORITY_INTERVAL: Duration = Duration::from_millis(25);
 // Authority/storage stalls fail closed; shutdown cannot inherit the normal one-second writer wait.
@@ -1083,7 +1086,7 @@ async fn open_terminal(
     size: TerminalOpen,
 ) -> Result<[u8; 16], ()> {
     let session_id = tokio::time::timeout(
-        BACKEND_TIMEOUT,
+        TERMINAL_CONNECT_TIMEOUT,
         state.agent.open(TerminalSize {
             cols: size.cols,
             rows: size.rows,

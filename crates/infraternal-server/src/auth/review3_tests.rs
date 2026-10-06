@@ -441,94 +441,130 @@ async fn review3_busy_expiry() {
 
 /// A tab's completion and cleanup must leave the replacement cookie's pending row untouched.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn review3_completion_and_cleanup_are_transaction_bound() {
     let _guard = SERIAL.lock().await;
-    let mut f = fixture().await;
-    let app = router(f.auth.clone());
-    let mut logins = Vec::new();
-    for _ in 0..2 {
-        let (_, headers, start) = http_post_json(&app, "login-start", json!({})).await;
-        let binding = headers[axum::http::header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap();
-        let mut proof = f.software.login(&start, ORIGIN, true);
-        proof["response"]["userHandle"] =
-            json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
-        let (status, headers, body) = http_post_json_with_cookie(
+    for reverse in [false, true] {
+        let mut f = fixture().await;
+        let app = router(f.auth.clone());
+        let mut logins = Vec::new();
+        for _ in 0..3 {
+            let (_, headers, start) = http_post_json(&app, "login-start", json!({})).await;
+            let binding = headers[axum::http::header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap();
+            let mut proof = f.software.login(&start, ORIGIN, true);
+            proof["response"]["userHandle"] =
+                json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+            let (status, headers, body) = http_post_json_with_cookie(
+                &app,
+                "login-finish",
+                json!({"ceremony":start["ceremony"],"proof":proof,"device":"tab"}),
+                binding,
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            let cookie = headers[axum::http::header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned();
+            logins.push((cookie, body["pending_transaction"].clone()));
+        }
+        if reverse {
+            logins.swap(0, 1);
+        }
+        let [(a, id_a), (b, id_b), (cleanup, cleanup_id)] = logins.as_slice() else {
+            unreachable!()
+        };
+        assert!(id_a.is_string() && id_b.is_string() && id_a != id_b);
+        for action in ["unlock-finish", "logout"] {
+            let (status, headers, _) =
+                http_post_json_with_cookie(&app, action, json!({"pending_transaction":id_a}), b)
+                    .await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+            assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+            assert_eq!(
+                http_post_json_with_cookie(&app, "unlock-session", json!({}), b)
+                    .await
+                    .0,
+                axum::http::StatusCode::OK
+            );
+            assert_eq!(
+                http_post_json_with_cookie(&app, "session", json!({}), b)
+                    .await
+                    .0,
+                axum::http::StatusCode::UNAUTHORIZED
+            );
+        }
+        let (status, headers, _) = http_post_json_with_cookie(
             &app,
-            "login-finish",
-            json!({"ceremony":start["ceremony"],"proof":proof,"device":"tab"}),
-            binding,
+            "unlock-finish",
+            json!({"pending_transaction":id_a}),
+            a,
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        let cookie = headers[axum::http::header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
-        logins.push((cookie, body["pending_transaction"].clone()));
-    }
-    let [(a, id_a), (b, id_b)] = logins.as_slice() else {
-        unreachable!()
-    };
-    assert!(id_a.is_string() && id_b.is_string() && id_a != id_b);
-    for action in ["unlock-finish", "logout"] {
-        let (status, headers, _) =
-            http_post_json_with_cookie(&app, action, json!({"pending_transaction":id_a}), b).await;
-        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        // A response may arrive after B replaces the shared cookie jar.
         assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
         assert_eq!(
-            http_post_json_with_cookie(&app, "unlock-session", json!({}), b)
-                .await
-                .0,
+            http_post_json_with_cookie(
+                &app,
+                "unlock-finish",
+                json!({"pending_transaction":id_a}),
+                a
+            )
+            .await
+            .0,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            http_post_json_with_cookie(
+                &app,
+                "unlock-finish",
+                json!({"pending_transaction":id_b}),
+                b
+            )
+            .await
+            .0,
             axum::http::StatusCode::OK
         );
+        // Reload and identity reads cannot restore a previous login's cookie either.
+        for cookie in [a, b] {
+            let (status, headers, _) =
+                http_post_json_with_cookie(&app, "session", json!({}), cookie).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+        }
+        for action in ["unlock-finish", "logout"] {
+            let (status, headers, _) =
+                http_post_json_with_cookie(&app, action, json!({"pending_transaction":id_a}), b)
+                    .await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+            assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+        }
+        let (status, headers, _) = http_post_json_with_cookie(
+            &app,
+            "logout",
+            json!({"pending_transaction":cleanup_id}),
+            cleanup,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+        // B remains active even if cleanup's response is delivered after this read.
         assert_eq!(
             http_post_json_with_cookie(&app, "session", json!({}), b)
                 .await
                 .0,
-            axum::http::StatusCode::UNAUTHORIZED
+            axum::http::StatusCode::OK
         );
     }
-    assert_eq!(
-        http_post_json_with_cookie(
-            &app,
-            "unlock-finish",
-            json!({"pending_transaction":id_a}),
-            a
-        )
-        .await
-        .0,
-        axum::http::StatusCode::OK
-    );
-    assert_eq!(
-        http_post_json_with_cookie(
-            &app,
-            "unlock-finish",
-            json!({"pending_transaction":id_a}),
-            a
-        )
-        .await
-        .0,
-        axum::http::StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        http_post_json_with_cookie(
-            &app,
-            "unlock-finish",
-            json!({"pending_transaction":id_b}),
-            b
-        )
-        .await
-        .0,
-        axum::http::StatusCode::OK
-    );
 }
 
 /// An unresponsive real Unix backend cannot monopolize a browser handler indefinitely.
@@ -577,7 +613,7 @@ async fn review3_backend_reply_has_a_deadline() {
         panic!("backend call")
     };
     let start = Instant::now();
-    let result = tokio::time::timeout(Duration::from_secs(6), read_client_frame(&mut socket))
+    let result = tokio::time::timeout(Duration::from_secs(61), read_client_frame(&mut socket))
         .await
         .unwrap();
     assert!(matches!(
@@ -588,7 +624,7 @@ async fn review3_backend_reply_has_a_deadline() {
             ..
         }
     ));
-    assert!(start.elapsed() < Duration::from_secs(6));
+    assert!(start.elapsed() < Duration::from_secs(61));
     leg_b_send(
         &mut peer,
         0,
@@ -759,4 +795,229 @@ async fn review3_expired_handshake_must_not_welcome() {
         .unwrap();
     assert_eq!(rows, 0);
     server.abort();
+}
+/// A slow live open succeeds; committed revocation interrupts it before the late reply.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn review4_ten_second_open_preserves_authority() {
+    let _guard = SERIAL.lock().await;
+    for revoke in [false, true] {
+        let (f, addr, server, mut peer) = review3_socket().await;
+        let mut receive = BytesMut::new();
+        read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+        leg_b_send(
+            &mut peer,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "no reply",
+            },
+        )
+        .await;
+        let cookie = format!("__Host-infraternal={}", f.session);
+        let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
+        assert_server_hello(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "deadline",
+            },
+        )
+        .await;
+        read_welcome(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Call {
+                call_id: 78,
+                action_id: "terminal.open",
+                input_json: br#"{"cols":80,"rows":24,"px_w":0,"px_h":0}"#,
+            },
+        )
+        .await;
+        let wire = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+        let Frame::Call { call_id, .. } = decode_muxed_frame(&wire).unwrap().frame else {
+            panic!("backend call")
+        };
+        let start = tokio::time::Instant::now();
+        if revoke {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            f.auth.logout(&f.session).await.unwrap();
+            let closed_at = Instant::now();
+            let next = tokio::time::timeout(Duration::from_millis(100), socket.next()).await;
+            assert!(matches!(
+                next,
+                Ok(None | Some(Ok(Message::Close(_)) | Err(_)))
+            ));
+            assert!(closed_at.elapsed() < Duration::from_millis(100));
+            println!(
+                "PASS: ten-second open revocation closes in {}us",
+                closed_at.elapsed().as_micros()
+            );
+        }
+        tokio::time::sleep_until(start + Duration::from_secs(10)).await;
+        leg_b_send(
+            &mut peer,
+            0,
+            &Frame::Result {
+                call_id,
+                ok: true,
+                json: br#"{"session_id":"42424242424242424242424242424242"}"#,
+            },
+        )
+        .await;
+        if revoke {
+            let late = tokio::time::timeout(Duration::from_millis(100), socket.next()).await;
+            assert!(!matches!(late, Ok(Some(Ok(Message::Binary(_))))));
+        } else {
+            let result =
+                tokio::time::timeout(Duration::from_secs(1), read_client_frame(&mut socket))
+                    .await
+                    .unwrap();
+            assert!(
+                matches!(
+                    decode_muxed_frame(&result).unwrap().frame,
+                    Frame::Result {
+                        call_id: 78,
+                        ok: true,
+                        ..
+                    }
+                ),
+                "live ten-second open was rejected"
+            );
+            println!(
+                "PASS: live ten-second open succeeds in {}ms",
+                start.elapsed().as_millis()
+            );
+        }
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions")
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, i64::from(!revoke));
+        server.abort();
+    }
+}
+
+/// Exercise slow connects at all 16 per-user sockets, with real SQLite and Unix replies.
+#[tokio::test]
+#[ignore = "release-only connect scale measurement; run without concurrent builds"]
+#[allow(clippy::too_many_lines)]
+async fn review4_slow_open_at_user_capacity() {
+    let _guard = SERIAL.lock().await;
+    for revoke in [false, true] {
+        let (f, addr, server, mut peer) = review3_socket().await;
+        let mut receive = BytesMut::new();
+        read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+        leg_b_send(
+            &mut peer,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "no reply",
+            },
+        )
+        .await;
+        let cookie = format!("__Host-infraternal={}", f.session);
+        let mut sockets = Vec::new();
+        let mut calls = Vec::new();
+        for _ in 0..16 {
+            let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
+            assert_server_hello(&mut socket).await;
+            client_ws_send(
+                &mut socket,
+                0,
+                &Frame::Hello {
+                    version: 1,
+                    caps: 0,
+                    client_info: "connect scale",
+                },
+            )
+            .await;
+            read_welcome(&mut socket).await;
+            client_ws_send(
+                &mut socket,
+                0,
+                &Frame::Call {
+                    call_id: 78,
+                    action_id: "terminal.open",
+                    input_json: br#"{"cols":80,"rows":24,"px_w":0,"px_h":0}"#,
+                },
+            )
+            .await;
+            let wire = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+            let Frame::Call { call_id, .. } = decode_muxed_frame(&wire).unwrap().frame else {
+                panic!("backend call");
+            };
+            calls.push(call_id);
+            sockets.push(socket);
+        }
+        let start = tokio::time::Instant::now();
+        if revoke {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            f.auth.logout(&f.session).await.unwrap();
+            let closed_at = Instant::now();
+            for socket in &mut sockets {
+                let next = tokio::time::timeout(Duration::from_millis(100), socket.next()).await;
+                assert!(matches!(
+                    next,
+                    Ok(None | Some(Ok(Message::Close(_)) | Err(_)))
+                ));
+            }
+            assert!(closed_at.elapsed() < Duration::from_millis(100));
+            println!(
+                "PASS: 16 pending opens revoked; all sockets closed in {}us",
+                closed_at.elapsed().as_micros()
+            );
+        }
+        tokio::time::sleep_until(start + Duration::from_secs(10)).await;
+        for (index, call_id) in calls.into_iter().enumerate() {
+            let session = format!("{{\"session_id\":\"{:032x}\"}}", index + 1);
+            leg_b_send(
+                &mut peer,
+                0,
+                &Frame::Result {
+                    call_id,
+                    ok: true,
+                    json: session.as_bytes(),
+                },
+            )
+            .await;
+        }
+        if revoke {
+            for socket in &mut sockets {
+                let late = tokio::time::timeout(Duration::from_millis(100), socket.next()).await;
+                assert!(!matches!(late, Ok(Some(Ok(Message::Binary(_))))));
+            }
+        } else {
+            for socket in &mut sockets {
+                let wire = tokio::time::timeout(Duration::from_secs(1), read_client_frame(socket))
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    decode_muxed_frame(&wire).unwrap().frame,
+                    Frame::Result {
+                        call_id: 78,
+                        ok: true,
+                        ..
+                    }
+                ));
+            }
+            println!(
+                "PASS: 16 live ten-second opens succeeded in {}ms",
+                start.elapsed().as_millis()
+            );
+        }
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions")
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, if revoke { 0 } else { 16 });
+        server.abort();
+    }
 }
