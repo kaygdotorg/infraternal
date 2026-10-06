@@ -13,6 +13,7 @@ const PORT = 4173;
 const MAX_HTTP_BODY = 32 * 1024;
 const MAX_MOCK_OUTPUT = 1024 * 1024;
 const MAX_MESSAGE = 16 * 1024;
+const MAX_TRACE_EVENTS = 120_000;
 const DIST_ROOT = resolve(import.meta.dirname, "../dist");
 const TEST_DOUBLE_HEADER = "X-Infraternal-Test-Double";
 
@@ -37,6 +38,7 @@ interface MockSession {
 interface Connection {
   socket: WebSocket;
   decoder: WebSocketFrameDecoder;
+  traceEnabled: boolean;
   session: MockSession;
   credit: number;
   outputCursor: bigint;
@@ -46,6 +48,12 @@ interface Connection {
   welcomeTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
+interface TraceEvent {
+  id: string;
+  stage: "doubleReceive" | "doubleDecode" | "doubleEchoEncode" | "doubleEchoSend";
+  atNs: string;
+}
+
 let owner: MockOwner | undefined;
 let activeAuthCookie: string | undefined;
 let setupToken = newToken();
@@ -53,6 +61,7 @@ let pendingRegistration: { ceremony: string; userId: string; recoveryWords: stri
 let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
 let session = createSession();
+const traceEvents: TraceEvent[] = [];
 
 const server = createServer((request, response) => { void routeHttp(request, response); });
 const webSockets = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
@@ -76,6 +85,7 @@ webSockets.on("connection", (socket, request) => {
   const connection: Connection = {
     socket,
     decoder: new WebSocketFrameDecoder(),
+    traceEnabled: new URL(request.url ?? "/", `http://${request.headers.host ?? `${HOST}:${PORT}`}`).searchParams.get("trace") === "1",
     session,
     credit: 0,
     outputCursor: 0n,
@@ -85,13 +95,14 @@ webSockets.on("connection", (socket, request) => {
     welcomeTimer: undefined,
   };
   socket.on("message", (raw, binary) => {
+    const receivedAt = connection.traceEnabled ? process.hrtime.bigint() : 0n;
     if (!binary) {
       socket.close(1003, "binary wire frames required");
       return;
     }
     try {
       const bytes = rawBytes(raw);
-      connection.decoder.feed(bytes, (streamId, frame) => handleWire(connection, streamId, frame));
+      connection.decoder.feed(bytes, (streamId, frame) => handleWire(connection, streamId, frame, receivedAt));
     } catch {
       socket.close(1002, "invalid test-double wire frame");
     }
@@ -123,6 +134,16 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       accepted_input_bytes: session.acceptedInputBytes,
       output_sequence: String(session.outputLength),
     });
+  }
+  if (request.method === "GET" && url.pathname === "/__mock/clock") {
+    return sendJson(response, 200, { monotonic_ns: process.hrtime.bigint().toString() });
+  }
+  if (request.method === "GET" && url.pathname === "/__mock/trace") {
+    return sendJson(response, 200, { events: traceEvents });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/trace/reset") {
+    traceEvents.length = 0;
+    return sendJson(response, 200, { ok: true });
   }
   if (request.method === "POST" && url.pathname === "/__mock/drop-next-ack") {
     dropNextAck = true;
@@ -242,8 +263,12 @@ async function authAction(
   }
 }
 
-function handleWire(connection: Connection, streamId: number, frame: WireFrame): void {
+function handleWire(connection: Connection, streamId: number, frame: WireFrame, receivedAt: bigint): void {
   if (!isSocketOpen(connection.socket)) return;
+  if (connection.traceEnabled && streamId === 1 && frame.type === "Input") {
+    traceRange(frame.inSeq, frame.bytes.byteLength, "doubleReceive", receivedAt);
+    traceRange(frame.inSeq, frame.bytes.byteLength, "doubleDecode", process.hrtime.bigint());
+  }
   if (streamId === 0) {
     handleControlFrame(connection, frame);
   } else if (streamId === 1) {
@@ -364,7 +389,8 @@ function flushOutput(connection: Connection): void {
     const offset = Number(connection.outputCursor);
     const length = Math.min(MAX_MESSAGE, connection.credit, connection.session.outputLength - offset);
     const bytes = connection.session.output.subarray(offset, offset + length);
-    sendFrame(connection.socket, 1, { type: "Output", outSeq: connection.outputCursor, bytes });
+    sendFrame(connection.socket, 1, { type: "Output", outSeq: connection.outputCursor, bytes },
+      connection.traceEnabled ? connection.outputCursor : undefined, length);
     connection.outputCursor += BigInt(length);
     connection.credit -= length;
   }
@@ -382,9 +408,19 @@ function sendWelcome(connection: Connection): void {
   });
 }
 
-function sendFrame(socket: WebSocket, streamId: number, frame: WireFrame): void {
+function sendFrame(socket: WebSocket, streamId: number, frame: WireFrame, traceStart?: bigint, traceLength = 0): void {
   if (!isSocketOpen(socket)) return;
-  socket.send(Buffer.from(encodeMuxedFrame(streamId, frame)), { binary: true });
+  const message = Buffer.from(encodeMuxedFrame(streamId, frame));
+  if (traceStart !== undefined) traceRange(traceStart, traceLength, "doubleEchoEncode", process.hrtime.bigint());
+  socket.send(message, { binary: true });
+  if (traceStart !== undefined) traceRange(traceStart, traceLength, "doubleEchoSend", process.hrtime.bigint());
+}
+
+/** Records server-side monotonic marks keyed by the echoed byte-stream offset. */
+function traceRange(start: bigint, length: number, stage: TraceEvent["stage"], atNs: bigint): void {
+  for (let offset = 0; offset < length && traceEvents.length < MAX_TRACE_EVENTS; offset += 1) {
+    traceEvents.push({ id: (start + BigInt(offset)).toString(), stage, atNs: atNs.toString() });
+  }
 }
 
 async function serveDist(pathname: string, headOnly: boolean, response: ServerResponse): Promise<void> {
@@ -452,6 +488,7 @@ function resetMockState(): void {
   pendingRegistration = undefined;
   pendingLogin = undefined;
   dropNextAck = false;
+  traceEvents.length = 0;
   session = createSession();
 }
 
