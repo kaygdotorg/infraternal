@@ -268,3 +268,15 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     (standalone) or as plain HTTP on a local address behind a reverse proxy.
     Dogfood instance: Traefik 443 → `172.18.0.1:7011`, and agents connect to
     `10.69.69.50:7443`.
+
+## Visual direction (grill of 2026-10-06, issue #14 to come)
+
+65. **No reference products.** The owner dislikes existing infra and
+    enterprise UIs: they feel static and old. infraternal is its own
+    reference and is designed piece by piece.
+66. **Calm and relaxed.** Strong highlights for what matters, little
+    overload. Hierarchy instead of density.
+67. **Light and dark are equal.** Both follow the system and get the same
+    care.
+68. **The terminal is the app** (for now). Everything else (sidebar, search
+    capsule, wizards) floats over it as overlays.
