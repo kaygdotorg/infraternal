@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure real static shim RSS idle/full and snapshot latency at 200x60 [41]."""
+"""Measure real static shim RSS and faithful RIS-context socket snapshots [41]."""
 import argparse
 import os
 from pathlib import Path
@@ -37,7 +37,10 @@ def run(binary):
             kind,body=read(peer);assert kind==0x11;tail.extend(body[8:]);del tail[:-1024]
         time.sleep(.2);idle=rss(child.pid)
         script=r'import os; d=b"1234567890 abcdefghijklmnopqrstuvwxyz\r\n"*8192; n=50*1024*1024; done=0; exec("while done<n:\n done+=os.write(1,d[:min(len(d),n-done)])")'
-        command=f"stty -echo -opost; python3 -c '{script}'; printf 'MEM_%s' DONE\n".encode()
+        # Fresh C starts with redraw=false, which the faithful path explicitly
+        # rejects. Select RIS for this benchmark, as in the serializer/scale
+        # fixtures; retain fresh-C rejection counts in the separate corpus.
+        command=f"stty -echo -opost; printf '\\033c'; python3 -c '{script}'; printf 'MEM_%s' DONE\n".encode()
         send(peer,0x10,command);tail.clear()
         while b'MEM_DONE' not in tail:
             kind,body=read(peer);assert kind==0x11;tail.extend(body[8:]);del tail[:-1024]
