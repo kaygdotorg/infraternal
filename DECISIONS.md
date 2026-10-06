@@ -280,3 +280,18 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     care.
 68. **The terminal is the app** (for now). Everything else (sidebar, search
     capsule, wizards) floats over it as overlays.
+69. **Three words:** calm, alive, precise. Every screen is judged against
+    them.
+70. **Alive** means two things: physical motion (springs, momentum, gestures
+    you can interrupt) and live data that changes softly in place. All UI
+    motion stays under about 250 ms. Motion is used only when it explains
+    something.
+71. **Color and guidance.** A near-neutral base with one vivid accent, used
+    only for focus and "look here". State colors only on small marks. Less
+    information, more guidance: friendly components that lead the user.
+72. **Materials.** Solid, calm surfaces. A light blur only on the overlays
+    that float over the terminal (sidebar, search capsule), so that the
+    terminal stays visible.
+73. **Type.** Geist Mono for the terminal and for code. One sans for the UI,
+    chosen by eye from mockups (licensed under OFL or similar, so it is
+    compatible with AGPL).
