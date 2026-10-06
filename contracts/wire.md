@@ -72,6 +72,13 @@ and use the shared codec. Because a Unix socketpair is a byte stream, frames
 use the leg-B mux envelope: stream 0 is control, and the server opens even
 terminal stream ids. The protocol remains transport independent.
 
+On leg A, the server sends Hello first and then receives the client's Hello on
+stream 0. A new client leaves caps bit 0 clear; the server sends a fresh
+Welcome. A client resuming a connection sets caps bit 0 (`RESUME_NEXT`), sends
+Resume immediately after Hello on stream 0, and receives a refreshed Welcome
+only after the token is validated. No other Hello capability bit changes this
+ordering. This removes ambiguity between a new connection and a resume request.
+
 The core `terminal.open` action is a control-stream `Call` whose JSON input is
 `{"cols":u16,"rows":u16,"px_w":u16,"px_h":u16}` and whose successful JSON
 result is `{"session_id":"<32 lowercase hexadecimal characters>"}`. The
