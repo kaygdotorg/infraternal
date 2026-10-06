@@ -1,8 +1,8 @@
 //! Single-use registration/login ceremonies, ownership and writer-locked counters [24,28].
 use super::{
-    Auth, Authority, B64, CEREMONY, Engine, Error, Passkey, Pending, RegisterPublicKeyCredential,
-    Registration, Result, Uuid, Value, Wrap, insert_session, json, prf_salt, put_wrap, random,
-    recovery_hash,
+    Auth, Authority, B64, CEREMONY, Engine, Error, Login, Passkey, Pending, PublicKeyCredential,
+    RegisterPublicKeyCredential, Registration, Result, Row, Uuid, Value, Wrap, hash,
+    insert_session, json, prf_salt, put_wrap, random, recovery_hash, require_session_tx,
 };
 
 #[allow(clippy::missing_errors_doc)]
@@ -19,7 +19,9 @@ impl Auth {
             return Err(Error::Invalid);
         }
         let keys = self.passkeys(&user).await?;
-
+        if matches!(authority, Authority::Add(_)) && keys.len() >= 2 {
+            return Err(Error::Denied);
+        }
         let (options, state) = self
             .webauthn
             .start_passkey_registration(
@@ -51,7 +53,7 @@ impl Auth {
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
-        if pending.registrations.len() >= 1024 {
+        if pending.registrations.len() + pending.logins.len() >= 1024 {
             return Err(Error::Denied);
         }
         pending.registrations.insert(
@@ -128,6 +130,17 @@ impl Auth {
                     .execute(&mut *tx)
                     .await?;
             }
+            Authority::Add(session) => {
+                require_session_tx(&mut tx, session, &registration.user, now).await?;
+                let count: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM passkeys WHERE user_id=?")
+                        .bind(&registration.user)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if count >= 2 {
+                    return Err(Error::Denied);
+                }
+            }
         }
         sqlx::query("INSERT INTO passkeys(id,user_id,credential) VALUES (?,?,?)")
             .bind(&key_id)
@@ -161,10 +174,119 @@ impl Auth {
             .map(|v| serde_json::from_str(&v).map_err(Error::from))
             .collect()
     }
+
+    /// Begin a UV-required login (also the fresh-tap ceremony).
+    pub async fn login_start(&self, user: &str, now: i64) -> Result<Value> {
+        let (options, state) = self
+            .webauthn
+            .start_passkey_authentication(&self.passkeys(user).await?)
+            .map_err(|_| Error::Denied)?;
+        let mut options = serde_json::to_value(options)?;
+        options["publicKey"]["extensions"] = json!({"prf":{"eval":{"first":prf_salt()}}});
+        let id = random();
+        let mut pending = self.pending.lock().await;
+        prune(&mut pending, now);
+        if pending.registrations.len() + pending.logins.len() >= 1024 {
+            return Err(Error::Denied);
+        }
+        pending.logins.insert(
+            id.clone(),
+            Login {
+                state,
+                user: user.into(),
+                expires: now + CEREMONY,
+            },
+        );
+        Ok(json!({"ceremony":id,"options":options}))
+    }
+
+    /// Validate a signature and counters before issuing a fresh opaque device session.
+    pub async fn login_finish(
+        &self,
+        id: &str,
+        proof: Value,
+        device: &str,
+        now: i64,
+    ) -> Result<String> {
+        let login = self
+            .pending
+            .lock()
+            .await
+            .logins
+            .remove(id)
+            .ok_or(Error::Denied)?;
+        if login.expires <= now || device.is_empty() || device.len() > 128 {
+            return Err(Error::Denied);
+        }
+        reject_prf(&proof)?;
+        let proof: PublicKeyCredential = serde_json::from_value(proof)?;
+        if proof.type_ != "public-key"
+            || proof.get_user_unique_id().is_some_and(|handle| {
+                Uuid::parse_str(&login.user).map_or(true, |user| handle != user.as_bytes())
+            })
+        {
+            return Err(Error::Denied);
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE users SET name=name WHERE id=?")
+            .bind(&login.user)
+            .execute(&mut *tx)
+            .await?;
+        // Verify the original server challenge, then compare against the latest database
+        // counter while holding the writer lock to reject concurrent stale assertions.
+        let result = self
+            .webauthn
+            .finish_passkey_authentication(&proof, &login.state)
+            .map_err(|_| Error::Denied)?;
+        let row = sqlx::query("SELECT id,credential FROM passkeys WHERE user_id=? AND id=?")
+            .bind(&login.user)
+            .bind(B64.encode(result.cred_id().as_ref()))
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::Denied)?;
+        let mut key: Passkey = serde_json::from_str(row.get("credential"))?;
+        // Nonzero counters are monotonic; synced authenticators legitimately use zero.
+        // The pinned verifier serializes this private counter under cred.counter; a schema
+        // change fails closed here and must pass the stale-counter regression test.
+        let previous = serde_json::to_value(&key)?;
+        let counter = previous["cred"]["counter"].as_u64().ok_or(Error::Invalid)?;
+        if (counter != 0 || result.counter() != 0) && u64::from(result.counter()) <= counter {
+            return Err(Error::Denied);
+        }
+        key.update_credential(&result).ok_or(Error::Denied)?;
+        sqlx::query("UPDATE passkeys SET credential=? WHERE id=?")
+            .bind(serde_json::to_string(&key)?)
+            .bind(row.get::<String, _>("id"))
+            .execute(&mut *tx)
+            .await?;
+        let token = random();
+        insert_session(&mut tx, &token, &login.user, device, now).await?;
+        tx.commit().await?;
+        Ok(token)
+    }
+
+    /// Enroll the optional second passkey after a fresh tap.
+    pub async fn add_start(&self, token: &str, now: i64) -> Result<Value> {
+        let session = self.session(token, now).await?;
+        session.require_fresh(now)?;
+        let name: String = sqlx::query_scalar("SELECT name FROM users WHERE id=?")
+            .bind(&session.user_id)
+            .fetch_one(&self.pool)
+            .await?;
+        self.registration(
+            session.user_id,
+            &name,
+            Authority::Add(hash(token)),
+            false,
+            now,
+        )
+        .await
+    }
 }
 
 pub(super) fn prune(p: &mut Pending, now: i64) {
     p.registrations.retain(|_, r| r.expires > now);
+    p.logins.retain(|_, l| l.expires > now);
 }
 pub(super) fn reject_prf(proof: &Value) -> Result<()> {
     let object = proof.as_object().ok_or(Error::Invalid)?;

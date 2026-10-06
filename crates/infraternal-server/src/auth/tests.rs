@@ -248,6 +248,149 @@ async fn finish_replacement(f: &Fixture, start: &Value, software: &Software, now
 }
 
 #[tokio::test]
+async fn ceremony_prf_wraps_and_optional_second_passkey() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let start = f.auth.login_start(&f.user, NOW + 1).await.unwrap();
+    let prf = f.software.prf(&start);
+    let wraps = f.auth.wraps(&f.session, NOW + 1).await.unwrap();
+    let wrap: Wrap = serde_json::from_value(
+        wraps
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["kind"] == "passkey")
+            .unwrap()["wrap"]
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        unwrap_browser(&prf, &wrap, &f.user, "passkey").unwrap(),
+        f.dek
+    );
+    assert!(unwrap_browser(&prf, &wrap, &Uuid::new_v4().to_string(), "passkey").is_err());
+    assert!(unwrap_browser(&rand::random::<[u8; 32]>(), &wrap, &f.user, "passkey").is_err());
+    let proof = f.software.login(&start, ORIGIN, true);
+    let session = f
+        .auth
+        .login_finish(
+            str_field(&start, "ceremony"),
+            proof.clone(),
+            "phone",
+            NOW + 1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.auth.session(&session, NOW + 2).await.unwrap().device,
+        "phone"
+    );
+    assert!(
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "phone", NOW + 2)
+            .await
+            .is_err()
+    );
+    let add = f.auth.add_start(&session, NOW + 3).await.unwrap();
+    assert!(add["recovery_words"].is_null());
+    let second = Software::new();
+    let pw = browser_wrap(&second.prf(&add), &f.dek, &f.user, "passkey");
+    f.auth
+        .registration_finish(
+            str_field(&add, "ceremony"),
+            second.registration(&add, ORIGIN, true),
+            pw,
+            None,
+            NOW + 3,
+        )
+        .await
+        .unwrap();
+    assert!(f.auth.add_start(&session, NOW + 4).await.is_err());
+    assert_eq!(f.auth.passkeys(&f.user).await.unwrap().len(), 2);
+    assert_eq!(
+        f.auth
+            .wraps(&session, NOW + 4)
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn rejected_origin_uv_challenge_signature_prf_and_expired_ceremonies() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    for (origin, uv) in [("https://evil.example.test", true), (ORIGIN, false)] {
+        let start = f.auth.login_start(&f.user, NOW).await.unwrap();
+        let proof = f.software.login(&start, origin, uv);
+        assert!(
+            f.auth
+                .login_finish(str_field(&start, "ceremony"), proof, "phone", NOW)
+                .await
+                .is_err()
+        );
+    }
+    let a = f.auth.login_start(&f.user, NOW).await.unwrap();
+    let b = f.auth.login_start(&f.user, NOW).await.unwrap();
+    let proof = f.software.login(&a, ORIGIN, true);
+    assert!(
+        f.auth
+            .login_finish(str_field(&b, "ceremony"), proof, "phone", NOW)
+            .await
+            .is_err()
+    );
+    let start = f.auth.login_start(&f.user, NOW).await.unwrap();
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["signature"] = json!(B64.encode([0; 64]));
+    assert!(
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "phone", NOW)
+            .await
+            .is_err()
+    );
+    let start = f.auth.login_start(&f.user, NOW).await.unwrap();
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["extensions"]["prf"] = json!({"results":{"first":B64.encode(f.software.prf(&start))}});
+    assert!(matches!(
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "phone", NOW)
+            .await,
+        Err(Error::Invalid)
+    ));
+    let start = f.auth.login_start(&f.user, NOW).await.unwrap();
+    let proof = f.software.login(&start, ORIGIN, true);
+    assert!(
+        f.auth
+            .login_finish(
+                str_field(&start, "ceremony"),
+                proof,
+                "phone",
+                NOW + CEREMONY
+            )
+            .await
+            .is_err()
+    );
+    let add = f.auth.add_start(&f.session, NOW).await.unwrap();
+    let software = Software::new();
+    let wrap = browser_wrap(&software.prf(&add), &f.dek, &f.user, "passkey");
+    assert!(
+        f.auth
+            .registration_finish(
+                str_field(&add, "ceremony"),
+                software.registration(&add, "https://evil.example.test", true),
+                wrap,
+                None,
+                NOW
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn setup_expiry_single_announcement_and_parallel_redemption() {
     let _guard = SERIAL.lock().await;
     let (auth, token) = empty().await;

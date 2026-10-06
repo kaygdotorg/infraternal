@@ -11,7 +11,8 @@ mod webauthn;
 mod wraps;
 
 use crypto::{hash, prf_salt, random, recovery_hash};
-use sessions::insert_session;
+pub use sessions::Session;
+use sessions::{insert_session, require_session_tx};
 pub use wraps::Wrap;
 use wraps::put_wrap;
 #[cfg(test)]
@@ -21,7 +22,7 @@ mod tests;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -30,6 +31,7 @@ use webauthn_rs::prelude::*;
 const DAY: i64 = 86_400;
 const SESSION: i64 = 30 * DAY;
 const CEREMONY: i64 = 300;
+const FRESH: i64 = 300;
 
 /// Errors deliberately expose no credential, capability or database contents.
 #[derive(Debug, thiserror::Error)]
@@ -67,11 +69,17 @@ struct Registration {
 }
 enum Authority {
     Setup(String),
+    Add(String),
 }
-
+struct Login {
+    state: PasskeyAuthentication,
+    user: String,
+    expires: i64,
+}
 #[derive(Default)]
 struct Pending {
     registrations: HashMap<String, Registration>,
+    logins: HashMap<String, Login>,
 }
 
 /// Shared auth library state. Configure the public HTTPS origin explicitly; proxy headers cannot change it.
