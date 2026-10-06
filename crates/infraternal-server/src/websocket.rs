@@ -36,7 +36,6 @@ const RESUME_WINDOW_SECONDS: u32 = 120;
 const MAX_CONNECTIONS: usize = 256;
 const MAX_USER_CONNECTIONS: usize = 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const PARTIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 const BACKEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1231,13 +1230,19 @@ where
         if receive.len() >= MAX_SOCKET_BUFFER {
             return Err(());
         }
-        // Preserve the deadline across select cancellation and transport pings, including
-        // RFC WebSocket fragmentation hidden inside Axum's message stream.
-        let end = *deadline.get_or_insert_with(|| tokio::time::Instant::now() + MESSAGE_TIMEOUT);
-        let Some(message) = tokio::time::timeout_at(end, source.next())
-            .await
-            .map_err(|_| ())?
-        else {
+        // A silent authenticated socket has no completion work and no timer [41].
+        // Preserve a begun mux frame's deadline across select cancellation and
+        // transport pings. Axum reassembles RFC fragments internally; those are
+        // bounded by message/frame size, admission and live authority, rather
+        // than an idle-read timer that disconnects healthy terminals every 30s.
+        let message = if let Some(end) = *deadline {
+            tokio::time::timeout_at(end, source.next())
+                .await
+                .map_err(|_| ())?
+        } else {
+            source.next().await
+        };
+        let Some(message) = message else {
             return Ok(None);
         };
         match message.map_err(|_| ())? {
@@ -1248,7 +1253,7 @@ where
                 }
                 receive.extend_from_slice(&bytes);
                 let partial = tokio::time::Instant::now() + PARTIAL_FRAME_TIMEOUT;
-                *deadline = Some(end.min(partial));
+                *deadline = Some(deadline.map_or(partial, |existing| existing.min(partial)));
             }
             Message::Ping(payload) => return Ok(Some(Inbound::TransportPing(payload))),
             Message::Pong(_) => {}
