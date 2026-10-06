@@ -63,8 +63,18 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
     await testInfo.attach(`signin-${colorScheme}`, { path, contentType: "image/png" });
   }
   await page.setViewportSize({ width: 1280, height: 720 });
+  await page.evaluate(() => {
+    const get = navigator.credentials.get.bind(navigator.credentials);
+    document.documentElement.dataset.passkeyGets = "0";
+    navigator.credentials.get = (options) => {
+      document.documentElement.dataset.passkeyGets = String(Number(document.documentElement.dataset.passkeyGets) + 1);
+      return get(options);
+    };
+  });
   await page.getByRole("button", { name: "Continue with passkey" }).click();
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+
+  expect(await page.evaluate(() => document.documentElement.dataset.passkeyGets)).toBe("1");
 
   await page.keyboard.press("a");
   await expect.poll(async () => {

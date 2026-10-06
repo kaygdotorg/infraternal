@@ -203,7 +203,7 @@ async function authAction(
       const ceremony = newToken();
       const displayName = typeof suppliedDisplayName === "string" && suppliedDisplayName.trim() ? suppliedDisplayName : username;
       const recoveryWords = entropyToMnemonic(randomBytes(32), wordlist);
-      const prfInput = createHash("sha256").update(`infraternal/keywrap/prf/v2|${userId}`).digest("base64url");
+      const prfInput = createHash("sha256").update("infraternal/keywrap/prf/v3").digest("base64url");
       pendingRegistration = { ceremony, userId, username, displayName, recoveryWords, rpId, prfInput };
       const publicKey = {
         challenge: randomBytes(32).toString("base64url"),
@@ -254,7 +254,7 @@ async function authAction(
         allowCredentials: [],
         timeout: 60_000,
         userVerification: "required",
-        extensions: {},
+        extensions: { prf: { eval: { first: createHash("sha256").update("infraternal/keywrap/prf/v3").digest("base64url") } } },
       };
       return sendJson(response, 200, { ceremony: pendingLogin.ceremony, options: { publicKey } });
     }

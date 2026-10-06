@@ -140,6 +140,7 @@ export async function loginWithPasskey(device: string): Promise<string> {
   try {
     const assertion = await navigator.credentials.get({ publicKey });
     if (!(assertion instanceof PublicKeyCredential)) throw new AuthError("Passkey login was cancelled.");
+    prf = prfFrom(assertion);
     await post("login-finish", {
       ceremony: requiredString(start.ceremony, "login ceremony"),
       proof: credentialProof(assertion),
@@ -156,7 +157,13 @@ export async function loginWithPasskey(device: string): Promise<string> {
       if (!envelope) throw new AuthError("Your account key is unavailable on the server. Try again.");
       const first = decodeBase64url(requiredString(entry?.prf_input, "passkey input"));
       try {
-        prf = await credentialPrf(assertion, publicKey.rpId, first);
+        // Stored v1/v2 envelopes keep their input and require the local fallback.
+        const requested = publicKey.extensions && (publicKey.extensions as CredentialOutputs).prf;
+        const matches = requested && base64url(prfInputFrom(publicKey)) === entry?.prf_input;
+        if (!prf || !matches) {
+          prf?.fill(0);
+          prf = await credentialPrf(assertion, publicKey.rpId, first);
+        }
       } finally { first.fill(0); }
       const dek = await unwrapDek(prf, envelope, userId, "passkey");
       if (dek.byteLength !== 32) throw new AuthError("Your account key could not be unlocked. Try again.");
