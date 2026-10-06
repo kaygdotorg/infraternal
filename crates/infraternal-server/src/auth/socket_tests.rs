@@ -107,3 +107,80 @@ async fn socket_authority_latency_at_user_capacity() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn half_open_sockets_obey_user_limit() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let mut sockets = Vec::new();
+    for _ in 0..16 {
+        let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+            .await
+            .unwrap();
+        assert_server_hello(&mut socket).await;
+        sockets.push(socket);
+    }
+    let seventeenth = connect_async(test_ws_request(address, &cookie)).await;
+    assert!(
+        matches!(seventeenth, Err(tokio_tungstenite::tungstenite::Error::Http(ref response))
+        if response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE),
+        "17 sockets without Hello bypassed the per-user admission limit"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn expired_handshake_releases_user_permits() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let mut held = Vec::new();
+    for _ in 0..16 {
+        let (socket, _) = connect_async(test_ws_request(address, &cookie))
+            .await
+            .unwrap();
+        held.push(socket);
+    }
+    tokio::time::sleep(Duration::from_millis(5250)).await;
+    let reopened = connect_async(test_ws_request(address, &cookie)).await;
+    assert!(reopened.is_ok(), "expired Hello retained per-user capacity");
+    server.abort();
+}
+
+#[tokio::test]
+async fn fragmented_wire_frame_has_a_completion_deadline() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "partial-frame",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    socket
+        .send(Message::Binary(Bytes::from_static(&[0x80])))
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let ended = tokio::time::timeout(Duration::from_secs(6), socket.next()).await;
+    assert!(
+        ended.is_ok(),
+        "fragmented frame never completed or timed out"
+    );
+    println!(
+        "partial frame removed after {}ms (configured 5000ms)",
+        start.elapsed().as_millis()
+    );
+    server.abort();
+}

@@ -34,6 +34,11 @@ const RESUME_NEXT: u64 = 1;
 const RESUME_WINDOW_SECONDS: u32 = 120;
 // Reject upgrades immediately when the process is at this fixed socket limit.
 const MAX_CONNECTIONS: usize = 256;
+const MAX_USER_CONNECTIONS: usize = 16;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
+const PARTIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 // Expired rows are pruned during new handshakes; this caps retained bearer metadata globally.
 const MAX_RESUME_ROWS: i64 = 4096;
 // Reject further AttachTerm requests on a socket at this bound.
@@ -51,6 +56,7 @@ pub(crate) struct WebSocketState {
     pool: SqlitePool,
     agent: EmbeddedAgent,
     connections: Arc<Semaphore>,
+    users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
 }
 
 impl WebSocketState {
@@ -61,7 +67,21 @@ impl WebSocketState {
             pool,
             agent,
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            users: Arc::default(),
         }
+    }
+
+    /// Reserve per-user capacity before Hello. Weak entries disappear when the last socket drops.
+    fn user_permit(&self, user: &str) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let mut users = self.users.lock().ok()?;
+        users.retain(|_, semaphore| semaphore.strong_count() != 0);
+        let semaphore = users
+            .get(user)
+            .and_then(std::sync::Weak::upgrade)
+            .unwrap_or_else(|| Arc::new(Semaphore::new(MAX_USER_CONNECTIONS)));
+        let permit = semaphore.clone().try_acquire_owned().ok()?;
+        users.insert(user.to_owned(), Arc::downgrade(&semaphore));
+        Some(permit)
     }
 }
 
@@ -97,10 +117,14 @@ async fn upgrade(
     let Ok(permit) = state.connections.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    let Some(user_permit) = state.user_permit(&session.user_id) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     ws.max_message_size(MAX_SOCKET_BUFFER)
         .max_frame_size(MAX_SOCKET_BUFFER)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
+            let _user_permit = user_permit;
             run_socket(socket, state, session.user_id, session_token).await;
         })
 }
@@ -151,23 +175,27 @@ async fn run_socket(
         return;
     }
 
-    let handshake = handshake(
-        &mut source,
-        &mut sink,
-        &mut receive,
-        &mut encode,
-        &state,
-        &user_id,
+    let handshake = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        handshake(
+            &mut source,
+            &mut sink,
+            &mut receive,
+            &mut encode,
+            &state,
+            &user_id,
+        ),
     )
     .await;
-    let Ok(connection_id) = handshake else {
-        let _ = sink.send(Message::Close(None)).await;
+    let Ok(Ok(connection_id)) = handshake else {
+        let _ = send_message(&mut sink, Message::Close(None)).await;
         return;
     };
 
     let (output_tx, mut output_rx) =
         mpsc::channel::<(u32, TerminalOutput)>(OUTPUT_CHANNEL_CAPACITY);
     let mut output_open = true;
+    let mut receive_deadline = None;
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut loop_result = Ok(());
     let mut expiry = socket_deadline(&state, &user_id, &session_token)
@@ -184,7 +212,7 @@ async fn run_socket(
                 let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
                 expiry = deadline;
             }
-            input = receive_wire(&mut source, &mut receive) => {
+            input = receive_wire(&mut source, &mut receive, &mut receive_deadline) => {
                 let input = match input {
                     Ok(Some(input)) => input,
                     Ok(None) => break,
@@ -195,7 +223,7 @@ async fn run_socket(
                 };
                 match input {
                     Inbound::TransportPing(payload) => {
-                        if sink.send(Message::Pong(payload)).await.is_err() { break; }
+                        if send_message(&mut sink, Message::Pong(payload)).await.is_err() { break; }
                     }
                     Inbound::Frame(wire) => {
                     if handle_client_frame(
@@ -852,18 +880,23 @@ where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
+    let mut deadline = None;
     loop {
-        match receive_wire(source, receive).await? {
+        match receive_wire(source, receive, &mut deadline).await? {
             Some(Inbound::Frame(frame)) => return Ok(Some(frame)),
             Some(Inbound::TransportPing(payload)) => {
-                sink.send(Message::Pong(payload)).await.map_err(|_| ())?;
+                send_message(sink, Message::Pong(payload)).await?;
             }
             None => return Ok(None),
         }
     }
 }
 
-async fn receive_wire<S>(source: &mut S, receive: &mut BytesMut) -> Result<Option<Inbound>, ()>
+async fn receive_wire<S>(
+    source: &mut S,
+    receive: &mut BytesMut,
+    deadline: &mut Option<tokio::time::Instant>,
+) -> Result<Option<Inbound>, ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
 {
@@ -871,7 +904,11 @@ where
         match decode_muxed_frame(receive) {
             Ok(decoded) => {
                 let wire_len = decoded.wire_len;
-                return Ok(Some(Inbound::Frame(receive.split_to(wire_len).freeze())));
+                let frame = receive.split_to(wire_len).freeze();
+                if receive.is_empty() {
+                    *deadline = None;
+                }
+                return Ok(Some(Inbound::Frame(frame)));
             }
             Err(DecodeError::Incomplete) => {}
             Err(_) => return Err(()),
@@ -879,7 +916,13 @@ where
         if receive.len() >= MAX_SOCKET_BUFFER {
             return Err(());
         }
-        let Some(message) = source.next().await else {
+        // Preserve the deadline across select cancellation and transport pings, including
+        // RFC WebSocket fragmentation hidden inside Axum's message stream.
+        let end = *deadline.get_or_insert_with(|| tokio::time::Instant::now() + MESSAGE_TIMEOUT);
+        let Some(message) = tokio::time::timeout_at(end, source.next())
+            .await
+            .map_err(|_| ())?
+        else {
             return Ok(None);
         };
         match message.map_err(|_| ())? {
@@ -889,6 +932,8 @@ where
                     return Err(());
                 }
                 receive.extend_from_slice(&bytes);
+                let partial = tokio::time::Instant::now() + PARTIAL_FRAME_TIMEOUT;
+                *deadline = Some(end.min(partial));
             }
             Message::Ping(payload) => return Ok(Some(Inbound::TransportPing(payload))),
             Message::Pong(_) => {}
@@ -908,8 +953,17 @@ where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
     encode_muxed_frame_into(stream_id, frame, encode).map_err(|_| ())?;
-    sink.send(Message::Binary(Bytes::copy_from_slice(encode)))
+    send_message(sink, Message::Binary(Bytes::copy_from_slice(encode))).await
+}
+
+/// Bound each writer independently; a stalled browser cannot retain its permits forever.
+async fn send_message<K>(sink: &mut K, message: Message) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    tokio::time::timeout(WRITE_TIMEOUT, sink.send(message))
         .await
+        .map_err(|_| ())?
         .map_err(|_| ())
 }
 
