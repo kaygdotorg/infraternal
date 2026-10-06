@@ -155,7 +155,11 @@ spending browser capacity. Request bodies are bounded at 32 KiB.
 The library never trusts `Forwarded` or `X-Forwarded-For`. The host must apply
 per-source admission at its trusted ingress using the actual peer address, or
 forwarded addresses only from explicitly configured proxy peers that strip
-caller-supplied forwarding headers. Keep separate browser and device policies:
+caller-supplied forwarding headers. The server accepts repeatable
+`--trusted-proxy <IP-or-CIDR>` entries only together with `--behind-proxy`;
+only those peers may supply a single `X-Forwarded-For` address for source
+admission. Other forwarding headers are ignored, and WebAuthn continues to use
+the explicit `--public-origin`. Keep separate browser and device policies:
 for example, at most 30 browser actions/minute/source and 10 device actions/
 minute/source, beneath the global partitions. Enforce body limits and admission
 before JSON parsing there. This policy is a deployment requirement; this library

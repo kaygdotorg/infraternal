@@ -62,6 +62,23 @@ On leg A every stream is muxed. Stream 0 is the control stream. Odd ids are open
 ids by the server. On leg B over QUIC, the native stream gives the id, and frames
 are not wrapped.
 
+### 3.1 Embedded agent over a local socketpair (S1, issue #19)
+
+The server starts its own infraternal agent as `<self> agent --fd 3` and passes
+one endpoint of a Unix socketpair as descriptor 3. This is a local process
+channel, not a network leg: the inherited socketpair is its trust boundary,
+so it does not use mTLS. Both processes still exchange the v1 `Hello` frame
+and use the shared codec. Because a Unix socketpair is a byte stream, frames
+use the leg-B mux envelope: stream 0 is control, and the server opens even
+terminal stream ids. The protocol remains transport independent.
+
+The core `terminal.open` action is a control-stream `Call` whose JSON input is
+`{"cols":u16,"rows":u16,"px_w":u16,"px_h":u16}` and whose successful JSON
+result is `{"session_id":"<32 lowercase hexadecimal characters>"}`. The
+server records the returned session id for the authenticated user before it
+returns the result to the browser. A terminal `AttachTerm` then names that
+session on a server-opened even stream to the embedded infraternal agent.
+
 ## 4. Frames
 
 Ranges: `0x00–0x0F` connection, `0x10–0x2F` terminal hot path, `0x30–0x3F`
