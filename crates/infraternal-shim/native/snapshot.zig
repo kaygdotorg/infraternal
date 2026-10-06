@@ -127,6 +127,20 @@ fn cursorShape(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writ
 
 fn position(w: *Writer, t: *const vt.Terminal, x: u16, y: u16, origin: bool) Writer.Error!void {
     const r = t.scrolling_region;
+    if (origin and (y < r.top or y > r.bottom or x < r.left or x > r.right)) {
+        // DECRC can restore an absolute position outside later margins; CUP
+        // in origin mode clamps it. The saved cursor is the existing absolute
+        // anchor and relative movement retains its outside-region position.
+        const saved = screenSaved: {
+            const saved = t.screens.active.saved_cursor orelse return error.WriteFailed;
+            if (!saved.origin) return error.WriteFailed;
+            break :screenSaved saved;
+        };
+        try w.writeAll("\x1b8");
+        if (y != saved.y) try w.print("\x1b[{d}{c}", .{ if (y > saved.y) y - saved.y else saved.y - y, @as(u8, if (y > saved.y) 'B' else 'A') });
+        if (x != saved.x) try w.print("\x1b[{d}{c}", .{ if (x > saved.x) x - saved.x else saved.x - x, @as(u8, if (x > saved.x) 'C' else 'D') });
+        return;
+    }
     try w.print("\x1b[{d};{d}H", .{ @as(i32, y) + 1 - @as(i32, if (origin) r.top else 0), @as(i32, x) + 1 - @as(i32, if (origin and t.modes.get(.enable_left_and_right_margin)) r.left else 0) });
 }
 
@@ -316,7 +330,7 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
         for (0..a.cols) |x| {
             if (a.tabstops.get(@intCast(x)) != b.tabstops.get(@intCast(x))) return 6000001;
         }
-        if (!std.meta.eql(sa.saved_cursor, sb.saved_cursor)) return 6000002;
+        if (!savedEqual(sa.saved_cursor, sb.saved_cursor)) return 6000002;
         if (sa.cursor.cursor_style != sb.cursor.cursor_style) return 6000003;
     }
     if (!std.meta.eql(a.colors.palette.current, b.colors.palette.current)) return 5000000;
@@ -351,4 +365,17 @@ fn linkKey(p: vt.PageList.Pin, value: *const vt.page.Cell, buf: *[64]u8) []const
         .explicit => |v| v.slice(page.memory),
         .implicit => |v| std.fmt.bufPrint(buf, "infraternal-implicit-{d}", .{v}) catch unreachable,
     };
+}
+
+// UTF-8 and ASCII designations use the same printable mapping in Ghostty.
+// Replay emits the standard ASCII designation, so compare behavior rather
+// than the internal default tag when checking saved cursor state.
+fn savedEqual(a: ?vt.Screen.SavedCursor, b: ?vt.Screen.SavedCursor) bool {
+    var aa = a orelse return b == null;
+    var bb = b orelse return false;
+    inline for (.{ vt.CharsetSlot.G0, vt.CharsetSlot.G1, vt.CharsetSlot.G2, vt.CharsetSlot.G3 }) |slot| {
+        if (aa.charset.charsets.get(slot) == .utf8) aa.charset.charsets.set(slot, .ascii);
+        if (bb.charset.charsets.get(slot) == .utf8) bb.charset.charsets.set(slot, .ascii);
+    }
+    return std.meta.eql(aa, bb);
 }

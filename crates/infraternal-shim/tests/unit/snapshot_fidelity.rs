@@ -34,7 +34,6 @@ fn fidelity_f1_rep() {
     replay("F1-alternate-rep", b"\x1b[?47hALT\x1b[?47lMAIN", 12, 5);
 }
 #[test]
-#[ignore = "red regression: enable after cursor fix"]
 fn fidelity_cursor() {
     replay(
         "saved-origin-outside-region",
