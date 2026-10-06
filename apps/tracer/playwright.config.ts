@@ -13,7 +13,10 @@ export default defineConfig({
     ...devices["Desktop Chrome"],
     baseURL: "http://localhost:4173",
     launchOptions: {
-      args: (process.env.TRACER_CHROMIUM_FLAGS ?? "").split(/\s+/).filter(Boolean),
+      // Keep a headless visible-surface probe on the renderer's foreground frame cadence.
+      args: process.env.TRACER_CHROMIUM_FLAGS === undefined
+        ? ["--disable-renderer-backgrounding"]
+        : process.env.TRACER_CHROMIUM_FLAGS.split(/\s+/).filter(Boolean),
     },
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
