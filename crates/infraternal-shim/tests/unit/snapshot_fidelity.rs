@@ -525,7 +525,6 @@ fn fidelity_single_shift_survives_rep_seed() {
 }
 
 #[test]
-#[ignore = "ISO scratch-seed red regression; enable with transient protection reset"]
 fn fidelity_iso_protection_does_not_keep_rep_scratch() {
     check_replay_branched(
         "protected DEC charset REP seed",

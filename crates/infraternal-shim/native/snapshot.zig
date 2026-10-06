@@ -146,6 +146,11 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
 // into occupied content: some states need a nonprinting upstream setter.
 fn restoreRep(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
     const cp = t.previous_char orelse return;
+    // A temporary seed must be erasable even when the live screen remembers
+    // ISO protection. DEC/off permits ordinary ECH; final cursor restoration
+    // reselects the source mode. Never select DEC for an originally off screen.
+    if (t.screens.active.protected_mode != .off) try w.writeAll("\x1b[1\"q\x1b[0\"q");
+
     const screen = t.screens.active;
     const width = unicode.table.get(cp).width;
     const saved_anchor = if (screen.saved_cursor) |saved| saved.pending_wrap and saved.x == screen.cursor.x and saved.y == screen.cursor.y and saved.origin == t.modes.get(.origin) else false;
