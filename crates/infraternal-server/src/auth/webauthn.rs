@@ -186,15 +186,21 @@ impl Auth {
 
     /// Begin a UV-required login (also the fresh-tap ceremony).
     pub async fn login_start(&self, user: &str, now: i64) -> Result<Value> {
-        let (options, state) = self
-            .webauthn
-            .start_passkey_authentication(&self.passkeys(user).await?)
-            .map_err(|_| Error::Denied)?;
-        let mut options = serde_json::to_value(options)?;
-        let inputs = sqlx::query("SELECT id,prf_input FROM passkeys WHERE user_id=?")
+        // One read binds each allowed credential to its wrapping input. Separate reads
+        // could race enrollment/recovery and also add an unnecessary storage round trip.
+        let inputs = sqlx::query("SELECT id,credential,prf_input FROM passkeys WHERE user_id=?")
             .bind(user)
             .fetch_all(&self.pool)
             .await?;
+        let keys: Vec<Passkey> = inputs
+            .iter()
+            .map(|row| serde_json::from_str(row.get("credential")).map_err(Error::from))
+            .collect::<Result<_>>()?;
+        let (options, state) = self
+            .webauthn
+            .start_passkey_authentication(&keys)
+            .map_err(|_| Error::Denied)?;
+        let mut options = serde_json::to_value(options)?;
         let evaluations: serde_json::Map<String, Value> = inputs
             .iter()
             .map(|row| {
