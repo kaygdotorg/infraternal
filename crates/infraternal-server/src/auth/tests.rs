@@ -2135,6 +2135,7 @@ async fn account_identity_migration_backfills_legacy_users() {
 /// Release-only scale evidence; no authenticator signing cost is included in server finish latency.
 #[tokio::test]
 #[ignore = "run --release --ignored --nocapture without concurrent builds"]
+#[allow(clippy::too_many_lines)]
 async fn discoverable_latency_at_pending_capacity() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
@@ -2222,15 +2223,18 @@ async fn discoverable_latency_at_pending_capacity() {
             .require_ceremony_binding(str_field(&start, "ceremony"), &headers)
             .await
             .unwrap();
-        f.auth
+        let token = f
+            .auth
             .pending_login_finish(str_field(&start, "ceremony"), proof, "benchmark", now)
             .await
             .unwrap();
+        // Include the completion id issued by HTTP, not just the verifier/SQLite path.
+        std::hint::black_box(super::sessions::pending_transaction(&token));
         samples.push(clock.elapsed());
     }
     let (p50, p99) = latency_us(&mut samples);
     println!(
-        "signed discoverable finish pending=1024 n=200 p50_us={p50} p99_us={p99} (browser binding + pending unlock transaction + SQLite memory + real ES256 verifier)"
+        "signed discoverable finish pending=1024 n=200 p50_us={p50} p99_us={p99} (browser binding + pending unlock transaction/id + SQLite memory + real ES256 verifier)"
     );
     assert!(
         p99 < 10_000,
