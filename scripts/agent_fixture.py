@@ -66,7 +66,9 @@ class Binary:
         env = dict(os.environ, ZDOTDIR=str(Path('crates/infraternal/tests/profile').resolve()))
         # Shell duplication closes the original descriptor before exec; the
         # binary's launch wrapper later closes fd 3 before every shim exec.
-        self.child = subprocess.Popen(['/bin/sh', '-c', 'exec 3<&"$1"; eval "exec $1<&-"; shift; exec "$@"',
+        # Bash supports closing descriptor numbers above nine, which concurrent
+        # fixtures can allocate; POSIX sh redirection only guarantees 0..9.
+        self.child = subprocess.Popen([shutil.which('bash'), '-c', 'exec 3<&"$1"; eval "exec $1<&-"; shift; exec "$@"',
             'leg-b', str(peer.fileno()), str(self.binary), 'agent', '--fd', '3', '--state', str(self.state)],
             pass_fds=(peer.fileno(),), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         peer.close()
@@ -157,6 +159,7 @@ class Binary:
     def kill(self):
         self.child.kill()
         self.child.wait()
+        self.child.stderr.close()
         self.sock.close()
 
     def restart(self):
@@ -179,35 +182,67 @@ class AckBarrier:
         self.release = threading.Event()
         self.kind = kind
         self.threshold = None
+        self.phase = {}
+        self.active = ()
         self.stopped = False
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
+
+    def forward(self, source, destination, direction):
+        try:
+            while not self.stopped:
+                self.phase[direction] = 'read'
+                prefix = exact(source, 4)
+                length = struct.unpack('<I', prefix)[0]
+                assert 0 < length <= 1024 * 1024, 'oversized shim proxy frame'
+                body = exact(source, length)
+                if body[0] == self.kind and self.threshold is not None and struct.unpack('<Q', body[1:9])[0] >= self.threshold:
+                    self.phase[direction] = 'barrier'
+                    self.held.set()
+                    assert self.release.wait(20)
+                    self.threshold = None
+                self.phase[direction] = f'forward type={body[0]:02x} bytes={length}'
+                destination.sendall(prefix + body)
+        except (EOFError, BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            # Closing either leg interrupts its companion pump, including a
+            # partial frame read/write, before the next connection is accepted.
+            for sock in (source, destination):
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
 
     def run(self):
         while not self.stopped:
             try:
                 peer, _ = self.listener.accept()
                 upstream = socket.socket(socket.AF_UNIX)
-                upstream.connect(str(self.real))
                 with peer, upstream:
-                    while True:
-                        ready, _, _ = select.select([peer, upstream], [], [])
-                        for source in ready:
-                            prefix = exact(source, 4)
-                            body = exact(source, struct.unpack('<I', prefix)[0])
-                            if source is upstream and body[0] == self.kind and self.threshold is not None and struct.unpack('<Q', body[1:9])[0] >= self.threshold:
-                                self.held.set()
-                                assert self.release.wait(20)
-                                self.threshold = None
-                            destination = peer if source is upstream else upstream
-                            destination.sendall(prefix + body)
+                    self.active = (peer, upstream)
+                    upstream.connect(str(self.real))
+                    # Two bounded frame pumps prevent the proxy itself creating
+                    # a duplex deadlock while the daemon sends a large replay
+                    # and the shim simultaneously sends retained output.
+                    outbound = threading.Thread(target=self.forward, args=(peer, upstream, 'input'), daemon=True)
+                    outbound.start()
+                    self.forward(upstream, peer, 'output')
+                    outbound.join()
+                    self.active = ()
             except (EOFError, BrokenPipeError, ConnectionResetError, OSError):
                 continue
 
     def close(self):
         self.stopped = True
         self.release.set()
+        for sock in (*self.active, self.listener):
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         self.listener.close()
+        self.thread.join(2)
 
 
 def cleanup(state):
