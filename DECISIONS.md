@@ -464,3 +464,15 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      input, provided the independent auth review confirms that this loses
      no protection compared with the per-user input. Existing envelopes
      keep their stored input (#19).
+109. **Browser terminal pinned to a source build (T1):** ghostty-web is built
+     from source at an upstream commit that contains the crash fix
+     (bec9e162, #180, or later on the 0.5.0-rc line), pinned by SHA with a
+     checksum, until an official release contains it. We then switch to the
+     release. A polite release request goes upstream after the owner sees
+     the draft (it needs `gh auth login`) (#31).
+110. **Lossless terminal state (T2):** ship with the bounded painter
+     (approximate restores are flagged and counted, and a reconnect never
+     closes a session). In parallel, build an engine-level state
+     export/import for libghostty-vt in our own fork and test it with our
+     differential suite. Propose it upstream as a PR only after it is
+     proven here (#26).
