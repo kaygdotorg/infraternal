@@ -13,6 +13,7 @@
     "./copy-feedback": "./src/copy-feedback.ts",
     "./tooltip": "./src/tooltip.ts",
     "./faulty-terminal": "./src/faulty-terminal.ts",
+    "./color": "./src/color.ts",
     "./styles.css": "./styles.css"
   }
 }
