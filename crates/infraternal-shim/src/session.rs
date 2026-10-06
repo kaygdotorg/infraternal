@@ -491,3 +491,7 @@ fn handle(
     }
     Ok(false)
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/session_budgets.rs"]
+mod measurements;
