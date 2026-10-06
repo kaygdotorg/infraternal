@@ -127,7 +127,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         if (t.previous_char) |cp| {
             const saved_anchor = if (screen.saved_cursor) |saved| saved.pending_wrap and saved.x == screen.cursor.x and saved.y == screen.cursor.y and saved.origin == t.modes.get(.origin) else false;
             if (unicode.table.get(cp).width == 2 and !saved_anchor) {
-                try w.writeAll("\x1b[?7l\x1b[?2027l\x1b(B\x0f");
+                try w.writeAll("\x1b[?7l\x1b[?2027l\x1b(B\x1b*B\x1b+B\x0f");
                 try codepoint(w, cp);
                 try w.print("\x1b[?7{c}\x1b[?2027{c}", .{ @as(u8, if (t.modes.get(.wraparound)) 'h' else 'l'), @as(u8, if (t.modes.get(.grapheme_cluster)) 'h' else 'l') });
                 try charset(w, screen.charset);
@@ -137,6 +137,10 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     try w.print("\x1b[4{c}", .{@as(u8, if (t.modes.get(.insert)) 'h' else 'l')});
 }
 
+// Transient single shifts can survive a screen switch or cursor restore.
+// Every painter/REP ASCII prologue designates G2/G3 as ASCII as well as G0,
+// so a pending shift is consumed by an identity-mapped print. Restore the
+// source designations and pending shift only after all reconstruction prints.
 // Restore terminal-global REP independently of repaint traversal. Reuse a
 // matching cell when possible, otherwise an erased scratch cell. Never seed
 // into occupied content: some states need a nonprinting upstream setter.
@@ -151,7 +155,7 @@ fn restoreRep(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
         const value = p.rowAndCell().cell;
         if (value.hasText() and value.codepoint() != cp) return error.Unrepresentable;
     }
-    try w.writeAll("\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[?2027l\x1b(B\x0f");
+    try w.writeAll("\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[?2027l\x1b(B\x1b*B\x1b+B\x0f");
     if (width == 2) {
         if (t.cols < 2) return error.Unrepresentable;
         try w.print("\x1b[1;{d}H\x1b[?7l", .{t.cols});
@@ -187,7 +191,7 @@ fn restoreRep(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
 }
 
 fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotError!void {
-    try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
+    try w.writeAll("\x1b(B\x1b*B\x1b+B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
     if (screen.saved_cursor) |saved| {
         // A saved cursor can lie outside margins changed after DECSC. Use
         // temporary full margins so CUP cannot clamp its absolute position;
@@ -203,7 +207,7 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotEr
             // A temporary narrow print establishes wrap at the saved margin;
             // the subsequent full grid repaint removes it without touching
             // the saved position/style/charset or pending-wrap bit.
-            try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?7h ");
+            try w.writeAll("\x1b(B\x1b*B\x1b+B\x0f\x1b[?2027l\x1b[?7h ");
         }
         try w.print("{f}\x1b[{d}\"q", .{ saved.style.formatterVt(), @as(u8, if (saved.protected) 1 else 0) });
         try charset(w, saved.charset);
@@ -211,7 +215,7 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotEr
     }
     // Discard temporary DECSC construction cells. Consume a saved single
     // shift before painting text, while retaining it in the saved record.
-    try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H");
+    try w.writeAll("\x1b(B\x1b*B\x1b+B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H");
     if (screen.saved_cursor) |saved| {
         if (saved.charset.single_shift != null and t.previous_char != null) try w.writeAll(" \x1b[H");
     }
@@ -319,7 +323,7 @@ fn recreateWrap(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, x: 
     var p = screen.pages.pin(.{ .active = .{ .x = x, .y = y } }).?;
     if (p.rowAndCell().cell.wide == .spacer_tail and x > 0) p.x -= 1;
     try position(w, t, p.x, y, origin);
-    try w.writeAll("\x1b(B\x0f\x1b[?2027l");
+    try w.writeAll("\x1b(B\x1b*B\x1b+B\x0f\x1b[?2027l");
     const value = p.rowAndCell().cell;
     const right = if (x > t.scrolling_region.right) t.cols - 1 else t.scrolling_region.right;
     if (!value.hasText() or x != right) return error.Unrepresentable;

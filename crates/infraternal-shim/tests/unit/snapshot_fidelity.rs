@@ -520,7 +520,6 @@ fn fidelity_diagnostic_fixture() {
 }
 
 #[test]
-#[ignore = "single-shift REP red regression; enable with safe seed charset"]
 fn fidelity_single_shift_survives_rep_seed() {
     check_replay_branched("single-shift after ASCII", b"abc\x1b*0\x1bN", None, 12, 5).unwrap();
 }
