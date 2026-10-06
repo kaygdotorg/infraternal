@@ -313,3 +313,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     an independent review, green gates and its own check. Each merge has a
     summary on its issue and a new preview. `main` only gets stable builds,
     and the owner has the final say there.
+78. **The palette searches everything:** hosts, sessions, actions and
+    commands, and also the text of the UI itself (settings, labels, help).
+    One index, results grouped by kind.
+79. **Mobile keys float.** No bottom band. Icon pills that scroll sideways
+    over a progressive blur.
