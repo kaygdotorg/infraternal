@@ -1,3 +1,4 @@
+<!-- Multiplexed wire framing, resume cursors and bounded flow control [12][41][81]. -->
 # Contract: wire protocol (leg A and leg B)
 
 Status: draft for #10. Implements DECISIONS 10, 11, 12, 17, 41, 63 and 64. The
@@ -122,6 +123,23 @@ frames are binary, because they carry each keystroke and each output chunk.
   credit returns, it sends one `Snapshot`. The user sees the current screen
   at once, and does not wait for megabytes of a flood that scrolled away.
   (The full output stays in the scrollback in the shim.)
+- **Snapshot credit.** A Snapshot is indivisible and bounded by the leg's
+  frame limit (the shim leg permits at most 1 MiB including type and sequence).
+  With positive usable credit, one Snapshot may exceed the remaining credit
+  by at most its own payload length. Record the excess as repaint debt. Future
+  Credit repays debt before permitting raw Output or another Snapshot. Snapshot
+  byte length consumes credit but never advances `out_seq`; the supplied
+  sequence identifies the screen state. Zero usable credit never sends a repaint.
+- An unfunded repaint or raw suffix must detach from the shim after the same
+  250 ms pending-output deadline. Partial debt repayments must not extend that
+  deadline. While detached, the PTY progresses independently; after debt is
+  repaid and usable credit returns, obtain a fresh Snapshot. Do not reconnect
+  on partial repayments or run an idle catch-up timer.
+- **Command isolation.** Each terminal command queue is bounded (eight slots
+  in the embedded infraternal agent). When full, retire only that attachment
+  with Close, cancel its shim link, and keep dispatching sibling/control frames.
+  The viewer reattaches and replays unacknowledged Input using shim-owned
+  accepted/written cursors (§5); a refused command never implies acceptance.
 - Leg B uses QUIC flow control plus the same credit idea between the server
   and the agent.
 
