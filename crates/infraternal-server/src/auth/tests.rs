@@ -1683,3 +1683,18 @@ async fn leg_b_send(socket: &mut UnixStream, stream_id: u32, frame: &Frame<'_>) 
     encode_muxed_frame_into(stream_id, frame, &mut encoded).expect("encode leg-B frame");
     socket.write_all(&encoded).await.expect("write leg-B frame");
 }
+
+/// Different owner handles must never share the new enrollment PRF input.
+#[tokio::test]
+async fn enrollment_prf_input_is_user_bound() {
+    let _guard = SERIAL.lock().await;
+    let (auth, token) = empty().await;
+    let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let b = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    assert_ne!(a["user_id"], b["user_id"]);
+    assert_ne!(
+        a["options"]["publicKey"]["extensions"]["prf"],
+        b["options"]["publicKey"]["extensions"]["prf"],
+        "PRF input must be per-user"
+    );
+}

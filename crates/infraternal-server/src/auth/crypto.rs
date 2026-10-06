@@ -9,8 +9,13 @@ pub(super) fn random() -> String {
 pub(super) fn hash(value: &str) -> String {
     B64.encode(Sha256::digest(value.as_bytes()))
 }
-pub(super) fn prf_salt() -> String {
-    B64.encode(Sha256::digest(b"infraternal/keywrap/prf/v1"))
+pub(super) fn prf_salt(user: Option<&str>) -> String {
+    // Existing envelopes must keep v1; new enrollment isolates input by canonical UUID.
+    let context = user.map_or_else(
+        || "infraternal/keywrap/prf/v1".to_owned(),
+        |user| format!("infraternal/keywrap/prf/v2|{user}"),
+    );
+    B64.encode(Sha256::digest(context.as_bytes()))
 }
 static ARGON_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 pub(super) async fn recovery_hash(words: String) -> Result<String> {

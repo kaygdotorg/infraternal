@@ -36,7 +36,7 @@ impl Auth {
         // UV, RP, origin, challenge, signature and counters are enforced by webauthn-rs.
         options["publicKey"]["authenticatorSelection"]["residentKey"] = json!("required");
         options["publicKey"]["authenticatorSelection"]["requireResidentKey"] = json!(true);
-        options["publicKey"]["extensions"]["prf"] = json!({"eval":{"first":prf_salt()}});
+        options["publicKey"]["extensions"]["prf"] = json!({"eval":{"first":prf_salt(Some(&user))}});
         let words = if rotate {
             Some(
                 bip39::Mnemonic::generate_in(bip39::Language::English, 24)
@@ -105,7 +105,6 @@ impl Auth {
             .webauthn
             .finish_passkey_registration(&proof, &registration.state)
             .map_err(|_| Error::Webauthn)?;
-        let key_id = B64.encode(key.cred_id().as_ref());
         let mut tx = self.pool.begin().await?;
         // A write first obtains SQLite's writer lock before any security-sensitive read.
         sqlx::query("UPDATE setup SET expires=expires WHERE singleton=1")
@@ -157,12 +156,7 @@ impl Auth {
                     .await?;
             }
         }
-        sqlx::query("INSERT INTO passkeys(id,user_id,credential) VALUES (?,?,?)")
-            .bind(&key_id)
-            .bind(&registration.user)
-            .bind(serde_json::to_string(&key)?)
-            .execute(&mut *tx)
-            .await?;
+        let key_id = store_passkey(&mut tx, &registration.user, &key).await?;
         put_wrap(
             &mut tx,
             &registration.user,
@@ -197,7 +191,27 @@ impl Auth {
             .start_passkey_authentication(&self.passkeys(user).await?)
             .map_err(|_| Error::Denied)?;
         let mut options = serde_json::to_value(options)?;
-        options["publicKey"]["extensions"] = json!({"prf":{"eval":{"first":prf_salt()}}});
+        let inputs = sqlx::query("SELECT id,prf_input FROM passkeys WHERE user_id=?")
+            .bind(user)
+            .fetch_all(&self.pool)
+            .await?;
+        let evaluations: serde_json::Map<String, Value> = inputs
+            .iter()
+            .map(|row| {
+                let input = row
+                    .get::<Option<String>, _>("prf_input")
+                    .unwrap_or_else(|| prf_salt(None));
+                (row.get("id"), json!({"first":input}))
+            })
+            .collect();
+        let first = evaluations.values().next().ok_or(Error::Denied)?;
+        let prf = if evaluations.values().all(|input| input == first) {
+            json!({"eval":first})
+        } else {
+            // With an identified allow-list WebAuthn permits credential-specific inputs.
+            json!({"evalByCredential":evaluations})
+        };
+        options["publicKey"]["extensions"] = json!({"prf":prf});
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
@@ -347,4 +361,21 @@ pub(super) fn reject_prf(proof: &Value) -> Result<()> {
         return Err(Error::Invalid);
     }
     Ok(())
+}
+
+/// Persist the verifier-owned credential and the exact input used to wrap its DEK.
+async fn store_passkey(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user: &str,
+    key: &Passkey,
+) -> Result<String> {
+    let id = B64.encode(key.cred_id().as_ref());
+    sqlx::query("INSERT INTO passkeys(id,user_id,credential,prf_input) VALUES (?,?,?,?)")
+        .bind(&id)
+        .bind(user)
+        .bind(serde_json::to_string(key)?)
+        .bind(prf_salt(Some(user)))
+        .execute(&mut **tx)
+        .await?;
+    Ok(id)
 }
