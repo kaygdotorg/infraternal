@@ -42,3 +42,10 @@ for kind, payload in [
     framed = len(raw).to_bytes(4, 'little') + raw
     (shim / f'{name}-framed').write_bytes(framed)
     (shim / f'{name}-twice').write_bytes(framed + framed)
+
+# Additive multi-writer selection: exercise every fixed-width identity byte.
+for writer in [0, 1, 0x01020304, 0xffffffff]:
+    raw = bytes([0x1b]) + writer.to_bytes(4, 'little')
+    framed = len(raw).to_bytes(4, 'little') + raw
+    for suffix, value in [('raw', raw), ('framed', framed), ('twice', framed + framed)]:
+        (shim / f'cap1-writer-{writer:x}-{suffix}').write_bytes(value)
