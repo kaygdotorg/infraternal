@@ -344,3 +344,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 85. **Mobile key bar: variant a.** One compact glass capsule. Keys that do
     not fit fade at the edges. The owner chose it after comparing it with a
     native keyboard row and a d-pad layout.
+86. **Passkey crypto: webauthn-rs with OpenSSL** (for now). It is proven code
+    for the front door. It costs about 2.5 MB of binary size and a pinned C
+    toolchain. Idle RAM stays near 5 MB. A pure-Rust verifier (webauthn-rp)
+    is reviewed again when it passes the advisory gate and has its own
+    security review.
