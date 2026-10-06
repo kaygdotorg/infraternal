@@ -384,3 +384,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     stores them per session so that they survive resume. Sixel and iTerm
     come only on request. ghostty-web 0.4 and alacritty_terminal have no
     image support.
+94. **The shim's terminal-state engine is libghostty-vt** (owner decision,
+    2026-10-06). It replaces alacritty_terminal, which a job chose without a
+    grill. It is the same engine as the browser's ghostty-web (14), so the
+    screen the shim saves and the screen the browser draws come from the
+    same code. It measured 2.4× the parse speed (138 MB/s) and 60% less
+    memory (about 20 MB per 10,000 lines). We write our own screen
+    serializer for snapshots (its built-in formatter failed our repaint
+    fixtures). Zig is pinned for the build.
