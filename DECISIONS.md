@@ -468,8 +468,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      from source at an upstream commit that contains the crash fix
      (bec9e162, #180, or later on the 0.5.0-rc line), pinned by SHA with a
      checksum, until an official release contains it. We then switch to the
-     release. A polite release request goes upstream after the owner sees
-     the draft (it needs `gh auth login`) (#31).
+     release. No upstream release request is sent: we build it ourselves
+     and move to the official release when it ships (owner) (#31).
 110. **Lossless terminal state (T2):** ship with the bounded painter
      (approximate restores are flagged and counted, and a reconnect never
      closes a session). In parallel, build an engine-level state
