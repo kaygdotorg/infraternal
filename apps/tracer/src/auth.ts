@@ -2,7 +2,6 @@
 import { mnemonicToEntropy } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const PRF_CONTEXT = "infraternal/keywrap/prf/v1";
 const KEY_CONTEXT = "infraternal/keywrap/v1";
 const encoder = new TextEncoder();
 
@@ -29,6 +28,7 @@ interface StoredWrap {
   kind: string;
   key_id: string;
   wrap: Wrap;
+  prf_input?: string | null;
 }
 
 interface PrfOutputs extends Record<string, unknown> {
@@ -46,6 +46,13 @@ export class AuthError extends Error {
     super(message);
     this.name = "AuthError";
   }
+}
+
+/** Reads only the public first-run flag before choosing an access screen. */
+export async function checkStatus(): Promise<boolean> {
+  const status = await post<{ setup_required: unknown }>("status", {});
+  if (typeof status.setup_required !== "boolean") throw new AuthError("The server returned an invalid setup status.");
+  return status.setup_required;
 }
 
 /** Checks the secure cookie when the app starts or returns to the foreground. */
@@ -82,7 +89,7 @@ export async function registerOwner(
 
     prf = prfFrom(created);
     if (!prf) {
-      prf = await registrationPrfFallback(created, publicKey, prfInput);
+      prf = await credentialPrf(created, publicKey.rp.id, prfInput);
     }
 
     // The recovery phrase is parsed before display so invalid server output cannot be wrapped.
@@ -111,29 +118,33 @@ export async function registerOwner(
 }
 
 /** Completes a UV-required passkey login and verifies its DEK envelope locally. */
-export async function loginWithPasskey(userIdInput: string, device: string): Promise<string> {
-  const userId = canonicalUuid(userIdInput.trim(), "account id");
-  const start = await post<AuthStart>("login-start", { user_id: userId });
+export async function loginWithPasskey(device: string, legacyDevice?: string): Promise<string> {
+  const start = await post<AuthStart>("login-start", {});
   const publicKey = requestOptions(start.options.publicKey);
-  const prfInput = prfInputFrom(publicKey);
   let prf: Uint8Array | undefined;
+  let userId: string;
 
   try {
     const assertion = await navigator.credentials.get({ publicKey });
     if (!(assertion instanceof PublicKeyCredential)) throw new AuthError("Passkey login was cancelled.");
-    prf = prfFrom(assertion);
-    if (!prf) throw new AuthError("This passkey did not return its key-wrapping proof.");
     await post("login-finish", {
       ceremony: requiredString(start.ceremony, "login ceremony"),
       proof: credentialProof(assertion),
-      device: device.slice(0, 128),
+      device: (legacyDevice ?? device).slice(0, 128),
     });
 
     try {
+      const session = await checkSession();
+      userId = canonicalUuid(session?.user_id, "session user id");
       const stored = await post<StoredWrap[]>("wraps", {});
       const keyId = base64url(new Uint8Array(assertion.rawId));
-      const envelope = stored.find((entry) => entry.kind === "passkey" && entry.key_id === keyId)?.wrap;
+      const entry = stored.find((entry) => entry.kind === "passkey" && entry.key_id === keyId);
+      const envelope = entry?.wrap;
       if (!envelope) throw new AuthError("The passkey key envelope is missing.");
+      const first = decodeBase64url(requiredString(entry?.prf_input, "passkey input"));
+      try {
+        prf = await credentialPrf(assertion, publicKey.rpId, first);
+      } finally { first.fill(0); }
       const dek = await unwrapDek(prf, envelope, userId, "passkey");
       if (dek.byteLength !== 32) throw new AuthError("The passkey key envelope is invalid.");
       dek.fill(0);
@@ -144,7 +155,6 @@ export async function loginWithPasskey(userIdInput: string, device: string): Pro
     return userId;
   } finally {
     prf?.fill(0);
-    prfInput.fill(0);
   }
 }
 
@@ -161,7 +171,14 @@ async function post<Result = unknown>(action: string, body: unknown): Promise<Re
   } catch {
     throw new AuthError("The infraternal server could not be reached.");
   }
-  if (!response.ok) throw new AuthError(`The server rejected ${action} (${response.status}).`, response.status);
+  if (!response.ok) {
+    const message = response.status >= 500 ? "The server could not complete the request. Try again."
+      : response.status === 429 ? "Too many attempts. Wait a minute and try again."
+      : action === "setup-start" && response.status === 401 ? "The setup token is invalid or expired. Get the current token from the server."
+      : action === "login-finish" ? "This passkey could not sign in. Try your registered passkey."
+      : "The request could not be accepted. Check your details and try again.";
+    throw new AuthError(message, response.status);
+  }
   try {
     return (await response.json()) as Result;
   } catch {
@@ -196,6 +213,7 @@ function normalizePublicKey(value: Record<string, unknown>, isRegistration: bool
       });
     }
   }
+  if (!options.extensions || !record(options.extensions, "WebAuthn extensions").prf) return options;
   const extensions = record(options.extensions, "WebAuthn extensions");
   const prf = record(extensions.prf, "WebAuthn PRF extension");
   const evaluation = record(prf.eval, "WebAuthn PRF input");
@@ -215,15 +233,15 @@ function prfInputFrom(options: PublicKeyCredentialCreationOptions | PublicKeyCre
     : new Uint8Array(first.buffer, first.byteOffset, first.byteLength);
 }
 
-async function registrationPrfFallback(
+async function credentialPrf(
   credential: PublicKeyCredential,
-  options: PublicKeyCredentialCreationOptions,
+  rpId: string | undefined,
   first: Uint8Array,
 ): Promise<Uint8Array> {
   const result = await navigator.credentials.get({
     publicKey: {
       challenge: toArrayBuffer(crypto.getRandomValues(new Uint8Array(32))),
-      ...(options.rp.id ? { rpId: options.rp.id } : {}),
+      ...(rpId ? { rpId } : {}),
       allowCredentials: [{ type: "public-key", id: credential.rawId }],
       userVerification: "required",
       extensions: { prf: { eval: { first: toArrayBuffer(first) } } } as AuthenticationExtensionsClientInputs,
