@@ -14,16 +14,26 @@ fn replay(name: &str, prefix: &[u8], cols: u16, rows: u16) {
     check_replay(name, prefix, None, cols, rows).unwrap_or_else(|error| panic!("{name}: {error}"));
 }
 
-fn check_replay_branched(
+// Preserve the pinned C constructor as a separately reported corpus context.
+// Canonical fixtures deliberately use RIS; neither context changes production.
+fn corpus_terminal(cols: u16, rows: u16) -> std::io::Result<Terminal> {
+    if std::env::var("VT_SNAPSHOT_INITIAL").as_deref() == Ok("fresh-c") {
+        Terminal::new(cols, rows)
+    } else {
+        reset_terminal(cols, rows)
+    }
+}
+
+fn check_replay(
     name: &str,
     prefix: &[u8],
     recorded: Option<&[u8]>,
     cols: u16,
     rows: u16,
 ) -> std::io::Result<()> {
-    let mut a = reset_terminal(cols, rows).unwrap();
+    let mut a = corpus_terminal(cols, rows).unwrap();
     a.process(prefix);
-    let mut b = reset_terminal(cols, rows).unwrap();
+    let mut b = corpus_terminal(cols, rows).unwrap();
     let snapshot = a.snapshot()?;
     b.process(&snapshot);
     assert_eq!(
@@ -49,9 +59,9 @@ fn check_replay_branched(
         continuations.push(continuation);
     }
     for (branch, continuation) in continuations.iter().enumerate() {
-        let mut original = reset_terminal(cols, rows).unwrap();
+        let mut original = corpus_terminal(cols, rows).unwrap();
         original.process(prefix);
-        let mut restored = reset_terminal(cols, rows).unwrap();
+        let mut restored = corpus_terminal(cols, rows).unwrap();
         restored.process(&snapshot);
         original.process(continuation);
         restored.process(continuation);
@@ -62,9 +72,9 @@ fn check_replay_branched(
         );
     }
     for (next_cols, next_rows) in [(cols.max(2) / 2, rows), (cols + 3, rows + 1)] {
-        let mut original = reset_terminal(cols, rows).unwrap();
+        let mut original = corpus_terminal(cols, rows).unwrap();
         original.process(prefix);
-        let mut restored = reset_terminal(cols, rows).unwrap();
+        let mut restored = corpus_terminal(cols, rows).unwrap();
         restored.process(&snapshot);
         original.resize(next_cols, next_rows).unwrap();
         restored.resize(next_cols, next_rows).unwrap();
@@ -203,7 +213,7 @@ fn generated(count: usize, extended: bool) {
             std::fs::create_dir_all(root).unwrap();
             std::fs::write(root.join(format!("{name}.vt")), &input).unwrap();
         }
-        match check_replay_branched(&name, &input, None, 12, 5) {
+        match check_replay(&name, &input, None, 12, 5) {
             Ok(()) => replayed += 1,
             Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
                 api_gaps += 1;
@@ -218,13 +228,17 @@ fn generated(count: usize, extended: bool) {
         }
     }
     println!(
-        "snapshot corpus: cases={count} replayed={replayed} rejected={api_gaps} divergent=0 extended={extended} initial=RIS seed=22601006"
+        "snapshot corpus: cases={count} replayed={replayed} rejected={api_gaps} divergent=0 extended={extended} initial={} seed=22601006",
+        if std::env::var("VT_SNAPSHOT_INITIAL").as_deref() == Ok("fresh-c") {
+            "fresh-c"
+        } else {
+            "RIS"
+        }
     );
     assert_eq!(replayed + api_gaps, count);
 }
 
 #[test]
-#[ignore = "branch completeness red corpus; enable after explicit state gaps"]
 fn fidelity_seeded_smoke() {
     generated(1000, false);
 }
@@ -448,56 +462,7 @@ fn fidelity_oracle_detects_hidden_state() {
     }
 }
 
-fn check_replay(
-    name: &str,
-    prefix: &[u8],
-    recorded: Option<&[u8]>,
-    cols: u16,
-    rows: u16,
-) -> std::io::Result<()> {
-    let mut a = reset_terminal(cols, rows).unwrap();
-    a.process(prefix);
-    let mut b = reset_terminal(cols, rows).unwrap();
-    let snapshot = a.snapshot()?;
-    b.process(&snapshot);
-    assert_eq!(
-        a.engine.state_difference(&b.engine),
-        0,
-        "{name}: immediate state"
-    );
-    if let Some(continuation) = recorded {
-        a.process(continuation);
-        b.process(continuation);
-        assert_eq!(
-            a.engine.state_difference(&b.engine),
-            0,
-            "{name}: recorded continuation"
-        );
-    }
-    let right_margin = format!("\x1b[?6l\x1b[1;{cols}HXZ");
-    // REP runs before any print can hide a wrong source; then exercise wrap,
-    // saved cursor, tabs and a newline at the region bottom on both screens.
-    for continuation in [
-        b"\x1b[2b".as_slice(),
-        "e\u{301}界👩‍💻".as_bytes(),
-        b"\t\x1b8\nZ",
-        right_margin.as_bytes(),
-        b"\x1b[?6h\x1b[999;1H\nZ",
-        b"\x1b[?47h\x1b8\t\nQ\x1b[?47l",
-    ] {
-        a.process(continuation);
-        b.process(continuation);
-        assert_eq!(
-            a.engine.state_difference(&b.engine),
-            0,
-            "{name}: continuation state"
-        );
-    }
-    Ok(())
-}
-
 #[test]
-#[ignore = "branch completeness red corpus; enable after explicit state gaps"]
 fn fidelity_extended_smoke() {
     generated(1000, true);
 }
@@ -513,7 +478,7 @@ fn fidelity_extended_nightly() {
 fn fidelity_diagnostic_fixture() {
     let path = std::env::var("VT_SNAPSHOT_FIXTURE").expect("fixture path required");
     let input = std::fs::read(path).unwrap();
-    match check_replay_branched("diagnostic fixture", &input, None, 12, 5) {
+    match check_replay("diagnostic fixture", &input, None, 12, 5) {
         Ok(()) => {}
         Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::Unsupported),
     }
@@ -521,12 +486,12 @@ fn fidelity_diagnostic_fixture() {
 
 #[test]
 fn fidelity_single_shift_survives_rep_seed() {
-    check_replay_branched("single-shift after ASCII", b"abc\x1b*0\x1bN", None, 12, 5).unwrap();
+    check_replay("single-shift after ASCII", b"abc\x1b*0\x1bN", None, 12, 5).unwrap();
 }
 
 #[test]
 fn fidelity_iso_protection_does_not_keep_rep_scratch() {
-    check_replay_branched(
+    check_replay(
         "protected DEC charset REP seed",
         b"\x1bV\x1b(0t",
         None,
