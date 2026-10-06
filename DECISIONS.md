@@ -349,3 +349,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     toolchain. Idle RAM stays near 5 MB. A pure-Rust verifier (webauthn-rp)
     is reviewed again when it passes the advisory gate and has its own
     security review.
+87. **Curated terminal fonts.** Nine OFL-1.1 monospace fonts, chosen in the
+    palette with a live preview: Geist Mono (default), JetBrains Mono, Commit
+    Mono, Maple Mono, Monaspace Neon, IBM Plex Mono, Cascadia Code, Fira Code
+    and Source Code Pro. They are self-hosted and loaded on first use.
+88. **Codec on both sides, one byte format.** The browser (TypeScript) and
+    the server and agent (Rust) each have a native codec for the wire format.
+    Shared golden vectors and differential tests keep them identical. No
+    WASM bridge: copying through the JS↔WASM boundary would cost more than
+    the about 230 ns that the JS decode itself takes. Performance is
+    measured from the UI, end to end (keystroke → paint), as the main S1
+    gate.
