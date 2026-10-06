@@ -94,3 +94,26 @@ fn expired_credit_resumes_retained_bytes_at_the_same_cursor() {
     // suffix, rather than silently discard it while waiting for a repaint.
     assert_eq!(output.suffix(cursor, 100).unwrap(), 0..100);
 }
+
+#[test]
+#[ignore = "T1 red regression; explicitly run before the unaffordable-frame fix"]
+fn positive_insufficient_credit_arms_a_one_shot_deadline() {
+    let mut output = Output::attach(0);
+    output.forward(1024 * 1024 - 1).unwrap();
+    let cursor = output.cursor();
+    assert_eq!(output.repaint(cursor + 100, 16_384), Err(Error::OutOfRange));
+    let now = Instant::now();
+    assert_eq!(output.pending(now), Some(now + STARVATION));
+    assert_eq!(
+        output.pending(now + Duration::from_millis(100)),
+        Some(now + STARVATION)
+    );
+    assert!(output.expire(now + STARVATION));
+    assert_eq!(output.cursor(), cursor);
+    assert!(
+        !output.needs_snapshot(),
+        "unchanged credit must park repaint serialization"
+    );
+    output.grant(16_384).unwrap();
+    assert!(output.needs_snapshot());
+}
