@@ -18,6 +18,7 @@ use serde_cbor_2::Value as Cbor;
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqlitePoolOptions;
 use std::collections::BTreeMap;
+use tower::ServiceExt;
 
 static SERIAL: Mutex<()> = Mutex::const_new(());
 const NOW: i64 = 1_800_000_000;
@@ -587,5 +588,41 @@ async fn review_old_words_race_rotation() {
             .recovery_start(&f.user, words, NOW + DAY)
             .await
             .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn review_invalid_device_polling_exhausts_browser_budget() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = router(f.auth.clone());
+    for index in 0..120 {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/auth/device-redeem")
+            .header("Content-Type", "application/json")
+            .body(axum::body::Body::from(r#"{"token":"invalid"}"#))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        if index < 60 {
+            assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        } else {
+            assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(response.headers()["retry-after"], "60");
+        }
+    }
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/auth/login-start")
+        .header("Origin", ORIGIN)
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&json!({"user_id":f.user})).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.oneshot(request).await.unwrap().status(),
+        axum::http::StatusCode::OK,
+        "unauthenticated CLI polling denied a legitimate browser login"
     );
 }

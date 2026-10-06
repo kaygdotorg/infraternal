@@ -6,6 +6,7 @@
 
 mod crypto;
 mod devices;
+mod http;
 mod recovery;
 mod sessions;
 mod setup;
@@ -30,6 +31,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
+pub use http::router;
 const DAY: i64 = 86_400;
 const SESSION: i64 = 30 * DAY;
 const CEREMONY: i64 = 300;
@@ -92,6 +94,7 @@ pub struct Auth {
     webauthn: Arc<Webauthn>,
     origin: String,
     pending: Arc<Mutex<Pending>>,
+    ingress: Arc<Mutex<http::Ingress>>,
     #[cfg(test)]
     recovery_pause: Arc<Mutex<Option<Arc<RecoveryPause>>>>,
 }
@@ -129,6 +132,7 @@ impl Auth {
             webauthn: Arc::new(webauthn),
             origin: url.origin().ascii_serialization(),
             pending: Arc::default(),
+            ingress: Arc::default(),
             #[cfg(test)]
             recovery_pause: Arc::default(),
         })

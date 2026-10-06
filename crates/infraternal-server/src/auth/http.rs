@@ -1,0 +1,355 @@
+//! Same-origin HTTP adapter. Cookies are capabilities; mutation requests require the pinned Origin.
+use super::{Auth, Error, Wrap};
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, Path, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::post,
+};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Mount the POST-only `/auth/{action}` API. TLS terminates at the configured public origin.
+pub fn router(auth: Auth) -> Router {
+    Router::new()
+        .route("/auth/{action}", post(dispatch))
+        .layer(DefaultBodyLimit::max(32 * 1024))
+        .layer(axum::middleware::map_response(no_store))
+        .with_state(auth)
+}
+
+// One typed body per action; unknown fields (including PRF/DEK plaintext) fail closed.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Setup {
+    token: String,
+    name: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct User {
+    user_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Register {
+    ceremony: String,
+    proof: Value,
+    passkey_wrap: Wrap,
+    recovery_wrap: Option<Wrap>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Login {
+    ceremony: String,
+    proof: Value,
+    device: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recovery {
+    user_id: String,
+    words: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Token {
+    token: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Device {
+    device: String,
+    scopes: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Code {
+    code: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Revoke {
+    id: String,
+}
+
+fn cookie(headers: &HeaderMap) -> super::Result<&str> {
+    let cookies = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(Error::Denied)?;
+    let mut matches = cookies
+        .split(';')
+        .filter_map(|c| c.trim().strip_prefix("__Host-infraternal="));
+    let value = matches.next().ok_or(Error::Denied)?;
+    if matches.next().is_some() || value.len() != 43 {
+        return Err(Error::Denied);
+    }
+    Ok(value)
+}
+fn body<T: serde::de::DeserializeOwned>(value: Value) -> super::Result<T> {
+    serde_json::from_value(value).map_err(|_| Error::Invalid)
+}
+fn session_cookie(token: &str) -> super::Result<HeaderValue> {
+    HeaderValue::from_str(&format!(
+        "__Host-infraternal={token}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000"
+    ))
+    .map_err(|_| Error::Invalid)
+}
+fn session_response(token: &str) -> super::Result<Response> {
+    let mut response = Json(json!({"ok":true})).into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, session_cookie(token)?);
+    Ok(response)
+}
+async fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn dispatch(
+    State(auth): State<Auth>,
+    Path(action): Path<String>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> Response {
+    let result = execute(&auth, &action, &headers, value).await;
+    let mut response = match result {
+        Ok(response) => response,
+        Err(Error::Throttled) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "60")],
+            Json(json!({"error":"too many requests"})),
+        )
+            .into_response(),
+        Err(Error::Denied | Error::Webauthn) => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"authorization failed"})),
+        )
+            .into_response(),
+        Err(Error::Invalid | Error::Json) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"invalid request"})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"auth unavailable"})),
+        )
+            .into_response(),
+    };
+    // Every successful cookie-authenticated action slides the browser cookie as well
+    // as SQLite expiry. Explicit login/logout cookies take precedence over refresh.
+    if response.status().is_success()
+        && !response.headers().contains_key(header::SET_COOKIE)
+        && matches!(
+            action.as_str(),
+            "add-start"
+                | "wraps"
+                | "recovery-cancel"
+                | "device-inspect"
+                | "device-approve"
+                | "api-list"
+                | "api-revoke"
+        )
+        && let Ok(token) = cookie(&headers)
+        && let Ok(value) = session_cookie(token)
+    {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    response
+}
+
+async fn execute(
+    auth: &Auth,
+    action: &str,
+    headers: &HeaderMap,
+    value: Value,
+) -> super::Result<Response> {
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Error::Invalid)?
+            .as_secs(),
+    )
+    .map_err(|_| Error::Invalid)?;
+    ingress(auth, action, headers, now).await?;
+    let payload = match action {
+        "setup-start" => {
+            let b: Setup = body(value)?;
+            auth.setup_start(&b.token, &b.name, now).await?
+        }
+        "registration-finish" => {
+            let b: Register = body(value)?;
+            return session_response(
+                &auth
+                    .registration_finish(&b.ceremony, b.proof, b.passkey_wrap, b.recovery_wrap, now)
+                    .await?,
+            );
+        }
+        "login-start" => {
+            let b: User = body(value)?;
+            auth.login_start(&b.user_id, now).await?
+        }
+        "login-finish" => {
+            let b: Login = body(value)?;
+            return session_response(
+                &auth
+                    .login_finish(&b.ceremony, b.proof, &b.device, now)
+                    .await?,
+            );
+        }
+        "add-start" => auth.add_start(cookie(headers)?, now).await?,
+        "wraps" => auth.wraps(cookie(headers)?, now).await?,
+        "session" => {
+            let token = cookie(headers)?;
+            let session = auth.session(token, now).await?;
+            let mut response = session_response(token)?;
+            *response.body_mut() = axum::body::Body::from(serde_json::to_vec(&session)?);
+            return Ok(response);
+        }
+        "recovery-start" => {
+            let b: Recovery = body(value)?;
+            json!({"token":auth.recovery_start(&b.user_id, b.words, now).await?,"delay_seconds":86400})
+        }
+        "recovery-ready" => {
+            let b: Token = body(value)?;
+            auth.recovery_ready(&b.token, now).await?
+        }
+        "recovery-cancel" => {
+            auth.recovery_cancel(cookie(headers)?, now).await?;
+            json!({"ok":true})
+        }
+        "device-start" => {
+            let b: Device = body(value)?;
+            auth.device_start(&b.device, b.scopes, now).await?
+        }
+        "device-inspect" => {
+            let b: Code = body(value)?;
+            auth.device_inspect(cookie(headers)?, &b.code, now).await?
+        }
+        "device-approve" => {
+            let b: Code = body(value)?;
+            auth.device_approve(cookie(headers)?, &b.code, now).await?;
+            json!({"ok":true})
+        }
+        "device-redeem" => {
+            let b: Token = body(value)?;
+            json!({"api_key":auth.device_redeem(&b.token, now).await?})
+        }
+        "api-list" => auth.api_list(cookie(headers)?, now).await?,
+        "api-revoke" => {
+            let b: Revoke = body(value)?;
+            auth.api_revoke(cookie(headers)?, &b.id, now).await?;
+            json!({"ok":true})
+        }
+        "logout" => {
+            auth.logout(cookie(headers)?).await?;
+            let mut response = Json(json!({"ok":true})).into_response();
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                HeaderValue::from_static(
+                    "__Host-infraternal=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+                ),
+            );
+            return Ok(response);
+        }
+        _ => return Err(Error::Invalid),
+    };
+    Ok(Json(payload).into_response())
+}
+
+async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> super::Result<()> {
+    // CLI approval polling uses its own bearer capability, never a browser cookie.
+    if !matches!(action, "device-start" | "device-redeem")
+        && headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(auth.origin())
+    {
+        return Err(Error::Denied);
+    }
+    // Two fixed partitions keep the aggregate ceiling at 180/minute. No device
+    // caller can spend the 120 browser slots; IP/proxy headers are never trusted.
+    let mut budget = auth.ingress.lock().await;
+    if now - budget.window >= 60 {
+        *budget = Ingress {
+            window: now,
+            ..Ingress::default()
+        };
+    }
+    let (used, limit) = if matches!(action, "device-start" | "device-redeem") {
+        (&mut budget.devices, 60)
+    } else {
+        (&mut budget.browser, 120)
+    };
+    if *used >= limit {
+        return Err(Error::Throttled);
+    }
+    *used += 1;
+    Ok(())
+}
+
+/// Fixed-size admission partitions; all HTTP actions count, including authenticated reads.
+#[derive(Default)]
+pub(super) struct Ingress {
+    window: i64,
+    browser: u32,
+    devices: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn admission_partitions_reset_without_trusting_forwarded_headers() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let auth = Auth::new(pool, "auth.example.test", "https://auth.example.test")
+            .await
+            .unwrap();
+        let now = 1_800_000_000;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example.test"),
+        );
+        headers.insert("x-forwarded-for", HeaderValue::from_static("127.0.0.1"));
+        assert!(matches!(
+            ingress(&auth, "login-start", &headers, now).await,
+            Err(Error::Denied)
+        ));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://auth.example.test"),
+        );
+        for _ in 0..120 {
+            ingress(&auth, "session", &headers, now).await.unwrap();
+        }
+        assert!(matches!(
+            ingress(&auth, "login-start", &headers, now).await,
+            Err(Error::Throttled)
+        ));
+        for _ in 0..60 {
+            ingress(&auth, "device-redeem", &HeaderMap::new(), now)
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            ingress(&auth, "device-start", &HeaderMap::new(), now).await,
+            Err(Error::Throttled)
+        ));
+        ingress(&auth, "login-start", &headers, now + 60)
+            .await
+            .unwrap();
+        ingress(&auth, "device-redeem", &HeaderMap::new(), now + 60)
+            .await
+            .unwrap();
+    }
+}
