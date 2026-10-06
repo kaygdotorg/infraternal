@@ -556,3 +556,7 @@ fn color(out: &mut String, color: Color, base: u8) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/terminal.rs"]
+mod checks;

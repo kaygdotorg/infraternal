@@ -1,0 +1,55 @@
+[?1049h[22;0;0t[60;1H[?1h=#!/usr/bin/env python3[m
+"""Capture real full-screen program output at 200x60 for VT comparisons [13]."""[m
+import fcntl[m
+import os[m
+import pathlib[m
+import pty[m
+import select[m
+import signal[m
+import struct[m
+import termios[m
+import time[m
+[m
+root = pathlib.Path(__file__).parent[m
+for name, argv, keys in [[m
+    ("vim", ["vim", "-u", "NONE", "-i", "NONE", "-n", str(root / "capture.py")], b"Ggg\x1b:q!\r"),[m
+    ("htop", ["htop", "-p", "1"], b"q"),[m
+    ("less", ["less", "-R", str(root / "capture.py")], b"Ggq"),[m
+]:[m
+    master, slave = pty.openpty()[m
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 200, 0, 0))[m
+    pid = os.fork()[m
+    if pid == 0:[m
+        os.close(master)[m
+        os.setsid()[m
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)[m
+        for fd in range(3):[m
+            os.dup2(slave, fd)[m
+        os.close(slave)[m
+        os.environ["TERM"] = "xterm-256color"[m
+        os.execvp(argv[0], argv)[m
+    os.close(slave)[m
+    output = bytearray()[m
+    until = time.monotonic() + 1[m
+    while time.monotonic() < until:[m
+        if select.select([master], [], [], .05)[0]:[m
+            output.extend(os.read(master, 65536))[m
+    # Keep the active full-screen state, then collect an independent continuation.[m
+    (root / (name + ".vt")).write_bytes(output)[m
+    os.write(master, keys)[m
+    continuation = bytearray()[m
+    until = time.monotonic() + .5[m
+    while time.monotonic() < until:[m
+        if select.select([master], [], [], .05)[0]:[m
+            try:[m
+                continuation.extend(os.read(master, 65536))[m
+            except OSError:[m
+                break[m
+    (root / (name + ".continue.vt")).write_bytes(continuation)[m
+    try:[m
+        os.kill(pid, signal.SIGKILL)[m
+    except ProcessLookupError:[m
+        pass[m
+    os.waitpid(pid, 0)[m
+    os.close(master)[m
+[7m/home/kayg/Developer/infraternal/.worktrees/lane-shim/crates/infraternal-shim/tests/fixtures/capture.py (END)[27m[K

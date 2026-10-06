@@ -1,0 +1,2 @@
+# Preserve byte-exact terminal recordings without text conversion.
+crates/infraternal-shim/tests/fixtures/*.vt binary
