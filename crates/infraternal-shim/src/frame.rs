@@ -231,3 +231,7 @@ impl Decoder {
         Ok(frames)
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/frame.rs"]
+mod checks;
