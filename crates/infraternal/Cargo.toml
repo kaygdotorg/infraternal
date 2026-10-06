@@ -1,0 +1,12 @@
+# The one-binary CLI package for server and host-agent modes.
+[package]
+name = "infraternal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true

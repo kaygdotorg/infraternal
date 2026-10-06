@@ -1,0 +1,16 @@
+# The small process that will own a PTY session across agent restarts.
+[package]
+name = "infraternal-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Cargo does not allow a member to inherit workspace lints and override one
+# inherited level, so this exception repeats the workspace Clippy policy.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"

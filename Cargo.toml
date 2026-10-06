@@ -1,0 +1,40 @@
+# Virtual workspace manifest for the Rust pieces of infraternal.
+[workspace]
+resolver = "3"
+members = [
+    "crates/infraternal",
+    "crates/infraternal-protocol",
+    "crates/infraternal-plugin-api",
+    "crates/infraternal-server",
+    "crates/infraternal-agent",
+    "crates/infraternal-shim",
+    "crates/plugins/ssh",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+# Keep unwinding (the default). With panic = "abort", one bug in one session
+# task would kill the whole server and every other user's connection. With
+# unwinding, tokio isolates a panicking task. The cost is a slightly larger
+# binary. That is acceptable (DECISIONS 5: measure; robustness here is worth
+# a few hundred KiB).
+panic = "unwind"

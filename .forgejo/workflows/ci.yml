@@ -1,0 +1,43 @@
+# Run the pinned Rust gates for every branch update and pull request.
+name: Rust CI
+
+on: [push, pull_request]
+
+jobs:
+  fast:
+    runs-on: docker
+    container:
+      image: node:22-bookworm
+    steps:
+      - name: Check out source
+        uses: https://data.forgejo.org/actions/checkout@v4
+
+      - name: Restore Cargo caches when the runner supports them
+        uses: https://data.forgejo.org/actions/cache@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install Rust and run gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install --yes --no-install-recommends binutils build-essential ca-certificates curl file
+          curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
+            | sh -s -- --yes --no-modify-path --profile minimal
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install 1.99.0 \
+            --profile minimal \
+            --component rustfmt \
+            --component clippy \
+            --target x86_64-unknown-linux-musl \
+            --target aarch64-unknown-linux-musl
+          cargo install cargo-deny --version 0.20.2 --locked
+          scripts/verify fast

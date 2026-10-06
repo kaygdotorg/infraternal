@@ -1,0 +1,8 @@
+# Use the pinned Rust toolchain's bundled LLD and musl CRT for static targets.
+[target.x86_64-unknown-linux-musl]
+linker = ".cargo/rust-lld.sh"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+linker = ".cargo/rust-lld.sh"
+rustflags = ["-C", "target-feature=+crt-static"]
