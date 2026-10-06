@@ -4,6 +4,8 @@
 
 #[cfg(test)]
 mod stream_tests;
+#[cfg(test)]
+mod tests;
 
 /// Maximum length of a frame's type byte and body, as specified by wire §2.
 pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
