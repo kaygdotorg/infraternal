@@ -2,3 +2,4 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod relay;
 pub mod sessions;
+pub mod transport;
