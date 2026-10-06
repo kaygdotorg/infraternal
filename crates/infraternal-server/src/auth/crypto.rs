@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 pub(super) fn random() -> String {
     B64.encode(rand::random::<[u8; 32]>())
 }
-pub(super) fn hash(value: &str) -> String {
+pub(crate) fn hash(value: &str) -> String {
     B64.encode(Sha256::digest(value.as_bytes()))
 }
 pub(super) fn prf_salt(user: Option<&str>) -> String {

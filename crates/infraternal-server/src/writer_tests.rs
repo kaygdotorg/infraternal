@@ -28,7 +28,7 @@ async fn second_device_does_not_inherit_first_device_input_ack() {
     let (pool, user, session) = database().await;
     let a = new_connection(&pool, &user, 0).await.unwrap();
     let b = new_connection(&pool, &user, 0).await.unwrap();
-    let (offset_a, stream_a) = owned_writer(&pool, &user, &a.connection_id, 1, &session)
+    let (offset_a, stream_a) = owned_writer(&pool, &user, &a.connection_id, 1, &session, None)
         .await
         .unwrap();
     assert_eq!(offset_a, 0);
@@ -38,11 +38,11 @@ async fn second_device_does_not_inherit_first_device_input_ack() {
         .execute(&pool)
         .await
         .unwrap();
-    let (offset_b, stream_b) = owned_writer(&pool, &user, &b.connection_id, 1, &session)
+    let (offset_b, stream_b) = owned_writer(&pool, &user, &b.connection_id, 1, &session, None)
         .await
         .unwrap();
     assert_ne!(stream_a, stream_b);
-    let resumed = owned_writer(&pool, &user, &a.connection_id, 1, &session)
+    let resumed = owned_writer(&pool, &user, &a.connection_id, 1, &session, None)
         .await
         .unwrap();
     assert_eq!(resumed, (77, stream_a));
@@ -56,7 +56,7 @@ async fn second_device_does_not_inherit_first_device_input_ack() {
 async fn writer_ownership_capacity_unsigned_offsets_and_identity_reuse() {
     let (pool, user, session) = database().await;
     let connection = new_connection(&pool, &user, 0).await.unwrap();
-    let (_, first) = owned_writer(&pool, &user, &connection.connection_id, 1, &session)
+    let (_, first) = owned_writer(&pool, &user, &connection.connection_id, 1, &session, None)
         .await
         .unwrap();
     assert!(
@@ -65,13 +65,14 @@ async fn writer_ownership_capacity_unsigned_offsets_and_identity_reuse() {
             "different-user",
             &connection.connection_id,
             1,
-            &session
+            &session,
+            None
         )
         .await
         .is_err()
     );
     assert!(
-        owned_writer(&pool, &user, &connection.connection_id, 1, &[8; 16])
+        owned_writer(&pool, &user, &connection.connection_id, 1, &[8; 16], None)
             .await
             .is_err()
     );
@@ -85,18 +86,25 @@ async fn writer_ownership_capacity_unsigned_offsets_and_identity_reuse() {
     .await
     .unwrap();
     assert_eq!(
-        owned_writer(&pool, &user, &connection.connection_id, 1, &session)
+        owned_writer(&pool, &user, &connection.connection_id, 1, &session, None)
             .await
             .unwrap(),
         (high, first)
     );
     for stream in (3..=63).step_by(2) {
-        owned_writer(&pool, &user, &connection.connection_id, stream, &session)
-            .await
-            .unwrap();
+        owned_writer(
+            &pool,
+            &user,
+            &connection.connection_id,
+            stream,
+            &session,
+            None,
+        )
+        .await
+        .unwrap();
     }
     assert!(
-        owned_writer(&pool, &user, &connection.connection_id, 65, &session)
+        owned_writer(&pool, &user, &connection.connection_id, 65, &session, None)
             .await
             .is_err()
     );
@@ -111,7 +119,7 @@ async fn writer_ownership_capacity_unsigned_offsets_and_identity_reuse() {
         .unwrap();
     assert_eq!(count, 0);
     let next = new_connection(&pool, &user, 0).await.unwrap();
-    let (_, identity) = owned_writer(&pool, &user, &next.connection_id, 1, &session)
+    let (_, identity) = owned_writer(&pool, &user, &next.connection_id, 1, &session, None)
         .await
         .unwrap();
     assert!(
@@ -129,9 +137,16 @@ async fn writer_admission_at_user_capacity() {
     for _ in 0..16 {
         let connection = new_connection(&pool, &user, 0).await.unwrap();
         for stream in (1..=63).step_by(2) {
-            owned_writer(&pool, &user, &connection.connection_id, stream, &session)
-                .await
-                .unwrap();
+            owned_writer(
+                &pool,
+                &user,
+                &connection.connection_id,
+                stream,
+                &session,
+                None,
+            )
+            .await
+            .unwrap();
         }
         connections.push(connection);
     }
@@ -139,7 +154,7 @@ async fn writer_admission_at_user_capacity() {
     for _ in 0..200 {
         for connection in &connections {
             let start = std::time::Instant::now();
-            owned_writer(&pool, &user, &connection.connection_id, 1, &session)
+            owned_writer(&pool, &user, &connection.connection_id, 1, &session, None)
                 .await
                 .unwrap();
             samples.push(start.elapsed());

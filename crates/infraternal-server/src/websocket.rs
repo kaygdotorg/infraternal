@@ -39,6 +39,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const PARTIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+const BACKEND_TIMEOUT: Duration = Duration::from_secs(5);
+// Stored expiry changes do not publish revocations; poll only during pending work, never idle.
+const BUSY_AUTHORITY_INTERVAL: Duration = Duration::from_millis(25);
+// Authority/storage stalls fail closed; shutdown cannot inherit the normal one-second writer wait.
+const AUTHORITY_READ_TIMEOUT: Duration = Duration::from_millis(25);
+const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
 // Expired rows are pruned during new handshakes; this caps retained bearer metadata globally.
 const MAX_RESUME_ROWS: i64 = 4096;
 // Reject further AttachTerm requests on a socket at this bound.
@@ -223,18 +229,20 @@ async fn run_socket(
                 };
                 match input {
                     Inbound::TransportPing(payload) => {
-                        if send_message(&mut sink, Message::Pong(payload)).await.is_err() { break; }
+                        if while_authorized(&state, &user_id, &session_token, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
                     }
                     Inbound::Frame(wire) => {
                     if let Ok(decoded) = decode_muxed_frame(&wire)
                         && decoded.stream_id == CONTROL_STREAM
                         && let Frame::Close { code, .. } = decoded.frame {
-                        let _ = send_frame(&mut sink, CONTROL_STREAM,
-                            &Frame::Close { code, reason: "connection closed" }, &mut encode).await;
-                        let _ = send_message(&mut sink, Message::Close(None)).await;
+                        let _ = while_authorized(&state, &user_id, &session_token, async {
+                            send_frame(&mut sink, CONTROL_STREAM,
+                                &Frame::Close { code, reason: "connection closed" }, &mut encode).await?;
+                            send_message(&mut sink, Message::Close(None)).await
+                        }).await;
                         break;
                     }
-                    if handle_client_frame(
+                    if while_authorized(&state, &user_id, &session_token, handle_client_frame(
                             wire,
                             &state,
                             &user_id,
@@ -244,7 +252,7 @@ async fn run_socket(
                             &output_tx,
                             &mut sink,
                             &mut encode,
-                        ).await.is_err() {
+                        )).await.is_err() {
                             loop_result = Err(());
                             break;
                         }
@@ -256,123 +264,34 @@ async fn run_socket(
                     output_open = false;
                     continue;
                 };
-                if !session_is_live(&state, &user_id, &session_token).await { break; }
-                let Some(attachment) = attachments.get_mut(&stream_id) else { continue; };
-                let sent = match output {
-                    TerminalOutput::Output { out_seq, bytes } => {
-                        let Some(end) = out_seq.checked_add(bytes.len() as u64) else {
-                            loop_result = Err(());
-                            break;
-                        };
-                        let Ok(length) = u64::try_from(bytes.len()) else {
-                            loop_result = Err(());
-                            break;
-                        };
-                        if out_seq < attachment.last_out_seq {
-                            continue;
-                        }
-                        if out_seq != attachment.last_out_seq {
-                            attachment.needs_snapshot = true;
-                            continue;
-                        }
-                        if attachment.needs_snapshot || length > attachment.credit {
-                            attachment.needs_snapshot = true;
-                            continue;
-                        }
-                        attachment.credit -= length;
-                        attachment.last_out_seq = end;
-                        send_frame(&mut sink, stream_id, &Frame::Output { out_seq, bytes: &bytes }, &mut encode).await.is_ok()
-                    }
-                    TerminalOutput::Snapshot { out_seq, bytes } => {
-                        let Ok(length) = u64::try_from(bytes.len()) else {
-                            loop_result = Err(());
-                            break;
-                        };
-                        if out_seq < attachment.last_out_seq
-                            || length > attachment.credit
-                        {
-                            attachment.needs_snapshot = true;
-                            continue;
-                        }
-                        attachment.credit -= length;
-                        attachment.last_out_seq = out_seq;
-                        attachment.needs_snapshot = false;
-                        send_frame(&mut sink, stream_id, &Frame::Snapshot { out_seq, bytes: &bytes }, &mut encode).await.is_ok()
-                    }
-                    TerminalOutput::Ack { in_seq_acked } => {
-                        if in_seq_acked < attachment.last_in_acked
-                            || (!attachment.awaiting_ack && in_seq_acked > attachment.input_sent_end)
-                        {
-                            loop_result = Err(());
-                            break;
-                        }
-                        attachment.awaiting_ack = false;
-                        attachment.input_sent_end = attachment.input_sent_end.max(in_seq_acked);
-                        attachment.last_in_acked = in_seq_acked;
-                        // Each device acknowledges only its durable writer range. The old
-                        // session column is retained for diagnostics, never new input authority.
-                        let changed = sqlx::query("UPDATE terminal_writers SET input_acked=? WHERE connection_id=? AND client_stream=? AND session_id=? AND input_acked<=?")
-                            .bind(in_seq_acked.to_be_bytes().as_slice()).bind(connection_id.as_slice()).bind(stream_id)
-                            .bind(attachment.session_id.as_slice()).bind(in_seq_acked.to_be_bytes().as_slice())
-                            .execute(&state.pool).await;
-                        if !matches!(changed, Ok(result) if result.rows_affected() == 1) { loop_result = Err(()); break; }
-                        let legacy_acked = i64::try_from(in_seq_acked).unwrap_or(-1);
-                        let acked_u64 = in_seq_acked.to_be_bytes();
-                        let Ok(now) = unix_seconds() else {
-                            loop_result = Err(());
-                            break;
-                        };
-                        let result = sqlx::query("UPDATE terminal_sessions SET input_acked_u64=CASE WHEN input_acked_u64<? THEN ? ELSE input_acked_u64 END, input_acked=CASE WHEN ?>=0 THEN MAX(input_acked,?) ELSE input_acked END, last_seen=? WHERE id=? AND user_id=?")
-                            .bind(acked_u64.as_slice())
-                            .bind(acked_u64.as_slice())
-                            .bind(legacy_acked)
-                            .bind(legacy_acked)
-                            .bind(now)
-                            .bind(attachment.session_id.as_slice())
-                            .bind(&user_id)
-                            .execute(&state.pool)
-                            .await;
-                        if result.is_err() {
-                            loop_result = Err(());
-                            break;
-                        }
-                        send_frame(&mut sink, stream_id, &Frame::Ack { in_seq_acked }, &mut encode).await.is_ok()
-                    }
-                    TerminalOutput::Closed { code } => {
-                        let sent = send_frame(
-                            &mut sink,
-                            stream_id,
-                            &Frame::Close {
-                                code,
-                                reason: "attachment ended",
-                            },
-                            &mut encode,
-                        )
-                        .await
-                        .is_ok();
-                        attachments.remove(&stream_id);
-                        sent
-                    }
-                };
-                if !sent {
-                    break;
-                }
+                if while_authorized(&state, &user_id, &session_token, handle_terminal_output(
+                    &state, &user_id, &session_token, &connection_id, stream_id, output,
+                    &mut attachments, &mut sink, &mut encode,
+                )).await.is_err() { break; }
             }
         }
     }
     drop(attachments);
-    if loop_result.is_err() {
-        let _ = send_frame(
-            &mut sink,
-            CONTROL_STREAM,
-            &Frame::Close {
-                code: 1011,
-                reason: "connection ended",
-            },
-            &mut encode,
+    if loop_result.is_err() && session_is_live(&state, &user_id, &session_token).await {
+        let _ = tokio::time::timeout(
+            CLOSE_TIMEOUT,
+            send_frame(
+                &mut sink,
+                CONTROL_STREAM,
+                &Frame::Close {
+                    code: 1011,
+                    reason: "connection ended",
+                },
+                &mut encode,
+            ),
         )
         .await;
     }
+    let _ =
+        tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None))).await;
+    // Drop transport before metadata cleanup so a busy SQLite writer cannot retain a revoked socket.
+    drop(sink);
+    drop(source);
     let now = unix_seconds().unwrap_or_default();
     let _ = sqlx::query("UPDATE websocket_connections SET active=0, expires_at=? WHERE connection_id=? AND user_id=? AND active=1")
         .bind(now.saturating_add(i64::from(RESUME_WINDOW_SECONDS)))
@@ -380,6 +299,182 @@ async fn run_socket(
         .bind(user_id)
         .execute(&state.pool)
         .await;
+}
+
+/// Interrupt pending work on authority loss. Subscribing before the read closes the missed-wakeup window.
+/// Checks on the ready branch prevent a late backend reply winning against committed revocation.
+async fn while_authorized<T>(
+    state: &WebSocketState,
+    user: &str,
+    token: &str,
+    operation: impl std::future::Future<Output = Result<T, ()>>,
+) -> Result<T, ()> {
+    let mut revocations = state.auth.revocation_events();
+    let mut expiry = socket_deadline(state, user, token).await?;
+    let mut check = tokio::time::interval_at(
+        tokio::time::Instant::now() + BUSY_AUTHORITY_INTERVAL,
+        BUSY_AUTHORITY_INTERVAL,
+    );
+    check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            biased;
+            changed = revocations.changed() => {
+                changed.map_err(|_| ())?;
+                expiry = socket_deadline(state, user, token).await?;
+            }
+            () = tokio::time::sleep_until(expiry) => { expiry = socket_deadline(state, user, token).await?; }
+            _ = check.tick() => { expiry = socket_deadline(state, user, token).await?; }
+            result = &mut operation => {
+                socket_deadline(state, user, token).await?;
+                return result;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn handle_terminal_output<K>(
+    state: &WebSocketState,
+    user_id: &str,
+    session_token: &str,
+    connection_id: &[u8; 16],
+    stream_id: u32,
+    output: TerminalOutput,
+    attachments: &mut HashMap<u32, ClientAttachment>,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    if !session_is_live(state, user_id, session_token).await {
+        return Err(());
+    }
+    let Some(attachment) = attachments.get_mut(&stream_id) else {
+        return Ok(());
+    };
+    let sent = match output {
+        TerminalOutput::Output { out_seq, bytes } => {
+            let Some(end) = out_seq.checked_add(bytes.len() as u64) else {
+                return Err(());
+            };
+            let Ok(length) = u64::try_from(bytes.len()) else {
+                return Err(());
+            };
+            if out_seq < attachment.last_out_seq {
+                return Ok(());
+            }
+            if out_seq != attachment.last_out_seq {
+                attachment.needs_snapshot = true;
+                return Ok(());
+            }
+            if attachment.needs_snapshot || length > attachment.credit {
+                attachment.needs_snapshot = true;
+                return Ok(());
+            }
+            attachment.credit -= length;
+            attachment.last_out_seq = end;
+            send_frame(
+                sink,
+                stream_id,
+                &Frame::Output {
+                    out_seq,
+                    bytes: &bytes,
+                },
+                encode,
+            )
+            .await
+            .is_ok()
+        }
+        TerminalOutput::Snapshot { out_seq, bytes } => {
+            let Ok(length) = u64::try_from(bytes.len()) else {
+                return Err(());
+            };
+            if out_seq < attachment.last_out_seq || length > attachment.credit {
+                attachment.needs_snapshot = true;
+                return Ok(());
+            }
+            attachment.credit -= length;
+            attachment.last_out_seq = out_seq;
+            attachment.needs_snapshot = false;
+            send_frame(
+                sink,
+                stream_id,
+                &Frame::Snapshot {
+                    out_seq,
+                    bytes: &bytes,
+                },
+                encode,
+            )
+            .await
+            .is_ok()
+        }
+        TerminalOutput::Ack { in_seq_acked } => {
+            if in_seq_acked < attachment.last_in_acked
+                || (!attachment.awaiting_ack && in_seq_acked > attachment.input_sent_end)
+            {
+                return Err(());
+            }
+            attachment.awaiting_ack = false;
+            attachment.input_sent_end = attachment.input_sent_end.max(in_seq_acked);
+            attachment.last_in_acked = in_seq_acked;
+            // Each device acknowledges only its durable writer range. The old
+            // session column is retained for diagnostics, never new input authority.
+            let changed = sqlx::query("UPDATE terminal_writers SET input_acked=? WHERE connection_id=? AND client_stream=? AND session_id=? AND input_acked<=? AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
+                .bind(in_seq_acked.to_be_bytes().as_slice()).bind(connection_id.as_slice()).bind(stream_id)
+                .bind(attachment.session_id.as_slice()).bind(in_seq_acked.to_be_bytes().as_slice())
+                .bind(crate::auth::hash(session_token)).bind(user_id).execute(&state.pool).await;
+            if !matches!(changed, Ok(result) if result.rows_affected() == 1) {
+                return Err(());
+            }
+            let legacy_acked = i64::try_from(in_seq_acked).unwrap_or(-1);
+            let acked_u64 = in_seq_acked.to_be_bytes();
+            let Ok(now) = unix_seconds() else {
+                return Err(());
+            };
+            let result = sqlx::query("UPDATE terminal_sessions SET input_acked_u64=CASE WHEN input_acked_u64<? THEN ? ELSE input_acked_u64 END, input_acked=CASE WHEN ?>=0 THEN MAX(input_acked,?) ELSE input_acked END, last_seen=? WHERE id=? AND user_id=? AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
+                .bind(acked_u64.as_slice())
+                .bind(acked_u64.as_slice())
+                .bind(legacy_acked)
+                .bind(legacy_acked)
+                .bind(now)
+                .bind(attachment.session_id.as_slice())
+                .bind(user_id)
+                .bind(crate::auth::hash(session_token)).bind(user_id)
+                .execute(&state.pool)
+                .await;
+            if !matches!(result, Ok(result) if result.rows_affected() == 1) {
+                return Err(());
+            }
+            if !session_is_live(state, user_id, session_token).await {
+                return Err(());
+            }
+            send_frame(sink, stream_id, &Frame::Ack { in_seq_acked }, encode)
+                .await
+                .is_ok()
+        }
+        TerminalOutput::Closed { code } => {
+            let sent = send_frame(
+                sink,
+                stream_id,
+                &Frame::Close {
+                    code,
+                    reason: "attachment ended",
+                },
+                encode,
+            )
+            .await
+            .is_ok();
+            attachments.remove(&stream_id);
+            sent
+        }
+    };
+    if !sent {
+        return Err(());
+    }
+    Ok(())
 }
 
 async fn handshake<S, K>(
@@ -617,9 +712,14 @@ where
             input_json,
         } if stream_id == CONTROL_STREAM => {
             let result = match serde_json::from_slice::<TerminalOpen>(input_json) {
-                Ok(size) if size.valid() => open_terminal(state, user_id, size).await,
+                Ok(size) if size.valid() => {
+                    open_terminal(state, user_id, session_token, size).await
+                }
                 _ => Err(()),
             };
+            if !session_is_live(state, user_id, session_token).await {
+                return Err(());
+            }
             match result {
                 Ok(session_id) => {
                     let json =
@@ -675,16 +775,33 @@ where
             }
             let mut session = [0_u8; 16];
             session.copy_from_slice(session_id);
-            let (input_acked, writer_stream) =
-                owned_writer(&state.pool, user_id, connection_id, stream_id, &session).await?;
+            let (input_acked, writer_stream) = owned_writer(
+                &state.pool,
+                user_id,
+                connection_id,
+                stream_id,
+                &session,
+                Some(&crate::auth::hash(session_token)),
+            )
+            .await?;
             if last_in_seq > input_acked {
                 return Err(());
             }
-            let attachment = state
-                .agent
-                .attach(session, last_out_seq, input_acked, writer_stream)
-                .await
-                .map_err(|_| ())?;
+            if !session_is_live(state, user_id, session_token).await {
+                return Err(());
+            }
+            let attachment = tokio::time::timeout(
+                BACKEND_TIMEOUT,
+                state
+                    .agent
+                    .attach(session, last_out_seq, input_acked, writer_stream),
+            )
+            .await
+            .map_err(|_| ())?
+            .map_err(|_| ())?;
+            if !session_is_live(state, user_id, session_token).await {
+                return Err(());
+            }
             let (handle, mut output) = attachment.split();
             let agent_stream = handle.stream_id();
             attachments.insert(
@@ -790,11 +907,13 @@ async fn socket_deadline(
     token: &str,
 ) -> Result<tokio::time::Instant, ()> {
     let now = unix_seconds()?;
-    let expiry = state
-        .auth
-        .live_expiry(token, user_id, now)
-        .await
-        .map_err(|_| ())?;
+    let expiry = tokio::time::timeout(
+        AUTHORITY_READ_TIMEOUT,
+        state.auth.live_expiry(token, user_id, now),
+    )
+    .await
+    .map_err(|_| ())?
+    .map_err(|_| ())?;
     let remaining = u64::try_from(expiry - now).map_err(|_| ())?;
     Ok(tokio::time::Instant::now() + Duration::from_secs(remaining))
 }
@@ -803,11 +922,14 @@ async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> 
     let Ok(now) = unix_seconds() else {
         return false;
     };
-    state
-        .auth
-        .socket_activity(token, user_id, now)
-        .await
-        .is_ok()
+    matches!(
+        tokio::time::timeout(
+            AUTHORITY_READ_TIMEOUT,
+            state.auth.socket_activity(token, user_id, now)
+        )
+        .await,
+        Ok(Ok(()))
+    )
 }
 
 struct ClientAttachment {
@@ -842,27 +964,37 @@ impl TerminalOpen {
 async fn open_terminal(
     state: &WebSocketState,
     user_id: &str,
+    session_token: &str,
     size: TerminalOpen,
 ) -> Result<[u8; 16], ()> {
-    let session_id = state
-        .agent
-        .open(TerminalSize {
+    let session_id = tokio::time::timeout(
+        BACKEND_TIMEOUT,
+        state.agent.open(TerminalSize {
             cols: size.cols,
             rows: size.rows,
             px_w: size.px_w,
             px_h: size.px_h,
-        })
-        .await
-        .map_err(|_| ())?;
+        }),
+    )
+    .await
+    .map_err(|_| ())?
+    .map_err(|_| ())?;
+    if !session_is_live(state, user_id, session_token).await {
+        return Err(());
+    }
     let now = unix_seconds()?;
-    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES (?,?,?,?)")
+    let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) SELECT ?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch()")
         .bind(session_id.as_slice())
         .bind(user_id)
         .bind(now)
         .bind(now)
+        .bind(crate::auth::hash(session_token)).bind(user_id)
         .execute(&state.pool)
         .await
         .map_err(|_| ())?;
+    if changed.rows_affected() != 1 {
+        return Err(());
+    }
     Ok(session_id)
 }
 
@@ -873,6 +1005,7 @@ async fn owned_writer(
     connection: &[u8; 16],
     stream: u32,
     session: &[u8; 16],
+    authority: Option<&str>,
 ) -> Result<(u64, u32), ()> {
     let mut tx = pool.begin().await.map_err(|_| ())?;
     // Acquire the writer lock before admission/ownership reads; concurrent devices
@@ -882,6 +1015,14 @@ async fn owned_writer(
         .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
+    // The writer lock orders this authority read and all following mutations with revocation.
+    if let Some(token_hash) = authority {
+        let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
+            .bind(token_hash).bind(user).fetch_one(&mut *tx).await.map_err(|_| ())?;
+        if !live {
+            return Err(());
+        }
+    }
     let existing: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM terminal_writers WHERE connection_id=? AND client_stream=?)",
     )

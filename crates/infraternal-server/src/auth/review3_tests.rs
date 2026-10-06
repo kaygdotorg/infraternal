@@ -248,6 +248,7 @@ async fn busy_revocation(mode: &str) {
     }
     let start = Instant::now();
     let next = tokio::time::timeout(Duration::from_millis(1500), socket.next()).await;
+    let close_elapsed = start.elapsed();
     let still_open = next.is_err();
     leg_b_send(
         &mut peer,
@@ -268,9 +269,13 @@ async fn busy_revocation(mode: &str) {
         .unwrap();
     println!(
         "busy {mode} -> still open at {}ms={still_open}; success Result after revocation={accepted}; terminal rows committed={rows}",
-        start.elapsed().as_millis()
+        close_elapsed.as_millis()
     );
     server.abort();
+    assert!(
+        close_elapsed < Duration::from_millis(100),
+        "busy {mode} close took {close_elapsed:?}"
+    );
     assert!(
         !still_open && !accepted && rows == 0,
         "revocation failed to interrupt busy handler or prevent post-revocation result/mutation"
@@ -423,17 +428,14 @@ async fn review3_pending_routes_and_idle_expiry_recovery() {
 }
 
 #[tokio::test]
-#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
 async fn review3_busy_logout() {
     busy_revocation("logout").await;
 }
 #[tokio::test]
-#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
 async fn review3_busy_recovery() {
     busy_revocation("recovery").await;
 }
 #[tokio::test]
-#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
 async fn review3_busy_expiry() {
     busy_revocation("expiry").await;
 }
@@ -528,4 +530,98 @@ async fn review3_completion_and_cleanup_are_transaction_bound() {
         .0,
         axum::http::StatusCode::OK
     );
+}
+
+/// An unresponsive real Unix backend cannot monopolize a browser handler indefinitely.
+#[tokio::test]
+async fn review3_backend_reply_has_a_deadline() {
+    let _guard = SERIAL.lock().await;
+    let (f, addr, server, mut peer) = review3_socket().await;
+    let mut receive = BytesMut::new();
+    read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+    leg_b_send(
+        &mut peer,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "no reply",
+        },
+    )
+    .await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "deadline",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 78,
+            action_id: "terminal.open",
+            input_json: br#"{"cols":80,"rows":24,"px_w":0,"px_h":0}"#,
+        },
+    )
+    .await;
+    let wire = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+    let Frame::Call { call_id, .. } = decode_muxed_frame(&wire).unwrap().frame else {
+        panic!("backend call")
+    };
+    let start = Instant::now();
+    let result = tokio::time::timeout(Duration::from_secs(6), read_client_frame(&mut socket))
+        .await
+        .unwrap();
+    assert!(matches!(
+        decode_muxed_frame(&result).unwrap().frame,
+        Frame::Result {
+            call_id: 78,
+            ok: false,
+            ..
+        }
+    ));
+    assert!(start.elapsed() < Duration::from_secs(6));
+    leg_b_send(
+        &mut peer,
+        0,
+        &Frame::Result {
+            call_id,
+            ok: true,
+            json: br#"{"session_id":"42424242424242424242424242424242"}"#,
+        },
+    )
+    .await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Ping {
+            nonce: 79,
+            sent_us: 0,
+        },
+    )
+    .await;
+    let wire = read_client_frame(&mut socket).await;
+    assert!(matches!(
+        decode_muxed_frame(&wire).unwrap().frame,
+        Frame::Pong { nonce: 79, .. }
+    ));
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions")
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    println!(
+        "backend reply deadline: failure at {}ms; late success ignored; next Ping succeeds; terminal rows=0",
+        start.elapsed().as_millis()
+    );
+    server.abort();
 }
