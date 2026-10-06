@@ -335,30 +335,45 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
     const a = c.zigTerminal(a_handle) orelse return 9999999;
     const b = c.zigTerminal(b_handle) orelse return 9999999;
     if (a.rows != b.rows or a.cols != b.cols) return 1000000;
-    const sa = a.screens.active;
-    const sb = b.screens.active;
-    for (0..a.rows) |y| {
-        const pa = sa.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
-        const pb = sb.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
-        const cells_a = pa.cells(.all);
-        const cells_b = pb.cells(.all);
-        for (cells_a, cells_b, 0..) |*ca, *cb, x| {
-            const cpa = if (ca.codepoint() == 0) ' ' else ca.codepoint();
-            const cpb = if (cb.codepoint() == 0) ' ' else cb.codepoint();
-            if (ca.hasText() != cb.hasText() or cpa != cpb or ca.wide != cb.wide or ca.protected != cb.protected or !std.meta.eql(effectiveStyle(pa, ca), effectiveStyle(pb, cb))) return 1 + y * a.cols + x;
-            const ga = pa.grapheme(ca) orelse &.{};
-            const gb = pb.grapheme(cb) orelse &.{};
-            if (!std.mem.eql(u21, ga, gb)) return 1 + y * a.cols + x;
-            if (!std.mem.eql(u8, cellUri(pa, ca), cellUri(pb, cb))) return 1 + y * a.cols + x;
-            var id_a: [64]u8 = undefined;
-            var id_b: [64]u8 = undefined;
-            if (!std.mem.eql(u8, linkKey(pa, ca, &id_a), linkKey(pb, cb, &id_b))) return 1 + y * a.cols + x;
+    inline for (.{ .primary, .alternate }) |key| {
+        if (strict or key == a.screens.active_key) {
+            const sa = a.screens.get(key);
+            const sb = b.screens.get(key);
+            if ((sa == null) != (sb == null)) return 6000004;
+            if (sa != null and sb != null) {
+                for (0..a.rows) |y| {
+                    const pa = sa.?.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
+                    const pb = sb.?.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
+                    const cells_a = pa.cells(.all);
+                    const cells_b = pb.cells(.all);
+                    for (cells_a, cells_b, 0..) |*ca, *cb, x| {
+                        const cpa = if (ca.codepoint() == 0) ' ' else ca.codepoint();
+                        const cpb = if (cb.codepoint() == 0) ' ' else cb.codepoint();
+                        if (ca.hasText() != cb.hasText() or cpa != cpb or ca.wide != cb.wide or ca.protected != cb.protected or !std.meta.eql(effectiveStyle(pa, ca), effectiveStyle(pb, cb))) {
+                            return 1 + y * a.cols + x;
+                        }
+                        const ga = pa.grapheme(ca) orelse &.{};
+                        const gb = pb.grapheme(cb) orelse &.{};
+                        if (!std.mem.eql(u21, ga, gb)) return 1 + y * a.cols + x;
+                        if (!std.mem.eql(u8, cellUri(pa, ca), cellUri(pb, cb))) return 1 + y * a.cols + x;
+                        var id_a: [64]u8 = undefined;
+                        var id_b: [64]u8 = undefined;
+                        if (!std.mem.eql(u8, linkKey(pa, ca, &id_a), linkKey(pb, cb, &id_b))) return 1 + y * a.cols + x;
+                    }
+                    if (pa.rowAndCell().row.wrap != pb.rowAndCell().row.wrap) return 2000000 + y;
+                    if (strict and pa.rowAndCell().row.wrap_continuation != pb.rowAndCell().row.wrap_continuation) return 2100000 + y;
+                }
+                if (sa.?.cursor.x != sb.?.cursor.x or sa.?.cursor.y != sb.?.cursor.y) return 3000000;
+                if (sa.?.cursor.pending_wrap != sb.?.cursor.pending_wrap) return 3000001;
+                if (!std.meta.eql(sa.?.cursor.style, sb.?.cursor.style)) return 3000002;
+
+                if (strict) {
+                    if (!savedEqual(sa.?.saved_cursor, sb.?.saved_cursor)) return 6000002;
+                    if (sa.?.cursor.cursor_style != sb.?.cursor.cursor_style) return 6000003;
+                }
+            }
         }
-        if (pa.rowAndCell().row.wrap != pb.rowAndCell().row.wrap) return 2000000 + y;
     }
-    if (sa.cursor.x != sb.cursor.x or sa.cursor.y != sb.cursor.y) return 3000000;
-    if (sa.cursor.pending_wrap != sb.cursor.pending_wrap) return 3000001;
-    if (!std.meta.eql(sa.cursor.style, sb.cursor.style)) return 3000002;
     if (a.screens.active_key != b.screens.active_key) return 3000003;
     inline for (std.meta.fields(vt.modes.Mode)) |field| {
         const mode: vt.modes.Mode = @enumFromInt(field.value);
@@ -372,12 +387,10 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
         for (0..a.cols) |x| {
             if (a.tabstops.get(@intCast(x)) != b.tabstops.get(@intCast(x))) return 6000001;
         }
-        if (!savedEqual(sa.saved_cursor, sb.saved_cursor)) return 6000002;
-        if (sa.cursor.cursor_style != sb.cursor.cursor_style) return 6000003;
     }
     if (!std.meta.eql(a.colors.palette.current, b.colors.palette.current)) return 5000000;
     if (!std.meta.eql(a.scrolling_region, b.scrolling_region)) return 5000001;
-    if (sa.kitty_keyboard.current().int() != sb.kitty_keyboard.current().int()) return 5000002;
+    if (a.screens.active.kitty_keyboard.current().int() != b.screens.active.kitty_keyboard.current().int()) return 5000002;
     return 0;
 }
 fn effectiveStyle(p: vt.PageList.Pin, value: *const vt.page.Cell) vt.Style {
