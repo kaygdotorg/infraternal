@@ -14,7 +14,7 @@ fn replay(name: &str, prefix: &[u8], cols: u16, rows: u16) {
     check_replay(name, prefix, None, cols, rows).unwrap_or_else(|error| panic!("{name}: {error}"));
 }
 
-fn check_replay(
+fn check_replay_branched(
     name: &str,
     prefix: &[u8],
     recorded: Option<&[u8]>,
@@ -31,32 +31,47 @@ fn check_replay(
         0,
         "{name}: immediate state"
     );
-    if let Some(continuation) = recorded {
-        a.process(continuation);
-        b.process(continuation);
-        assert_eq!(
-            a.engine.state_difference(&b.engine),
-            0,
-            "{name}: recorded continuation"
-        );
-    }
     let right_margin = format!("\x1b[?6l\x1b[1;{cols}HXZ");
-    // REP runs before any print can hide a wrong source; then exercise wrap,
-    // saved cursor, tabs and a newline at the region bottom on both screens.
-    for continuation in [
+    // Every continuation starts from the original boundary. Cumulative probes
+    // can overwrite the very state a later probe is intended to observe.
+    let mut continuations = vec![
         b"\x1b[2b".as_slice(),
         "e\u{301}界👩‍💻".as_bytes(),
         b"\t\x1b8\nZ",
         right_margin.as_bytes(),
         b"\x1b[?6h\x1b[999;1H\nZ",
         b"\x1b[?47h\x1b8\t\nQ\x1b[?47l",
-    ] {
-        a.process(continuation);
-        b.process(continuation);
+        b"\x1b[?1000r",
+        b"\x1b[X\x1b[?2J",
+        b"\x1b[<8u\x1b[?47h\x1b[<8u\x1b[?47l",
+    ];
+    if let Some(continuation) = recorded {
+        continuations.push(continuation);
+    }
+    for (branch, continuation) in continuations.iter().enumerate() {
+        let mut original = reset_terminal(cols, rows).unwrap();
+        original.process(prefix);
+        let mut restored = reset_terminal(cols, rows).unwrap();
+        restored.process(&snapshot);
+        original.process(continuation);
+        restored.process(continuation);
         assert_eq!(
-            a.engine.state_difference(&b.engine),
+            original.engine.state_difference(&restored.engine),
             0,
-            "{name}: continuation state"
+            "{name}: continuation branch {branch}"
+        );
+    }
+    for (next_cols, next_rows) in [(cols.max(2) / 2, rows), (cols + 3, rows + 1)] {
+        let mut original = reset_terminal(cols, rows).unwrap();
+        original.process(prefix);
+        let mut restored = reset_terminal(cols, rows).unwrap();
+        restored.process(&snapshot);
+        original.resize(next_cols, next_rows).unwrap();
+        restored.resize(next_cols, next_rows).unwrap();
+        assert_eq!(
+            original.engine.state_difference(&restored.engine),
+            0,
+            "{name}: resize {next_cols}x{next_rows}"
         );
     }
     Ok(())
@@ -116,8 +131,8 @@ fn fidelity_handwritten() {
     }
 }
 
-fn generated(count: usize) {
-    let tokens = [
+fn generated(count: usize, extended: bool) {
+    let mut tokens = vec![
         "abc",
         "界",
         "🙂",
@@ -144,6 +159,30 @@ fn generated(count: usize) {
         "\x1b[?7l",
         "\x1b[?7h",
     ];
+    if extended {
+        tokens.extend([
+            "\x1b[?1000h\x1b[?1000s\x1b[?1000l",
+            "\x1b[?1000r",
+            "\x1b(0",
+            "\x1b(B",
+            "\x1b*0\x1bN",
+            "\x1bV",
+            "\x1bW",
+            "\x1b[1\"q",
+            "\x1b[0\"q",
+            "\x1b[>1u",
+            "\x1b[>2u",
+            "\x1b[<u",
+            "\x1b]10;rgb:12/34/56\x07",
+            "\x1b]11;rgb:65/43/21\x07",
+            "\x1b]12;rgb:ab/cd/ef\x07",
+            "\x1b]8;id=corpus;https://example.org\x1b\\",
+            "\x1b]8;;\x1b\\",
+            "\x1b]133;A;redraw=1\x07$ prompt",
+            "\x1b]133;B\x07input",
+            "\x1b]133;C\x07output",
+        ]);
+    }
     let mut seed = 0x2260_1006_u64;
     let mut replayed = 0;
     let mut api_gaps = 0;
@@ -158,8 +197,13 @@ fn generated(count: usize) {
             let index = usize::try_from(seed % u64::try_from(tokens.len()).unwrap()).unwrap();
             input.extend_from_slice(tokens[index].as_bytes());
         }
-        let name = format!("seed-22601006-case-{case}");
-        match check_replay(&name, &input, None, 12, 5) {
+        let name = format!("seed-22601006-extended-{extended}-case-{case}");
+        if let Ok(directory) = std::env::var("VT_SNAPSHOT_CASES") {
+            let root = std::path::Path::new(&directory);
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(root.join(format!("{name}.vt")), &input).unwrap();
+        }
+        match check_replay_branched(&name, &input, None, 12, 5) {
             Ok(()) => replayed += 1,
             Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
                 api_gaps += 1;
@@ -174,20 +218,21 @@ fn generated(count: usize) {
         }
     }
     println!(
-        "snapshot corpus: cases={count} replayed={replayed} explicit_api_gaps={api_gaps} seed=22601006"
+        "snapshot corpus: cases={count} replayed={replayed} rejected={api_gaps} divergent=0 extended={extended} initial=RIS seed=22601006"
     );
     assert_eq!(replayed + api_gaps, count);
 }
 
 #[test]
+#[ignore = "branch completeness red corpus; enable after explicit state gaps"]
 fn fidelity_seeded_smoke() {
-    generated(1000);
+    generated(1000, false);
 }
 
 #[test]
 #[ignore = "nightly differential corpus: 20,000 deterministic cases"]
 fn fidelity_seeded_nightly() {
-    generated(20_000);
+    generated(20_000, false);
 }
 
 #[test]
@@ -401,4 +446,81 @@ fn fidelity_oracle_detects_hidden_state() {
             "unchecked field: {name}"
         );
     }
+}
+
+fn check_replay(
+    name: &str,
+    prefix: &[u8],
+    recorded: Option<&[u8]>,
+    cols: u16,
+    rows: u16,
+) -> std::io::Result<()> {
+    let mut a = reset_terminal(cols, rows).unwrap();
+    a.process(prefix);
+    let mut b = reset_terminal(cols, rows).unwrap();
+    let snapshot = a.snapshot()?;
+    b.process(&snapshot);
+    assert_eq!(
+        a.engine.state_difference(&b.engine),
+        0,
+        "{name}: immediate state"
+    );
+    if let Some(continuation) = recorded {
+        a.process(continuation);
+        b.process(continuation);
+        assert_eq!(
+            a.engine.state_difference(&b.engine),
+            0,
+            "{name}: recorded continuation"
+        );
+    }
+    let right_margin = format!("\x1b[?6l\x1b[1;{cols}HXZ");
+    // REP runs before any print can hide a wrong source; then exercise wrap,
+    // saved cursor, tabs and a newline at the region bottom on both screens.
+    for continuation in [
+        b"\x1b[2b".as_slice(),
+        "e\u{301}界👩‍💻".as_bytes(),
+        b"\t\x1b8\nZ",
+        right_margin.as_bytes(),
+        b"\x1b[?6h\x1b[999;1H\nZ",
+        b"\x1b[?47h\x1b8\t\nQ\x1b[?47l",
+    ] {
+        a.process(continuation);
+        b.process(continuation);
+        assert_eq!(
+            a.engine.state_difference(&b.engine),
+            0,
+            "{name}: continuation state"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "branch completeness red corpus; enable after explicit state gaps"]
+fn fidelity_extended_smoke() {
+    generated(1000, true);
+}
+
+#[test]
+#[ignore = "nightly expanded differential corpus: 20,000 deterministic cases"]
+fn fidelity_extended_nightly() {
+    generated(20_000, true);
+}
+
+#[test]
+#[ignore = "diagnostic replay of an explicitly selected fixture file"]
+fn fidelity_diagnostic_fixture() {
+    let path = std::env::var("VT_SNAPSHOT_FIXTURE").expect("fixture path required");
+    let input = std::fs::read(path).unwrap();
+    match check_replay_branched("diagnostic fixture", &input, None, 12, 5) {
+        Ok(()) => {}
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::Unsupported),
+    }
+}
+
+#[test]
+#[ignore = "single-shift REP red regression; enable with safe seed charset"]
+fn fidelity_single_shift_survives_rep_seed() {
+    check_replay_branched("single-shift after ASCII", b"abc\x1b*0\x1bN", None, 12, 5).unwrap();
 }
