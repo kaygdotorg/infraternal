@@ -57,7 +57,8 @@ DECSC state or clear the alternate screen as 1049 would. Subsequent original
 Screen-switch mode bookkeeping is represented by that canonical construction;
 synchronized-output mode 2026 is omitted to permit the repaint to display.
 
-The serializer preserves visible cells and a bounded history tail, SGR flags,
+For representable states, the serializer preserves visible cells and a bounded
+history tail, SGR flags,
 16/256/RGB colors and palette overrides, hyperlinks and their row groups,
 wide cells and stored graphemes, saved/live cursors and protection, pending
 wrap, vertical/horizontal margins and origin, input modes, custom tabs,
@@ -83,7 +84,9 @@ grid-reference lookup; sized live/saved cursor-state records with charset,
 protection and hyperlink identity; margins/tab-stop/keyboard-stack queries;
 and a grid-reference hyperlink-ID getter. These can expose the same existing
 Zig fields this adapter reads, with references valid until terminal mutation.
-No upstream parser or formatter change is needed. Until those getters exist,
+Those getters cover observation, but the fidelity work below also needs
+nonprinting setters for states the bounded VT painter cannot restore. Until
+those APIs exist,
 the adapter is compiled into the pinned library using two C exports, snapshot
 and a read-only test oracle. Updating Ghostty requires reviewing this adapter
 against the new fields and rerunning the fixtures.
@@ -211,3 +214,118 @@ logs are `toolchain-gate.log`, `init-api-gate.log`,
 `snapshot-regressions-gate.log`, `carry-perf-gate.log`, `measurements-gate.log`,
 and `docs-gate.log`. Forgejo #22 records start/base, findings and final HEAD with
 verbatim gate output. No issue is closed and no branch is pushed by this job.
+
+
+## Snapshot fidelity follow-up (#22)
+
+The differential oracle compares both allocated screens immediately after
+replay and after shared continuations. It checks text and grapheme scalars,
+wide/continuation flags, empty-cell attributes, SGR (including RGB and underline
+style), protection, OSC 8 URI/group identity, row wrap/continuation flags,
+live/saved cursor coordinates and attributes, cursor shape/visibility, active
+screen, region/origin, tab stops, the terminal REP source, and each screen's pending wrap.
+Continuation probes run REP first, print at the actual right margin, combine
+characters, tab, restore the saved cursor, and newline at the region bottom.
+They also switch screens to exercise retained inactive state.
+
+Regression tests preceded their corresponding fixes. F1 compared with code
+6,000,000 (REP source); painting the inactive screen first and active screen
+last fixes the alternate-screen round trip. The cursor regression compared
+with 3,000,000: CUP under origin mode clamps a cursor which was outside its
+region before origin was enabled. Restoration now positions it with full
+margins before reinstating the region. Edge regressions required independently
+styled empty spacer heads, narrowed wide cells, wrapped graphemes and widened
+variation-selector tails to retain their own metadata. Saved cursors are
+constructed before painting because the saved margin cell can subsequently
+change width. REP is reconstructed explicitly, and temporary wrap anchors
+preserve live/saved pending wrap without leaving visible scratch cells.
+
+The Rust corpus lives in `crates/infraternal-shim/tests/unit/snapshot_fidelity.rs`.
+The normal fast gate runs 1,000 seeded cases; `scripts/verify nightly` runs
+20,000 in release mode. Both use xorshift64 seed `0x22601006`, 24 valid tokens
+per case, including screen switches, regions, origin, save/restore, tabs,
+REP, erase, wrap, SGR, CJK, emoji, ZWJ and combining marks. Four tracked vim,
+htop, less and Unicode captures replay their recorded continuations too.
+`spikes/stress` is absent from the supplied checkout and its local history;
+the loader will include it if restored, but this run covers zero stress files.
+
+### Remaining restoration API gaps
+
+Accepted snapshots must pass the full oracle; inability to construct a state
+returns `io::ErrorKind::Unsupported`, never a knowingly divergent snapshot.
+The C boundary reserves `usize::MAX` for this error, separate from zero for
+buffer exhaustion. Rust checks the sentinel before interpreting a length;
+Unsupported propagates immediately rather than retrying shorter history tails.
+The original terminal is not mutated. A regression verifies rejection leaves
+later REP output unchanged and that subsequent input can make it representable.
+
+| State the bounded painter cannot reliably restore | Proposed upstream addition |
+| --- | --- |
+| Optional terminal REP source independent of grid/live/saved pending wrap, including no previous character | A nonprinting terminal previous-character getter/setter, with explicit null support |
+| Live and saved cursor pending wrap when no safe paint anchor exists (including degenerate geometry and modified margin cells) | Sized per-screen live/saved cursor setters including absolute coordinates, attributes, origin, and pending wrap; no implicit printing or clamping |
+| Visible boundary or orphaned row wrap/continuation flags after rows are overwritten/scrolled | Per-row wrap and continuation getters/setters independent of adjacent cell writes |
+| Independently styled, linked or protected no-text interior cells which ordinary erase cannot reproduce | A nonprinting cell metadata setter retaining text absence, wide flags, style, protection and hyperlink group identity |
+
+These additions should have native/WASM parity and explicit reference lifetime
+rules. A versioned, bounded state export/import API would be an alternative
+that covers the same invariants. This adapter already reads the underlying
+fields; extra read-only C getters alone cannot solve restoration. The gaps are
+in this bounded VT construction strategy, not a claim that every original
+input stream is impossible to replay. Upstream setters and their client/wire
+integration remain future work; this change keeps Ghostty and the frozen
+Snapshot frame. The owner decides engine or protocol changes.
+
+### Final corpus and performance evidence
+
+The final smoke corpus has **990 faithful replays / 10 explicit API gaps**;
+the nightly corpus has **19,864 faithful replays / 136 explicit API gaps**.
+All accepted snapshots compare equal before and after the continuations.
+The shim module reports **32 passed, 0 failed, 5 ignored** (four measurements
+and the nightly corpus); nightly is separately executed, not skipped evidence.
+No unsupported case is counted as a faithful replay.
+
+Performance below is from the unisolated development box, not the pinned
+performance VM. Flood uses the real PTY, shim, infraternal agent and credited
+output socket, 50 MiB per pattern, with decimal MB/s. Snapshot is the release
+serializer benchmark, 1,000 samples at 200×60 plus a 256-row history tail;
+it is not socket Snapshot latency. The first post-change trial under saturated
+C compilation measured p50 0.613 ms / p99 4.637 ms and failed the existing 2 ms
+guard. Its log is retained as `after-snapshot.log`; the concurrent flood still
+exceeded 10 MB/s (LF 11.189, CRLF 18.963, printable 64.846). Serial reruns after the saturation subsided (still an unisolated host)
+are listed separately below rather than replacing that evidence.
+
+
+| Measurement | Before (base d3c7194) | After (serial) |
+| --- | ---: | ---: |
+| LF flood, MB/s | 17.505 | 16.514 |
+| CRLF flood, MB/s | 20.808 | 20.810 |
+| Printable flood, MB/s | 74.784 | 77.715 |
+| Serializer Snapshot p50, ms | 0.487 | 0.519–0.547 |
+| Serializer Snapshot p99, ms | 1.034 | 1.023 / 1.051 / 1.191 |
+| Snapshot bytes | 27,279 | 27,410 |
+
+The extra restoration and metadata checks add about 6.6–12.3% to measured
+serializer p50; they are justified by the red-then-green future-state and edge
+regressions above. All three serial p99 trials pass the existing 2 ms guard,
+and every flood (including the loaded-host run) exceeds DECISIONS 41's 10 MB/s
+budget. One flood trial per pattern is not enough to claim a throughput
+improvement or attribute LF's 5.7% difference to code; the input/parser path
+was unchanged. These numbers are development-box evidence, not a guarantee
+under arbitrary host contention.
+
+Evidence lives under `target/snapshot-fidelity/`: `before-flood.log`,
+`before-snapshot.log`, `after-flood.log`, `after-flood-serial.log`,
+`after-snapshot.log`, `after-snapshot-serial-{1,2,3}.log`,
+`variation-module-green.log`, `final-nightly.log`, and `final-docs-fast.log`.
+The first unsupported seeded fixture is also retained there as a named
+`seed-22601006-case-*-api-gap.vt` file. Logs contain fixtures only by path;
+console reads are sanitized and restricted to summaries.
+
+```sh
+nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify fast > target/snapshot-fidelity/final-docs-fast.log 2>&1
+nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify nightly > target/snapshot-fidelity/final-nightly.log 2>&1
+nix shell nixpkgs#zig_0_15 -c cargo test --release -p infraternal-shim --lib snapshot_200x60 -- --ignored --nocapture --test-threads=1 > target/snapshot-fidelity/after-snapshot-serial-1.log 2>&1
+python3 crates/infraternal-shim/tests/vt_flood.py --binary target/x86_64-unknown-linux-musl/release/infraternal > target/snapshot-fidelity/after-flood-serial.log 2>&1
+```
+
+Forgejo #22 contains the final HEAD and verbatim final fast summary table.
