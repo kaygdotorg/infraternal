@@ -1,8 +1,7 @@
-//! Owns long-lived PTY sessions across browser drops and agent upgrades [13].
+//! Long-lived local PTY sessions with frozen v1 resume semantics [13][17].
 //!
-//! PTY syscalls will need audited unsafe blocks. Unsafe code remains denied here
-//! until those syscalls exist, and each future block must document its safety
-//! invariant and receive focused review.
+//! Unsafe code is confined to the audited PTY/process boundary; data modules
+//! forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod frame;
