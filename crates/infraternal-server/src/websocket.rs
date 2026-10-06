@@ -785,11 +785,27 @@ where
         }
         Frame::Call {
             call_id,
-            action_id: "terminal.open",
+            action_id: action_id @ ("terminal.open" | "ssh.session.open"),
             input_json,
         } if stream_id == CONTROL_STREAM => {
-            let result = match serde_json::from_slice::<TerminalOpen>(input_json) {
-                Ok(size) if size.valid() => {
+            let size = if action_id == "ssh.session.open" {
+                // The tracer defaults to the embedded host. Explicit remote
+                // hosts require the inventory/plugin path; never silently run
+                // a requested remote command on the local server host [9].
+                serde_json::from_slice::<BrowserTerminalOpen>(input_json)
+                    .ok()
+                    .filter(|input| input.host_id.is_none())
+                    .map(|_| TerminalOpen {
+                        cols: 80,
+                        rows: 24,
+                        px_w: 0,
+                        px_h: 0,
+                    })
+            } else {
+                serde_json::from_slice::<TerminalOpen>(input_json).ok()
+            };
+            let result = match size {
+                Some(size) if size.valid() => {
                     open_terminal(state, user_id, session_token, size).await
                 }
                 _ => Err(()),
@@ -799,9 +815,13 @@ where
             }
             match result {
                 Ok(session_id) => {
+                    let session_id = if action_id == "ssh.session.open" {
+                        uuid::Uuid::from_bytes(session_id).to_string()
+                    } else {
+                        encode_session_id(&session_id)
+                    };
                     let json =
-                        serde_json::to_vec(&json!({"session_id":encode_session_id(&session_id)}))
-                            .map_err(|_| ())?;
+                        serde_json::to_vec(&json!({"session_id": session_id})).map_err(|_| ())?;
                     send_frame(
                         sink,
                         CONTROL_STREAM,
@@ -1030,6 +1050,13 @@ struct ClientAttachment {
     credit: u64,
     awaiting_ack: bool,
     needs_snapshot: bool,
+}
+
+/// Browser plugin action adapter; dimensions arrive in the attachment's Resize.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserTerminalOpen {
+    host_id: Option<uuid::Uuid>,
 }
 
 #[derive(Deserialize)]
