@@ -1,0 +1,33 @@
+//! Deterministic real-shim regressions for multiplexing, Snapshot credit and restart [13][41][81].
+#![allow(clippy::unwrap_used)]
+use std::{path::PathBuf, process::Command};
+
+fn probe(script: &str) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("python3")
+        .current_dir(root)
+        .arg(script)
+        .args(["--binary", env!("CARGO_BIN_EXE_infraternal")])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{script}:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+}
+
+#[test]
+fn retained_unwritten_input_survives_interleaved_ack_restart() {
+    probe("scripts/verify-agent-resume.py");
+}
+#[test]
+fn stalled_terminal_never_delays_control_or_sibling_dispatch() {
+    probe("scripts/verify-agent-isolation.py");
+}
+#[test]
+fn repeated_tiny_credit_snapshots_preserve_shell_progress() {
+    probe("scripts/verify-agent-snapshot.py");
+}

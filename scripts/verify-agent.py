@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-binary leg-B crash, credit and release performance evidence [13][41]."""
+"""Real-binary leg-B abrupt-stop/restart, credit and release performance evidence [13][41]."""
 import argparse
 import sys
 
@@ -77,7 +77,7 @@ def run(binary, state, functional=False, seed=20):
                 threshold = rng.randrange(1, len(payload) // 2)
                 while len(client.data) < threshold:
                     client.process()
-                assert 0 < len(client.data) < len(payload), 'crash must interrupt output'
+                assert 0 < len(client.data) < len(payload), 'abrupt stop must interrupt output'
             observed = len(client.data)
             client.kill()
             barrier.release.set()
@@ -92,12 +92,12 @@ def run(binary, state, functional=False, seed=20):
                 while len(client.data) < len(payload) + len(fence) or client.acked < client.entered:
                     client.process()
             except Exception:
-                print(f'crash oracle stalled: iteration={iteration}, position={position}, payload={len(payload)}, observed={observed}, received={len(client.data)}, input sent={client.entered}, input acked={client.acked}, output cursor={client.out}, proxy alive={barrier.thread.is_alive()}, proxy threshold={barrier.threshold}, proxy phase={barrier.phase}', flush=True)
+                print(f'restart oracle stalled: iteration={iteration}, position={position}, payload={len(payload)}, observed={observed}, received={len(client.data)}, input sent={client.entered}, input acked={client.acked}, output cursor={client.out}, proxy alive={barrier.thread.is_alive()}, proxy threshold={barrier.threshold}, proxy phase={barrier.phase}', flush=True)
                 raise
             assert client.data == payload + fence, (iteration, position, len(client.data))
             total += len(payload)
-            print(f'SIGKILL {iteration:02d}/24 {position}: {len(payload)} bytes, output observed before kill={observed}; exact input/output replay: PASS', flush=True)
-        print(f'24-iteration crash fixture seed={seed}: {total} payload bytes, all four crash positions x 6: PASS', flush=True)
+            print(f'abrupt stop/restart {iteration:02d}/24 {position}: {len(payload)} bytes, output observed before stop={observed}; exact input/output replay: PASS', flush=True)
+        print(f'24-iteration restart fixture seed={seed}: {total} payload bytes, all four stop positions x 6: PASS', flush=True)
         if functional:
             return
         # The proxy is a correctness fixture; latency and flood use a new direct session.
@@ -180,6 +180,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, default=Path('target/x86_64-unknown-linux-musl/release/infraternal'))
     parser.add_argument("--functional", action="store_true", help="run short real-process correctness gates without release measurements")
-    parser.add_argument("--seed", type=int, default=20, help="reproducible crash positions and payload sizes")
+    parser.add_argument("--seed", type=int, default=20, help="reproducible stop positions and payload sizes")
     args = parser.parse_args()
     run(args.binary.resolve(), Path(f'target/tb{os.getpid()}'), args.functional, args.seed)
