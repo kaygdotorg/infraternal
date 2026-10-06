@@ -85,6 +85,13 @@ export function meshColors(theme: Theme): string[] {
 let newestRender = 0;
 let currentUrl = "";
 
+/** Cancels an in-flight result and releases the current still when mesh mode is left. */
+export function releaseBackdrop(): void {
+  newestRender += 1;
+  if (currentUrl) URL.revokeObjectURL(currentUrl);
+  currentUrl = "";
+}
+
 /** Draws one half-resolution frame and returns a replaceable blob URL for CSS. */
 export async function renderBackdrop(theme: Theme, width: number, height: number): Promise<string> {
   const renderId = ++newestRender;
@@ -156,9 +163,12 @@ export async function renderBackdrop(theme: Theme, width: number, height: number
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
   gl.deleteProgram(program);
+  // toBlob snapshots the presented pixels when requested; start it before releasing
+  // the drawing buffer so the GPU can go idle while the immutable PNG is encoded.
+  const snapshot = new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
   loseContext();
 
-  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  const blob = await snapshot;
   if (renderId !== newestRender) return "";
   if (currentUrl) URL.revokeObjectURL(currentUrl);
   currentUrl = blob ? URL.createObjectURL(blob) : "";

@@ -36,11 +36,15 @@ export type TerminalTraceHop =
 
 export interface TerminalConfig {
   host: HTMLElement;
+  /** Stage that follows the visual viewport when iOS opens its on-screen keyboard. */
+  screen?: HTMLElement;
   status: HTMLElement;
   hooks?: TerminalHooks;
   /** Curated theme shared by the floating controls and Ghostty. */
   theme?: ITheme;
   onRoundTrip?: (milliseconds: number | undefined) => void;
+  onConnectionChange?: (connected: boolean) => void;
+  onScroll?: (scrolled: boolean) => void;
   onInputActivity?: () => void;
   traceMockServer?: boolean;
   /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
@@ -165,7 +169,7 @@ export class TerminalClient {
 
   private constructor(private readonly config: TerminalConfig, terminal: Terminal) {
     this.terminal = terminal;
-    this.screen = config.host.parentElement ?? config.host;
+    this.screen = config.screen ?? config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
     this.resizeObserver = new ResizeObserver(() => this.scheduleFit());
@@ -180,6 +184,7 @@ export class TerminalClient {
     this.terminal.onData((data) => this.handleInput(data));
     this.terminal.onScroll((offset) => {
       config.host.dataset.scrolled = String(offset !== 0);
+      config.onScroll?.(offset !== 0);
     });
     this.scheduleFit();
     this.connect();
@@ -277,6 +282,7 @@ export class TerminalClient {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.config.onConnectionChange?.(false);
     window.clearTimeout(this.retryTimer);
     this.stopPings();
     this.resizeObserver.disconnect();
@@ -344,6 +350,7 @@ export class TerminalClient {
       this.decoder = undefined;
       this.attached = false;
       this.attachRequested = false;
+      this.config.onConnectionChange?.(false);
       this.stopPings();
       const forced = this.forcedDrop;
       this.forcedDrop = false;
@@ -486,6 +493,7 @@ export class TerminalClient {
     this.resendUnacknowledgedInput();
     this.setStatus("");
     this.retryAttempt = 0;
+    this.config.onConnectionChange?.(true);
     this.startPings();
     this.config.hooks?.onAttached?.(this.connectionIsResume, this);
   }
