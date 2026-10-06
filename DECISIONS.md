@@ -392,3 +392,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     memory (about 20 MB per 10,000 lines). We write our own screen
     serializer for snapshots (its built-in formatter failed our repaint
     fixtures). Zig is pinned for the build.
+95. **Onboarding is a guided wizard.** The app detects whether a server
+    owner exists. If none exists, it goes straight into a stepped setup
+    wizard (setup token → name → passkey → recovery key), with numbered steps
+    that turn into ticks. After the passkey is registered, the owner is
+    signed in automatically. Sign-in is one "Continue with passkey" button
+    with no username.
+96. **The sign-in and onboarding backdrop is our own "faulty terminal"
+    shader,** in black and white, written from scratch after the
+    sveltebits.xyz effect. Its code cannot be copied (MIT + Commons Clause).
+    Budget: half resolution, at most 30 fps, paused when hidden or after
+    sign-in, one still frame with reduced motion.
