@@ -141,12 +141,14 @@ export async function loginWithPasskey(device: string): Promise<string> {
     const assertion = await navigator.credentials.get({ publicKey });
     if (!(assertion instanceof PublicKeyCredential)) throw new AuthError("Passkey login was cancelled.");
     prf = prfFrom(assertion);
-    await post("login-finish", {
+    const pending = await post<{ pending_transaction: string }>("login-finish", {
       ceremony: requiredString(start.ceremony, "login ceremony"),
       proof: credentialProof(assertion),
       device: device.slice(0, 128),
     });
 
+    // Keep completion in this page call; shared cookies cannot identify which tab unwrapped.
+    const transaction = requiredString(pending?.pending_transaction, "pending login transaction");
     try {
       const session = await post<AuthSession>("unlock-session", {});
       userId = canonicalUuid(session?.user_id, "session user id");
@@ -168,9 +170,9 @@ export async function loginWithPasskey(device: string): Promise<string> {
       const dek = await unwrapDek(prf, envelope, userId, "passkey");
       if (dek.byteLength !== 32) throw new AuthError("Your account key could not be unlocked. Try again.");
       dek.fill(0);
-      await post("unlock-finish", {});
+      await post("unlock-finish", { pending_transaction: transaction });
     } catch (error: unknown) {
-      try { await post("logout", {}); }
+      try { await post("logout", { pending_transaction: transaction }); }
       catch { throw new AuthError("Your account key was not unlocked. Sign in again; this incomplete session cannot access the terminal."); }
       throw error;
     }

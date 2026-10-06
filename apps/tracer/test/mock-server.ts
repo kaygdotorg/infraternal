@@ -65,6 +65,7 @@ interface TraceEvent {
 let owner: MockOwner | undefined;
 let activeAuthCookie: string | undefined;
 let unlockPending = false;
+let pendingTransaction: string | undefined;
 let setupToken = newToken();
 let pendingRegistration: { ceremony: string; userId: string; username: string; displayName: string; recoveryWords: string; rpId: string; prfInput: string } | undefined;
 let pendingLogin: { ceremony: string } | undefined;
@@ -333,18 +334,22 @@ async function authAction(
       }
       pendingLogin = undefined;
       unlockPending = true;
+      pendingTransaction = newToken();
       activeAuthCookie = newToken();
       setAuthCookie(response, activeAuthCookie);
-      return sendJson(response, 200, { ok: true });
+      return sendJson(response, 200, { ok: true, pending_transaction: pendingTransaction });
     }
     case "unlock-finish":
       if (!isAuthenticated(request)) return sendJson(response, 401, { error: "authorization failed" });
+      if (!unlockPending || body.pending_transaction !== pendingTransaction) return sendJson(response, 401, { error: "authorization failed" });
       unlockPending = false;
+      pendingTransaction = undefined;
       return sendJson(response, 200, { ok: true });
     case "wraps":
       if (!isAuthenticated(request) || !owner) return sendJson(response, 401, { error: "authorization failed" });
       return sendJson(response, 200, [{ kind: "passkey", key_id: owner.credentialId, wrap: owner.passkeyWrap, prf_input: owner.prfInput }]);
     case "logout":
+      if (body.pending_transaction !== undefined && (!unlockPending || body.pending_transaction !== pendingTransaction)) return sendJson(response, 401, { error: "authorization failed" });
       if (!isAuthenticated(request)) return sendJson(response, 401, { error: "authorization failed" });
       activeAuthCookie = undefined;
       response.setHeader("Set-Cookie", "__Host-infraternal=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
