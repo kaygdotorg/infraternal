@@ -323,3 +323,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     ≥ 4.5 against the background). Failing colors are fixed by changing only
     their OKLab lightness, and each change is logged. Touch targets are at
     least 44 × 44 pt (Apple HIG). Both are CI gates when the UI lands.
+81. **Polish only after grilling; performance first.** Each feature is
+    designed and built only after a design grill, and that grill includes
+    performance. Before any code, the feature gets a budget: idle CPU (zero
+    by default), memory, and what runs on the server and what runs in the
+    client. Features ship at the highest polish or not at all.
