@@ -318,3 +318,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     One index, results grouped by kind.
 79. **Mobile keys float.** No bottom band. Icon pills that scroll sideways
     over a progressive blur.
+80. **Themes are curated and gated.** Each theme passes the contrast audit
+    (fg ≥ 7, fg2 ≥ 4.5, fg3 ≥ 3, accent and status ≥ 3, terminal colors
+    ≥ 4.5 against the background). Failing colors are fixed by changing only
+    their OKLab lightness, and each change is logged. Touch targets are at
+    least 44 × 44 pt (Apple HIG). Both are CI gates when the UI lands.
