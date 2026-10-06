@@ -1212,6 +1212,8 @@ dependencies = [
  "infraternal-protocol",
  "infraternal-shim",
  "nix",
+ "serde",
+ "serde_json",
  "tokio",
  "uuid",
 ]
