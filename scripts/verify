@@ -15,6 +15,7 @@ fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${script_dir}/verify.d/rust.sh"
+source "${script_dir}/verify.d/ts.sh"
 
 if [[ $# -ne 1 ]]; then
     printf 'usage: scripts/verify {fast|integration|browser|bench}\n' >&2
@@ -24,6 +25,7 @@ fi
 case "$1" in
     fast)
         rust_verify_fast
+        ts_verify_fast
         ;;
     browser)
         "${script_dir}/verify-auth-browser"

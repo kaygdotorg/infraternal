@@ -1,0 +1,103 @@
+{
+  "vectors": [
+    {
+      "name": "hello",
+      "file": "hello.bin",
+      "frame": { "type": "Hello", "version": 1, "caps": "3", "clientInfo": "\uFEFFweb/1" }
+    },
+    {
+      "name": "welcome",
+      "file": "welcome.bin",
+      "frame": {
+        "type": "Welcome",
+        "connectionId": "000102030405060708090a0b0c0d0e0f",
+        "resumeToken": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+        "resumeWindowSeconds": 120
+      }
+    },
+    {
+      "name": "resume",
+      "file": "resume.bin",
+      "frame": {
+        "type": "Resume",
+        "connectionId": "000102030405060708090a0b0c0d0e0f",
+        "resumeToken": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+      }
+    },
+    {
+      "name": "ping",
+      "file": "ping.bin",
+      "frame": { "type": "Ping", "nonce": "72623859790382856", "sentUs": "123456789" }
+    },
+    {
+      "name": "pong",
+      "file": "pong.bin",
+      "frame": { "type": "Pong", "nonce": "72623859790382856", "sentUs": "123456789" }
+    },
+    {
+      "name": "close",
+      "file": "close.bin",
+      "frame": { "type": "Close", "code": 1000, "reason": "done" }
+    },
+    {
+      "name": "input",
+      "file": "input.bin",
+      "frame": { "type": "Input", "inSeq": "42", "bytesHex": "6b" }
+    },
+    {
+      "name": "output",
+      "file": "output.bin",
+      "frame": { "type": "Output", "outSeq": "65535", "bytesHex": "68656c6c6f" }
+    },
+    {
+      "name": "resize",
+      "file": "resize.bin",
+      "frame": { "type": "Resize", "cols": 120, "rows": 40, "pxW": 960, "pxH": 640 }
+    },
+    {
+      "name": "ack",
+      "file": "ack.bin",
+      "frame": { "type": "Ack", "inSeqAcked": "4294967297" }
+    },
+    {
+      "name": "credit",
+      "file": "credit.bin",
+      "frame": { "type": "Credit", "bytes": 1048576 }
+    },
+    {
+      "name": "snapshot",
+      "file": "snapshot.bin",
+      "frame": { "type": "Snapshot", "outSeq": "4096", "bytesHex": "1b5b324a" }
+    },
+    {
+      "name": "attach-term",
+      "file": "attach-term.bin",
+      "frame": {
+        "type": "AttachTerm",
+        "sessionId": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+        "lastOutSeq": "8192",
+        "lastInSeq": "4096"
+      }
+    },
+    {
+      "name": "call",
+      "file": "call.bin",
+      "frame": { "type": "Call", "callId": 7, "actionId": "ssh.exec", "inputJson": "{\"cmd\":\"pwd\"}" }
+    },
+    {
+      "name": "result",
+      "file": "result.bin",
+      "frame": { "type": "Result", "callId": 7, "ok": true, "json": "{\"ok\":true}" }
+    },
+    {
+      "name": "subscribe",
+      "file": "subscribe.bin",
+      "frame": { "type": "Subscribe", "subId": 2, "filterJson": "{\"host\":\"edge\"}" }
+    },
+    {
+      "name": "event",
+      "file": "event.bin",
+      "frame": { "type": "Event", "subId": 2, "eventJson": "{\"state\":\"ready\"}" }
+    }
+  ]
+}
