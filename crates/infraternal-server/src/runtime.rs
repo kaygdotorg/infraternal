@@ -414,7 +414,8 @@ async fn source_admission(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    if !path.starts_with("/auth/") {
+    // Exact-Origin checking still runs in auth; source admission cannot deny revocation.
+    if !path.starts_with("/auth/") || path == "/auth/logout" {
         return next.run(request).await;
     }
     let device = matches!(

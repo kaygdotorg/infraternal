@@ -300,6 +300,28 @@ impl Auth {
         device: &str,
         now: i64,
     ) -> Result<String> {
+        self.finish_login(id, proof, device, now, false).await
+    }
+
+    /// HTTP login grants only envelope access until a successful local unwrap is confirmed.
+    pub(super) async fn pending_login_finish(
+        &self,
+        id: &str,
+        proof: Value,
+        device: &str,
+        now: i64,
+    ) -> Result<String> {
+        self.finish_login(id, proof, device, now, true).await
+    }
+
+    async fn finish_login(
+        &self,
+        id: &str,
+        proof: Value,
+        device: &str,
+        now: i64,
+        pending_unlock: bool,
+    ) -> Result<String> {
         let login = self
             .pending
             .lock()
@@ -371,6 +393,13 @@ impl Auth {
             .await?;
         let token = random();
         insert_session(&mut tx, &token, &user, device, now).await?;
+        if pending_unlock {
+            sqlx::query("UPDATE sessions SET unlocked=0,expires=? WHERE token_hash=?")
+                .bind(now + CEREMONY)
+                .bind(hash(&token))
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(token)
     }

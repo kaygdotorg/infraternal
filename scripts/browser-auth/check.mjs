@@ -67,7 +67,7 @@ try {
           return { id: credential.id, rawId: encode(credential.rawId), type: credential.type, response, extensions };
         };
         check(JSON.stringify((await post('status', {})).body) === JSON.stringify({setup_required:true}), 'initial public status');
-        const start = await post('setup-start', { token, name: 'browser owner' });
+        const start = await post('setup-start', { token, username: 'browser_owner', display_name: 'Browser owner' });
         check(start.status === 200, 'setup options');
         let credential;
         try {
@@ -123,7 +123,8 @@ try {
         const logged = await post('login-finish', { ceremony: login.body.ceremony, proof: proof(assertion), device: 'Chromium virtual passkey' });
         check(logged.status === 200, 'login finish');
         check(login.body.options.publicKey.allowCredentials.length === 0, 'discoverable allow-list not empty');
-        check((await post('session', {})).body.user_id === user, 'resident handle resolved wrong user');
+        check((await post('session', {})).status === 401, 'pending unlock granted authority');
+        check((await post('unlock-session', {})).body.user_id === user, 'resident handle resolved wrong user');
         const entry = (await post('wraps', {})).body.find(w => w.kind === 'passkey');
         const local = await navigator.credentials.get({ publicKey: {
           challenge: crypto.getRandomValues(new Uint8Array(32)), rpId: 'auth.example.test',
@@ -135,6 +136,7 @@ try {
         const stored = entry.wrap;
         const clear = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: decode(stored.nonce), additionalData: aad }, await derive(loginPrf), decode(stored.ciphertext));
         check(encode(clear) === encode(dek), 'DEK changed across login');
+        check((await post('unlock-finish', {})).status === 200, 'unlock completion rejected');
         // A real browser response with a tampered origin/UV must fail server verification.
         const wrongOrigin = await post('login-start', {});
         const fresh = await navigator.credentials.get({ publicKey: options(wrongOrigin.body, false) });

@@ -23,8 +23,27 @@ impl Session {
 impl Auth {
     /// Slide a live session by 30 days, never resurrecting an expired or revoked record.
     pub async fn session(&self, token: &str, now: i64) -> Result<Session> {
-        let row = sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=? AND expires>? RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name")
-            .bind(now + SESSION).bind(hash(token)).bind(now).fetch_optional(&self.pool).await?.ok_or(Error::Denied)?;
+        self.read_session(token, now, false).await
+    }
+
+    /// Restricted login cookies can read identity/wraps while awaiting local DEK unwrap.
+    /// Reads never extend their five-minute expiry; expired rows are revoked here.
+    pub async fn unlock_session(&self, token: &str, now: i64) -> Result<Session> {
+        self.read_session(token, now, true).await
+    }
+
+    async fn read_session(&self, token: &str, now: i64, pending: bool) -> Result<Session> {
+        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name")
+            .bind(now + SESSION).bind(hash(token)).bind(now).bind(pending).fetch_optional(&self.pool).await?;
+        let Some(row) = row else {
+            // Successful sessions keep the original single write; cleanup runs only on denial.
+            sqlx::query("DELETE FROM sessions WHERE token_hash=? AND unlocked=0 AND expires<=?")
+                .bind(hash(token))
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+            return Err(Error::Denied);
+        };
         Ok(Session {
             user_id: row.get("user_id"),
             username: row.get("username"),
@@ -32,6 +51,17 @@ impl Auth {
             device: row.get("device"),
             fresh: row.get("fresh"),
         })
+    }
+
+    /// Activate only a still-live pending cookie after the browser confirms successful unwrap.
+    /// The server never receives the plaintext DEK; this is a client completion signal.
+    pub async fn unlock_finish(&self, token: &str, now: i64) -> Result<()> {
+        let changed = sqlx::query("UPDATE sessions SET unlocked=1,expires=? WHERE token_hash=? AND unlocked=0 AND expires>?")
+            .bind(now + SESSION).bind(hash(token)).bind(now).execute(&self.pool).await?.rows_affected();
+        if changed != 1 {
+            return Err(Error::Denied);
+        }
+        Ok(())
     }
 
     /// Authenticate a device and require a passkey tap within five minutes for destructive UI actions [28].
@@ -57,7 +87,7 @@ pub(super) async fn require_session_tx(
     user: &str,
     now: i64,
 ) -> Result<()> {
-    if sqlx::query("SELECT user_id FROM sessions WHERE token_hash=? AND user_id=? AND expires>? AND fresh>? AND fresh<=?")
+    if sqlx::query("SELECT user_id FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>? AND fresh>? AND fresh<=?")
         .bind(token_hash).bind(user).bind(now).bind(now - FRESH).bind(now).fetch_optional(&mut **tx).await?.is_none() { return Err(Error::Denied); }
     Ok(())
 }

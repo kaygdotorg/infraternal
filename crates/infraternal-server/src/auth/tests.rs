@@ -1893,6 +1893,12 @@ async fn public_status_and_discoverable_http_login() {
             .as_secs(),
     )
     .unwrap();
+    assert!(f.auth.session(token, now).await.is_err());
+    assert_eq!(
+        f.auth.unlock_session(token, now).await.unwrap().user_id,
+        f.user
+    );
+    f.auth.unlock_finish(token, now).await.unwrap();
     assert_eq!(f.auth.session(token, now).await.unwrap().user_id, f.user);
 }
 
@@ -2240,4 +2246,66 @@ async fn audit_no_public_credential_listing() {
         http_post_json(&app, "login-start", json!({})).await.2["options"]["publicKey"]["allowCredentials"],
         json!([])
     );
+}
+
+/// Independent audit: revocation of an incomplete unlock cannot be denied by admission.
+#[tokio::test]
+async fn audit_logout_survives_admission_exhaustion() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = router(f.auth.clone());
+    for _ in 0..120 {
+        assert_eq!(
+            http_post_json(&app, "status", json!({})).await.0,
+            axum::http::StatusCode::OK
+        );
+    }
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/auth/logout")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ORIGIN, ORIGIN)
+        .header(
+            axum::http::header::COOKIE,
+            format!("__Host-infraternal={}", f.session),
+        )
+        .body(axum::body::Body::from("{}"))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let still_live = f.auth.session(&f.session, NOW).await.is_ok();
+    println!(
+        "120 browser actions then authenticated logout → expected 200/revoked → actual {} live_session={still_live}",
+        response.status()
+    );
+    assert!(
+        !still_live,
+        "admission exhaustion blocks mandatory revocation"
+    );
+}
+
+/// Abandoned unlocks cannot slide, authorize a device, or revive after their deadline.
+#[tokio::test]
+async fn pending_unlock_expires_without_terminal_authority() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let start = f.auth.discoverable_login_start(NOW).await.unwrap();
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    let token = f
+        .auth
+        .pending_login_finish(str_field(&start, "ceremony"), proof, "pending", NOW)
+        .await
+        .unwrap();
+    assert!(f.auth.session(&token, NOW).await.is_err());
+    assert!(f.auth.fresh_session(&token, NOW).await.is_err());
+    assert!(f.auth.wraps(&token, NOW + CEREMONY - 1).await.is_ok());
+    assert!(f.auth.unlock_finish(&token, NOW + CEREMONY).await.is_err());
+    assert!(f.auth.unlock_session(&token, NOW + CEREMONY).await.is_err());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash=?")
+        .bind(hash(&token))
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "server did not revoke expired incomplete unlock");
 }

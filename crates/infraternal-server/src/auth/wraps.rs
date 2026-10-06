@@ -25,7 +25,7 @@ impl Wrap {
 impl Auth {
     /// Return only authenticated user's envelopes. No PRF output or DEK is accepted.
     pub async fn wraps(&self, token: &str, now: i64) -> Result<Value> {
-        let session = self.session(token, now).await?;
+        let session = self.unlock_session(token, now).await?;
         let rows = sqlx::query("SELECT wraps.kind,wraps.key_id,wraps.blob,passkeys.prf_input FROM wraps LEFT JOIN passkeys ON passkeys.id=wraps.key_id AND passkeys.user_id=wraps.user_id WHERE wraps.user_id=?")
             .bind(session.user_id)
             .fetch_all(&self.pool)
