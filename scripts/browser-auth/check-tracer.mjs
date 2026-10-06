@@ -90,8 +90,19 @@ try {
   await page.reload();
   await page.locator('#login-passkey').waitFor();
   check(await page.locator('#setup-card, #account-id, #device-name').count() === 0, 'configured server showed setup or identity fields');
+  await page.evaluate(() => {
+    const get = navigator.credentials.get.bind(navigator.credentials);
+    document.documentElement.dataset.gets = '0';
+    navigator.credentials.get = options => {
+      document.documentElement.dataset.gets = String(Number(document.documentElement.dataset.gets) + 1);
+      return get(options);
+    };
+  });
   await page.getByRole('button', { name: 'Continue with passkey' }).click();
   await page.locator('#terminal-host').waitFor();
+  const gets = await page.evaluate(() => Number(document.documentElement.dataset.gets));
+  const expected = process.env.AUTH_TEST_PRF_VERSION ? 2 : 1;
+  check(gets === expected, `native prompt count ${gets}, expected ${expected}`);
   const status = await page.evaluate(async () => {
     const post = async (action) => (await fetch('/auth/' + action, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
@@ -99,7 +110,7 @@ try {
     return { status: await post('status'), session: await post('session') };
   });
   check(status.status.setup_required === false && typeof status.session.user_id === 'string', 'authenticated resident session absent');
-  console.log(`tracer + Rust auth: PASS (production UI, resident PRF setup, empty-storage discoverable login, DEK unwrap; Chromium ${browser.version()})`);
+  console.log(`tracer + Rust auth: PASS (production UI, resident PRF setup, empty-storage discoverable login, DEK unwrap, ${gets} native prompt(s); Chromium ${browser.version()})`);
 } finally {
   await context.close();
   child?.stdin.end();
