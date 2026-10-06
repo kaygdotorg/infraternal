@@ -1698,3 +1698,71 @@ async fn enrollment_prf_input_is_user_bound() {
         "PRF input must be per-user"
     );
 }
+
+/// Resident assertions bind the discovered handle to a live credential and latest counter.
+#[tokio::test]
+async fn discoverable_login_handle_credential_counter_and_replay() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let start = f.auth.discoverable_login_start(NOW).await.unwrap();
+    assert_eq!(start["options"]["publicKey"]["allowCredentials"], json!([]));
+    assert_eq!(start["options"]["publicKey"]["extensions"], json!({}));
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    let token = f
+        .auth
+        .login_finish(
+            str_field(&start, "ceremony"),
+            proof.clone(),
+            "resident",
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.auth.session(&token, NOW).await.unwrap().user_id, f.user);
+    assert!(
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "resident", NOW)
+            .await
+            .is_err()
+    );
+    for handle in [
+        Value::Null,
+        json!(B64.encode([1_u8; 15])),
+        json!(B64.encode(Uuid::new_v4().as_bytes())),
+    ] {
+        let start = f.auth.discoverable_login_start(NOW).await.unwrap();
+        let mut proof = f.software.login(&start, ORIGIN, true);
+        proof["response"]["userHandle"] = handle;
+        assert!(
+            f.auth
+                .login_finish(str_field(&start, "ceremony"), proof, "resident", NOW)
+                .await
+                .is_err()
+        );
+    }
+    let start = f.auth.discoverable_login_start(NOW).await.unwrap();
+    let mut stranger = Software::new();
+    let mut proof = stranger.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    assert!(
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "resident", NOW)
+            .await
+            .is_err()
+    );
+    // A new challenge with the same nonzero counter must fail against current storage.
+    f.software.counter = 0;
+    let start = f.auth.discoverable_login_start(NOW).await.unwrap();
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    assert!(
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "resident", NOW)
+            .await
+            .is_err()
+    );
+}

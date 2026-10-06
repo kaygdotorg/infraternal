@@ -75,9 +75,12 @@ enum Authority {
     Add(String),
     Recovery(String),
 }
+enum LoginState {
+    Identified(PasskeyAuthentication, String),
+    Discoverable(DiscoverableAuthentication),
+}
 struct Login {
-    state: PasskeyAuthentication,
-    user: String,
+    state: LoginState,
     expires: i64,
 }
 #[derive(Default)]
