@@ -38,6 +38,18 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         }
     }
     try w.writeAll("\x1bc\x1b[?6l\x1b[r\x1b[?7h\x1b[?2027l");
+    // DECSM stores values independently of live modes. Seed these before
+    // painting, because screen and cursor modes can have destructive effects.
+    const defaults: vt.modes.ModeState = .{};
+    inline for (std.meta.fields(vt.modes.Mode)) |field| {
+        const mode: vt.modes.Mode = @enumFromInt(field.value);
+        const tag = vt.modes.ModeTag.fromMode(mode);
+        const saved = @field(t.modes.saved, field.name);
+        if (saved != @field(defaults.saved, field.name)) {
+            if (tag.ansi) return error.Unrepresentable;
+            try w.print("\x1b[?{d}{c}\x1b[?{d}s\x1b[?{d}{c}", .{ tag.value, @as(u8, if (saved) 'h' else 'l'), tag.value, tag.value, @as(u8, if (defaults.get(mode)) 'h' else 'l') });
+        }
+    }
     for (t.colors.palette.current, 0..) |rgb, i| {
         if (t.colors.palette.mask.isSet(i)) try w.print("\x1b]4;{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{ i, rgb.r, rgb.g, rgb.b });
     }
@@ -537,6 +549,7 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
         }
     }
     if (strict) {
+        if (!std.meta.eql(a.modes.saved, b.modes.saved)) return 6100000;
         if (a.previous_char != b.previous_char) return 6000000;
         for (0..a.cols) |x| {
             if (a.tabstops.get(@intCast(x)) != b.tabstops.get(@intCast(x))) return 6000001;

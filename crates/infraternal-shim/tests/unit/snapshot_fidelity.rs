@@ -287,7 +287,6 @@ fn fidelity_variation_wrap_attributes() {
 }
 
 #[test]
-#[ignore = "R2 red regression; enable with saved-mode restoration"]
 fn fidelity_saved_modes_future_restore() {
     let mut a = Terminal::new(80, 24).unwrap();
     a.process(b"\x1b[?1000h\x1b[?1000s\x1b[?1000lX");
