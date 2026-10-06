@@ -17,9 +17,10 @@ bun run build
 
 Serve `dist/` from the infraternal server. The public `status` action chooses the
 screen before session lookup. When setup is required, enter the current one-time
-token from `infraternal server setup-token`, register a passkey, and save the
-recovery words before finishing setup. Otherwise, choose **Continue with passkey**.
-No account UUID or device name is required. The browser supplies a device label.
+token from `infraternal server setup-token`, choose a username and display name,
+create a passkey, and save the recovery words before opening the terminal.
+Otherwise, choose **Continue with passkey**. No account UUID or device name is
+required; the browser supplies a device label.
 
 Sign-in discovers the resident credential and verifies its signed user handle.
 After authentication, a second local passkey prompt evaluates the credential's
@@ -29,6 +30,56 @@ Prompt cancellation, invalid setup input and server failure have separate guidan
 
 The optional `host` query parameter selects a lowercase UUID host, for example
 `?host=00000000-0000-4000-8000-000000000001`.
+
+## Onboarding and account identity (#32)
+
+First enrollment is a four-step flow: setup token, username and display name,
+passkey, then the 24-word recovery key. The server's `registration-finish`
+request is held until the owner confirms they stored the recovery words. The
+session response carries the username and display name. The username is checked
+as lowercase ASCII `[a-z0-9_-]{2,32}` by both the client and server; the server
+enforces uniqueness and limits display names to 64 Unicode characters.
+
+Returning owners use one primary **Continue with passkey** action with a
+discoverable credential. First enrollment shows the centred glitch welcome for
+2.6 seconds. The faulty-terminal canvas runs behind auth, then fades and releases
+its WebGL context when the terminal takes over. Short waits show no counter; waits
+past 400 ms count actual elapsed time. The account key still follows the existing
+resident-credential and PRF flow described above.
+
+`packages/ui` is the shared AGPL-3.0-only package for spring, tick, glitch,
+count-up, copy feedback, warm tooltips and the faulty-terminal canvas. Its source
+modules hold the motion timings and lifecycle rules. The tracer preloads Geist
+Mono, waits for `document.fonts.load()` (with the mockup's 800 ms fallback), and
+uses `font-display: block` so auth text does not swap from a fallback face.
+
+The production-browser `onboarding.spec.ts` saves dark screenshots for token,
+identity, passkey, recovery, welcome and returning sign-in at 393 × 852 and
+1440 × 900. It checks the welcome block within 1 px of viewport center, checks
+that step transitions add no non-input layout shifts and preserve the reserved
+card height, exercises the 400 ms counter threshold and recovery copy/download
+tick swap (including a rejected clipboard write), and confirms the canvas is
+removed after sign-in. The test uses generated recovery words from the local
+test double; do not use it with a real account.
+
+The full browser run passed four tests with one worker because the specs share
+one mutable test-double process. On Linux 6.12.111 x86_64 (8 vCPUs; load average
+3.56/1.94/1.99 immediately after the run), 30 fresh production surfaces measured
+first-contentful-paint setup p50/p99 66.8/279.5 ms and sign-in 66.2/93.7 ms.
+The screenshot upper bounds were 151.1/367.2 ms for setup and 123/162 ms for
+sign-in; the existing gate requires each p99 to stay below 1,000 ms. Against
+the 639ac27 baseline, FCP medians rose by 9.7 ms and 10.2 ms; setup's p99 was
+191.7 ms higher. Screenshot time includes capture overhead, and this local run
+does not model a phone, network or concurrent users. The existing 500-key
+terminal probe measured p50/p99 15.1/16.7 ms and resume 79.5 ms.
+
+Area self-review checklist: status chooses setup or sign-in; enrollment sends
+identity labels and waits for recovery acknowledgement; username/display limits
+are enforced; resident login and PRF unwrap are unchanged; no recovery phrase is
+written to logs or tracked files; icon-only controls have labels/tooltips; fonts
+and count-up timing follow the approved module contracts; phone/desktop screenshots
+and layout checks are attached to #32. The real Rust router browser check runs
+from the server lane against this production `dist/`.
 
 ## Latency probe
 
@@ -96,8 +147,8 @@ prove the pinned perf-VM or physical-phone budgets in decision 41.
 
 Self-review checked Origin/cookie requests, missing/invalid status rejection,
 no guessed access form during server failure, resident identity without local
-UUID storage, PRF stripping and zeroization, logout after unwrap failure, reused existing
-tracer styles (packages/ui is absent), 16px mobile inputs and explicit screenshots without secret captures.
+UUID storage, PRF stripping and zeroization, logout after unwrap failure, the
+shared UI package, 16px mobile inputs and explicit screenshots without real secret captures.
 
 The server lane also runs `scripts/browser-auth/check-tracer.mjs` against this
 production dist directory and the actual Rust router over private IPC. It passes
