@@ -31,3 +31,8 @@ fn stalled_terminal_never_delays_control_or_sibling_dispatch() {
 fn repeated_tiny_credit_snapshots_preserve_shell_progress() {
     probe("scripts/verify-agent-snapshot.py");
 }
+
+#[test]
+fn two_writers_keep_independent_ack_and_exact_input_after_restart() {
+    probe("scripts/verify-agent-multi.py");
+}
