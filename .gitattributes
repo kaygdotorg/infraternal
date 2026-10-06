@@ -1,2 +1,3 @@
-# Preserve byte-exact terminal recordings without text conversion.
+# Preserve byte-exact VT recordings and fuzz seeds without text conversion.
 crates/infraternal-shim/tests/fixtures/*.vt binary
+fuzz/corpus/shim_frame_decode/* binary
