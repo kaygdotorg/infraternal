@@ -1,5 +1,5 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
-import { init, Terminal } from "../vendor/ghostty-web";
+import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
@@ -38,8 +38,16 @@ export type TerminalTraceHop =
 
 export interface TerminalConfig {
   host: HTMLElement;
+  /** Stage that follows the visual viewport when iOS opens its on-screen keyboard. */
+  screen?: HTMLElement;
   status: HTMLElement;
   hooks?: TerminalHooks;
+  /** Curated theme shared by the floating controls and Ghostty. */
+  theme?: ITheme;
+  onRoundTrip?: (milliseconds: number | undefined) => void;
+  onConnectionChange?: (connected: boolean) => void;
+  onScroll?: (scrolled: boolean) => void;
+  onInputActivity?: () => void;
   traceMockServer?: boolean;
   /** Reattach this tab's owned session using a new writer after a page reload. */
   initialSessionId?: string;
@@ -156,12 +164,16 @@ export class TerminalClient {
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
+  private pingTimer = 0;
+  private nextPingNonce = 0n;
+  private readonly pendingPings = new Map<bigint, number>();
+  private inputModifier: "ctrl" | "alt" | undefined;
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
   private readonly onViewportChange = (): void => this.syncVisualViewport();
 
   private constructor(private readonly config: TerminalConfig, terminal: Terminal) {
     this.terminal = terminal;
-    this.screen = config.host.parentElement ?? config.host;
+    this.screen = config.screen ?? config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
     this.resizeObserver = new ResizeObserver(() => this.scheduleFit());
@@ -176,6 +188,7 @@ export class TerminalClient {
     this.terminal.onData((data) => this.handleInput(data));
     this.terminal.onScroll((offset) => {
       config.host.dataset.scrolled = String(offset !== 0);
+      config.onScroll?.(offset !== 0);
     });
     if (config.initialSessionId && isCanonicalUuid(config.initialSessionId)) {
       // A page reload has no pending-input buffer or writer capability. Start
@@ -198,7 +211,7 @@ export class TerminalClient {
       cursorBlink: true,
       cursorStyle: "bar",
       scrollback: config.scrollbackLimit ?? 10_000,
-      theme: {
+      theme: config.theme ?? {
         background: "#101113",
         foreground: "#e6e7e9",
         cursor: "#c8ceff",
@@ -257,6 +270,19 @@ export class TerminalClient {
     this.terminal.input(data, true);
   }
 
+  /** Applies one sticky mobile modifier to the next terminal input event. */
+  setInputModifier(modifier: "ctrl" | "alt" | null): void {
+    this.inputModifier = modifier ?? undefined;
+  }
+
+  /** Updates both Ghostty's option record and renderer palette without rebuilding the session. */
+  setTheme(theme: ITheme): void {
+    this.config.theme = theme;
+    this.terminal.options.theme = theme;
+    const renderer = (this.terminal as unknown as { renderer?: { setTheme: (next: ITheme) => void } }).renderer;
+    renderer?.setTheme(theme);
+  }
+
   /** Forces a WebSocket close for the opt-in resume probe. */
   forceDrop(): void {
     this.forcedDrop = true;
@@ -266,7 +292,9 @@ export class TerminalClient {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.config.onConnectionChange?.(false);
     window.clearTimeout(this.retryTimer);
+    this.stopPings();
     this.resizeObserver.disconnect();
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
@@ -332,6 +360,8 @@ export class TerminalClient {
       this.decoder = undefined;
       this.attached = false;
       this.attachRequested = false;
+      this.config.onConnectionChange?.(false);
+      this.stopPings();
       const forced = this.forcedDrop;
       this.forcedDrop = false;
       this.config.hooks?.onDisconnected?.(forced);
@@ -395,6 +425,9 @@ export class TerminalClient {
       case "Ping":
         this.sendFrame(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
         return;
+      case "Pong":
+        this.acceptPong(frame.nonce);
+        return;
       case "Close":
         this.setStatus(frame.reason || "The server closed the connection.");
         this.socket?.close();
@@ -425,6 +458,9 @@ export class TerminalClient {
         return;
       case "Ping":
         this.sendFrame(TERMINAL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
+        return;
+      case "Pong":
+        this.acceptPong(frame.nonce);
         return;
       case "Close":
         this.setStatus(frame.reason || "The terminal stream closed.");
@@ -469,6 +505,8 @@ export class TerminalClient {
     this.resendUnacknowledgedInput();
     this.setStatus("");
     this.retryAttempt = 0;
+    this.config.onConnectionChange?.(true);
+    this.startPings();
     this.config.hooks?.onAttached?.(this.connectionIsResume, this);
   }
 
@@ -493,6 +531,15 @@ export class TerminalClient {
 
   private handleInput(data: string): void {
     if (this.closed || !data) return;
+    this.config.onInputActivity?.();
+    const modifier = this.inputModifier;
+    this.inputModifier = undefined;
+    if (modifier === "ctrl" && data.length === 1) {
+      const code = data.toUpperCase().charCodeAt(0);
+      if (code >= 64 && code <= 95) data = String.fromCharCode(code - 64);
+    } else if (modifier === "alt") {
+      data = `\x1b${data}`;
+    }
     const at = performance.now();
     const traceInput = this.config.hooks?.onInput?.(data, at, this.nextInSeq) === true;
     let encoded = this.encoderIntoScratch(data);
@@ -745,6 +792,40 @@ export class TerminalClient {
   private setStatus(message: string): void {
     this.config.status.textContent = message;
     this.config.status.hidden = message.length === 0;
+  }
+
+  /** Starts one immediate RTT sample and then a single bounded sample every two seconds. */
+  private startPings(): void {
+    this.stopPings();
+    if (!this.attached || this.closed) return;
+    const ping = () => {
+      if (!this.attached || this.closed) return;
+      this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
+      const nonce = this.nextPingNonce;
+      if (this.pendingPings.size >= 8) {
+        const oldest = this.pendingPings.keys().next().value as bigint | undefined;
+        if (oldest !== undefined) this.pendingPings.delete(oldest);
+      }
+      const startedAt = performance.now();
+      this.pendingPings.set(nonce, startedAt);
+      this.sendFrame(TERMINAL_STREAM, { type: "Ping", nonce, sentUs: BigInt(Math.round(startedAt * 1000)) });
+    };
+    ping();
+    this.pingTimer = window.setInterval(ping, 2000);
+  }
+
+  private stopPings(): void {
+    window.clearInterval(this.pingTimer);
+    this.pingTimer = 0;
+    this.pendingPings.clear();
+    this.config.onRoundTrip?.(undefined);
+  }
+
+  private acceptPong(nonce: bigint): void {
+    const startedAt = this.pendingPings.get(nonce);
+    if (startedAt === undefined) return;
+    this.pendingPings.delete(nonce);
+    this.config.onRoundTrip?.(Math.max(1, performance.now() - startedAt));
   }
 }
 

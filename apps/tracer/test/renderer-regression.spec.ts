@@ -34,9 +34,20 @@ for (const fixture of terminalFixtures) {
     }).toBe(true);
     const initialMetrics = await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics());
     expect(initialMetrics).toBeDefined();
+    const insets = await page.evaluate(() => {
+      const host = document.querySelector<HTMLElement>("#terminal-host");
+      if (!host) throw new Error("terminal host is missing");
+      const style = getComputedStyle(host);
+      return {
+        outsideWidth: innerWidth - host.clientWidth,
+        outsideHeight: innerHeight - host.clientHeight,
+        paddingWidth: Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight),
+        paddingHeight: Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom),
+      };
+    });
     const targetViewport = {
-      width: Math.ceil(initialMetrics!.cellWidth * 205) + 16,
-      height: Math.ceil(initialMetrics!.cellHeight * 56) + 16,
+      width: Math.ceil(initialMetrics!.cellWidth * 205 + insets.outsideWidth + insets.paddingWidth),
+      height: Math.ceil(initialMetrics!.cellHeight * 56 + insets.outsideHeight + insets.paddingHeight),
     };
     await page.setViewportSize(targetViewport);
     await expect.poll(() => page.evaluate(() => {

@@ -33,6 +33,7 @@ const app = document.querySelector<HTMLElement>("#app") ?? missingMount();
 let activeUserId: string | undefined;
 let checkingResume = false;
 let currentTerminal: TerminalClient | undefined;
+let coreScreen: import("./core-screen").CoreScreen | undefined;
 let performanceProbe: PerformanceProbe | undefined;
 let backdrop: FaultyTerminal | undefined;
 let welcomeEffect: ReturnType<typeof glitchText> | undefined;
@@ -74,10 +75,19 @@ async function showAuthState(setupRequired: boolean): Promise<void> {
   const session = setupRequired ? undefined : await checkSession();
   if (session) {
     activeUserId = session.user_id;
-    showTerminal();
+    await showTerminal(sessionHostname(session));
   } else {
     renderAuth(setupRequired);
   }
+}
+
+/** Narrows additive server metadata from the authenticated session response. */
+type SessionWithHostname = NonNullable<Awaited<ReturnType<typeof checkSession>>> & { hostname?: unknown };
+
+function sessionHostname(session: Awaited<ReturnType<typeof checkSession>>): string | undefined {
+  if (!session) return undefined;
+  const hostname = (session as SessionWithHostname).hostname;
+  return typeof hostname === "string" && hostname.trim() ? hostname.trim() : undefined;
 }
 
 function installForegroundListener(): void {
@@ -109,7 +119,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
     saveBrowserId("tracer.user-id", userId);
     activeUserId = userId;
     if (firstSetup) showWelcome(welcomeName ?? "");
-    else showTerminal();
+    else void showTerminal();
   });
   scheduleBackdrop();
 }
@@ -123,7 +133,7 @@ function showWelcome(displayName: string): void {
   welcomeTimer = window.setTimeout(() => {
     welcomeEffect?.destroy();
     welcomeEffect = undefined;
-    showTerminal();
+    void showTerminal();
   }, 2600);
 }
 
@@ -167,45 +177,44 @@ function stopBackdrop(): void {
   }, 450);
 }
 
-function showTerminal(): void {
+async function showTerminal(serverHostname?: string): Promise<void> {
+  const hostName = serverHostname ?? sessionHostname(await checkSession());
+  if (!hostName) {
+    renderUnavailable("The authenticated session did not include the server hostname.");
+    return;
+  }
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
   welcomeEffect = undefined;
   stopBackdrop();
   currentTerminal?.dispose();
+  coreScreen?.dispose();
   performanceProbe?.dispose();
   currentTerminal = undefined;
+  coreScreen = undefined;
   performanceProbe = undefined;
   const query = new URLSearchParams(location.search);
   const mockMode = query.get("mock") === "1";
   const probeMode = query.get("probe") === "1";
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
-  app.innerHTML = `
-    <section class="terminal-screen" aria-label="Terminal">
-      <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal"></div>
-      <p id="connection-status" class="connection-status" role="status">Starting terminal…</p>
-      <span id="test-double-badge" class="test-double-badge" hidden>TEST DOUBLE</span>
-      <aside id="probe-panel" class="probe-panel" aria-label="Terminal latency probe" hidden>
-        <h2>Latency probe</h2>
-        <label for="probe-count">Synthetic keys</label>
-        <input id="probe-count" type="number" min="1" max="5000" inputmode="numeric" />
-        <div class="probe-actions">
-          <button id="probe-run" type="button">Run probe</button>
-          <button id="probe-drop" type="button">Drop socket</button>
-          <button id="probe-copy" type="button">Copy results</button>
-        </div>
-        <pre id="probe-results" aria-live="polite">Waiting for terminal.</pre>
-        <p id="probe-message" role="status"></p>
-      </aside>
-    </section>`;
-  mustGet<HTMLElement>("#test-double-badge").hidden = !mockMode;
-  const probePanel = mustGet<HTMLElement>("#probe-panel");
-  probePanel.hidden = !probeMode;
-  if (probeMode) performanceProbe = new PerformanceProbe(probePanel, probeCount(query.get("n")));
+  let screen: import("./core-screen").CoreScreen | undefined;
+  try {
+    const { mountCoreScreen } = await import("./core-screen");
+    await document.fonts.load('450 14px "Geist Sans"');
+    screen = mountCoreScreen(app, { hostName, mockMode, probeMode });
+  } catch (error: unknown) {
+    renderUnavailable(safeMessage(error));
+    return;
+  }
+  coreScreen = screen;
+  if (probeMode) performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
+  const probeHooks = performanceProbe?.hooks();
+  // Session continuity across reloads (integration, #34): the tab remembers its
+  // public session id so a reload reattaches to the same terminal.
   const sessionKey = activeUserId ? `tracer.session.${activeUserId}` : undefined;
   const initialSessionId = query.get("session") ?? (sessionKey ? loadTabSession(sessionKey) : undefined);
   const hooks = {
-    ...performanceProbe?.hooks(),
+    ...probeHooks,
     onSessionCreated: (sessionId: string): void => {
       // Public session ids are scoped to the authenticated owner, not input
       // writers. The server still authorizes every attachment [50]. No pending
@@ -215,16 +224,33 @@ function showTerminal(): void {
       url.searchParams.set("session", sessionId);
       history.replaceState(null, "", url);
     },
+    onAttached: (resumed: boolean, terminal: import("./terminal").TerminalClient) => {
+      screen.setConnection(true);
+      probeHooks?.onAttached?.(resumed, terminal);
+    },
+    onDisconnected: (forced: boolean) => {
+      screen.setConnection(false);
+      probeHooks?.onDisconnected?.(forced);
+    },
   };
-  void import("./terminal").then(({ TerminalClient }) => TerminalClient.open({
-    host: mustGet<HTMLElement>("#terminal-host"),
-    status: mustGet<HTMLElement>("#connection-status"),
-    traceMockServer: probeMode && mockMode,
-    ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
-    ...(initialSessionId ? { initialSessionId } : {}),
-    hooks,
-  })).then((client) => {
+  try {
+    const { TerminalClient } = await import("./terminal");
+    const client = await TerminalClient.open({
+      host: screen.terminalHost,
+      screen: screen.stage,
+      status: screen.status,
+      theme: screen.theme(),
+      hooks,
+      onRoundTrip: (milliseconds) => screen?.setRoundTrip(milliseconds),
+      onConnectionChange: (connected) => screen?.setConnection(connected),
+      onScroll: (scrolled) => screen?.setScrolled(scrolled),
+      onInputActivity: () => screen?.onInputActivity(),
+      traceMockServer: probeMode && mockMode,
+      ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
+      ...(initialSessionId ? { initialSessionId } : {}),
+    });
     currentTerminal = client;
+    screen.bindTerminal(client);
     performanceProbe?.bind(client);
     if (mockMode) {
       window.__tracerTestDouble = {
@@ -234,10 +260,10 @@ function showTerminal(): void {
         trace: () => performanceProbe?.traceSamples() ?? [],
       };
     }
-  }).catch((error: unknown) => {
+  } catch (error: unknown) {
     const status = document.querySelector<HTMLElement>("#connection-status");
     if (status) status.textContent = safeMessage(error);
-  });
+  }
 }
 
 function testScrollbackLimit(value: string | null): number | undefined {
@@ -262,6 +288,8 @@ async function checkForegroundSession(): Promise<void> {
       currentTerminal = undefined;
       performanceProbe?.dispose();
       performanceProbe = undefined;
+      coreScreen?.dispose();
+      coreScreen = undefined;
       delete window.__tracerTestDouble;
       activeUserId = undefined;
       renderAuth(false, "Your session ended. Sign in again to reconnect.");
