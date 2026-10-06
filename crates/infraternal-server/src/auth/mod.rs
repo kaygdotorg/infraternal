@@ -5,6 +5,7 @@
 //! owner creation, recovery replacement, passkey limits and capability redemption.
 
 mod crypto;
+mod devices;
 mod recovery;
 mod sessions;
 mod setup;

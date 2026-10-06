@@ -433,6 +433,109 @@ async fn setup_expiry_single_announcement_and_parallel_redemption() {
 }
 
 #[tokio::test]
+async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    assert!(f.auth.session(&random(), NOW).await.is_err());
+    f.auth.session(&f.session, NOW + SESSION - 1).await.unwrap();
+    assert!(
+        f.auth
+            .session(&f.session, NOW + 2 * SESSION - 2)
+            .await
+            .is_ok()
+    );
+    assert!(
+        f.auth
+            .session(&f.session, NOW + 3 * SESSION - 2)
+            .await
+            .is_err()
+    );
+    // New fixture avoids resurrecting an expired record for the device API assertions.
+    let f = fixture().await;
+    let approval = f
+        .auth
+        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .await
+        .unwrap();
+    assert!(
+        f.auth
+            .device_redeem(str_field(&approval, "poll_token"), NOW)
+            .await
+            .is_err()
+    );
+    assert!(
+        f.auth
+            .device_redeem(str_field(&approval, "user_code"), NOW)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        f.auth
+            .device_inspect(&f.session, str_field(&approval, "user_code"), NOW)
+            .await
+            .unwrap()["scopes"],
+        json!(["hosts:read"])
+    );
+    f.auth
+        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+        .await
+        .unwrap();
+    let key = f
+        .auth
+        .device_redeem(str_field(&approval, "poll_token"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.auth.api_authorize(&key, "hosts:read").await.unwrap(),
+        f.user
+    );
+    assert!(
+        f.auth
+            .api_authorize(&key, "terminal:connect")
+            .await
+            .is_err()
+    );
+    assert!(
+        f.auth
+            .device_redeem(str_field(&approval, "poll_token"), NOW)
+            .await
+            .is_err()
+    );
+    assert!(f.auth.add_start(&f.session, NOW + FRESH).await.is_err());
+    f.auth
+        .api_revoke(&f.session, &hash(&key), NOW + 1)
+        .await
+        .unwrap();
+    assert!(f.auth.api_authorize(&key, "hosts:read").await.is_err());
+    assert!(
+        f.auth
+            .device_start("cli", vec!["admin".into()], NOW)
+            .await
+            .is_err()
+    );
+    let approval = f
+        .auth
+        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .await
+        .unwrap();
+    assert!(
+        f.auth
+            .device_approve(&f.session, str_field(&approval, "user_code"), NOW + 600)
+            .await
+            .is_err()
+    );
+    let stored: String = sqlx::query_scalar("SELECT recovery_hash FROM users WHERE id=?")
+        .bind(&f.user)
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert!(stored.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
+    assert!(!stored.contains(&f.words));
+    f.auth.logout(&f.session).await.unwrap();
+    assert!(f.auth.session(&f.session, NOW).await.is_err());
+}
+
+#[tokio::test]
 async fn review_old_words_race_rotation() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
