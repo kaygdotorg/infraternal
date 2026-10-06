@@ -1,7 +1,7 @@
 //! Single-threaded bounded PTY/socket pump; replay precedes live output at one cursor.
 #![forbid(unsafe_code)]
 use crate::{
-    frame::{Decoder, Frame, FrameRef, MAX_FRAME, SEQUENCED_INPUT},
+    frame::{Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT},
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
     terminal::Terminal,
@@ -33,6 +33,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 const CHUNK: usize = 16 * 1024;
+const MAX_PEERS: usize = 32;
+#[path = "inputs.rs"]
+mod inputs;
+use inputs::Inputs;
 /// Startup parameters passed only by the local infraternal agent.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -79,6 +83,9 @@ struct Peer {
     attached: bool,
     caps: u64,
     input_reply: Option<InputReply>,
+    writer: Option<u32>,
+    ack_queued: u64,
+    size: (u16, u16, u16, u16),
     cursor: Option<u64>,
     pending: Vec<u8>,
     written: usize,
@@ -209,8 +216,8 @@ pub fn run(mut config: Config) -> io::Result<()> {
     let mut terminal = Terminal::new(config.cols, config.rows);
     let mut ring = Ring::new(config.ring_capacity);
     let mut input = VecDeque::new();
-    let mut cursors = InputCursors::default();
-    let mut peer: Option<Peer> = None;
+    let mut cursors = Inputs::default();
+    let mut peers: Vec<Peer> = Vec::new();
     let mut exit = None;
     let mut drained = false;
     loop {
@@ -223,65 +230,73 @@ pub fn run(mut config: Config) -> io::Result<()> {
                     .unwrap_or_else(|| -status.signal().unwrap_or(1)),
             );
         }
-        if let Some(p) = &mut peer
-            && p.pending.is_empty()
-            && let Some(reply) = p.input_reply.take()
-        {
-            p.queue(&match reply {
-                InputReply::State => Frame::InputState(cursors.written, cursors.accepted),
-                InputReply::Ack => Frame::InputAck(cursors.written),
-            })?;
-        }
-        if let Some(p) = &mut peer
-            && p.pending.is_empty()
-            && let Some(request) = p.request.take()
-        {
-            match request {
-                Request::Read(seq) => p.cursor = Some(seq),
-                Request::Snapshot => p.snapshot(&terminal, ring.head())?,
-            }
-        }
-        if let Some(p) = &mut peer
-            && p.pending.is_empty()
-            && let Some(seq) = p.cursor
-        {
-            if seq < ring.start() {
-                p.snapshot(&terminal, ring.head())?;
-            } else if seq < ring.head() {
-                let bytes = ring
-                    .read(seq, CHUNK)
-                    .ok_or_else(|| io::Error::other("delivery cursor invariant"))?;
-                p.cursor = Some(seq + bytes.len() as u64);
-                p.queue(&Frame::Output(seq, bytes))?;
-            } else if drained
-                && !p.exited_sent
-                && let Some(status) = exit
+        for p in &mut peers {
+            if p.caps & SEQUENCED_INPUT != 0
+                && p.writer.is_some()
+                && cursors.get(p.writer)?.written > p.ack_queued
+                && p.input_reply.is_none()
             {
-                p.queue(&Frame::Exited(status, ring.head()))?;
-                p.exited_sent = true;
+                p.input_reply = Some(InputReply::Ack);
+            }
+            if p.pending.is_empty()
+                && let Some(reply) = p.input_reply.take()
+            {
+                let state = cursors.get(p.writer)?;
+                p.ack_queued = state.written;
+                p.queue(&match reply {
+                    InputReply::State => Frame::InputState(state.written, state.accepted),
+                    InputReply::Ack => Frame::InputAck(state.written),
+                })?;
+            }
+            if p.pending.is_empty()
+                && let Some(request) = p.request.take()
+            {
+                match request {
+                    Request::Read(seq) => p.cursor = Some(seq),
+                    Request::Snapshot => p.snapshot(&terminal, ring.head())?,
+                }
+            }
+            if p.pending.is_empty()
+                && let Some(seq) = p.cursor
+            {
+                if seq < ring.start() {
+                    p.snapshot(&terminal, ring.head())?;
+                } else if seq < ring.head() {
+                    let bytes = ring
+                        .read(seq, CHUNK)
+                        .ok_or_else(|| io::Error::other("delivery cursor invariant"))?;
+                    p.cursor = Some(seq + bytes.len() as u64);
+                    p.queue(&Frame::Output(seq, bytes))?;
+                } else if drained
+                    && !p.exited_sent
+                    && let Some(status) = exit
+                {
+                    p.queue(&Frame::Exited(status, ring.head()))?;
+                    p.exited_sent = true;
+                }
             }
         }
         // Borrow descriptors only through poll. Every queue and ownership
         // mutation happens after this scope, so replacement cannot leave a
         // PollFd referring to a closed/reused file descriptor.
         let ready = {
+            // A fast viewer permits PTY progress. Lagging viewers catch up from
+            // the ring or a snapshot; when every viewer stalls the old bounded
+            // backpressure rule still applies until their daemon links detach.
             let can_read = !drained
-                && peer.as_ref().is_none_or(|p| {
-                    p.pending.is_empty() && p.cursor.is_some_and(|seq| seq == ring.head())
-                });
+                && (peers.is_empty()
+                    || peers.iter().any(|p| {
+                        p.pending.is_empty() && p.cursor.is_some_and(|seq| seq == ring.head())
+                    }));
             let has_input = !input.is_empty();
-            // At most four borrowed descriptors. Stack storage avoids a heap
-            // allocation on every readiness turn and is dropped before mutation.
-            let mut fds = [
-                PollFd::new(listener.as_fd(), PollFlags::POLLIN),
-                PollFd::new(signals.as_fd(), PollFlags::POLLIN),
-                PollFd::new(listener.as_fd(), PollFlags::empty()),
-                PollFd::new(listener.as_fd(), PollFlags::empty()),
-            ];
-            let mut count = 2;
-            // Omit a disabled PTY: level-triggered HUP would otherwise spin.
-            let pty_index = if can_read || has_input {
-                fds[count] = PollFd::new(
+            // Stack slots preserve the allocation-free readiness loop. Disabled
+            // PTYs are omitted because level-triggered HUP would otherwise spin.
+            let mut fds: [PollFd<'_>; MAX_PEERS + 3] =
+                std::array::from_fn(|_| PollFd::new(listener.as_fd(), PollFlags::empty()));
+            fds[0] = PollFd::new(listener.as_fd(), PollFlags::POLLIN);
+            fds[1] = PollFd::new(signals.as_fd(), PollFlags::POLLIN);
+            if can_read || has_input {
+                fds[2] = PollFd::new(
                     pty.master.as_fd(),
                     (if can_read {
                         PollFlags::POLLIN
@@ -293,13 +308,8 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         PollFlags::empty()
                     }),
                 );
-                count += 1;
-                Some(2)
-            } else {
-                None
-            };
-            let peer_index = if let Some(p) = &peer {
-                let index = count;
+            }
+            for (index, p) in peers.iter().enumerate() {
                 let mut flags = PollFlags::empty();
                 if input.len() < MAX_FRAME {
                     flags |= PollFlags::POLLIN;
@@ -307,28 +317,16 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 if !p.pending.is_empty() {
                     flags |= PollFlags::POLLOUT;
                 }
-                fds[index] = PollFd::new(p.stream.as_fd(), flags);
-                count += 1;
-                Some(index)
-            } else {
-                None
-            };
-            match poll(&mut fds[..count], None::<u16>) {
+                fds[index + 3] = PollFd::new(p.stream.as_fd(), flags);
+            }
+            match poll(&mut fds[..peers.len() + 3], None::<u16>) {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => return Err(e.into()),
             }
-            let flags = |index: Option<usize>| {
-                index
-                    .and_then(|i| fds[i].revents())
-                    .unwrap_or_else(PollFlags::empty)
-            };
-            (
-                flags(Some(0)),
-                flags(Some(1)),
-                flags(pty_index),
-                flags(peer_index),
-            )
+            let flags = |i: usize| fds[i].revents().unwrap_or_else(PollFlags::empty);
+            let peer_flags: [PollFlags; MAX_PEERS] = std::array::from_fn(|i| flags(i + 3));
+            (flags(0), flags(1), flags(2), peer_flags)
         };
         if ready.1.contains(PollFlags::POLLIN) {
             while signals.read_signal().map_err(io::Error::from)?.is_some() {}
@@ -340,7 +338,9 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 Ok((stream, _)) => {
                     let credentials =
                         getsockopt(&stream, PeerCredentials).map_err(io::Error::from)?;
-                    if credentials.uid() == 0 || credentials.uid() == Uid::effective().as_raw() {
+                    if (credentials.uid() == 0 || credentials.uid() == Uid::effective().as_raw())
+                        && peers.len() < MAX_PEERS
+                    {
                         stream.set_nonblocking(true)?;
                         let mut next = Peer {
                             stream,
@@ -348,6 +348,9 @@ pub fn run(mut config: Config) -> io::Result<()> {
                             attached: false,
                             caps: 0,
                             input_reply: None,
+                            writer: Some(0),
+                            ack_queued: 0,
+                            size: (config.cols, config.rows, 0, 0),
                             cursor: None,
                             pending: Vec::new(),
                             written: 0,
@@ -356,7 +359,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
-                            caps: SEQUENCED_INPUT,
+                            caps: SEQUENCED_INPUT | MULTI_WRITER,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -365,8 +368,8 @@ pub fn run(mut config: Config) -> io::Result<()> {
                             head: ring.head(),
                             start: ring.start(),
                         })?;
-                        peer = Some(next);
-                        continue; // old socket readiness cannot apply to new fd
+                        peers.push(next);
+                        continue; // descriptors added after poll have no readiness yet
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -380,13 +383,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 match pty.master.write(bytes) {
                     Ok(n) => {
                         input.drain(..n);
-                        cursors.written += n as u64;
-                        if let Some(p) = &mut peer
-                            && p.caps & SEQUENCED_INPUT != 0
-                            && p.input_reply.is_none()
-                        {
-                            p.input_reply = Some(InputReply::Ack);
-                        }
+                        cursors.advance(n)?;
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                     Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => {
@@ -430,12 +427,14 @@ pub fn run(mut config: Config) -> io::Result<()> {
             }
         }
 
-        let mut disconnect = ready.3.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL);
-        if let Some(p) = &mut peer {
-            if ready.3.contains(PollFlags::POLLOUT) && p.flush().is_err() {
+        let mut disconnects = [false; MAX_PEERS];
+        for (index, p) in peers.iter_mut().enumerate() {
+            let flags = ready.3[index];
+            let mut disconnect = flags.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL);
+            if flags.contains(PollFlags::POLLOUT) && p.flush().is_err() {
                 disconnect = true;
             }
-            if ready.3.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
+            if flags.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
                 let mut bytes = [0; CHUNK];
                 match p.stream.read(&mut bytes) {
                     Ok(0) => disconnect = true,
@@ -472,9 +471,21 @@ pub fn run(mut config: Config) -> io::Result<()> {
                     Err(_) => disconnect = true,
                 }
             }
+            disconnects[index] = disconnect;
         }
-        if disconnect {
-            peer = None;
+        // A reattachment supersedes only the same writer. Legacy writer zero
+        // keeps v1 replacement semantics; selected viewers never evict siblings.
+        for index in (0..peers.len()).rev() {
+            let p = &peers[index];
+            let duplicate = p.attached
+                && p.writer.is_some_and(|id| {
+                    peers[index + 1..]
+                        .iter()
+                        .any(|next| next.attached && next.writer == Some(id))
+                });
+            if disconnects[index] || duplicate {
+                peers.remove(index);
+            }
         }
     }
 }
@@ -487,7 +498,7 @@ fn handle<'a>(
     ring: &Ring,
     config: &mut Config,
     input: &mut VecDeque<u8>,
-    cursors: &mut InputCursors,
+    cursors: &mut Inputs,
     exited: bool,
 ) -> io::Result<bool> {
     let invalid = || {
@@ -502,17 +513,39 @@ fn handle<'a>(
             return Err(invalid());
         }
         p.attached = true;
-        p.caps = caps & SEQUENCED_INPUT;
+        p.caps = caps & (SEQUENCED_INPUT | MULTI_WRITER);
+        if p.caps & MULTI_WRITER != 0 {
+            if p.caps & SEQUENCED_INPUT == 0 {
+                return Err(invalid());
+            }
+            p.writer = None;
+        }
         return Ok(false);
     }
-    if !p.attached {
+    if !p.attached
+        || (p.writer.is_none() && !matches!(&frame, FrameRef::Owned(Frame::SelectWriter(_))))
+    {
         return Err(invalid());
     }
     if let Some((offset, bytes)) = frame.input() {
         if exited || (offset.is_some() != (p.caps & SEQUENCED_INPUT != 0)) {
             return Err(invalid());
         }
-        cursors.accept(offset.unwrap_or(cursors.accepted), bytes, input)?;
+        let writer = p.writer.ok_or_else(invalid)?;
+        let accepted = cursors.get(p.writer)?.accepted;
+        cursors.accept(writer, offset.unwrap_or(accepted), bytes, input)?;
+        if cursors.get(p.writer)?.accepted > accepted {
+            // Only newly accepted input changes the active size [74]. Replayed
+            // duplicate bytes cannot steal the last typist's terminal geometry.
+            let (cols, rows, px_w, px_h) = p.size;
+            if cursors.active_writer != Some(writer) {
+                pty.resize(cols, rows, px_w, px_h)?;
+                terminal.resize(cols, rows);
+                config.cols = cols;
+                config.rows = rows;
+                cursors.active_writer = Some(writer);
+            }
+        }
         if offset.is_some() && p.input_reply.is_none() {
             p.input_reply = Some(InputReply::Ack);
         }
@@ -523,7 +556,7 @@ fn handle<'a>(
             match pty.master.write(first) {
                 Ok(n) => {
                     input.drain(..n);
-                    cursors.written += n as u64;
+                    cursors.advance(n)?;
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(e),
@@ -536,7 +569,11 @@ fn handle<'a>(
         return Err(invalid());
     };
     match frame {
-        Frame::InputStateRequest if p.caps & SEQUENCED_INPUT != 0 => {
+        Frame::SelectWriter(id) if p.caps & MULTI_WRITER != 0 && p.writer.is_none() && id != 0 => {
+            cursors.select(id)?;
+            p.writer = Some(id);
+        }
+        Frame::InputStateRequest if p.caps & SEQUENCED_INPUT != 0 && p.writer.is_some() => {
             p.input_reply = Some(InputReply::State);
         }
         Frame::Resize {
@@ -548,10 +585,14 @@ fn handle<'a>(
             if cols == 0 || rows == 0 || usize::from(cols) * usize::from(rows) > 200_000 {
                 return Err(invalid());
             }
-            pty.resize(cols, rows, px_w, px_h)?;
-            terminal.resize(cols, rows);
-            config.cols = cols;
-            config.rows = rows;
+            p.size = (cols, rows, px_w, px_h);
+            if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
+                pty.resize(cols, rows, px_w, px_h)?;
+                terminal.resize(cols, rows);
+                config.cols = cols;
+                config.rows = rows;
+                cursors.active_writer = p.writer;
+            }
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
             p.request = Some(Request::Read(seq));
@@ -605,3 +646,8 @@ impl InputCursors {
 #[cfg(test)]
 #[path = "../tests/unit/sequenced_input.rs"]
 mod sequenced_checks;
+
+/// Static error copy keeps malformed writer data out of diagnostics.
+fn invalid_input() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "invalid shim writer input")
+}
