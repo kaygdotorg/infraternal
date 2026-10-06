@@ -1,0 +1,38 @@
+[?1049h[22;0;0t[>4;2m[?1h=[?2004h[1;60r[?12h[?12l[22;2t[22;1t[27m[23m[29m[m[H[2J[?25l[60;1H"~/Developer/infraternal/.worktrees/lane-shim/crates/infraternal-shim/tests/fixtures/capture.py" 54 lines, 1750 bytes[1;1H#!/usr/bin/env python3
+"""Capture real full-screen program output at 200x60 for VT comparisons [13]."""
+import fcntl
+import os
+import pathlib
+import pty
+import select
+import signal
+import struct
+import termios
+import time
+
+root = pathlib.Path(__file__).parent
+for name, argv, keys in [
+    ("vim", ["vim", "-u", "NONE", "-i", "NONE", "-n", str(root / "capture.py")], b"Ggg\x1b:q!\r"),
+    ("htop", ["htop", "-p", "1"], b"q"),
+    ("less", ["less", "-R", str(root / "capture.py")], b"Ggq"),
+]:
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 200, 0, 0))
+    pid = os.fork()
+    if pid == 0:[23;9Hos.close(master)[24;9Hos.setsid()[25;9Hfcntl.ioctl(slave, termios.TIOCSCTTY, 0)[26;9Hfor fd in range(3):[27;13Hos.dup2(slave, fd)[28;9Hos.close(slave)[29;9Hos.environ["TERM"] = "xterm-256color"[30;9Hos.execvp(argv[0], argv)
+    os.close(slave)
+    output = bytearray()
+    until = time.monotonic() + 1
+    while time.monotonic() < until:[35;9Hif select.select([master], [], [], .05)[0]:[36;13Houtput.extend(os.read(master, 65536))
+    # Keep the active full-screen state, then collect an independent continuation.
+    (root / (name + ".vt")).write_bytes(output)
+    os.write(master, keys)
+    continuation = bytearray()
+    until = time.monotonic() + .5
+    while time.monotonic() < until:[43;9Hif select.select([master], [], [], .05)[0]:[44;13Htry:[45;17Hcontinuation.extend(os.read(master, 65536))[46;13Hexcept OSError:[47;17Hbreak
+    (root / (name + ".continue.vt")).write_bytes(continuation)
+    try:[50;9Hos.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:[52;9Hpass
+    os.waitpid(pid, 0)
+    os.close(master)
+[94m~                                                                                                                                                                                                       [56;1H~                                                                                                                                                                                                       [57;1H~                                                                                                                                                                                                       [58;1H~                                                                                                                                                                                                       [59;1H~                                                                                                                                                                                                       [1;1H[?25h[?4m

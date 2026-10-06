@@ -14,3 +14,19 @@ unsafe_code = "deny"
 pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
+
+[dependencies]
+alacritty_terminal.workspace = true
+vte.workspace = true
+nix.workspace = true
+
+[dev-dependencies]
+vt100.workspace = true
+
+# Opt-in candidate only: native Ghostty build requires Zig and fetched sources.
+[features]
+bench-ghostty = ["dep:libghostty-vt"]
+
+[dependencies.libghostty-vt]
+workspace = true
+optional = true

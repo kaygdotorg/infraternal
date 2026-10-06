@@ -12,6 +12,8 @@ allow = [
     "AGPL-3.0-only",
     "Apache-2.0",
     "MIT",
+    # LLVM libFuzzer: permissive and AGPL-compatible, harness only.
+    "NCSA",
     "Unicode-3.0",
     # WebAuthn uses MPL-2.0 with secondary GNU licenses; BIP-39 is CC0.
     # BSD-3-Clause and Zlib are permissive transitive crypto/HTTP/SQLite licenses.

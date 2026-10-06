@@ -2,6 +2,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "fuzz",
     "crates/infraternal",
     "crates/infraternal-protocol",
     "crates/infraternal-plugin-api",
@@ -36,6 +37,13 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 serde_cbor_2 = "0.13"
 tower = { version = "0.5", features = ["util"] }
+libghostty-vt = { version = "0.2.2", default-features = false }
+libfuzzer-sys = "0.4"
+vt100 = "0.16"
+vte = "0.15"
+alacritty_terminal = "0.25"
+nix = { version = "0.30", features = ["fs", "term", "process", "signal", "user", "socket", "poll"] }
+infraternal-shim = { version = "0.1.0", path = "crates/infraternal-shim" }
 clap = { version = "4.5", features = ["derive"] }
 
 [workspace.lints.rust]
