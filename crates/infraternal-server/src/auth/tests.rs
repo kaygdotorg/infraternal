@@ -1,0 +1,290 @@
+//! Defensive tests with a real ES256 software authenticator and a browser-side PRF/keywrap double.
+//! No verifier is mocked: CBOR attestation, client data, flags and signatures enter webauthn-rs.
+use super::*;
+use aes_gcm::{
+    Aes256Gcm, KeyInit, Nonce,
+    aead::{Aead, Payload},
+};
+use hkdf::Hkdf;
+use openssl::{
+    bn::{BigNum, BigNumContext},
+    ec::{EcGroup, EcKey},
+    hash::MessageDigest,
+    nid::Nid,
+    pkey::{PKey, Private},
+    sign::Signer,
+};
+use serde_cbor_2::Value as Cbor;
+use sha2::{Digest, Sha256};
+use sqlx::sqlite::SqlitePoolOptions;
+use std::collections::BTreeMap;
+
+static SERIAL: Mutex<()> = Mutex::const_new(());
+const NOW: i64 = 1_800_000_000;
+const ORIGIN: &str = "https://auth.example.test";
+
+struct Software {
+    key: PKey<Private>,
+    id: Vec<u8>,
+    prf_key: PKey<Private>,
+    counter: u32,
+}
+impl Software {
+    fn new() -> Self {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        Self {
+            key: PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap(),
+            id: rand::random::<[u8; 32]>().to_vec(),
+            prf_key: PKey::hmac(&rand::random::<[u8; 32]>()).unwrap(),
+            counter: 0,
+        }
+    }
+    fn client_data(start: &Value, kind: &str, origin: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({"type":kind,"challenge":start["options"]["publicKey"]["challenge"],"origin":origin,"crossOrigin":false})).unwrap()
+    }
+    fn auth_data(&self, flags: u8) -> Vec<u8> {
+        let mut data = Sha256::digest(b"auth.example.test").to_vec();
+        data.push(flags);
+        data.extend_from_slice(&self.counter.to_be_bytes());
+        data
+    }
+    fn registration(&self, start: &Value, origin: &str, uv: bool) -> Value {
+        assert_eq!(
+            start["options"]["publicKey"]["authenticatorSelection"]["residentKey"],
+            "required"
+        );
+        assert_eq!(
+            start["options"]["publicKey"]["authenticatorSelection"]["userVerification"],
+            "required"
+        );
+        let ec = self.key.ec_key().unwrap();
+        let mut x = BigNum::new().unwrap();
+        let mut y = BigNum::new().unwrap();
+        ec.public_key()
+            .affine_coordinates_gfp(
+                ec.group(),
+                &mut x,
+                &mut y,
+                &mut BigNumContext::new().unwrap(),
+            )
+            .unwrap();
+        let key = Cbor::Map(BTreeMap::from([
+            (Cbor::Integer(1), Cbor::Integer(2)),
+            (Cbor::Integer(3), Cbor::Integer(-7)),
+            (Cbor::Integer(-1), Cbor::Integer(1)),
+            (Cbor::Integer(-2), Cbor::Bytes(x.to_vec_padded(32).unwrap())),
+            (Cbor::Integer(-3), Cbor::Bytes(y.to_vec_padded(32).unwrap())),
+        ]));
+        let mut data = self.auth_data(if uv { 0x45 } else { 0x41 });
+        data.extend_from_slice(&[0; 16]);
+        data.extend_from_slice(&u16::try_from(self.id.len()).unwrap().to_be_bytes());
+        data.extend_from_slice(&self.id);
+        data.extend_from_slice(&serde_cbor_2::to_vec(&key).unwrap());
+        let attestation = Cbor::Map(BTreeMap::from([
+            (Cbor::Text("fmt".into()), Cbor::Text("none".into())),
+            (Cbor::Text("attStmt".into()), Cbor::Map(BTreeMap::new())),
+            (Cbor::Text("authData".into()), Cbor::Bytes(data)),
+        ]));
+        json!({"id":B64.encode(&self.id),"rawId":B64.encode(&self.id),"type":"public-key","response":{"clientDataJSON":B64.encode(Self::client_data(start,"webauthn.create",origin)),"attestationObject":B64.encode(serde_cbor_2::to_vec(&attestation).unwrap()),"transports":["internal"]},"extensions":{"credProps":{"rk":true}}})
+    }
+    fn login(&mut self, start: &Value, origin: &str, uv: bool) -> Value {
+        assert_eq!(
+            start["options"]["publicKey"]["userVerification"],
+            "required"
+        );
+        self.counter += 1;
+        let data = self.auth_data(if uv { 5 } else { 1 });
+        let client = Self::client_data(start, "webauthn.get", origin);
+        let mut message = data.clone();
+        message.extend_from_slice(&Sha256::digest(&client));
+        let mut signer = Signer::new(MessageDigest::sha256(), &self.key).unwrap();
+        signer.update(&message).unwrap();
+        json!({"id":B64.encode(&self.id),"rawId":B64.encode(&self.id),"type":"public-key","response":{"clientDataJSON":B64.encode(client),"authenticatorData":B64.encode(data),"signature":B64.encode(signer.sign_to_vec().unwrap()),"userHandle":null},"extensions":{}})
+    }
+    fn prf(&self, start: &Value) -> Vec<u8> {
+        let salt = B64
+            .decode(
+                start["options"]["publicKey"]["extensions"]["prf"]["eval"]["first"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+        // The software client applies WebAuthn's PRF domain prefix before hmac-secret.
+        let mut input = b"WebAuthn PRF\0".to_vec();
+        input.extend_from_slice(&salt);
+        let mut signer = Signer::new(MessageDigest::sha256(), &self.prf_key).unwrap();
+        signer.update(&Sha256::digest(&input)).unwrap();
+        signer.sign_to_vec().unwrap()
+    }
+}
+fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
+    v[key].as_str().unwrap()
+}
+fn aad(user: &str, kind: &str) -> Vec<u8> {
+    format!("infraternal/keywrap/v1|{user}|{kind}").into_bytes()
+}
+fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
+    let salt = rand::random::<[u8; 32]>();
+    let nonce = rand::random::<[u8; 12]>();
+    let aad = aad(user, kind);
+    let mut key = [0; 32];
+    Hkdf::<Sha256>::new(Some(&salt), ikm)
+        .expand(&aad, &mut key)
+        .unwrap();
+    let ciphertext = Aes256Gcm::new_from_slice(&key)
+        .unwrap()
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: dek,
+                aad: &aad,
+            },
+        )
+        .unwrap();
+    Wrap {
+        salt: B64.encode(salt),
+        nonce: B64.encode(nonce),
+        ciphertext: B64.encode(ciphertext),
+    }
+}
+fn unwrap_browser(
+    ikm: &[u8],
+    wrap: &Wrap,
+    user: &str,
+    kind: &str,
+) -> std::result::Result<Vec<u8>, aes_gcm::Error> {
+    let salt = B64.decode(&wrap.salt).unwrap();
+    let nonce = B64.decode(&wrap.nonce).unwrap();
+    let ciphertext = B64.decode(&wrap.ciphertext).unwrap();
+    let aad = aad(user, kind);
+    let mut key = [0; 32];
+    Hkdf::<Sha256>::new(Some(&salt), ikm)
+        .expand(&aad, &mut key)
+        .unwrap();
+    Aes256Gcm::new_from_slice(&key).unwrap().decrypt(
+        Nonce::from_slice(&nonce),
+        Payload {
+            msg: &ciphertext,
+            aad: &aad,
+        },
+    )
+}
+fn recovery_ikm(words: &str) -> Vec<u8> {
+    bip39::Mnemonic::parse_in(bip39::Language::English, words)
+        .unwrap()
+        .to_entropy()
+}
+struct Fixture {
+    auth: Auth,
+    software: Software,
+    user: String,
+    session: String,
+    words: String,
+    dek: [u8; 32],
+}
+async fn empty() -> (Auth, String) {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let auth = Auth::new(pool, "auth.example.test", ORIGIN).await.unwrap();
+    let mut token = String::new();
+    auth.bootstrap(NOW, |banner| token = banner.lines().nth(1).unwrap().into())
+        .await
+        .unwrap();
+    (auth, token)
+}
+async fn fixture() -> Fixture {
+    let (auth, token) = empty().await;
+    let start = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let user = str_field(&start, "user_id").to_owned();
+    let words = str_field(&start, "recovery_words").to_owned();
+    let software = Software::new();
+    let dek = rand::random::<[u8; 32]>();
+    let pw = browser_wrap(&software.prf(&start), &dek, &user, "passkey");
+    let rw = browser_wrap(&recovery_ikm(&words), &dek, &user, "recovery");
+    let session = auth
+        .registration_finish(
+            str_field(&start, "ceremony"),
+            software.registration(&start, ORIGIN, true),
+            pw,
+            Some(rw),
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert!(auth.setup_start(&token, "attacker", NOW).await.is_err());
+    Fixture {
+        auth,
+        software,
+        user,
+        session,
+        words,
+        dek,
+    }
+}
+async fn finish_replacement(f: &Fixture, start: &Value, software: &Software, now: i64) -> String {
+    let old: Wrap = serde_json::from_value(start["old_recovery_wrap"].clone()).unwrap();
+    let dek = unwrap_browser(&recovery_ikm(&f.words), &old, &f.user, "recovery").unwrap();
+    assert_eq!(dek, f.dek);
+    let pw = browser_wrap(&software.prf(start), &dek, &f.user, "passkey");
+    let rw = browser_wrap(
+        &recovery_ikm(str_field(start, "recovery_words")),
+        &dek,
+        &f.user,
+        "recovery",
+    );
+    f.auth
+        .registration_finish(
+            str_field(start, "ceremony"),
+            software.registration(start, ORIGIN, true),
+            pw,
+            Some(rw),
+            now,
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn setup_expiry_single_announcement_and_parallel_redemption() {
+    let _guard = SERIAL.lock().await;
+    let (auth, token) = empty().await;
+    auth.bootstrap(NOW, |_| panic!("setup token announced twice"))
+        .await
+        .unwrap();
+    assert!(auth.setup_start(&token, "owner", NOW + DAY).await.is_err());
+    let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let b = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let software = Software::new();
+    let dek = rand::random::<[u8; 32]>();
+    for (start, succeeds) in [(&a, true), (&b, false)] {
+        let user = str_field(start, "user_id");
+        let pw = browser_wrap(&software.prf(start), &dek, user, "passkey");
+        let rw = browser_wrap(
+            &recovery_ikm(str_field(start, "recovery_words")),
+            &dek,
+            user,
+            "recovery",
+        );
+        let result = auth
+            .registration_finish(
+                str_field(start, "ceremony"),
+                software.registration(start, ORIGIN, true),
+                pw,
+                Some(rw),
+                NOW,
+            )
+            .await;
+        assert_eq!(result.is_ok(), succeeds);
+    }
+    auth.bootstrap(NOW + 2 * DAY, |_| panic!("owner caused reannouncement"))
+        .await
+        .unwrap();
+    let owners: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE owner=1")
+        .fetch_one(&auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(owners, 1);
+}
