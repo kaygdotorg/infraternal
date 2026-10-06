@@ -12,6 +12,9 @@ export default defineConfig({
   use: {
     ...devices["Desktop Chrome"],
     baseURL: "http://localhost:4173",
+    launchOptions: {
+      args: (process.env.TRACER_CHROMIUM_FLAGS ?? "").split(/\s+/).filter(Boolean),
+    },
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },

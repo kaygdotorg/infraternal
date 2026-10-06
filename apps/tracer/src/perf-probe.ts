@@ -1,14 +1,33 @@
 /** Measures synthetic terminal keydown-to-paint latency and forced-drop recovery. */
-import type { TerminalClient, TerminalHooks } from "./terminal";
+import type { TerminalClient, TerminalHooks, TerminalTraceHop } from "./terminal";
 
 const KEY_SET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const MAX_PROBE_KEYS = 5_000;
 const ECHO_TIMEOUT_MS = 15_000;
 
 interface ProbeSample {
+  id: string | undefined;
   startedAt: number;
   kind: "key" | "resume";
+  stages: Partial<Record<ProbeStage, number>>;
 }
+
+type ProbeStage = "keydown" | "onData" | TerminalTraceHop;
+
+export interface ProbeTraceSample {
+  id: string;
+  stages: Partial<Record<ProbeStage, number>>;
+}
+
+const BROWSER_HOPS: ReadonlyArray<readonly [string, ProbeStage, ProbeStage]> = [
+  ["keydown → onData", "keydown", "onData"],
+  ["onData → encode", "onData", "encode"],
+  ["encode → ws.send", "encode", "wsSend"],
+  ["ws.onmessage → decode", "wsMessage", "decode"],
+  ["decode → term.write", "decode", "termWrite"],
+  ["term.write → callback", "termWrite", "writeCallback"],
+  ["callback → paint rAF", "writeCallback", "paint"],
+];
 
 interface SampleQueue {
   samples: ProbeSample[];
@@ -20,6 +39,8 @@ export class PerformanceProbe {
   private terminal: TerminalClient | undefined;
   private readonly pending = new Map<number, SampleQueue>();
   private readonly latencies: number[] = [];
+  private readonly samples: ProbeSample[] = [];
+  private readonly samplesById = new Map<string, ProbeSample>();
   private readonly countInput: HTMLInputElement;
   private readonly runButton: HTMLButtonElement;
   private readonly dropButton: HTMLButtonElement;
@@ -58,6 +79,8 @@ export class PerformanceProbe {
     return {
       onAttached: (resumed, terminal) => this.onAttached(resumed, terminal),
       onDisconnected: (forced) => this.onDisconnected(forced),
+      onInput: (data, at, sequence) => this.onInput(data, at, sequence),
+      onTrace: (id, hop, at) => this.onTrace(id, hop, at),
       onPaintedOutput: (bytes, at) => this.onPaintedOutput(bytes, at),
     };
   }
@@ -72,11 +95,19 @@ export class PerformanceProbe {
     window.clearTimeout(this.quietTimer);
     document.removeEventListener("keydown", this.onKeydown, true);
     this.pending.clear();
+    this.samplesById.clear();
   }
 
   private readonly onKeydown = (event: KeyboardEvent): void => {
     if (!this.syntheticKey || event.key !== this.syntheticKey) return;
-    this.syntheticSample = { startedAt: performance.now(), kind: "key" };
+    const startedAt = performance.now();
+    this.syntheticSample = {
+      id: this.terminal?.inputSequence.toString(),
+      startedAt,
+      kind: "key",
+      stages: { keydown: startedAt },
+    };
+    this.samples.push(this.syntheticSample);
     this.enqueue(event.key, this.syntheticSample);
     event.preventDefault();
   };
@@ -97,6 +128,8 @@ export class PerformanceProbe {
     window.clearTimeout(this.timeout);
     this.pending.clear();
     this.latencies.length = 0;
+    this.samples.length = 0;
+    this.samplesById.clear();
     this.runTarget = count;
     this.runActive = true;
     this.resumeDuration = undefined;
@@ -118,9 +151,11 @@ export class PerformanceProbe {
       try {
         terminal.injectInput(key);
       } catch {
+        this.syntheticSample = undefined;
         this.failRun("Terminal input is paused; wait for the server acknowledgement and try again.");
         return;
       }
+      this.syntheticSample = undefined;
     }
 
     this.timeout = window.setTimeout(() => this.finishRun(true), ECHO_TIMEOUT_MS);
@@ -153,7 +188,7 @@ export class PerformanceProbe {
     this.waitForOutputQuiet();
     if (resumed && this.resumeStartedAt !== undefined && !this.resumeMarkerSent) {
       this.resumeMarkerSent = true;
-      const sample: ProbeSample = { startedAt: this.resumeStartedAt, kind: "resume" };
+      const sample: ProbeSample = { id: undefined, startedAt: this.resumeStartedAt, kind: "resume", stages: {} };
       this.enqueue("~", sample);
       try {
         terminal.injectInput("~");
@@ -176,6 +211,7 @@ export class PerformanceProbe {
       }
       queue.next += 1;
       if (queue.next >= queue.samples.length) this.pending.delete(byte);
+      sample.stages.paint = paintedAt;
       const duration = Math.max(0, paintedAt - sample.startedAt);
       if (sample.kind === "resume") {
         this.resumeDuration = duration;
@@ -195,6 +231,28 @@ export class PerformanceProbe {
     const queue = this.pending.get(byte) ?? { samples: [], next: 0 };
     queue.samples.push(sample);
     this.pending.set(byte, queue);
+  }
+
+  /** Attaches the byte-stream sequence as a stable key ID at Ghostty's onData boundary. */
+  private onInput(data: string, at: number, sequence: bigint): boolean {
+    const sample = this.syntheticSample;
+    if (!sample || sample.kind !== "key" || data.length !== 1) return false;
+    const id = sequence.toString();
+    sample.id = id;
+    sample.stages.onData = at;
+    this.samplesById.set(id, sample);
+    return true;
+  }
+
+  private onTrace(id: string, hop: TerminalTraceHop, at: number): void {
+    const sample = this.samplesById.get(id);
+    if (sample) sample.stages[hop] = at;
+  }
+
+  traceSamples(): ProbeTraceSample[] {
+    return this.samples.flatMap((sample) => sample.id === undefined
+      ? []
+      : [{ id: sample.id, stages: { ...sample.stages } }]);
   }
 
   private finishRun(timedOut: boolean): void {
@@ -234,6 +292,7 @@ export class PerformanceProbe {
       `p50: ${format(percentile(sorted, 0.5))} ms`,
       `p95: ${format(percentile(sorted, 0.95))} ms`,
       `p99: ${format(percentile(sorted, 0.99))} ms`,
+      ...this.renderHopReport(),
       `Time to resume: ${resume}`,
     ].join("\n");
     this.results.textContent = this.lastReport;
@@ -264,6 +323,32 @@ export class PerformanceProbe {
       this.quiet = true;
       this.syncButtons();
     }, 100);
+  }
+
+  private renderHopReport(): string[] {
+    const lines: string[] = [];
+    for (const [label, from, to] of BROWSER_HOPS) {
+      const durations = this.samples.flatMap((sample) => {
+        const start = sample.stages[from];
+        const end = sample.stages[to];
+        return sample.kind === "key" && start !== undefined && end !== undefined
+          ? [Math.max(0, end - start)]
+          : [];
+      }).sort((left, right) => left - right);
+      if (durations.length === 0) continue;
+      lines.push(`${label}: p50 ${format(percentile(durations, 0.5))} ms, p99 ${format(percentile(durations, 0.99))} ms`);
+    }
+    const sendToMessage = this.samples.flatMap((sample) => {
+      const start = sample.stages.wsSend;
+      const end = sample.stages.wsMessage;
+      return sample.kind === "key" && start !== undefined && end !== undefined
+        ? [Math.max(0, end - start)]
+        : [];
+    }).sort((left, right) => left - right);
+    if (sendToMessage.length > 0) {
+      lines.push(`ws.send → ws.onmessage: p50 ${format(percentile(sendToMessage, 0.5))} ms, p99 ${format(percentile(sendToMessage, 0.99))} ms (includes the double and both local socket legs)`);
+    }
+    return lines;
   }
 }
 

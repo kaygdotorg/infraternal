@@ -1,6 +1,6 @@
 /** Renders first-run and login screens, then hands an authenticated user to the terminal. */
 import { AuthError, checkSession, loginWithPasskey, registerOwner } from "./auth";
-import { PerformanceProbe } from "./perf-probe";
+import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
 import { TerminalClient } from "./terminal";
 
 declare global {
@@ -8,6 +8,7 @@ declare global {
     __tracerTestDouble?: {
       isConnected: () => boolean;
       screenText: () => string;
+      trace: () => ProbeTraceSample[];
     };
   }
 }
@@ -195,6 +196,7 @@ function showTerminal(): void {
   void TerminalClient.open({
     host: mustGet("#terminal-host"),
     status: mustGet("#connection-status"),
+    trace: probeMode,
     ...(hooks ? { hooks } : {}),
   }).then((client) => {
     currentTerminal = client;
@@ -203,6 +205,7 @@ function showTerminal(): void {
       window.__tracerTestDouble = {
         isConnected: () => currentTerminal?.isConnected === true,
         screenText: () => currentTerminal?.readScreenText() ?? "",
+        trace: () => performanceProbe?.traceSamples() ?? [],
       };
     }
   }).catch((error: unknown) => {
