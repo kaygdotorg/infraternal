@@ -349,3 +349,19 @@ fn fidelity_fresh_c_redraw_default_is_explicitly_rejected() {
         "RIS changes the fresh C redraw default; faithful snapshot must reject"
     );
 }
+
+#[test]
+#[ignore = "R4 red regression; enable with ISO protection restoration"]
+fn fidelity_iso_protection_erase() {
+    let mut a = reset_terminal(80, 24).unwrap();
+    a.process(b"\x1bVX\x1bW\r");
+    let mut b = reset_terminal(80, 24).unwrap();
+    b.process(&a.snapshot().unwrap());
+    a.process(b"\x1b[X");
+    b.process(b"\x1b[X");
+    assert_eq!(
+        a.engine.state_difference(&b.engine),
+        0,
+        "ISO protected erase continuation"
+    );
+}
