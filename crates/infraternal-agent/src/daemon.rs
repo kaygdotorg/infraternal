@@ -413,7 +413,17 @@ async fn terminal(
                             Command::Resize(cols, rows, px_w, px_h) => peer.send(&Shim::Resize {cols, rows, px_w, px_h}).await?,
                             Command::Credit(_) => return Err(sessions::invalid("unexpected credit dispatch")),
                         }
-                        if detached { session = None; output.retry_recovery(); }
+                        if detached {
+                            // The shim has one peer. Reconnecting can replace
+                            // this socket before it reads an already-written
+                            // command. An ordered State reply proves input was
+                            // accepted (or resize handled) before peer loss;
+                            // accepted input survives until the PTY writes it.
+                            let written = input_state(peer).await?;
+                            emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
+                            session = None;
+                            output.retry_recovery();
+                        }
                     }
                 }
             }
