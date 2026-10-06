@@ -564,3 +564,24 @@ fn fidelity_charset_mapped_wide_space_is_explicitly_rejected() {
         "rejection leaves source intact"
     );
 }
+
+#[test]
+#[ignore = "inherited protection with off-mode red regression; enable with explicit rejection"]
+fn fidelity_inherited_protection_off_mode_is_explicitly_rejected() {
+    let prefix = b"\x1bV\x1b[?47h";
+    let mut a = reset_terminal(12, 5).unwrap();
+    a.process(prefix);
+    assert!(
+        matches!(a.snapshot(), Err(error) if error.kind() == std::io::ErrorKind::Unsupported),
+        "protected cursor inherited into an off-mode screen needs explicit import"
+    );
+    let mut control = reset_terminal(12, 5).unwrap();
+    control.process(prefix);
+    a.process(b"X");
+    control.process(b"X");
+    assert_eq!(
+        a.engine.state_difference(&control.engine),
+        0,
+        "rejection preserves inherited protection"
+    );
+}
