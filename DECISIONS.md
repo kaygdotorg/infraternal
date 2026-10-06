@@ -295,3 +295,21 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 73. **Type.** Geist Mono for the terminal and for code. One sans for the UI,
     chosen by eye from mockups (licensed under OFL or similar, so it is
     compatible with AGPL).
+74. **Shared sessions size like tmux.** When several devices attach to one
+    session, the size of the device that typed last wins (tmux's default
+    `window-size latest`). The other devices show the same screen, scaled to
+    fit.
+75. **Nothing depends on the browser.** Each session, each SSH connection
+    and each job starts and runs on the server side: in an agent, which can
+    be the server's embedded agent. Hosts without an agent (routers,
+    appliances) get their SSH session in a shim in the embedded agent, with
+    the same persistence and resume. Browsers, CLIs and apps only subscribe
+    and send input. When you close every client, nothing changes:
+    notifications still come from the server.
+76. **Restore after a reboot.** When a host reboots, its sessions are gone.
+    infraternal offers to reopen the same tabs in the same directories, and
+    the old scrollback stays visible above them, read-only.
+77. **Merging** (changes decision 39). Claude merges lanes into `dev` after
+    an independent review, green gates and its own check. Each merge has a
+    summary on its issue and a new preview. `main` only gets stable builds,
+    and the owner has the final say there.
