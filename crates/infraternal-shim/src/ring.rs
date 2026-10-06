@@ -61,3 +61,7 @@ impl Ring {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/ring.rs"]
+mod checks;
