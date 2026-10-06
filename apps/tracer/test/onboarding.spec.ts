@@ -6,6 +6,51 @@ const viewports = [
   { id: "desktop", width: 1440, height: 900 },
 ] as const;
 
+test("invalid setup token stays on step 1 with focused guidance", async ({ page }, testInfo) => {
+  test.setTimeout(60_000);
+  const context = page.context();
+  await context.request.post("/__mock/reset");
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "no-preference" });
+  await page.goto("/?mock=1");
+  await expect(page.getByRole("heading", { name: "Make this server yours" })).toBeVisible();
+
+  // Hold the validation response long enough to check the 400 ms count-up threshold.
+  await page.route("**/auth/setup-check", async (route) => {
+    await page.waitForTimeout(900);
+    await route.continue();
+  });
+  await page.locator("#setup-token").fill("definitely-wrong-token");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.waitForTimeout(180);
+  await expect(page.getByRole("heading", { name: "Make this server yours" })).toBeVisible();
+  await expect(page.locator("#setup-next .busy-count")).toBeHidden();
+  await page.waitForTimeout(300);
+  await expect(page.locator("#setup-next .busy-count")).toBeVisible();
+  await expect(page.locator("#setup-next .busy-count")).toContainText(/\d+\.\d+s/);
+  await expect(page.locator("#setup-token-error")).toContainText(
+    "That token doesn't match. Run infraternal server setup-token on the server.",
+  );
+  await expect(page.locator("#setup-token")).toBeFocused();
+  await expect(page.locator("#setup-username")).toHaveCount(0);
+
+  const screenshots: string[] = [];
+  for (const viewport of viewports) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    const path = testInfo.outputPath(`step-1-wrong-token-${viewport.id}.png`);
+    await page.screenshot({ path, fullPage: true, animations: "disabled", mask: [page.locator("#setup-token")] });
+    await testInfo.attach(`step-1-wrong-token-${viewport.id}`, { path, contentType: "image/png" });
+    screenshots.push(path);
+  }
+
+  const setupResponse = await context.request.get("/__mock/setup-token");
+  const setupBody = await setupResponse.json() as { setup_token: string };
+  await page.locator("#setup-token").fill(setupBody.setup_token);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("heading", { name: "Who are you?" })).toBeVisible();
+  console.log(`SETUP_TOKEN_ERROR_SCREENSHOTS ${screenshots.join(" ")}`);
+});
+
 test("setup, recovery acknowledgement, welcome and returning sign-in match the browser contract", async ({ page }, testInfo) => {
   test.setTimeout(60_000);
   const context = page.context();
