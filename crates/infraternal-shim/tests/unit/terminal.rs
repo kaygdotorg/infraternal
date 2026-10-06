@@ -6,7 +6,7 @@ mod tests {
     use super::*;
     #[test]
     fn fixtures_and_continuations_repaint() {
-        for name in ["vim", "htop", "less"] {
+        for name in ["vim", "htop", "less", "unicode"] {
             let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
             let bytes = std::fs::read(dir.join(format!("{name}.vt"))).unwrap();
             let continuation = std::fs::read(dir.join(format!("{name}.continue.vt"))).unwrap();
@@ -75,5 +75,135 @@ mod tests {
             b.process(suffix);
             compare(&a, &b, "partial");
         }
+    }
+    #[test]
+    fn retained_alternate_saved_cursor_and_keyboard_stack_continue() {
+        let mut a = Terminal::new(200, 60).unwrap();
+        a.process(b"PRIMARY\x1b[?47h\x1b[31mALT\x1b7\x1b[?47l");
+        for flags in 1..=12 {
+            a.process(format!("\x1b[>{flags}u").as_bytes());
+        }
+        let mut b = Terminal::new(200, 60).unwrap();
+        b.process(&a.snapshot().unwrap());
+        compare(&a, &b, "inactive alternate and wrapped keyboard stack");
+        for _ in 0..10 {
+            a.process(b"\x1b[<u");
+            b.process(b"\x1b[<u");
+            compare(&a, &b, "keyboard pop continuation");
+        }
+        let suffix = b"\x1b[?47h\x1b8Z\x1b[?47l";
+        a.process(suffix);
+        b.process(suffix);
+        compare(&a, &b, "inactive alternate saved cursor continuation");
+    }
+    #[test]
+    fn pending_wrap_and_saved_wrap_continue_with_wide_cells() {
+        for prefix in [
+            "\x1b[1;200HX",
+            "\x1b[1;199H界",
+            "\x1b[1;199H界\x1b7\x1b[5;4H",
+            "\x1b[?2027h\x1b[1;199H👩‍💻",
+            "\x1b[?69h\x1b[4;40s\x1b[1;40HX\x1b7\x1b[5;4H",
+            "\x1b[1;200HX\x1b[?7l",
+        ] {
+            let mut a = Terminal::new(200, 60).unwrap();
+            a.process(prefix.as_bytes());
+            let mut b = Terminal::new(200, 60).unwrap();
+            b.process(&a.snapshot().unwrap());
+            compare(&a, &b, "wide pending wrap");
+            let suffix = "e\u{301}界\x1b8Z".as_bytes();
+            a.process(suffix);
+            b.process(suffix);
+            compare(
+                &a,
+                &b,
+                &format!("wide saved wrap continuation for {prefix:?}"),
+            );
+        }
+    }
+    #[test]
+    fn long_unfinished_hyperlink_and_control_strings_continue() {
+        for opener in [
+            b"\x1b]8;id=carry;https://example.org/".as_slice(),
+            b"\x1b]2;",
+        ] {
+            let mut prefix = opener.to_vec();
+            prefix.extend_from_slice(&vec![b'x'; 8000]);
+            let mut a = Terminal::new(200, 60).unwrap();
+            a.process(&prefix);
+            let mut b = Terminal::new(200, 60).unwrap();
+            b.process(&a.snapshot().unwrap());
+            a.process(b"\x1b\\linked");
+            b.process(b"\x1b\\linked");
+            compare(&a, &b, "long unfinished OSC");
+        }
+        for (prefix, suffix) in [
+            (b"hello\x1bP1$q".as_slice(), b"m\x1b\\X".as_slice()),
+            (b"hello\x1b_ignored", b"\x1b\\X"),
+            (b"hello\x1b]8;;https://example.org", b"\x07X"),
+        ] {
+            let mut a = Terminal::new(200, 60).unwrap();
+            a.process(prefix);
+            let mut b = Terminal::new(200, 60).unwrap();
+            b.process(&a.snapshot().unwrap());
+            a.process(suffix);
+            b.process(suffix);
+            compare(&a, &b, "control string carry");
+        }
+    }
+    #[test]
+    fn unfinished_sequence_over_frame_limit_fails_without_losing_runtime_state() {
+        let mut a = Terminal::new(200, 60).unwrap();
+        a.process(b"\x1b]2;");
+        a.process(&vec![b'x'; MAX_FRAME]);
+        assert!(a.snapshot().is_err());
+        a.process(b"\x1b\\OK");
+        let mut b = Terminal::new(200, 60).unwrap();
+        b.process(&a.snapshot().unwrap());
+        compare(&a, &b, "oversized carry completed");
+    }
+    #[test]
+    fn byte_budget_prunes_history_and_resize_remains_repaintable() {
+        let mut a = Terminal::new(200, 60).unwrap();
+        a.process(&b"typical ASCII output\r\n".repeat(100_000));
+        let history = a.engine.history_rows();
+        assert!(
+            (5000..20000).contains(&history),
+            "17 MiB budget retained {history} rows"
+        );
+        a.resize(120, 40).unwrap();
+        let mut b = Terminal::new(120, 40).unwrap();
+        b.process(&a.snapshot().unwrap());
+        compare(&a, &b, "resize with byte-bounded history");
+        a.process(b"\tX\r\nZ");
+        b.process(b"\tX\r\nZ");
+        compare(&a, &b, "resize continuation");
+    }
+    #[test]
+    fn saved_origin_survives_changed_margins() {
+        for prefix in [
+            b"\x1b[3;50r\x1b[?6h\x1b[4;12HX\x1b7\x1b[20;40r\x1b[?6l\x1b[1;1H".as_slice(),
+            b"\x1b[?69h\x1b[4;100s\x1b[3;50r\x1b[?6h\x1b[4;12HX\x1b7\x1b[10;2H",
+        ] {
+            let mut a = Terminal::new(200, 60).unwrap();
+            a.process(prefix);
+            let mut b = Terminal::new(200, 60).unwrap();
+            b.process(&a.snapshot().unwrap());
+            compare(&a, &b, "origin and margins repaint");
+            a.process(b"\x1b8Z");
+            b.process(b"\x1b8Z");
+            compare(&a, &b, "saved origin and changed margins continuation");
+        }
+    }
+    #[test]
+    fn implicit_hyperlinks_retain_groups_across_rows_and_continuation() {
+        let mut a = Terminal::new(200, 60).unwrap();
+        a.process(b"\x1b]8;;https://example.org/implicit\x1b\\A\r\nB");
+        let mut b = Terminal::new(200, 60).unwrap();
+        b.process(&a.snapshot().unwrap());
+        compare(&a, &b, "implicit multi-row link");
+        a.process(b"C");
+        b.process(b"C");
+        compare(&a, &b, "active implicit link continuation");
     }
 }

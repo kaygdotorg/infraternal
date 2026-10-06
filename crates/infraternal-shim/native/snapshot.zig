@@ -59,10 +59,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) Writer.Error!void {
     for (0..t.cols) |x| if (t.tabstops.get(@intCast(x))) {
         try w.print("\x1b[1;{d}H\x1bH", .{x + 1});
     };
-    try w.print("\x1b[?69{c}", .{@as(u8, if (t.modes.get(.enable_left_and_right_margin)) 'h' else 'l')});
-    const r = t.scrolling_region;
-    try w.print("\x1b[{d};{d}r", .{ r.top + 1, r.bottom + 1 });
-    if (t.modes.get(.enable_left_and_right_margin)) try w.print("\x1b[{d};{d}s", .{ r.left + 1, r.right + 1 });
+    try regions(w, t);
     try w.print("\x1b[?7{c}", .{@as(u8, if (t.modes.get(.wraparound)) 'h' else 'l')});
     const screen = t.screens.active;
     try cursorShape(w, t, screen);
@@ -70,7 +67,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) Writer.Error!void {
 }
 
 fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Error!void {
-    try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?6l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
+    try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
     var wrap = false;
     for (0..t.rows) |y| {
         if (!wrap) try w.print("\x1b[{d};1H", .{y + 1});
@@ -79,12 +76,15 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Err
         wrap = p.rowAndCell().row.wrap;
     }
     if (screen.saved_cursor) |saved| {
-        // DECSC saves origin mode along with the cursor. Restore the actual
-        // margins first, then position relative to origin when it is enabled.
-        const r = t.scrolling_region;
-        try w.print("\x1b[{d};{d}r\x1b[?6{c}", .{ r.top + 1, r.bottom + 1, @as(u8, if (saved.origin) 'h' else 'l') });
-        try position(w, t, saved.x, saved.y, saved.origin);
-        if (saved.pending_wrap) try recreateWrap(w, t, screen, saved.x, saved.y, saved.origin);
+        // A saved cursor can lie outside margins changed after DECSC. Use
+        // temporary full margins so CUP cannot clamp its absolute position;
+        // DECSC stores origin but not the margins, restored independently.
+        try w.print("\x1b[?6l\x1b[?69l\x1b[r\x1b[?6{c}", .{@as(u8, if (saved.origin) 'h' else 'l')});
+        if (saved.pending_wrap and saved.x + 1 < t.cols) {
+            try w.print("\x1b[?69h\x1b[1;{d}s", .{saved.x + 1});
+        }
+        try w.print("\x1b[{d};{d}H", .{ saved.y + 1, saved.x + 1 });
+        if (saved.pending_wrap) try recreateWrap(w, t, screen, saved.x, saved.y, false);
         try w.print("{f}\x1b[{d}\"q", .{ saved.style.formatterVt(), @as(u8, if (saved.protected) 1 else 0) });
         try charset(w, saved.charset);
         try w.writeAll("\x1b7");
@@ -98,7 +98,15 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Err
     try w.print("\x1b[>{d}u", .{keys.flags[0].int()});
     for (1..@as(usize, keys.idx) + 1) |i| try w.print("\x1b[>{d}u", .{keys.flags[i].int()});
     try cursorShape(w, t, screen);
+    try regions(w, t);
     try liveCursor(w, t, screen, false);
+}
+
+fn regions(w: *Writer, t: *const vt.Terminal) Writer.Error!void {
+    try w.print("\x1b[?6l\x1b[?69{c}", .{@as(u8, if (t.modes.get(.enable_left_and_right_margin)) 'h' else 'l')});
+    const r = t.scrolling_region;
+    if (t.modes.get(.enable_left_and_right_margin)) try w.print("\x1b[{d};{d}s", .{ r.left + 1, r.right + 1 });
+    try w.print("\x1b[{d};{d}r", .{ r.top + 1, r.bottom + 1 });
 }
 
 fn cursorShape(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Error!void {
@@ -120,7 +128,11 @@ fn liveCursor(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, origi
     const cursor = screen.cursor;
     try w.print("\x1b[?6{c}", .{@as(u8, if (origin) 'h' else 'l')});
     try position(w, t, cursor.x, cursor.y, origin);
-    if (cursor.pending_wrap) try recreateWrap(w, t, screen, cursor.x, cursor.y, origin);
+    if (cursor.pending_wrap) {
+        try w.writeAll("\x1b[?7h");
+        try recreateWrap(w, t, screen, cursor.x, cursor.y, origin);
+        try w.print("\x1b[?7{c}", .{@as(u8, if (t.modes.get(.wraparound)) 'h' else 'l')});
+    }
     try w.print("\x1b[?2027{c}", .{@as(u8, if (t.modes.get(.grapheme_cluster)) 'h' else 'l')});
     try w.print("{f}\x1b[{d}\"q", .{ cursor.style.formatterVt(), @as(u8, if (cursor.protected) 1 else 0) });
     try cursorLink(w, cursor.hyperlink);
@@ -131,7 +143,7 @@ fn recreateWrap(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, x: 
     var p = screen.pages.pin(.{ .active = .{ .x = x, .y = y } }).?;
     if (p.rowAndCell().cell.wide == .spacer_tail and x > 0) p.x -= 1;
     try position(w, t, p.x, y, origin);
-    try w.writeAll("\x1b(B\x0f");
+    try w.writeAll("\x1b(B\x0f\x1b[?2027l");
     try cell(w, p, p.rowAndCell().cell);
 }
 
@@ -163,6 +175,7 @@ fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
     var last: ?vt.Style = null;
     var last_link: usize = 0;
     var protected: ?bool = null;
+    var empty: usize = 0;
     for (p.cells(.all)) |*value| {
         if (value.wide == .spacer_tail or value.wide == .spacer_head) continue;
         var style = p.style(value);
@@ -172,9 +185,18 @@ fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
             else => {},
         }
         if (last == null or !std.meta.eql(last.?, style)) {
+            try emptyCells(w, &empty);
             try w.print("{f}", .{style.formatterVt()});
             last = style;
         }
+        // Empty cells must stay empty: with wrap disabled, a combining mark
+        // is ignored over an erased cell but attaches to a printed space.
+        // ECH/CUF runs preserve that distinction without one control per cell.
+        if (!value.hasText()) {
+            empty += 1;
+            continue;
+        }
+        try emptyCells(w, &empty);
         const link_id: usize = if (value.hyperlink) p.node.page().lookupHyperlink(value).? else 0;
         if (link_id != last_link) {
             try cellLink(w, p, value);
@@ -186,14 +208,21 @@ fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
         }
         try text(w, p, value);
     }
+    try emptyCells(w, &empty);
     try w.writeAll("\x1b]8;;\x1b\\");
+}
+
+fn emptyCells(w: *Writer, count: *usize) Writer.Error!void {
+    if (count.* == 0) return;
+    try w.print("\x1b[{d}X\x1b[{d}C", .{ count.*, count.* });
+    count.* = 0;
 }
 
 fn cursorLink(w: *Writer, link: ?*@import("terminal/hyperlink.zig").Hyperlink) Writer.Error!void {
     if (link) |l| {
         switch (l.id) {
             .explicit => |id| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ id, l.uri }),
-            .implicit => try w.print("\x1b]8;;{s}\x1b\\", .{l.uri}),
+            .implicit => |id| try w.print("\x1b]8;id=infraternal-implicit-{d};{s}\x1b\\", .{ id, l.uri }),
         }
     } else try w.writeAll("\x1b]8;;\x1b\\");
 }
@@ -213,7 +242,9 @@ fn cellLink(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) Writer.E
         const uri = link.uri.slice(page.memory);
         switch (link.id) {
             .explicit => |s| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ s.slice(page.memory), uri }),
-            .implicit => try w.print("\x1b]8;;{s}\x1b\\", .{uri}),
+            // Stable IDs keep a multi-row implicit link one group. Reopening
+            // without an ID would create a new link at every repaint row.
+            .implicit => |implicit_id| try w.print("\x1b]8;id=infraternal-implicit-{d};{s}\x1b\\", .{ implicit_id, uri }),
         }
     } else try w.writeAll("\x1b]8;;\x1b\\");
 }
@@ -252,11 +283,14 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal) callconv(lib.calling_
         for (cells_a, cells_b, 0..) |*ca, *cb, x| {
             const cpa = if (ca.codepoint() == 0) ' ' else ca.codepoint();
             const cpb = if (cb.codepoint() == 0) ' ' else cb.codepoint();
-            if (cpa != cpb or ca.wide != cb.wide or ca.protected != cb.protected or !std.meta.eql(effectiveStyle(pa, ca), effectiveStyle(pb, cb))) return 1 + y * a.cols + x;
+            if (ca.hasText() != cb.hasText() or cpa != cpb or ca.wide != cb.wide or ca.protected != cb.protected or !std.meta.eql(effectiveStyle(pa, ca), effectiveStyle(pb, cb))) return 1 + y * a.cols + x;
             const ga = pa.grapheme(ca) orelse &.{};
             const gb = pb.grapheme(cb) orelse &.{};
             if (!std.mem.eql(u21, ga, gb)) return 1 + y * a.cols + x;
             if (!std.mem.eql(u8, cellUri(pa, ca), cellUri(pb, cb))) return 1 + y * a.cols + x;
+            var id_a: [64]u8 = undefined;
+            var id_b: [64]u8 = undefined;
+            if (!std.mem.eql(u8, linkKey(pa, ca, &id_a), linkKey(pb, cb, &id_b))) return 1 + y * a.cols + x;
         }
         if (pa.rowAndCell().row.wrap != pb.rowAndCell().row.wrap) return 2000000 + y;
     }
@@ -290,4 +324,17 @@ fn cellUri(p: vt.PageList.Pin, value: *const vt.page.Cell) []const u8 {
     const page = p.node.page();
     const id = page.lookupHyperlink(value).?;
     return page.hyperlink_set.get(page.memory, id).uri.slice(page.memory);
+}
+
+// Explicit IDs are kept verbatim. Implicit IDs are represented by stable VT
+// identifiers; comparing their group keys verifies row/cursor link continuity.
+fn linkKey(p: vt.PageList.Pin, value: *const vt.page.Cell, buf: *[64]u8) []const u8 {
+    if (!value.hyperlink) return "";
+    const page = p.node.page();
+    const id = page.lookupHyperlink(value).?;
+    const link = page.hyperlink_set.get(page.memory, id);
+    return switch (link.id) {
+        .explicit => |v| v.slice(page.memory),
+        .implicit => |v| std.fmt.bufPrint(buf, "infraternal-implicit-{d}", .{v}) catch unreachable,
+    };
 }
