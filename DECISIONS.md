@@ -341,3 +341,6 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 84. **Zoom changes the text, not the UI.** On touch devices, page zoom is
     off. A pinch changes the terminal font size. Inputs are 16 px, so iOS
     never zooms when one takes focus. The safe areas follow the theme.
+85. **Mobile key bar: variant a.** One compact glass capsule. Keys that do
+    not fit fade at the edges. The owner chose it after comparing it with a
+    native keyboard row and a d-pad layout.
