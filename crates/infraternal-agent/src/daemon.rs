@@ -241,11 +241,24 @@ async fn input_state(link: &mut Link) -> io::Result<u64> {
             "shim lacks restart-safe input capability",
         ));
     }
-    link.send(&Shim::InputStateRequest).await?;
-    match link.read().await? {
-        Shim::InputState(written, accepted) if written <= accepted => Ok(written),
-        _ => Err(sessions::invalid("invalid shim input state")),
-    }
+    // Retained accepted input can advance after capability selection and before
+    // StateRequest reaches the shim. Acks may legally precede the State reply.
+    // Bound the whole exchange, rather than resetting the deadline for each Ack.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        link.send(&Shim::InputStateRequest).await?;
+        let mut acked = 0;
+        loop {
+            match link.read().await? {
+                Shim::InputAck(seq) if seq >= acked => acked = seq,
+                Shim::InputState(written, accepted) if acked <= written && written <= accepted => {
+                    return Ok(written);
+                }
+                _ => return Err(sessions::invalid("invalid shim input state")),
+            }
+        }
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim input state timed out"))?
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
