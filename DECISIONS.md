@@ -424,3 +424,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      view uses. Font faces use `font-display: block`, and a view renders once
      its font is ready (with a short cap). The first frame is the final frame.
      This applies to the app, the website and the docs.
+101. **Everything has motion; first sign-in has a moment.** After the
+     onboarding wizard, "Welcome to infraternal" appears as glitch text
+     (reimplemented, monochrome, settles after 1.6 s), then the app opens.
+     The rest of onboarding is designed as we go.
+102. **Waits use the count-up.** Nothing appears for waits under 400 ms. Above
+     that, a count-up shows real progress when known, otherwise elapsed
+     seconds. Never fake progress, and no spinners. One shared loading()
+     primitive.
