@@ -34,7 +34,11 @@ unsafe extern "C" {
         tail: usize,
     ) -> usize;
 }
-pub(super) struct Engine(NonNull<c_void>);
+// A failed resize can partially mutate Ghostty page ownership. None is a
+// permanent tombstone: even destruction would inspect invalid native state.
+// Retired allocations remain held until shim exit pending transactional resize
+// upstream (#37); recreating the engine must never revive this handle.
+pub(super) struct Engine(Option<NonNull<c_void>>);
 impl Engine {
     pub fn new(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
         let mut raw = std::ptr::null_mut();
@@ -62,21 +66,27 @@ impl Engine {
             ));
         }
         NonNull::new(raw)
-            .map(Self)
+            .map(|handle| Self(Some(handle)))
             .ok_or_else(|| io::Error::other("Ghostty returned a null terminal"))
     }
     pub fn process(&mut self, data: &[u8]) {
+        let Some(handle) = self.0 else { return };
         // SAFETY: uniquely owned terminal; Ghostty consumes the borrowed slice
         // synchronously and retains parser state, never the input pointer.
-        unsafe { ghostty_terminal_vt_write(self.0.as_ptr(), data.as_ptr(), data.len()) }
+        unsafe { ghostty_terminal_vt_write(handle.as_ptr(), data.as_ptr(), data.len()) }
     }
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         // SAFETY: uniquely owned live terminal; zero pixel dimensions are valid.
-        // Ghostty validates cell dimensions and leaves valid state on failure.
-        let result = unsafe { ghostty_terminal_resize(self.0.as_ptr(), cols, rows, 0, 0) };
+        // Resize is not transactional in the pinned engine. Retire on every
+        // native error without querying or freeing the potentially invalid handle.
+        let handle = self
+            .0
+            .ok_or_else(|| io::Error::other("retired Ghostty engine"))?;
+        let result = unsafe { ghostty_terminal_resize(handle.as_ptr(), cols, rows, 0, 0) };
         if result == 0 {
             Ok(())
         } else {
+            self.0 = None;
             Err(io::Error::new(
                 if result == -2 {
                     io::ErrorKind::InvalidInput
@@ -89,41 +99,52 @@ impl Engine {
     }
     #[cfg(test)]
     pub fn difference(&self, other: &Self) -> usize {
+        let (Some(left), Some(right)) = (self.0, other.0) else {
+            return usize::MAX;
+        };
         // SAFETY: both uniquely owned live terminals are borrowed read-only for
         // the call. The oracle retains no references and does not mutate them.
-        unsafe { infraternal_vt_compare(self.0.as_ptr(), other.0.as_ptr(), false) }
+        unsafe { infraternal_vt_compare(left.as_ptr(), right.as_ptr(), false) }
     }
     #[cfg(test)]
     pub fn state_difference(&self, other: &Self) -> usize {
+        let (Some(left), Some(right)) = (self.0, other.0) else {
+            return usize::MAX;
+        };
         // SAFETY: read-only oracle borrows live handles synchronously and retains nothing.
-        unsafe { infraternal_vt_compare(self.0.as_ptr(), other.0.as_ptr(), true) }
+        unsafe { infraternal_vt_compare(left.as_ptr(), right.as_ptr(), true) }
     }
     #[cfg(test)]
     pub fn history_rows(&self) -> usize {
+        let Some(handle) = self.0 else { return 0 };
         let mut rows: usize = 0;
         // SAFETY: tag 15 in the pinned C ABI writes a usize to this valid out
         // pointer; the live terminal is borrowed for this synchronous query.
         unsafe {
-            ghostty_terminal_get(self.0.as_ptr(), 15, (&raw mut rows).cast());
+            ghostty_terminal_get(handle.as_ptr(), 15, (&raw mut rows).cast());
         }
         rows
     }
     pub fn approximate_snapshot(&self, data: &mut [u8]) -> usize {
+        let Some(handle) = self.0 else { return 0 };
         // SAFETY: read-only live handle and writable bounded slice remain valid
         // synchronously. The adapter rolls back complete cell operations on
         // clipping, reserves a footer, and retains neither pointer.
         let len =
-            unsafe { infraternal_vt_approximate(self.0.as_ptr(), data.as_mut_ptr(), data.len()) };
+            unsafe { infraternal_vt_approximate(handle.as_ptr(), data.as_mut_ptr(), data.len()) };
         if len <= data.len() { len } else { 0 }
     }
     pub fn try_snapshot(&self, data: &mut [u8], tail: usize) -> io::Result<Option<usize>> {
+        let handle = self
+            .0
+            .ok_or_else(|| io::Error::other("retired Ghostty engine"))?;
         // SAFETY: live terminal and writable slice remain valid throughout the
         // synchronous call. The adapter uses Writer.fixed and returns at most
         // data.len(), zero on overflow, or usize::MAX for an unrepresentable
         // state. The sentinel is checked before using it as a slice length;
         // the adapter retains neither pointer.
         let len = unsafe {
-            infraternal_vt_snapshot(self.0.as_ptr(), data.as_mut_ptr(), data.len(), tail)
+            infraternal_vt_snapshot(handle.as_ptr(), data.as_mut_ptr(), data.len(), tail)
         };
         if len == usize::MAX {
             return Err(io::Error::new(
@@ -136,9 +157,10 @@ impl Engine {
 }
 impl Drop for Engine {
     fn drop(&mut self) {
+        let Some(handle) = self.0.take() else { return };
         // SAFETY: this is the unique owner; destruction runs exactly once and
         // there are no callbacks or outstanding grid references in Rust.
-        unsafe { ghostty_terminal_free(self.0.as_ptr()) }
+        unsafe { ghostty_terminal_free(handle.as_ptr()) }
     }
 }
 

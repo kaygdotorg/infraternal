@@ -111,7 +111,7 @@ fn resize_allocation_refusal_retires_native_handle() {
         },
         0
     );
-    let mut engine = Engine(NonNull::new(raw).unwrap());
+    let mut engine = Engine(Some(NonNull::new(raw).unwrap()));
     engine.process(b"\x1bcPRIMARY\x1b[?47hALT\x1b[?47l");
     context.refusing = true;
     context.remaining = step;
