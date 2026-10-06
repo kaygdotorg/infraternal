@@ -119,7 +119,7 @@ impl Engine {
         if len == usize::MAX {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Ghostty state requires nonprinting cursor, REP or row-wrap restore APIs",
+                "Ghostty state requires nonprinting cell, cursor, REP or row-wrap restore APIs",
             ));
         }
         Ok((len != 0 && len <= data.len()).then_some(len))

@@ -58,9 +58,10 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     const count = @min(history, tail);
     if (count != 0) {
         // Each lookup resolves one row, never one cell through full history.
+        var skip_first = false;
         for (history - count..history) |y| {
             const p = primary.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(y) } }).?;
-            try row(w, p);
+            skip_first = try row(w, p, skip_first);
             if (!p.rowAndCell().row.wrap) try w.writeAll("\x1b[0m\r\n");
         }
         try w.print("\x1b[{d}S", .{t.rows});
@@ -138,6 +139,13 @@ fn restoreRep(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
             var at = p;
             at.x = @intCast(x);
             if (value.hasText() and value.codepoint() == cp) {
+                if (value.wide == .wide and width == 1 and x <= 1 and y > 0) {
+                    const above = p.up(1).?;
+                    const above_cells = above.cells(.all);
+                    // Reprinting this narrow base over its stored wide glyph
+                    // would narrow the preceding spacer head. Seed elsewhere.
+                    if (above_cells[above_cells.len - 1].wide == .spacer_head) continue;
+                }
                 try w.print("\x1b[{d};{d}H\x1b[?7h", .{ y + 1, x + 1 });
                 try cell(w, at, value);
                 return;
@@ -183,10 +191,11 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotEr
     }
     try w.writeAll("\x1b[2J\x1b]8;;\x1b\\");
     var wrap = false;
+    var skip_first = false;
     for (0..t.rows) |y| {
         if (!wrap) try w.print("\x1b[{d};1H", .{y + 1});
         const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
-        try row(w, p);
+        skip_first = try row(w, p, skip_first);
         wrap = p.rowAndCell().row.wrap;
     }
     // A screen has its own complete Kitty flag stack, including pop state.
@@ -307,12 +316,17 @@ fn charset(w: *Writer, state: vt.Screen.CharsetState) SnapshotError!void {
     if (state.single_shift) |slot| try w.writeAll(if (slot == .G2) "\x1bN" else "\x1bO");
 }
 
-fn row(w: *Writer, p: vt.PageList.Pin) SnapshotError!void {
+fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool) SnapshotError!bool {
+    // A narrow base widened by its grapheme may already have been emitted
+    // across the preceding spacer head. Reprinting it over a wide cell would
+    // narrow that head. The remaining cells start after its continuation.
+    if (skip_first) try w.writeAll("\x1b]8;;\x1b\\");
     var last: ?vt.Style = null;
     var last_link: usize = 0;
     var protected: ?bool = null;
     var empty: usize = 0;
-    for (p.cells(.all)) |*value| {
+    for (p.cells(.all), 0..) |*value, x| {
+        if (skip_first and x == 0) continue;
         if (value.wide == .spacer_tail or value.wide == .spacer_head) continue;
         var style = p.style(value);
         switch (value.content_tag) {
@@ -329,6 +343,17 @@ fn row(w: *Writer, p: vt.PageList.Pin) SnapshotError!void {
         // is ignored over an erased cell but attaches to a printed space.
         // ECH/CUF runs preserve that distinction without one control per cell.
         if (!value.hasText()) {
+            if (value.style_id != 0 or value.hyperlink or value.protected) {
+                const blank: vt.Style = .{};
+                var non_bg = style;
+                non_bg.bg_color = blank.bg_color;
+                const needs_attributes = !std.meta.eql(non_bg, blank) or value.hyperlink or value.protected;
+                const reconstructible_edge = p.rowAndCell().row.wrap and x + 1 == p.cells(.all).len;
+                // ECH preserves only background. An independently styled or
+                // linked empty interior cell needs a nonprinting cell setter;
+                // wrapped edges have the explicit construction below.
+                if (needs_attributes and !reconstructible_edge) return error.Unrepresentable;
+            }
             empty += 1;
             continue;
         }
@@ -348,7 +373,8 @@ fn row(w: *Writer, p: vt.PageList.Pin) SnapshotError!void {
     try w.writeAll("\x1b]8;;\x1b\\");
     const values = p.cells(.all);
     const edge = &values[values.len - 1];
-    if (!p.rowAndCell().row.wrap) return;
+    if (!p.rowAndCell().row.wrap) return false;
+    if (values.len < 2 and !edge.hasText()) return error.Unrepresentable;
     const next = p.down(1) orelse return error.Unrepresentable;
     const next_continues = next.rowAndCell().row.wrap_continuation;
     if (!edge.hasText() and (edge.wide == .narrow or edge.wide == .spacer_head)) {
@@ -362,6 +388,13 @@ fn row(w: *Writer, p: vt.PageList.Pin) SnapshotError!void {
         try w.print("\x1b[{d}G", .{values.len});
         try cellLink(w, p, edge);
         try w.print("\x1b[{d}\"q{f}", .{ @as(u8, if (edge.protected) 1 else 0), effectiveStyle(p, edge).formatterVt() });
+        const next_base = &next.cells(.all)[0];
+        if (edge.wide == .spacer_head and next_continues and next_base.wide == .wide and unicode.table.get(next_base.codepoint()).width == 1) {
+            // Build the actual cluster across the head, rather than overwriting
+            // a temporary wide glyph with its narrow base on the next row.
+            try text(w, next, next_base);
+            return true;
+        }
         try codepoint(w, '界');
         try w.writeAll("\x1b[2D");
         if (edge.wide == .narrow) try w.writeAll(" \x1b[1D");
@@ -375,6 +408,7 @@ fn row(w: *Writer, p: vt.PageList.Pin) SnapshotError!void {
         try w.writeAll(" \x1b[1D");
         if (!next_continues) try w.writeAll("\x1b[M");
     }
+    return false;
 }
 
 fn emptyCells(w: *Writer, count: *usize) SnapshotError!void {
@@ -420,9 +454,26 @@ fn text(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) SnapshotErro
         // A cell boundary must stay a boundary even when adjacent emoji would
         // form a cluster. Print the base with clustering off, and enable it
         // only while appending the cell's already-known grapheme codepoints.
+        const widened = value.wide == .wide and unicode.table.get(value.codepoint()).width == 1;
+        if (widened) {
+            // A variation selector can widen a narrow base after SGR/link
+            // changes. Its tail has independent attributes. The borrowed
+            // cell belongs to this row; check the tail index before lookup.
+            const values = p.cells(.all);
+            const x = (@intFromPtr(value) - @intFromPtr(values.ptr)) / @sizeOf(vt.page.Cell);
+            if (x + 1 >= values.len) return error.Unrepresentable;
+            const tail = &values[x + 1];
+            try cellLink(w, p, tail);
+            try w.print("\x1b[{d}\"q{f}", .{ @as(u8, if (tail.protected) 1 else 0), effectiveStyle(p, tail).formatterVt() });
+        }
         try w.writeAll("\x1b[?2027h");
         for (extra) |cp| try codepoint(w, cp);
         try w.writeAll("\x1b[?2027l");
+        if (widened) {
+            // Keep row()'s attribute caches consistent for the next cell.
+            try cellLink(w, p, value);
+            try w.print("\x1b[{d}\"q{f}", .{ @as(u8, if (value.protected) 1 else 0), effectiveStyle(p, value).formatterVt() });
+        }
     }
 }
 

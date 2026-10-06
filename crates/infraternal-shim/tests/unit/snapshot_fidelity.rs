@@ -161,7 +161,12 @@ fn fidelity_saved_cursor_over_changed_edge() {
 }
 
 #[test]
-#[ignore = "red regression: enable after variation-tail attribute fix"]
 fn fidelity_variation_tail_attributes() {
     replay("variation-tail-independent-attributes", "\x1b[?2027h❤\x1b[38;2;12;34;56;48;2;65;43;21;4:3m\x1b]8;id=tail;https://example.org/tail\x1b\\\u{fe0f}".as_bytes(), 12, 5);
+}
+
+#[test]
+fn fidelity_variation_wrap_attributes() {
+    replay("variation-wrap-direct", "\x1b[?2027h\x1b[1;12H❤\x1b[38;2;12;34;56;48;2;65;43;21;4:3m\x1b]8;id=tail;https://example.org/tail\x1b\\\u{fe0f}".as_bytes(), 12, 5);
+    replay("variation-wrap-with-prior-combining", "\x1b[?2027h\x1b[1;12H❤\u{301}\x1b[38;2;12;34;56;48;2;65;43;21;4:3m\x1b]8;id=tail;https://example.org/tail\x1b\\\u{fe0f}".as_bytes(), 12, 5);
 }
