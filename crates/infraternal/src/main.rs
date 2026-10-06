@@ -19,7 +19,11 @@ enum Command {
     /// Run the trusted control plane.
     Server(ServerArgs),
     /// Run the per-host infraternal agent.
-    Agent,
+    Agent {
+        /// Inherited server socket descriptor for the local wire connection.
+        #[arg(long)]
+        fd: Option<u32>,
+    },
     /// Internal session owner; not a public CLI interface.
     #[command(name = "__shim", hide = true)]
     Shim {
@@ -75,6 +79,8 @@ struct ServerArgs {
 enum ServerAction {
     /// Write and enable a systemd unit for this server configuration.
     Install(InstallArgs),
+    /// Print the initial owner setup capability through the private local control socket.
+    SetupToken,
 }
 
 #[derive(Debug, Args)]
@@ -127,6 +133,18 @@ fn main() -> ExitCode {
                         }
                     }
                 }
+                Some(ServerAction::SetupToken) => {
+                    match runtime.block_on(read_setup_token(&args.data)) {
+                        Ok(token) => {
+                            println!("{token}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(error) => {
+                            eprintln!("setup token unavailable: {error}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
                 None => {
                     let config = match server_config(args) {
                         Ok(config) => config,
@@ -160,11 +178,49 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Command::Agent => {
+        Command::Agent { fd: _ } => {
             eprintln!("not implemented");
             ExitCode::from(2)
         }
     }
+}
+
+#[cfg(unix)]
+async fn read_setup_token(data_dir: &std::path::Path) -> Result<String, &'static str> {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::UnixStream,
+    };
+
+    let mut socket = UnixStream::connect(data_dir.join("setup-token.sock"))
+        .await
+        .map_err(|_| "no active first-run token socket")?;
+    socket
+        .write_all(b"GET\n")
+        .await
+        .map_err(|_| "local token request failed")?;
+    let mut response = Vec::with_capacity(44);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        socket.take(45).read_to_end(&mut response),
+    )
+    .await
+    .map_err(|_| "local token request timed out")?
+    .map_err(|_| "local token response failed")?;
+    if response.len() != 44
+        || response[43] != b'\n'
+        || !response[..43]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("no active first-run token");
+    }
+    String::from_utf8(response[..43].to_vec()).map_err(|_| "invalid local token response")
+}
+
+#[cfg(not(unix))]
+async fn read_setup_token(_data_dir: &std::path::Path) -> Result<String, &'static str> {
+    Err("local token retrieval requires a Unix socket")
 }
 
 fn server_config(args: ServerArgs) -> Result<infraternal_server::ServerConfig, String> {
@@ -197,6 +253,46 @@ fn origin_for_listener(listen: SocketAddr) -> String {
         listen.ip().to_string()
     };
     format!("https://{host}:{}", listen.port())
+}
+
+#[cfg(all(test, unix))]
+mod setup_token_tests {
+    //! Verifies the explicit CLI handoff uses the private local request protocol.
+
+    use super::read_setup_token;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::UnixListener,
+    };
+
+    #[tokio::test]
+    async fn setup_token_command_reads_only_the_expected_socket_response() {
+        let data_dir =
+            std::env::temp_dir().join(format!("infraternal-token-cli-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).expect("create token test directory");
+        let listener =
+            UnixListener::bind(data_dir.join("setup-token.sock")).expect("bind token test socket");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept token request");
+            let mut request = [0; 4];
+            socket
+                .read_exact(&mut request)
+                .await
+                .expect("read token request");
+            assert_eq!(&request, b"GET\n");
+            socket
+                .write_all(format!("{}\n", "A".repeat(43)).as_bytes())
+                .await
+                .expect("write token response");
+        });
+        assert_eq!(
+            read_setup_token(&data_dir).await.expect("read setup token"),
+            "A".repeat(43)
+        );
+        server.await.expect("token test socket server");
+        std::fs::remove_dir_all(data_dir).expect("remove token test directory");
+    }
 }
 
 /// Validate the session identifier before any fork or filesystem operation.

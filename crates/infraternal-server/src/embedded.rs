@@ -1,0 +1,1035 @@
+//! Relays control calls and resumable terminal streams through the local socketpair infraternal agent [9][13].
+
+use bytes::{Buf, Bytes, BytesMut};
+use infraternal_protocol::{
+    DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
+};
+use serde::Serialize;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use thiserror::Error;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UnixStream,
+    net::unix::{OwnedReadHalf, OwnedWriteHalf},
+    sync::{mpsc, oneshot},
+};
+
+const CONTROL_STREAM: u32 = 0;
+const INITIAL_SERVER_STREAM: u32 = 2;
+// Callers await capacity; terminal output stalls at this bound and backpressures the socket reader.
+const COMMAND_CAPACITY: usize = 64;
+// Full output queues stop agent reads until a WebSocket consumer catches up or detaches.
+const OUTPUT_CAPACITY: usize = 4;
+// Full input queues stop the WebSocket reader and propagate backpressure to the peer.
+const INPUT_CAPACITY: usize = 4;
+const READ_CHUNK: usize = 16 * 1024;
+const MAX_BUFFERED_WIRE: usize = MAX_FRAME_LEN + READ_CHUNK + 10;
+
+/// Protocol or process failures are deliberately independent of user input and agent log output.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub(crate) enum AgentError {
+    /// The embedded infraternal agent could not start or stopped unexpectedly.
+    #[error("embedded infraternal agent is unavailable")]
+    Unavailable,
+    /// The embedded infraternal agent violated the shared wire contract.
+    #[error("embedded infraternal agent sent an invalid protocol frame")]
+    Protocol,
+    /// The terminal action was rejected by the embedded infraternal agent.
+    #[error("terminal action failed")]
+    Rejected,
+}
+
+/// Dimensions passed to the core terminal.open action.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) struct TerminalSize {
+    /// Character columns.
+    pub cols: u16,
+    /// Character rows.
+    pub rows: u16,
+    /// Pixel width.
+    pub px_w: u16,
+    /// Pixel height.
+    pub px_h: u16,
+}
+
+/// Output returned by one attached terminal stream.
+#[derive(Debug)]
+pub(crate) enum TerminalOutput {
+    /// PTY bytes and their absolute offset.
+    Output { out_seq: u64, bytes: Bytes },
+    /// Repaint bytes valid at the given absolute offset.
+    Snapshot { out_seq: u64, bytes: Bytes },
+    /// Highest input sequence written to the PTY.
+    Ack { in_seq_acked: u64 },
+    /// The agent retired one terminal stream.
+    Closed { code: u16 },
+}
+
+/// A single client attachment to a terminal session owned by the embedded infraternal agent.
+pub(crate) struct TerminalAttachment {
+    handle: AttachmentHandle,
+    output: mpsc::Receiver<TerminalOutput>,
+}
+
+/// A cloneable attachment sender; its last drop detaches the leg-B stream.
+#[derive(Clone)]
+pub(crate) struct AttachmentHandle(Arc<AttachmentHandleInner>);
+
+struct AttachmentHandleInner {
+    id: u64,
+    stream_id: u32,
+    input: mpsc::Sender<Bytes>,
+    commands: mpsc::Sender<Command>,
+}
+
+impl AttachmentHandle {
+    /// The server-opened, even-numbered leg-B stream corresponding to this client attachment.
+    #[must_use]
+    pub fn stream_id(&self) -> u32 {
+        self.0.stream_id
+    }
+
+    /// Queue one complete leg-A muxed terminal frame for forwarding to leg B.
+    pub async fn send_frame(&self, frame: Bytes) -> Result<(), AgentError> {
+        self.0
+            .input
+            .send(frame)
+            .await
+            .map_err(|_| AgentError::Unavailable)
+    }
+}
+
+impl Drop for AttachmentHandleInner {
+    fn drop(&mut self) {
+        let _ = self.commands.try_send(Command::Detach {
+            attachment_id: self.id,
+        });
+    }
+}
+
+impl TerminalAttachment {
+    /// Separate the cloneable input handle from its single output receiver.
+    pub fn split(self) -> (AttachmentHandle, mpsc::Receiver<TerminalOutput>) {
+        (self.handle, self.output)
+    }
+}
+
+/// Bounded command sender for the embedded agent actor.
+#[derive(Clone)]
+pub(crate) struct EmbeddedAgent {
+    commands: mpsc::Sender<Command>,
+    next_attachment_id: Arc<AtomicU64>,
+}
+
+impl EmbeddedAgent {
+    /// Start the on-demand agent supervisor for the server's own executable.
+    pub fn spawn(executable: PathBuf) -> Self {
+        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        tokio::spawn(run_actor(executable, None, receiver));
+        Self {
+            commands,
+            next_attachment_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    /// Open a terminal on the embedded infraternal agent's host.
+    pub async fn open(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::Open { size, reply })
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        result.await.map_err(|_| AgentError::Unavailable)?
+    }
+
+    /// Attach one device to a user-owned terminal session and request replay from its last offsets.
+    pub async fn attach(
+        &self,
+        session_id: [u8; 16],
+        last_out_seq: u64,
+        last_in_seq: u64,
+    ) -> Result<TerminalAttachment, AgentError> {
+        let (output_tx, output) = mpsc::channel(OUTPUT_CAPACITY);
+        let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
+        let id = self
+            .next_attachment_id
+            .fetch_add(1, Ordering::Relaxed)
+            .max(1);
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::Attach {
+                id,
+                session_id,
+                last_out_seq,
+                last_in_seq,
+                output: output_tx,
+                reply,
+            })
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        let (id, stream_id) = result.await.map_err(|_| AgentError::Unavailable)??;
+        let command_tx = self.commands.clone();
+        tokio::spawn(async move {
+            forward_inputs(id, input_rx, command_tx).await;
+        });
+        Ok(TerminalAttachment {
+            handle: AttachmentHandle(Arc::new(AttachmentHandleInner {
+                id,
+                stream_id,
+                input,
+                commands: self.commands.clone(),
+            })),
+            output,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_socket(stream: UnixStream) -> Self {
+        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        tokio::spawn(run_actor(PathBuf::new(), Some(stream), receiver));
+        Self {
+            commands,
+            next_attachment_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+}
+
+enum Command {
+    Open {
+        size: TerminalSize,
+        reply: oneshot::Sender<Result<[u8; 16], AgentError>>,
+    },
+    Attach {
+        id: u64,
+        session_id: [u8; 16],
+        last_out_seq: u64,
+        last_in_seq: u64,
+        output: mpsc::Sender<TerminalOutput>,
+        reply: oneshot::Sender<Result<(u64, u32), AgentError>>,
+    },
+    Input {
+        attachment_id: u64,
+        frame: Bytes,
+    },
+    Detach {
+        attachment_id: u64,
+    },
+}
+
+struct AttachmentState {
+    session_id: [u8; 16],
+    stream_id: u32,
+    last_out_seq: u64,
+    last_in_seq: u64,
+    last_input_end: u64,
+    output: mpsc::Sender<TerminalOutput>,
+}
+
+struct AgentConnection {
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
+    pid: Option<nix::unistd::Pid>,
+    receive: BytesMut,
+    scratch: Vec<u8>,
+    encode: Vec<u8>,
+    next_call_id: u32,
+    next_stream_id: u32,
+}
+
+enum Incoming {
+    Hello {
+        version: u16,
+    },
+    Result {
+        call_id: u32,
+        ok: bool,
+        json: Vec<u8>,
+    },
+    Output {
+        stream_id: u32,
+        out_seq: u64,
+        bytes: Bytes,
+    },
+    Snapshot {
+        stream_id: u32,
+        out_seq: u64,
+        bytes: Bytes,
+    },
+    Ack {
+        stream_id: u32,
+        in_seq_acked: u64,
+    },
+    Close {
+        stream_id: u32,
+        code: u16,
+    },
+    Ping {
+        nonce: u64,
+        sent_us: u64,
+    },
+    Disconnected,
+}
+
+struct PendingCall {
+    reply: oneshot::Sender<Result<[u8; 16], AgentError>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenResult {
+    session_id: String,
+}
+
+async fn forward_inputs(
+    attachment_id: u64,
+    mut input: mpsc::Receiver<Bytes>,
+    commands: mpsc::Sender<Command>,
+) {
+    while let Some(frame) = input.recv().await {
+        if commands
+            .send(Command::Input {
+                attachment_id,
+                frame,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let _ = commands.send(Command::Detach { attachment_id }).await;
+}
+
+async fn run_actor(
+    executable: PathBuf,
+    initial_connection: Option<UnixStream>,
+    mut commands: mpsc::Receiver<Command>,
+) {
+    let mut initial_connection = initial_connection;
+    let mut attachments = HashMap::<u64, AttachmentState>::new();
+    let mut routes = HashMap::<u32, u64>::new();
+    let mut pending = HashMap::<u32, PendingCall>::new();
+    let mut connection: Option<AgentConnection> = None;
+    let mut next_stream_id = INITIAL_SERVER_STREAM;
+    let mut backoff = Duration::from_millis(200);
+    let mut first_attempt = true;
+
+    loop {
+        if connection.is_none() {
+            if commands.is_closed() {
+                return;
+            }
+            if !first_attempt {
+                tokio::time::sleep(backoff).await;
+            }
+            first_attempt = false;
+            if let Ok(mut fresh) = connect_agent(&executable, initial_connection.take()).await {
+                if !reattach_all(
+                    &mut fresh,
+                    &mut attachments,
+                    &mut routes,
+                    &mut next_stream_id,
+                )
+                .await
+                {
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    routes.clear();
+                    cleanup_connection(fresh).await;
+                    continue;
+                }
+                connection = Some(fresh);
+                backoff = Duration::from_millis(200);
+            } else {
+                tracing::warn!(
+                    "embedded infraternal agent connection failed; retrying with backoff"
+                );
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+                continue;
+            }
+        }
+
+        let Some(link) = connection.as_mut() else {
+            continue;
+        };
+        tokio::select! {
+            command = commands.recv() => {
+                let Some(command) = command else { return; };
+                let ok = process_command(
+                    command,
+                    link,
+                    &mut attachments,
+                    &mut routes,
+                    &mut pending,
+                    &mut next_stream_id,
+                ).await;
+                if !ok {
+                    let link = connection.take();
+                    if let Some(link) = link {
+                        connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        first_attempt = false;
+                    }
+                }
+            }
+            incoming = read_incoming(link) => {
+                let Some(incoming) = incoming else {
+                    let link = connection.take();
+                    if let Some(link) = link {
+                        connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        first_attempt = false;
+                    }
+                    continue;
+                };
+                if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
+                    let link = connection.take();
+                    if let Some(link) = link {
+                        connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        first_attempt = false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn connect_agent(
+    executable: &Path,
+    initial: Option<UnixStream>,
+) -> Result<AgentConnection, AgentError> {
+    let (mut socket, pid) = if let Some(socket) = initial {
+        (socket, None)
+    } else {
+        spawn_socketpair_agent(executable).map_err(|_| AgentError::Unavailable)?
+    };
+    let setup = async {
+        let mut encode = Vec::with_capacity(128);
+        encode_muxed_frame_into(
+            CONTROL_STREAM,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "infraternal-server/0.1",
+            },
+            &mut encode,
+        )
+        .map_err(|_| AgentError::Protocol)?;
+        socket
+            .write_all(&encode)
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        let mut receive = BytesMut::with_capacity(4096);
+        let mut scratch = vec![0_u8; READ_CHUNK];
+        let incoming = read_frame_from_socket(&mut socket, &mut receive, &mut scratch).await?;
+        if !matches!(incoming, Incoming::Hello { version: 1 }) {
+            return Err(AgentError::Protocol);
+        }
+        Ok::<_, AgentError>((receive, scratch))
+    };
+    let Ok(Ok((receive, scratch))) = tokio::time::timeout(Duration::from_secs(5), setup).await
+    else {
+        if let Some(pid) = pid {
+            stop_child(pid).await;
+        }
+        return Err(AgentError::Unavailable);
+    };
+    let (reader, writer) = socket.into_split();
+    Ok(AgentConnection {
+        reader,
+        writer,
+        pid,
+        receive,
+        scratch,
+        encode: Vec::with_capacity(4096),
+        next_call_id: 1,
+        next_stream_id: INITIAL_SERVER_STREAM,
+    })
+}
+
+async fn read_frame_from_socket(
+    socket: &mut UnixStream,
+    receive: &mut BytesMut,
+    scratch: &mut [u8],
+) -> Result<Incoming, AgentError> {
+    loop {
+        match decode_muxed_frame(receive) {
+            Ok(decoded) => {
+                if decoded.wire_len > receive.len() {
+                    return Err(AgentError::Protocol);
+                }
+                if decoded.stream_id != CONTROL_STREAM
+                    || !matches!(decoded.frame, Frame::Hello { version: 1, .. })
+                {
+                    return Err(AgentError::Protocol);
+                }
+                receive.advance(decoded.wire_len);
+                return Ok(Incoming::Hello { version: 1 });
+            }
+            Err(DecodeError::Incomplete) => {}
+            Err(_) => return Err(AgentError::Protocol),
+        }
+        if receive.len() >= MAX_BUFFERED_WIRE {
+            return Err(AgentError::Protocol);
+        }
+        let read = socket
+            .read(scratch)
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        if read == 0 {
+            return Err(AgentError::Unavailable);
+        }
+        receive.extend_from_slice(&scratch[..read]);
+    }
+}
+
+// The command variants mutate one shared route table, so they remain in one bounded actor turn.
+#[allow(clippy::too_many_lines)]
+async fn process_command(
+    command: Command,
+    connection: &mut AgentConnection,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    pending: &mut HashMap<u32, PendingCall>,
+    next_stream_id: &mut u32,
+) -> bool {
+    match command {
+        Command::Open { size, reply } => {
+            if pending.len() >= COMMAND_CAPACITY {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return true;
+            }
+            let Some(call_id) = allocate_call_id(connection, pending) else {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return true;
+            };
+            let Ok(json) = serde_json::to_vec(&size) else {
+                let _ = reply.send(Err(AgentError::Protocol));
+                return true;
+            };
+            let frame = Frame::Call {
+                call_id,
+                action_id: "terminal.open",
+                input_json: &json,
+            };
+            if !write_frame(connection, CONTROL_STREAM, &frame).await {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
+            pending.insert(call_id, PendingCall { reply });
+            true
+        }
+        Command::Attach {
+            id: attachment_id,
+            session_id,
+            last_out_seq,
+            last_in_seq,
+            output,
+            reply,
+        } => {
+            let Some(stream_id) = allocate_stream_id(connection, routes, next_stream_id) else {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return true;
+            };
+            if !send_attach(connection, stream_id, session_id, last_out_seq, last_in_seq).await {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
+            routes.insert(stream_id, attachment_id);
+            attachments.insert(
+                attachment_id,
+                AttachmentState {
+                    session_id,
+                    stream_id,
+                    last_out_seq,
+                    last_in_seq,
+                    last_input_end: last_in_seq,
+                    output,
+                },
+            );
+            let _ = reply.send(Ok((attachment_id, stream_id)));
+            true
+        }
+        Command::Input {
+            attachment_id,
+            frame,
+        } => {
+            let Some(attachment) = attachments.get(&attachment_id) else {
+                return true;
+            };
+            let Ok(decoded) = decode_muxed_frame(&frame) else {
+                return true;
+            };
+            if decoded.stream_id == CONTROL_STREAM || decoded.stream_id % 2 == 0 {
+                return false;
+            }
+            let stream_id = attachment.stream_id;
+            let b_frame = match decoded.frame {
+                Frame::Input { in_seq, bytes } => {
+                    let Some(end) = in_seq.checked_add(bytes.len() as u64) else {
+                        return false;
+                    };
+                    let Some(attachment) = attachments.get_mut(&attachment_id) else {
+                        return false;
+                    };
+                    if in_seq > attachment.last_input_end {
+                        return false;
+                    }
+                    attachment.last_input_end = attachment.last_input_end.max(end);
+                    let forward_from = in_seq.max(attachment.last_in_seq);
+                    if end <= forward_from {
+                        return true;
+                    }
+                    let Ok(skip) = usize::try_from(forward_from - in_seq) else {
+                        return false;
+                    };
+                    let Some(bytes) = bytes.get(skip..) else {
+                        return false;
+                    };
+                    Frame::Input {
+                        in_seq: forward_from,
+                        bytes,
+                    }
+                }
+                Frame::Resize {
+                    cols,
+                    rows,
+                    px_w,
+                    px_h,
+                } => Frame::Resize {
+                    cols,
+                    rows,
+                    px_w,
+                    px_h,
+                },
+                Frame::Credit { bytes } => Frame::Credit { bytes },
+                _ => return false,
+            };
+            write_frame(connection, stream_id, &b_frame).await
+        }
+        Command::Detach { attachment_id } => {
+            if let Some(attachment) = attachments.remove(&attachment_id) {
+                routes.remove(&attachment.stream_id);
+                return write_frame(
+                    connection,
+                    attachment.stream_id,
+                    &Frame::Close {
+                        code: 1000,
+                        reason: "detached",
+                    },
+                )
+                .await;
+            }
+            true
+        }
+    }
+}
+
+fn allocate_call_id(
+    connection: &mut AgentConnection,
+    pending: &HashMap<u32, PendingCall>,
+) -> Option<u32> {
+    let start = connection.next_call_id;
+    loop {
+        let candidate = connection.next_call_id;
+        connection.next_call_id = connection.next_call_id.wrapping_add(1).max(1);
+        if !pending.contains_key(&candidate) {
+            return Some(candidate);
+        }
+        if connection.next_call_id == start {
+            return None;
+        }
+    }
+}
+
+fn allocate_stream_id(
+    connection: &mut AgentConnection,
+    routes: &HashMap<u32, u64>,
+    next_stream_id: &mut u32,
+) -> Option<u32> {
+    let start = connection.next_stream_id.max(INITIAL_SERVER_STREAM);
+    loop {
+        let candidate = connection.next_stream_id.max(INITIAL_SERVER_STREAM);
+        connection.next_stream_id = candidate.checked_add(2).unwrap_or(INITIAL_SERVER_STREAM);
+        *next_stream_id = connection.next_stream_id;
+        if !routes.contains_key(&candidate) {
+            return Some(candidate);
+        }
+        if connection.next_stream_id == start {
+            return None;
+        }
+    }
+}
+
+async fn send_attach(
+    connection: &mut AgentConnection,
+    stream_id: u32,
+    session_id: [u8; 16],
+    last_out_seq: u64,
+    last_in_seq: u64,
+) -> bool {
+    write_frame(
+        connection,
+        stream_id,
+        &Frame::AttachTerm {
+            session_id: &session_id,
+            last_out_seq,
+            last_in_seq,
+        },
+    )
+    .await
+}
+
+async fn reattach_all(
+    connection: &mut AgentConnection,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    next_stream_id: &mut u32,
+) -> bool {
+    for (id, attachment) in attachments.iter_mut() {
+        let Some(stream_id) = allocate_stream_id(connection, routes, next_stream_id) else {
+            return false;
+        };
+        if !send_attach(
+            connection,
+            stream_id,
+            attachment.session_id,
+            attachment.last_out_seq,
+            attachment.last_in_seq,
+        )
+        .await
+        {
+            return false;
+        }
+        attachment.stream_id = stream_id;
+        routes.insert(stream_id, *id);
+    }
+    true
+}
+
+// Incoming wire cases share actor-owned sequence accounting and bounded output senders.
+#[allow(clippy::too_many_lines)]
+async fn process_incoming(
+    incoming: Incoming,
+    connection: &mut AgentConnection,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    pending: &mut HashMap<u32, PendingCall>,
+) -> bool {
+    match incoming {
+        Incoming::Result { call_id, ok, json } => {
+            let Some(call) = pending.remove(&call_id) else {
+                return false;
+            };
+            if !ok {
+                let _ = call.reply.send(Err(AgentError::Rejected));
+                return true;
+            }
+            let session = serde_json::from_slice::<OpenResult>(&json);
+            let result = session
+                .ok()
+                .and_then(|value| decode_session_id(&value.session_id))
+                .ok_or(AgentError::Protocol);
+            let _ = call.reply.send(result);
+            true
+        }
+        Incoming::Output {
+            stream_id,
+            out_seq,
+            bytes,
+        } => {
+            let Some(attachment_id) = routes.get(&stream_id).copied() else {
+                return true;
+            };
+            let Some(attachment) = attachments.get_mut(&attachment_id) else {
+                return false;
+            };
+            let Some(end) = out_seq.checked_add(bytes.len() as u64) else {
+                return false;
+            };
+            if out_seq != attachment.last_out_seq {
+                return false;
+            }
+            if attachment
+                .output
+                .send(TerminalOutput::Output { out_seq, bytes })
+                .await
+                .is_err()
+            {
+                attachments.remove(&attachment_id);
+                routes.remove(&stream_id);
+                return true;
+            }
+            attachment.last_out_seq = end;
+            true
+        }
+        Incoming::Snapshot {
+            stream_id,
+            out_seq,
+            bytes,
+        } => {
+            let Some(attachment_id) = routes.get(&stream_id).copied() else {
+                return true;
+            };
+            let Some(attachment) = attachments.get_mut(&attachment_id) else {
+                return false;
+            };
+            if out_seq < attachment.last_out_seq {
+                return false;
+            }
+            if attachment
+                .output
+                .send(TerminalOutput::Snapshot { out_seq, bytes })
+                .await
+                .is_err()
+            {
+                attachments.remove(&attachment_id);
+                routes.remove(&stream_id);
+                return true;
+            }
+            attachment.last_out_seq = out_seq;
+            true
+        }
+        Incoming::Ack {
+            stream_id,
+            in_seq_acked,
+        } => {
+            let Some(attachment_id) = routes.get(&stream_id).copied() else {
+                return true;
+            };
+            let Some(attachment) = attachments.get_mut(&attachment_id) else {
+                return false;
+            };
+            if in_seq_acked < attachment.last_in_seq || in_seq_acked > attachment.last_input_end {
+                return false;
+            }
+            attachment.last_in_seq = in_seq_acked;
+            attachment
+                .output
+                .send(TerminalOutput::Ack { in_seq_acked })
+                .await
+                .is_ok()
+        }
+        Incoming::Close { stream_id, code } => {
+            let Some(attachment_id) = routes.remove(&stream_id) else {
+                return true;
+            };
+            let Some(attachment) = attachments.remove(&attachment_id) else {
+                return false;
+            };
+            attachment
+                .output
+                .send(TerminalOutput::Closed { code })
+                .await
+                .is_ok()
+        }
+        Incoming::Ping { nonce, sent_us } => {
+            write_frame(connection, CONTROL_STREAM, &Frame::Pong { nonce, sent_us }).await
+        }
+        Incoming::Disconnected | Incoming::Hello { .. } => false,
+    }
+}
+
+async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
+    loop {
+        match decode_muxed_frame(&connection.receive) {
+            Ok(decoded) => {
+                let wire_len = decoded.wire_len;
+                let wire = connection.receive.split_to(wire_len).freeze();
+                let Ok(decoded) = decode_muxed_frame(&wire) else {
+                    return None;
+                };
+                let stream_id = decoded.stream_id;
+                let frame = match decoded.frame {
+                    Frame::Result { call_id, ok, json } => Incoming::Result {
+                        call_id,
+                        ok,
+                        json: json.to_vec(),
+                    },
+                    Frame::Output { out_seq, bytes } => Incoming::Output {
+                        stream_id,
+                        out_seq,
+                        bytes: share_payload(&wire, bytes)?,
+                    },
+                    Frame::Snapshot { out_seq, bytes } => Incoming::Snapshot {
+                        stream_id,
+                        out_seq,
+                        bytes: share_payload(&wire, bytes)?,
+                    },
+                    Frame::Ack { in_seq_acked } => Incoming::Ack {
+                        stream_id,
+                        in_seq_acked,
+                    },
+                    Frame::Close { .. } if stream_id == CONTROL_STREAM => Incoming::Disconnected,
+                    Frame::Close { code, .. } => Incoming::Close { stream_id, code },
+                    Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
+                        Incoming::Ping { nonce, sent_us }
+                    }
+                    _ => return None,
+                };
+                if matches!(&frame, Incoming::Result { .. }) && stream_id != CONTROL_STREAM {
+                    return None;
+                }
+                if matches!(
+                    &frame,
+                    Incoming::Output { .. }
+                        | Incoming::Snapshot { .. }
+                        | Incoming::Ack { .. }
+                        | Incoming::Close { .. }
+                ) && (stream_id == CONTROL_STREAM || stream_id % 2 != 0)
+                {
+                    return None;
+                }
+                return Some(frame);
+            }
+            Err(DecodeError::Incomplete) => {}
+            Err(_) => return None,
+        }
+        if connection.receive.len() >= MAX_BUFFERED_WIRE {
+            return None;
+        }
+        let read = connection.reader.read(&mut connection.scratch).await.ok()?;
+        if read == 0 {
+            return Some(Incoming::Disconnected);
+        }
+        connection
+            .receive
+            .extend_from_slice(&connection.scratch[..read]);
+    }
+}
+
+/// Keep terminal payloads backed by the receive allocation instead of copying each frame.
+fn share_payload(wire: &Bytes, payload: &[u8]) -> Option<Bytes> {
+    if payload.is_empty() {
+        return Some(Bytes::new());
+    }
+    let start = (payload.as_ptr() as usize).checked_sub(wire.as_ptr() as usize)?;
+    let end = start.checked_add(payload.len())?;
+    (end <= wire.len()).then(|| wire.slice(start..end))
+}
+
+async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &Frame<'_>) -> bool {
+    let (writer, encode) = (&mut connection.writer, &mut connection.encode);
+    if encode_muxed_frame_into(stream_id, frame, encode).is_err() {
+        return false;
+    }
+    writer.write_all(encode).await.is_ok()
+}
+
+async fn connection_lost(
+    mut connection: AgentConnection,
+    _attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    pending: &mut HashMap<u32, PendingCall>,
+) {
+    routes.clear();
+    for (_, call) in pending.drain() {
+        let _ = call.reply.send(Err(AgentError::Unavailable));
+    }
+    if let Some(pid) = connection.pid.take() {
+        stop_child(pid).await;
+    }
+}
+
+async fn cleanup_connection(mut connection: AgentConnection) {
+    if let Some(pid) = connection.pid.take() {
+        stop_child(pid).await;
+    }
+}
+
+fn decode_session_id(value: &str) -> Option<[u8; 16]> {
+    if value.len() != 32 || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return None;
+    }
+    let mut id = [0_u8; 16];
+    for (index, byte) in id.iter_mut().enumerate() {
+        let offset = index.checked_mul(2)?;
+        *byte = u8::from_str_radix(value.get(offset..offset + 2)?, 16).ok()?;
+    }
+    Some(id)
+}
+
+#[cfg(unix)]
+fn spawn_socketpair_agent(
+    executable: &std::path::Path,
+) -> Result<(UnixStream, Option<nix::unistd::Pid>), AgentError> {
+    use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, posix_spawn};
+    use std::{
+        ffi::CString,
+        os::fd::AsRawFd,
+        os::unix::{ffi::OsStrExt, net::UnixStream as StdUnixStream},
+    };
+
+    let (parent, child) = StdUnixStream::pair().map_err(|_| AgentError::Unavailable)?;
+    let path =
+        CString::new(executable.as_os_str().as_bytes()).map_err(|_| AgentError::Unavailable)?;
+    let argv = [
+        path.clone(),
+        CString::new("agent").map_err(|_| AgentError::Unavailable)?,
+        CString::new("--fd").map_err(|_| AgentError::Unavailable)?,
+        CString::new("3").map_err(|_| AgentError::Unavailable)?,
+    ];
+    let environment = std::env::vars_os()
+        .map(|(key, value)| {
+            let mut entry = key.as_os_str().as_bytes().to_vec();
+            entry.push(b'=');
+            entry.extend_from_slice(value.as_os_str().as_bytes());
+            CString::new(entry).map_err(|_| AgentError::Unavailable)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let envp: Vec<_> = environment.iter().collect();
+    let mut actions = PosixSpawnFileActions::init().map_err(|_| AgentError::Unavailable)?;
+    let child_fd = child.as_raw_fd();
+    actions
+        .add_dup2(child_fd, 3)
+        .map_err(|_| AgentError::Unavailable)?;
+    if child_fd != 3 {
+        actions
+            .add_close(child_fd)
+            .map_err(|_| AgentError::Unavailable)?;
+    }
+    let attributes = PosixSpawnAttr::init().map_err(|_| AgentError::Unavailable)?;
+    let pid = posix_spawn(path.as_c_str(), &actions, &attributes, &argv, &envp)
+        .map_err(|_| AgentError::Unavailable)?;
+    drop(child);
+    parent
+        .set_nonblocking(true)
+        .map_err(|_| AgentError::Unavailable)?;
+    let stream = UnixStream::from_std(parent).map_err(|_| AgentError::Unavailable)?;
+    tracing::debug!(
+        pid = pid.as_raw(),
+        "started embedded infraternal agent over inherited socketpair"
+    );
+    Ok((stream, Some(pid)))
+}
+
+#[cfg(not(unix))]
+fn spawn_socketpair_agent(
+    _executable: &std::path::Path,
+) -> Result<(UnixStream, Option<nix::unistd::Pid>), AgentError> {
+    Err(AgentError::Unavailable)
+}
+
+#[cfg(unix)]
+async fn stop_child(pid: nix::unistd::Pid) {
+    use nix::{
+        sys::{
+            signal::{Signal, kill},
+            wait::waitpid,
+        },
+        unistd::Pid,
+    };
+    let _ = kill(pid, Signal::SIGTERM);
+    let _ = tokio::task::spawn_blocking(move || waitpid(Pid::from_raw(pid.as_raw()), None)).await;
+}
+
+#[cfg(not(unix))]
+async fn stop_child(_pid: nix::unistd::Pid) {}

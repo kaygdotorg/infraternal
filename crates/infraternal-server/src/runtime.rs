@@ -1,6 +1,10 @@
 //! Starts the trusted HTTP control plane with private SQLite storage, pinned passkey origin, and optional TLS [8][19][24][26].
 
 use crate::auth::{self, Auth};
+use crate::{
+    embedded::EmbeddedAgent,
+    websocket::{self, WebSocketState},
+};
 use axum::{
     Json, Router,
     extract::{ConnectInfo, State},
@@ -23,7 +27,11 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, UnixListener},
+    sync::{Mutex, Semaphore},
+};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::EnvFilter;
 
@@ -158,6 +166,9 @@ pub enum ServerError {
     /// The listener could not bind or serve.
     #[error("server listener failed")]
     Listener(#[source] std::io::Error),
+    /// The private first-run setup-token control socket could not be created.
+    #[error("setup-token control socket failed")]
+    SetupTokenSocket(#[source] std::io::Error),
     /// System time predates the Unix epoch or does not fit the auth API.
     #[error("system clock is invalid")]
     Clock,
@@ -170,7 +181,10 @@ pub enum ServerError {
 /// Returns a sanitized startup, storage, migration, TLS, or listener error.
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
     init_logging();
-    let app = router(config.clone()).await?;
+    let (app, setup_token) = build_router(config.clone(), None).await?;
+    if let Some(token) = setup_token {
+        start_setup_token_socket(config.data_dir.join("setup-token.sock"), token)?;
+    }
     tracing::info!(
         listen = %config.listen,
         public_origin = %config.public_origin,
@@ -198,8 +212,21 @@ pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
     }
 }
 
-/// Build the production router after applying the same migrations and owner bootstrap as `serve`.
-pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
+#[cfg(test)]
+pub(crate) async fn router_with_agent(
+    config: ServerConfig,
+    agent: EmbeddedAgent,
+) -> Result<(Router, String), ServerError> {
+    let (router, setup_token) = build_router(config, Some(agent)).await?;
+    setup_token
+        .map(|token| (router, token))
+        .ok_or(ServerError::InvalidConfiguration)
+}
+
+async fn build_router(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+) -> Result<(Router, Option<String>), ServerError> {
     validate_config(&config)?;
     if let Some(web_root) = &config.web_root
         && !web_root.is_dir()
@@ -215,16 +242,28 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .await
         .map_err(ServerError::Auth)?;
     let now = unix_seconds()?;
+    websocket::recover_connections(&pool, now)
+        .await
+        .map_err(ServerError::Storage)?;
+    let mut setup_token = None;
     auth.bootstrap(now, |banner| {
-        tracing::info!(target: "infraternal::setup", setup_token_banner = %banner, "initial owner setup is required");
+        setup_token = banner.lines().nth(1).map(str::to_owned);
     })
     .await
     .map_err(ServerError::Auth)?;
 
+    let agent = if let Some(agent) = supplied_agent {
+        agent
+    } else {
+        let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
+        EmbeddedAgent::spawn(executable)
+    };
+    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent);
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
-        .merge(auth::router(auth));
+        .merge(auth::router(auth))
+        .merge(websocket::router(ws_state));
     let app = if let Some(web_root) = config.web_root {
         let fallback = ServeFile::new(web_root.join("index.html"));
         app.fallback_service(
@@ -240,7 +279,50 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         trusted_proxies: config.trusted_proxies,
         buckets: Arc::default(),
     };
-    Ok(app.layer(from_fn_with_state(admission, source_admission)))
+    Ok((
+        app.layer(from_fn_with_state(admission, source_admission)),
+        setup_token,
+    ))
+}
+
+// Keep the one-time capability in memory. Only a same-user CLI request over this
+// private socket may retrieve it; systemd output and application logs never contain it.
+fn start_setup_token_socket(path: PathBuf, token: String) -> Result<(), ServerError> {
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).map_err(ServerError::SetupTokenSocket)?;
+    if let Err(error) = set_private_file(&path) {
+        let _ = std::fs::remove_file(path);
+        return Err(ServerError::SetupTokenSocket(error));
+    }
+    let clients = Arc::new(Semaphore::new(4));
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let Ok(permit) = clients.clone().try_acquire_owned() else {
+                continue;
+            };
+            let token = token.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let mut request = [0; 4];
+                let valid =
+                    tokio::time::timeout(Duration::from_secs(2), socket.read_exact(&mut request))
+                        .await
+                        .is_ok_and(|result| result.is_ok())
+                        && request == *b"GET\n";
+                if valid {
+                    let mut response = token.into_bytes();
+                    response.push(b'\n');
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(2), socket.write_all(&response))
+                            .await;
+                }
+            });
+        }
+    });
+    Ok(())
 }
 
 async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerError> {
@@ -442,7 +524,11 @@ fn set_private_file(_path: &std::path::Path) -> std::io::Result<()> {
 mod tests {
     //! Verifies startup storage and trusted-proxy validation without binding a listener.
 
-    use super::{ProxyNetwork, ServerConfig, TlsFiles, router};
+    use super::{
+        ProxyNetwork, ServerConfig, TlsFiles, router_with_agent, set_private_directory,
+        start_setup_token_socket, validate_config,
+    };
+    use crate::embedded::EmbeddedAgent;
     use axum::{body::Body, http::Request};
     use std::{net::SocketAddr, path::PathBuf, str::FromStr};
     use tower::ServiceExt;
@@ -481,9 +567,13 @@ mod tests {
     #[tokio::test]
     async fn router_migrates_private_storage_and_serves_health() {
         let data_dir = temp_dir();
-        let app = router(config(data_dir.clone()))
-            .await
-            .expect("server router startup");
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
         let response = app
             .oneshot(
                 Request::builder()
@@ -514,11 +604,63 @@ mod tests {
         std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn setup_token_socket_is_private_and_requires_explicit_request() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::UnixStream,
+        };
+
+        let data_dir = temp_dir();
+        std::fs::create_dir_all(&data_dir).expect("create private data directory");
+        set_private_directory(&data_dir).expect("protect data directory");
+        let path = data_dir.join("setup-token.sock");
+        start_setup_token_socket(path.clone(), "test-capability".to_owned())
+            .expect("start token control socket");
+        let mode = std::fs::metadata(&path)
+            .expect("control socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let mut client = UnixStream::connect(&path)
+            .await
+            .expect("connect to private token socket");
+        client
+            .write_all(b"GET\n")
+            .await
+            .expect("request setup capability");
+        let mut token = Vec::new();
+        client
+            .read_to_end(&mut token)
+            .await
+            .expect("read setup capability");
+        assert_eq!(token, b"test-capability\n");
+
+        let mut invalid = UnixStream::connect(&path)
+            .await
+            .expect("connect for invalid request");
+        invalid
+            .write_all(b"NOPE")
+            .await
+            .expect("send invalid token request");
+        let mut rejected = Vec::new();
+        invalid
+            .read_to_end(&mut rejected)
+            .await
+            .expect("read invalid request response");
+        assert_eq!(rejected.as_slice(), b"");
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
     #[tokio::test]
     async fn proxy_mode_requires_an_explicit_peer_allowlist() {
         let mut config = config(temp_dir());
         config.tls = None;
         config.behind_proxy = true;
-        assert!(router(config).await.is_err());
+        assert!(validate_config(&config).is_err());
     }
 }
