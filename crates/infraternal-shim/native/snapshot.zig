@@ -127,6 +127,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             try w.print("\x1b[{s}{d}{c}", .{ if (tag.ansi) "" else "?", tag.value, @as(u8, if (t.modes.get(mode)) 'h' else 'l') });
         }
     }
+    try restoreMouse(w, t);
     try w.writeAll("\x1b[?6l\x1b[3g");
     for (0..t.cols) |x| if (t.tabstops.get(@intCast(x))) {
         try w.print("\x1b[1;{d}H\x1bH", .{x + 1});
@@ -152,6 +153,46 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         }
     }
     try w.print("\x1b[4{c}", .{@as(u8, if (t.modes.get(.insert)) 'h' else 'l')});
+}
+
+// Mouse booleans are independent of the effective reporting fields. Every
+// mouse mode write, including a false value, replaces its effective field.
+// Repeat a source-compatible selector last so enumeration order cannot choose
+// reporting behavior. Refuse states with no selector preserving all booleans.
+fn restoreMouse(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
+    const event_modes = [_]vt.modes.Mode{ .mouse_event_x10, .mouse_event_normal, .mouse_event_button, .mouse_event_any };
+    const event: ?vt.modes.Mode = switch (t.flags.mouse_event) {
+        .none => null,
+        .x10 => .mouse_event_x10,
+        .normal => .mouse_event_normal,
+        .button => .mouse_event_button,
+        .any => .mouse_event_any,
+    };
+    try mouseSelector(w, t, &event_modes, event);
+    const format_modes = [_]vt.modes.Mode{ .mouse_format_utf8, .mouse_format_sgr, .mouse_format_urxvt, .mouse_format_sgr_pixels };
+    const format: ?vt.modes.Mode = switch (t.flags.mouse_format) {
+        .x10 => null,
+        .utf8 => .mouse_format_utf8,
+        .sgr => .mouse_format_sgr,
+        .urxvt => .mouse_format_urxvt,
+        .sgr_pixels => .mouse_format_sgr_pixels,
+    };
+    try mouseSelector(w, t, &format_modes, format);
+}
+
+fn mouseSelector(w: *Writer, t: *const vt.Terminal, modes: []const vt.modes.Mode, selected: ?vt.modes.Mode) SnapshotError!void {
+    if (selected) |mode| {
+        if (!t.modes.get(mode)) return error.Unrepresentable;
+        try w.print("\x1b[?{d}h", .{vt.modes.ModeTag.fromMode(mode).value});
+        return;
+    }
+    for (modes) |mode| {
+        if (!t.modes.get(mode)) {
+            try w.print("\x1b[?{d}l", .{vt.modes.ModeTag.fromMode(mode).value});
+            return;
+        }
+    }
+    return error.Unrepresentable;
 }
 
 // Transient single shifts can survive a screen switch or cursor restore.
@@ -626,6 +667,8 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
             if (!std.meta.eql(@field(a.colors, name), @field(b.colors, name))) return 6400003;
         }
         if (!std.meta.eql(a.colors.palette.mask, b.colors.palette.mask)) return 6400004;
+        if (a.flags.mouse_event != b.flags.mouse_event) return 6500000;
+        if (a.flags.mouse_format != b.flags.mouse_format) return 6500001;
         if (a.flags.shell_redraws_prompt != b.flags.shell_redraws_prompt) return 6200002;
         if (!std.meta.eql(a.modes.saved, b.modes.saved)) return 6100000;
         if (a.previous_char != b.previous_char) return 6000000;
