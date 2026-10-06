@@ -26,10 +26,6 @@ unsafe extern "C" {
     fn infraternal_vt_compare(a: *mut c_void, b: *mut c_void, strict: bool) -> usize;
     #[cfg(test)]
     fn ghostty_terminal_get(terminal: *mut c_void, tag: i32, out: *mut c_void) -> i32;
-    #[allow(
-        dead_code,
-        reason = "Staged bounded API is consumed by the next session-module commit (#26)"
-    )]
     fn infraternal_vt_approximate(terminal: *mut c_void, data: *mut u8, len: usize) -> usize;
     fn infraternal_vt_snapshot(
         terminal: *mut c_void,
@@ -112,10 +108,6 @@ impl Engine {
         }
         rows
     }
-    #[allow(
-        dead_code,
-        reason = "Staged bounded API is consumed by the next session-module commit (#26)"
-    )]
     pub fn approximate_snapshot(&self, data: &mut [u8]) -> usize {
         // SAFETY: read-only live handle and writable bounded slice remain valid
         // synchronously. The adapter rolls back complete cell operations on

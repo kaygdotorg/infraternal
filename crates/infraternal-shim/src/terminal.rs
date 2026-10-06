@@ -99,10 +99,6 @@ impl Terminal {
     /// Bounded visible fallback; fidelity gaps and clipping are explicitly
     /// announced by the negotiated frame, never substituted for a faithful VT.
     #[must_use]
-    #[allow(
-        dead_code,
-        reason = "Staged bounded API is consumed by the next session-module commit (#26)"
-    )]
     pub fn approximate_snapshot(&self) -> Vec<u8> {
         let budget = MAX_FRAME - 10;
         // Preserve unfinished syntax only when the entire carry and a useful

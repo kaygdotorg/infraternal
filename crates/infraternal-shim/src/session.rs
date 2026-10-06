@@ -1,7 +1,7 @@
 //! Single-threaded bounded PTY/socket pump; replay precedes live output at one cursor.
 #![forbid(unsafe_code)]
 use crate::{
-    frame::{Decoder, Frame, MAX_FRAME, SEQUENCED_INPUT},
+    frame::{APPROXIMATE_SNAPSHOT, Decoder, Frame, MAX_FRAME, SEQUENCED_INPUT},
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
     terminal::Terminal,
@@ -92,15 +92,30 @@ impl Peer {
         Ok(())
     }
     fn snapshot(&mut self, terminal: &Terminal, head: u64) -> io::Result<()> {
-        if let Ok(bytes) = terminal.snapshot() {
-            self.queue(&Frame::Snapshot(head, bytes))?;
-            self.cursor = Some(head);
-        } else {
-            self.queue(&Frame::Error(
-                1,
-                "screen repaint exceeds frame limit".into(),
-            ))?;
-            self.cursor = None;
+        match terminal.snapshot() {
+            Ok(bytes) => {
+                self.queue(&Frame::Snapshot(head, bytes))?;
+                self.cursor = Some(head);
+            }
+            Err(_) if self.caps & APPROXIMATE_SNAPSHOT != 0 => {
+                self.queue(&Frame::SnapshotWithFlags(
+                    head,
+                    1,
+                    terminal.approximate_snapshot(),
+                ))?;
+                self.cursor = Some(head);
+            }
+            Err(error) => {
+                // A restoration API gap is not a frame-size overflow. Legacy
+                // peers get the real bounded reason, with no source mutation.
+                let code = if error.kind() == io::ErrorKind::Unsupported {
+                    2
+                } else {
+                    1
+                };
+                self.queue(&Frame::Error(code, error.to_string()))?;
+                self.cursor = None;
+            }
         }
         Ok(())
     }
@@ -349,7 +364,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
-                            caps: SEQUENCED_INPUT,
+                            caps: SEQUENCED_INPUT | APPROXIMATE_SNAPSHOT,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -472,7 +487,7 @@ fn handle(
             return Err(invalid());
         }
         p.attached = true;
-        p.caps = caps & SEQUENCED_INPUT;
+        p.caps = caps & (SEQUENCED_INPUT | APPROXIMATE_SNAPSHOT);
         return Ok(false);
     }
     if !p.attached {
@@ -499,7 +514,7 @@ fn handle(
                 }
             }
         }
-        Frame::Input(bytes) if !exited && p.caps == 0 => {
+        Frame::Input(bytes) if !exited && p.caps & SEQUENCED_INPUT == 0 => {
             if input.len() + bytes.len() > MAX_FRAME {
                 return Err(invalid());
             }
