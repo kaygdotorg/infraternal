@@ -123,6 +123,48 @@ button { color: inherit; }
   font-size: 10px;
   letter-spacing: 0.08em;
 }
+.probe-panel {
+  position: absolute;
+  z-index: 5;
+  top: max(12px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  width: min(360px, calc(100% - 24px));
+  max-height: min(76vh, 560px);
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid #393b40;
+  border-radius: 10px;
+  background: rgb(25 26 29 / 96%);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  color: #e6e7e9;
+  touch-action: pan-y;
+}
+.probe-panel h2 { margin: 0 0 10px; font-size: 13px; font-weight: 550; }
+.probe-panel label { display: block; margin-bottom: 5px; color: #a6a8ad; font-size: 11px; }
+.probe-panel input {
+  width: 100%;
+  min-height: 44px;
+  margin-bottom: 10px;
+  border: 1px solid #393b40;
+  border-radius: 7px;
+  background: #101113;
+  color: #f2f3f5;
+  padding: 0 10px;
+  font-size: 16px;
+}
+.probe-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.probe-actions button {
+  min-height: 44px;
+  border: 1px solid #45474d;
+  border-radius: 7px;
+  background: #242529;
+  padding: 0 9px;
+  font-size: 11px;
+  touch-action: manipulation;
+}
+.probe-actions button:disabled { opacity: 0.45; }
+.probe-panel pre { margin: 12px 0 5px; white-space: pre-wrap; font-size: 12px; line-height: 1.7; }
+.probe-panel p { margin: 0; color: #b6b8bd; font-size: 11px; line-height: 1.5; }
 
 /* Keep Ghostty's hidden input present without iOS zoom or its large native caret. */
 .terminal-host textarea, .terminal-host input {

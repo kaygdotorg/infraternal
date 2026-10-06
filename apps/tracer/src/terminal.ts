@@ -18,7 +18,8 @@ const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const encoder = new TextEncoder();
 
 export interface TerminalHooks {
-  onAttached?: (resumed: boolean) => void;
+  onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
+  onDisconnected?: (forced: boolean) => void;
   onInput?: (data: string, at: number) => void;
   onPaintedOutput?: (bytes: Uint8Array, at: number) => void;
 }
@@ -134,6 +135,7 @@ export class TerminalClient {
   private openCallSent = false;
   private fitQueued = false;
   private closed = false;
+  private forcedDrop = false;
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
@@ -188,6 +190,18 @@ export class TerminalClient {
   get inputSequence(): bigint { return this.nextInSeq; }
   get inputAcknowledged(): bigint { return this.ackedInSeq; }
 
+  /** Returns bounded renderer text for the explicitly marked test-double page. */
+  readScreenText(): string {
+    const buffer = this.terminal.buffer.active;
+    const first = Math.max(0, buffer.length - this.terminal.rows - 10_000);
+    const lines: string[] = [];
+    for (let row = first; row < buffer.length; row += 1) {
+      const line = buffer.getLine(row);
+      if (line) lines.push(line.translateToString(true));
+    }
+    return lines.join("\n");
+  }
+
   /** Injects probe input through Ghostty's normal input event path. */
   injectInput(data: string): void {
     if (this.closed || this.inputPaused) throw new Error("terminal input is paused");
@@ -196,6 +210,7 @@ export class TerminalClient {
 
   /** Forces a WebSocket close for the opt-in resume probe. */
   forceDrop(): void {
+    this.forcedDrop = true;
     this.socket?.close(4000, "tracer resume probe");
   }
 
@@ -265,6 +280,9 @@ export class TerminalClient {
       this.decoder = undefined;
       this.attached = false;
       this.attachRequested = false;
+      const forced = this.forcedDrop;
+      this.forcedDrop = false;
+      this.config.hooks?.onDisconnected?.(forced);
       this.setStatus("Connection lost; resuming…");
       this.scheduleReconnect();
     };
@@ -393,7 +411,7 @@ export class TerminalClient {
     this.resendUnacknowledgedInput();
     this.setStatus("");
     this.retryAttempt = 0;
-    this.config.hooks?.onAttached?.(this.connectionIsResume);
+    this.config.hooks?.onAttached?.(this.connectionIsResume, this);
   }
 
   private resendUnacknowledgedInput(): void {

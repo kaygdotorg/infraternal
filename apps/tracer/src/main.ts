@@ -1,12 +1,23 @@
 /** Renders first-run and login screens, then hands an authenticated user to the terminal. */
 import { AuthError, checkSession, loginWithPasskey, registerOwner } from "./auth";
+import { PerformanceProbe } from "./perf-probe";
 import { TerminalClient } from "./terminal";
+
+declare global {
+  interface Window {
+    __tracerTestDouble?: {
+      isConnected: () => boolean;
+      screenText: () => string;
+    };
+  }
+}
 
 const app = document.querySelector<HTMLElement>("#app") ?? missingMount();
 
 let activeUserId: string | undefined;
 let checkingResume = false;
 let currentTerminal: TerminalClient | undefined;
+let performanceProbe: PerformanceProbe | undefined;
 
 void start();
 
@@ -150,23 +161,60 @@ function showRecoveryWords(words: string, userId: string): Promise<void> {
 
 function showTerminal(): void {
   currentTerminal?.dispose();
+  performanceProbe?.dispose();
   currentTerminal = undefined;
+  performanceProbe = undefined;
+  const query = new URLSearchParams(location.search);
+  const mockMode = query.get("mock") === "1";
+  const probeMode = query.get("probe") === "1";
   app.innerHTML = `
     <section class="terminal-screen" aria-label="Terminal">
       <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal"></div>
       <p id="connection-status" class="connection-status" role="status">Starting terminal…</p>
       <span id="test-double-badge" class="test-double-badge" hidden>TEST DOUBLE</span>
+      <aside id="probe-panel" class="probe-panel" aria-label="Terminal latency probe" hidden>
+        <h2>Latency probe</h2>
+        <label for="probe-count">Synthetic keys</label>
+        <input id="probe-count" type="number" min="1" max="5000" inputmode="numeric" />
+        <div class="probe-actions">
+          <button id="probe-run" type="button">Run probe</button>
+          <button id="probe-drop" type="button">Drop socket</button>
+          <button id="probe-copy" type="button">Copy results</button>
+        </div>
+        <pre id="probe-results" aria-live="polite">Waiting for terminal.</pre>
+        <p id="probe-message" role="status"></p>
+      </aside>
     </section>`;
-  mustGet("#test-double-badge").hidden = new URLSearchParams(location.search).get("mock") !== "1";
+  mustGet("#test-double-badge").hidden = !mockMode;
+  const probePanel = mustGet("#probe-panel");
+  probePanel.hidden = !probeMode;
+  if (probeMode) {
+    performanceProbe = new PerformanceProbe(probePanel, probeCount(query.get("n")));
+  }
+  const hooks = performanceProbe?.hooks();
   void TerminalClient.open({
     host: mustGet("#terminal-host"),
     status: mustGet("#connection-status"),
+    ...(hooks ? { hooks } : {}),
   }).then((client) => {
     currentTerminal = client;
+    performanceProbe?.bind(client);
+    if (mockMode) {
+      window.__tracerTestDouble = {
+        isConnected: () => currentTerminal?.isConnected === true,
+        screenText: () => currentTerminal?.readScreenText() ?? "",
+      };
+    }
   }).catch((error: unknown) => {
     const status = document.querySelector<HTMLElement>("#connection-status");
     if (status) status.textContent = safeMessage(error);
   });
+}
+
+function probeCount(value: string | null): number {
+  if (!value) return 500;
+  const count = Number(value);
+  return Number.isInteger(count) && count >= 1 && count <= 5_000 ? count : 500;
 }
 
 async function checkForegroundSession(): Promise<void> {
@@ -177,6 +225,9 @@ async function checkForegroundSession(): Promise<void> {
     if (!session) {
       currentTerminal?.dispose();
       currentTerminal = undefined;
+      performanceProbe?.dispose();
+      performanceProbe = undefined;
+      delete window.__tracerTestDouble;
       activeUserId = undefined;
       renderAccess(false, "Your session ended. Sign in again to reconnect.");
     }
