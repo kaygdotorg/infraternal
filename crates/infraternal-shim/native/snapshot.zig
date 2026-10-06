@@ -74,13 +74,6 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) Writer.Error!void {
 
 fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Error!void {
     try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
-    var wrap = false;
-    for (0..t.rows) |y| {
-        if (!wrap) try w.print("\x1b[{d};1H", .{y + 1});
-        const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
-        try row(w, p);
-        wrap = p.rowAndCell().row.wrap;
-    }
     if (screen.saved_cursor) |saved| {
         // A saved cursor can lie outside margins changed after DECSC. Use
         // temporary full margins so CUP cannot clamp its absolute position;
@@ -90,10 +83,31 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Err
             try w.print("\x1b[?69h\x1b[1;{d}s", .{saved.x + 1});
         }
         try w.print("\x1b[{d};{d}H", .{ saved.y + 1, saved.x + 1 });
-        if (saved.pending_wrap) try recreateWrap(w, t, screen, saved.x, saved.y, false);
+        if (saved.pending_wrap) {
+            // Build DECSC before repainting: its pending cursor can refer to
+            // a cell that has since become empty or a wide spacer head.
+            // A temporary narrow print establishes wrap at the saved margin;
+            // the subsequent full grid repaint removes it without touching
+            // the saved position/style/charset or pending-wrap bit.
+            try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?7h ");
+        }
         try w.print("{f}\x1b[{d}\"q", .{ saved.style.formatterVt(), @as(u8, if (saved.protected) 1 else 0) });
         try charset(w, saved.charset);
         try w.writeAll("\x1b7");
+    }
+    // Discard temporary DECSC construction cells. Consume a saved single
+    // shift before painting text, while retaining it in the saved record.
+    try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H");
+    if (screen.saved_cursor) |saved| {
+        if (saved.charset.single_shift != null and t.previous_char != null) try w.writeAll(" \x1b[H");
+    }
+    try w.writeAll("\x1b[2J\x1b]8;;\x1b\\");
+    var wrap = false;
+    for (0..t.rows) |y| {
+        if (!wrap) try w.print("\x1b[{d};1H", .{y + 1});
+        const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
+        try row(w, p);
+        wrap = p.rowAndCell().row.wrap;
     }
     // A screen has its own complete Kitty flag stack, including pop state.
     const keys = screen.kitty_keyboard;

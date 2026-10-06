@@ -151,7 +151,6 @@ fn fidelity_orphaned_spacer_head() {
 }
 
 #[test]
-#[ignore = "red regression: enable after saved-wrap construction fix"]
 fn fidelity_saved_cursor_over_changed_edge() {
     replay(
         "saved-wrap-over-spacer-head",
