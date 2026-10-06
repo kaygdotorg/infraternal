@@ -110,6 +110,9 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   // The probe serializes keys through a completed paint so its latency samples do not measure burst queueing.
   await context.request.post("/__mock/trace/reset");
   const probeCount = 500;
+  // The throughput probe deliberately starts a fresh PTY; normal reloads now
+  // keep the tab's public session id instead of silently opening another shell.
+  await page.evaluate(() => sessionStorage.clear());
   await page.goto(`/?probe=1&n=${probeCount}&mock=1`);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
   const clockCalibration = await page.evaluate(async () => {
