@@ -96,6 +96,7 @@ impl Input {
 pub struct Output {
     cursor: u64,
     credit: u64,
+    repaint_debt: u64,
     stalled: Option<Instant>,
     snapshot: bool,
 }
@@ -107,6 +108,7 @@ impl Output {
         Self {
             cursor,
             credit: 1024 * 1024,
+            repaint_debt: 0,
             stalled: None,
             snapshot: false,
         }
@@ -116,11 +118,16 @@ impl Output {
     /// # Errors
     /// Rejects a credit counter overflow without mutating state.
     pub fn grant(&mut self, bytes: u32) -> Result<(), Error> {
-        self.credit = self
+        let grant = u64::from(bytes);
+        let repaid = grant.min(self.repaint_debt);
+        let credit = self
             .credit
-            .checked_add(u64::from(bytes))
+            .checked_add(grant - repaid)
             .ok_or(Error::Overflow)?;
-        if bytes > 0 {
+        self.repaint_debt -= repaid;
+        self.credit = credit;
+        // Partial debt repayment must not postpone detachment of pending data.
+        if self.credit > 0 {
             self.stalled = None;
         }
         Ok(())
@@ -186,16 +193,18 @@ impl Output {
         self.snapshot && self.credit > 0
     }
 
-    /// Commit a repaint; its byte length consumes credit but never advances seq.
+    /// Commit one bounded repaint with positive credit, carrying excess as debt.
+    /// Grants repay debt before raw output or another repaint; seq is screen state.
     /// # Errors
-    /// Rejects regression, overflow and insufficient credit without mutation.
+    /// Rejects regression, oversized repaint or zero usable credit without mutation.
     pub fn repaint(&mut self, seq: u64, len: usize) -> Result<(), Error> {
         let bytes = u64::try_from(len).map_err(|_| Error::Overflow)?;
-        if seq < self.cursor || bytes > self.credit {
+        if seq < self.cursor || len > infraternal_shim::frame::MAX_FRAME - 9 || self.credit == 0 {
             return Err(Error::OutOfRange);
         }
         self.cursor = seq;
-        self.credit -= bytes;
+        self.repaint_debt = bytes.saturating_sub(self.credit);
+        self.credit = self.credit.saturating_sub(bytes);
         self.snapshot = false;
         self.stalled = None;
         Ok(())
