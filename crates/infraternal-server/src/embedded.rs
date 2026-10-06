@@ -760,13 +760,17 @@ async fn process_incoming(
             }
             if attachment
                 .output
-                .send(TerminalOutput::Output { out_seq, bytes })
-                .await
+                .try_send(TerminalOutput::Output { out_seq, bytes })
                 .is_err()
             {
-                attachments.remove(&attachment_id);
-                routes.remove(&stream_id);
-                return true;
+                return retire_slow_stream(
+                    connection,
+                    attachments,
+                    routes,
+                    attachment_id,
+                    stream_id,
+                )
+                .await;
             }
             attachment.last_out_seq = end;
             true
@@ -787,13 +791,17 @@ async fn process_incoming(
             }
             if attachment
                 .output
-                .send(TerminalOutput::Snapshot { out_seq, bytes })
-                .await
+                .try_send(TerminalOutput::Snapshot { out_seq, bytes })
                 .is_err()
             {
-                attachments.remove(&attachment_id);
-                routes.remove(&stream_id);
-                return true;
+                return retire_slow_stream(
+                    connection,
+                    attachments,
+                    routes,
+                    attachment_id,
+                    stream_id,
+                )
+                .await;
             }
             attachment.last_out_seq = out_seq;
             true
@@ -812,11 +820,21 @@ async fn process_incoming(
                 return false;
             }
             attachment.last_in_seq = in_seq_acked;
-            attachment
+            if attachment
                 .output
-                .send(TerminalOutput::Ack { in_seq_acked })
-                .await
-                .is_ok()
+                .try_send(TerminalOutput::Ack { in_seq_acked })
+                .is_err()
+            {
+                return retire_slow_stream(
+                    connection,
+                    attachments,
+                    routes,
+                    attachment_id,
+                    stream_id,
+                )
+                .await;
+            }
+            true
         }
         Incoming::Close { stream_id, code } => {
             let Some(attachment_id) = routes.remove(&stream_id) else {
@@ -827,8 +845,7 @@ async fn process_incoming(
             };
             attachment
                 .output
-                .send(TerminalOutput::Closed { code })
-                .await
+                .try_send(TerminalOutput::Closed { code })
                 .is_ok()
         }
         Incoming::Ping { nonce, sent_us } => {
@@ -836,6 +853,28 @@ async fn process_incoming(
         }
         Incoming::Disconnected | Incoming::Hello { .. } => false,
     }
+}
+
+/// A full or disconnected consumer retires only its attachment. The PTY/ring remain
+/// in the shim; reconnect can catch up from the browser's last delivered offset.
+async fn retire_slow_stream(
+    connection: &mut AgentConnection,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    attachment_id: u64,
+    stream_id: u32,
+) -> bool {
+    attachments.remove(&attachment_id);
+    routes.remove(&stream_id);
+    write_frame(
+        connection,
+        stream_id,
+        &Frame::Close {
+            code: 1013,
+            reason: "reader fell behind; reattach",
+        },
+    )
+    .await
 }
 
 async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
@@ -921,7 +960,10 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
     if encode_muxed_frame_into(stream_id, frame, encode).is_err() {
         return false;
     }
-    writer.write_all(encode).await.is_ok()
+    matches!(
+        tokio::time::timeout(Duration::from_secs(1), writer.write_all(encode)).await,
+        Ok(Ok(()))
+    )
 }
 
 async fn connection_lost(
@@ -1033,3 +1075,7 @@ async fn stop_child(pid: nix::unistd::Pid) {
 
 #[cfg(not(unix))]
 async fn stop_child(_pid: nix::unistd::Pid) {}
+
+#[cfg(test)]
+#[path = "embedded_regressions.rs"]
+mod regressions;

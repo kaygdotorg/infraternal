@@ -326,7 +326,7 @@ async fn run_socket(
                             stream_id,
                             &Frame::Close {
                                 code,
-                                reason: "terminal closed",
+                                reason: "attachment ended",
                             },
                             &mut encode,
                         )
@@ -686,6 +686,11 @@ where
                         return;
                     }
                 }
+                // An isolated slow attachment closes its browser stream explicitly so the
+                // client reconnects from delivered offsets instead of waiting silently.
+                let _ = sender
+                    .send((stream_id, TerminalOutput::Closed { code: 1013 }))
+                    .await;
             });
             tracing::debug!(
                 agent_stream,
