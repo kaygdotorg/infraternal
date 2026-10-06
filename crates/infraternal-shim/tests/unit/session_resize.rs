@@ -16,7 +16,7 @@ fn native_resize_refusal_preserves_peer_and_pty() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let evidence = root.join("target/review-vt3-fixes");
     fs::create_dir_all(&evidence).unwrap();
-    for case in ["exact", "gap", "readfrom", "control"] {
+    for case in ["exact", "gap", "readfrom", "control", "queued"] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -56,7 +56,7 @@ fn resize_refusal_session_probe() {
         let uid = Uid::effective().as_raw();
         let mut child = ChildGuard(Pty::spawn(uid, 80, 24).unwrap());
         let mut terminal = Terminal::allocation_fixture(engine, PREFIX);
-        let mut ring = Ring::new(if case == "gap" || case == "control" {
+        let mut ring = Ring::new(if case == "gap" || case == "control" || case == "queued" {
             4
         } else {
             4096
@@ -78,6 +78,10 @@ fn resize_refusal_session_probe() {
         if case == "control" {
             peer.cursor = None;
             peer.caps |= SEQUENCED_INPUT;
+        }
+        if case == "queued" {
+            peer.cursor = None;
+            peer.request = Some(Request::Read(ring.head()));
         }
         let mut config = Config::new([0; 16], uid);
         let mut input = VecDeque::new();
