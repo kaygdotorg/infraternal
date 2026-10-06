@@ -438,3 +438,29 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      else on the page moves. A region blur and a pixel mosaic were tried and
      rejected as maximal. Reduced motion is opacity only. One shared
      copyFeedback() primitive for every copy action.
+
+104. **Remote desktop sessions are held by the server side, like SSH:** the
+     server or its infraternal agent opens and keeps the VNC (later RDP)
+     connection to the target. Browsers and later Apple clients only
+     subscribe to it. Closing a tab or losing a phone connection never
+     ends the session. The holder keeps the current framebuffer, so a
+     client that joins or rejoins gets a full image at once (the
+     equivalent of the terminal Snapshot). A browser-held RFB connection
+     (noVNC talking to the target) is rejected for that reason. Decoding
+     in the browser is fine (owner, #23).
+105. **First remote desktop targets:** macOS Screen Sharing first, then
+     Proxmox/QEMU (#23).
+106. **Minimum client:** iOS/Safari 17, so WebCodecs video decode is always
+     available (#23).
+107. **Remote desktop quality and input follow measurement:** the encoding
+     from holder to subscriber (dirty rectangles, lossless or JPEG,
+     H.264/HEVC low-delay video, or a mix) is chosen by benchmark for the
+     lowest input-to-photon latency and the best performance on phones.
+     Text sharpness, trackpad mode and clipboard follow from that
+     benchmark. They are not fixed promises. Benchmark and optimise
+     aggressively (#23).
+108. **One passkey prompt at sign-in (A3):** discoverable sign-in and the
+     PRF key unwrap use a single ceremony, with a server-wide constant PRF
+     input, provided the independent auth review confirms that this loses
+     no protection compared with the per-user input. Existing envelopes
+     keep their stored input (#19).
