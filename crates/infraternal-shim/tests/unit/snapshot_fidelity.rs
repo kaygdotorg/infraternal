@@ -630,3 +630,26 @@ fn fidelity_semantic_validation_matches_exported_history_extent() {
         }
     }
 }
+
+#[test]
+fn fidelity_mouse_effective_fields_follow_order_independently_of_booleans() {
+    let pairs: &[(&[u8], &[u8])] = &[
+        (b"\x1b[?1003h\x1b[?1000hX", b"\x1b[?1000h\x1b[?1003hX"),
+        (b"\x1b[?1005h\x1b[?1006hX", b"\x1b[?1006h\x1b[?1005hX"),
+        (b"\x1b[?1000h\x1b[?1002lX", b"\x1b[?1002l\x1b[?1000hX"),
+        (b"\x1b[?1006h\x1b[?1005lX", b"\x1b[?1005l\x1b[?1006hX"),
+    ];
+    for (case, &(left, right)) in pairs.iter().enumerate() {
+        let mut a = reset_terminal(80, 24).unwrap();
+        let mut b = reset_terminal(80, 24).unwrap();
+        a.process(left);
+        b.process(right);
+        assert_ne!(
+            a.engine.state_difference(&b.engine),
+            0,
+            "effective mouse field {case}"
+        );
+        check_replay(&format!("mouse ordering left {case}"), left, None, 80, 24).unwrap();
+        check_replay(&format!("mouse ordering right {case}"), right, None, 80, 24).unwrap();
+    }
+}
