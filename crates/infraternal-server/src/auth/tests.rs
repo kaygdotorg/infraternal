@@ -1,11 +1,19 @@
 //! Defensive tests with a real ES256 software authenticator and a browser-side PRF/keywrap double.
 //! No verifier is mocked: CBOR attestation, client data, flags and signatures enter webauthn-rs.
 use super::*;
+use crate::{
+    embedded::EmbeddedAgent,
+    runtime::{ServerConfig, TlsFiles, router_with_agent},
+};
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, Payload},
 };
+use bytes::{Bytes, BytesMut};
+use futures_util::{SinkExt, Stream, StreamExt};
 use hkdf::Hkdf;
+use http_body_util::BodyExt;
+use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use openssl::{
     bn::{BigNum, BigNumContext},
     ec::{EcGroup, EcKey},
@@ -16,8 +24,21 @@ use openssl::{
 };
 use serde_cbor_2::Value as Cbor;
 use sha2::{Digest, Sha256};
-use sqlx::sqlite::SqlitePoolOptions;
-use std::{collections::BTreeMap, time::Instant};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, UnixStream},
+};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
+};
 use tower::ServiceExt;
 
 static SERIAL: Mutex<()> = Mutex::const_new(());
@@ -975,4 +996,683 @@ async fn review_invalid_device_polling_exhausts_browser_budget() {
         axum::http::StatusCode::OK,
         "unauthenticated CLI polling denied a legitimate browser login"
     );
+}
+
+/// Drives setup, passkey registration, both wire legs, and a dropped/resumed browser connection.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
+    let _guard = SERIAL.lock().await;
+    let data_dir = std::env::temp_dir().join(format!("infraternal-ws-{}", rand::random::<u64>()));
+    let (server_agent_socket, agent_socket) = UnixStream::pair().expect("agent socketpair");
+    let input_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stub_count = input_count.clone();
+    let stub = tokio::spawn(test_leg_b_agent(agent_socket, stub_count));
+    let (app, setup_token) = router_with_agent(
+        ServerConfig {
+            listen: "127.0.0.1:0".parse().expect("listen address"),
+            data_dir: data_dir.clone(),
+            public_origin: ORIGIN.to_owned(),
+            web_root: None,
+            tls: Some(TlsFiles {
+                certificate: PathBuf::from("unused.crt"),
+                private_key: PathBuf::from("unused.key"),
+            }),
+            behind_proxy: false,
+            trusted_proxies: Vec::new(),
+        },
+        EmbeddedAgent::from_test_socket(server_agent_socket),
+    )
+    .await
+    .expect("server router");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener");
+    let address = listener.local_addr().expect("listener address");
+    let serving_app = app.clone();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            serving_app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
+    });
+    let unauthenticated = match connect_async(test_ws_request_without_cookie(address)).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => response.status(),
+        Err(error) => panic!("unexpected unauthenticated websocket error: {error}"),
+        Ok(_) => panic!("unauthenticated websocket upgraded"),
+    };
+    assert_eq!(unauthenticated, axum::http::StatusCode::UNAUTHORIZED);
+    let (user_id, cookie) = register_over_http(&app, &setup_token).await;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(data_dir.join("infraternal.sqlite")))
+        .await
+        .expect("test database connection");
+
+    let (mut first, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .expect("first websocket");
+    assert_server_hello(&mut first).await;
+    client_ws_send(
+        &mut first,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "software-authenticator-test",
+        },
+    )
+    .await;
+    let (connection_id, resume_token) = read_welcome(&mut first).await;
+    client_ws_send(
+        &mut first,
+        0,
+        &Frame::Call {
+            call_id: 7,
+            action_id: "terminal.open",
+            input_json: br#"{"cols":80,"rows":24,"px_w":0,"px_h":0}"#,
+        },
+    )
+    .await;
+    let open = read_client_frame(&mut first).await;
+    let decoded = decode_muxed_frame(&open).expect("terminal.open result frame");
+    let session_id = match decoded.frame {
+        Frame::Result {
+            call_id: 7,
+            ok: true,
+            json,
+        } => decode_test_session_id(str_field(
+            &serde_json::from_slice(json).expect("terminal.open result JSON"),
+            "session_id",
+        )),
+        _ => panic!("server did not return terminal.open result"),
+    };
+    assert_eq!(
+        decode_muxed_frame(&open).expect("result frame").stream_id,
+        0
+    );
+
+    client_ws_send(
+        &mut first,
+        1,
+        &Frame::AttachTerm {
+            session_id: &session_id,
+            last_out_seq: 0,
+            last_in_seq: 0,
+        },
+    )
+    .await;
+    let attached = read_client_frame(&mut first).await;
+    assert!(matches!(
+        decode_muxed_frame(&attached)
+            .expect("attach acknowledgement")
+            .frame,
+        Frame::Ack { in_seq_acked: 0 }
+    ));
+    client_ws_send(&mut first, 1, &Frame::Credit { bytes: 4 }).await;
+    client_ws_send(
+        &mut first,
+        1,
+        &Frame::Input {
+            in_seq: 0,
+            bytes: b"echo hi\n",
+        },
+    )
+    .await;
+    let (first_output, input_acknowledged) = read_partial_terminal(&mut first).await;
+    assert_eq!(first_output, b"echo");
+    assert!(input_acknowledged);
+    drop(first);
+    wait_connection_inactive(&pool, &connection_id).await;
+    let acked_bytes: Vec<u8> = sqlx::query_scalar(
+        "SELECT input_acked_u64 FROM terminal_sessions WHERE user_id=? AND id=?",
+    )
+    .bind(&user_id)
+    .bind(session_id.as_slice())
+    .fetch_one(&pool)
+    .await
+    .expect("persisted terminal input offset");
+    assert_eq!(
+        u64::from_be_bytes(acked_bytes.try_into().expect("eight-byte offset")),
+        8
+    );
+
+    let (mut resumed, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .expect("resumed websocket");
+    assert_server_hello(&mut resumed).await;
+    client_ws_send(
+        &mut resumed,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 1,
+            client_info: "software-authenticator-test",
+        },
+    )
+    .await;
+    client_ws_send(
+        &mut resumed,
+        0,
+        &Frame::Resume {
+            connection_id: &connection_id,
+            resume_token: &resume_token,
+        },
+    )
+    .await;
+    let (resumed_id, rotated_token) = read_welcome(&mut resumed).await;
+    assert_eq!(resumed_id, connection_id);
+    assert_ne!(rotated_token, resume_token);
+    client_ws_send(
+        &mut resumed,
+        1,
+        &Frame::AttachTerm {
+            session_id: &session_id,
+            last_out_seq: 4,
+            last_in_seq: 8,
+        },
+    )
+    .await;
+    let attached = read_client_frame(&mut resumed).await;
+    assert!(matches!(
+        decode_muxed_frame(&attached)
+            .expect("resumed attach acknowledgement")
+            .frame,
+        Frame::Ack { in_seq_acked: 8 }
+    ));
+    client_ws_send(&mut resumed, 1, &Frame::Credit { bytes: 1024 }).await;
+    client_ws_send(
+        &mut resumed,
+        1,
+        &Frame::Input {
+            in_seq: 0,
+            bytes: b"echo hi\n",
+        },
+    )
+    .await;
+    let remaining = read_terminal_output(&mut resumed).await;
+    let mut complete_output = first_output;
+    complete_output.extend_from_slice(&remaining);
+    assert_eq!(complete_output, b"echo hi\r\nhi\r\n");
+    assert_eq!(input_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    client_ws_send(
+        &mut resumed,
+        1,
+        &Frame::Close {
+            code: 1000,
+            reason: "detach",
+        },
+    )
+    .await;
+
+    let logout = axum::http::Request::builder()
+        .method("POST")
+        .uri("/auth/logout")
+        .header(axum::http::header::ORIGIN, ORIGIN)
+        .header(axum::http::header::COOKIE, &cookie)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from("{}"))
+        .expect("logout request");
+    let mut logout = logout;
+    logout
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    assert_eq!(
+        app.clone()
+            .oneshot(logout)
+            .await
+            .expect("logout response")
+            .status(),
+        axum::http::StatusCode::OK
+    );
+    client_ws_send(
+        &mut resumed,
+        0,
+        &Frame::Call {
+            call_id: 8,
+            action_id: "terminal.open",
+            input_json: br#"{"cols":80,"rows":24,"px_w":0,"px_h":0}"#,
+        },
+    )
+    .await;
+    let unauthorized_call = read_client_frame(&mut resumed).await;
+    match decode_muxed_frame(&unauthorized_call)
+        .expect("unauthorized call result")
+        .frame
+    {
+        Frame::Result {
+            call_id: 8,
+            ok: false,
+            json,
+        } => assert_eq!(json, br#"{"error":"unauthorized"}"#),
+        _ => panic!("revoked session still authorized a call"),
+    }
+
+    drop(resumed);
+    server.abort();
+    let _ = server.await;
+    stub.abort();
+    let _ = stub.await;
+    drop(app);
+    pool.close().await;
+    std::fs::remove_dir_all(data_dir).expect("remove temporary server data");
+}
+
+async fn register_over_http(app: &axum::Router, setup_token: &str) -> (String, String) {
+    let (status, _, start) = http_post_json(
+        app,
+        "setup-start",
+        json!({"token":setup_token,"name":"owner"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let user_id = str_field(&start, "user_id").to_owned();
+    let words = str_field(&start, "recovery_words").to_owned();
+    let software = Software::new();
+    let dek = rand::random::<[u8; 32]>();
+    let passkey_wrap = browser_wrap(&software.prf(&start), &dek, &user_id, "passkey");
+    let recovery_wrap = browser_wrap(&recovery_ikm(&words), &dek, &user_id, "recovery");
+    let proof = software.registration(&start, ORIGIN, true);
+    let (status, headers, _) = http_post_json(
+        app,
+        "registration-finish",
+        json!({
+            "ceremony":start["ceremony"],
+            "proof":proof,
+            "passkey_wrap":passkey_wrap,
+            "recovery_wrap":recovery_wrap,
+        }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let cookie = headers
+        .get(axum::http::header::SET_COOKIE)
+        .expect("registered session cookie")
+        .to_str()
+        .expect("cookie header")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_owned();
+    (user_id, cookie)
+}
+
+async fn http_post_json(
+    app: &axum::Router,
+    action: &str,
+    value: Value,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/auth/{action}"))
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ORIGIN, ORIGIN)
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&value).expect("HTTP JSON"),
+        ))
+        .expect("auth HTTP request");
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("auth HTTP response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("auth HTTP body")
+        .to_bytes();
+    let value = serde_json::from_slice(&body).expect("auth JSON response");
+    (status, headers, value)
+}
+
+fn test_ws_request(
+    address: SocketAddr,
+    cookie: &str,
+) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    let mut request = format!("ws://{address}/v1/ws")
+        .into_client_request()
+        .expect("websocket request");
+    request.headers_mut().insert(
+        axum::http::header::ORIGIN,
+        axum::http::HeaderValue::from_static(ORIGIN),
+    );
+    request.headers_mut().insert(
+        axum::http::header::COOKIE,
+        axum::http::HeaderValue::from_str(cookie).expect("session cookie"),
+    );
+    request
+}
+
+fn test_ws_request_without_cookie(
+    address: SocketAddr,
+) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    let mut request = format!("ws://{address}/v1/ws")
+        .into_client_request()
+        .expect("unauthenticated websocket request");
+    request.headers_mut().insert(
+        axum::http::header::ORIGIN,
+        axum::http::HeaderValue::from_static(ORIGIN),
+    );
+    request
+}
+
+async fn assert_server_hello<S>(socket: &mut S)
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let wire = read_client_frame(socket).await;
+    let decoded = decode_muxed_frame(&wire).expect("server Hello frame");
+    assert_eq!(decoded.stream_id, 0);
+    assert!(matches!(decoded.frame, Frame::Hello { version: 1, .. }));
+}
+
+async fn read_welcome<S>(socket: &mut S) -> ([u8; 16], [u8; 32])
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let wire = read_client_frame(socket).await;
+    let decoded = decode_muxed_frame(&wire).expect("Welcome frame");
+    assert_eq!(decoded.stream_id, 0);
+    match decoded.frame {
+        Frame::Welcome {
+            connection_id,
+            resume_token,
+            resume_window_seconds,
+        } => {
+            assert_eq!(resume_window_seconds, 120);
+            (*connection_id, *resume_token)
+        }
+        _ => panic!("server did not send Welcome"),
+    }
+}
+
+async fn client_ws_send<S>(socket: &mut S, stream_id: u32, frame: &Frame<'_>)
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Debug,
+{
+    let mut encoded = Vec::with_capacity(128);
+    encode_muxed_frame_into(stream_id, frame, &mut encoded).expect("encode websocket frame");
+    socket
+        .send(Message::Binary(Bytes::from(encoded)))
+        .await
+        .expect("send websocket frame");
+}
+
+async fn read_client_frame<S>(socket: &mut S) -> Bytes
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    loop {
+        match socket
+            .next()
+            .await
+            .expect("websocket message")
+            .expect("websocket frame")
+        {
+            Message::Binary(bytes) => return bytes,
+            Message::Ping(bytes) => socket
+                .send(Message::Pong(bytes))
+                .await
+                .expect("websocket pong"),
+            Message::Pong(_) | Message::Frame(_) => {}
+            Message::Close(_) => panic!("server closed websocket unexpectedly"),
+            Message::Text(_) => panic!("server sent a text websocket message"),
+        }
+    }
+}
+
+async fn read_partial_terminal<S>(socket: &mut S) -> (Vec<u8>, bool)
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let mut output = Vec::new();
+    let mut input_acknowledged = false;
+    while output.is_empty() || !input_acknowledged {
+        let wire = read_client_frame(socket).await;
+        let decoded = decode_muxed_frame(&wire).expect("terminal response frame");
+        match decoded.frame {
+            Frame::Ack { in_seq_acked: 8 } => input_acknowledged = true,
+            Frame::Output { out_seq: 0, bytes } => output.extend_from_slice(bytes),
+            _ => {}
+        }
+    }
+    (output, input_acknowledged)
+}
+
+async fn read_terminal_output<S>(socket: &mut S) -> Vec<u8>
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    loop {
+        let wire = read_client_frame(socket).await;
+        let decoded = decode_muxed_frame(&wire).expect("resumed terminal frame");
+        if let Frame::Output { out_seq: 4, bytes } = decoded.frame {
+            return bytes.to_vec();
+        }
+    }
+}
+
+fn decode_test_session_id(value: &str) -> [u8; 16] {
+    assert_eq!(value.len(), 32);
+    let mut session = [0_u8; 16];
+    for (index, byte) in session.iter_mut().enumerate() {
+        let offset = index * 2;
+        *byte = u8::from_str_radix(&value[offset..offset + 2], 16).expect("session id hex");
+    }
+    session
+}
+
+async fn wait_connection_inactive(pool: &sqlx::SqlitePool, id: &[u8; 16]) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let active: Option<i64> =
+            sqlx::query_scalar("SELECT active FROM websocket_connections WHERE connection_id=?")
+                .bind(id.as_slice())
+                .fetch_optional(pool)
+                .await
+                .expect("resume row query");
+        if active == Some(0) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "socket did not enter resume state"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Test-only leg-B implementation: it returns one deterministic session and resumes a fixed PTY transcript.
+#[allow(clippy::too_many_lines)]
+async fn test_leg_b_agent(
+    mut socket: UnixStream,
+    input_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    const OUTPUT: &[u8] = b"echo hi\r\nhi\r\n";
+    let mut receive = BytesMut::with_capacity(1024);
+    let hello = read_leg_b_frame(&mut socket, &mut receive)
+        .await
+        .expect("server Hello");
+    assert!(matches!(
+        decode_muxed_frame(&hello).expect("Hello frame").frame,
+        Frame::Hello { version: 1, .. }
+    ));
+    leg_b_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "test-agent-stub",
+        },
+    )
+    .await;
+
+    let session_id = [0x42; 16];
+    let session_id_json = "42".repeat(16);
+    let mut terminal_stream = None;
+    let mut output_cursor = 0_usize;
+    let mut input_acked = 0_u64;
+    let mut credit = 0_u64;
+    let mut command_seen = false;
+    loop {
+        let Some(wire) = read_leg_b_frame(&mut socket, &mut receive).await else {
+            return;
+        };
+        let Ok(decoded) = decode_muxed_frame(&wire) else {
+            return;
+        };
+        let stream_id = decoded.stream_id;
+        match decoded.frame {
+            Frame::Call {
+                call_id,
+                action_id: "terminal.open",
+                ..
+            } => {
+                let json = serde_json::to_vec(&json!({"session_id":session_id_json}))
+                    .expect("stub result JSON");
+                leg_b_send(
+                    &mut socket,
+                    0,
+                    &Frame::Result {
+                        call_id,
+                        ok: true,
+                        json: &json,
+                    },
+                )
+                .await;
+            }
+            Frame::AttachTerm {
+                session_id: received,
+                last_out_seq,
+                last_in_seq,
+            } => {
+                assert_eq!(*received, session_id);
+                terminal_stream = Some(stream_id);
+                output_cursor = usize::try_from(last_out_seq).expect("output offset");
+                input_acked = input_acked.max(last_in_seq);
+                credit = 0;
+            }
+            Frame::Credit { bytes } => {
+                credit = credit.saturating_add(u64::from(bytes));
+                stub_flush_output(
+                    &mut socket,
+                    terminal_stream,
+                    &mut output_cursor,
+                    &mut credit,
+                    command_seen,
+                    OUTPUT,
+                )
+                .await;
+            }
+            Frame::Input { in_seq, bytes } => {
+                input_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let end = in_seq + u64::try_from(bytes.len()).expect("input length");
+                if end > input_acked {
+                    assert!(in_seq <= input_acked);
+                    input_acked = end;
+                    command_seen = true;
+                }
+                leg_b_send(
+                    &mut socket,
+                    stream_id,
+                    &Frame::Ack {
+                        in_seq_acked: input_acked,
+                    },
+                )
+                .await;
+                stub_flush_output(
+                    &mut socket,
+                    terminal_stream,
+                    &mut output_cursor,
+                    &mut credit,
+                    command_seen,
+                    OUTPUT,
+                )
+                .await;
+            }
+            Frame::Close { .. } if terminal_stream == Some(stream_id) => {
+                terminal_stream = None;
+                credit = 0;
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn stub_flush_output(
+    socket: &mut UnixStream,
+    stream: Option<u32>,
+    cursor: &mut usize,
+    credit: &mut u64,
+    command_seen: bool,
+    output: &[u8],
+) {
+    let Some(stream) = stream else {
+        return;
+    };
+    if !command_seen || *credit == 0 || *cursor >= output.len() {
+        return;
+    }
+    let available = usize::try_from(*credit).unwrap_or(usize::MAX);
+    let end = cursor.saturating_add(available).min(output.len());
+    let start_seq = u64::try_from(*cursor).expect("stub output sequence");
+    let bytes = &output[*cursor..end];
+    leg_b_send(
+        socket,
+        stream,
+        &Frame::Output {
+            out_seq: start_seq,
+            bytes,
+        },
+    )
+    .await;
+    *credit -= u64::try_from(bytes.len()).expect("stub output length");
+    *cursor = end;
+}
+
+async fn read_leg_b_frame(socket: &mut UnixStream, receive: &mut BytesMut) -> Option<Bytes> {
+    let mut scratch = [0_u8; 4096];
+    loop {
+        match decode_muxed_frame(receive) {
+            Ok(decoded) => return Some(receive.split_to(decoded.wire_len).freeze()),
+            Err(infraternal_protocol::DecodeError::Incomplete) => {}
+            Err(_) => return None,
+        }
+        let read = socket.read(&mut scratch).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        receive.extend_from_slice(&scratch[..read]);
+    }
+}
+
+async fn leg_b_send(socket: &mut UnixStream, stream_id: u32, frame: &Frame<'_>) {
+    let mut encoded = Vec::with_capacity(128);
+    encode_muxed_frame_into(stream_id, frame, &mut encoded).expect("encode leg-B frame");
+    socket.write_all(&encoded).await.expect("write leg-B frame");
 }
