@@ -4,7 +4,7 @@
 //! with a two-second handshake deadline; a nonresponsive shim cannot serialize
 //! recovery of healthy sessions. Only refused sockets are removed as stale.
 
-use infraternal_shim::frame::{Frame, MAX_FRAME, SEQUENCED_INPUT};
+use infraternal_shim::frame::{APPROXIMATE_SNAPSHOT, Frame, MAX_FRAME, SEQUENCED_INPUT};
 use nix::{
     sys::inotify::{AddWatchFlags, InitFlags, Inotify},
     unistd::Uid,
@@ -189,11 +189,11 @@ pub async fn connect(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
     connect_with(path, id, 0).await
 }
 
-/// Select restart-safe input when advertised; expose caps-zero limitations.
+/// Select restart-safe input and approximate recovery when advertised.
 /// # Errors
 /// Returns the same authentication and framing failures as `connect`.
 pub async fn connect_sequenced(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
-    connect_with(path, id, SEQUENCED_INPUT).await
+    connect_with(path, id, SEQUENCED_INPUT | APPROXIMATE_SNAPSHOT).await
 }
 
 async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result<Session> {
