@@ -24,6 +24,92 @@ body { overflow: hidden; }
 button, input { font: inherit; }
 button { color: inherit; }
 
+.access {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(100%, 440px);
+  min-height: 100%;
+  margin: auto;
+  padding: max(32px, env(safe-area-inset-top)) 24px max(32px, env(safe-area-inset-bottom));
+  justify-content: center;
+}
+.access h1 { margin: 0; font-size: 22px; font-weight: 520; letter-spacing: -0.04em; }
+.lead { margin: -6px 0 10px; color: #a6a8ad; font-size: 14px; line-height: 1.6; }
+.access form { display: flex; flex-direction: column; gap: 10px; }
+.access label { color: #a6a8ad; font-size: 12px; }
+.access input:not([type="checkbox"]) {
+  width: 100%;
+  min-height: 48px;
+  border: 1px solid #393b40;
+  border-radius: 9px;
+  outline: none;
+  background: #191a1d;
+  color: #f2f3f5;
+  padding: 0 12px;
+  font-size: 16px;
+}
+.access input:focus { border-color: #a9b5ff; }
+.access button {
+  min-height: 46px;
+  border-radius: 9px;
+  padding: 0 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.primary { border: 1px solid #c8ceff; background: #c8ceff; color: #171820 !important; font-weight: 600; }
+.primary:disabled { opacity: 0.45; cursor: default !important; }
+.quiet { border: 1px solid #393b40; background: transparent; color: #d6d7da; }
+.message { min-height: 1.4em; margin: 0; color: #d0d2d7; font-size: 12px; line-height: 1.5; }
+.recovery { width: min(100%, 560px); }
+.recovery-words {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 20px;
+  border: 1px solid #393b40;
+  border-radius: 9px;
+  background: #191a1d;
+  color: #f2f3f5;
+  font: 450 15px/1.8 "Geist Mono", ui-monospace, monospace;
+}
+.account-copy { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; align-items: center; }
+.account-copy span { color: #a6a8ad; font-size: 12px; }
+.account-copy code { min-width: 0; overflow-wrap: anywhere; color: #f2f3f5; font-size: 12px; }
+.account-copy button { grid-column: 2; grid-row: 1 / span 2; }
+.check-row { display: flex; gap: 10px; align-items: center; min-height: 44px; }
+.check-row input { width: 20px; height: 20px; accent-color: #c8ceff; }
+
+.terminal-screen {
+  position: relative;
+  width: 100%;
+  height: var(--visual-height, 100dvh);
+  overflow: hidden;
+  background: #101113;
+  touch-action: pan-x pan-y;
+}
+.terminal-host {
+  position: absolute;
+  inset: var(--visual-top, 0px) 0 0;
+  overflow: hidden;
+  padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  touch-action: pan-y;
+}
+.connection-status {
+  position: absolute;
+  z-index: 3;
+  left: max(16px, env(safe-area-inset-left));
+  bottom: max(12px, env(safe-area-inset-bottom));
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid #393b40;
+  border-radius: 8px;
+  background: #191a1d;
+  color: #d6d7da;
+  font-size: 12px;
+}
+.connection-status:empty, .connection-status[hidden] { display: none; }
+
 /* Keep Ghostty's hidden input present without iOS zoom or its large native caret. */
 .terminal-host textarea, .terminal-host input {
   opacity: 0 !important;
@@ -37,4 +123,8 @@ button { color: inherit; }
   max-height: 1px !important;
   resize: none !important;
   overflow: hidden !important;
+}
+
+@media (max-width: 520px) {
+  .access { padding-right: 20px; padding-left: 20px; }
 }
