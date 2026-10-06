@@ -370,6 +370,7 @@ async fn terminal(
                         return Err(sessions::invalid("snapshot cursor regressed"));
                     }
                     if output.repaint(seq, length).is_ok() {
+                        deadline = None;
                         if approximate {
                             let json = serde_json::to_vec(
                                 &serde_json::json!({"type":"terminal.snapshot", "session_id":uuid::Uuid::from_bytes(id), "seq":seq, "approximate":true}),
@@ -379,6 +380,13 @@ async fn terminal(
                         emit(&tx, Message::Shim(stream, frame)).await?;
                     } else {
                         pending = Some(frame);
+                        // A repaint is indivisible. Positive credit below its
+                        // cost needs the same bounded pause as zero-credit raw
+                        // output; expiry preserves the client cursor and parks
+                        // serialization until the remembered cost is affordable.
+                        deadline = output
+                            .pending(Instant::now())
+                            .map(tokio::time::Instant::from_std);
                     }
                 }
                 _ => return Err(sessions::invalid("invalid pending frame")),
