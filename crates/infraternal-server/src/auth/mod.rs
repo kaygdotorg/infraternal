@@ -14,7 +14,7 @@ mod setup;
 mod webauthn;
 mod wraps;
 
-use crypto::{hash, prf_salt, random, recovery_hash, verify_recovery};
+use crypto::{constant_prf_input, hash, prf_salt, random, recovery_hash, verify_recovery};
 pub use sessions::Session;
 use sessions::{insert_session, require_session_tx};
 pub use wraps::Wrap;

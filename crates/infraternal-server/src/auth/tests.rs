@@ -1713,18 +1713,23 @@ async fn leg_b_send(socket: &mut UnixStream, stream_id: u32, frame: &Frame<'_>) 
     socket.write_all(&encoded).await.expect("write leg-B frame");
 }
 
-/// Different owner handles must never share the new enrollment PRF input.
+/// New enrollments share a public input; credential PRF and UUID AAD retain key isolation.
 #[tokio::test]
-async fn enrollment_prf_input_is_user_bound() {
+async fn enrollment_prf_input_matches_discoverable_login() {
     let _guard = SERIAL.lock().await;
     let (auth, token) = empty().await;
     let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
     let b = auth.setup_start(&token, "owner", NOW).await.unwrap();
     assert_ne!(a["user_id"], b["user_id"]);
-    assert_ne!(
+    assert_eq!(
         a["options"]["publicKey"]["extensions"]["prf"],
         b["options"]["publicKey"]["extensions"]["prf"],
-        "PRF input must be per-user"
+        "new enrollments must use the public discoverable PRF input"
+    );
+    let login = auth.discoverable_login_start(NOW).await.unwrap();
+    assert_eq!(
+        login["options"]["publicKey"]["extensions"]["prf"],
+        a["options"]["publicKey"]["extensions"]["prf"]
     );
 }
 
@@ -1735,7 +1740,10 @@ async fn discoverable_login_handle_credential_counter_and_replay() {
     let mut f = fixture().await;
     let start = f.auth.discoverable_login_start(NOW).await.unwrap();
     assert_eq!(start["options"]["publicKey"]["allowCredentials"], json!([]));
-    assert_eq!(start["options"]["publicKey"]["extensions"], json!({}));
+    assert_eq!(
+        start["options"]["publicKey"]["extensions"]["prf"]["eval"]["first"],
+        constant_prf_input()
+    );
     let mut proof = f.software.login(&start, ORIGIN, true);
     proof["response"]["userHandle"] =
         json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
@@ -1796,7 +1804,7 @@ async fn discoverable_login_handle_credential_counter_and_replay() {
     );
 }
 
-/// Legacy ciphertext retains v1 while new credentials expose their exact user-bound input.
+/// Legacy ciphertext retains v1 while new credentials expose their exact constant input.
 #[tokio::test]
 async fn authenticated_prf_metadata_preserves_legacy_envelopes() {
     let _guard = SERIAL.lock().await;
@@ -1808,7 +1816,7 @@ async fn authenticated_prf_metadata_preserves_legacy_envelopes() {
             .iter()
             .find(|entry| entry["kind"] == "passkey")
             .unwrap()["prf_input"],
-        prf_salt(Some(&f.user))
+        constant_prf_input()
     );
     assert!(
         entries

@@ -2,8 +2,8 @@
 use super::{
     Auth, Authority, B64, CEREMONY, Engine, Error, Login, LoginState, Passkey, Pending,
     PublicKeyCredential, RegisterPublicKeyCredential, Registration, Result, Row, Uuid, Value, Wrap,
-    hash, insert_session, json, prf_salt, put_wrap, random, recovery_hash, require_session_tx,
-    setup::valid_username,
+    constant_prf_input, hash, insert_session, json, prf_salt, put_wrap, random, recovery_hash,
+    require_session_tx, setup::valid_username,
 };
 
 #[allow(clippy::missing_errors_doc)]
@@ -38,7 +38,7 @@ impl Auth {
         // UV, RP, origin, challenge, signature and counters are enforced by webauthn-rs.
         options["publicKey"]["authenticatorSelection"]["residentKey"] = json!("required");
         options["publicKey"]["authenticatorSelection"]["requireResidentKey"] = json!(true);
-        options["publicKey"]["extensions"]["prf"] = json!({"eval":{"first":prf_salt(Some(&user))}});
+        options["publicKey"]["extensions"]["prf"] = json!({"eval":{"first":constant_prf_input()}});
         let words = if rotate {
             Some(
                 bip39::Mnemonic::generate_in(bip39::Language::English, 24)
@@ -277,7 +277,7 @@ impl Auth {
             .ok_or(Error::Json)?
             .remove("mediation");
         options["publicKey"]["allowCredentials"] = json!([]);
-        options["publicKey"]["extensions"] = json!({});
+        options["publicKey"]["extensions"] = json!({"prf":{"eval":{"first":constant_prf_input()}}});
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
@@ -488,7 +488,7 @@ async fn store_passkey(
         .bind(&id)
         .bind(user)
         .bind(serde_json::to_string(key)?)
-        .bind(prf_salt(Some(user)))
+        .bind(constant_prf_input())
         .execute(&mut **tx)
         .await?;
     Ok(id)

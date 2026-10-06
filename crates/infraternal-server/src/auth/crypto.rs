@@ -10,12 +10,16 @@ pub(super) fn hash(value: &str) -> String {
     B64.encode(Sha256::digest(value.as_bytes()))
 }
 pub(super) fn prf_salt(user: Option<&str>) -> String {
-    // Existing envelopes must keep v1; new enrollment isolates input by canonical UUID.
+    // Stored v1/v2 envelopes keep their original input; never relabel ciphertext.
     let context = user.map_or_else(
         || "infraternal/keywrap/prf/v1".to_owned(),
         |user| format!("infraternal/keywrap/prf/v2|{user}"),
     );
     B64.encode(Sha256::digest(context.as_bytes()))
+}
+/// Stable public input [D108]: credential PRF secrets remain distinct; envelope AAD is unchanged.
+pub(super) fn constant_prf_input() -> String {
+    B64.encode(Sha256::digest(b"infraternal/keywrap/prf/v3"))
 }
 static ARGON_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 pub(super) async fn recovery_hash(words: String) -> Result<String> {
