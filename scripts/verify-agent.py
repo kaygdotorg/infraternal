@@ -14,6 +14,7 @@ import threading
 import time
 
 from agent_fixture import Binary, AckBarrier, cleanup, rss, varint
+from idle_canary import assert_process_idle, session_shim_pid
 
 
 def run(binary, state, functional=False, seed=20):
@@ -24,15 +25,29 @@ def run(binary, state, functional=False, seed=20):
     stopped = threading.Event()
     try:
         idle = rss(client.child.pid)
-        ticks0 = Path(f'/proc/{client.child.pid}/stat').read_text().split()[13:15]
-        time.sleep(.5)
-        ticks1 = Path(f'/proc/{client.child.pid}/stat').read_text().split()[13:15]
-        assert ticks0 == ticks1, (ticks0, ticks1)
+        idle_agent = assert_process_idle(client.child.pid, 'idle infraternal agent')
         assert idle < 15 * 1024
-        print(f'idle infraternal agent RSS={idle} KiB; CPU ticks over 500 ms={ticks0} -> {ticks1}', flush=True)
+        print(
+            f'idle infraternal agent: {idle_agent.total_slices} scheduled slices over '
+            f'{idle_agent.elapsed_seconds:.3f} s '
+            f'({idle_agent.scheduled_per_minute:.3f}/min); RSS={idle} KiB',
+            flush=True,
+        )
         session = client.open()
         client.attach()
         client.until(b'shim-test')
+        shim_pid = session_shim_pid(session)
+        attached_agent = assert_process_idle(
+            client.child.pid, 'idle infraternal agent with attached shim'
+        )
+        idle_shim = assert_process_idle(shim_pid, 'idle session shim')
+        print(
+            f'idle attached infraternal agent: {attached_agent.total_slices} scheduled slices '
+            f'over {attached_agent.elapsed_seconds:.3f} s; '
+            f'idle session shim: {idle_shim.total_slices} over '
+            f'{idle_shim.elapsed_seconds:.3f} s',
+            flush=True,
+        )
         client.input(b"printf 'OPEN_%s\\n' OK\n")
         client.until(b'OPEN_OK\r\n')
         client.wait_ack()

@@ -21,4 +21,5 @@ fn real_binary_preserves_input_and_output_across_24_abrupt_stops() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    print!("{}", String::from_utf8_lossy(&output.stdout));
 }
