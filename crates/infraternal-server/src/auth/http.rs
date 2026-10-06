@@ -7,9 +7,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+#[path = "http_hostname_tests.rs"]
+mod hostname_tests;
 
 /// Mount the POST-only `/auth/{action}` API. TLS terminates at the configured public origin.
 pub fn router(auth: Auth) -> Router {
@@ -107,6 +111,25 @@ fn cookie(headers: &HeaderMap) -> super::Result<&str> {
 fn body<T: serde::de::DeserializeOwned>(value: Value) -> super::Result<T> {
     serde_json::from_value(value).map_err(|_| Error::Invalid)
 }
+
+#[derive(Serialize)]
+struct AuthenticatedSession {
+    #[serde(flatten)]
+    session: super::Session,
+    hostname: Option<String>,
+}
+
+/// Add the server's system name only to authenticated session reads.
+fn authenticated_session(session: super::Session) -> AuthenticatedSession {
+    AuthenticatedSession {
+        session,
+        hostname: nix::unistd::gethostname()
+            .ok()
+            .map(|name| name.to_string_lossy().trim().to_owned())
+            .filter(|name| !name.is_empty()),
+    }
+}
+
 fn session_cookie(token: &str) -> super::Result<HeaderValue> {
     HeaderValue::from_str(&format!(
         "__Host-infraternal={token}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000"
@@ -213,7 +236,10 @@ async fn execute(
         "wraps" => auth.wraps(cookie(headers)?, now).await?,
         "unlock-session" => {
             let _: Empty = body(value)?;
-            return Ok(Json(auth.unlock_session(cookie(headers)?, now).await?).into_response());
+            return Ok(Json(authenticated_session(
+                auth.unlock_session(cookie(headers)?, now).await?,
+            ))
+            .into_response());
         }
         "unlock-finish" => {
             let b: Unlock = body(value)?;
@@ -224,7 +250,10 @@ async fn execute(
             return Ok(Json(json!({"ok":true})).into_response());
         }
         "session" => {
-            return Ok(Json(auth.session(cookie(headers)?, now).await?).into_response());
+            return Ok(Json(authenticated_session(
+                auth.session(cookie(headers)?, now).await?,
+            ))
+            .into_response());
         }
         "recovery-start" => {
             let b: Recovery = body(value)?;
