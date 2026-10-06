@@ -364,3 +364,42 @@ fn fidelity_iso_protection_erase() {
         "ISO protected erase continuation"
     );
 }
+
+#[test]
+#[ignore = "oracle completeness red probes; enable with independent state checks"]
+fn fidelity_oracle_detects_hidden_state() {
+    // Pair real engines directly: these probes test observation independently
+    // of Snapshot construction, so a serializer bug cannot define equality.
+    let probes: &[(&str, &[u8], &[u8])] = &[
+        ("live charset", b"\x1b(0", b""),
+        ("live single shift", b"\x1b*0\x1bN", b"\x1b*0"),
+        ("live protection", b"\x1b[1\"q", b"\x1b[1\"q\x1b[0\"q"),
+        (
+            "live hyperlink",
+            b"\x1b]8;id=a;https://example.org\x1b\\",
+            b"\x1b]8;id=b;https://example.org\x1b\\",
+        ),
+        (
+            "inactive keyboard ring",
+            b"\x1b[?47h\x1b[>1u\x1b[>2u\x1b[<u\x1b[?47l",
+            b"\x1b[?47h\x1b[>1u\x1b[>3u\x1b[<u\x1b[?47l",
+        ),
+        ("foreground color", b"\x1b]10;rgb:12/34/56\x07", b""),
+        ("background color", b"\x1b]11;rgb:12/34/56\x07", b""),
+        ("cursor color", b"\x1b]12;rgb:12/34/56\x07", b""),
+        ("semantic content", b"\x1b]133;A;redraw=1\x07X", b"X"),
+        ("saved mode", b"\x1b[?1000h\x1b[?1000s\x1b[?1000lX", b"X"),
+        ("ISO protected mode", b"\x1bV\x1bW", b"\x1b[1\"q\x1b[0\"q"),
+    ];
+    for &(name, left, right) in probes {
+        let mut a = reset_terminal(80, 24).unwrap();
+        let mut b = reset_terminal(80, 24).unwrap();
+        a.process(left);
+        b.process(right);
+        assert_ne!(
+            a.engine.state_difference(&b.engine),
+            0,
+            "unchecked field: {name}"
+        );
+    }
+}
