@@ -135,6 +135,19 @@ frames are binary, because they carry each keystroke and each output chunk.
   resume, it resends from the server's `in_seq_acked`. The server drops
   bytes below the offset that it already wrote. Thus, a keystroke is never
   lost and never typed two times.
+- **Writer authority (#28).** Input ranges belong to a durable pair of
+  authenticated connection id and odd client stream id, pinned to one owned
+  session. Distinct devices can start at zero without sharing acknowledgements.
+  SQLite retains each writer's full unsigned Ack. A monotonic, never-reused even
+  leg-B stream id represents that writer across connection/supervision reconnects;
+  output offsets still belong to the session. The backend must deduplicate by
+  writer identity and return its authoritative Ack on AttachTerm before replay.
+  A connection retains at most 32 writer identities, including detached streams.
+  The current implementation preserves this identity only during connection
+  resume. After the resume window, pending input needs a separate durable writer
+  capability: blindly replaying it with a new writer can duplicate accepted input.
+  This longer-drop contract gap is recorded on #28; production daemon/PTY proof
+  is blocked by the currently unimplemented host daemon.
 - **Window.** A connection can resume for `resume window seconds` (default
   120). After that, the client opens a new connection and attaches by
   session id. The session itself lives in the shim, without a time limit.
@@ -150,11 +163,25 @@ frames are binary, because they carry each keystroke and each output chunk.
   credit returns, it sends one `Snapshot`. The user sees the current screen
   at once, and does not wait for megabytes of a flood that scrolled away.
   (The full output stays in the scrollback in the shim.)
+- The embedded actor retains unspent credit, subtracting accepted Output and
+  Snapshot payload bytes. After a leg-B reconnect it sends AttachTerm and then
+  restores only the remaining credit. Snapshot repaint bytes do not advance the
+  output sequence.
+- A full attachment output queue retires that attachment (Close 1013), allowing
+  the browser to reconnect from its last consumed offset. It never waits for a
+  stalled reader in the shared actor. Stream Close remains local even when its
+  consumer has already dropped; control Close is echoed normally.
 - Leg B uses QUIC flow control plus the same credit idea between the server
   and the agent.
 
 ## 7. Authentication
 
+- WebSocket admission reserves the 16-per-user and 256-global permits at
+  upgrade, including sockets without Hello. Hello/Resume and incomplete wire
+  frames have five-second completion deadlines; transport reads have a
+  thirty-second liveness deadline and writes are bounded at one second.
+  Disconnect releases permits. Revocation wakes idle sockets without polling;
+  each dispatch checks current session authority and expiration.
 - Leg A: the WebSocket upgrade carries the session cookie
   or a device API key. The server checks the key before it accepts `Hello`.
   Every `Call` is then authorized for each action (contracts/plugin.md §4).
