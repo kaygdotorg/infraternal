@@ -584,3 +584,42 @@ fn fidelity_inherited_protection_off_mode_is_explicitly_rejected() {
         "rejection preserves inherited protection"
     );
 }
+
+#[test]
+#[ignore = "history-tail red regression; enable with exact retained-tail painting"]
+fn fidelity_snapshot_history_tail_contains_no_padding_rows() {
+    for lines in [7, 1005] {
+        let mut source = reset_terminal(12, 5).unwrap();
+        source.process(&b"line\r\n".repeat(lines));
+        let expected = source.engine.history_rows().min(256);
+        let mut restored = reset_terminal(12, 5).unwrap();
+        restored.process(&source.snapshot().unwrap());
+        assert_eq!(
+            restored.engine.history_rows(),
+            expected,
+            "retained tail must not append blank padding to history"
+        );
+        assert_eq!(
+            source.engine.state_difference(&restored.engine),
+            0,
+            "bounded history tail and active state must agree"
+        );
+    }
+}
+
+#[test]
+#[ignore = "history oracle red regression; enable after retained-tail comparison"]
+fn fidelity_oracle_observes_archived_cells_with_equal_active_screens() {
+    let mut a = reset_terminal(12, 5).unwrap();
+    let mut b = reset_terminal(12, 5).unwrap();
+    a.process(b"old A\r\n");
+    b.process(b"old B\r\n");
+    for terminal in [&mut a, &mut b] {
+        terminal.process(b"\r\n\r\n\r\n\r\n\r\nQ\x1b[2J\x1b[1;1H");
+    }
+    assert_ne!(
+        a.engine.state_difference(&b.engine),
+        0,
+        "archived cells are part of the retained-tail oracle scope"
+    );
+}
