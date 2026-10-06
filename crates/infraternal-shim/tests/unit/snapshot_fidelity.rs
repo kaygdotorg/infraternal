@@ -653,3 +653,7 @@ fn fidelity_mouse_effective_fields_follow_order_independently_of_booleans() {
         check_replay(&format!("mouse ordering right {case}"), right, None, 80, 24).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "fresh_captures.rs"]
+mod fresh_captures;
