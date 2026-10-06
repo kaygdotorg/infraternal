@@ -413,12 +413,19 @@ async fn rejected_origin_uv_challenge_signature_prf_and_expired_ceremonies() {
 }
 
 #[tokio::test]
-async fn setup_expiry_single_announcement_and_parallel_redemption() {
+async fn setup_restart_rotation_expiry_and_parallel_redemption() {
     let _guard = SERIAL.lock().await;
-    let (auth, token) = empty().await;
-    auth.bootstrap(NOW, |_| panic!("setup token announced twice"))
+    let (auth, old_token) = empty().await;
+    let mut token = String::new();
+    auth.bootstrap(NOW, |banner| token = banner.lines().nth(1).unwrap().into())
         .await
         .unwrap();
+    assert!(
+        !token.is_empty(),
+        "restart must issue a fresh setup capability"
+    );
+    assert_ne!(token, old_token);
+    assert!(auth.setup_start(&old_token, "owner", NOW).await.is_err());
     assert!(auth.setup_start(&token, "owner", NOW + DAY).await.is_err());
     let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
     let b = auth.setup_start(&token, "owner", NOW).await.unwrap();

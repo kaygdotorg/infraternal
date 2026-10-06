@@ -3,11 +3,11 @@ use super::{Auth, Authority, DAY, Error, Result, Uuid, Value, hash, random};
 
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
-    /// Announce a 256-bit setup token once. The callback is the sole permitted secret log [26].
-    /// An expired/lost token requires operator intervention; restarts never disclose or rotate it.
+    /// Rotate the single-use capability at startup until an owner exists [26].
+    /// The transaction invalidates older enrollment authority without retaining plaintext.
     pub async fn bootstrap(&self, now: i64, announce: impl FnOnce(&str)) -> Result<()> {
         let token = random();
-        let inserted = sqlx::query("INSERT INTO setup(singleton,token_hash,expires) SELECT 1,?,? WHERE NOT EXISTS (SELECT 1 FROM users WHERE owner=1) ON CONFLICT(singleton) DO NOTHING")
+        let inserted = sqlx::query("INSERT INTO setup(singleton,token_hash,expires) SELECT 1,?,? WHERE NOT EXISTS (SELECT 1 FROM users WHERE owner=1) ON CONFLICT(singleton) DO UPDATE SET token_hash=excluded.token_hash, expires=excluded.expires")
             .bind(hash(&token)).bind(now + DAY).execute(&self.pool).await?.rows_affected();
         if inserted == 1 {
             announce(&format!(
