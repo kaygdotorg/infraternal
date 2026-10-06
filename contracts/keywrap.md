@@ -1,4 +1,4 @@
-<!-- Browser encryption and auth adapter contract for decisions 23–29 and 53; issue #17. -->
+<!-- Browser encryption and auth adapter contract for decisions 23–29 and 53, 97–98; issues #17 and #32. -->
 # Browser key wrapping v1
 
 The server never receives a plaintext DEK, PRF output or SSH secret. It receives
@@ -83,12 +83,12 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 
 | Action | JSON body | Result |
 | --- | --- | --- |
-| setup-start | `{token,name}` | `{ceremony,user_id,options,recovery_words}` |
+| setup-start | legacy `{token,name}` or `{token,username,display_name?}` | `{ceremony,user_id,options,recovery_words}` |
 | registration-finish | `{ceremony,proof,passkey_wrap,recovery_wrap}` | secure session cookie |
 | status | `{}` | `{setup_required: bool}` only |
 | login-start | `{}` (legacy `{user_id}` supported) | `{ceremony,options}` |
 | login-finish | `{ceremony,proof,device}` | secure session cookie |
-| session | `{}` | `{user_id,device,fresh}` and refreshed cookie |
+| session | `{}` | `{user_id,username,display_name,device,fresh}` and refreshed cookie |
 | add-start | `{}` + session | enrollment options; recovery_words=null |
 | wraps | `{}` + session | `[{kind,key_id,wrap}]` for the session user |
 | recovery-start | `{user_id,words}` | `{token,delay_seconds:86400}` |
@@ -121,6 +121,22 @@ setup ceremonies at their transaction authority check.
 A host integration must invoke bootstrap at startup with its log writer.
 The setup token is consumed atomically only upon successful owner enrollment;
 all parallel enrollments then fail. Exactly one owner is enforced in storage.
+
+Owner enrollment stores the immutable internal UUID separately from the public
+username and display name [97–98]. The username is unique and must match ASCII
+`[a-z0-9_-]{2,32}`. The display name accepts up to 64 Unicode scalar values;
+missing or blank display names default to the username. New requests use
+`{token,username,display_name?}` and cannot mix those fields with legacy `name`.
+Legacy `{token,name}` remains accepted by treating `name` as both labels, subject
+to the username rule. WebAuthn registration uses the username for `user.name`
+and the display name for `user.displayName`. The authenticated session returns
+both labels; public status remains exactly `{setup_required}`.
+
+Migration 0006 preserves existing display labels. A unique legacy label that
+already matches the username rule is retained in lowercase; an invalid or
+duplicate legacy label receives a stable UUID-derived username. The unique index
+continues to arbitrate concurrent inserts. Enrollment returns HTTP 409 when a
+username already exists.
 
 First enrollment displays 24 recovery words once, asks the user to retain them,
 and builds both envelopes before `registration-finish`. The server pending
