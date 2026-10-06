@@ -541,12 +541,40 @@ fn handle(
                 return Err(invalid());
             }
             pty.resize(cols, rows, px_w, px_h)?;
-            terminal.resize(cols, rows)?;
+            // Ring origin coverage is necessary but the terminal also checks
+            // resize history. On refusal the native handle is retired and a
+            // fresh terminal is rebuilt at the unchanged last-good geometry.
+            let resized = if ring.start() == 0 {
+                terminal.resize_with_ring(cols, rows, Some(ring))
+            } else {
+                terminal.resize(cols, rows)
+            };
+            if resized.is_err() {
+                pty.resize(config.cols, config.rows, 0, 0)?;
+                // Force a repaint even when this viewer still has raw ring
+                // coverage, so clean recovery receives a negotiated notice.
+                // Keep the peer, session and accepted input flowing.
+                if p.cursor.is_some() || matches!(p.request, Some(Request::Read(_))) {
+                    p.request = Some(Request::Snapshot);
+                }
+                // Control-only peers await an ordered InputState fence. Their
+                // recovery notice is selected by the next ReadFrom, rather
+                // than sending an unsolicited frame before the State reply.
+                return Ok(false);
+            }
             config.cols = cols;
             config.rows = rows;
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
-            p.request = Some(Request::Read(seq));
+            // A new peer or a later request can replace the resize's queued
+            // repaint. Lost native state must still be announced, even when
+            // raw bytes cover this viewer's cursor; byte retention alone does
+            // not cover state after historical resizes or omitted output.
+            p.request = Some(if terminal.requires_approximation() {
+                Request::Snapshot
+            } else {
+                Request::Read(seq)
+            });
         }
         Frame::SnapshotRequest => p.request = Some(Request::Snapshot),
         Frame::Signal(signal) if !exited => pty.signal(signal)?,
