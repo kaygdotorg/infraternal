@@ -78,3 +78,19 @@ fn returned_credit_cancels_starvation_and_state_has_no_payload_buffer() {
     assert!(std::mem::size_of::<Output>() <= 64);
     assert!(std::mem::size_of::<Input>() <= 32);
 }
+
+#[test]
+#[ignore = "retained replay red regression; enable with recovery transition"]
+fn expired_credit_resumes_retained_bytes_at_the_same_cursor() {
+    let mut output = Output::attach(41);
+    output.forward(1024 * 1024).unwrap();
+    let cursor = output.cursor();
+    let now = Instant::now();
+    output.pending(now);
+    assert!(output.expire(now + STARVATION));
+    output.grant(100).unwrap();
+    assert_eq!(output.cursor(), cursor);
+    // After a retained ReadFrom response the relay must forward its unseen
+    // suffix, rather than silently discard it while waiting for a repaint.
+    assert_eq!(output.suffix(cursor, 100).unwrap(), 0..100);
+}
