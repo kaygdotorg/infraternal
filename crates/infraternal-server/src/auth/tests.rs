@@ -17,7 +17,7 @@ use openssl::{
 use serde_cbor_2::Value as Cbor;
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqlitePoolOptions;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Instant};
 use tower::ServiceExt;
 
 static SERIAL: Mutex<()> = Mutex::const_new(());
@@ -434,6 +434,74 @@ async fn setup_expiry_single_announcement_and_parallel_redemption() {
 }
 
 #[tokio::test]
+async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    assert!(
+        f.auth
+            .recovery_start(
+                &f.user,
+                bip39::Mnemonic::generate(24).unwrap().to_string(),
+                NOW
+            )
+            .await
+            .is_err()
+    );
+    let token = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    assert!(f.auth.recovery_ready(&token, NOW + DAY - 1).await.is_err());
+    assert!(
+        f.auth
+            .recovery_start(&f.user, f.words.clone(), NOW + 1)
+            .await
+            .is_err()
+    );
+    let start = f.auth.recovery_ready(&token, NOW + DAY).await.unwrap();
+    f.auth.recovery_cancel(&f.session, NOW + DAY).await.unwrap();
+    assert!(f.auth.recovery_ready(&token, NOW + DAY).await.is_err());
+    let second = Software::new();
+    let pw = browser_wrap(&second.prf(&start), &f.dek, &f.user, "passkey");
+    let rw = browser_wrap(
+        &recovery_ikm(str_field(&start, "recovery_words")),
+        &f.dek,
+        &f.user,
+        "recovery",
+    );
+    assert!(
+        f.auth
+            .registration_finish(
+                str_field(&start, "ceremony"),
+                second.registration(&start, ORIGIN, true),
+                pw,
+                Some(rw),
+                NOW + DAY
+            )
+            .await
+            .is_err()
+    );
+    let token = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW + DAY)
+        .await
+        .unwrap();
+    let start = f.auth.recovery_ready(&token, NOW + 2 * DAY).await.unwrap();
+    let session = finish_replacement(&f, &start, &second, NOW + 2 * DAY).await;
+    assert!(f.auth.session(&f.session, NOW + 2 * DAY).await.is_err());
+    assert!(f.auth.recovery_ready(&token, NOW + 2 * DAY).await.is_err());
+    assert!(
+        f.auth
+            .recovery_start(&f.user, f.words, NOW + 2 * DAY)
+            .await
+            .is_err()
+    );
+    assert_eq!(f.auth.passkeys(&f.user).await.unwrap().len(), 1);
+    assert!(f.auth.session(&session, NOW + 2 * DAY).await.is_ok());
+}
+
+#[tokio::test]
 async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
@@ -536,6 +604,288 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     assert!(f.auth.session(&f.session, NOW).await.is_err());
 }
 
+#[tokio::test]
+async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let router = router(f.auth.clone());
+    let request = |origin: &str| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/auth/session")
+            .header("Origin", origin)
+            .header("Cookie", format!("__Host-infraternal={}", f.session))
+            .header("Content-Type", "application/json")
+            .body(axum::body::Body::from("{}"))
+            .unwrap()
+    };
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request("https://evil.example.test"))
+            .await
+            .unwrap()
+            .status(),
+        axum::http::StatusCode::UNAUTHORIZED
+    );
+    // Synthetic timestamps do not match wall time; use a fresh real-time session for HTTP.
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    sqlx::query("UPDATE sessions SET expires=?,fresh=?")
+        .bind(now + SESSION)
+        .bind(now)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let response = router.clone().oneshot(request(ORIGIN)).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let cookie = response.headers()["set-cookie"].to_str().unwrap();
+    for flag in [
+        "Secure",
+        "HttpOnly",
+        "SameSite=Strict",
+        "Path=/",
+        "Max-Age=2592000",
+    ] {
+        assert!(cookie.contains(flag));
+    }
+    assert!(!cookie.contains("Domain="));
+    let wraps_request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/auth/wraps")
+        .header("Origin", ORIGIN)
+        .header("Cookie", format!("__Host-infraternal={}", f.session))
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from("{}"))
+        .unwrap();
+    let wraps_response = router.clone().oneshot(wraps_request).await.unwrap();
+    assert!(wraps_response.headers().contains_key("set-cookie"));
+
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let oversized = axum::http::Request::builder()
+        .method("POST")
+        .uri("/auth/device-start")
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from("x".repeat(33 * 1024)))
+        .unwrap();
+    assert_eq!(
+        router.oneshot(oversized).await.unwrap().status(),
+        axum::http::StatusCode::PAYLOAD_TOO_LARGE
+    );
+    let mut samples = Vec::new();
+    for _ in 0..200 {
+        let start = Instant::now();
+        f.auth.session(&f.session, now).await.unwrap();
+        samples.push(start.elapsed().as_micros());
+    }
+    samples.sort_unstable();
+    eprintln!(
+        "auth session SQLite memory: n=200 p50={}us p99={}us",
+        samples[100], samples[198]
+    );
+    let start = Instant::now();
+    verify_recovery(
+        f.words.clone(),
+        sqlx::query_scalar("SELECT recovery_hash FROM users WHERE id=?")
+            .bind(&f.user)
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    eprintln!(
+        "auth Argon2id verification: {}ms (m=19456KiB,t=2,p=1)",
+        start.elapsed().as_millis()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_owner_and_optional_passkey_enrollment_fail_closed() {
+    let _guard = SERIAL.lock().await;
+    let (auth, token) = empty().await;
+    let (a, b) = tokio::join!(
+        auth.setup_start(&token, "owner", NOW),
+        auth.setup_start(&token, "owner", NOW)
+    );
+    let a = a.unwrap();
+    let b = b.unwrap();
+    let one = Software::new();
+    let two = Software::new();
+    let dek = rand::random::<[u8; 32]>();
+    let finish = |start: Value, software: Software| {
+        let auth = auth.clone();
+        async move {
+            let user = str_field(&start, "user_id");
+            let pw = browser_wrap(&software.prf(&start), &dek, user, "passkey");
+            let rw = browser_wrap(
+                &recovery_ikm(str_field(&start, "recovery_words")),
+                &dek,
+                user,
+                "recovery",
+            );
+            auth.registration_finish(
+                str_field(&start, "ceremony"),
+                software.registration(&start, ORIGIN, true),
+                pw,
+                Some(rw),
+                NOW,
+            )
+            .await
+        }
+    };
+    let (first, second) = tokio::join!(finish(a, one), finish(b, two));
+    assert_ne!(first.is_ok(), second.is_ok());
+    let f = fixture().await;
+    let (a, b) = tokio::join!(
+        f.auth.add_start(&f.session, NOW),
+        f.auth.add_start(&f.session, NOW)
+    );
+    let a = a.unwrap();
+    let b = b.unwrap();
+    let one = Software::new();
+    let two = Software::new();
+    let pw = browser_wrap(&one.prf(&a), &f.dek, &f.user, "passkey");
+    let other = browser_wrap(&two.prf(&b), &f.dek, &f.user, "passkey");
+    let (first, second) = tokio::join!(
+        f.auth.registration_finish(
+            str_field(&a, "ceremony"),
+            one.registration(&a, ORIGIN, true),
+            pw,
+            None,
+            NOW
+        ),
+        f.auth.registration_finish(
+            str_field(&b, "ceremony"),
+            two.registration(&b, ORIGIN, true),
+            other,
+            None,
+            NOW
+        )
+    );
+    assert_ne!(first.is_ok(), second.is_ok());
+    assert_eq!(f.auth.passkeys(&f.user).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn recovery_expiry_revocation_and_cross_user_isolation() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let approval = f
+        .auth
+        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .await
+        .unwrap();
+    f.auth
+        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+        .await
+        .unwrap();
+    let api_key = f
+        .auth
+        .device_redeem(str_field(&approval, "poll_token"), NOW)
+        .await
+        .unwrap();
+    let token = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    assert!(f.auth.recovery_ready(&token, NOW + 2 * DAY).await.is_err());
+    let token = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW + 2 * DAY)
+        .await
+        .unwrap();
+    let start = f.auth.recovery_ready(&token, NOW + 3 * DAY).await.unwrap();
+    let replacement = Software::new();
+    finish_replacement(&f, &start, &replacement, NOW + 3 * DAY).await;
+    assert!(f.auth.api_authorize(&api_key, "hosts:read").await.is_err());
+    let login = f.auth.login_start(&f.user, NOW + 3 * DAY).await.unwrap();
+    assert!(
+        f.auth
+            .login_finish(
+                str_field(&login, "ceremony"),
+                f.software.login(&login, ORIGIN, true),
+                "stolen",
+                NOW + 3 * DAY
+            )
+            .await
+            .is_err()
+    );
+    let other = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES (?,'other',0,'unused')")
+        .bind(&other)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let mut tx = f.auth.pool.begin().await.unwrap();
+    let other_token = random();
+    insert_session(&mut tx, &other_token, &other, "other device", NOW)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(f.auth.wraps(&other_token, NOW).await.unwrap(), json!([]));
+    assert_eq!(f.auth.api_list(&other_token, NOW).await.unwrap(), json!([]));
+}
+
+#[tokio::test]
+async fn stale_counters_recovery_cancellation_and_wrap_tampering() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let a = f.auth.login_start(&f.user, NOW).await.unwrap();
+    let b = f.auth.login_start(&f.user, NOW).await.unwrap();
+    let old = f.software.login(&a, ORIGIN, true);
+    let new = f.software.login(&b, ORIGIN, true);
+    f.auth
+        .login_finish(str_field(&b, "ceremony"), new, "phone", NOW)
+        .await
+        .unwrap();
+    assert!(
+        f.auth
+            .login_finish(str_field(&a, "ceremony"), old, "phone", NOW)
+            .await
+            .is_err()
+    );
+    let start = f.auth.login_start(&f.user, NOW).await.unwrap();
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] = json!(B64.encode(Uuid::new_v4().as_bytes()));
+    assert!(
+        f.auth
+            .login_finish(str_field(&start, "ceremony"), proof, "phone", NOW)
+            .await
+            .is_err()
+    );
+    let start = f.auth.add_start(&f.session, NOW).await.unwrap();
+    let software = Software::new();
+    f.auth.logout(&f.session).await.unwrap();
+    let wrap = browser_wrap(&software.prf(&start), &f.dek, &f.user, "passkey");
+    assert!(
+        f.auth
+            .registration_finish(
+                str_field(&start, "ceremony"),
+                software.registration(&start, ORIGIN, true),
+                wrap,
+                None,
+                NOW
+            )
+            .await
+            .is_err()
+    );
+    let mut wrap = browser_wrap(&rand::random::<[u8; 32]>(), &f.dek, &f.user, "passkey");
+    wrap.nonce = B64.encode([0; 11]);
+    assert!(wrap.validate().is_err());
+    let material = rand::random::<[u8; 32]>();
+    let mut wrap = browser_wrap(&material, &f.dek, &f.user, "passkey");
+    let mut ciphertext = B64.decode(&wrap.ciphertext).unwrap();
+    ciphertext[0] ^= 1;
+    wrap.ciphertext = B64.encode(ciphertext);
+    assert!(unwrap_browser(&material, &wrap, &f.user, "passkey").is_err());
+}
 #[tokio::test]
 async fn review_old_words_race_rotation() {
     let _guard = SERIAL.lock().await;

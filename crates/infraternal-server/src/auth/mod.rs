@@ -19,7 +19,6 @@ use sessions::{insert_session, require_session_tx};
 pub use wraps::Wrap;
 use wraps::put_wrap;
 #[cfg(test)]
-#[allow(dead_code)]
 mod tests;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
