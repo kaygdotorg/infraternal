@@ -77,9 +77,10 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
     contentType: "image/png",
   });
 
-  // The phone/headless probe uses the same painted-output callback and adds a real forced-drop round trip.
+  // The probe serializes keys through a completed paint so its latency samples do not measure burst queueing.
   await context.request.post("/__mock/trace/reset");
-  await page.goto("/?probe=1&n=36&mock=1");
+  const probeCount = 500;
+  await page.goto(`/?probe=1&n=${probeCount}&mock=1`);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
   const clockCalibration = await page.evaluate(async () => {
     const samples: Array<{ offsetMs: number; roundTripMs: number }> = [];
@@ -108,15 +109,20 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
     accepted_input_bytes: number;
     output_sequence: string;
   };
-  expect(probeState.echoed_text).toBe("abcdefghijklmnopqrstuvwxyz0123456789");
-  expect(probeState.accepted_input_bytes).toBe(36);
-  expect(probeState.output_sequence).toBe("36");
-  await expect(page.locator("#probe-results")).toContainText("Painted echoes: 36 / 36");
+  const probeKeys = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const expectedProbeText = Array.from({ length: probeCount }, (_, index) => probeKeys[index % probeKeys.length]).join("");
+  expect(probeState.echoed_text).toBe(expectedProbeText);
+  expect(probeState.accepted_input_bytes).toBe(probeCount);
+  expect(probeState.output_sequence).toBe(String(probeCount));
+  await expect(page.locator("#probe-results")).toContainText(`Painted echoes: ${probeCount} / ${probeCount}`);
   await page.locator("#probe-drop").click();
   await expect.poll(async () => (await page.locator("#probe-results").textContent()) ?? "")
     .toMatch(/Time to resume: [0-9.]+ ms/);
   const probeReport = (await page.locator("#probe-results").textContent()) ?? "";
-  console.log(`S1 probe result (36 keys)\n${probeReport}`);
+  const measuredP99 = /(?:^|\n)p99: ([\d.]+) ms/.exec(probeReport)?.[1];
+  expect(measuredP99).toBeDefined();
+  expect(Number(measuredP99)).toBeLessThan(20);
+  console.log(`S1 probe result (${probeCount} keys)\n${probeReport}`);
   await testInfo.attach("tracer-probe-results.txt", {
     body: probeReport,
     contentType: "text/plain",
@@ -125,11 +131,16 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   const serverTraceResponse = await context.request.get("/__mock/trace");
   const serverTraceBody = await serverTraceResponse.json() as { events: DoubleTraceEvent[] };
   const attribution = summarizeAttribution(browserTrace, serverTraceBody.events, clockCalibration);
-  console.log(`S1 per-hop attribution (36 keys)\n${attribution.report}`);
-  await testInfo.attach("tracer-attribution.json", {
-    body: JSON.stringify({ clockCalibration, browserTrace, serverTrace: serverTraceBody.events, report: attribution.report }, null, 2),
-    contentType: "application/json",
-  });
+  expect(browserTrace).toHaveLength(probeCount);
+  console.log(`S1 per-hop attribution (${probeCount} keys)\n${attribution.report}`);
+  const attributionPath = testInfo.outputPath("tracer-attribution.json");
+  await writeFile(attributionPath, JSON.stringify({
+    clockCalibration,
+    browserTrace,
+    serverTrace: serverTraceBody.events,
+    report: attribution.report,
+  }, null, 2));
+  await testInfo.attach("tracer-attribution.json", { path: attributionPath, contentType: "application/json" });
   await testInfo.attach("tracer-attribution.txt", {
     body: attribution.report,
     contentType: "text/plain",
