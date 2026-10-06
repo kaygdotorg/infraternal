@@ -74,7 +74,9 @@ real-browser router tests. No arbitrary browser traces/failure screens are saved
 Production screenshots for external review are in
 `test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/`:
 `setup-light.png`, `setup-dark.png`, `signin-light.png`, `signin-dark.png` at
-390 × 844. No visual-quality approval or physical-iPhone result is claimed.
+390 × 844 under light and dark system preferences. The inherited tracer CSS is
+dark-only, so these are preference captures rather than separate implemented
+themes. No visual-quality approval or physical-iPhone result is claimed.
 
 Local host: Linux 6.12.111, x86_64, 8 vCPUs on Intel i9-9900K at 3.60 GHz.
 Thirty fresh browser surfaces per state confirm painted pixels by screenshot.
@@ -83,7 +85,7 @@ p99 171.9 ms; sign-in p50 174.6 ms, p99 376 ms. The final three-test run
 measured setup p99 217.1 ms and sign-in p99 169.5 ms. This is a local upper bound
 with routed status and a test-double session endpoint, not a phone/network claim.
 Zero access-screen polling is added; the terminal remains deferred until sign-in.
-Production `main.js` is 49,465 bytes, deferred terminal chunk 662,827 bytes.
+Production `main.js` is 49,589 bytes, deferred terminal chunk 662,827 bytes.
 
 The existing 500-key probe painted 500/500 echoes: p50 15.0 ms, p99 16.4 ms,
 resume 75.0 ms. Earlier concurrent-build runs exceeded its unchanged 20 ms gate
@@ -94,5 +96,18 @@ prove the pinned perf-VM or physical-phone budgets in decision 41.
 
 Self-review checked Origin/cookie requests, missing/invalid status rejection,
 no guessed access form during server failure, resident identity without local
-UUID storage, PRF stripping and zeroization, logout after unwrap failure, shared
-UI styles, 16px mobile inputs and explicit screenshots without secret captures.
+UUID storage, PRF stripping and zeroization, logout after unwrap failure, reused existing
+tracer styles (packages/ui is absent), 16px mobile inputs and explicit screenshots without secret captures.
+
+The server lane also runs `scripts/browser-auth/check-tracer.mjs` against this
+production dist directory and the actual Rust router over private IPC. It passes
+resident setup, recovery acknowledgement, empty-storage discoverable login and
+DEK unwrap on Chromium 149.0.7827.55; terminal sockets are closed locally because
+that fixture verifies authentication only. Evidence is the server worktree's
+`target/passkey-job/paired-browser.log`.
+
+`check-restart.mjs` in the server lane also SIGKILLs the actual server, retrieves
+the newly minted token through the actual CLI, and runs this production browser
+flow against its HTTP router. Older and spent tokens fail; a third startup
+retains the owner and exposes no new capability. Evidence: the server worktree's
+`target/passkey-job/process-restart.log`.
