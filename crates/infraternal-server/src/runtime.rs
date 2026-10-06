@@ -12,6 +12,7 @@ use axum::{
     middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Response},
     routing::get,
+    serve::ListenerExt,
 };
 use axum_server::tls_openssl::OpenSSLConfig;
 use serde_json::json;
@@ -202,7 +203,15 @@ pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
     } else {
         let listener = TcpListener::bind(config.listen)
             .await
-            .map_err(ServerError::Listener)?;
+            .map_err(ServerError::Listener)?
+            .tap_io(|socket| {
+                // Match the TLS acceptor: Ack and PTY Output are separate small
+                // writes. Nagle otherwise couples echo to a delayed TCP Ack,
+                // adding tens of milliseconds on the proxy leg [5][41].
+                if socket.set_nodelay(true).is_err() {
+                    tracing::warn!("could not set TCP_NODELAY on accepted server socket");
+                }
+            });
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
