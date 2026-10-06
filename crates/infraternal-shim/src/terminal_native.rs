@@ -166,4 +166,4 @@ impl Drop for Engine {
 
 #[cfg(test)]
 #[path = "../tests/unit/allocation.rs"]
-mod allocation;
+pub(crate) mod allocation;

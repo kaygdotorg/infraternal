@@ -51,6 +51,16 @@ pub struct Terminal {
     recovery_pending: bool,
 }
 impl Terminal {
+    #[cfg(test)]
+    pub(crate) fn allocation_fixture(engine: Engine, prefix: &[u8]) -> Self {
+        let mut terminal = Self::new(80, 24).unwrap();
+        // Seed the carry observer before replacing the native engine with the
+        // real refusing allocator fixture, already seeded with the same bytes.
+        terminal.process(prefix);
+        terminal.engine = engine;
+        terminal
+    }
+
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
         Ok(Self {
             engine: Engine::new(cols, rows, SCROLLBACK_BYTES)?,

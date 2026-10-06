@@ -80,13 +80,10 @@ static VTABLE: Vtable = Vtable {
     free: free_memory,
 };
 
-#[test]
-#[ignore = "T3 red fixture; explicitly run with VT_ALLOCATION_STEP before the fix"]
-fn resize_allocation_refusal_retires_native_handle() {
-    let step = std::env::var("VT_ALLOCATION_STEP")
-        .unwrap()
-        .parse()
-        .unwrap();
+// The context outlives the closure and every valid native handle. Refusal is
+// enabled only after both retained screens have been constructed.
+pub(crate) const PREFIX: &[u8] = b"\x1bcPRIMARY\x1b[?47hALT\x1b[?47l";
+pub(crate) fn with_refusing_engine(step: usize, run: impl FnOnce(Engine)) {
     let mut context = Box::new(Context {
         remaining: 0,
         refusing: false,
@@ -96,7 +93,7 @@ fn resize_allocation_refusal_retires_native_handle() {
         vtable: &raw const VTABLE,
     };
     let mut raw = std::ptr::null_mut();
-    // SAFETY: allocator/vtable/context remain live through the entire fixture.
+    // SAFETY: allocator, vtable and boxed context outlive the synchronous closure.
     assert_eq!(
         unsafe {
             ghostty_terminal_new(
@@ -112,18 +109,29 @@ fn resize_allocation_refusal_retires_native_handle() {
         0
     );
     let mut engine = Engine(Some(NonNull::new(raw).unwrap()));
-    engine.process(b"\x1bcPRIMARY\x1b[?47hALT\x1b[?47l");
+    engine.process(PREFIX);
     context.refusing = true;
     context.remaining = step;
-    let result = engine.resize(20_000, 2);
-    context.refusing = false;
-    if result.is_err() {
-        let mut buffer = vec![0; 1024 * 1024];
-        assert!(
-            engine.try_snapshot(&mut buffer, 0).is_err(),
-            "failed resize must retire the handle before any Snapshot"
-        );
-        engine.process(b"later output");
-        assert_eq!(engine.approximate_snapshot(&mut buffer), 0);
-    }
+    run(engine);
+}
+
+#[test]
+#[ignore = "allocation matrix; production ReleaseFast steps 0-11 exercised separately"]
+fn resize_allocation_refusal_retires_native_handle() {
+    let step = std::env::var("VT_ALLOCATION_STEP")
+        .unwrap()
+        .parse()
+        .unwrap();
+    with_refusing_engine(step, |mut engine| {
+        if engine.resize(20_000, 2).is_err() {
+            let mut buffer = vec![0; 1024 * 1024];
+            assert!(engine.try_snapshot(&mut buffer, 0).is_err());
+            engine.process(b"later output");
+            assert_eq!(engine.approximate_snapshot(&mut buffer), 0);
+            assert_eq!(engine.history_rows(), 0);
+            assert_eq!(engine.state_difference(&engine), usize::MAX);
+            assert_eq!(engine.difference(&engine), usize::MAX);
+            assert!(engine.resize(80, 24).is_err());
+        }
+    });
 }

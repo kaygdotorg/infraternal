@@ -597,3 +597,7 @@ impl InputCursors {
 #[cfg(test)]
 #[path = "../tests/unit/sequenced_input.rs"]
 mod sequenced_checks;
+
+#[cfg(test)]
+#[path = "../tests/unit/session_resize.rs"]
+mod resize_checks;
