@@ -34,7 +34,7 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 10. **Always relay.** Traffic goes browser → server → agent. The browser is only
     a viewer.
 11. **Transport legs.**
-    - Browser ↔ server: WebTransport (QUIC) first, WebSocket as the fallback.
+    - Browser ↔ server: WebSocket only (changed on 2026-10-06, decision 63).
       One multiplexed binary protocol with sequence numbers, so streams resume
       after a drop without lost or duplicated bytes.
     - Server ↔ agent: QUIC (quinn, BBR) first, TCP/TLS as the fallback. KCP is
@@ -254,3 +254,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 62. **Own visual identity.** infraternal is not a consumer product. It must
     look different from calternal. A visual grill with mockups that Claude
     builds comes before the first UI lane.
+63. **WebSocket only on leg A in S1** (changes decision 11). WebTransport
+    only helps on lossy links (#12: p99 216 ms against 489 ms at 1% loss; no
+    difference on clean links). It costs a public certificate inside the
+    app, a UDP port for browsers, a second transport, and Safari risk.
+    Predictive local echo is the bigger gain for "feels local" on any slow
+    link. The wire format stays independent of the transport. WebTransport
+    comes back only if real-phone numbers show the stutter matters.
+64. **Ports.** Managed hosts open no inbound ports: agents dial out. The
+    server has one port of its own for agents (default 7443, QUIC on UDP with
+    a TCP/TLS fallback, mTLS with the internal CA). The UI, API and WebSocket
+    are served either on that port with the server's own certificate
+    (standalone) or as plain HTTP on a local address behind a reverse proxy.
+    Dogfood instance: Traefik 443 → `172.18.0.1:7011`, and agents connect to
+    `10.69.69.50:7443`.

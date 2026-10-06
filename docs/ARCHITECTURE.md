@@ -11,9 +11,10 @@ brackets). The contracts in `contracts/` are written before S1 code starts.
                              └─ embedded agent (subprocess, `agent --fd 3`)
 ```
 
-- **Leg A** (browser ↔ server): WebTransport, with a WebSocket fallback. This is
-  where most latency and jitter come from: mobile networks, roaming, sleep.
-  Streams have sequence numbers, so they resume without loss [11].
+- **Leg A** (browser ↔ server): WebSocket [63]. This is where most latency and
+  jitter come from: mobile networks, roaming, sleep. Streams have sequence
+  numbers, so they resume without loss [11]. Predictive echo hides the round
+  trip.
 - **Leg B** (server ↔ agent): QUIC with a TCP/TLS fallback. Both ends are our
   code. KCP is added only if a benchmark justifies it [11].
 - **Leg C** (agent ↔ host): a local PTY or engine socket, or SSH to devices that
