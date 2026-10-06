@@ -1,6 +1,8 @@
 /** Production tracer passkey UI against the real Rust auth router over private IPC [23,24,40].
  * The supplied dist directory is read-only. Capabilities/recovery words remain in pipe/browser
  * memory; no network trace, arbitrary screenshot, body logging or secret argv is produced.
+ * TRACER_BROWSER_AUTH_BIN selects a prebuilt fixture binary, keeping temporary Rust targets
+ * outside the source worktree when a job supplies its own scratch target directory.
  */
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
@@ -19,7 +21,8 @@ if (transport && (transport.protocol !== 'http:' || transport.hostname !== '127.
     || transport.pathname !== '/' || transport.username || transport.password || transport.search || transport.hash)) {
   throw new Error('HTTP auth fixture must be an uncredentialed loopback origin');
 }
-const child = transport ? undefined : spawn(resolve(root, 'target/debug/examples/browser_auth'), [], {
+const binary = process.env.TRACER_BROWSER_AUTH_BIN ?? resolve(root, 'target/debug/examples/browser_auth');
+const child = transport ? undefined : spawn(binary, [], {
   stdio: ['pipe', 'pipe', 'inherit'],
 });
 const lines = createInterface({ input: child ? child.stdout : process.stdin })[Symbol.asyncIterator]();
@@ -64,21 +67,29 @@ try {
   // This fixture verifies auth only. Close terminal sockets locally rather than dialing a host.
   await page.routeWebSocket('**/v1/ws*', (socket) => socket.close({ code: 1000, reason: 'auth-only fixture' }));
   await page.goto('https://auth.example.test/');
-  await page.locator('#setup-form').waitFor();
-  check(await page.locator('#login-form').count() === 0, 'unconfigured server showed login');
+  await page.locator('#setup-card').waitFor();
+  check(await page.locator('#login-passkey').count() === 0, 'unconfigured server showed login');
   await page.locator('#setup-token').fill(initial.setup_token);
-  await page.locator('#owner-name').fill('Production integration');
-  await page.getByRole('button', { name: 'Register a passkey' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.locator('#setup-username').fill('production_integration');
+  await page.locator('#setup-display-name').fill('Production integration');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Create passkey' }).click();
   await page.getByRole('heading', { name: 'Save your recovery key' }).waitFor();
-  check((await page.locator('#recovery-words').textContent()).trim().split(/\s+/).length === 24, 'recovery display shape');
-  await page.locator('#recovery-saved').check();
-  await page.getByRole('button', { name: 'Finish setup' }).click();
+  check(await page.locator('#recovery-words li').count() === 24, 'recovery display shape');
+  await page.locator('.auth-check').click();
+  await page.getByRole('button', { name: 'Open infraternal' }).click();
   await page.locator('#terminal-host').waitFor();
+  const enrolledSession = await page.evaluate(async () => (await fetch('/auth/session', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  })).json());
+  check(enrolledSession.username === 'production_integration'
+    && enrolledSession.display_name === 'Production integration', 'session labels absent after enrollment');
   await context.clearCookies();
   await page.evaluate(() => localStorage.clear());
   await page.reload();
-  await page.locator('#login-form').waitFor();
-  check(await page.locator('#setup-form, #account-id, #device-name').count() === 0, 'configured server showed setup or identity fields');
+  await page.locator('#login-passkey').waitFor();
+  check(await page.locator('#setup-card, #account-id, #device-name').count() === 0, 'configured server showed setup or identity fields');
   await page.getByRole('button', { name: 'Continue with passkey' }).click();
   await page.locator('#terminal-host').waitFor();
   const status = await page.evaluate(async () => {
