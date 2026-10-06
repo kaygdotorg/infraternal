@@ -147,7 +147,7 @@ export async function loginWithPasskey(device: string): Promise<string> {
     });
 
     try {
-      const session = await checkSession();
+      const session = await post<AuthSession>("unlock-session", {});
       userId = canonicalUuid(session?.user_id, "session user id");
       const stored = await post<StoredWrap[]>("wraps", {});
       const keyId = base64url(new Uint8Array(assertion.rawId));
@@ -161,8 +161,10 @@ export async function loginWithPasskey(device: string): Promise<string> {
       const dek = await unwrapDek(prf, envelope, userId, "passkey");
       if (dek.byteLength !== 32) throw new AuthError("Your account key could not be unlocked. Try again.");
       dek.fill(0);
+      await post("unlock-finish", {});
     } catch (error: unknown) {
-      await post("logout", {}).catch(() => undefined);
+      try { await post("logout", {}); }
+      catch { throw new AuthError("Your account key was not unlocked. Sign in again; this incomplete session cannot access the terminal."); }
       throw error;
     }
     return userId;

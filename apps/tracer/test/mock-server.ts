@@ -59,6 +59,7 @@ interface TraceEvent {
 
 let owner: MockOwner | undefined;
 let activeAuthCookie: string | undefined;
+let unlockPending = false;
 let setupToken = newToken();
 let pendingRegistration: { ceremony: string; userId: string; username: string; displayName: string; recoveryWords: string; rpId: string; prfInput: string } | undefined;
 let pendingLogin: { ceremony: string } | undefined;
@@ -184,6 +185,8 @@ async function authAction(
     case "status":
       return sendJson(response, 200, { setup_required: !owner });
     case "session":
+      if (unlockPending) return sendJson(response, 401, { error: "authorization failed" });
+    case "unlock-session":
       if (!isAuthenticated(request) || !owner) return sendJson(response, 401, { error: "authorization failed" });
       return sendJson(response, 200, { user_id: owner.userId, username: owner.username, display_name: owner.displayName, device: "test-double", fresh: 1 });
     case "setup-start": {
@@ -263,10 +266,15 @@ async function authAction(
         return sendJson(response, 401, { error: "authorization failed" });
       }
       pendingLogin = undefined;
+      unlockPending = true;
       activeAuthCookie = newToken();
       setAuthCookie(response, activeAuthCookie);
       return sendJson(response, 200, { ok: true });
     }
+    case "unlock-finish":
+      if (!isAuthenticated(request)) return sendJson(response, 401, { error: "authorization failed" });
+      unlockPending = false;
+      return sendJson(response, 200, { ok: true });
     case "wraps":
       if (!isAuthenticated(request) || !owner) return sendJson(response, 401, { error: "authorization failed" });
       return sendJson(response, 200, [{ kind: "passkey", key_id: owner.credentialId, wrap: owner.passkeyWrap, prf_input: owner.prfInput }]);
