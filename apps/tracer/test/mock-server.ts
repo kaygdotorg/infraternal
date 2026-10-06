@@ -11,7 +11,11 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
 
 const HOST = "localhost";
-const PORT = 4173;
+// Other worktrees may run their own production-build browser gate concurrently.
+const PORT = Number(process.env.TRACER_TEST_PORT ?? "4173");
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error("TRACER_TEST_PORT must be an integer TCP port");
+}
 const MAX_HTTP_BODY = 32 * 1024;
 const MAX_MOCK_OUTPUT = 1024 * 1024;
 const MAX_MESSAGE = 16 * 1024;

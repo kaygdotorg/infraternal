@@ -1,6 +1,12 @@
 /** Runs browser checks against the built tracer and its clearly marked test double. */
 import { defineConfig, devices } from "playwright/test";
 
+const port = Number(process.env.TRACER_TEST_PORT ?? "4173");
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  throw new Error("TRACER_TEST_PORT must be an integer TCP port");
+}
+const origin = `http://localhost:${port}`;
+
 export default defineConfig({
   testDir: "./test",
   testMatch: "*.spec.ts",
@@ -13,7 +19,7 @@ export default defineConfig({
   outputDir: "./test-results",
   use: {
     ...devices["Desktop Chrome"],
-    baseURL: "http://localhost:4173",
+    baseURL: origin,
     launchOptions: {
       // Keep a headless visible-surface probe on the renderer's foreground frame cadence.
       args: process.env.TRACER_CHROMIUM_FLAGS === undefined
@@ -27,7 +33,7 @@ export default defineConfig({
   },
   webServer: {
     command: "bun run build && bun run test/mock-server.ts",
-    url: "http://localhost:4173/health",
+    url: `${origin}/health`,
     reuseExistingServer: false,
     timeout: 120_000,
     stdout: "pipe",
