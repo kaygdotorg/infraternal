@@ -566,7 +566,6 @@ fn fidelity_charset_mapped_wide_space_is_explicitly_rejected() {
 }
 
 #[test]
-#[ignore = "inherited protection with off-mode red regression; enable with explicit rejection"]
 fn fidelity_inherited_protection_off_mode_is_explicitly_rejected() {
     let prefix = b"\x1bV\x1b[?47h";
     let mut a = reset_terminal(12, 5).unwrap();

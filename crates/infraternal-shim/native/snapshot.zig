@@ -31,11 +31,15 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     inline for (.{ .primary, .alternate }) |key| {
         if (t.screens.get(key)) |screen| {
             if (!std.meta.eql(screen.semantic_prompt, vt.Screen.SemanticPrompt.disabled) or screen.cursor.semantic_content != .output or screen.cursor.semantic_content_clear_eol) return error.Unrepresentable;
+            // Cursor copies can inherit protection into a screen whose sticky
+            // mode is off. VT can set protection only by selecting a mode;
+            // reject this construction gap rather than changing later erase.
+            if (screen.protected_mode == .off and (screen.cursor.protected or if (screen.saved_cursor) |saved| saved.protected else false)) return error.Unrepresentable;
             var semantic_rows = screen.pages.rowIterator(.right_down, .{ .screen = .{ .x = 0, .y = 0 } }, null);
             while (semantic_rows.next()) |semantic_row| {
                 if (semantic_row.rowAndCell().row.semantic_prompt != .none) return error.Unrepresentable;
                 for (semantic_row.cells(.all)) |value| {
-                    if (value.semantic_content != .output) return error.Unrepresentable;
+                    if (value.semantic_content != .output or (screen.protected_mode == .off and value.protected)) return error.Unrepresentable;
                 }
             }
             const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = t.rows - 1 } }).?;
