@@ -21,14 +21,16 @@ def run(binary):
     barriers = []
     try:
         sessions = []
-        for _ in range(12):
+        for index in range(12):
             session = client.open()
             client.attach()
             client.until(b'shim-test')
             client.input(b"stty raw -echo; printf 'QUEUE_%s' READY; cat\n")
             client.until(b'QUEUE_READY')
             client.wait_ack()
-            sessions.append((session, client.out, client.acked))
+            # Preparation uses writer 1. The later stream ids 2..12 are
+            # new writers and must start at zero, even on an existing PTY.
+            sessions.append((session, client.out, client.acked if index == 0 else 0))
             client.send(1, 0x0f, struct.pack('<H', 0) + b'\x04done')
         # Hold InputState, before the terminal task can drain even one command.
         # More than eight requests now deterministically fills the bounded queue.
