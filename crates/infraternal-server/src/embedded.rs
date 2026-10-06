@@ -230,6 +230,7 @@ struct AttachmentState {
     last_out_seq: u64,
     last_in_seq: u64,
     last_input_end: u64,
+    credit: u64,
     output: mpsc::Sender<TerminalOutput>,
 }
 
@@ -552,6 +553,7 @@ async fn process_command(
                     last_out_seq,
                     last_in_seq,
                     last_input_end: last_in_seq,
+                    credit: 0,
                     output,
                 },
             );
@@ -610,7 +612,19 @@ async fn process_command(
                     px_w,
                     px_h,
                 },
-                Frame::Credit { bytes } => Frame::Credit { bytes },
+                Frame::Credit { bytes } => {
+                    let Some(attachment) = attachments.get_mut(&attachment_id) else {
+                        return false;
+                    };
+                    let Some(credit) = attachment.credit.checked_add(u64::from(bytes)) else {
+                        return false;
+                    };
+                    if credit > 8 * 1024 * 1024 {
+                        return false;
+                    }
+                    attachment.credit = credit;
+                    Frame::Credit { bytes }
+                }
                 _ => return false,
             };
             write_frame(connection, stream_id, &b_frame).await
@@ -709,6 +723,14 @@ async fn reattach_all(
         {
             return false;
         }
+        if attachment.credit != 0 {
+            let Ok(bytes) = u32::try_from(attachment.credit) else {
+                return false;
+            };
+            if !write_frame(connection, stream_id, &Frame::Credit { bytes }).await {
+                return false;
+            }
+        }
         attachment.stream_id = stream_id;
         routes.insert(stream_id, *id);
     }
@@ -772,6 +794,7 @@ async fn process_incoming(
                 )
                 .await;
             }
+            attachment.credit = attachment.credit.saturating_sub(end - out_seq);
             attachment.last_out_seq = end;
             true
         }
@@ -789,6 +812,7 @@ async fn process_incoming(
             if out_seq < attachment.last_out_seq {
                 return false;
             }
+            let length = bytes.len() as u64;
             if attachment
                 .output
                 .try_send(TerminalOutput::Snapshot { out_seq, bytes })
@@ -803,6 +827,7 @@ async fn process_incoming(
                 )
                 .await;
             }
+            attachment.credit = attachment.credit.saturating_sub(length);
             attachment.last_out_seq = out_seq;
             true
         }

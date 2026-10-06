@@ -26,6 +26,7 @@ fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
         last_out_seq: 0,
         last_in_seq: 0,
         last_input_end: 0,
+        credit: 0,
         output,
     }
 }
@@ -156,4 +157,86 @@ async fn healthy_streams_progress_at_user_attachment_capacity() {
         samples[(samples.len() * 99).div_ceil(100) - 1].as_micros(),
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
+}
+
+#[tokio::test]
+async fn reattach_must_restore_output_credit() {
+    let (mut old, mut old_peer) = connection();
+    let (tx, _rx) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(1, attachment(tx))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let mut wire = Vec::new();
+    encode_muxed_frame_into(1, &Frame::Credit { bytes: 1024 }, &mut wire).unwrap();
+    assert!(
+        process_command(
+            Command::Input {
+                attachment_id: 1,
+                frame: Bytes::from(wire)
+            },
+            &mut old,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new(),
+            &mut 4
+        )
+        .await
+    );
+    let mut discard = [0; 64];
+    assert!(old_peer.read(&mut discard).await.unwrap() > 0);
+    let (mut replacement, mut peer) = connection();
+    routes.clear();
+    assert!(reattach_all(&mut replacement, &mut attachments, &mut routes, &mut 4).await);
+    let mut bytes = [0; 256];
+    let length = peer.read(&mut bytes).await.unwrap();
+    let first = decode_muxed_frame(&bytes[..length]).unwrap();
+    assert!(matches!(first.frame, Frame::AttachTerm { .. }));
+    let next = decode_muxed_frame(&bytes[first.wire_len..length]);
+    assert!(
+        matches!(next.map(|f| f.frame), Ok(Frame::Credit { bytes: 1024 })),
+        "restart reattached without remaining browser credit"
+    );
+}
+
+/// Snapshot repaint bytes consume credit without advancing the output byte offset.
+#[tokio::test]
+async fn output_and_snapshot_spend_remaining_restart_credit() {
+    let (mut link, _peer) = connection();
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut state = attachment(tx);
+    state.credit = 1024;
+    let mut attachments = HashMap::from([(1, state)]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let mut pending = HashMap::new();
+    assert!(
+        process_incoming(
+            Incoming::Output {
+                stream_id: 2,
+                out_seq: 0,
+                bytes: Bytes::from_static(b"abc")
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut pending
+        )
+        .await
+    );
+    rx.try_recv().unwrap();
+    assert!(
+        process_incoming(
+            Incoming::Snapshot {
+                stream_id: 2,
+                out_seq: 3,
+                bytes: Bytes::from_static(b"repaint")
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut pending
+        )
+        .await
+    );
+    rx.try_recv().unwrap();
+    assert_eq!(attachments[&1].credit, 1014);
+    assert_eq!(attachments[&1].last_out_seq, 3);
 }
