@@ -351,7 +351,6 @@ fn fidelity_fresh_c_redraw_default_is_explicitly_rejected() {
 }
 
 #[test]
-#[ignore = "R4 red regression; enable with ISO protection restoration"]
 fn fidelity_iso_protection_erase() {
     let mut a = reset_terminal(80, 24).unwrap();
     a.process(b"\x1bVX\x1bW\r");

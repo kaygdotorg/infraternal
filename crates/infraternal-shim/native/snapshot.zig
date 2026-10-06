@@ -303,6 +303,14 @@ fn liveCursor(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, origi
     }
     try w.print("\x1b[?2027{c}", .{@as(u8, if (t.modes.get(.grapheme_cluster)) 'h' else 'l')});
     try w.print("{f}\x1b[{d}\"q", .{ cursor.style.formatterVt(), @as(u8, if (cursor.protected) 1 else 0) });
+    // EPA/DECSCA-off clear only live protection, retaining the last selected
+    // mode. Ordinary ECH protects ISO cells but needs a selective flag for DEC.
+    switch (screen.protected_mode) {
+        .iso => try w.writeAll("\x1bV"),
+        .dec => try w.writeAll("\x1b[1\"q"),
+        .off => {},
+    }
+    if (!cursor.protected) try w.writeAll("\x1bW");
     try cursorLink(w, cursor.hyperlink);
     try charset(w, screen.charset);
 }
@@ -550,6 +558,7 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
 
                 if (strict) {
                     if (!std.meta.eql(sa.?.semantic_prompt, sb.?.semantic_prompt) or sa.?.cursor.semantic_content != sb.?.cursor.semantic_content or sa.?.cursor.semantic_content_clear_eol != sb.?.cursor.semantic_content_clear_eol) return 6200001;
+                    if (sa.?.protected_mode != sb.?.protected_mode or sa.?.cursor.protected != sb.?.cursor.protected) return 6300000;
                     if (!savedEqual(sa.?.saved_cursor, sb.?.saved_cursor)) return 6000002;
                     if (sa.?.cursor.cursor_style != sb.?.cursor.cursor_style) return 6000003;
                 }
