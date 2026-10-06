@@ -108,13 +108,24 @@ impl Engine {
         rows
     }
     pub fn snapshot(&self, data: &mut [u8], tail: usize) -> Option<usize> {
+        self.try_snapshot(data, tail).ok().flatten()
+    }
+    pub fn try_snapshot(&self, data: &mut [u8], tail: usize) -> io::Result<Option<usize>> {
         // SAFETY: live terminal and writable slice remain valid throughout the
         // synchronous call. The adapter uses Writer.fixed and returns at most
-        // data.len(), or zero on overflow; it retains neither pointer.
+        // data.len(), zero on overflow, or usize::MAX for an unrepresentable
+        // state. The sentinel is checked before using it as a slice length;
+        // the adapter retains neither pointer.
         let len = unsafe {
             infraternal_vt_snapshot(self.0.as_ptr(), data.as_mut_ptr(), data.len(), tail)
         };
-        (len != 0 && len <= data.len()).then_some(len)
+        if len == usize::MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Ghostty state requires nonprinting cursor, REP or row-wrap restore APIs",
+            ));
+        }
+        Ok((len != 0 && len <= data.len()).then_some(len))
     }
 }
 impl Drop for Engine {
