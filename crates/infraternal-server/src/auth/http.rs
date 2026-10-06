@@ -203,7 +203,13 @@ async fn execute(
         "login-start" => {
             let b: User = body(value)?;
             match b.user_id {
-                Some(user) => auth.login_start(&user, now).await?,
+                Some(user) => {
+                    // Identified fresh taps disclose credentials only to their owner.
+                    if auth.session(cookie(headers)?, now).await?.user_id != user {
+                        return Err(Error::Denied);
+                    }
+                    auth.login_start(&user, now).await?
+                }
                 None => auth.discoverable_login_start(now).await?,
             }
         }

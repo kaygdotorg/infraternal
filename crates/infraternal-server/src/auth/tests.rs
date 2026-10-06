@@ -995,7 +995,7 @@ async fn review_invalid_device_polling_exhausts_browser_budget() {
         .header("Origin", ORIGIN)
         .header("Content-Type", "application/json")
         .body(axum::body::Body::from(
-            serde_json::to_vec(&json!({"user_id":f.user})).unwrap(),
+            serde_json::to_vec(&json!({})).unwrap(),
         ))
         .unwrap();
     assert_eq!(
@@ -2218,4 +2218,26 @@ fn resident_kib() -> usize {
         .unwrap()
         .parse()
         .unwrap()
+}
+
+/// Known UUIDs must not turn the public front door into a credential directory.
+#[tokio::test]
+async fn audit_no_public_credential_listing() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = router(f.auth.clone());
+    let known = http_post_json(&app, "login-start", json!({"user_id":f.user})).await;
+    let unknown = http_post_json(
+        &app,
+        "login-start",
+        json!({"user_id":Uuid::new_v4().to_string()}),
+    )
+    .await;
+    assert_eq!(known.0, axum::http::StatusCode::UNAUTHORIZED);
+    assert_eq!(known.0, unknown.0);
+    assert_eq!(known.2, unknown.2);
+    assert_eq!(
+        http_post_json(&app, "login-start", json!({})).await.2["options"]["publicKey"]["allowCredentials"],
+        json!([])
+    );
 }
