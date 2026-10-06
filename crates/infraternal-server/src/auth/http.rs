@@ -134,7 +134,7 @@ async fn dispatch(
     Json(value): Json<Value>,
 ) -> Response {
     let result = execute(&auth, &action, &headers, value).await;
-    let mut response = match result {
+    let response = match result {
         Ok(response) => response,
         Err(Error::Throttled) => (
             StatusCode::TOO_MANY_REQUESTS,
@@ -163,25 +163,8 @@ async fn dispatch(
         )
             .into_response(),
     };
-    // Every successful cookie-authenticated action slides the browser cookie as well
-    // as SQLite expiry. Explicit login/logout cookies take precedence over refresh.
-    if response.status().is_success()
-        && !response.headers().contains_key(header::SET_COOKIE)
-        && matches!(
-            action.as_str(),
-            "add-start"
-                | "wraps"
-                | "recovery-cancel"
-                | "device-inspect"
-                | "device-approve"
-                | "api-list"
-                | "api-revoke"
-        )
-        && let Ok(token) = cookie(&headers)
-        && let Ok(value) = session_cookie(token)
-    {
-        response.headers_mut().insert(header::SET_COOKIE, value);
-    }
+    // Only explicit login/registration issuance writes the auth cookie. Delayed
+    // authenticated replies cannot know which login the shared jar holds now.
     response
 }
 
@@ -236,14 +219,12 @@ async fn execute(
             let b: Unlock = body(value)?;
             auth.unlock_finish(cookie(headers)?, &b.pending_transaction, now)
                 .await?;
-            return session_response(cookie(headers)?);
+            // The browser can hold another tab's login by the time this reply arrives.
+            // Activation changes only the matched database row, never the cookie jar.
+            return Ok(Json(json!({"ok":true})).into_response());
         }
         "session" => {
-            let token = cookie(headers)?;
-            let session = auth.session(token, now).await?;
-            let mut response = session_response(token)?;
-            *response.body_mut() = axum::body::Body::from(serde_json::to_vec(&session)?);
-            return Ok(response);
+            return Ok(Json(auth.session(cookie(headers)?, now).await?).into_response());
         }
         "recovery-start" => {
             let b: Recovery = body(value)?;
@@ -284,17 +265,11 @@ async fn execute(
             let b: Logout = body(value)?;
             if let Some(transaction) = b.pending_transaction {
                 auth.logout_pending(cookie(headers)?, &transaction).await?;
-            } else {
-                auth.logout(cookie(headers)?).await?;
+                // A delayed cleanup reply must not clear a later login's cookie.
+                return Ok(Json(json!({"ok":true})).into_response());
             }
-            let mut response = Json(json!({"ok":true})).into_response();
-            response.headers_mut().insert(
-                header::SET_COOKIE,
-                HeaderValue::from_static(
-                    "__Host-infraternal=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
-                ),
-            );
-            return Ok(response);
+            auth.logout(cookie(headers)?).await?;
+            return Ok(Json(json!({"ok":true})).into_response());
         }
         _ => return Err(Error::Invalid),
     };

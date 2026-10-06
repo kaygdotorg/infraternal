@@ -441,94 +441,130 @@ async fn review3_busy_expiry() {
 
 /// A tab's completion and cleanup must leave the replacement cookie's pending row untouched.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn review3_completion_and_cleanup_are_transaction_bound() {
     let _guard = SERIAL.lock().await;
-    let mut f = fixture().await;
-    let app = router(f.auth.clone());
-    let mut logins = Vec::new();
-    for _ in 0..2 {
-        let (_, headers, start) = http_post_json(&app, "login-start", json!({})).await;
-        let binding = headers[axum::http::header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap();
-        let mut proof = f.software.login(&start, ORIGIN, true);
-        proof["response"]["userHandle"] =
-            json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
-        let (status, headers, body) = http_post_json_with_cookie(
+    for reverse in [false, true] {
+        let mut f = fixture().await;
+        let app = router(f.auth.clone());
+        let mut logins = Vec::new();
+        for _ in 0..3 {
+            let (_, headers, start) = http_post_json(&app, "login-start", json!({})).await;
+            let binding = headers[axum::http::header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap();
+            let mut proof = f.software.login(&start, ORIGIN, true);
+            proof["response"]["userHandle"] =
+                json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+            let (status, headers, body) = http_post_json_with_cookie(
+                &app,
+                "login-finish",
+                json!({"ceremony":start["ceremony"],"proof":proof,"device":"tab"}),
+                binding,
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            let cookie = headers[axum::http::header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned();
+            logins.push((cookie, body["pending_transaction"].clone()));
+        }
+        if reverse {
+            logins.swap(0, 1);
+        }
+        let [(a, id_a), (b, id_b), (cleanup, cleanup_id)] = logins.as_slice() else {
+            unreachable!()
+        };
+        assert!(id_a.is_string() && id_b.is_string() && id_a != id_b);
+        for action in ["unlock-finish", "logout"] {
+            let (status, headers, _) =
+                http_post_json_with_cookie(&app, action, json!({"pending_transaction":id_a}), b)
+                    .await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+            assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+            assert_eq!(
+                http_post_json_with_cookie(&app, "unlock-session", json!({}), b)
+                    .await
+                    .0,
+                axum::http::StatusCode::OK
+            );
+            assert_eq!(
+                http_post_json_with_cookie(&app, "session", json!({}), b)
+                    .await
+                    .0,
+                axum::http::StatusCode::UNAUTHORIZED
+            );
+        }
+        let (status, headers, _) = http_post_json_with_cookie(
             &app,
-            "login-finish",
-            json!({"ceremony":start["ceremony"],"proof":proof,"device":"tab"}),
-            binding,
+            "unlock-finish",
+            json!({"pending_transaction":id_a}),
+            a,
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        let cookie = headers[axum::http::header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
-        logins.push((cookie, body["pending_transaction"].clone()));
-    }
-    let [(a, id_a), (b, id_b)] = logins.as_slice() else {
-        unreachable!()
-    };
-    assert!(id_a.is_string() && id_b.is_string() && id_a != id_b);
-    for action in ["unlock-finish", "logout"] {
-        let (status, headers, _) =
-            http_post_json_with_cookie(&app, action, json!({"pending_transaction":id_a}), b).await;
-        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        // A response may arrive after B replaces the shared cookie jar.
         assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
         assert_eq!(
-            http_post_json_with_cookie(&app, "unlock-session", json!({}), b)
-                .await
-                .0,
+            http_post_json_with_cookie(
+                &app,
+                "unlock-finish",
+                json!({"pending_transaction":id_a}),
+                a
+            )
+            .await
+            .0,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            http_post_json_with_cookie(
+                &app,
+                "unlock-finish",
+                json!({"pending_transaction":id_b}),
+                b
+            )
+            .await
+            .0,
             axum::http::StatusCode::OK
         );
+        // Reload and identity reads cannot restore a previous login's cookie either.
+        for cookie in [a, b] {
+            let (status, headers, _) =
+                http_post_json_with_cookie(&app, "session", json!({}), cookie).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+        }
+        for action in ["unlock-finish", "logout"] {
+            let (status, headers, _) =
+                http_post_json_with_cookie(&app, action, json!({"pending_transaction":id_a}), b)
+                    .await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+            assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+        }
+        let (status, headers, _) = http_post_json_with_cookie(
+            &app,
+            "logout",
+            json!({"pending_transaction":cleanup_id}),
+            cleanup,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+        // B remains active even if cleanup's response is delivered after this read.
         assert_eq!(
             http_post_json_with_cookie(&app, "session", json!({}), b)
                 .await
                 .0,
-            axum::http::StatusCode::UNAUTHORIZED
+            axum::http::StatusCode::OK
         );
     }
-    assert_eq!(
-        http_post_json_with_cookie(
-            &app,
-            "unlock-finish",
-            json!({"pending_transaction":id_a}),
-            a
-        )
-        .await
-        .0,
-        axum::http::StatusCode::OK
-    );
-    assert_eq!(
-        http_post_json_with_cookie(
-            &app,
-            "unlock-finish",
-            json!({"pending_transaction":id_a}),
-            a
-        )
-        .await
-        .0,
-        axum::http::StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        http_post_json_with_cookie(
-            &app,
-            "unlock-finish",
-            json!({"pending_transaction":id_b}),
-            b
-        )
-        .await
-        .0,
-        axum::http::StatusCode::OK
-    );
 }
 
 /// An unresponsive real Unix backend cannot monopolize a browser handler indefinitely.

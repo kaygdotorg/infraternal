@@ -649,9 +649,10 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     let _guard = SERIAL.lock().await;
-    let f = fixture().await;
+    let mut f = fixture().await;
     let router = router(f.auth.clone());
     let request = |origin: &str| {
         axum::http::Request::builder()
@@ -688,7 +689,26 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
         .unwrap();
     let response = router.clone().oneshot(request(ORIGIN)).await.unwrap();
     assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let cookie = response.headers()["set-cookie"].to_str().unwrap();
+    assert!(!response.headers().contains_key("set-cookie"));
+    // Cookie flags belong to explicit issuance; identity reads cannot refresh a stale jar.
+    let (_, binding, start) = http_post_json(&router, "login-start", json!({})).await;
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    let (status, headers, _) = http_post_json_with_cookie(
+        &router,
+        "login-finish",
+        json!({"ceremony":start["ceremony"],"proof":proof,"device":"flags"}),
+        binding["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let cookie = headers["set-cookie"].to_str().unwrap();
     for flag in [
         "Secure",
         "HttpOnly",
@@ -708,7 +728,7 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
         .body(axum::body::Body::from("{}"))
         .unwrap();
     let wraps_response = router.clone().oneshot(wraps_request).await.unwrap();
-    assert!(wraps_response.headers().contains_key("set-cookie"));
+    assert!(!wraps_response.headers().contains_key("set-cookie"));
 
     assert_eq!(response.headers()["cache-control"], "no-store");
     let oversized = axum::http::Request::builder()
