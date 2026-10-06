@@ -403,3 +403,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     sveltebits.xyz effect. Its code cannot be copied (MIT + Commons Clause).
     Budget: half resolution, at most 30 fps, paused when hidden or after
     sign-in, one still frame with reduced motion.
+97. **Account identity.** Each account has an internal random user ID (the
+    primary key and the WebAuthn user handle), a **username** (unique,
+    lowercase, `[a-z0-9._-]`, 1–32 characters, can be changed later because
+    everything refers to the ID), a free-text **display name**, and an
+    **optional email** (notifications only; no email server is required).
+    The passkey is created with name = username and displayName = display
+    name. The wizard step "name" becomes username + display name (the
+    display name is pre-filled from the username).
+98. **Sign-in:** one usernameless "Continue with passkey" button, plus a quiet
+    secondary "use a different passkey…" that opens the browser's QR or
+    security-key flow. Typing a username is never required.
