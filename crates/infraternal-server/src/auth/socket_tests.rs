@@ -242,3 +242,92 @@ async fn clean_control_close_is_not_an_internal_error() {
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn authenticated_idle_socket_survives_the_former_read_timeout() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "idle-lifetime",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Ping {
+            nonce: 34,
+            sent_us: 0,
+        },
+    )
+    .await;
+    let wire = tokio::time::timeout(Duration::from_secs(2), read_client_frame(&mut socket))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            decode_muxed_frame(&wire).unwrap().frame,
+            Frame::Pong { nonce: 34, .. }
+        ),
+        "healthy authenticated idle socket closed after 30 seconds"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn incomplete_rfc_message_still_loses_authority_on_revocation() {
+    use tokio_tungstenite::tungstenite::protocol::frame::{
+        Frame as WebSocketFrame,
+        coding::{Data, OpCode},
+    };
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "partial-rfc-revocation",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    // A nonfinal RFC binary fragment stays hidden inside Axum's message stream.
+    socket
+        .send(Message::Frame(WebSocketFrame::message(
+            Bytes::from_static(&[0x80]),
+            OpCode::Data(Data::Binary),
+            false,
+        )))
+        .await
+        .unwrap();
+    f.auth.logout(&f.session).await.unwrap();
+    let next = tokio::time::timeout(Duration::from_millis(1500), socket.next()).await;
+    assert!(
+        next.is_ok(),
+        "incomplete RFC message masked committed revocation"
+    );
+    assert!(
+        !matches!(next.unwrap(), Some(Ok(Message::Binary(_)))),
+        "revoked fragmented socket received authority-bearing output"
+    );
+    server.abort();
+}
