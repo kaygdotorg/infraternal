@@ -138,3 +138,14 @@ fn fidelity_spacer_head_attributes() {
         5,
     );
 }
+
+#[test]
+#[ignore = "red regression: enable after orphaned-head fix"]
+fn fidelity_orphaned_spacer_head() {
+    replay(
+        "spacer-head-after-region-scroll",
+        "\x1b[1;12H界\x1b[2;4r\x1b[4;1H\n".as_bytes(),
+        12,
+        5,
+    );
+}
