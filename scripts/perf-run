@@ -20,8 +20,17 @@ LOCK=/var/lock/perf-bench.lock
 HOLDER=/var/lock/perf-bench.holder
 MAX_MINUTES=60
 
+LEGACY=/root/perf.lock  # calternal's old lock; a symlink to $LOCK after migration
+
+# Until the legacy lock is a symlink to $LOCK, it is a separate lock that old
+# calternal scripts still take. status reports both, and a run waits for both.
+legacy_separate() { [[ -e $LEGACY && ! -L $LEGACY ]]; }
+
 if [[ ${1:-} == status ]]; then
   if flock -n "$LOCK" true 2>/dev/null; then echo "free"; else echo "held: $(cat "$HOLDER" 2>/dev/null || echo unknown)"; fi
+  if legacy_separate; then
+    if flock -n "$LEGACY" true 2>/dev/null; then echo "legacy $LEGACY: free"; else echo "legacy $LEGACY: held (pids: $(fuser "$LEGACY" 2>/dev/null))"; fi
+  fi
   exit 0
 fi
 
@@ -38,6 +47,10 @@ fi
 exec 9>"$LOCK"
 echo "perf-run: waiting for $LOCK ($(cat "$HOLDER" 2>/dev/null || echo free))" >&2
 flock -w 3600 9 || { echo "perf-run: lock not acquired within 60 min" >&2; exit 75; }
+if legacy_separate; then
+  exec 8>"$LEGACY"
+  flock -w 3600 8 || { echo "perf-run: legacy lock not acquired within 60 min" >&2; exit 75; }
+fi
 printf '%s %s pid=%s start=%s expected_min=%s\n' "$project" "$job" "$$" "$(date -Is)" "$minutes" > "$HOLDER"
 trap 'rm -f "$HOLDER"' EXIT
 timeout --signal=TERM "${MAX_MINUTES}m" "$@"
