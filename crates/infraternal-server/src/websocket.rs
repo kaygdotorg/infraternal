@@ -175,6 +175,7 @@ async fn run_socket(
                 &state,
                 &user_id,
                 &session_token,
+                false,
                 send_frame(
                     &mut sink,
                     CONTROL_STREAM,
@@ -200,6 +201,7 @@ async fn run_socket(
             &state,
             &user_id,
             &session_token,
+            false,
             handshake(
                 &mut source,
                 &mut sink,
@@ -257,20 +259,20 @@ async fn run_socket(
                 };
                 match input {
                     Inbound::TransportPing(payload) => {
-                        if while_authorized(&state, &user_id, &session_token, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
+                        if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
                     }
                     Inbound::Frame(wire) => {
                     if let Ok(decoded) = decode_muxed_frame(&wire)
                         && decoded.stream_id == CONTROL_STREAM
                         && let Frame::Close { code, .. } = decoded.frame {
-                        let _ = while_authorized(&state, &user_id, &session_token, async {
+                        let _ = while_authorized(&state, &user_id, &session_token, true, async {
                             send_frame(&mut sink, CONTROL_STREAM,
                                 &Frame::Close { code, reason: "connection closed" }, &mut encode).await?;
                             send_message(&mut sink, Message::Close(None)).await
                         }).await;
                         break;
                     }
-                    if while_authorized(&state, &user_id, &session_token, handle_client_frame(
+                    if while_authorized(&state, &user_id, &session_token, true, handle_client_frame(
                             wire,
                             &state,
                             &user_id,
@@ -292,7 +294,7 @@ async fn run_socket(
                     output_open = false;
                     continue;
                 };
-                if while_authorized(&state, &user_id, &session_token, handle_terminal_output(
+                if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
                     &state, &user_id, &session_token, &connection_id, stream_id, output,
                     &mut attachments, &mut sink, &mut encode,
                 )).await.is_err() { break; }
@@ -335,10 +337,11 @@ async fn while_authorized<T>(
     state: &WebSocketState,
     user: &str,
     token: &str,
+    renew: bool,
     operation: impl std::future::Future<Output = Result<T, ()>>,
 ) -> Result<T, ()> {
     let mut revocations = state.auth.revocation_events();
-    let mut expiry = socket_deadline(state, user, token).await?;
+    let mut expiry = authority_deadline(state, user, token, renew).await?;
     let mut check = tokio::time::interval_at(
         tokio::time::Instant::now() + BUSY_AUTHORITY_INTERVAL,
         BUSY_AUTHORITY_INTERVAL,
@@ -355,7 +358,13 @@ async fn while_authorized<T>(
             () = tokio::time::sleep_until(expiry) => { expiry = socket_deadline(state, user, token).await?; }
             _ = check.tick() => { expiry = socket_deadline(state, user, token).await?; }
             result = &mut operation => {
-                socket_deadline(state, user, token).await?;
+                // The entry read authenticates this operation. All production revocations
+                // publish after commit, and renewal can only extend expiry. Recheck that
+                // generation/deadline without two redundant SQLite reads per fast frame.
+                // Backend/persistence boundaries still read actual authority and predicate SQL.
+                if revocations.has_changed().map_err(|_| ())? || tokio::time::Instant::now() >= expiry {
+                    socket_deadline(state, user, token).await?;
+                }
                 return result;
             }
         }
@@ -377,9 +386,6 @@ async fn handle_terminal_output<K>(
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
-    if !session_is_live(state, user_id, session_token).await {
-        return Err(());
-    }
     let Some(attachment) = attachments.get_mut(&stream_id) else {
         return Ok(());
     };
@@ -766,10 +772,7 @@ where
     let decoded = decode_muxed_frame(&wire).map_err(|_| ())?;
     let stream_id = decoded.stream_id;
     let passthrough = wire.clone();
-    // Every terminal/control frame uses current authority, including attach, input and credit.
-    if !session_is_live(state, user_id, session_token).await {
-        return Err(());
-    }
+    // The surrounding watchdog authenticates every frame, including attach, input and credit.
     match decoded.frame {
         Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
             send_frame(
@@ -980,11 +983,23 @@ async fn socket_deadline(
     user_id: &str,
     token: &str,
 ) -> Result<tokio::time::Instant, ()> {
+    authority_deadline(state, user_id, token, false).await
+}
+
+async fn authority_deadline(
+    state: &WebSocketState,
+    user_id: &str,
+    token: &str,
+    renew: bool,
+) -> Result<tokio::time::Instant, ()> {
     let now = unix_seconds()?;
-    let expiry = tokio::time::timeout(
-        AUTHORITY_READ_TIMEOUT,
-        state.auth.live_expiry(token, user_id, now),
-    )
+    let expiry = tokio::time::timeout(AUTHORITY_READ_TIMEOUT, async {
+        if renew {
+            state.auth.socket_activity(token, user_id, now).await
+        } else {
+            state.auth.live_expiry(token, user_id, now).await
+        }
+    })
     .await
     .map_err(|_| ())?
     .map_err(|_| ())?;
@@ -1002,7 +1017,7 @@ async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> 
             state.auth.socket_activity(token, user_id, now)
         )
         .await,
-        Ok(Ok(()))
+        Ok(Ok(_))
     )
 }
 

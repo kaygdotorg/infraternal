@@ -105,7 +105,8 @@ impl Auth {
     }
 
     /// Recheck every hot-path event with a read, renewing active sessions at most once a minute.
-    pub(crate) async fn socket_activity(&self, token: &str, user: &str, now: i64) -> Result<()> {
+    /// Return the resulting expiry so a watchdog can reuse this exact authority read.
+    pub(crate) async fn socket_activity(&self, token: &str, user: &str, now: i64) -> Result<i64> {
         let expiry = self.live_expiry(token, user, now).await?;
         if expiry < now + SESSION - 60 {
             let changed = sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
@@ -113,8 +114,9 @@ impl Auth {
             if changed != 1 {
                 return Err(Error::Denied);
             }
+            return Ok(now + SESSION);
         }
-        Ok(())
+        Ok(expiry)
     }
 
     /// Read a socket's actual deadline without sliding it during idle checks.
