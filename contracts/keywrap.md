@@ -255,7 +255,9 @@ with one authoritative SQLite read; its expiry snapshot and the committed
 revocation generation are rechecked after waits. Backend/persistence boundaries
 also read actual authority before success frames; SQLite writer locks and mutation
 predicates order commits with logout/recovery. Revocation interrupts
-pending operations; backend reply waits are bounded to five seconds. Expiry is
+pending operations independently of connect deadlines. Terminal open has a
+60-second connect budget (#29 owner-task fallback; no earlier SSH connect budget
+was specified); attachment reply waits remain bounded to five seconds. Expiry is
 checked every 25 ms only during pending operations, including handshakes; idle live
 sockets keep event-driven revocation and actual deadline checks without polling.
 Authority reads and shutdown writes have 25 ms deadlines and fail closed.

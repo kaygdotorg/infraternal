@@ -613,7 +613,7 @@ async fn review3_backend_reply_has_a_deadline() {
         panic!("backend call")
     };
     let start = Instant::now();
-    let result = tokio::time::timeout(Duration::from_secs(6), read_client_frame(&mut socket))
+    let result = tokio::time::timeout(Duration::from_secs(61), read_client_frame(&mut socket))
         .await
         .unwrap();
     assert!(matches!(
@@ -624,7 +624,7 @@ async fn review3_backend_reply_has_a_deadline() {
             ..
         }
     ));
-    assert!(start.elapsed() < Duration::from_secs(6));
+    assert!(start.elapsed() < Duration::from_secs(61));
     leg_b_send(
         &mut peer,
         0,
@@ -795,4 +795,229 @@ async fn review3_expired_handshake_must_not_welcome() {
         .unwrap();
     assert_eq!(rows, 0);
     server.abort();
+}
+/// A slow live open succeeds; committed revocation interrupts it before the late reply.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn review4_ten_second_open_preserves_authority() {
+    let _guard = SERIAL.lock().await;
+    for revoke in [false, true] {
+        let (f, addr, server, mut peer) = review3_socket().await;
+        let mut receive = BytesMut::new();
+        read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+        leg_b_send(
+            &mut peer,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "no reply",
+            },
+        )
+        .await;
+        let cookie = format!("__Host-infraternal={}", f.session);
+        let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
+        assert_server_hello(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "deadline",
+            },
+        )
+        .await;
+        read_welcome(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Call {
+                call_id: 78,
+                action_id: "terminal.open",
+                input_json: br#"{"cols":80,"rows":24,"px_w":0,"px_h":0}"#,
+            },
+        )
+        .await;
+        let wire = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+        let Frame::Call { call_id, .. } = decode_muxed_frame(&wire).unwrap().frame else {
+            panic!("backend call")
+        };
+        let start = tokio::time::Instant::now();
+        if revoke {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            f.auth.logout(&f.session).await.unwrap();
+            let closed_at = Instant::now();
+            let next = tokio::time::timeout(Duration::from_millis(100), socket.next()).await;
+            assert!(matches!(
+                next,
+                Ok(None | Some(Ok(Message::Close(_)) | Err(_)))
+            ));
+            assert!(closed_at.elapsed() < Duration::from_millis(100));
+            println!(
+                "PASS: ten-second open revocation closes in {}us",
+                closed_at.elapsed().as_micros()
+            );
+        }
+        tokio::time::sleep_until(start + Duration::from_secs(10)).await;
+        leg_b_send(
+            &mut peer,
+            0,
+            &Frame::Result {
+                call_id,
+                ok: true,
+                json: br#"{"session_id":"42424242424242424242424242424242"}"#,
+            },
+        )
+        .await;
+        if revoke {
+            let late = tokio::time::timeout(Duration::from_millis(100), socket.next()).await;
+            assert!(!matches!(late, Ok(Some(Ok(Message::Binary(_))))));
+        } else {
+            let result =
+                tokio::time::timeout(Duration::from_secs(1), read_client_frame(&mut socket))
+                    .await
+                    .unwrap();
+            assert!(
+                matches!(
+                    decode_muxed_frame(&result).unwrap().frame,
+                    Frame::Result {
+                        call_id: 78,
+                        ok: true,
+                        ..
+                    }
+                ),
+                "live ten-second open was rejected"
+            );
+            println!(
+                "PASS: live ten-second open succeeds in {}ms",
+                start.elapsed().as_millis()
+            );
+        }
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions")
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, i64::from(!revoke));
+        server.abort();
+    }
+}
+
+/// Exercise slow connects at all 16 per-user sockets, with real SQLite and Unix replies.
+#[tokio::test]
+#[ignore = "release-only connect scale measurement; run without concurrent builds"]
+#[allow(clippy::too_many_lines)]
+async fn review4_slow_open_at_user_capacity() {
+    let _guard = SERIAL.lock().await;
+    for revoke in [false, true] {
+        let (f, addr, server, mut peer) = review3_socket().await;
+        let mut receive = BytesMut::new();
+        read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+        leg_b_send(
+            &mut peer,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "no reply",
+            },
+        )
+        .await;
+        let cookie = format!("__Host-infraternal={}", f.session);
+        let mut sockets = Vec::new();
+        let mut calls = Vec::new();
+        for _ in 0..16 {
+            let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
+            assert_server_hello(&mut socket).await;
+            client_ws_send(
+                &mut socket,
+                0,
+                &Frame::Hello {
+                    version: 1,
+                    caps: 0,
+                    client_info: "connect scale",
+                },
+            )
+            .await;
+            read_welcome(&mut socket).await;
+            client_ws_send(
+                &mut socket,
+                0,
+                &Frame::Call {
+                    call_id: 78,
+                    action_id: "terminal.open",
+                    input_json: br#"{"cols":80,"rows":24,"px_w":0,"px_h":0}"#,
+                },
+            )
+            .await;
+            let wire = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+            let Frame::Call { call_id, .. } = decode_muxed_frame(&wire).unwrap().frame else {
+                panic!("backend call");
+            };
+            calls.push(call_id);
+            sockets.push(socket);
+        }
+        let start = tokio::time::Instant::now();
+        if revoke {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            f.auth.logout(&f.session).await.unwrap();
+            let closed_at = Instant::now();
+            for socket in &mut sockets {
+                let next = tokio::time::timeout(Duration::from_millis(100), socket.next()).await;
+                assert!(matches!(
+                    next,
+                    Ok(None | Some(Ok(Message::Close(_)) | Err(_)))
+                ));
+            }
+            assert!(closed_at.elapsed() < Duration::from_millis(100));
+            println!(
+                "PASS: 16 pending opens revoked; all sockets closed in {}us",
+                closed_at.elapsed().as_micros()
+            );
+        }
+        tokio::time::sleep_until(start + Duration::from_secs(10)).await;
+        for (index, call_id) in calls.into_iter().enumerate() {
+            let session = format!("{{\"session_id\":\"{:032x}\"}}", index + 1);
+            leg_b_send(
+                &mut peer,
+                0,
+                &Frame::Result {
+                    call_id,
+                    ok: true,
+                    json: session.as_bytes(),
+                },
+            )
+            .await;
+        }
+        if revoke {
+            for socket in &mut sockets {
+                let late = tokio::time::timeout(Duration::from_millis(100), socket.next()).await;
+                assert!(!matches!(late, Ok(Some(Ok(Message::Binary(_))))));
+            }
+        } else {
+            for socket in &mut sockets {
+                let wire = tokio::time::timeout(Duration::from_secs(1), read_client_frame(socket))
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    decode_muxed_frame(&wire).unwrap().frame,
+                    Frame::Result {
+                        call_id: 78,
+                        ok: true,
+                        ..
+                    }
+                ));
+            }
+            println!(
+                "PASS: 16 live ten-second opens succeeded in {}ms",
+                start.elapsed().as_millis()
+            );
+        }
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions")
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, if revoke { 0 } else { 16 });
+        server.abort();
+    }
 }
