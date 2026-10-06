@@ -53,6 +53,7 @@ export class PerformanceProbe {
   private runActive = false;
   private timeout = 0;
   private quietTimer = 0;
+  private nextKeyTimer = 0;
   private quiet = false;
   private resumeStartedAt: number | undefined;
   private resumeMarkerSent = false;
@@ -93,6 +94,7 @@ export class PerformanceProbe {
   dispose(): void {
     window.clearTimeout(this.timeout);
     window.clearTimeout(this.quietTimer);
+    window.clearTimeout(this.nextKeyTimer);
     document.removeEventListener("keydown", this.onKeydown, true);
     this.pending.clear();
     this.samplesById.clear();
@@ -126,6 +128,7 @@ export class PerformanceProbe {
     if (this.runActive) return;
 
     window.clearTimeout(this.timeout);
+    window.clearTimeout(this.nextKeyTimer);
     this.pending.clear();
     this.latencies.length = 0;
     this.samples.length = 0;
@@ -137,28 +140,8 @@ export class PerformanceProbe {
     this.results.textContent = `Painted 0 / ${count}`;
     this.syncButtons();
 
-    for (let index = 0; index < count; index += 1) {
-      const key = KEY_SET[index % KEY_SET.length];
-      if (!key) continue;
-      this.syntheticKey = key;
-      this.syntheticSample = undefined;
-      document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
-      this.syntheticKey = undefined;
-      if (!this.syntheticSample) {
-        this.failRun("The browser did not deliver the synthetic keydown event.");
-        return;
-      }
-      try {
-        terminal.injectInput(key);
-      } catch {
-        this.syntheticSample = undefined;
-        this.failRun("Terminal input is paused; wait for the server acknowledgement and try again.");
-        return;
-      }
-      this.syntheticSample = undefined;
-    }
-
-    this.timeout = window.setTimeout(() => this.finishRun(true), ECHO_TIMEOUT_MS);
+    this.timeout = window.setTimeout(() => this.finishRun(true), Math.max(ECHO_TIMEOUT_MS, count * 50));
+    this.sendNextKey();
   }
 
   private forceDrop(): void {
@@ -224,6 +207,12 @@ export class PerformanceProbe {
         if (this.latencies.length >= this.runTarget) this.finishRun(false);
       }
     }
+    if (this.runActive && this.latencies.length === this.samples.length) {
+      this.nextKeyTimer = window.setTimeout(() => {
+        this.nextKeyTimer = 0;
+        this.sendNextKey();
+      }, 0);
+    }
   }
 
   private enqueue(key: string, sample: ProbeSample): void {
@@ -249,6 +238,30 @@ export class PerformanceProbe {
     if (sample) sample.stages[hop] = at;
   }
 
+  /** Sends one key, then waits for its painted echo before measuring the next key. */
+  private sendNextKey(): void {
+    const terminal = this.terminal;
+    if (!this.runActive || !terminal?.isConnected || this.samples.length >= this.runTarget) return;
+    const key = KEY_SET[this.samples.length % KEY_SET.length];
+    if (!key) return;
+    this.syntheticKey = key;
+    this.syntheticSample = undefined;
+    document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    this.syntheticKey = undefined;
+    if (!this.syntheticSample) {
+      this.failRun("The browser did not deliver the synthetic keydown event.");
+      return;
+    }
+    try {
+      terminal.injectInput(key);
+    } catch {
+      this.syntheticSample = undefined;
+      this.failRun("Terminal input is paused; wait for the server acknowledgement and try again.");
+      return;
+    }
+    this.syntheticSample = undefined;
+  }
+
   traceSamples(): ProbeTraceSample[] {
     return this.samples.flatMap((sample) => sample.id === undefined
       ? []
@@ -259,6 +272,7 @@ export class PerformanceProbe {
     if (!this.runActive) return;
     this.runActive = false;
     window.clearTimeout(this.timeout);
+    window.clearTimeout(this.nextKeyTimer);
     this.timeout = 0;
     this.renderReport();
     this.message.textContent = timedOut
@@ -271,6 +285,7 @@ export class PerformanceProbe {
     this.runActive = false;
     this.pending.clear();
     window.clearTimeout(this.timeout);
+    window.clearTimeout(this.nextKeyTimer);
     this.timeout = 0;
     this.message.textContent = message;
     this.renderReport();
