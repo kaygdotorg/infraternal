@@ -3,7 +3,7 @@
 //! This state owns no terminal bytes: retention belongs to the shim. A transport
 //! may hold one bounded frame while credit is exhausted. After 250 ms with
 //! pending output it detaches from the shim, letting the shim update its screen
-//! and ring, and requests a snapshot when credit returns. No idle timer runs.
+//! and ring, and requests replay when credit returns. No idle timer runs.
 
 use std::{
     ops::Range,
@@ -180,10 +180,23 @@ impl Output {
         self.snapshot
     }
 
-    /// Whether returned credit requires a fresh screen rather than replay bytes.
+    /// Whether returned credit requires reattachment for replay or a repaint.
     #[must_use]
     pub const fn needs_snapshot(&self) -> bool {
         self.snapshot && self.credit > 0
+    }
+
+    /// Resume raw replay at the unchanged cursor after a successful `ReadFrom`.
+    /// Ring coverage is decided by the shim, which may send a repaint instead.
+    pub fn resume_replay(&mut self) {
+        self.snapshot = false;
+        self.stalled = None;
+    }
+
+    /// Park/retry catch-up without keeping a payload or starting an idle timer.
+    pub fn retry_recovery(&mut self) {
+        self.snapshot = true;
+        self.stalled = None;
     }
 
     /// Commit a repaint; its byte length consumes credit but never advances seq.
