@@ -23,29 +23,25 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   });
 
   await page.goto("/?mock=1");
-  await expect(page.locator("#setup-form")).toBeVisible();
-  await expect(page.locator("#login-form")).toHaveCount(0);
+  await expect(page.locator("#setup-card")).toBeVisible();
+  await expect(page.locator("#login-passkey")).toHaveCount(0);
   expect(authRequests[0]).toBe("/auth/status");
-  for (const colorScheme of ["light", "dark"] as const) {
-    await page.emulateMedia({ colorScheme });
-    await page.setViewportSize({ width: 390, height: 844 });
-    const path = testInfo.outputPath(`setup-${colorScheme}.png`);
-    await page.screenshot({ path });
-    await testInfo.attach(`setup-${colorScheme}`, { path, contentType: "image/png" });
-  }
   await page.setViewportSize({ width: 1280, height: 720 });
   const setupResponse = await context.request.get("/__mock/setup-token");
   const setupBody = await setupResponse.json() as { setup_token: string };
   await page.locator("#setup-token").fill(setupBody.setup_token);
-  await page.locator("#owner-name").fill("Tracer browser test");
-  await page.getByRole("button", { name: "Register a passkey" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.locator("#setup-username").fill("tracer_browser_test");
+  await page.locator("#setup-display-name").fill("Tracer browser test");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Create passkey" }).click();
 
   await expect(page.getByRole("heading", { name: "Save your recovery key" })).toBeVisible();
-  const recoveryWords = (await page.locator("#recovery-words").textContent())?.trim().split(/\s+/) ?? [];
+  const recoveryWords = await page.locator("#recovery-words li").count();
   // Failed assertions must never print the actual recovery phrase.
-  expect(recoveryWords.length).toBe(24);
-  await page.locator("#recovery-saved").check();
-  await page.getByRole("button", { name: "Finish setup" }).click();
+  expect(recoveryWords).toBe(24);
+  await page.locator(".auth-check").click();
+  await page.getByRole("button", { name: "Open infraternal" }).click();
   await expect(page.getByText("TEST DOUBLE")).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
 
@@ -53,10 +49,12 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   await context.clearCookies();
   await page.evaluate(() => localStorage.clear());
   await page.reload();
-  await expect(page.locator("#login-form")).toBeVisible();
+  await expect(page.locator("#login-passkey")).toBeVisible();
   await expect(page.locator("#account-id")).toHaveCount(0);
   await expect(page.locator("#device-name")).toHaveCount(0);
-  await expect(page.locator("#setup-form")).toHaveCount(0);
+  await expect(page.locator("#setup-card")).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: testInfo.outputPath("signin-dark-small.png") });
   for (const colorScheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme });
     await page.setViewportSize({ width: 390, height: 844 });
@@ -259,9 +257,11 @@ test("status failure, invalid setup token, and cancelled passkey have distinct g
   await page.unroute("**/auth/status");
   await page.getByRole("button", { name: "Try again" }).click();
   await page.locator("#setup-token").fill("invalid-input");
-  await page.locator("#owner-name").fill("Owner");
-  await page.getByRole("button", { name: "Register a passkey" }).click();
-  await expect(page.locator("#auth-error")).toContainText("The setup token is invalid or expired.");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.locator("#setup-username").fill("owner");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Create passkey" }).click();
+  await expect(page.locator("#passkey-error")).toContainText("The setup token is invalid or expired.");
   await page.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: false } }));
   await page.route("**/auth/login-start", (route) => route.fulfill({ json: {
     ceremony: "cancel-test", options: { publicKey: {
@@ -275,7 +275,7 @@ test("status failure, invalid setup token, and cancelled passkey have distinct g
     } });
   });
   await page.goto("/?setup=1");
-  await expect(page.locator("#setup-form")).toHaveCount(0);
+  await expect(page.locator("#login-passkey")).toBeVisible();
   await page.getByRole("button", { name: "Continue with passkey" }).click();
   await expect(page.locator("#auth-error")).toHaveText("The passkey prompt was cancelled or timed out. Try again when you are ready.");
 });
@@ -286,12 +286,15 @@ test("access screens render within the local first-paint budget", async ({ page 
   await page.context().request.post("/__mock/reset");
   for (const setupRequired of [true, false]) {
     const samples: number[] = [];
+    const firstPaints: number[] = [];
     for (let index = 0; index < 30; index += 1) {
       // Fresh surfaces avoid Chromium reusing an unchanged compositor frame on reload.
       const sample = await page.context().newPage();
       await sample.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: setupRequired } }));
       await sample.goto("/");
-      await expect(sample.locator(setupRequired ? "#setup-form" : "#login-form")).toBeVisible();
+      await expect(sample.locator(setupRequired ? "#setup-card" : "#login-passkey")).toBeVisible();
+      firstPaints.push(await sample.evaluate(() =>
+        performance.getEntriesByName("first-contentful-paint")[0]?.startTime ?? performance.now()));
       // A compositor screenshot confirms painted pixels. The timestamp after capture
       // is an upper bound, including screenshot overhead, rather than FCP telemetry.
       await sample.screenshot();
@@ -299,8 +302,10 @@ test("access screens render within the local first-paint budget", async ({ page 
       await sample.close();
     }
     samples.sort((left, right) => left - right);
+    firstPaints.sort((left, right) => left - right);
     const p99 = samples[29] ?? Infinity;
     console.log(`Access render upper bound (${setupRequired ? "setup" : "signin"}, n=30, local production build): p50 ${samples[14]} ms, p99 ${p99} ms`);
+    console.log(`Access first-contentful-paint (${setupRequired ? "setup" : "signin"}, n=30, local production build): p50 ${firstPaints[14]} ms, p99 ${firstPaints[29]} ms`);
     expect(p99).toBeLessThan(1000);
   }
 });

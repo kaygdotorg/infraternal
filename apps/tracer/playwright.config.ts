@@ -5,6 +5,8 @@ export default defineConfig({
   testDir: "./test",
   testMatch: "*.spec.ts",
   fullyParallel: false,
+  // All workers share one auth/terminal test-double process and its owner state.
+  workers: 1,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
   reporter: "list",
