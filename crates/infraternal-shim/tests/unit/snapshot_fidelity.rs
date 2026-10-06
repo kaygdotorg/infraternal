@@ -47,7 +47,7 @@ fn fidelity_cursor() {
 fn fidelity_edge() {
     replay(
         "wrapped-head-before-region-change",
-        "\x1b[?6h\x1b[1;12H\x1b[?2027h👩‍💻\x1b[2;4r\x1b[31;4:3mabc".as_bytes(),
+        "\x1b[31;4:3m\x1b[?6h\x1b[1;12H\x1b[?2027h👩‍💻\x1b[2;4r\x1b[31;4:3mabc".as_bytes(),
         12,
         5,
     );
