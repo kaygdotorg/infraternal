@@ -24,7 +24,7 @@ fn new_frames_roundtrip_and_refuse_noncanonical_payloads() {
         Frame::InputAck(10),
         Frame::InputStateRequest,
         Frame::InputState(10, 12),
-        Frame::SelectWriter(0x01020304),
+        Frame::SelectWriter(0x0102_0304),
     ] {
         let wire = frame.encode().unwrap();
         for split in 0..wire.len() {
@@ -103,7 +103,7 @@ fn reusable_encoder_retains_capacity_and_refuses_growth_before_mutation() {
 #[test]
 fn writer_selection_has_a_frozen_little_endian_layout() {
     assert_eq!(
-        Frame::SelectWriter(0x01020304).encode().unwrap(),
+        Frame::SelectWriter(0x0102_0304).encode().unwrap(),
         [5, 0, 0, 0, 0x1b, 4, 3, 2, 1]
     );
 }
