@@ -311,7 +311,6 @@ fn fidelity_saved_modes_future_restore() {
 }
 
 #[test]
-#[ignore = "R3 red regression; enable with semantic-state rejection"]
 fn fidelity_prompt_resize_requires_explicit_rejection() {
     let prefix = b"\x1b]133;A;redraw=1\x07$ hello";
     let mut a = reset_terminal(80, 24).unwrap();
@@ -343,7 +342,6 @@ fn fidelity_prompt_resize_requires_explicit_rejection() {
 }
 
 #[test]
-#[ignore = "R3 fresh-C-default red regression; enable with explicit rejection"]
 fn fidelity_fresh_c_redraw_default_is_explicitly_rejected() {
     let a = Terminal::new(80, 24).unwrap();
     assert!(

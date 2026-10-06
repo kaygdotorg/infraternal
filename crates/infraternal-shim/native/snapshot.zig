@@ -19,11 +19,25 @@ pub fn snapshot(handle: c.Terminal, buf: [*]u8, len: usize, tail: usize) callcon
 }
 
 fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void {
+    // OSC 133 metadata drives resize and prompt interaction. VT painting
+    // cannot import arbitrary cell/row semantics without triggering actions;
+    // refuse the faithful path instead of silently certifying visible text.
+    // C initialization starts at false, while RIS starts at true. Restoring
+    // false through OSC 133 would itself create unimportable semantic state.
+    if (t.flags.shell_redraws_prompt != .true) return error.Unrepresentable;
     // The bounded painter cannot recreate a boundary wrap flag independently
     // of adjacent history or scrolling. Refuse these states until upstream
     // exposes nonprinting row-wrap restoration instead of emitting a lossy VT.
     inline for (.{ .primary, .alternate }) |key| {
         if (t.screens.get(key)) |screen| {
+            if (!std.meta.eql(screen.semantic_prompt, vt.Screen.SemanticPrompt.disabled) or screen.cursor.semantic_content != .output or screen.cursor.semantic_content_clear_eol) return error.Unrepresentable;
+            var semantic_rows = screen.pages.rowIterator(.right_down, .{ .screen = .{ .x = 0, .y = 0 } }, null);
+            while (semantic_rows.next()) |semantic_row| {
+                if (semantic_row.rowAndCell().row.semantic_prompt != .none) return error.Unrepresentable;
+                for (semantic_row.cells(.all)) |value| {
+                    if (value.semantic_content != .output) return error.Unrepresentable;
+                }
+            }
             const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = t.rows - 1 } }).?;
             if (p.rowAndCell().row.wrap) return error.Unrepresentable;
             const first = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?;
@@ -515,7 +529,7 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
                     for (cells_a, cells_b, 0..) |*ca, *cb, x| {
                         const cpa = if (ca.codepoint() == 0) ' ' else ca.codepoint();
                         const cpb = if (cb.codepoint() == 0) ' ' else cb.codepoint();
-                        if (ca.hasText() != cb.hasText() or cpa != cpb or ca.wide != cb.wide or ca.protected != cb.protected or !std.meta.eql(effectiveStyle(pa, ca), effectiveStyle(pb, cb))) {
+                        if ((strict and ca.semantic_content != cb.semantic_content) or ca.hasText() != cb.hasText() or cpa != cpb or ca.wide != cb.wide or ca.protected != cb.protected or !std.meta.eql(effectiveStyle(pa, ca), effectiveStyle(pb, cb))) {
                             return 1 + y * a.cols + x;
                         }
                         const ga = pa.grapheme(ca) orelse &.{};
@@ -526,6 +540,7 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
                         var id_b: [64]u8 = undefined;
                         if (!std.mem.eql(u8, linkKey(pa, ca, &id_a), linkKey(pb, cb, &id_b))) return 1 + y * a.cols + x;
                     }
+                    if (strict and pa.rowAndCell().row.semantic_prompt != pb.rowAndCell().row.semantic_prompt) return 6200000 + y;
                     if (pa.rowAndCell().row.wrap != pb.rowAndCell().row.wrap) return 2000000 + y;
                     if (strict and pa.rowAndCell().row.wrap_continuation != pb.rowAndCell().row.wrap_continuation) return 2100000 + y;
                 }
@@ -534,6 +549,7 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
                 if (!std.meta.eql(sa.?.cursor.style, sb.?.cursor.style)) return 3000002;
 
                 if (strict) {
+                    if (!std.meta.eql(sa.?.semantic_prompt, sb.?.semantic_prompt) or sa.?.cursor.semantic_content != sb.?.cursor.semantic_content or sa.?.cursor.semantic_content_clear_eol != sb.?.cursor.semantic_content_clear_eol) return 6200001;
                     if (!savedEqual(sa.?.saved_cursor, sb.?.saved_cursor)) return 6000002;
                     if (sa.?.cursor.cursor_style != sb.?.cursor.cursor_style) return 6000003;
                 }
@@ -549,6 +565,7 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
         }
     }
     if (strict) {
+        if (a.flags.shell_redraws_prompt != b.flags.shell_redraws_prompt) return 6200002;
         if (!std.meta.eql(a.modes.saved, b.modes.saved)) return 6100000;
         if (a.previous_char != b.previous_char) return 6000000;
         for (0..a.cols) |x| {
