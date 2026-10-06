@@ -9,5 +9,9 @@ license.workspace = true
 criterion.workspace = true
 serde_json.workspace = true
 
+[[bench]]
+name = "wire_codec"
+harness = false
+
 [lints]
 workspace = true
