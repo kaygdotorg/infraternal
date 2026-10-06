@@ -5,6 +5,7 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "bench": "bun run src/bench.ts"
   }
 }
