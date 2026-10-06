@@ -38,6 +38,12 @@ u8      type
 
 - Integers in bodies are little-endian, fixed width, unless the table says
   varint.
+- Every `varint` is an unsigned 32-bit LEB128 value in shortest form; decoders
+  reject non-canonical encodings. This applies to frame lengths, mux stream ids,
+  and the lengths before UTF-8 strings. The frame-length limit is checked before
+  buffering or allocating from the declared size.
+- Examples: `80 00` is a redundant encoding of zero; `ff ff ff ff 10`
+  overflows u32. Both are protocol errors, including at nested string sites.
 - A decoder never allocates from a length before it checks the length
   against the limit. A frame over the limit is a protocol error. Close with
   code `FRAME_TOO_LARGE`.
@@ -88,6 +94,11 @@ frames are binary, because they carry each keystroke and each output chunk.
 
 ## 5. Resume without lost or duplicated bytes (DECISIONS 41)
 
+- Input and Output byte ranges must have an exclusive end representable as
+  u64. Consumers check `seq + payload_length` before dispatch (`checked_add`
+  in Rust, an explicit u64 maximum in TypeScript). The codec reads fields but
+  does not perform sequence arithmetic. Snapshot repaint length never advances
+  `out_seq`; it represents screen state valid at that sequence.
 - **Output.** The client keeps `last_out_seq`. After a drop, it sends
   `Resume` and then `AttachTerm(last_out_seq)`. The server asks the agent,
   and the agent asks the shim with `ReadFrom`. The client gets the bytes
