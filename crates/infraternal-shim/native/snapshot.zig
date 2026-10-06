@@ -35,7 +35,14 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             // mode is off. VT can set protection only by selecting a mode;
             // reject this construction gap rather than changing later erase.
             if (screen.protected_mode == .off and (screen.cursor.protected or if (screen.saved_cursor) |saved| saved.protected else false)) return error.Unrepresentable;
-            var semantic_rows = screen.pages.rowIterator(.right_down, .{ .screen = .{ .x = 0, .y = 0 } }, null);
+            // Validate the exported extent, not intentionally omitted older
+            // history. Frozen v1 permits tail truncation; the oracle compares
+            // every returned row, while live semantic scalars above remain
+            // mandatory. This bounds validation to visible rows plus the tail
+            // instead of scanning ~10k stored rows on every Snapshot request.
+            const history = screen.pages.total_rows - t.rows;
+            const first_exported = history - @min(history, tail);
+            var semantic_rows = screen.pages.rowIterator(.right_down, .{ .screen = .{ .x = 0, .y = @intCast(first_exported) } }, null);
             while (semantic_rows.next()) |semantic_row| {
                 if (semantic_row.rowAndCell().row.semantic_prompt != .none) return error.Unrepresentable;
                 for (semantic_row.cells(.all)) |value| {

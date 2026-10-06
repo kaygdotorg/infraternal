@@ -615,7 +615,6 @@ fn fidelity_screen_entry_consumes_inherited_shift_before_saving() {
 }
 
 #[test]
-#[ignore = "red regression: semantic validation must use the exported history extent"]
 fn fidelity_semantic_validation_matches_exported_history_extent() {
     for lines in [20, 400] {
         // OSC 133 B tags input without marking the screen as a seen prompt.
