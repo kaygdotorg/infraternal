@@ -47,6 +47,15 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
   gate output, verbatim). Jobs never close issues. Memory tools such as Honcho
   are a convenience, not the record.
 
+## Foundational choices (owner rule)
+
+- A library or engine that the foundation depends on (terminal state,
+  crypto, database, transport, renderer, and so on) is never chosen inside a
+  job. The orchestrator brings it to the owner as a grill question with
+  measured trade-offs: speed, memory per session multiplied by the expected
+  number of sessions, correctness, and consistency with the rest of the
+  stack. A job may measure candidates. It does not decide.
+
 ## Gates
 
 Before you report that work is done, run `scripts/verify fast` and quote its
