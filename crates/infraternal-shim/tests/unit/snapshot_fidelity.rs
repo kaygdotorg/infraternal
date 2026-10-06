@@ -601,3 +601,16 @@ fn fidelity_snapshot_resets_stale_viewer_color_overrides() {
         "fresh source must clear stale palette and dynamic overrides in an existing viewer"
     );
 }
+
+#[test]
+#[ignore = "red regression: inherited single shift changes saved cursor charset"]
+fn fidelity_screen_entry_consumes_inherited_shift_before_saving() {
+    // Primary retains its unconsumed shift while alternate text consumes its
+    // copy. Repaint must not inherit that shift into alternate DECSC state.
+    for prefix in [
+        "\x1b*0\x1bN\x1b[?47he\u{301}\x1b7",
+        "\x1b*0\x1bN\x1b[?47h\x1b8\x1b7",
+    ] {
+        check_replay("screen-entry saved charset", prefix.as_bytes(), None, 12, 5).unwrap();
+    }
+}
