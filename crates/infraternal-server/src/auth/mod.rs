@@ -4,6 +4,7 @@
 //! Restarting invalidates pending ceremonies, never credentials. SQLite transactions serialize
 //! owner creation, recovery replacement, passkey limits and capability redemption.
 
+mod binding;
 mod crypto;
 mod devices;
 mod http;
@@ -72,6 +73,7 @@ struct Registration {
     authority: Authority,
     recovery_hash: Option<String>,
     expires: i64,
+    binding: Option<String>,
 }
 enum Authority {
     Setup(String),
@@ -85,6 +87,7 @@ enum LoginState {
 struct Login {
     state: LoginState,
     expires: i64,
+    binding: Option<String>,
 }
 #[derive(Default)]
 struct Pending {

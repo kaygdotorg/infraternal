@@ -194,6 +194,7 @@ async fn execute(
         "setup-start" => setup_start(auth, value, now).await?,
         "registration-finish" => {
             let b: Register = body(value)?;
+            auth.require_ceremony_binding(&b.ceremony, headers).await?;
             return session_response(
                 &auth
                     .registration_finish(&b.ceremony, b.proof, b.passkey_wrap, b.recovery_wrap, now)
@@ -203,6 +204,7 @@ async fn execute(
         "login-start" => login_start(auth, headers, value, now).await?,
         "login-finish" => {
             let b: Login = body(value)?;
+            auth.require_ceremony_binding(&b.ceremony, headers).await?;
             return session_response(
                 &auth
                     .pending_login_finish(&b.ceremony, b.proof, &b.device, now)
@@ -275,7 +277,32 @@ async fn execute(
         }
         _ => return Err(Error::Invalid),
     };
-    Ok(Json(payload).into_response())
+    ceremony_response(auth, action, headers, payload).await
+}
+
+/// Attach browser transaction state only to successful ceremony starts.
+async fn ceremony_response(
+    auth: &Auth,
+    action: &str,
+    headers: &HeaderMap,
+    payload: Value,
+) -> super::Result<Response> {
+    let binding = if matches!(
+        action,
+        "setup-start" | "login-start" | "add-start" | "recovery-ready"
+    ) {
+        Some(
+            auth.bind_ceremony(payload["ceremony"].as_str().ok_or(Error::Invalid)?, headers)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let mut response = Json(payload).into_response();
+    if let Some(binding) = binding {
+        response.headers_mut().insert(header::SET_COOKIE, binding);
+    }
+    Ok(response)
 }
 
 /// The identified path is an authenticated fresh tap, never a public directory.

@@ -68,6 +68,7 @@ impl Auth {
                 authority,
                 recovery_hash,
                 expires: now + CEREMONY,
+                binding: None,
             },
         );
         Ok(json!({"ceremony":id,"user_id":user,"options":options,"recovery_words":words}))
@@ -257,6 +258,7 @@ impl Auth {
             Login {
                 state: LoginState::Identified(state, user.into()),
                 expires: now + CEREMONY,
+                binding: None,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))
@@ -287,6 +289,7 @@ impl Auth {
             Login {
                 state: LoginState::Discoverable(state),
                 expires: now + CEREMONY,
+                binding: None,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))

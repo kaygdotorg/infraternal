@@ -1270,7 +1270,7 @@ async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
 }
 
 pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) -> (String, String) {
-    let (status, _, start) = http_post_json(
+    let (status, start_headers, start) = http_post_json(
         app,
         "setup-start",
         json!({"token":setup_token,"name":"owner"}),
@@ -1284,7 +1284,13 @@ pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) ->
     let passkey_wrap = browser_wrap(&software.prf(&start), &dek, &user_id, "passkey");
     let recovery_wrap = browser_wrap(&recovery_ikm(&words), &dek, &user_id, "recovery");
     let proof = software.registration(&start, ORIGIN, true);
-    let (status, headers, _) = http_post_json(
+    let binding = start_headers[axum::http::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let (status, headers, _) = http_post_json_with_cookie(
         app,
         "registration-finish",
         json!({
@@ -1293,6 +1299,7 @@ pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) ->
             "passkey_wrap":passkey_wrap,
             "recovery_wrap":recovery_wrap,
         }),
+        binding,
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
@@ -1866,16 +1873,23 @@ async fn public_status_and_discoverable_http_login() {
         http_post_json(&app, "status", json!({})).await.2,
         json!({"setup_required":false})
     );
-    let (status, _, start) = http_post_json(&app, "login-start", json!({})).await;
+    let (status, start_headers, start) = http_post_json(&app, "login-start", json!({})).await;
     assert_eq!(status, axum::http::StatusCode::OK);
     assert_eq!(start["options"]["publicKey"]["allowCredentials"], json!([]));
     let mut proof = f.software.login(&start, ORIGIN, true);
     proof["response"]["userHandle"] =
         json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
-    let (status, headers, _) = http_post_json(
+    let binding = start_headers[axum::http::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let (status, headers, _) = http_post_json_with_cookie(
         &app,
         "login-finish",
         json!({"ceremony":start["ceremony"],"proof":proof,"device":"resident browser"}),
+        binding,
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
@@ -1919,7 +1933,7 @@ async fn setup_start_accepts_username_and_display_name() {
         "ada_default"
     );
 
-    let (status, _, body) = http_post_json(
+    let (status, start_headers, body) = http_post_json(
         &app,
         "setup-start",
         json!({
@@ -1943,7 +1957,13 @@ async fn setup_start_accepts_username_and_display_name() {
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&body), &dek, &user_id, "passkey");
     let recovery_wrap = browser_wrap(&recovery_ikm(&words), &dek, &user_id, "recovery");
-    let (status, headers, _) = http_post_json(
+    let binding = start_headers[axum::http::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let (status, headers, _) = http_post_json_with_cookie(
         &app,
         "registration-finish",
         json!({
@@ -1952,6 +1972,7 @@ async fn setup_start_accepts_username_and_display_name() {
             "passkey_wrap":passkey_wrap,
             "recovery_wrap":recovery_wrap
         }),
+        binding,
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
@@ -2308,4 +2329,51 @@ async fn pending_unlock_expires_without_terminal_authority() {
         .await
         .unwrap();
     assert_eq!(count, 0, "server did not revoke expired incomplete unlock");
+}
+/// Independent audit: browser-bound ceremonies cannot be redeemed in another cookie context.
+#[tokio::test]
+async fn audit_ceremony_browser_binding() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let app = router(f.auth.clone());
+    let (_, start_headers, start) = http_post_json(&app, "login-start", json!({})).await;
+    let mut proof = f.software.login(&start, ORIGIN, true);
+    proof["response"]["userHandle"] =
+        json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
+    // HTTP helper supplies no Cookie at all: an independent browser context.
+    let (status, _, _) = http_post_json(
+        &app,
+        "login-finish",
+        json!({"ceremony":start["ceremony"],"proof":proof.clone(),"device":"different browser"}),
+    )
+    .await;
+    println!(
+        "start in A / signed finish in cookie-free B → expected 401 → actual {status}; binding cookie issued={}",
+        start_headers.contains_key(axum::http::header::SET_COOKIE)
+    );
+    assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    let binding = start_headers[axum::http::header::SET_COOKIE]
+        .to_str()
+        .unwrap();
+    for flag in [
+        "Secure",
+        "HttpOnly",
+        "SameSite=Strict",
+        "Path=/",
+        "Max-Age=300",
+    ] {
+        assert!(binding.contains(flag));
+    }
+    let original = http_post_json_with_cookie(
+        &app,
+        "login-finish",
+        json!({"ceremony":start["ceremony"],"proof":proof,"device":"starting browser"}),
+        binding.split(';').next().unwrap(),
+    )
+    .await;
+    assert_eq!(
+        original.0,
+        axum::http::StatusCode::OK,
+        "foreign finish drained original ceremony"
+    );
 }
