@@ -79,3 +79,35 @@ mod budgets {
         let _ = pty.child.wait();
     }
 }
+
+#[test]
+#[ignore = "release poll-storage allocation measurement"]
+fn poll_storage_measurement() {
+    use std::{hint::black_box, time::Instant};
+    let (peer, _) = UnixStream::pair().unwrap();
+    let n = 1_000_000;
+    for (label, heap) in [("poll-heap", true), ("poll-stack", false)] {
+        let start = Instant::now();
+        for _ in 0..n {
+            if heap {
+                black_box(vec![
+                    PollFd::new(peer.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLOUT),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLOUT),
+                ]);
+            } else {
+                black_box([
+                    PollFd::new(peer.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLOUT),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(peer.as_fd(), PollFlags::POLLOUT),
+                ]);
+            }
+        }
+        println!(
+            "{label}: n={n} ns/turn={:.1}",
+            start.elapsed().as_secs_f64() * 1e9 / f64::from(n)
+        );
+    }
+}
