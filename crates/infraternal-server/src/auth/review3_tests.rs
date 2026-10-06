@@ -151,7 +151,6 @@ async fn review3_socket() -> (Fixture, SocketAddr, tokio::task::JoinHandle<()>, 
 }
 
 #[tokio::test]
-#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
 async fn review3_revoked_handshake_must_not_welcome() {
     let _guard = SERIAL.lock().await;
     let (f, addr, server, _peer) = review3_socket().await;
@@ -628,7 +627,6 @@ async fn review3_backend_reply_has_a_deadline() {
 
 /// Resume must not rotate a capability after the authenticating session has been revoked.
 #[tokio::test]
-#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
 async fn review3_revoked_resume_must_not_welcome() {
     let _guard = SERIAL.lock().await;
     let (f, addr, server, _peer) = review3_socket().await;
@@ -704,7 +702,6 @@ async fn review3_revoked_resume_must_not_welcome() {
 
 /// Revocation interrupts the pre-Hello wait itself; a client need not send another frame.
 #[tokio::test]
-#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
 async fn review3_waiting_handshake_loses_authority() {
     let _guard = SERIAL.lock().await;
     let (f, addr, server, _peer) = review3_socket().await;
@@ -725,7 +722,6 @@ async fn review3_waiting_handshake_loses_authority() {
 
 /// A stored expiry transition between upgrade and Hello cannot mint connection state.
 #[tokio::test]
-#[ignore = "Known focused-audit regression #29; run explicitly before fixing"]
 async fn review3_expired_handshake_must_not_welcome() {
     let _guard = SERIAL.lock().await;
     let (f, addr, server, _peer) = review3_socket().await;

@@ -26,8 +26,8 @@ async fn database() -> (SqlitePool, String, [u8; 16]) {
 #[tokio::test]
 async fn second_device_does_not_inherit_first_device_input_ack() {
     let (pool, user, session) = database().await;
-    let a = new_connection(&pool, &user, 0).await.unwrap();
-    let b = new_connection(&pool, &user, 0).await.unwrap();
+    let a = new_connection(&pool, &user, 0, None, None).await.unwrap();
+    let b = new_connection(&pool, &user, 0, None, None).await.unwrap();
     let (offset_a, stream_a) = owned_writer(&pool, &user, &a.connection_id, 1, &session, None)
         .await
         .unwrap();
@@ -55,7 +55,7 @@ async fn second_device_does_not_inherit_first_device_input_ack() {
 #[tokio::test]
 async fn writer_ownership_capacity_unsigned_offsets_and_identity_reuse() {
     let (pool, user, session) = database().await;
-    let connection = new_connection(&pool, &user, 0).await.unwrap();
+    let connection = new_connection(&pool, &user, 0, None, None).await.unwrap();
     let (_, first) = owned_writer(&pool, &user, &connection.connection_id, 1, &session, None)
         .await
         .unwrap();
@@ -118,7 +118,7 @@ async fn writer_ownership_capacity_unsigned_offsets_and_identity_reuse() {
         .await
         .unwrap();
     assert_eq!(count, 0);
-    let next = new_connection(&pool, &user, 0).await.unwrap();
+    let next = new_connection(&pool, &user, 0, None, None).await.unwrap();
     let (_, identity) = owned_writer(&pool, &user, &next.connection_id, 1, &session, None)
         .await
         .unwrap();
@@ -135,7 +135,7 @@ async fn writer_admission_at_user_capacity() {
     let (pool, user, session) = database().await;
     let mut connections = Vec::new();
     for _ in 0..16 {
-        let connection = new_connection(&pool, &user, 0).await.unwrap();
+        let connection = new_connection(&pool, &user, 0, None, None).await.unwrap();
         for stream in (1..=63).step_by(2) {
             owned_writer(
                 &pool,

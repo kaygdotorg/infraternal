@@ -161,42 +161,70 @@ async fn run_socket(
     user_id: String,
     session_token: String,
 ) {
+    // One absolute budget covers server Hello, authority reads, client Hello and Resume.
+    // Starting a fresh five seconds after a slow initial write would retain admission too long.
+    let handshake_deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
     let mut revocations = state.auth.revocation_events();
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
     let mut encode = Vec::with_capacity(4096);
-    if send_frame(
-        &mut sink,
-        CONTROL_STREAM,
-        &Frame::Hello {
-            version: 1,
-            caps: 0,
-            client_info: "infraternal-server/0.1",
-        },
-        &mut encode,
-    )
-    .await
-    .is_err()
-    {
+    if !matches!(
+        tokio::time::timeout_at(
+            handshake_deadline,
+            while_authorized(
+                &state,
+                &user_id,
+                &session_token,
+                send_frame(
+                    &mut sink,
+                    CONTROL_STREAM,
+                    &Frame::Hello {
+                        version: 1,
+                        caps: 0,
+                        client_info: "infraternal-server/0.1",
+                    },
+                    &mut encode,
+                ),
+            )
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
         return;
     }
 
-    let handshake = tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        handshake(
-            &mut source,
-            &mut sink,
-            &mut receive,
-            &mut encode,
+    let mut pending_welcome = None;
+    let handshake = tokio::time::timeout_at(
+        handshake_deadline,
+        while_authorized(
             &state,
             &user_id,
+            &session_token,
+            handshake(
+                &mut source,
+                &mut sink,
+                &mut receive,
+                &mut encode,
+                &state,
+                &user_id,
+                &session_token,
+                &mut pending_welcome,
+            ),
         ),
     )
     .await;
     let Ok(Ok(connection_id)) = handshake else {
-        let _ = send_message(&mut sink, Message::Close(None)).await;
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None)))
+            .await;
+        drop(sink);
+        drop(source);
+        if let Some(welcome) = pending_welcome.take() {
+            rollback_connection(&state.pool, &user_id, &welcome).await;
+        }
         return;
     };
+    // Welcome was sent while authorized; subsequent drops use the normal resume cleanup.
+    pending_welcome.take();
 
     let (output_tx, mut output_rx) =
         mpsc::channel::<(u32, TerminalOutput)>(OUTPUT_CHANNEL_CAPACITY);
@@ -477,6 +505,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handshake<S, K>(
     source: &mut S,
     sink: &mut K,
@@ -484,12 +513,15 @@ async fn handshake<S, K>(
     encode: &mut Vec<u8>,
     state: &WebSocketState,
     user_id: &str,
+    session_token: &str,
+    pending_welcome: &mut Option<Welcome>,
 ) -> Result<[u8; 16], ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
     let hello = next_wire(source, sink, receive).await?.ok_or(())?;
+    socket_deadline(state, user_id, session_token).await?;
     let decoded = decode_muxed_frame(&hello).map_err(|_| ())?;
     let resume = match (decoded.stream_id, decoded.frame) {
         (
@@ -502,6 +534,7 @@ where
     };
     let welcome = if resume {
         let request = next_wire(source, sink, receive).await?.ok_or(())?;
+        socket_deadline(state, user_id, session_token).await?;
         let decoded = decode_muxed_frame(&request).map_err(|_| ())?;
         let (id, token) = match (decoded.stream_id, decoded.frame) {
             (
@@ -513,14 +546,32 @@ where
             ) => (*connection_id, *resume_token),
             _ => return Err(()),
         };
-        resume_connection(&state.pool, user_id, id, token, unix_seconds()?)
-            .await
-            .map_err(|_| ())?
+        resume_connection(
+            &state.pool,
+            user_id,
+            id,
+            token,
+            unix_seconds()?,
+            Some(&crate::auth::hash(session_token)),
+            Some(pending_welcome),
+        )
+        .await
+        .map_err(|_| ())?
     } else {
-        new_connection(&state.pool, user_id, unix_seconds()?)
-            .await
-            .map_err(|_| ())?
+        new_connection(
+            &state.pool,
+            user_id,
+            unix_seconds()?,
+            Some(&crate::auth::hash(session_token)),
+            Some(pending_welcome),
+        )
+        .await
+        .map_err(|_| ())?
     };
+    // Retain rollback metadata outside the cancelled future, including the previous Resume token.
+    *pending_welcome = Some(welcome);
+    let welcome = pending_welcome.as_ref().ok_or(())?;
+    socket_deadline(state, user_id, session_token).await?;
     if send_frame(
         sink,
         CONTROL_STREAM,
@@ -534,12 +585,12 @@ where
     .await
     .is_err()
     {
-        rollback_connection(&state.pool, user_id, &welcome).await;
         return Err(());
     }
     Ok(welcome.connection_id)
 }
 
+#[derive(Clone)]
 struct Welcome {
     connection_id: [u8; 16],
     resume_token: [u8; 32],
@@ -551,12 +602,15 @@ async fn new_connection(
     pool: &SqlitePool,
     user_id: &str,
     now: i64,
+    authority: Option<&str>,
+    pending_welcome: Option<&mut Option<Welcome>>,
 ) -> Result<Welcome, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     sqlx::query("DELETE FROM websocket_connections WHERE active=0 AND expires_at<?")
         .bind(now)
         .execute(&mut *transaction)
         .await?;
+    require_socket_authority_tx(&mut transaction, user_id, authority).await?;
     let active: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM websocket_connections WHERE user_id=? AND active=1",
     )
@@ -581,6 +635,10 @@ async fn new_connection(
         previous_token_hash: None,
         previous_expiry: None,
     };
+    // Stage before the SQL write/commit await: cancellation can outlive SQLx's worker command.
+    if let Some(pending) = pending_welcome {
+        *pending = Some(welcome.clone());
+    }
     let token_hash = token_hash(&welcome.resume_token);
     sqlx::query("INSERT INTO websocket_connections(connection_id,token_hash,user_id,created_at,expires_at,active) VALUES (?,?,?,?,NULL,1)")
         .bind(welcome.connection_id.as_slice())
@@ -589,6 +647,7 @@ async fn new_connection(
         .bind(now)
         .execute(&mut *transaction)
         .await?;
+    require_socket_authority_tx(&mut transaction, user_id, authority).await?;
     transaction.commit().await?;
     Ok(welcome)
 }
@@ -599,8 +658,16 @@ async fn resume_connection(
     connection_id: [u8; 16],
     token: [u8; 32],
     now: i64,
+    authority: Option<&str>,
+    pending_welcome: Option<&mut Option<Welcome>>,
 ) -> Result<Welcome, sqlx::Error> {
     let mut transaction = pool.begin().await?;
+    // Lock before reading auth/resume state: logout cannot commit between validation and rotation.
+    sqlx::query("UPDATE websocket_connections SET created_at=created_at WHERE connection_id=?")
+        .bind(connection_id.as_slice())
+        .execute(&mut *transaction)
+        .await?;
+    require_socket_authority_tx(&mut transaction, user_id, authority).await?;
     let row = sqlx::query("SELECT token_hash,expires_at FROM websocket_connections WHERE connection_id=? AND user_id=? AND active=0 AND expires_at>=?")
         .bind(connection_id.as_slice())
         .bind(user_id)
@@ -632,6 +699,10 @@ async fn resume_connection(
         previous_token_hash: Some(previous_token_hash),
         previous_expiry: Some(previous_expiry),
     };
+    // Previous token metadata must survive cancellation while rotation/commit is pending.
+    if let Some(pending) = pending_welcome {
+        *pending = Some(welcome.clone());
+    }
     let rotated_hash = token_hash(&welcome.resume_token);
     let changed = sqlx::query("UPDATE websocket_connections SET token_hash=?, active=1, expires_at=NULL WHERE connection_id=? AND user_id=? AND active=0 AND expires_at>=?")
         .bind(rotated_hash.as_slice())
@@ -644,25 +715,28 @@ async fn resume_connection(
     if changed != 1 {
         return Err(sqlx::Error::Protocol("resume rejected".into()));
     }
+    require_socket_authority_tx(&mut transaction, user_id, authority).await?;
     transaction.commit().await?;
     Ok(welcome)
 }
 
 async fn rollback_connection(pool: &SqlitePool, user_id: &str, welcome: &Welcome) {
-    if let Some(token_hash) = welcome.previous_token_hash {
-        let _ = sqlx::query("UPDATE websocket_connections SET token_hash=?, active=0, expires_at=? WHERE connection_id=? AND user_id=? AND active=1")
-            .bind(token_hash.as_slice())
+    if let Some(previous_hash) = welcome.previous_token_hash {
+        let _ = sqlx::query("UPDATE websocket_connections SET token_hash=?, active=0, expires_at=? WHERE connection_id=? AND user_id=? AND active=1 AND token_hash=?")
+            .bind(previous_hash.as_slice())
             .bind(welcome.previous_expiry.unwrap_or_default())
             .bind(welcome.connection_id.as_slice())
             .bind(user_id)
+            .bind(token_hash(&welcome.resume_token).as_slice())
             .execute(pool)
             .await;
     } else {
         let _ = sqlx::query(
-            "DELETE FROM websocket_connections WHERE connection_id=? AND user_id=? AND active=1",
+            "DELETE FROM websocket_connections WHERE connection_id=? AND user_id=? AND active=1 AND token_hash=?",
         )
         .bind(welcome.connection_id.as_slice())
         .bind(user_id)
+        .bind(token_hash(&welcome.resume_token).as_slice())
         .execute(pool)
         .await;
     }
@@ -1015,14 +1089,9 @@ async fn owned_writer(
         .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
-    // The writer lock orders this authority read and all following mutations with revocation.
-    if let Some(token_hash) = authority {
-        let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
-            .bind(token_hash).bind(user).fetch_one(&mut *tx).await.map_err(|_| ())?;
-        if !live {
-            return Err(());
-        }
-    }
+    require_socket_authority_tx(&mut tx, user, authority)
+        .await
+        .map_err(|_| ())?;
     let existing: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM terminal_writers WHERE connection_id=? AND client_stream=?)",
     )
@@ -1054,6 +1123,9 @@ async fn owned_writer(
         .ok_or(())?;
     let ack: Vec<u8> = row.get("input_acked");
     let ack = u64::from_be_bytes(ack.try_into().map_err(|_| ())?);
+    require_socket_authority_tx(&mut tx, user, authority)
+        .await
+        .map_err(|_| ())?;
     tx.commit().await.map_err(|_| ())?;
     Ok((ack, writer))
 }
@@ -1198,3 +1270,20 @@ fn unix_seconds() -> Result<i64, ()> {
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 mod writer_tests;
+
+/// Caller already holds SQLite's writer lock. Production supplies an exact session hash;
+/// storage-only unit tests omit it. Reads do not slide expiry or require a fresh destructive tap.
+async fn require_socket_authority_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user: &str,
+    authority: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    if let Some(hash) = authority {
+        let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
+            .bind(hash).bind(user).fetch_one(&mut **tx).await?;
+        if !live {
+            return Err(sqlx::Error::Protocol("session authority ended".into()));
+        }
+    }
+    Ok(())
+}

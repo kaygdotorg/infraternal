@@ -144,7 +144,14 @@ async fn expired_handshake_releases_user_permits() {
     }
     tokio::time::sleep(Duration::from_millis(5250)).await;
     let reopened = connect_async(test_ws_request(address, &cookie)).await;
-    assert!(reopened.is_ok(), "expired Hello retained per-user capacity");
+    let status = match &reopened {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => response.status().as_u16(),
+        _ => 0,
+    };
+    assert!(
+        reopened.is_ok(),
+        "expired Hello retained per-user capacity; upgrade HTTP status={status}"
+    );
     server.abort();
 }
 
