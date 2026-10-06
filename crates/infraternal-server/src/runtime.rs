@@ -347,6 +347,11 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
+        // Local SQLite has no remote connection lifetime. Keep the bounded
+        // eight-connection pool until shutdown instead of waking a reaper
+        // every 600s while idle; request failures still surface normally [41].
+        .idle_timeout(None)
+        .max_lifetime(None)
         .connect_with(options)
         .await
         .map_err(ServerError::Storage)?;
