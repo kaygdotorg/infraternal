@@ -278,3 +278,28 @@ test("status failure, invalid setup token, and cancelled passkey have distinct g
   await page.getByRole("button", { name: "Continue with passkey" }).click();
   await expect(page.locator("#auth-error")).toHaveText("The passkey prompt was cancelled or timed out. Try again when you are ready.");
 });
+
+/** Measure the status round trip and access paint across repeated cold documents. */
+test("access screens render within the local first-paint budget", async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.context().request.post("/__mock/reset");
+  for (const setupRequired of [true, false]) {
+    const samples: number[] = [];
+    for (let index = 0; index < 30; index += 1) {
+      // Fresh surfaces avoid Chromium reusing an unchanged compositor frame on reload.
+      const sample = await page.context().newPage();
+      await sample.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: setupRequired } }));
+      await sample.goto("/");
+      await expect(sample.locator(setupRequired ? "#setup-form" : "#login-form")).toBeVisible();
+      // A compositor screenshot confirms painted pixels. The timestamp after capture
+      // is an upper bound, including screenshot overhead, rather than FCP telemetry.
+      await sample.screenshot();
+      samples.push(await sample.evaluate(() => performance.now()));
+      await sample.close();
+    }
+    samples.sort((left, right) => left - right);
+    const p99 = samples[29] ?? Infinity;
+    console.log(`Access render upper bound (${setupRequired ? "setup" : "signin"}, n=30, local production build): p50 ${samples[14]} ms, p99 ${p99} ms`);
+    expect(p99).toBeLessThan(1000);
+  }
+});
