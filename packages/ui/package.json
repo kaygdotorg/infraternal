@@ -15,6 +15,7 @@
     "./faulty-terminal": "./src/faulty-terminal.ts",
     "./color": "./src/color.ts",
     "./themes": "./src/themes.ts",
+    "./backdrop": "./src/backdrop.ts",
     "./styles.css": "./styles.css"
   }
 }
