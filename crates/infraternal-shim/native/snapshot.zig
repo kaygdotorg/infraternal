@@ -68,12 +68,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             try w.print("\x1b[?{d}{c}\x1b[?{d}s\x1b[?{d}{c}", .{ tag.value, @as(u8, if (saved) 'h' else 'l'), tag.value, tag.value, @as(u8, if (defaults.get(mode)) 'h' else 'l') });
         }
     }
-    for (t.colors.palette.current, 0..) |rgb, i| {
-        if (t.colors.palette.mask.isSet(i)) try w.print("\x1b]4;{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{ i, rgb.r, rgb.g, rgb.b });
-    }
-    inline for (.{ .{ "foreground", 10 }, .{ "background", 11 }, .{ "cursor", 12 } }) |entry| {
-        if (@field(t.colors, entry[0]).override) |rgb| try w.print("\x1b]{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{ entry[1], rgb.r, rgb.g, rgb.b });
-    }
+    try restoreColors(w, t);
     const primary = t.screens.get(.primary).?;
     // Printing changes the terminal-global REP source. Reconstruct the
     // inactive screen first so its final character cannot win on replay.
@@ -709,6 +704,7 @@ pub fn approximate(handle: c.Terminal, buf: [*]u8, len: usize) callconv(lib.call
     if (len < 256) return 0;
     var w = Writer.fixed(buf[0 .. len - 128]);
     w.writeAll("\x1bc\x1b[?7l\x1b[?6l\x1b[?2027l\x1b(B\x0f") catch return 0;
+    restoreColors(&w, t) catch return 0;
     if (t.screens.active_key == .alternate) w.writeAll("\x1b[?47h") catch return 0;
     const screen = t.screens.active;
     outer: for (0..t.rows) |y| {
@@ -756,4 +752,16 @@ fn cellEqual(pa: vt.PageList.Pin, pb: vt.PageList.Pin, ca: *const vt.page.Cell, 
     var id_a: [64]u8 = undefined;
     var id_b: [64]u8 = undefined;
     return std.mem.eql(u8, linkKey(pa, ca, &id_a), linkKey(pb, cb, &id_b));
+}
+
+// RIS preserves palette/dynamic overrides. Clear the existing viewer first;
+// emitting only source overrides would silently inherit stale viewer colors.
+fn restoreColors(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
+    try w.writeAll("\x1b]104\x1b\\\x1b]110\x1b\\\x1b]111\x1b\\\x1b]112\x1b\\");
+    for (t.colors.palette.current, 0..) |rgb, i| {
+        if (t.colors.palette.mask.isSet(i)) try w.print("\x1b]4;{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{ i, rgb.r, rgb.g, rgb.b });
+    }
+    inline for (.{ .{ "foreground", 10 }, .{ "background", 11 }, .{ "cursor", 12 } }) |entry| {
+        if (@field(t.colors, entry[0]).override) |rgb| try w.print("\x1b]{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{ entry[1], rgb.r, rgb.g, rgb.b });
+    }
 }

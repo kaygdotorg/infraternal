@@ -623,7 +623,6 @@ fn fidelity_oracle_observes_archived_cells_with_equal_active_screens() {
 }
 
 #[test]
-#[ignore = "warm viewer colors red regression; enable after override reset"]
 fn fidelity_snapshot_resets_stale_viewer_color_overrides() {
     let mut source = reset_terminal(12, 5).unwrap();
     source.process(b"SOURCE");
