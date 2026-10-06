@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Build MIT-licensed libghostty-vt with a read-only snapshot adapter [7,20,94].
+set -euo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+output="${1:?Cargo OUT_DIR required}"
+version=a887df42c56f6de86c0fe6da9c4eeca37931e083
+checksum=fb4b2f9ffa0af125983041fdbe4ef94d3fa79fb9f2d22b9c213c0e3847a866b6
+[[ "$(zig version)" == 0.15.2 ]] || { printf 'libghostty-vt requires Zig 0.15.2\n' >&2; exit 1; }
+case "${TARGET:?Cargo target required}" in
+    x86_64-unknown-linux-musl) vt_target=x86_64-linux-musl ;;
+    aarch64-unknown-linux-musl) vt_target=aarch64-linux-musl ;;
+    x86_64-unknown-linux-gnu) vt_target=x86_64-linux-gnu ;;
+    aarch64-unknown-linux-gnu) vt_target=aarch64-linux-gnu ;;
+    *) printf 'unsupported libghostty-vt target: %s\n' "$TARGET" >&2; exit 1 ;;
+esac
+mkdir -p "$root/target/vt-tools"
+archive="$root/target/vt-tools/$version.tar.gz"
+if [[ ! -f "$archive" ]]; then
+    temporary="$(mktemp "$root/target/vt-tools/download.XXXXXX")"
+    trap 'rm -f -- "$temporary"' EXIT
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        "https://codeload.github.com/ghostty-org/ghostty/tar.gz/$version" -o "$temporary"
+    printf '%s  %s\n' "$checksum" "$temporary" | sha256sum --check --status
+    mv "$temporary" "$archive"
+fi
+printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status
+# Cargo check/test/features have different OUT_DIRs. Key the expensive native
+# build by source, adapter, build recipe, ABI and optimization instead. A lock
+# prevents two Cargo invocations from observing a partly installed archive.
+optimize=ReleaseSafe
+[[ "${PROFILE:-debug}" != release ]] || optimize=ReleaseFast
+key="$( { sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" "$root/scripts/build-vt"; printf '%s %s %s\n' "$checksum" "$vt_target" "$optimize"; } | sha256sum | cut -d ' ' -f1)"
+cache_dir="$root/target/vt-tools/native-$key"
+mkdir -p "$cache_dir"
+exec 9> "$cache_dir/lock"
+flock 9
+if [[ -f "$cache_dir/native/lib/libghostty-vt.a" ]]; then
+    rm -rf -- "$output/native"
+    ln -s "$cache_dir/native" "$output/native"
+    exit 0
+fi
+source_dir="$cache_dir/ghostty-source"
+if [[ ! -d "$source_dir" ]]; then
+    mkdir -p "$source_dir"
+    tar -xzf "$archive" --strip-components=1 -C "$source_dir"
+fi
+cp "$root/crates/infraternal-shim/native/snapshot.zig" "$source_dir/src/infraternal_snapshot.zig"
+# Restore the exact upstream root before adding our two adapter exports.
+tar -xOf "$archive" "ghostty-$version/src/lib_vt.zig" > "$source_dir/src/lib_vt.zig"
+cat >> "$source_dir/src/lib_vt.zig" <<'ZIG'
+
+comptime {
+    @export(&@import("infraternal_snapshot.zig").snapshot, .{ .name = "infraternal_vt_snapshot" });
+    @export(&@import("infraternal_snapshot.zig").compare, .{ .name = "infraternal_vt_compare" });
+}
+ZIG
+# Baseline CPU keeps distributed binaries valid on hosts older than the builder.
+# ReleaseSafe retains bounds checks in development; release uses ReleaseFast.
+cd "$source_dir"
+zig build -j2 -Demit-lib-vt=true -Doptimize="$optimize" -Dcpu=baseline \
+    -Dtarget="$vt_target" -Demit-xcframework=false -Dapp-runtime=none \
+    --prefix "$cache_dir/native" --cache-dir "$cache_dir/zig-cache" \
+    --global-cache-dir "$root/target/vt-tools/zig-cache"
+rm -rf -- "$output/native"
+ln -s "$cache_dir/native" "$output/native"

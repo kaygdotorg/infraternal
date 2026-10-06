@@ -29,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           apt-get update
-          apt-get install --yes --no-install-recommends binutils build-essential ca-certificates curl file git perl xz-utils
+          apt-get install --yes --no-install-recommends binutils build-essential ca-certificates curl file git perl util-linux xz-utils
           curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
             | sh -s -- --yes --no-modify-path --profile minimal
           export PATH="$HOME/.cargo/bin:$PATH"

@@ -1,0 +1,293 @@
+//! Snapshot adapter over pinned libghostty-vt's Zig screen/cell API [13][94].
+//! The C API does not yet expose inactive screens, saved cursors, tabs or
+//! charsets. This read-only adapter accesses those fields without a mirror VT.
+const std = @import("std");
+const c = @import("terminal/c/terminal.zig");
+const vt = @import("terminal/main.zig");
+const lib = @import("terminal/lib.zig");
+const Writer = std.Io.Writer;
+
+pub fn snapshot(handle: c.Terminal, buf: [*]u8, len: usize, tail: usize) callconv(lib.calling_conv) usize {
+    const t = c.zigTerminal(handle) orelse return 0;
+    var w = Writer.fixed(buf[0..len]);
+    serialize(t, &w, tail) catch return 0;
+    return w.end;
+}
+
+fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) Writer.Error!void {
+    try w.writeAll("\x1bc\x1b[?6l\x1b[r\x1b[?7h\x1b[?2027l");
+    for (t.colors.palette.current, 0..) |rgb, i| {
+        if (t.colors.palette.mask.isSet(i)) try w.print("\x1b]4;{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{ i, rgb.r, rgb.g, rgb.b });
+    }
+    inline for (.{ .{ "foreground", 10 }, .{ "background", 11 }, .{ "cursor", 12 } }) |entry| {
+        if (@field(t.colors, entry[0]).override) |rgb| try w.print("\x1b]{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{ entry[1], rgb.r, rgb.g, rgb.b });
+    }
+    const primary = t.screens.get(.primary).?;
+    const history = primary.pages.total_rows - t.rows;
+    const count = @min(history, tail);
+    if (count != 0) {
+        // Each lookup resolves one row, never one cell through full history.
+        for (history - count..history) |y| {
+            const p = primary.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(y) } }).?;
+            try row(w, p);
+            if (!p.rowAndCell().row.wrap) try w.writeAll("\x1b[0m\r\n");
+        }
+        try w.print("\x1b[{d}S", .{t.rows});
+    }
+    try paint(w, t, primary);
+    if (t.screens.get(.alternate)) |alt| {
+        // 47 preserves saved cursors and content, unlike 1049 which saves and
+        // clears on every set, including nested sets. Continuations retain
+        // their original 47/1047/1049 behavior in the real engine.
+        try w.writeAll("\x1b[?47h");
+        try paint(w, t, alt);
+        if (t.screens.active_key == .primary) {
+            try w.writeAll("\x1b[?47l");
+            try liveCursor(w, t, primary, false);
+        }
+    }
+    // Modes with screen-switching or reset side effects are represented by
+    // the screen construction above, rather than dispatched a second time.
+    inline for (std.meta.fields(vt.modes.Mode)) |field| {
+        const mode: vt.modes.Mode = @enumFromInt(field.value);
+        const tag = vt.modes.ModeTag.fromMode(mode);
+        if (!(tag.value == 47 or tag.value == 1047 or tag.value == 1049 or tag.value == 1048 or tag.value == 6 or tag.value == 7 or tag.value == 69 or tag.value == 2026)) {
+            try w.print("\x1b[{s}{d}{c}", .{ if (tag.ansi) "" else "?", tag.value, @as(u8, if (t.modes.get(mode)) 'h' else 'l') });
+        }
+    }
+    try w.writeAll("\x1b[3g");
+    for (0..t.cols) |x| if (t.tabstops.get(@intCast(x))) {
+        try w.print("\x1b[1;{d}H\x1bH", .{x + 1});
+    };
+    try w.print("\x1b[?69{c}", .{@as(u8, if (t.modes.get(.enable_left_and_right_margin)) 'h' else 'l')});
+    const r = t.scrolling_region;
+    try w.print("\x1b[{d};{d}r", .{ r.top + 1, r.bottom + 1 });
+    if (t.modes.get(.enable_left_and_right_margin)) try w.print("\x1b[{d};{d}s", .{ r.left + 1, r.right + 1 });
+    try w.print("\x1b[?7{c}", .{@as(u8, if (t.modes.get(.wraparound)) 'h' else 'l')});
+    const screen = t.screens.active;
+    try cursorShape(w, t, screen);
+    try liveCursor(w, t, screen, t.modes.get(.origin));
+}
+
+fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Error!void {
+    try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?6l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
+    var wrap = false;
+    for (0..t.rows) |y| {
+        if (!wrap) try w.print("\x1b[{d};1H", .{y + 1});
+        const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
+        try row(w, p);
+        wrap = p.rowAndCell().row.wrap;
+    }
+    if (screen.saved_cursor) |saved| {
+        // DECSC saves origin mode along with the cursor. Restore the actual
+        // margins first, then position relative to origin when it is enabled.
+        const r = t.scrolling_region;
+        try w.print("\x1b[{d};{d}r\x1b[?6{c}", .{ r.top + 1, r.bottom + 1, @as(u8, if (saved.origin) 'h' else 'l') });
+        try position(w, t, saved.x, saved.y, saved.origin);
+        if (saved.pending_wrap) try recreateWrap(w, t, screen, saved.x, saved.y, saved.origin);
+        try w.print("{f}\x1b[{d}\"q", .{ saved.style.formatterVt(), @as(u8, if (saved.protected) 1 else 0) });
+        try charset(w, saved.charset);
+        try w.writeAll("\x1b7");
+    }
+    // A screen has its own complete Kitty flag stack, including pop state.
+    const keys = screen.kitty_keyboard;
+    try w.print("\x1b[={d}u", .{keys.flags[0].int()});
+    // Rebuild the complete eight-entry ring, including entries behind a
+    // wrapped index: future pops can expose any of them.
+    for (1..keys.flags.len) |i| try w.print("\x1b[>{d}u", .{keys.flags[i].int()});
+    try w.print("\x1b[>{d}u", .{keys.flags[0].int()});
+    for (1..@as(usize, keys.idx) + 1) |i| try w.print("\x1b[>{d}u", .{keys.flags[i].int()});
+    try cursorShape(w, t, screen);
+    try liveCursor(w, t, screen, false);
+}
+
+fn cursorShape(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Error!void {
+    const shape: u8 = switch (screen.cursor.cursor_style) {
+        .block => 1,
+        .underline => 3,
+        .bar => 5,
+        .block_hollow => 1,
+    };
+    try w.print("\x1b[{d} q", .{shape + @as(u8, if (t.modes.get(.cursor_blinking)) 0 else 1)});
+}
+
+fn position(w: *Writer, t: *const vt.Terminal, x: u16, y: u16, origin: bool) Writer.Error!void {
+    const r = t.scrolling_region;
+    try w.print("\x1b[{d};{d}H", .{ @as(i32, y) + 1 - @as(i32, if (origin) r.top else 0), @as(i32, x) + 1 - @as(i32, if (origin and t.modes.get(.enable_left_and_right_margin)) r.left else 0) });
+}
+
+fn liveCursor(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, origin: bool) Writer.Error!void {
+    const cursor = screen.cursor;
+    try w.print("\x1b[?6{c}", .{@as(u8, if (origin) 'h' else 'l')});
+    try position(w, t, cursor.x, cursor.y, origin);
+    if (cursor.pending_wrap) try recreateWrap(w, t, screen, cursor.x, cursor.y, origin);
+    try w.print("\x1b[?2027{c}", .{@as(u8, if (t.modes.get(.grapheme_cluster)) 'h' else 'l')});
+    try w.print("{f}\x1b[{d}\"q", .{ cursor.style.formatterVt(), @as(u8, if (cursor.protected) 1 else 0) });
+    try cursorLink(w, cursor.hyperlink);
+    try charset(w, screen.charset);
+}
+
+fn recreateWrap(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, x: u16, y: u16, origin: bool) Writer.Error!void {
+    var p = screen.pages.pin(.{ .active = .{ .x = x, .y = y } }).?;
+    if (p.rowAndCell().cell.wide == .spacer_tail and x > 0) p.x -= 1;
+    try position(w, t, p.x, y, origin);
+    try w.writeAll("\x1b(B\x0f");
+    try cell(w, p, p.rowAndCell().cell);
+}
+
+fn charset(w: *Writer, state: vt.Screen.CharsetState) Writer.Error!void {
+    inline for (.{ .{ "G0", '(' }, .{ "G1", ')' }, .{ "G2", '*' }, .{ "G3", '+' } }) |entry| {
+        const set = state.charsets.get(@field(vt.CharsetSlot, entry[0]));
+        try w.print("\x1b{c}{c}", .{ @as(u8, entry[1]), @as(u8, switch (set) {
+            .utf8, .ascii => 'B',
+            .british => 'A',
+            .dec_special => '0',
+        }) });
+    }
+    try w.writeAll(switch (state.gl) {
+        .G0 => "\x0f",
+        .G1 => "\x0e",
+        .G2 => "\x1bn",
+        .G3 => "\x1bo",
+    });
+    try w.writeAll(switch (state.gr) {
+        .G0 => "",
+        .G1 => "\x1b~",
+        .G2 => "\x1b}",
+        .G3 => "\x1b|",
+    });
+    if (state.single_shift) |slot| try w.writeAll(if (slot == .G2) "\x1bN" else "\x1bO");
+}
+
+fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
+    var last: ?vt.Style = null;
+    var last_link: usize = 0;
+    var protected: ?bool = null;
+    for (p.cells(.all)) |*value| {
+        if (value.wide == .spacer_tail or value.wide == .spacer_head) continue;
+        var style = p.style(value);
+        switch (value.content_tag) {
+            .bg_color_palette => style.bg_color = .{ .palette = value.content.color_palette },
+            .bg_color_rgb => style.bg_color = .{ .rgb = .{ .r = value.content.color_rgb.r, .g = value.content.color_rgb.g, .b = value.content.color_rgb.b } },
+            else => {},
+        }
+        if (last == null or !std.meta.eql(last.?, style)) {
+            try w.print("{f}", .{style.formatterVt()});
+            last = style;
+        }
+        const link_id: usize = if (value.hyperlink) p.node.page().lookupHyperlink(value).? else 0;
+        if (link_id != last_link) {
+            try cellLink(w, p, value);
+            last_link = link_id;
+        }
+        if (protected == null or protected.? != value.protected) {
+            try w.print("\x1b[{d}\"q", .{@as(u8, if (value.protected) 1 else 0)});
+            protected = value.protected;
+        }
+        try text(w, p, value);
+    }
+    try w.writeAll("\x1b]8;;\x1b\\");
+}
+
+fn cursorLink(w: *Writer, link: ?*@import("terminal/hyperlink.zig").Hyperlink) Writer.Error!void {
+    if (link) |l| {
+        switch (l.id) {
+            .explicit => |id| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ id, l.uri }),
+            .implicit => try w.print("\x1b]8;;{s}\x1b\\", .{l.uri}),
+        }
+    } else try w.writeAll("\x1b]8;;\x1b\\");
+}
+
+fn cell(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) Writer.Error!void {
+    try cellLink(w, p, value);
+    try w.print("\x1b[{d}\"q", .{@as(u8, if (value.protected) 1 else 0)});
+    try w.print("{f}", .{effectiveStyle(p, value).formatterVt()});
+    try text(w, p, value);
+}
+
+fn cellLink(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) Writer.Error!void {
+    const page = p.node.page();
+    if (value.hyperlink) {
+        const id = page.lookupHyperlink(value).?;
+        const link = page.hyperlink_set.get(page.memory, id);
+        const uri = link.uri.slice(page.memory);
+        switch (link.id) {
+            .explicit => |s| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ s.slice(page.memory), uri }),
+            .implicit => try w.print("\x1b]8;;{s}\x1b\\", .{uri}),
+        }
+    } else try w.writeAll("\x1b]8;;\x1b\\");
+}
+
+fn text(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) Writer.Error!void {
+    try codepoint(w, if (value.codepoint() == 0) ' ' else value.codepoint());
+    if (p.grapheme(value)) |extra| {
+        // A cell boundary must stay a boundary even when adjacent emoji would
+        // form a cluster. Print the base with clustering off, and enable it
+        // only while appending the cell's already-known grapheme codepoints.
+        try w.writeAll("\x1b[?2027h");
+        for (extra) |cp| try codepoint(w, cp);
+        try w.writeAll("\x1b[?2027l");
+    }
+}
+
+fn codepoint(w: *Writer, cp: u21) Writer.Error!void {
+    var buf: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &buf) catch return error.WriteFailed;
+    try w.writeAll(buf[0..n]);
+}
+
+// Read-only fixture oracle: compare visible state through actual Ghostty cells,
+// not bytes from our serializer. Normalise empty cells to displayed spaces.
+pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal) callconv(lib.calling_conv) usize {
+    const a = c.zigTerminal(a_handle) orelse return 9999999;
+    const b = c.zigTerminal(b_handle) orelse return 9999999;
+    if (a.rows != b.rows or a.cols != b.cols) return 1000000;
+    const sa = a.screens.active;
+    const sb = b.screens.active;
+    for (0..a.rows) |y| {
+        const pa = sa.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
+        const pb = sb.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
+        const cells_a = pa.cells(.all);
+        const cells_b = pb.cells(.all);
+        for (cells_a, cells_b, 0..) |*ca, *cb, x| {
+            const cpa = if (ca.codepoint() == 0) ' ' else ca.codepoint();
+            const cpb = if (cb.codepoint() == 0) ' ' else cb.codepoint();
+            if (cpa != cpb or ca.wide != cb.wide or ca.protected != cb.protected or !std.meta.eql(effectiveStyle(pa, ca), effectiveStyle(pb, cb))) return 1 + y * a.cols + x;
+            const ga = pa.grapheme(ca) orelse &.{};
+            const gb = pb.grapheme(cb) orelse &.{};
+            if (!std.mem.eql(u21, ga, gb)) return 1 + y * a.cols + x;
+            if (!std.mem.eql(u8, cellUri(pa, ca), cellUri(pb, cb))) return 1 + y * a.cols + x;
+        }
+        if (pa.rowAndCell().row.wrap != pb.rowAndCell().row.wrap) return 2000000 + y;
+    }
+    if (sa.cursor.x != sb.cursor.x or sa.cursor.y != sb.cursor.y) return 3000000;
+    if (sa.cursor.pending_wrap != sb.cursor.pending_wrap) return 3000001;
+    if (!std.meta.eql(sa.cursor.style, sb.cursor.style)) return 3000002;
+    if (a.screens.active_key != b.screens.active_key) return 3000003;
+    inline for (std.meta.fields(vt.modes.Mode)) |field| {
+        const mode: vt.modes.Mode = @enumFromInt(field.value);
+        const tag = vt.modes.ModeTag.fromMode(mode);
+        if (!(tag.value == 47 or tag.value == 1047 or tag.value == 1049 or tag.value == 1048 or tag.value == 2026)) {
+            if (a.modes.get(mode) != b.modes.get(mode)) return 4000000 + @as(usize, tag.value);
+        }
+    }
+    if (!std.meta.eql(a.colors.palette.current, b.colors.palette.current)) return 5000000;
+    if (!std.meta.eql(a.scrolling_region, b.scrolling_region)) return 5000001;
+    if (sa.kitty_keyboard.current().int() != sb.kitty_keyboard.current().int()) return 5000002;
+    return 0;
+}
+fn effectiveStyle(p: vt.PageList.Pin, value: *const vt.page.Cell) vt.Style {
+    var s = p.style(value);
+    switch (value.content_tag) {
+        .bg_color_palette => s.bg_color = .{ .palette = value.content.color_palette },
+        .bg_color_rgb => s.bg_color = .{ .rgb = .{ .r = value.content.color_rgb.r, .g = value.content.color_rgb.g, .b = value.content.color_rgb.b } },
+        else => {},
+    }
+    return s;
+}
+fn cellUri(p: vt.PageList.Pin, value: *const vt.page.Cell) []const u8 {
+    if (!value.hyperlink) return "";
+    const page = p.node.page();
+    const id = page.lookupHyperlink(value).?;
+    return page.hyperlink_set.get(page.memory, id).uri.slice(page.memory);
+}

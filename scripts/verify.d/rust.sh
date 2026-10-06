@@ -103,6 +103,7 @@ rust_verify_fast() {
     RUST_GATE_FAILED=0
 
     rust_run_gate "fmt" cargo fmt --all --check
+    rust_run_gate "VT native fmt" zig fmt --check crates/infraternal-shim/native/snapshot.zig
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
     rust_run_gate "test" cargo test --workspace --locked
     rust_run_gate "cargo-deny" cargo deny check
