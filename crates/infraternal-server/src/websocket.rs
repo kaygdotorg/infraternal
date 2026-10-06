@@ -226,6 +226,14 @@ async fn run_socket(
                         if send_message(&mut sink, Message::Pong(payload)).await.is_err() { break; }
                     }
                     Inbound::Frame(wire) => {
+                    if let Ok(decoded) = decode_muxed_frame(&wire)
+                        && decoded.stream_id == CONTROL_STREAM
+                        && let Frame::Close { code, .. } = decoded.frame {
+                        let _ = send_frame(&mut sink, CONTROL_STREAM,
+                            &Frame::Close { code, reason: "connection closed" }, &mut encode).await;
+                        let _ = send_message(&mut sink, Message::Close(None)).await;
+                        break;
+                    }
                     if handle_client_frame(
                             wire,
                             &state,

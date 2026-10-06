@@ -868,10 +868,9 @@ async fn process_incoming(
             let Some(attachment) = attachments.remove(&attachment_id) else {
                 return false;
             };
-            attachment
-                .output
-                .try_send(TerminalOutput::Closed { code })
-                .is_ok()
+            // Retirement is local even when the consumer has already dropped or filled its queue.
+            let _ = attachment.output.try_send(TerminalOutput::Closed { code });
+            true
         }
         Incoming::Ping { nonce, sent_us } => {
             write_frame(connection, CONTROL_STREAM, &Frame::Pong { nonce, sent_us }).await

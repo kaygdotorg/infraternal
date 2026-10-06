@@ -240,3 +240,28 @@ async fn output_and_snapshot_spend_remaining_restart_credit() {
     assert_eq!(attachments[&1].credit, 1014);
     assert_eq!(attachments[&1].last_out_seq, 3);
 }
+
+#[tokio::test]
+async fn stream_close_must_not_restart_all_sessions() {
+    let (mut link, _peer) = connection();
+    let (tx, rx) = mpsc::channel(1);
+    drop(rx);
+    let mut attachments = HashMap::from([(1, attachment(tx))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    assert!(
+        process_incoming(
+            Incoming::Close {
+                stream_id: 2,
+                code: 1000
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new()
+        )
+        .await,
+        "retiring a dropped receiver restarted every session"
+    );
+    assert!(attachments.is_empty());
+    assert!(routes.is_empty());
+}

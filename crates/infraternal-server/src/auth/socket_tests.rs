@@ -184,3 +184,44 @@ async fn fragmented_wire_frame_has_a_completion_deadline() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn clean_control_close_is_not_an_internal_error() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "close",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Close {
+            code: 1000,
+            reason: "done",
+        },
+    )
+    .await;
+    if let Some(Ok(Message::Binary(bytes))) = socket.next().await {
+        assert!(
+            !matches!(
+                decode_muxed_frame(&bytes).unwrap().frame,
+                Frame::Close { code: 1011, .. }
+            ),
+            "clean Close became an internal error"
+        );
+    }
+    server.abort();
+}
