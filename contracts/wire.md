@@ -53,7 +53,7 @@ frame   (§2)
 ```
 
 On leg A every stream is muxed. Stream 0 is the control stream. Odd ids are opened by the client, and even
-ids by the server. On WT and QUIC, the native stream gives the id, and frames
+ids by the server. On leg B over QUIC, the native stream gives the id, and frames
 are not wrapped.
 
 ## 4. Frames
