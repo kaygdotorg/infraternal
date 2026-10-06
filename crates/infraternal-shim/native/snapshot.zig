@@ -492,6 +492,11 @@ fn cellLink(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) Snapshot
 }
 
 fn text(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) SnapshotError!void {
+    // Charset mapping can turn a wide source glyph into a stored space while
+    // retaining width. Ordinary space painting narrows it; this construction
+    // needs explicit wide-cell metadata restoration rather than silent loss.
+    if (value.wide == .wide and value.codepoint() == ' ') return error.Unrepresentable;
+
     try codepoint(w, if (value.codepoint() == 0) ' ' else value.codepoint());
     if (p.grapheme(value)) |extra| {
         // A cell boundary must stay a boundary even when adjacent emoji would

@@ -537,7 +537,6 @@ fn fidelity_iso_protection_does_not_keep_rep_scratch() {
 }
 
 #[test]
-#[ignore = "charset-mapped wide-space red regression; enable with explicit rejection"]
 fn fidelity_charset_mapped_wide_space_is_explicitly_rejected() {
     let prefix = "\x1b*0\x1bN界".as_bytes();
     let mut a = reset_terminal(12, 5).unwrap();
