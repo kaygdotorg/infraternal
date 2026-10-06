@@ -13,7 +13,6 @@ fn connection() -> (AgentConnection, UnixStream) {
             scratch: vec![0; 4096],
             encode: Vec::new(),
             next_call_id: 1,
-            next_stream_id: 2,
         },
         peer,
     )
@@ -27,6 +26,7 @@ fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
         last_in_seq: 0,
         last_input_end: 0,
         credit: 0,
+        awaiting_ack: false,
         output,
     }
 }
@@ -177,7 +177,6 @@ async fn reattach_must_restore_output_credit() {
             &mut attachments,
             &mut routes,
             &mut HashMap::new(),
-            &mut 4
         )
         .await
     );
@@ -185,10 +184,14 @@ async fn reattach_must_restore_output_credit() {
     assert!(old_peer.read(&mut discard).await.unwrap() > 0);
     let (mut replacement, mut peer) = connection();
     routes.clear();
-    assert!(reattach_all(&mut replacement, &mut attachments, &mut routes, &mut 4).await);
+    assert!(reattach_all(&mut replacement, &mut attachments, &mut routes).await);
     let mut bytes = [0; 256];
     let length = peer.read(&mut bytes).await.unwrap();
     let first = decode_muxed_frame(&bytes[..length]).unwrap();
+    assert_eq!(
+        first.stream_id, 2,
+        "supervision changed durable writer identity"
+    );
     assert!(matches!(first.frame, Frame::AttachTerm { .. }));
     let next = decode_muxed_frame(&bytes[first.wire_len..length]);
     assert!(

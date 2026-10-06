@@ -239,6 +239,7 @@ async fn run_socket(
                             &state,
                             &user_id,
                             &session_token,
+                            &connection_id,
                             &mut attachments,
                             &output_tx,
                             &mut sink,
@@ -300,12 +301,21 @@ async fn run_socket(
                     }
                     TerminalOutput::Ack { in_seq_acked } => {
                         if in_seq_acked < attachment.last_in_acked
-                            || in_seq_acked > attachment.input_sent_end
+                            || (!attachment.awaiting_ack && in_seq_acked > attachment.input_sent_end)
                         {
                             loop_result = Err(());
                             break;
                         }
+                        attachment.awaiting_ack = false;
+                        attachment.input_sent_end = attachment.input_sent_end.max(in_seq_acked);
                         attachment.last_in_acked = in_seq_acked;
+                        // Each device acknowledges only its durable writer range. The old
+                        // session column is retained for diagnostics, never new input authority.
+                        let changed = sqlx::query("UPDATE terminal_writers SET input_acked=? WHERE connection_id=? AND client_stream=? AND session_id=? AND input_acked<=?")
+                            .bind(in_seq_acked.to_be_bytes().as_slice()).bind(connection_id.as_slice()).bind(stream_id)
+                            .bind(attachment.session_id.as_slice()).bind(in_seq_acked.to_be_bytes().as_slice())
+                            .execute(&state.pool).await;
+                        if !matches!(changed, Ok(result) if result.rows_affected() == 1) { loop_result = Err(()); break; }
                         let legacy_acked = i64::try_from(in_seq_acked).unwrap_or(-1);
                         let acked_u64 = in_seq_acked.to_be_bytes();
                         let Ok(now) = unix_seconds() else {
@@ -575,6 +585,7 @@ async fn handle_client_frame<K>(
     state: &WebSocketState,
     user_id: &str,
     session_token: &str,
+    connection_id: &[u8; 16],
     attachments: &mut HashMap<u32, ClientAttachment>,
     output_tx: &mpsc::Sender<(u32, TerminalOutput)>,
     sink: &mut K,
@@ -664,13 +675,14 @@ where
             }
             let mut session = [0_u8; 16];
             session.copy_from_slice(session_id);
-            let input_acked = owned_session_ack(&state.pool, user_id, &session).await?;
+            let (input_acked, writer_stream) =
+                owned_writer(&state.pool, user_id, connection_id, stream_id, &session).await?;
             if last_in_seq > input_acked {
                 return Err(());
             }
             let attachment = state
                 .agent
-                .attach(session, last_out_seq, input_acked)
+                .attach(session, last_out_seq, input_acked, writer_stream)
                 .await
                 .map_err(|_| ())?;
             let (handle, mut output) = attachment.split();
@@ -684,6 +696,7 @@ where
                     last_in_acked: input_acked,
                     input_sent_end: input_acked,
                     credit: 0,
+                    awaiting_ack: true,
                     needs_snapshot: false,
                 },
             );
@@ -804,6 +817,7 @@ struct ClientAttachment {
     last_in_acked: u64,
     input_sent_end: u64,
     credit: u64,
+    awaiting_ack: bool,
     needs_snapshot: bool,
 }
 
@@ -852,22 +866,55 @@ async fn open_terminal(
     Ok(session_id)
 }
 
-async fn owned_session_ack(
+/// Writer identity survives reconnect and supervision; output remains session-wide.
+async fn owned_writer(
     pool: &SqlitePool,
-    user_id: &str,
-    session_id: &[u8; 16],
-) -> Result<u64, ()> {
-    let row = sqlx::query("UPDATE terminal_sessions SET last_seen=? WHERE id=? AND user_id=? AND closed_at IS NULL RETURNING input_acked_u64")
-        .bind(unix_seconds()?)
-        .bind(session_id.as_slice())
-        .bind(user_id)
-        .fetch_optional(pool)
+    user: &str,
+    connection: &[u8; 16],
+    stream: u32,
+    session: &[u8; 16],
+) -> Result<(u64, u32), ()> {
+    let mut tx = pool.begin().await.map_err(|_| ())?;
+    // Acquire the writer lock before admission/ownership reads; concurrent devices
+    // cannot allocate one identity twice or bypass the retained-writer limit.
+    sqlx::query("UPDATE websocket_connections SET created_at=created_at WHERE connection_id=?")
+        .bind(connection.as_slice())
+        .execute(&mut *tx)
         .await
+        .map_err(|_| ())?;
+    let existing: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM terminal_writers WHERE connection_id=? AND client_stream=?)",
+    )
+    .bind(connection.as_slice())
+    .bind(stream)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| ())?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM terminal_writers WHERE connection_id=?")
+            .bind(connection.as_slice())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| ())?;
+    if !existing && count >= i64::try_from(MAX_ATTACHMENTS).map_err(|_| ())? {
+        return Err(());
+    }
+    sqlx::query("INSERT INTO terminal_writers(connection_id,client_stream,session_id) SELECT ?,?,t.id FROM terminal_sessions t JOIN websocket_connections c ON c.connection_id=? AND c.user_id=t.user_id AND c.active=1 WHERE t.id=? AND t.user_id=? AND t.closed_at IS NULL ON CONFLICT(connection_id,client_stream) DO NOTHING")
+        .bind(connection.as_slice()).bind(stream).bind(connection.as_slice()).bind(session.as_slice()).bind(user)
+        .execute(&mut *tx).await.map_err(|_| ())?;
+    let row = sqlx::query("SELECT w.writer_id,w.input_acked FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id JOIN websocket_connections c ON c.connection_id=w.connection_id WHERE w.connection_id=? AND w.client_stream=? AND w.session_id=? AND t.user_id=? AND c.user_id=? AND c.active=1 AND t.closed_at IS NULL")
+        .bind(connection.as_slice()).bind(stream).bind(session.as_slice()).bind(user).bind(user)
+        .fetch_optional(&mut *tx).await.map_err(|_| ())?.ok_or(())?;
+    let writer: i64 = row.get("writer_id");
+    let writer = u32::try_from(writer)
         .map_err(|_| ())?
+        .checked_mul(2)
+        .filter(|id| *id != 0)
         .ok_or(())?;
-    let bytes: Vec<u8> = row.get("input_acked_u64");
-    let bytes: [u8; 8] = bytes.try_into().map_err(|_| ())?;
-    Ok(u64::from_be_bytes(bytes))
+    let ack: Vec<u8> = row.get("input_acked");
+    let ack = u64::from_be_bytes(ack.try_into().map_err(|_| ())?);
+    tx.commit().await.map_err(|_| ())?;
+    Ok((ack, writer))
 }
 
 fn encode_session_id(session_id: &[u8; 16]) -> String {
@@ -1006,3 +1053,7 @@ pub(crate) fn now_seconds() -> Result<i64, ()> {
 fn unix_seconds() -> Result<i64, ()> {
     now_seconds()
 }
+
+#[cfg(test)]
+#[path = "writer_tests.rs"]
+mod writer_tests;

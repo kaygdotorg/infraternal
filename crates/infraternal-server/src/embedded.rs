@@ -23,10 +23,9 @@ use tokio::{
 };
 
 const CONTROL_STREAM: u32 = 0;
-const INITIAL_SERVER_STREAM: u32 = 2;
-// Callers await capacity; terminal output stalls at this bound and backpressures the socket reader.
+// Callers await bounded command capacity; output never waits on a browser receiver.
 const COMMAND_CAPACITY: usize = 64;
-// Full output queues stop agent reads until a WebSocket consumer catches up or detaches.
+// A full output queue retires only that attachment; reconnect replays from its last offset.
 const OUTPUT_CAPACITY: usize = 4;
 // Full input queues stop the WebSocket reader and propagate backpressure to the peer.
 const INPUT_CAPACITY: usize = 4;
@@ -156,6 +155,7 @@ impl EmbeddedAgent {
         session_id: [u8; 16],
         last_out_seq: u64,
         last_in_seq: u64,
+        stream_id: u32,
     ) -> Result<TerminalAttachment, AgentError> {
         let (output_tx, output) = mpsc::channel(OUTPUT_CAPACITY);
         let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
@@ -168,6 +168,7 @@ impl EmbeddedAgent {
             .send(Command::Attach {
                 id,
                 session_id,
+                stream_id,
                 last_out_seq,
                 last_in_seq,
                 output: output_tx,
@@ -210,6 +211,7 @@ enum Command {
     Attach {
         id: u64,
         session_id: [u8; 16],
+        stream_id: u32,
         last_out_seq: u64,
         last_in_seq: u64,
         output: mpsc::Sender<TerminalOutput>,
@@ -231,6 +233,7 @@ struct AttachmentState {
     last_in_seq: u64,
     last_input_end: u64,
     credit: u64,
+    awaiting_ack: bool,
     output: mpsc::Sender<TerminalOutput>,
 }
 
@@ -242,7 +245,6 @@ struct AgentConnection {
     scratch: Vec<u8>,
     encode: Vec<u8>,
     next_call_id: u32,
-    next_stream_id: u32,
 }
 
 enum Incoming {
@@ -319,7 +321,6 @@ async fn run_actor(
     let mut routes = HashMap::<u32, u64>::new();
     let mut pending = HashMap::<u32, PendingCall>::new();
     let mut connection: Option<AgentConnection> = None;
-    let mut next_stream_id = INITIAL_SERVER_STREAM;
     let mut backoff = Duration::from_millis(200);
     let mut first_attempt = true;
 
@@ -333,14 +334,7 @@ async fn run_actor(
             }
             first_attempt = false;
             if let Ok(mut fresh) = connect_agent(&executable, initial_connection.take()).await {
-                if !reattach_all(
-                    &mut fresh,
-                    &mut attachments,
-                    &mut routes,
-                    &mut next_stream_id,
-                )
-                .await
-                {
+                if !reattach_all(&mut fresh, &mut attachments, &mut routes).await {
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                     routes.clear();
                     cleanup_connection(fresh).await;
@@ -369,7 +363,6 @@ async fn run_actor(
                     &mut attachments,
                     &mut routes,
                     &mut pending,
-                    &mut next_stream_id,
                 ).await;
                 if !ok {
                     let link = connection.take();
@@ -452,7 +445,6 @@ async fn connect_agent(
         scratch,
         encode: Vec::with_capacity(4096),
         next_call_id: 1,
-        next_stream_id: INITIAL_SERVER_STREAM,
     })
 }
 
@@ -500,7 +492,6 @@ async fn process_command(
     attachments: &mut HashMap<u64, AttachmentState>,
     routes: &mut HashMap<u32, u64>,
     pending: &mut HashMap<u32, PendingCall>,
-    next_stream_id: &mut u32,
 ) -> bool {
     match command {
         Command::Open { size, reply } => {
@@ -531,15 +522,29 @@ async fn process_command(
         Command::Attach {
             id: attachment_id,
             session_id,
+            stream_id,
             last_out_seq,
             last_in_seq,
             output,
             reply,
         } => {
-            let Some(stream_id) = allocate_stream_id(connection, routes, next_stream_id) else {
-                let _ = reply.send(Err(AgentError::Unavailable));
+            if stream_id == 0 || stream_id % 2 != 0 {
+                let _ = reply.send(Err(AgentError::Protocol));
                 return true;
-            };
+            }
+            if let Some(previous) = routes.get(&stream_id).copied() {
+                if attachments
+                    .get(&previous)
+                    .is_none_or(|old| old.session_id != session_id)
+                {
+                    let _ = reply.send(Err(AgentError::Protocol));
+                    return true;
+                }
+                // A resumed browser may reclaim its writer even if a full command
+                // queue prevented the old handle's best-effort Detach notification.
+                attachments.remove(&previous);
+                routes.remove(&stream_id);
+            }
             if !send_attach(connection, stream_id, session_id, last_out_seq, last_in_seq).await {
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return false;
@@ -554,6 +559,7 @@ async fn process_command(
                     last_in_seq,
                     last_input_end: last_in_seq,
                     credit: 0,
+                    awaiting_ack: true,
                     output,
                 },
             );
@@ -664,25 +670,6 @@ fn allocate_call_id(
     }
 }
 
-fn allocate_stream_id(
-    connection: &mut AgentConnection,
-    routes: &HashMap<u32, u64>,
-    next_stream_id: &mut u32,
-) -> Option<u32> {
-    let start = connection.next_stream_id.max(INITIAL_SERVER_STREAM);
-    loop {
-        let candidate = connection.next_stream_id.max(INITIAL_SERVER_STREAM);
-        connection.next_stream_id = candidate.checked_add(2).unwrap_or(INITIAL_SERVER_STREAM);
-        *next_stream_id = connection.next_stream_id;
-        if !routes.contains_key(&candidate) {
-            return Some(candidate);
-        }
-        if connection.next_stream_id == start {
-            return None;
-        }
-    }
-}
-
 async fn send_attach(
     connection: &mut AgentConnection,
     stream_id: u32,
@@ -706,12 +693,10 @@ async fn reattach_all(
     connection: &mut AgentConnection,
     attachments: &mut HashMap<u64, AttachmentState>,
     routes: &mut HashMap<u32, u64>,
-    next_stream_id: &mut u32,
 ) -> bool {
     for (id, attachment) in attachments.iter_mut() {
-        let Some(stream_id) = allocate_stream_id(connection, routes, next_stream_id) else {
-            return false;
-        };
+        let stream_id = attachment.stream_id;
+        attachment.awaiting_ack = true;
         if !send_attach(
             connection,
             stream_id,
@@ -731,7 +716,6 @@ async fn reattach_all(
                 return false;
             }
         }
-        attachment.stream_id = stream_id;
         routes.insert(stream_id, *id);
     }
     true
@@ -777,8 +761,18 @@ async fn process_incoming(
             let Some(end) = out_seq.checked_add(bytes.len() as u64) else {
                 return false;
             };
+            if end <= attachment.last_out_seq {
+                return true;
+            }
             if out_seq != attachment.last_out_seq {
-                return false;
+                return retire_slow_stream(
+                    connection,
+                    attachments,
+                    routes,
+                    attachment_id,
+                    stream_id,
+                )
+                .await;
             }
             if attachment
                 .output
@@ -841,9 +835,16 @@ async fn process_incoming(
             let Some(attachment) = attachments.get_mut(&attachment_id) else {
                 return false;
             };
-            if in_seq_acked < attachment.last_in_seq || in_seq_acked > attachment.last_input_end {
+            if in_seq_acked < attachment.last_in_seq {
+                return true;
+            }
+            if !attachment.awaiting_ack && in_seq_acked > attachment.last_input_end {
                 return false;
             }
+            // The backend may have accepted input whose Ack died with the old browser.
+            // Its first reattach Ack is authoritative for this same durable writer.
+            attachment.last_input_end = attachment.last_input_end.max(in_seq_acked);
+            attachment.awaiting_ack = false;
             attachment.last_in_seq = in_seq_acked;
             if attachment
                 .output
