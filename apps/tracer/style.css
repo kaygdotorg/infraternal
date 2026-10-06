@@ -275,8 +275,7 @@ button { color: inherit; }
 .tab:disabled { cursor: default; }
 .tab-host { color: var(--fg-3); }
 .tab-name { color: var(--fg); }
-.sample-tag { color: var(--fg-3); font: 500 10px/1 var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; }
-.tab-add { gap: 5px; padding: 0 10px; font: 500 10px/1 var(--font-mono); text-transform: uppercase; }
+.tab-add { width: 38px; justify-content: center; padding: 0; }
 .tab-add svg { width: 14px; height: 14px; }
 .dot { display: inline-block; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); }
 .dot.live { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 18%, transparent); }
@@ -284,7 +283,7 @@ button { color: inherit; }
 
 @media (hover: hover) and (pointer: fine) {
   .icon-btn:hover, .capsule:hover, .tab:hover:not(:disabled) { background: var(--overlay-solid); }
-  .bm-head:hover:not(:disabled), .bm-leaf:hover:not(:disabled), .result:hover:not(:disabled), .add-row:hover:not(:disabled) { background: var(--hover); }
+  .bm-head:hover:not(:disabled), .bm-leaf:hover:not(:disabled), .result:hover:not(:disabled) { background: var(--hover); }
 }
 
 /* Floating host tree: it can open without taking a permanent column from the terminal. */
@@ -299,8 +298,6 @@ button { color: inherit; }
 .sidebar.instant { transition: none; }
 .sidebar-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 0 10px 10px; }
 .sidebar-title { font-weight: 600; letter-spacing: -0.01em; }
-.sidebar-count { color: var(--fg-2); font-size: 11px; white-space: nowrap; }
-.sidebar-foot { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
 .bm { --bm-line: color-mix(in oklab, var(--fg) 16%, transparent); position: relative; margin-left: 4px; padding-left: 14px; }
 .bm-trunk { position: absolute; left: 0; top: -10px; bottom: -10px; width: 1.5px; }
 .bm-trunk::before {
@@ -315,7 +312,7 @@ button { color: inherit; }
   color: var(--fg-2); text-align: left; cursor: default; transition: transform 140ms var(--ease-out);
 }
 .bm-head:active:not(:disabled), .bm-leaf:active:not(:disabled) { transform: scale(0.98); }
-.bm-head:focus-visible, .bm-leaf:focus-visible, .add-row:focus-visible, .result:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.bm-head:focus-visible, .bm-leaf:focus-visible, .result:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .bm-head:disabled { opacity: 0.8; }
 .bm-sec.is-current > .bm-head { color: var(--fg); }
 .bm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
@@ -333,10 +330,6 @@ button { color: inherit; }
 .glyph { width: 18px; flex: none; color: var(--fg-3); font: 500 11px/1 var(--font-mono); }
 .bm-leaf[aria-current] { color: var(--fg); }
 .bm-leaf[aria-current] .glyph { color: var(--accent); }
-.add-row { display: flex; align-items: center; width: 100%; min-height: 38px; gap: 8px; padding: 0 10px; border-radius: var(--r-sm); color: var(--fg-2); text-align: left; }
-.add-row svg { width: 16px; height: 16px; }
-.add-row:disabled { cursor: default; }
-.add-hint { margin-left: auto; color: var(--fg-3); font-size: 10px; }
 
 /* Palette open from the keyboard is immediate; pointer-open uses only opacity/transform. */
 .palette-scrim { position: absolute; z-index: 7; inset: 0; background: rgb(0 0 0 / 0.18); opacity: 1; transition: opacity 140ms ease-out; }

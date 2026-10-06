@@ -6,10 +6,9 @@ import type { ITheme } from "../vendor/ghostty-web";
 
 const ROOT = document.documentElement;
 const THEME_COLOR = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
-const HOST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export interface CoreScreenOptions {
-  hostId?: string | undefined;
+  hostName: string;
   mockMode: boolean;
   probeMode: boolean;
 }
@@ -63,19 +62,12 @@ const SCREEN = `
         <kbd class="capsule-kbd">⌘K</kbd>
       </button>
       <nav class="tabs" aria-label="Other sessions">
-        <button class="tab" type="button" disabled aria-label="monitor01 htop, static example"><span class="tab-host">monitor01</span><span class="tab-name">htop</span><span class="sample-tag">static</span></button>
-        <button class="tab" type="button" disabled aria-label="o2 bash, static example"><span class="tab-host">o2</span><span class="tab-name">bash</span><span class="sample-tag">static</span></button>
-        <button class="tab tab-add" type="button" disabled aria-label="New session, not available"><span>static</span>${SVG.plus}</button>
+        <button class="tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
       </nav>
     </header>
     <aside class="sidebar" id="sidebar" aria-label="Hosts" hidden>
-      <div class="sidebar-head"><span class="sidebar-title">Hosts</span><span class="sidebar-count">1 current · examples marked static</span></div>
+      <div class="sidebar-head"><span class="sidebar-title">Hosts</span></div>
       <div id="tree"></div>
-      <div class="sidebar-foot">
-        <button class="add-row" type="button" disabled aria-label="Add hosts, not available yet">
-          ${SVG.plus}<span>Add hosts</span><span class="add-hint">Static example · not connected</span>
-        </button>
-      </div>
     </aside>
     <div class="palette-scrim" id="scrim" hidden></div>
     <section class="palette" id="palette" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
@@ -136,11 +128,10 @@ interface PaletteEntry {
   label: string;
   hint: string;
   action?: string;
-  disabled?: boolean;
   swatch?: Theme;
 }
 
-/** Mounts the user's current connection and marks every unavailable example as static. */
+/** Mounts the authenticated server host, its live shell session, and terminal controls. */
 export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): CoreScreen {
   app.innerHTML = SCREEN;
   const stage = get<HTMLElement>("#terminal-screen");
@@ -158,27 +149,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const keyblur = get<HTMLElement>(".keyblur");
   const rtt = get<HTMLElement>("#rtt");
   const dot = get<HTMLElement>("#connection-dot");
-  const hostId = options.hostId && HOST_ID.test(options.hostId) ? options.hostId : undefined;
-  const hostName = hostId ? `Host ${hostId.slice(0, 8)}…` : "Current host";
-  const hostDetail = hostId ? `${hostName} · current UUID` : "Current host · name unavailable";
+  const hostName = options.hostName.trim();
   get<HTMLElement>("#capsule-host").textContent = hostName;
   get<HTMLElement>("#test-double-badge").hidden = !options.mockMode;
   probePanel.hidden = !options.probeMode;
 
   const branch = branchedMenu(get<HTMLElement>("#tree"), [
-    { id: "current-host", label: hostName, meta: hostId ? "current" : "name unavailable", live: true, open: true, leaves: [
+    { id: "current-host", label: hostName, meta: "current", live: true, open: true, leaves: [
       { id: "current-shell", label: "SSH shell", meta: "current" },
-    ] },
-    { id: "static-monitor", label: "monitor01", meta: "static example", open: true, leaves: [
-      { id: "static-monitor-bash", label: "bash", meta: "static", disabled: true },
-      { id: "static-monitor-htop", label: "htop", meta: "static", disabled: true },
-    ] },
-    { id: "static-o2", label: "o2", meta: "static example", open: true, leaves: [
-      { id: "static-o2-bash", label: "bash", meta: "static", disabled: true },
     ] },
   ], { active: "current-shell" });
   const liveHost = get<HTMLElement>("#tree .bm-sec");
-  liveHost.setAttribute("aria-label", hostDetail);
+  liveHost.setAttribute("aria-label", hostName);
 
   const params = new URLSearchParams(location.search);
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
@@ -230,25 +212,14 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   applyLook();
 
-  const staticEntry = (group: string, glyph: string, label: string, hint = "static example"): PaletteEntry => ({ group, glyph, label, hint, disabled: true });
   const entries: PaletteEntry[] = [
-    { group: "Sessions", glyph: "›_", label: "Current SSH shell", hint: hostName, action: "session:current" },
-    staticEntry("Sessions", "›_", "monitor01 / htop", "static example · 2h"),
-    staticEntry("Sessions", "›_", "o2 / bash", "static example · 5m"),
-    { group: "Hosts", glyph: "●", label: hostName, hint: "current host", action: "host:current" },
-    staticEntry("Hosts", "●", "monitor01", "static example · 2 sessions"),
-    staticEntry("Hosts", "●", "o2", "static example · 1 session"),
-    staticEntry("Actions", "+", "New session on…", "not available yet"),
-    staticEntry("Actions", "⇣", "Import hosts from NetBird", "not connected"),
-    staticEntry("Actions", "⌕", "Search command history", "not available yet"),
-    staticEntry("Actions", "⇥", "Split right", "not available yet"),
+    { group: "Sessions", glyph: "›_", label: "SSH shell", hint: hostName, action: "session:current" },
+    { group: "Hosts", glyph: "●", label: hostName, hint: "current", action: "host:current" },
     ...Object.entries(THEMES).map(([id, theme]) => ({
       group: "Theme", glyph: "◉", label: theme.name, hint: theme.dark ? "dark" : "light", action: `theme:${id}`, swatch: theme,
     })),
     { group: "Background", glyph: "▦", label: "Mesh from the theme", hint: "one still · no idle work", action: "bg:mesh" },
     { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
-    staticEntry("Settings and help", "⚙", "Appearance settings", "settings"),
-    staticEntry("Settings and help", "?", "How do sessions survive a restart?", "help"),
   ];
   let visibleEntries: PaletteEntry[] = [];
   let selected = 0;
@@ -273,7 +244,6 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       result.className = "result";
       result.setAttribute("role", "option");
       result.setAttribute("aria-selected", String(index === selected));
-      result.disabled = Boolean(entry.disabled);
       result.dataset.action = entry.action ?? "";
       const icon = document.createElement("span");
       icon.className = "result-icon";
@@ -372,7 +342,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       event.preventDefault();
     } else if (event.key === "Enter") {
       const entry = visibleEntries[selected];
-      if (entry && !entry.disabled) runAction(entry.action ?? "");
+      if (entry) runAction(entry.action ?? "");
       setPalette(false, "keyboard");
       event.preventDefault();
     }
@@ -381,7 +351,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const target = event.target;
     if (!(target instanceof Element)) return;
     const result = target.closest<HTMLButtonElement>(".result");
-    if (!result || result.disabled) return;
+    if (!result) return;
     runAction(result.dataset.action ?? "");
     setPalette(false, "pointer");
   });

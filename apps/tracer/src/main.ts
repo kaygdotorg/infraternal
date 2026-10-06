@@ -75,10 +75,19 @@ async function showAuthState(setupRequired: boolean): Promise<void> {
   const session = setupRequired ? undefined : await checkSession();
   if (session) {
     activeUserId = session.user_id;
-    await showTerminal();
+    await showTerminal(sessionHostname(session));
   } else {
     renderAuth(setupRequired);
   }
+}
+
+/** Narrows additive server metadata from the authenticated session response. */
+type SessionWithHostname = NonNullable<Awaited<ReturnType<typeof checkSession>>> & { hostname?: unknown };
+
+function sessionHostname(session: Awaited<ReturnType<typeof checkSession>>): string | undefined {
+  if (!session) return undefined;
+  const hostname = (session as SessionWithHostname).hostname;
+  return typeof hostname === "string" && hostname.trim() ? hostname.trim() : undefined;
 }
 
 function installForegroundListener(): void {
@@ -168,7 +177,12 @@ function stopBackdrop(): void {
   }, 450);
 }
 
-async function showTerminal(): Promise<void> {
+async function showTerminal(serverHostname?: string): Promise<void> {
+  const hostName = serverHostname ?? sessionHostname(await checkSession());
+  if (!hostName) {
+    renderUnavailable("The authenticated session did not include the server hostname.");
+    return;
+  }
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
   welcomeEffect = undefined;
@@ -187,7 +201,7 @@ async function showTerminal(): Promise<void> {
   try {
     const { mountCoreScreen } = await import("./core-screen");
     await document.fonts.load('450 14px "Geist Sans"');
-    screen = mountCoreScreen(app, { hostId: query.get("host") ?? undefined, mockMode, probeMode });
+    screen = mountCoreScreen(app, { hostName, mockMode, probeMode });
   } catch (error: unknown) {
     renderUnavailable(safeMessage(error));
     return;
