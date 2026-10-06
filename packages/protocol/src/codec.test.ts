@@ -3,6 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   MAX_FRAME_LEN,
+  WebSocketFrameDecoder,
   WireDecodeError,
   decodeFrame,
   decodeMuxedFrame,
@@ -47,6 +48,43 @@ describe("wire protocol golden vectors", () => {
       3,
     );
     expect(reusable.subarray(3, 3 + written)).toEqual(original);
+  });
+
+  test("decodes muxed messages split across WebSocket messages", () => {
+    const first = encodeMuxedFrame(3, {
+      type: "Input",
+      inSeq: 9n,
+      bytes: new Uint8Array([0x61, 0x62]),
+    });
+    const second = encodeMuxedFrame(4, {
+      type: "Output",
+      outSeq: 12n,
+      bytes: new Uint8Array([0x78, 0x79]),
+    });
+    const joined = new Uint8Array(first.byteLength + second.byteLength);
+    joined.set(first);
+    joined.set(second, first.byteLength);
+
+    const direct = decodeMuxedFrame(joined);
+    expect(direct.streamId).toBe(3);
+    expect(direct.bytesRead).toBe(first.byteLength);
+
+    const decoder = new WebSocketFrameDecoder();
+    const frames: Array<{ streamId: number; frame: WireFrame }> = [];
+    for (let offset = 0; offset < joined.byteLength; offset += 2) {
+      decoder.feed(joined.subarray(offset, offset + 2), (streamId, frame) => {
+        if (frame.type === "Input" || frame.type === "Output") {
+          frames.push({ streamId, frame: { ...frame, bytes: frame.bytes.slice() } });
+        } else {
+          throw new Error("expected terminal bytes in mux stream test");
+        }
+      });
+    }
+    expect(frames).toEqual([
+      { streamId: 3, frame: { type: "Input", inSeq: 9n, bytes: new Uint8Array([0x61, 0x62]) } },
+      { streamId: 4, frame: { type: "Output", outSeq: 12n, bytes: new Uint8Array([0x78, 0x79]) } },
+    ]);
+    expect(decoder.bufferedLength).toBe(0);
   });
 
   test("rejects oversized, non-canonical, unknown, and malformed frame bytes", () => {
@@ -226,3 +264,20 @@ function hexField(value: Record<string, unknown>, key: string): Uint8Array {
   }
   return bytes;
 }
+
+test("split mux header preserves trailing Close", () => {
+  const bytes = new Uint8Array([0, 3, 15, 0, 0, 0, 3, 15, 0, 0]);
+  const decoder = new WebSocketFrameDecoder();
+  const frames: WireFrame[] = [];
+  for (const chunk of [bytes.subarray(0, 1), bytes.subarray(1)]) {
+    decoder.feed(chunk, (id, frame) => {
+      expect(id).toBe(0);
+      frames.push(frame);
+    });
+  }
+  expect(frames).toEqual([
+    { type: "Close", code: 0, reason: "" },
+    { type: "Close", code: 0, reason: "" },
+  ]);
+  expect(decoder.bufferedLength).toBe(0);
+});

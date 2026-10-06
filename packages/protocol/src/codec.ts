@@ -4,6 +4,7 @@ export const MAX_FRAME_LEN = 4 * 1024 * 1024;
 const MAX_U32 = 0xffff_ffff;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const MAX_VARINT_BYTES = 5;
+const MAX_HEADER_LEN = MAX_VARINT_BYTES * 2;
 const textEncoder = new TextEncoder();
 // Keep an initial U+FEFF as data, matching Rust's strict UTF-8 string decoder.
 const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -149,6 +150,112 @@ export function encodeMuxedFrame(streamId: number, frame: WireFrame): Uint8Array
   writeVarintAt(muxId, output, 0);
   writeFrameAt(frame, output, streamPrefixLength, measured);
   return output;
+}
+
+/**
+ * Buffers incomplete muxed frames received across WebSocket messages.
+ * Fragmented input is copied; callbacks must copy retained payloads. For
+ * asynchronous zero-copy dispatch, own the receive buffer and decode directly.
+ */
+export class WebSocketFrameDecoder {
+  private buffer: Uint8Array = new Uint8Array(0);
+  private bufferedCount = 0;
+
+  /** Returns the buffered byte count retained from an incomplete message. */
+  get bufferedLength(): number {
+    return this.bufferedCount;
+  }
+
+  /**
+   * Decodes complete muxed frames from a WebSocket message or message fragment.
+   * Binary payload views are borrowed; copy them in the callback if retained.
+   */
+  feed(message: Uint8Array, onFrame: (streamId: number, frame: WireFrame) => void): void {
+    let offset = 0;
+    while (offset < message.byteLength || this.hasCompleteBufferedFrame()) {
+      if (this.bufferedCount === 0) {
+        const remaining = message.subarray(offset);
+        try {
+          const decoded = decodeMuxedFrame(remaining);
+          onFrame(decoded.streamId, decoded.frame);
+          offset += decoded.bytesRead;
+        } catch (error: unknown) {
+          if (!isIncomplete(error)) {
+            throw error;
+          }
+          this.retainIncomplete(remaining);
+          offset = message.byteLength;
+        }
+        continue;
+      }
+
+      const expectedLength = muxedWireLength(this.buffer.subarray(0, this.bufferedCount));
+      if (expectedLength === undefined) {
+        const missingHeaderBytes = MAX_HEADER_LEN - this.bufferedCount;
+        // Check the length after each header byte: a ten-byte refill can
+        // otherwise consume part or all of the next short envelope.
+        const copyLength = Math.min(message.byteLength - offset, missingHeaderBytes, 1);
+        if (copyLength === 0) {
+          this.bufferedCount = 0;
+          throw decodeError("varint-too-long", "mux or frame length header is too long");
+        }
+        this.appendBuffered(message.subarray(offset, offset + copyLength), MAX_HEADER_LEN);
+        offset += copyLength;
+        continue;
+      }
+
+      if (this.bufferedCount < expectedLength) {
+        const copyLength = Math.min(message.byteLength - offset, expectedLength - this.bufferedCount);
+        if (copyLength === 0) {
+          break;
+        }
+        this.appendBuffered(message.subarray(offset, offset + copyLength), expectedLength);
+        offset += copyLength;
+        continue;
+      }
+
+      try {
+        const decoded = decodeMuxedFrame(this.buffer.subarray(0, this.bufferedCount));
+        onFrame(decoded.streamId, decoded.frame);
+        this.bufferedCount = 0;
+      } catch (error: unknown) {
+        this.bufferedCount = 0;
+        throw error;
+      }
+    }
+  }
+
+  private hasCompleteBufferedFrame(): boolean {
+    const length = muxedWireLength(this.buffer.subarray(0, this.bufferedCount));
+    return length !== undefined && this.bufferedCount >= length;
+  }
+
+  private retainIncomplete(input: Uint8Array): void {
+    const expectedLength = muxedWireLength(input);
+    if (expectedLength !== undefined) {
+      this.appendBuffered(input, expectedLength);
+      return;
+    }
+    this.appendBuffered(input.subarray(0, Math.min(input.byteLength, MAX_HEADER_LEN)), MAX_HEADER_LEN);
+  }
+
+  private appendBuffered(bytes: Uint8Array, maxCapacity: number): void {
+    // maxCapacity is either the fixed header bound or a validated frame total.
+    const required = this.bufferedCount + bytes.byteLength;
+    if (required > maxCapacity) {
+      this.bufferedCount = 0;
+      throw decodeError("invalid-body", "buffer exceeded the validated frame boundary");
+    }
+    if (required > this.buffer.byteLength) {
+      const doubledCapacity = this.buffer.byteLength * 2;
+      const capacity = Math.min(maxCapacity, Math.max(required, doubledCapacity));
+      const expanded = new Uint8Array(capacity);
+      expanded.set(this.buffer.subarray(0, this.bufferedCount));
+      this.buffer = expanded;
+    }
+    this.buffer.set(bytes, this.bufferedCount);
+    this.bufferedCount = required;
+  }
 }
 
 interface Varint {
@@ -596,6 +703,31 @@ function readVarint(input: Uint8Array, offset: number): Varint {
     }
   }
   throw decodeError("varint-too-long", "varint exceeds five bytes");
+}
+
+function muxedWireLength(input: Uint8Array): number | undefined {
+  let streamPrefix: Varint;
+  try {
+    streamPrefix = readVarint(input, 0);
+  } catch (error: unknown) {
+    if (isIncomplete(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+  let frameLength: Varint;
+  try {
+    frameLength = readFrameLength(input, streamPrefix.bytesRead);
+  } catch (error: unknown) {
+    if (isIncomplete(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+  if (frameLength.value === 0) {
+    throw decodeError("empty-frame", "frame length cannot be zero");
+  }
+  return streamPrefix.bytesRead + frameLength.bytesRead + frameLength.value;
 }
 
 function varintLength(value: number): number {
