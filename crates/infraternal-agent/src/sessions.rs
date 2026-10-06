@@ -4,7 +4,7 @@
 //! with a two-second handshake deadline; a nonresponsive shim cannot serialize
 //! recovery of healthy sessions. Only refused sockets are removed as stale.
 
-use infraternal_shim::frame::{Frame, FrameRef, MAX_FRAME, SEQUENCED_INPUT};
+use infraternal_shim::frame::{Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT};
 use nix::{
     sys::inotify::{AddWatchFlags, InitFlags, Inotify},
     unistd::Uid,
@@ -200,6 +200,18 @@ pub async fn connect(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
 /// Returns the same authentication and framing failures as `connect`.
 pub async fn connect_sequenced(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
     connect_with(path, id, SEQUENCED_INPUT).await
+}
+
+/// Select a stable leg-B writer in the surviving shim before querying cursors.
+/// # Errors
+/// Refuses old shims without writer isolation instead of borrowing another device's Ack.
+pub async fn connect_writer(path: PathBuf, id: [u8; 16], writer: u32) -> io::Result<Session> {
+    let mut session = connect_with(path, id, SEQUENCED_INPUT | MULTI_WRITER).await?;
+    if session.caps & MULTI_WRITER == 0 || writer == 0 {
+        return Err(invalid("shim lacks independent writer capability"));
+    }
+    send(&mut session.peer, &Frame::SelectWriter(writer)).await?;
+    Ok(session)
 }
 
 async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result<Session> {
