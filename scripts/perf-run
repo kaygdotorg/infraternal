@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# perf-run: the shared benchmark lock on the perf VM (perf-test-69-63).
+#
+# infraternal and calternal share the perf VM for benchmarks only (no builds;
+# copy built binaries in). Every benchmark runs under ONE flock, so runs from
+# both projects queue instead of disturbing each other's numbers. Agreed
+# between the infraternal and calternal orchestrators on 2026-10-06
+# (docs/PROCESS.md §1).
+#
+#   perf-run <project> <job> <expected-minutes> -- <command...>
+#   perf-run status
+#
+# - Waits up to 60 min for the lock (flock -w 3600); a crashed holder releases it.
+# - A run may hold the lock for at most 60 min (split longer A/B runs).
+# - /var/lock/perf-bench.holder records who holds it, for `perf-run status`.
+# Install: /usr/local/bin/perf-run on the VM (root).
+set -euo pipefail
+
+LOCK=/var/lock/perf-bench.lock
+HOLDER=/var/lock/perf-bench.holder
+MAX_MINUTES=60
+
+if [[ ${1:-} == status ]]; then
+  if flock -n "$LOCK" true 2>/dev/null; then echo "free"; else echo "held: $(cat "$HOLDER" 2>/dev/null || echo unknown)"; fi
+  exit 0
+fi
+
+if (( $# < 5 )) || [[ $4 != -- ]]; then
+  echo "usage: perf-run <project> <job> <expected-minutes> -- <command...> | perf-run status" >&2
+  exit 2
+fi
+project=$1 job=$2 minutes=$3; shift 4
+if ! [[ $minutes =~ ^[0-9]+$ ]] || (( minutes < 1 || minutes > MAX_MINUTES )); then
+  echo "perf-run: expected-minutes must be 1..$MAX_MINUTES (split longer runs)" >&2
+  exit 2
+fi
+
+exec 9>"$LOCK"
+echo "perf-run: waiting for $LOCK ($(cat "$HOLDER" 2>/dev/null || echo free))" >&2
+flock -w 3600 9 || { echo "perf-run: lock not acquired within 60 min" >&2; exit 75; }
+printf '%s %s pid=%s start=%s expected_min=%s\n' "$project" "$job" "$$" "$(date -Is)" "$minutes" > "$HOLDER"
+trap 'rm -f "$HOLDER"' EXIT
+timeout --signal=TERM "${MAX_MINUTES}m" "$@"
