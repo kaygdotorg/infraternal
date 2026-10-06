@@ -145,7 +145,7 @@ export function branchedMenu(
         lit.setAttribute("d", branch(list, mine.parentElement!));
         if (animate && !reduced()) lit.animate(
           [{ strokeDashoffset: 1 }, { strokeDashoffset: 0 }],
-          { duration: 300, easing: EASE, fill: "both" },
+          { duration: 280, easing: EASE, fill: "both" },
         );
         lit.style.opacity = "1";
       } else {
@@ -161,7 +161,7 @@ export function branchedMenu(
     const currentHead = host.querySelector<HTMLElement>(".bm-sec.is-current .bm-head");
     marker.style.opacity = currentHead ? "1" : "0";
     if (currentHead) {
-      marker.style.transition = animate && !reduced() ? `transform 300ms ${EASE}` : "none";
+      marker.style.transition = animate && !reduced() ? `transform 280ms ${EASE}` : "none";
       marker.style.transform = `translateY(${currentHead.offsetTop + currentHead.offsetHeight / 2 - 10}px)`;
     }
   }

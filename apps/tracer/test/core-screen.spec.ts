@@ -113,6 +113,14 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
 
   await page.locator("#sidebar-toggle").click();
   await expect(page.locator("#sidebar")).toBeVisible();
+  await page.locator("#tree .bm-leaf:not(:disabled)").click();
+  const branchMotion = await page.evaluate(() => ({
+    marker: Number.parseFloat(document.querySelector<HTMLElement>("#tree .bm-marker")!.style.transitionDuration),
+    draw: document.querySelector<SVGPathElement>("#tree .bm-lit")!.getAnimations()
+      .map((animation) => Number(animation.effect?.getTiming().duration)),
+  }));
+  expect(branchMotion.marker, "the marker glide must stay under the 300 ms motion cap").toBeLessThan(300);
+  expect(branchMotion.draw.some((duration) => duration >= 300), "the branch draw must stay under the 300 ms motion cap").toBe(false);
   await expect(page.locator("#tree")).toContainText("static example");
   await page.keyboard.press("Escape");
   await expect(page.locator("#sidebar")).toBeHidden();
