@@ -5,7 +5,7 @@
 //! input is replayed on attachment using shim-owned cursors. The writer has eight slots
 //! and awaits capacity, applying transport backpressure. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
-//! snapshot. Unviewed sessions stay disconnected so their PTYs keep progressing.
+//! snapshot (one bounded repaint may borrow credit). Unviewed sessions stay disconnected so their PTYs keep progressing.
 //! A closed shim or failed terminal task closes only its mux stream.
 use crate::{
     relay,
@@ -356,6 +356,9 @@ async fn terminal(
                         emit(&tx, Message::Shim(stream, Shim::Snapshot(seq, bytes))).await?;
                     } else {
                         pending = Some(Shim::Snapshot(seq, bytes));
+                        deadline = output
+                            .pending(Instant::now())
+                            .map(tokio::time::Instant::from_std);
                     }
                 }
                 _ => return Err(sessions::invalid("invalid pending frame")),
@@ -372,7 +375,8 @@ async fn terminal(
             command = commands.recv() => {
                 let Some(command) = command else { return Ok(()); };
                 match command {
-                    Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?; deadline = None; }
+                    Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?;
+                        if pending.is_some() { deadline = output.pending(Instant::now()).map(tokio::time::Instant::from_std); } }
                     other => {
                         let detached = session.is_none();
                         if detached {
