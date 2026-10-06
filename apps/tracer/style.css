@@ -1,0 +1,40 @@
+/* Full viewport primitives for the bare tracer and its later terminal surface. */
+@font-face {
+  font-family: "Geist Mono";
+  src: url("./fonts/GeistMono-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  font-family: "Geist Mono", ui-monospace, monospace;
+  background: #101113;
+  color: #e6e7e9;
+  font-synthesis: none;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+  touch-action: pan-x pan-y;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; margin: 0; }
+body { overflow: hidden; }
+button, input { font: inherit; }
+button { color: inherit; }
+
+/* Keep Ghostty's hidden input present without iOS zoom or its large native caret. */
+.terminal-host textarea, .terminal-host input {
+  opacity: 0 !important;
+  color: transparent !important;
+  caret-color: transparent !important;
+  font-size: 16px !important;
+  background: transparent !important;
+  width: 1px !important;
+  height: 1px !important;
+  line-height: 1px !important;
+  max-height: 1px !important;
+  resize: none !important;
+  overflow: hidden !important;
+}
