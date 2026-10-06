@@ -115,3 +115,24 @@ def session_shim_pid(session_id):
     if len(matches) != 1:
         raise RuntimeError(f"expected one live shim for session {session_id}, found {matches}")
     return matches[0]
+
+
+def main():
+    """Observe an explicitly supplied daemon/server PID without probing its API."""
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--pid', type=int, required=True)
+    parser.add_argument('--label', default='infraternal process')
+    parser.add_argument('--seconds', type=float, default=10.0)
+    args = parser.parse_args()
+    measurement = assert_process_idle(args.pid, args.label, args.seconds)
+    status = Path(f'/proc/{args.pid}/status').read_text().splitlines()
+    rss = next(line.split()[1] for line in status if line.startswith('VmRSS:'))
+    print(f'{args.label}: {measurement.total_slices} scheduler activations / '
+          f'{measurement.elapsed_seconds:.3f}s '
+          f'({measurement.scheduled_per_minute:.3f}/min); RSS={rss} KiB; '
+          f'threads={len(measurement.per_thread)}')
+
+
+if __name__ == '__main__':
+    main()
