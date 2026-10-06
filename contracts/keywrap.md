@@ -20,13 +20,15 @@ browsers. XChaCha20 would add a browser implementation and extra download/CPU
 cost; AES-GCM needs careful nonce uniqueness, handled below. These primitives
 and domain separation are versioned; changing them requires a new contract.
 
-All transport binary values use canonical unpadded base64url. Options include
+All transport binary values use canonical unpadded base64url. Legacy credentials use
 `extensions.prf.eval.first = base64url(SHA256(UTF8("infraternal/keywrap/prf/v1")))`.
+New enrollment uses the per-user v2 input specified below; existing ciphertext
+retains v1. Discoverable challenges omit PRF until authenticated input retrieval.
 Decode this into a Uint8Array before WebAuthn. The browser performs WebAuthn's
 specified PRF input transformation; do **not** prehash it again yourself.
 Registration requests `residentKey: required`, `requireResidentKey: true`,
-`userVerification: required`, `credProps: true`, and PRF. Login also requests
-PRF and requires UV. Stop enrollment if `getClientExtensionResults().prf.enabled`
+`userVerification: required`, `credProps: true`, and PRF. Identified login requests PRF; discoverable login obtains it in a subsequent
+local credential-specific get. Both require UV. Stop enrollment if `getClientExtensionResults().prf.enabled`
 is not true. If creation does not return PRF results, perform a client-side
 `credentials.get` with the same RP, credential allow-list and PRF input to obtain
 results before finishing registration. This local get is for key derivation;
