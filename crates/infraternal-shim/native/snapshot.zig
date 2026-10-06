@@ -6,15 +6,37 @@ const c = @import("terminal/c/terminal.zig");
 const vt = @import("terminal/main.zig");
 const lib = @import("terminal/lib.zig");
 const Writer = std.Io.Writer;
+const SnapshotError = Writer.Error || error{Unrepresentable};
+const unicode = @import("unicode/main.zig");
 
+/// Byte count on success, zero on overflow, max usize for a state requiring
+/// nonprinting upstream restoration. Serialization never mutates the source.
 pub fn snapshot(handle: c.Terminal, buf: [*]u8, len: usize, tail: usize) callconv(lib.calling_conv) usize {
     const t = c.zigTerminal(handle) orelse return 0;
     var w = Writer.fixed(buf[0..len]);
-    serialize(t, &w, tail) catch return 0;
+    serialize(t, &w, tail) catch |err| return if (err == error.Unrepresentable) std.math.maxInt(usize) else 0;
     return w.end;
 }
 
-fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) Writer.Error!void {
+fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void {
+    // The bounded painter cannot recreate a boundary wrap flag independently
+    // of adjacent history or scrolling. Refuse these states until upstream
+    // exposes nonprinting row-wrap restoration instead of emitting a lossy VT.
+    inline for (.{ .primary, .alternate }) |key| {
+        if (t.screens.get(key)) |screen| {
+            const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = t.rows - 1 } }).?;
+            if (p.rowAndCell().row.wrap) return error.Unrepresentable;
+            const first = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?;
+            if (first.rowAndCell().row.wrap_continuation) return error.Unrepresentable;
+            var previous_wrap = first.rowAndCell().row.wrap;
+            for (1..t.rows) |y| {
+                const current = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
+                if (current.rowAndCell().row.wrap_continuation and !previous_wrap) return error.Unrepresentable;
+                if (y + 1 == t.rows and previous_wrap and !current.rowAndCell().row.wrap_continuation) return error.Unrepresentable;
+                previous_wrap = current.rowAndCell().row.wrap;
+            }
+        }
+    }
     try w.writeAll("\x1bc\x1b[?6l\x1b[r\x1b[?7h\x1b[?2027l");
     for (t.colors.palette.current, 0..) |rgb, i| {
         if (t.colors.palette.mask.isSet(i)) try w.print("\x1b]4;{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{ i, rgb.r, rgb.g, rgb.b });
@@ -61,18 +83,76 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) Writer.Error!void {
             try w.print("\x1b[{s}{d}{c}", .{ if (tag.ansi) "" else "?", tag.value, @as(u8, if (t.modes.get(mode)) 'h' else 'l') });
         }
     }
-    try w.writeAll("\x1b[3g");
+    try w.writeAll("\x1b[?6l\x1b[3g");
     for (0..t.cols) |x| if (t.tabstops.get(@intCast(x))) {
         try w.print("\x1b[1;{d}H\x1bH", .{x + 1});
     };
+    try restoreRep(w, t);
     try regions(w, t);
     try w.print("\x1b[?7{c}", .{@as(u8, if (t.modes.get(.wraparound)) 'h' else 'l')});
     const screen = t.screens.active;
     try cursorShape(w, t, screen);
-    try liveCursor(w, t, screen, t.modes.get(.origin));
+    try liveCursor(w, t, screen, t.modes.get(.origin), true);
+    // A wide print at the right margin with wrapping disabled is ignored by
+    // the grid, but Ghostty still records it as the REP source. This also
+    // handles a pending cursor whose edge cell has a different character.
+    if (screen.cursor.pending_wrap) {
+        if (t.previous_char) |cp| {
+            const saved_anchor = if (screen.saved_cursor) |saved| saved.pending_wrap and saved.x == screen.cursor.x and saved.y == screen.cursor.y and saved.origin == t.modes.get(.origin) else false;
+            if (unicode.table.get(cp).width == 2 and !saved_anchor) {
+                try w.writeAll("\x1b[?7l\x1b[?2027l\x1b(B\x0f");
+                try codepoint(w, cp);
+                try w.print("\x1b[?7{c}\x1b[?2027{c}", .{ @as(u8, if (t.modes.get(.wraparound)) 'h' else 'l'), @as(u8, if (t.modes.get(.grapheme_cluster)) 'h' else 'l') });
+                try charset(w, screen.charset);
+            }
+        }
+    }
+    try w.print("\x1b[4{c}", .{@as(u8, if (t.modes.get(.insert)) 'h' else 'l')});
 }
 
-fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Error!void {
+// Restore terminal-global REP independently of repaint traversal. Reuse a
+// matching cell when possible, otherwise an erased scratch cell. Never seed
+// into occupied content: some states need a nonprinting upstream setter.
+fn restoreRep(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
+    const cp = t.previous_char orelse return;
+    const screen = t.screens.active;
+    const width = unicode.table.get(cp).width;
+    const saved_anchor = if (screen.saved_cursor) |saved| saved.pending_wrap and saved.x == screen.cursor.x and saved.y == screen.cursor.y and saved.origin == t.modes.get(.origin) else false;
+    if (screen.cursor.pending_wrap and width != 2 and !saved_anchor) {
+        var p = screen.pages.pin(.{ .active = .{ .x = screen.cursor.x, .y = screen.cursor.y } }).?;
+        if (p.rowAndCell().cell.wide == .spacer_tail and p.x > 0) p.x -= 1;
+        const value = p.rowAndCell().cell;
+        if (value.hasText() and value.codepoint() != cp) return error.Unrepresentable;
+    }
+    try w.writeAll("\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[?2027l\x1b(B\x0f");
+    if (width == 2) {
+        if (t.cols < 2) return error.Unrepresentable;
+        try w.print("\x1b[1;{d}H\x1b[?7l", .{t.cols});
+        try codepoint(w, cp);
+        return;
+    }
+    var scratch: ?struct { pin: vt.PageList.Pin, y: usize } = null;
+    for (0..t.rows) |y| {
+        const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
+        for (p.cells(.all), 0..) |*value, x| {
+            var at = p;
+            at.x = @intCast(x);
+            if (value.hasText() and value.codepoint() == cp) {
+                try w.print("\x1b[{d};{d}H\x1b[?7h", .{ y + 1, x + 1 });
+                try cell(w, at, value);
+                return;
+            }
+            if (!value.hasText() and value.wide == .narrow and !p.rowAndCell().row.wrap) scratch = .{ .pin = at, .y = y };
+        }
+    }
+    const chosen = scratch orelse return error.Unrepresentable;
+    const p = chosen.pin;
+    try w.print("\x1b[{d};{d}H\x1b[?7l\x1b]8;;\x1b\\{f}", .{ chosen.y + 1, p.x + 1, effectiveStyle(p, p.rowAndCell().cell).formatterVt() });
+    try codepoint(w, cp);
+    try w.print("\x1b[{d}G\x1b[X", .{p.x + 1});
+}
+
+fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotError!void {
     try w.writeAll("\x1b(B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
     if (screen.saved_cursor) |saved| {
         // A saved cursor can lie outside margins changed after DECSC. Use
@@ -119,17 +199,17 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Err
     for (1..@as(usize, keys.idx) + 1) |i| try w.print("\x1b[>{d}u", .{keys.flags[i].int()});
     try cursorShape(w, t, screen);
     try regions(w, t);
-    try liveCursor(w, t, screen, false);
+    try liveCursor(w, t, screen, false, false);
 }
 
-fn regions(w: *Writer, t: *const vt.Terminal) Writer.Error!void {
+fn regions(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
     try w.print("\x1b[?6l\x1b[?69{c}", .{@as(u8, if (t.modes.get(.enable_left_and_right_margin)) 'h' else 'l')});
     const r = t.scrolling_region;
     if (t.modes.get(.enable_left_and_right_margin)) try w.print("\x1b[{d};{d}s", .{ r.left + 1, r.right + 1 });
     try w.print("\x1b[{d};{d}r", .{ r.top + 1, r.bottom + 1 });
 }
 
-fn cursorShape(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writer.Error!void {
+fn cursorShape(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotError!void {
     const shape: u8 = switch (screen.cursor.cursor_style) {
         .block => 1,
         .underline => 3,
@@ -139,18 +219,32 @@ fn cursorShape(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) Writ
     try w.print("\x1b[{d} q", .{shape + @as(u8, if (t.modes.get(.cursor_blinking)) 0 else 1)});
 }
 
-fn position(w: *Writer, t: *const vt.Terminal, x: u16, y: u16, origin: bool) Writer.Error!void {
+fn position(w: *Writer, t: *const vt.Terminal, x: u16, y: u16, origin: bool) SnapshotError!void {
     const r = t.scrolling_region;
     if (origin and (y < r.top or y > r.bottom or x < r.left or x > r.right)) {
         // DECRC can restore an absolute position outside later margins; CUP
         // in origin mode clamps it. The saved cursor is the existing absolute
         // anchor and relative movement retains its outside-region position.
         const saved = screenSaved: {
-            const saved = t.screens.active.saved_cursor orelse return error.WriteFailed;
-            if (!saved.origin) return error.WriteFailed;
+            const saved = t.screens.active.saved_cursor orelse return error.Unrepresentable;
+            if (!saved.origin) return error.Unrepresentable;
             break :screenSaved saved;
         };
+        if ((y < saved.y and saved.y >= r.top and y < r.top) or
+            (y > saved.y and saved.y <= r.bottom and y > r.bottom) or
+            (x > saved.x and saved.x <= r.right and x > r.right)) return error.Unrepresentable;
         try w.writeAll("\x1b8");
+        if (saved.pending_wrap) {
+            // Clear wrap using a vertical move that returns to this exact
+            // anchor, including anchors outside the current scroll region.
+            if (saved.y == 0 or saved.y == r.top) {
+                try w.writeAll("\x1b[A");
+            } else if (saved.y + 1 == t.rows or saved.y == r.bottom) {
+                try w.writeAll("\x1b[B");
+            } else if (saved.y < r.top or saved.y <= r.bottom) {
+                try w.writeAll("\x1b[A\x1b[B");
+            } else try w.writeAll("\x1b[B\x1b[A");
+        }
         if (y != saved.y) try w.print("\x1b[{d}{c}", .{ if (y > saved.y) y - saved.y else saved.y - y, @as(u8, if (y > saved.y) 'B' else 'A') });
         if (x != saved.x) try w.print("\x1b[{d}{c}", .{ if (x > saved.x) x - saved.x else saved.x - x, @as(u8, if (x > saved.x) 'C' else 'D') });
         return;
@@ -158,13 +252,18 @@ fn position(w: *Writer, t: *const vt.Terminal, x: u16, y: u16, origin: bool) Wri
     try w.print("\x1b[{d};{d}H", .{ @as(i32, y) + 1 - @as(i32, if (origin) r.top else 0), @as(i32, x) + 1 - @as(i32, if (origin and t.modes.get(.enable_left_and_right_margin)) r.left else 0) });
 }
 
-fn liveCursor(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, origin: bool) Writer.Error!void {
+fn liveCursor(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, origin: bool, final_live: bool) SnapshotError!void {
     const cursor = screen.cursor;
     try w.print("\x1b[?6{c}", .{@as(u8, if (origin) 'h' else 'l')});
     try position(w, t, cursor.x, cursor.y, origin);
     if (cursor.pending_wrap) {
         try w.writeAll("\x1b[?7h");
-        try recreateWrap(w, t, screen, cursor.x, cursor.y, origin);
+        const saved_anchor = if (screen.saved_cursor) |saved| saved.pending_wrap and saved.x == cursor.x and saved.y == cursor.y and (saved.origin == origin or !final_live) else false;
+        if (saved_anchor) {
+            // DECRC restores pending wrap without printing or clamping to
+            // subsequently changed margins, and preserves the REP source.
+            try w.writeAll("\x1b8");
+        } else try recreateWrap(w, t, screen, cursor.x, cursor.y, origin);
         try w.print("\x1b[?7{c}", .{@as(u8, if (t.modes.get(.wraparound)) 'h' else 'l')});
     }
     try w.print("\x1b[?2027{c}", .{@as(u8, if (t.modes.get(.grapheme_cluster)) 'h' else 'l')});
@@ -173,15 +272,18 @@ fn liveCursor(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, origi
     try charset(w, screen.charset);
 }
 
-fn recreateWrap(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, x: u16, y: u16, origin: bool) Writer.Error!void {
+fn recreateWrap(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, x: u16, y: u16, origin: bool) SnapshotError!void {
     var p = screen.pages.pin(.{ .active = .{ .x = x, .y = y } }).?;
     if (p.rowAndCell().cell.wide == .spacer_tail and x > 0) p.x -= 1;
     try position(w, t, p.x, y, origin);
     try w.writeAll("\x1b(B\x0f\x1b[?2027l");
-    try cell(w, p, p.rowAndCell().cell);
+    const value = p.rowAndCell().cell;
+    const right = if (x > t.scrolling_region.right) t.cols - 1 else t.scrolling_region.right;
+    if (!value.hasText() or x != right) return error.Unrepresentable;
+    try cell(w, p, value);
 }
 
-fn charset(w: *Writer, state: vt.Screen.CharsetState) Writer.Error!void {
+fn charset(w: *Writer, state: vt.Screen.CharsetState) SnapshotError!void {
     inline for (.{ .{ "G0", '(' }, .{ "G1", ')' }, .{ "G2", '*' }, .{ "G3", '+' } }) |entry| {
         const set = state.charsets.get(@field(vt.CharsetSlot, entry[0]));
         try w.print("\x1b{c}{c}", .{ @as(u8, entry[1]), @as(u8, switch (set) {
@@ -205,7 +307,7 @@ fn charset(w: *Writer, state: vt.Screen.CharsetState) Writer.Error!void {
     if (state.single_shift) |slot| try w.writeAll(if (slot == .G2) "\x1bN" else "\x1bO");
 }
 
-fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
+fn row(w: *Writer, p: vt.PageList.Pin) SnapshotError!void {
     var last: ?vt.Style = null;
     var last_link: usize = 0;
     var protected: ?bool = null;
@@ -247,10 +349,10 @@ fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
     const values = p.cells(.all);
     const edge = &values[values.len - 1];
     if (!p.rowAndCell().row.wrap) return;
-    const next = p.down(1) orelse return error.WriteFailed;
+    const next = p.down(1) orelse return error.Unrepresentable;
     const next_continues = next.rowAndCell().row.wrap_continuation;
     if (!edge.hasText() and (edge.wide == .narrow or edge.wide == .spacer_head)) {
-        if (edge.wide == .spacer_head and next_continues and next.cells(.all)[0].wide != .wide) return error.WriteFailed;
+        if (edge.wide == .spacer_head and next_continues and next.cells(.all)[0].wide != .wide) return error.Unrepresentable;
         // Construct a spacer head with its own attributes before painting
         // the next row: that row's first wide glyph may have a different style
         // or hyperlink. If the original head had narrowed, overwrite the
@@ -265,22 +367,23 @@ fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
         if (edge.wide == .narrow) try w.writeAll(" \x1b[1D");
         try w.writeAll("\x1b]8;;\x1b\\");
         if (!next_continues) try w.writeAll("\x1b[M");
-    } else if (!next_continues) {
-        // Region scrolling can retain this row's wrap/head while replacing
-        // its following row. Remove the temporary following row before its
-        // repaint so no wide-cell erase can clear the retained head.
-        try codepoint(w, '界');
-        try w.writeAll("\x1b[2D\x1b[M");
+    } else {
+        // Even an entirely erased next row needs a real wrap transition.
+        // Its ECH/CUF controls cannot trigger the pending wrap themselves.
+        // A temporary narrow space avoids clearing a previous wide head
+        // when the next row starts with erased cells.
+        try w.writeAll(" \x1b[1D");
+        if (!next_continues) try w.writeAll("\x1b[M");
     }
 }
 
-fn emptyCells(w: *Writer, count: *usize) Writer.Error!void {
+fn emptyCells(w: *Writer, count: *usize) SnapshotError!void {
     if (count.* == 0) return;
     try w.print("\x1b[{d}X\x1b[{d}C", .{ count.*, count.* });
     count.* = 0;
 }
 
-fn cursorLink(w: *Writer, link: ?*@import("terminal/hyperlink.zig").Hyperlink) Writer.Error!void {
+fn cursorLink(w: *Writer, link: ?*@import("terminal/hyperlink.zig").Hyperlink) SnapshotError!void {
     if (link) |l| {
         switch (l.id) {
             .explicit => |id| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ id, l.uri }),
@@ -289,14 +392,14 @@ fn cursorLink(w: *Writer, link: ?*@import("terminal/hyperlink.zig").Hyperlink) W
     } else try w.writeAll("\x1b]8;;\x1b\\");
 }
 
-fn cell(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) Writer.Error!void {
+fn cell(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) SnapshotError!void {
     try cellLink(w, p, value);
     try w.print("\x1b[{d}\"q", .{@as(u8, if (value.protected) 1 else 0)});
     try w.print("{f}", .{effectiveStyle(p, value).formatterVt()});
     try text(w, p, value);
 }
 
-fn cellLink(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) Writer.Error!void {
+fn cellLink(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) SnapshotError!void {
     const page = p.node.page();
     if (value.hyperlink) {
         const id = page.lookupHyperlink(value).?;
@@ -311,7 +414,7 @@ fn cellLink(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) Writer.E
     } else try w.writeAll("\x1b]8;;\x1b\\");
 }
 
-fn text(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) Writer.Error!void {
+fn text(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) SnapshotError!void {
     try codepoint(w, if (value.codepoint() == 0) ' ' else value.codepoint());
     if (p.grapheme(value)) |extra| {
         // A cell boundary must stay a boundary even when adjacent emoji would
@@ -323,9 +426,9 @@ fn text(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) Writer.Error
     }
 }
 
-fn codepoint(w: *Writer, cp: u21) Writer.Error!void {
+fn codepoint(w: *Writer, cp: u21) SnapshotError!void {
     var buf: [4]u8 = undefined;
-    const n = std.unicode.utf8Encode(cp, &buf) catch return error.WriteFailed;
+    const n = std.unicode.utf8Encode(cp, &buf) catch return error.Unrepresentable;
     try w.writeAll(buf[0..n]);
 }
 
