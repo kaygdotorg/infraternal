@@ -1,0 +1,9 @@
+# The first-party SSH plugin crate for host access and SSH sessions.
+[package]
+name = "infraternal-plugin-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

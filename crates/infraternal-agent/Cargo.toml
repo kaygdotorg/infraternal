@@ -1,0 +1,9 @@
+# The per-host package that will execute local PTY and engine work.
+[package]
+name = "infraternal-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

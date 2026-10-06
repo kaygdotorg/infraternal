@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Dispatch repository verification modes and report which gate is not ready yet.
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${script_dir}/verify.d/rust.sh"
+
+if [[ $# -ne 1 ]]; then
+    printf 'usage: scripts/verify {fast|integration|browser|bench}\n' >&2
+    exit 2
+fi
+
+case "$1" in
+    fast)
+        rust_verify_fast
+        ;;
+    integration|browser|bench)
+        printf '%s: not yet implemented\n' "$1"
+        ;;
+    *)
+        printf 'unknown verification mode: %s\n' "$1" >&2
+        printf 'usage: scripts/verify {fast|integration|browser|bench}\n' >&2
+        exit 2
+        ;;
+esac
