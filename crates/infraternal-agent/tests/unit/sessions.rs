@@ -1,4 +1,4 @@
-//! Private-directory and stale-rendezvous checks for shim discovery [13][40].
+//! Rendezvous security, cancellation-safe receive storage and reader measurements [13][40][41].
 use super::{discover, state};
 use std::{
     fs,
@@ -190,4 +190,66 @@ async fn post_listen_chmod_wakes_a_connection_refused_at_bind() {
             .mask
             .contains(nix::sys::inotify::AddWatchFlags::IN_ATTRIB)
     }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn borrowed_reader_payload_uses_reusable_cancel_safe_storage() {
+    use super::Reader;
+    use infraternal_shim::frame::{Frame, FrameRef};
+    use tokio::io::AsyncWriteExt;
+    let (mut source, mut peer) = tokio::net::UnixStream::pair().unwrap();
+    let wire = Frame::Output(7, vec![42; 16_384]).encode().unwrap();
+    let mut reader = Reader::default();
+    source.write_all(&wire[..6]).await.unwrap();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            reader.read_ref(&mut peer)
+        )
+        .await
+        .is_err()
+    );
+    source.write_all(&wire[6..]).await.unwrap();
+    let pointer = match reader.read_ref(&mut peer).await.unwrap() {
+        FrameRef::Output(7, bytes) => {
+            assert_eq!(bytes.len(), 16_384);
+            assert!(bytes.iter().all(|byte| *byte == 42));
+            bytes.as_ptr()
+        }
+        frame => panic!("unexpected borrowed frame: {frame:?}"),
+    };
+    source.write_all(&wire).await.unwrap();
+    match reader.read_ref(&mut peer).await.unwrap() {
+        FrameRef::Output(7, bytes) => assert_eq!(bytes.as_ptr(), pointer),
+        frame => panic!("unexpected borrowed frame: {frame:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "release borrowed versus owned asynchronous receive measurement"]
+async fn reader_borrow_measurement() {
+    use infraternal_shim::frame::Frame;
+    use std::{hint::black_box, time::Instant};
+    use tokio::io::AsyncWriteExt;
+    let (mut source, mut peer) = tokio::net::UnixStream::pair().unwrap();
+    let wire = Frame::Output(7, vec![42; 16_384]).encode().unwrap();
+    let mut reader = super::Reader::default();
+    let n = 10_000;
+    for round in 0..5 {
+        for (label, borrowed) in [("reader-owned", false), ("reader-borrowed", true)] {
+            let start = Instant::now();
+            for _ in 0..n {
+                source.write_all(&wire).await.unwrap();
+                if borrowed {
+                    black_box(reader.read_ref(&mut peer).await.unwrap());
+                } else {
+                    black_box(reader.read(&mut peer).await.unwrap());
+                }
+            }
+            println!(
+                "{label}: round={round} n={n} ns/frame={:.1}",
+                start.elapsed().as_secs_f64() * 1e9 / f64::from(n)
+            );
+        }
+    }
 }

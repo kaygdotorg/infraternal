@@ -4,7 +4,7 @@
 //! with a two-second handshake deadline; a nonresponsive shim cannot serialize
 //! recovery of healthy sessions. Only refused sockets are removed as stale.
 
-use infraternal_shim::frame::{Frame, MAX_FRAME, SEQUENCED_INPUT};
+use infraternal_shim::frame::{Frame, FrameRef, MAX_FRAME, SEQUENCED_INPUT};
 use nix::{
     sys::inotify::{AddWatchFlags, InitFlags, Inotify},
     unistd::Uid,
@@ -100,6 +100,14 @@ impl Reader {
     /// # Errors
     /// Returns truncated, oversized or malformed frame errors.
     pub async fn read(&mut self, peer: &mut UnixStream) -> io::Result<Frame> {
+        Ok(self.read_ref(peer).await?.into_owned())
+    }
+
+    /// Receive a borrowed payload valid until the next read. Frame-scoped
+    /// consumers avoid an allocation; writer queues still require ownership.
+    /// # Errors
+    /// Returns the same framing and IO failures as `read`.
+    pub async fn read_ref(&mut self, peer: &mut UnixStream) -> io::Result<FrameRef<'_>> {
         // read() is cancellation safe; counters live in Reader so selecting a
         // control request while a fragmented shim frame arrives loses no bytes.
         while self.prefix_read < self.prefix.len() {
@@ -121,9 +129,7 @@ impl Reader {
             }
             self.received += n;
         }
-        // The frozen codec returns owned payloads. Receive storage is reused;
-        // removing that codec allocation requires an additive borrowed API.
-        let frame = Frame::decode(&self.bytes)?;
+        let frame = FrameRef::decode(&self.bytes)?;
         self.prefix_read = 0;
         self.received = 0;
         Ok(frame)
