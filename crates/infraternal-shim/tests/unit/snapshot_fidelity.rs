@@ -130,7 +130,6 @@ fn fidelity_seeded_nightly() {
 }
 
 #[test]
-#[ignore = "red regression: enable after spacer-head fix"]
 fn fidelity_spacer_head_attributes() {
     replay(
         "spacer-head-independent-attributes",

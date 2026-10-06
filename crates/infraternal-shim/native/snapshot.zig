@@ -232,16 +232,20 @@ fn row(w: *Writer, p: vt.PageList.Pin) Writer.Error!void {
     try w.writeAll("\x1b]8;;\x1b\\");
     const values = p.cells(.all);
     const edge = &values[values.len - 1];
-    if (p.rowAndCell().row.wrap and edge.wide == .narrow and !edge.hasText()) {
-        // Wrapping a wide character makes a styled spacer head. Overwriting
-        // that wide character on the next row narrows the head without losing
-        // its SGR/link/protection. ECH would discard those empty-cell attributes.
-        // Leave the cursor at the next row's start for its ordinary repaint.
+    if (p.rowAndCell().row.wrap and !edge.hasText() and (edge.wide == .narrow or edge.wide == .spacer_head)) {
+        // Construct a spacer head with its own attributes before painting
+        // the next row: that row's first wide glyph may have a different style
+        // or hyperlink. If the original head had narrowed, overwrite the
+        // temporary wide glyph to narrow it without losing its attributes.
+        // ECH would discard those empty-cell attributes. Leave the cursor at
+        // the next row's start for its ordinary repaint.
         try w.print("\x1b[{d}G", .{values.len});
         try cellLink(w, p, edge);
         try w.print("\x1b[{d}\"q{f}", .{ @as(u8, if (edge.protected) 1 else 0), effectiveStyle(p, edge).formatterVt() });
         try codepoint(w, '界');
-        try w.writeAll("\x1b[2D \x1b[1D\x1b]8;;\x1b\\");
+        try w.writeAll("\x1b[2D");
+        if (edge.wide == .narrow) try w.writeAll(" \x1b[1D");
+        try w.writeAll("\x1b]8;;\x1b\\");
     }
 }
 
