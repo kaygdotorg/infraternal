@@ -82,9 +82,9 @@ function renderAccess(showSetup: boolean, message = ""): void {
 }
 
 async function submitLogin(form: HTMLFormElement, error: HTMLElement): Promise<void> {
+  const data = new FormData(form);
   setDisabled(form, true);
   error.textContent = "Touch your passkey to continue…";
-  const data = new FormData(form);
   try {
     const userId = await loginWithPasskey(String(data.get("username") ?? ""), String(data.get("device") ?? ""));
     saveLocal("tracer.user-id", userId);
@@ -97,9 +97,9 @@ async function submitLogin(form: HTMLFormElement, error: HTMLElement): Promise<v
 }
 
 async function submitSetup(form: HTMLFormElement, error: HTMLElement): Promise<void> {
+  const data = new FormData(form);
   setDisabled(form, true);
   error.textContent = "Preparing your passkey…";
-  const data = new FormData(form);
   try {
     const userId = await registerOwner(
       String(data.get("token") ?? ""),
