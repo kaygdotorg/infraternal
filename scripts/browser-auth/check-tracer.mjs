@@ -12,10 +12,17 @@ const root = resolve(import.meta.dirname, '../..');
 if (!process.argv[2]) throw new Error('provide the production tracer dist directory');
 const dist = resolve(process.argv[2]);
 const browser = await chromium.launch({ headless: true });
-const child = spawn(resolve(root, 'target/debug/examples/browser_auth'), [], {
+// An optional loopback reverse-proxy fixture receives its setup capability only
+// through private stdin. The default fixture keeps both capability and API in IPC.
+const transport = process.env.TRACER_AUTH_URL ? new URL(process.env.TRACER_AUTH_URL) : undefined;
+if (transport && (transport.protocol !== 'http:' || transport.hostname !== '127.0.0.1'
+    || transport.pathname !== '/' || transport.username || transport.password || transport.search || transport.hash)) {
+  throw new Error('HTTP auth fixture must be an uncredentialed loopback origin');
+}
+const child = transport ? undefined : spawn(resolve(root, 'target/debug/examples/browser_auth'), [], {
   stdio: ['pipe', 'pipe', 'inherit'],
 });
-const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+const lines = createInterface({ input: child ? child.stdout : process.stdin })[Symbol.asyncIterator]();
 const initial = JSON.parse((await lines.next()).value);
 const context = await browser.newContext();
 const check = (condition, message) => { if (!condition) throw new Error(message); };
@@ -39,9 +46,18 @@ try {
       await route.fulfill({ contentType: types[extname(path)] ?? 'application/octet-stream', body: await readFile(path) });
       return;
     }
-    child.stdin.write(JSON.stringify({ path: new URL(request.url()).pathname,
-      headers: request.headers(), body: request.postDataJSON() }) + '\n');
-    const response = JSON.parse((await lines.next()).value);
+    const path = new URL(request.url()).pathname;
+    let response;
+    if (transport) {
+      const result = await fetch(new URL(path, transport), { method: 'POST',
+        headers: request.headers(), body: request.postData() });
+      let body;
+      try { body = await result.json(); } catch { throw new Error('unreadable auth fixture response'); }
+      response = { status: result.status, headers: [...result.headers], body };
+    } else {
+      child.stdin.write(JSON.stringify({ path, headers: request.headers(), body: request.postDataJSON() }) + '\n');
+      response = JSON.parse((await lines.next()).value);
+    }
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers),
       body: JSON.stringify(response.body) });
   });
@@ -75,7 +91,7 @@ try {
   console.log(`tracer + Rust auth: PASS (production UI, resident PRF setup, empty-storage discoverable login, DEK unwrap; Chromium ${browser.version()})`);
 } finally {
   await context.close();
-  child.stdin.end();
-  child.kill();
+  child?.stdin.end();
+  child?.kill();
   await browser.close();
 }
