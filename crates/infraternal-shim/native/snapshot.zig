@@ -681,3 +681,47 @@ fn cursorLinkEqual(a: ?*@import("terminal/hyperlink.zig").Hyperlink, b: ?*@impor
     };
     return std.mem.eql(u8, a_key, b_key);
 }
+
+/// Best-effort visible repaint for negotiated approximate recovery. It omits
+/// semantic/history/hidden state and may clip cells, but never emits half a VT
+/// operation or half a UTF-8 scalar. The faithful serializer is unchanged.
+pub fn approximate(handle: c.Terminal, buf: [*]u8, len: usize) callconv(lib.calling_conv) usize {
+    const t = c.zigTerminal(handle) orelse return 0;
+    if (len < 256) return 0;
+    var w = Writer.fixed(buf[0 .. len - 128]);
+    w.writeAll("\x1bc\x1b[?7l\x1b[?6l\x1b[?2027l\x1b(B\x0f") catch return 0;
+    if (t.screens.active_key == .alternate) w.writeAll("\x1b[?47h") catch return 0;
+    const screen = t.screens.active;
+    outer: for (0..t.rows) |y| {
+        const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
+        for (p.cells(.all), 0..) |*value, x| {
+            if (value.wide == .spacer_tail or value.wide == .spacer_head) continue;
+            const style = effectiveStyle(p, value);
+            if (!value.hasText() and style.bg_color == .none) continue;
+            const boundary = w.end;
+            // Roll back a whole cell if its bounded operation cannot fit. No
+            // borrowed engine data is modified by failure or clipping.
+            approximateCell(&w, p, value, style, x, y) catch {
+                w.end = boundary;
+                break :outer;
+            };
+        }
+    }
+    // Reserve footer space independently of clipping, and leave a parser in
+    // ground state at the visible cursor before subsequent raw output resumes.
+    var footer = Writer.fixed(buf[w.end..len]);
+    footer.print("\x1b[0m\x1b[?7h\x1b[?25{c}\x1b[{d};{d}H", .{ @as(u8, if (t.modes.get(.cursor_visible)) 'h' else 'l'), screen.cursor.y + 1, screen.cursor.x + 1 }) catch return 0;
+    return w.end + footer.end;
+}
+
+fn approximateCell(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell, style: vt.Style, x: usize, y: usize) SnapshotError!void {
+    try w.print("\x1b[{d};{d}H{f}", .{ y + 1, x + 1, style.formatterVt() });
+    if (value.hasText()) {
+        try codepoint(w, value.codepoint());
+        if (p.grapheme(value)) |extra| {
+            try w.writeAll("\x1b[?2027h");
+            for (extra) |cp| try codepoint(w, cp);
+            try w.writeAll("\x1b[?2027l");
+        }
+    } else try w.writeAll(" ");
+}

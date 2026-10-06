@@ -45,11 +45,12 @@ if [[ ! -d "$source_dir" ]]; then
     tar -xzf "$archive" --strip-components=1 -C "$source_dir"
 fi
 cp "$root/crates/infraternal-shim/native/snapshot.zig" "$source_dir/src/infraternal_snapshot.zig"
-# Restore the exact upstream root before adding our two adapter exports.
+# Restore the exact upstream root before adding our three adapter exports.
 tar -xOf "$archive" "ghostty-$version/src/lib_vt.zig" > "$source_dir/src/lib_vt.zig"
 cat >> "$source_dir/src/lib_vt.zig" <<'ZIG'
 
 comptime {
+    @export(&@import("infraternal_snapshot.zig").approximate, .{ .name = "infraternal_vt_approximate" });
     @export(&@import("infraternal_snapshot.zig").snapshot, .{ .name = "infraternal_vt_snapshot" });
     @export(&@import("infraternal_snapshot.zig").compare, .{ .name = "infraternal_vt_compare" });
 }
