@@ -503,7 +503,15 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
             };
-            let Ok(json) = serde_json::to_vec(&size) else {
+            // The trusted local host identity never comes from browser JSON.
+            // Pixel geometry is sent later through Resize; the daemon opens a
+            // PTY using its approved {uid, cols, rows} action schema [9][13].
+            let request = serde_json::json!({
+                "uid": nix::unistd::Uid::effective().as_raw(),
+                "cols": size.cols,
+                "rows": size.rows,
+            });
+            let Ok(json) = serde_json::to_vec(&request) else {
                 let _ = reply.send(Err(AgentError::Protocol));
                 return true;
             };
@@ -1013,15 +1021,11 @@ async fn cleanup_connection(mut connection: AgentConnection) {
 }
 
 fn decode_session_id(value: &str) -> Option<[u8; 16]> {
-    if value.len() != 32 || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        return None;
-    }
-    let mut id = [0_u8; 16];
-    for (index, byte) in id.iter_mut().enumerate() {
-        let offset = index.checked_mul(2)?;
-        *byte = u8::from_str_radix(value.get(offset..offset + 2)?, 16).ok()?;
-    }
-    Some(id)
+    let parsed = uuid::Uuid::parse_str(value).ok()?;
+    // Accept the real daemon's canonical UUID and the existing 32-hex core
+    // result, but reject alternate spellings rather than normalizing authority.
+    (value == parsed.simple().to_string() || value == parsed.hyphenated().to_string())
+        .then(|| parsed.into_bytes())
 }
 
 #[cfg(unix)]
