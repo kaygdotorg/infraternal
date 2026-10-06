@@ -21,6 +21,7 @@ interface MockOwner {
   userId: string;
   credentialId: string;
   passkeyWrap: unknown;
+  prfInput: string;
 }
 
 interface MockSession {
@@ -57,7 +58,7 @@ interface TraceEvent {
 let owner: MockOwner | undefined;
 let activeAuthCookie: string | undefined;
 let setupToken = newToken();
-let pendingRegistration: { ceremony: string; userId: string; recoveryWords: string; rpId: string } | undefined;
+let pendingRegistration: { ceremony: string; userId: string; recoveryWords: string; rpId: string; prfInput: string } | undefined;
 let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
 let session = createSession();
@@ -177,6 +178,8 @@ async function authAction(
 ): Promise<void> {
   response.setHeader("Cache-Control", "no-store");
   switch (action) {
+    case "status":
+      return sendJson(response, 200, { setup_required: !owner });
     case "session":
       if (!isAuthenticated(request) || !owner) return sendJson(response, 401, { error: "authorization failed" });
       return sendJson(response, 200, { user_id: owner.userId, device: "test-double", fresh: true });
@@ -189,12 +192,12 @@ async function authAction(
       const userId = randomUuid();
       const ceremony = newToken();
       const recoveryWords = entropyToMnemonic(randomBytes(32), wordlist);
-      const prfInput = createHash("sha256").update("infraternal/keywrap/prf/v1").digest("base64url");
-      pendingRegistration = { ceremony, userId, recoveryWords, rpId };
+      const prfInput = createHash("sha256").update(`infraternal/keywrap/prf/v2|${userId}`).digest("base64url");
+      pendingRegistration = { ceremony, userId, recoveryWords, rpId, prfInput };
       const publicKey = {
         challenge: randomBytes(32).toString("base64url"),
         rp: { name: "infraternal test double", id: rpId },
-        user: { id: randomBytes(16).toString("base64url"), name: body.name, displayName: body.name },
+        user: { id: Buffer.from(uuidBytes(userId)).toString("base64url"), name: body.name, displayName: body.name },
         pubKeyCredParams: [{ type: "public-key", alg: -7 }],
         timeout: 60_000,
         attestation: "none",
@@ -218,23 +221,22 @@ async function authAction(
       if (!credentialId || !asRecord(body.passkey_wrap) || !asRecord(body.recovery_wrap)) {
         return sendJson(response, 400, { error: "invalid request" });
       }
-      owner = { userId: pendingRegistration.userId, credentialId, passkeyWrap: body.passkey_wrap };
+      owner = { userId: pendingRegistration.userId, credentialId, passkeyWrap: body.passkey_wrap, prfInput: pendingRegistration.prfInput };
       pendingRegistration = undefined;
       activeAuthCookie = newToken();
       setAuthCookie(response, activeAuthCookie);
       return sendJson(response, 200, { ok: true });
     }
     case "login-start": {
-      if (!owner || body.user_id !== owner.userId) return sendJson(response, 401, { error: "authorization failed" });
+      if (!owner || Object.keys(body).length !== 0) return sendJson(response, 401, { error: "authorization failed" });
       pendingLogin = { ceremony: newToken() };
-      const prfInput = createHash("sha256").update("infraternal/keywrap/prf/v1").digest("base64url");
       const publicKey = {
         challenge: randomBytes(32).toString("base64url"),
         rpId: request.headers.host?.split(":")[0] ?? HOST,
-        allowCredentials: [{ type: "public-key", id: owner.credentialId }],
+        allowCredentials: [],
         timeout: 60_000,
         userVerification: "required",
-        extensions: { prf: { eval: { first: prfInput } } },
+        extensions: {},
       };
       return sendJson(response, 200, { ceremony: pendingLogin.ceremony, options: { publicKey } });
     }
@@ -242,7 +244,7 @@ async function authAction(
       const proof = asRecord(body.proof);
       const extensionResults = asRecord(proof.extensions);
       if (!owner || !pendingLogin || body.ceremony !== pendingLogin.ceremony
-        || proof.rawId !== owner.credentialId || "prf" in extensionResults) {
+        || proof.rawId !== owner.credentialId || asRecord(proof.response).userHandle !== Buffer.from(uuidBytes(owner.userId)).toString("base64url") || "prf" in extensionResults) {
         return sendJson(response, 401, { error: "authorization failed" });
       }
       pendingLogin = undefined;
@@ -252,7 +254,7 @@ async function authAction(
     }
     case "wraps":
       if (!isAuthenticated(request) || !owner) return sendJson(response, 401, { error: "authorization failed" });
-      return sendJson(response, 200, [{ kind: "passkey", key_id: owner.credentialId, wrap: owner.passkeyWrap }]);
+      return sendJson(response, 200, [{ kind: "passkey", key_id: owner.credentialId, wrap: owner.passkeyWrap, prf_input: owner.prfInput }]);
     case "logout":
       if (!isAuthenticated(request)) return sendJson(response, 401, { error: "authorization failed" });
       activeAuthCookie = undefined;
