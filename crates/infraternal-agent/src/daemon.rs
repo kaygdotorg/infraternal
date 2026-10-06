@@ -4,7 +4,7 @@
 //! a full queue pauses leg-B reads until capacity returns. The writer has eight slots
 //! and awaits capacity, applying transport backpressure. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
-//! snapshot. Unviewed sessions stay disconnected so their PTYs keep progressing.
+//! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
 //! A closed shim or failed terminal task closes only its mux stream.
 use crate::{
     relay,
@@ -12,9 +12,25 @@ use crate::{
     transport::{Receive, Socket, Transmit},
 };
 use infraternal_protocol::Frame;
-use infraternal_shim::frame::{Frame as Shim, SEQUENCED_INPUT};
+use infraternal_shim::frame::{APPROXIMATE_SNAPSHOT, Frame as Shim, SEQUENCED_INPUT};
 use serde::Deserialize;
-use std::{collections::HashMap, io, path::PathBuf, time::Instant};
+use std::{
+    collections::HashMap,
+    io,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
+};
+
+/// Process-wide count of approximate repaints written to the leg-B socket.
+/// Constant-space and content-free; metrics adapters can export this value.
+static APPROXIMATE_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
+
+/// Monotonic approximation counter for the infraternal agent metrics adapter.
+#[must_use]
+pub fn approximate_snapshots_total() -> u64 {
+    APPROXIMATE_SNAPSHOTS.load(Ordering::Relaxed)
+}
 use tokio::io::AsyncWriteExt;
 use tokio::{sync::mpsc, task::JoinSet};
 
@@ -58,14 +74,19 @@ async fn writer(socket: &Socket, mut messages: mpsc::Receiver<Message>) -> io::R
                         out_seq: *seq,
                         bytes,
                     },
-                    Shim::Snapshot(seq, bytes) => Frame::Snapshot {
-                        out_seq: *seq,
-                        bytes,
-                    },
+                    Shim::Snapshot(seq, bytes) | Shim::SnapshotWithFlags(seq, _, bytes) => {
+                        Frame::Snapshot {
+                            out_seq: *seq,
+                            bytes,
+                        }
+                    }
                     Shim::InputAck(seq) => Frame::Ack { in_seq_acked: *seq },
                     _ => return Err(sessions::invalid("invalid relay message")),
                 };
                 tx.send(socket, stream, &wire).await?;
+                if matches!(frame, Shim::SnapshotWithFlags(_, flags, _) if flags & 1 != 0) {
+                    APPROXIMATE_SNAPSHOTS.fetch_add(1, Ordering::Relaxed);
+                }
             }
             Message::Result(stream, call_id, ok, json) => {
                 tx.send(
@@ -232,7 +253,13 @@ impl Link {
         self.session.peer.write_all(&self.transmit).await
     }
     async fn read(&mut self) -> io::Result<Shim> {
-        self.reader.read(&mut self.session.peer).await
+        let frame = self.reader.read(&mut self.session.peer).await?;
+        if matches!(frame, Shim::SnapshotWithFlags(..))
+            && self.session.caps & APPROXIMATE_SNAPSHOT == 0
+        {
+            return Err(sessions::invalid("unnegotiated approximate Snapshot"));
+        }
+        Ok(frame)
     }
 }
 async fn input_state(link: &mut Link) -> io::Result<u64> {
@@ -331,14 +358,27 @@ async fn terminal(
                             .map(tokio::time::Instant::from_std);
                     }
                 }
-                Shim::Snapshot(seq, bytes) => {
+                frame @ (Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => {
+                    let (seq, length, approximate) = match &frame {
+                        Shim::Snapshot(seq, bytes) => (*seq, bytes.len(), false),
+                        Shim::SnapshotWithFlags(seq, flags, bytes) => {
+                            (*seq, bytes.len(), flags & 1 != 0)
+                        }
+                        _ => return Err(sessions::invalid("invalid Snapshot variant")),
+                    };
                     if seq < output.cursor() {
                         return Err(sessions::invalid("snapshot cursor regressed"));
                     }
-                    if output.repaint(seq, bytes.len()).is_ok() {
-                        emit(&tx, Message::Shim(stream, Shim::Snapshot(seq, bytes))).await?;
+                    if output.repaint(seq, length).is_ok() {
+                        if approximate {
+                            let json = serde_json::to_vec(
+                                &serde_json::json!({"type":"terminal.snapshot", "session_id":uuid::Uuid::from_bytes(id), "seq":seq, "approximate":true}),
+                            )?;
+                            emit(&tx, Message::Event(stream, json)).await?;
+                        }
+                        emit(&tx, Message::Shim(stream, frame)).await?;
                     } else {
-                        pending = Some(Shim::Snapshot(seq, bytes));
+                        pending = Some(frame);
                     }
                 }
                 _ => return Err(sessions::invalid("invalid pending frame")),
@@ -348,14 +388,18 @@ async fn terminal(
             let mut next = Link::connect(path.clone(), id).await?;
             let written = input_state(&mut next).await?;
             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
-            next.send(&Shim::SnapshotRequest).await?;
+            // A credit deadline discards only the daemon's pending frame,
+            // never the client's offset. Let the shim select retained replay
+            // first, then faithful or negotiated approximate repaint on a gap.
+            next.send(&Shim::ReadFrom(output.cursor())).await?;
+            output.resume_replay();
             session = Some(next);
         }
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { return Ok(()); };
                 match command {
-                    Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?; deadline = None; }
+                    Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?; if session.is_none() && bytes > 0 { output.retry_recovery(); } deadline = None; }
                     other => {
                         let detached = session.is_none();
                         if detached {
@@ -369,7 +413,7 @@ async fn terminal(
                             Command::Resize(cols, rows, px_w, px_h) => peer.send(&Shim::Resize {cols, rows, px_w, px_h}).await?,
                             Command::Credit(_) => return Err(sessions::invalid("unexpected credit dispatch")),
                         }
-                        if detached { session = None; }
+                        if detached { session = None; output.retry_recovery(); }
                     }
                 }
             }
@@ -381,12 +425,20 @@ async fn terminal(
                 else { std::future::pending().await }
             }, if pending.is_none() => {
                 match frame? {
-                    frame @ (Shim::Output(..) | Shim::Snapshot(..)) => pending = Some(frame),
+                    frame @ (Shim::Output(..) | Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => pending = Some(frame),
                     Shim::InputAck(seq) => emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?,
                     Shim::Exited(status, final_seq) => {
                         let json = serde_json::to_vec(&serde_json::json!({"type":"terminal.exited", "session_id":uuid::Uuid::from_bytes(id), "status":status, "final_seq":final_seq}))?;
                         // Keep shim exit until a future explicit lifecycle policy acknowledges it.
                         emit(&tx, Message::Event(stream, json)).await?;
+                    }
+                    Shim::Error(1 | 2, _) => {
+                        // Older shims cannot negotiate approximation. Park
+                        // until credit/input/resize triggers recovery: keep the
+                        // live mux stream, but neither busy-loop nor block PTY.
+                        let json = serde_json::to_vec(&serde_json::json!({"type":"terminal.snapshot_unavailable", "session_id":uuid::Uuid::from_bytes(id), "seq":output.cursor()}))?;
+                        emit(&tx, Message::Event(stream, json)).await?;
+                        session = None;
                     }
                     Shim::Error(..) => { emit(&tx, Message::Close(stream, "shim refused terminal request")).await?; return Ok(()); }
                     _ => return Err(sessions::invalid("unexpected shim relay frame")),
