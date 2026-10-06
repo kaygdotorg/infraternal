@@ -5,3 +5,4 @@
 //! invariant and receive focused review.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod frame;
+pub mod ring;
