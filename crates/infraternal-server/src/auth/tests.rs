@@ -2200,24 +2200,34 @@ async fn discoverable_latency_at_pending_capacity() {
     );
     now += CEREMONY + 1;
     for _ in 0..1023 {
-        f.auth.discoverable_login_start(now).await.unwrap();
+        benchmark_start(&f, false, now).await;
     }
     let mut samples = Vec::with_capacity(200);
     for _ in 0..200 {
         let start = f.auth.discoverable_login_start(now).await.unwrap();
+        let binding = f
+            .auth
+            .bind_ceremony(str_field(&start, "ceremony"), &axum::http::HeaderMap::new())
+            .await
+            .unwrap();
+        let headers = axum::http::HeaderMap::from_iter([(axum::http::header::COOKIE, binding)]);
         let mut proof = f.software.login(&start, ORIGIN, true);
         proof["response"]["userHandle"] =
             json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
         let clock = Instant::now();
         f.auth
-            .login_finish(str_field(&start, "ceremony"), proof, "benchmark", now)
+            .require_ceremony_binding(str_field(&start, "ceremony"), &headers)
+            .await
+            .unwrap();
+        f.auth
+            .pending_login_finish(str_field(&start, "ceremony"), proof, "benchmark", now)
             .await
             .unwrap();
         samples.push(clock.elapsed());
     }
     let (p50, p99) = latency_us(&mut samples);
     println!(
-        "signed discoverable finish pending=1024 n=200 p50_us={p50} p99_us={p99} (SQLite memory + real ES256 verifier)"
+        "signed discoverable finish pending=1024 n=200 p50_us={p50} p99_us={p99} (browser binding + pending unlock transaction + SQLite memory + real ES256 verifier)"
     );
     assert!(
         p99 < 10_000,
@@ -2227,11 +2237,15 @@ async fn discoverable_latency_at_pending_capacity() {
 
 /// Measure either retained identified admission or the new identity-free path through the same facade.
 async fn benchmark_start(f: &Fixture, identified: bool, now: i64) {
-    if identified {
-        f.auth.login_start(&f.user, now).await.unwrap();
+    let start = if identified {
+        f.auth.login_start(&f.user, now).await.unwrap()
     } else {
-        f.auth.discoverable_login_start(now).await.unwrap();
-    }
+        f.auth.discoverable_login_start(now).await.unwrap()
+    };
+    f.auth
+        .bind_ceremony(str_field(&start, "ceremony"), &axum::http::HeaderMap::new())
+        .await
+        .unwrap();
 }
 
 /// Nearest-rank percentiles from monotonic durations, sorted outside the timed section.
