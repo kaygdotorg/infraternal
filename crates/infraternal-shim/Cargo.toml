@@ -19,3 +19,6 @@ expect_used = "deny"
 alacritty_terminal.workspace = true
 vte.workspace = true
 nix.workspace = true
+
+[dev-dependencies]
+vt100.workspace = true

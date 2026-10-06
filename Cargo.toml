@@ -17,6 +17,7 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
+vt100 = "0.16"
 vte = "0.15"
 alacritty_terminal = "0.25"
 nix = { version = "0.30", features = ["fs", "term", "process", "signal", "user", "socket", "poll"] }
