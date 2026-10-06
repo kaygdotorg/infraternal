@@ -131,7 +131,6 @@ mod golden {
 }
 
 #[test]
-#[ignore = "additive approximate codec red regression; enable with frame support"]
 fn approximate_snapshot_codec_is_bounded_and_canonical() {
     let mut body = vec![0x1b];
     body.extend_from_slice(&42_u64.to_le_bytes());

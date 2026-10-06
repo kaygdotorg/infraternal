@@ -8,6 +8,9 @@ pub const MAX_FRAME: usize = 1024 * 1024;
 /// Capability bit 0 selects shim-owned input deduplication and PTY-write cursors.
 pub const SEQUENCED_INPUT: u64 = 1;
 
+/// Capability bit 1 selects additive bounded Snapshots with an approximation flag.
+pub const APPROXIMATE_SNAPSHOT: u64 = 2;
+
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
@@ -34,6 +37,8 @@ pub enum Frame {
     ReadFrom(u64),
     SnapshotRequest,
     Snapshot(u64, Vec<u8>),
+    /// Additive 0x1B, legal only after selecting `APPROXIMATE_SNAPSHOT`.
+    SnapshotWithFlags(u64, u8, Vec<u8>),
     Signal(u8),
     SequencedInput(u64, Vec<u8>),
     InputAck(u64),
@@ -83,6 +88,12 @@ impl Frame {
             Self::Input(bytes) => 1 + bytes.len(),
             Self::Output(_, bytes) | Self::Snapshot(_, bytes) | Self::SequencedInput(_, bytes) => {
                 9 + bytes.len()
+            }
+            Self::SnapshotWithFlags(_, flags, bytes) => {
+                if flags & !1 != 0 {
+                    return Err(invalid());
+                }
+                10 + bytes.len()
             }
             Self::Error(_, message) => 3 + message.len(),
             _ => 59,
@@ -136,6 +147,12 @@ impl Frame {
                     0x15
                 });
                 put!(seq);
+                body.extend_from_slice(bytes);
+            }
+            Self::SnapshotWithFlags(seq, flags, bytes) => {
+                body.push(0x1b);
+                put!(seq);
+                body.push(*flags);
                 body.extend_from_slice(bytes);
             }
             Self::Resize {
@@ -228,6 +245,14 @@ impl Frame {
             0x18 => Self::InputAck(p.u64()?),
             0x19 => Self::InputStateRequest,
             0x1a => Self::InputState(p.u64()?, p.u64()?),
+            0x1b => {
+                let seq = p.u64()?;
+                let flags = p.take::<1>()?[0];
+                if flags & !1 != 0 {
+                    return Err(invalid());
+                }
+                Self::SnapshotWithFlags(seq, flags, p.bytes())
+            }
             0x20 => Self::Exited(i32::from_le_bytes(p.take()?), p.u64()?),
             0x21 => Self::ExitAck,
             0x7f => Self::Error(
