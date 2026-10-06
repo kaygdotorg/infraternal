@@ -135,7 +135,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
 
   const screenshotPaths = await screenshotMatrix(page, testInfo, 1440, 900);
   const mobileContext = await browser.newContext({
-    baseURL: "http://localhost:4173",
+    baseURL: new URL(page.url()).origin,
     viewport: { width: 393, height: 852 },
     deviceScaleFactor: 1,
     isMobile: true,

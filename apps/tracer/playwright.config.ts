@@ -1,6 +1,9 @@
 /** Runs browser checks against the built tracer and its clearly marked test double. */
 import { defineConfig, devices } from "playwright/test";
 
+const testPort = Number(process.env.TRACER_TEST_PORT ?? "4173");
+const testOrigin = `http://localhost:${testPort}`;
+
 export default defineConfig({
   testDir: "./test",
   testMatch: "*.spec.ts",
@@ -13,7 +16,7 @@ export default defineConfig({
   outputDir: "./test-results",
   use: {
     ...devices["Desktop Chrome"],
-    baseURL: "http://localhost:4173",
+    baseURL: testOrigin,
     launchOptions: {
       // Keep a headless visible-surface probe on the renderer's foreground frame cadence.
       args: process.env.TRACER_CHROMIUM_FLAGS === undefined
@@ -27,7 +30,7 @@ export default defineConfig({
   },
   webServer: {
     command: "bun run build && bun run test/mock-server.ts",
-    url: "http://localhost:4173/health",
+    url: `${testOrigin}/health`,
     reuseExistingServer: false,
     timeout: 120_000,
     stdout: "pipe",
