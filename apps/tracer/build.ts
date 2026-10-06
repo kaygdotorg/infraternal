@@ -8,6 +8,7 @@ const build = await Bun.build({
   outdir: "dist",
   minify: true,
   target: "browser",
+  splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
 });
 if (!build.success) {
   throw new Error(build.logs.map((log) => log.message).join("\n"));

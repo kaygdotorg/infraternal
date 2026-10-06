@@ -5,11 +5,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#101113" />
-    <title>infraternal tracer</title>
+    <title>infraternal</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main id="app" aria-live="polite">Loading tracer…</main>
+    <!-- No interim "loading" text: the page stays a calm empty surface for the few
+         milliseconds before the sign-in screen mounts. If the script fails to start,
+         a quiet message explains it instead of an endless loading state. -->
+    <main id="app" aria-live="polite"></main>
+    <noscript><p class="boot-error">infraternal needs JavaScript.</p></noscript>
+    <script>
+      addEventListener("error", function () {
+        var app = document.getElementById("app");
+        if (app && !app.firstChild) app.innerHTML = '<p class="boot-error">infraternal could not start. Reload, and if it persists, check the browser console.</p>';
+      }, { once: true });
+    </script>
     <script type="module" src="./main.js"></script>
   </body>
 </html>

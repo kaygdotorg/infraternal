@@ -1,7 +1,9 @@
 /** Renders first-run and login screens, then hands an authenticated user to the terminal. */
 import { AuthError, checkSession, loginWithPasskey, registerOwner } from "./auth";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
-import { TerminalClient } from "./terminal";
+// The terminal (ghostty-web with its WASM, ~640 KB) loads only after sign-in, so the
+// sign-in screen paints at once. A static import made every visitor wait for it.
+import type { TerminalClient } from "./terminal";
 
 declare global {
   interface Window {
@@ -193,12 +195,12 @@ function showTerminal(): void {
     performanceProbe = new PerformanceProbe(probePanel, probeCount(query.get("n")));
   }
   const hooks = performanceProbe?.hooks();
-  void TerminalClient.open({
+  void import("./terminal").then(({ TerminalClient }) => TerminalClient.open({
     host: mustGet("#terminal-host"),
     status: mustGet("#connection-status"),
     traceMockServer: probeMode && mockMode,
     ...(hooks ? { hooks } : {}),
-  }).then((client) => {
+  })).then((client) => {
     currentTerminal = client;
     performanceProbe?.bind(client);
     if (mockMode) {
