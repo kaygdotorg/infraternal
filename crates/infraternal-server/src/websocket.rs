@@ -25,7 +25,7 @@ use sqlx::{Row, SqlitePool};
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Semaphore, mpsc};
 
@@ -131,6 +131,7 @@ async fn run_socket(
     user_id: String,
     session_token: String,
 ) {
+    let mut revocations = state.auth.revocation_events();
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
     let mut encode = Vec::with_capacity(4096);
@@ -169,8 +170,20 @@ async fn run_socket(
     let mut output_open = true;
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut loop_result = Ok(());
+    let mut expiry = socket_deadline(&state, &user_id, &session_token)
+        .await
+        .unwrap_or_else(|()| tokio::time::Instant::now());
     loop {
         tokio::select! {
+            changed = revocations.changed() => {
+                if changed.is_err() { break; }
+                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
+                expiry = deadline;
+            }
+            () = tokio::time::sleep_until(expiry) => {
+                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
+                expiry = deadline;
+            }
             input = receive_wire(&mut source, &mut receive) => {
                 let input = match input {
                     Ok(Some(input)) => input,
@@ -206,6 +219,7 @@ async fn run_socket(
                     output_open = false;
                     continue;
                 };
+                if !session_is_live(&state, &user_id, &session_token).await { break; }
                 let Some(attachment) = attachments.get_mut(&stream_id) else { continue; };
                 let sent = match output {
                     TerminalOutput::Output { out_seq, bytes } => {
@@ -536,20 +550,9 @@ where
     let decoded = decode_muxed_frame(&wire).map_err(|_| ())?;
     let stream_id = decoded.stream_id;
     let passthrough = wire.clone();
-    if let Frame::Call { call_id, .. } = &decoded.frame
-        && !session_is_live(state, user_id, session_token).await
-    {
-        return send_frame(
-            sink,
-            CONTROL_STREAM,
-            &Frame::Result {
-                call_id: *call_id,
-                ok: false,
-                json: br#"{"error":"unauthorized"}"#,
-            },
-            encode,
-        )
-        .await;
+    // Every terminal/control frame uses current authority, including attach, input and credit.
+    if !session_is_live(state, user_id, session_token).await {
+        return Err(());
     }
     match decoded.frame {
         Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
@@ -726,11 +729,31 @@ where
     }
 }
 
+/// Deadline and revocation checks are event-driven; idle sockets do no repeated database work.
+async fn socket_deadline(
+    state: &WebSocketState,
+    user_id: &str,
+    token: &str,
+) -> Result<tokio::time::Instant, ()> {
+    let now = unix_seconds()?;
+    let expiry = state
+        .auth
+        .live_expiry(token, user_id, now)
+        .await
+        .map_err(|_| ())?;
+    let remaining = u64::try_from(expiry - now).map_err(|_| ())?;
+    Ok(tokio::time::Instant::now() + Duration::from_secs(remaining))
+}
+
 async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> bool {
     let Ok(now) = unix_seconds() else {
         return false;
     };
-    matches!(state.auth.session(token, now).await, Ok(session) if session.user_id == user_id)
+    state
+        .auth
+        .socket_activity(token, user_id, now)
+        .await
+        .is_ok()
 }
 
 struct ClientAttachment {

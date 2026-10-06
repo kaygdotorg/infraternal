@@ -465,6 +465,7 @@ async fn setup_restart_rotation_expiry_and_parallel_redemption() {
 async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
+    let events = f.auth.revocation_events();
     assert!(
         f.auth
             .recovery_start(
@@ -517,6 +518,16 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         .unwrap();
     let start = f.auth.recovery_ready(&token, NOW + 2 * DAY).await.unwrap();
     let session = finish_replacement(&f, &start, &second, NOW + 2 * DAY).await;
+    assert!(
+        events.has_changed().unwrap(),
+        "recovery failed to wake live sockets"
+    );
+    assert!(
+        f.auth
+            .live_expiry(&f.session, &f.user, NOW + 2 * DAY)
+            .await
+            .is_err()
+    );
     assert!(f.auth.session(&f.session, NOW + 2 * DAY).await.is_err());
     assert!(f.auth.recovery_ready(&token, NOW + 2 * DAY).await.is_err());
     assert!(
@@ -1236,27 +1247,16 @@ async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
             .status(),
         axum::http::StatusCode::OK
     );
-    client_ws_send(
-        &mut resumed,
-        0,
-        &Frame::Call {
-            call_id: 8,
-            action_id: "terminal.open",
-            input_json: br#"{"cols":80,"rows":24,"px_w":0,"px_h":0}"#,
-        },
-    )
-    .await;
-    let unauthorized_call = read_client_frame(&mut resumed).await;
-    match decode_muxed_frame(&unauthorized_call)
-        .expect("unauthorized call result")
-        .frame
-    {
-        Frame::Result {
-            call_id: 8,
-            ok: false,
-            json,
-        } => assert_eq!(json, br#"{"error":"unauthorized"}"#),
-        _ => panic!("revoked session still authorized a call"),
+    let ended = tokio::time::timeout(Duration::from_millis(1500), resumed.next()).await;
+    assert!(
+        ended.is_ok(),
+        "logout did not invalidate live terminal socket"
+    );
+    if let Some(Ok(Message::Binary(bytes))) = ended.unwrap() {
+        assert!(matches!(
+            decode_muxed_frame(&bytes).unwrap().frame,
+            Frame::Close { .. }
+        ));
     }
 
     drop(resumed);
@@ -2385,3 +2385,6 @@ async fn audit_ceremony_browser_binding() {
         "foreign finish drained original ceremony"
     );
 }
+
+#[path = "socket_tests.rs"]
+mod socket_tests;

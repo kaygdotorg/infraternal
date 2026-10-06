@@ -103,6 +103,7 @@ pub struct Auth {
     origin: String,
     pending: Arc<Mutex<Pending>>,
     ingress: Arc<Mutex<http::Ingress>>,
+    revocations: Arc<tokio::sync::watch::Sender<()>>,
     #[cfg(test)]
     recovery_pause: Arc<Mutex<Option<Arc<RecoveryPause>>>>,
 }
@@ -141,6 +142,7 @@ impl Auth {
             origin: url.origin().ascii_serialization(),
             pending: Arc::default(),
             ingress: Arc::default(),
+            revocations: Arc::new(tokio::sync::watch::channel(()).0),
             #[cfg(test)]
             recovery_pause: Arc::default(),
         })

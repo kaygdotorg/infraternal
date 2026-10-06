@@ -175,6 +175,9 @@ impl Auth {
         let token = random();
         insert_session(&mut tx, &token, &registration.user, "enrollment", now).await?;
         tx.commit().await?;
+        if matches!(registration.authority, Authority::Recovery(_)) {
+            self.revocations.send_replace(());
+        }
         Ok(token)
     }
 

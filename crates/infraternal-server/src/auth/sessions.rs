@@ -73,11 +73,39 @@ impl Auth {
 
     /// Revoke the current session immediately.
     pub async fn logout(&self, token: &str) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+        let changed = sqlx::query("DELETE FROM sessions WHERE token_hash=?")
             .bind(hash(token))
             .execute(&self.pool)
-            .await?;
+            .await?
+            .rows_affected();
+        if changed != 0 {
+            self.revocations.send_replace(());
+        }
         Ok(())
+    }
+
+    /// Wake live sockets on committed revocation without periodic idle database polling.
+    pub(crate) fn revocation_events(&self) -> tokio::sync::watch::Receiver<()> {
+        self.revocations.subscribe()
+    }
+
+    /// Recheck every hot-path event with a read, renewing active sessions at most once a minute.
+    pub(crate) async fn socket_activity(&self, token: &str, user: &str, now: i64) -> Result<()> {
+        let expiry = self.live_expiry(token, user, now).await?;
+        if expiry < now + SESSION - 60 {
+            let changed = sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
+                .bind(now + SESSION).bind(hash(token)).bind(user).bind(now).execute(&self.pool).await?.rows_affected();
+            if changed != 1 {
+                return Err(Error::Denied);
+            }
+        }
+        Ok(())
+    }
+
+    /// Read a socket's actual deadline without sliding it during idle checks.
+    pub(crate) async fn live_expiry(&self, token: &str, user: &str, now: i64) -> Result<i64> {
+        sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
+            .bind(hash(token)).bind(user).bind(now).fetch_optional(&self.pool).await?.ok_or(Error::Denied)
     }
 }
 

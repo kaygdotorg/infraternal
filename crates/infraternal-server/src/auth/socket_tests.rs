@@ -1,0 +1,109 @@
+//! Real WebSocket regressions for upgrade reservation, revoked idle sockets and clean Close.
+use super::*;
+
+async fn socket_fixture() -> (Fixture, SocketAddr, tokio::task::JoinHandle<()>) {
+    let f = fixture().await;
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let state = crate::websocket::WebSocketState::new(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        EmbeddedAgent::from_test_socket(socket),
+    );
+    let app = crate::websocket::router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (f, address, server)
+}
+
+#[tokio::test]
+async fn revoked_idle_socket_loses_all_authority() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "revocation",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    f.auth.logout(&f.session).await.unwrap();
+    let next = tokio::time::timeout(Duration::from_millis(1500), socket.next()).await;
+    assert!(
+        next.is_ok(),
+        "revoked idle socket remained open past revocation deadline"
+    );
+    if let Some(Ok(Message::Binary(bytes))) = next.unwrap() {
+        assert!(
+            !matches!(
+                decode_muxed_frame(&bytes).unwrap().frame,
+                Frame::Pong { .. }
+            ),
+            "revoked socket retained terminal/control authority"
+        );
+    }
+    server.abort();
+}
+
+/// Local-network overhead with the real router, real SQLite authority and 16 simultaneous sockets.
+#[tokio::test]
+#[ignore = "release-only measurement without concurrent compilation"]
+async fn socket_authority_latency_at_user_capacity() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let mut sockets = Vec::new();
+    for _ in 0..16 {
+        let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+            .await
+            .unwrap();
+        assert_server_hello(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "capacity-bench",
+            },
+        )
+        .await;
+        read_welcome(&mut socket).await;
+        sockets.push(socket);
+    }
+    let mut samples = Vec::new();
+    let load = std::fs::read_to_string("/proc/loadavg").unwrap();
+    for nonce in 0..200 {
+        let durations = futures_util::future::join_all(sockets.iter_mut().map(async |socket| {
+            let start = Instant::now();
+            client_ws_send(socket, 0, &Frame::Ping { nonce, sent_us: 0 }).await;
+            let wire = read_client_frame(socket).await;
+            assert!(matches!(decode_muxed_frame(&wire).unwrap().frame, Frame::Pong { nonce: got, .. } if got == nonce));
+            start.elapsed()
+        })).await;
+        samples.extend(durations);
+    }
+    let (p50, p99) = latency_us(&mut samples);
+    println!(
+        "socket authority: sockets=16 simultaneous_per_round=16 rounds=200 n={} p50={p50}us p99={p99}us arch={} load={}",
+        samples.len(),
+        std::env::consts::ARCH,
+        load.trim()
+    );
+    assert!(
+        p99 < 5000,
+        "authority/control overhead exceeds local 5ms budget"
+    );
+    server.abort();
+}
