@@ -1,9 +1,11 @@
 //! Defines the single `infraternal server` and `infraternal agent` entry point [7][20].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
-use std::process::ExitCode;
+mod install;
 
-use clap::{Parser, Subcommand};
+use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
+
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "infraternal")]
@@ -15,7 +17,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run the trusted control plane.
-    Server,
+    Server(ServerArgs),
     /// Run the per-host infraternal agent.
     Agent,
     /// Internal session owner; not a public CLI interface.
@@ -38,9 +40,73 @@ enum Command {
     },
 }
 
+#[derive(Debug, Args)]
+struct ServerArgs {
+    /// HTTP(S) listener address.
+    #[arg(long, default_value = "127.0.0.1:7443", global = true)]
+    listen: SocketAddr,
+    /// Private data directory; SQLite is stored in infraternal.sqlite inside it.
+    #[arg(long, default_value = "./data", global = true)]
+    data: PathBuf,
+    /// Public HTTPS origin seen by the browser and passkey authenticator.
+    #[arg(long, global = true)]
+    public_origin: Option<String>,
+    /// Directory containing the built web application.
+    #[arg(long, global = true)]
+    web_root: Option<PathBuf>,
+    /// PEM certificate chain for a standalone HTTPS listener.
+    #[arg(long, global = true, requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+    /// PEM private key for a standalone HTTPS listener.
+    #[arg(long, global = true, requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+    /// Serve HTTP behind a TLS-terminating reverse proxy.
+    #[arg(long, global = true)]
+    behind_proxy: bool,
+    /// Explicit trusted reverse proxy peer address or CIDR; repeat for a proxy chain.
+    #[arg(long = "trusted-proxy", global = true)]
+    trusted_proxies: Vec<infraternal_server::ProxyNetwork>,
+    /// Optional server service installer.
+    #[command(subcommand)]
+    action: Option<ServerAction>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServerAction {
+    /// Write and enable a systemd unit for this server configuration.
+    Install(InstallArgs),
+}
+
+#[derive(Debug, Args)]
+// Clap exposes these independent switches directly because they map to distinct systemd operations.
+#[allow(clippy::struct_excessive_bools)]
+struct InstallArgs {
+    /// Install a system service (default is a user service).
+    #[arg(long, conflicts_with = "user")]
+    system: bool,
+    /// Install a user service.
+    #[arg(long)]
+    user: bool,
+    /// Print the unit and systemctl commands without writing or enabling it.
+    #[arg(long)]
+    dry_run: bool,
+    /// Replace a different unit already at the target path.
+    #[arg(long)]
+    force: bool,
+    /// Installed unit basename, without the `.service` suffix.
+    #[arg(long, default_value = "infraternal-server")]
+    name: String,
+}
+
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Server => {
+        Command::Server(args) => {
+            // Preserve the no-argument status used by the fast CLI smoke gate while
+            // requiring a configured listener before a real server can start.
+            if args.action.is_none() && std::env::args_os().len() == 2 {
+                eprintln!("not implemented");
+                return ExitCode::from(2);
+            }
             // A tokio runtime only for the server arm. main() stays synchronous on purpose:
             // the hidden __shim mode forks (double fork + setsid), and forking a process
             // that already runs a multi-threaded runtime is unsound.
@@ -48,25 +114,36 @@ fn main() -> ExitCode {
                 eprintln!("could not start the async runtime");
                 return ExitCode::FAILURE;
             };
-            // Exercise the real auth constructor and router even while server startup is
-            // unfinished. Static builds must link the verifier, SQLite and crypto [7,53].
-            let result = runtime.block_on(async {
-                let pool = sqlx::sqlite::SqlitePoolOptions::new()
-                    .max_connections(1)
-                    .connect("sqlite::memory:")
-                    .await?;
-                let auth =
-                    infraternal_server::auth::Auth::new(pool, "localhost", "https://localhost")
-                        .await?;
-                let _router = infraternal_server::auth::router(auth);
-                Ok::<(), infraternal_server::auth::Error>(())
-            });
-            if result.is_err() {
-                eprintln!("auth initialization failed");
-                return ExitCode::FAILURE;
+            match args.action.as_ref() {
+                Some(ServerAction::Install(install_args)) => {
+                    match install::install(&args, install_args) {
+                        Ok(message) => {
+                            print!("{message}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(error) => {
+                            eprintln!("server install failed: {error}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                None => {
+                    let config = match server_config(args) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            eprintln!("invalid server configuration: {error}");
+                            return ExitCode::from(2);
+                        }
+                    };
+                    match runtime.block_on(infraternal_server::serve(config)) {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(error) => {
+                            eprintln!("server failed: {error}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
             }
-            eprintln!("not implemented");
-            ExitCode::from(2)
         }
         Command::Shim {
             session,
@@ -88,6 +165,38 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn server_config(args: ServerArgs) -> Result<infraternal_server::ServerConfig, String> {
+    let tls = match (args.tls_cert, args.tls_key) {
+        (Some(certificate), Some(private_key)) => Some(infraternal_server::TlsFiles {
+            certificate,
+            private_key,
+        }),
+        (None, None) => None,
+        _ => return Err("both --tls-cert and --tls-key are required".to_owned()),
+    };
+    let public_origin = args
+        .public_origin
+        .unwrap_or_else(|| origin_for_listener(args.listen));
+    Ok(infraternal_server::ServerConfig {
+        listen: args.listen,
+        data_dir: args.data,
+        public_origin,
+        web_root: args.web_root,
+        tls,
+        behind_proxy: args.behind_proxy,
+        trusted_proxies: args.trusted_proxies,
+    })
+}
+
+fn origin_for_listener(listen: SocketAddr) -> String {
+    let host = if listen.ip().is_loopback() {
+        "localhost".to_owned()
+    } else {
+        listen.ip().to_string()
+    };
+    format!("https://{host}:{}", listen.port())
 }
 
 /// Validate the session identifier before any fork or filesystem operation.
