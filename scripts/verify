@@ -25,7 +25,10 @@ case "$1" in
     fast)
         rust_verify_fast
         ;;
-    integration|browser|bench)
+    browser)
+        "${script_dir}/verify-auth-browser"
+        ;;
+    integration|bench)
         printf '%s: not yet implemented\n' "$1"
         ;;
     *)
