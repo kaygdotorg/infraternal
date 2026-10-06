@@ -160,3 +160,30 @@ Exit is a wire Event on the terminal mux stream, sub_id 0, JSON
 "final_seq": u64 }`. The embedded infraternal agent uses the inherited
 socketpair for leg B; its trusted spawning server owns the channel. This
 introduces no listener or mTLS bypass.
+
+### Capability bit 1: MULTI_WRITER (#34; remaining #28 acceptance)
+
+Bit 1 requires bit 0. A supporting shim advertises both in Hello; a new
+infraternal agent selects both in Attach, then sends `SelectWriter` (0x1B,
+exactly one little-endian u32 identity). Identity zero is reserved for legacy
+bit-0 peers. Select a nonzero identity exactly once, before state, input or
+resize requests. Existing v1 frame layouts and caps-zero behavior are unchanged.
+The parser fuzz target also decodes this additive fixed-length frame.
+
+Each selected writer has independent accepted/written offsets. A new device
+starts at zero; reconnecting the same identity retains both cursors. The daemon
+uses its monotonic server-assigned leg-B stream id, never an untrusted browser
+identity. There are at most 32 simultaneous peers and 512 retained nonzero
+writer identities per surviving shim, plus legacy identity zero. Refuse a new
+identity at capacity without evicting existing cursors. Legacy identity zero
+keeps replacement semantics; replacing the same nonzero identity disconnects
+its former peer. A shim lacking bit 1 is refused for multi-device attachment;
+it cannot safely impersonate independent writers.
+
+All writers share the existing at-most-1-MiB input byte queue. Bounded ownership
+segments associate each queued byte with its writer; actual partial PTY writes
+advance only those owners' written offsets. Duplicate trimming and gap/overflow
+refusal remain per writer. Output and its ring cursor remain shared. Slow
+viewers recover from the ring or Snapshot without preventing a credited viewer
+from receiving live output. Newly accepted input selects that peer's remembered
+geometry [74]; duplicate input does not steal the active geometry.

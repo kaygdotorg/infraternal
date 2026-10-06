@@ -87,6 +87,18 @@ server records the returned session id for the authenticated user before it
 returns the result to the browser. A terminal `AttachTerm` then names that
 session on a server-opened even stream to the embedded infraternal agent.
 
+The browser tracer also calls `ssh.session.open` with `{}` or an optional
+`host_id`. Omission chooses the embedded host at 80x24; its result uses a
+canonical hyphenated UUID. Explicit remote hosts are denied until the host
+inventory path exists. The legacy core action and its result spelling above
+remain available. Both actions enforce the authenticated user's ownership.
+
+The trusted server adapts either action to the leg-B daemon request
+`terminal.open` with `{ "uid": u32, "cols": u16, "rows": u16 }`: uid is the
+server's effective uid, never browser supplied. The daemon returns a canonical
+hyphenated UUID; the server accepts that or its legacy lowercase 32-hex spelling.
+Pixel dimensions are carried by later Resize frames, not daemon-open input.
+
 ## 4. Frames
 
 Ranges: `0x00–0x0F` connection, `0x10–0x2F` terminal hot path, `0x30–0x3F`
@@ -147,8 +159,9 @@ frames are binary, because they carry each keystroke and each output chunk.
   The current implementation preserves this identity only during connection
   resume. After the resume window, pending input needs a separate durable writer
   capability: blindly replaying it with a new writer can duplicate accepted input.
-  This longer-drop contract gap is recorded on #28; production daemon/PTY proof
-  is blocked by the currently unimplemented host daemon.
+  This longer-drop contract gap remains recorded on #28. The merged daemon now
+  selects independent shim writers (contracts/shim.md bit 1); real shared PTY
+  tests cover independent Acks and full-range replay across daemon crashes.
 - **Window.** A connection can resume for `resume window seconds` (default
   120). After that, the client opens a new connection and attaches by
   session id. The session itself lives in the shim, without a time limit.
