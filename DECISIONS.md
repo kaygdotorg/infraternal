@@ -1115,3 +1115,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Deploys:** lean and fast: every change that passes its gate and a
        hands-on check is deployed to monitor01 with a short note, for many
        quick test rounds. Mockups never deploy before owner approval.
+171. **The orchestrator builds the UI (owner, 2026-10-07):** after GPT-built
+     mockups were repeatedly rejected as heavy and unsubtle, every UI mockup
+     and UI change is written by the orchestrator (Claude) itself, in the
+     product code, and checked by clicking through it before the owner sees
+     it. Codex jobs keep backend, tests, measurement and mechanical work. The
+     taste rules apply to all UI: subtle; focus rings only for keyboard focus;
+     no glossy bevels on in-page controls (glass only for floating overlays,
+     D160); desktop-sized controls on desktop; every state change animated;
+     one input rather than mode tabs; no settings sections inside flows.
