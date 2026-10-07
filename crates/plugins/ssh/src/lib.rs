@@ -3,6 +3,7 @@
 
 pub mod credentials;
 pub mod model;
+pub mod openssh;
 pub mod probe;
 pub mod process;
 pub mod transport;
