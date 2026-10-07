@@ -1,18 +1,20 @@
 /** Mounts the mock-only host discovery and SSH bootstrap window on the tracer canvas. */
 import {
   enhanceSwitch,
+  createSpinner,
   hostSourceIconMarkup,
   installStretchingCapsule,
   mountConfirmTip,
+  mountStepStatus,
   mountToast,
   showTip,
   Spring,
   springCheckbox,
-  tick,
   type ConfirmTipController,
   type HostSource,
+  type StepStatus,
+  type StepStatusController,
   type StretchingCapsule,
-  type Tick,
   type ToastController,
   type UiSwitch,
 } from "../../../packages/ui/src/index";
@@ -37,7 +39,7 @@ const BOOTSTRAP_STEPS = [
 
 type AddHostStep = "entry" | "discovery" | "manual" | "credentials" | "root-consent" | "bootstrap" | "failure" | "success";
 type FailureKind = "unreachable" | "authentication" | "mesh-policy";
-type AddHostFailure = { kind: FailureKind; host: AddHostFixture; logs: string };
+type AddHostFailure = { kind: FailureKind; host: AddHostFixture };
 type ProtoActionDetail = { action?: unknown; source?: unknown };
 
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({
@@ -52,13 +54,13 @@ function one<T extends HTMLElement>(root: ParentNode, selector: string): T {
 
 function failureFor(host: AddHostFixture): AddHostFailure | undefined {
   if (host.reachability === "unreachable") {
-    return { kind: "unreachable", host, logs: `SSH reachability check: ${host.evidence}\nNo authentication request was sent.` };
+    return { kind: "unreachable", host };
   }
   if (host.reachability === "mesh-policy") {
-    return { kind: "mesh-policy", host, logs: `Mesh peer state: connected\nSSH reachability: denied on TCP port 22\nEvidence: ${host.evidence}` };
+    return { kind: "mesh-policy", host };
   }
   if (host.authentication === "refused") {
-    return { kind: "authentication", host, logs: "SSH reachability: port 22 answered\nAuthentication: the selected identity was refused\nNo shell was opened." };
+    return { kind: "authentication", host };
   }
   return undefined;
 }
@@ -89,7 +91,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
   card.tabIndex = -1;
   card.innerHTML = `
     <header class="window-header addhost-window-header">
-      <div class="window-host-pill ui-pill ui-overlay-surface"><span class="addhost-window-title">Add hosts</span></div>
+      <div class="window-host-pill ui-pill ui-overlay-surface" hidden><span class="addhost-window-title"></span></div>
       <div class="window-header-actions">
         <button class="window-header-action ui-icon-button ui-overlay-surface" type="button" data-addhost-action="close" aria-label="Close add hosts" data-tip="Close add hosts">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
@@ -104,6 +106,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
   const body = one<HTMLElement>(card, ".addhost-content");
   const footer = one<HTMLElement>(card, ".addhost-footer");
   const title = one<HTMLElement>(card, ".addhost-window-title");
+  const hostPill = one<HTMLElement>(card, ".addhost-window-header .window-host-pill");
   const toast: ToastController = mountToast(stage);
   const query = new URLSearchParams(location.search);
   const emptyEntry = query.get("empty") === "1";
@@ -121,7 +124,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
   let confirmTip: ConfirmTipController | undefined;
   let sourceSwitches: UiSwitch[] = [];
   let timerIds: number[] = [];
-  let progressTicks = new Map<string, Tick[]>();
+  let progressMarks = new Map<string, StepStatusController[]>();
   let terminalWindows: Array<{ group: HTMLElement; card: HTMLElement; host: AddHostFixture }> = [];
   let disposed = false;
 
@@ -166,7 +169,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
   }
 
   function sourceMarkup(source: HostSource): string {
-    return `<span class="addhost-source-chip" data-source="${source}">${hostSourceIconMarkup(source)}<span>${SOURCE_LABELS[source]}</span></span>`;
+    return `<span class="addhost-source-chip" data-source="${source}"><span class="addhost-source-separator" aria-hidden="true">·</span>${hostSourceIconMarkup(source)}<span>${SOURCE_LABELS[source]}</span></span>`;
   }
 
   function hostRowMarkup(host: AddHostFixture): string {
@@ -178,22 +181,19 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
         : host.reachability === "mesh-policy"
           ? "SSH blocked · mesh policy"
           : "No SSH response on port 22";
-    const sourceChips = [
-      ...host.sources.map(sourceMarkup),
-      ...(host.alreadyAdded ? [sourceMarkup("already-added")] : []),
-    ].join("");
+    const sourceChips = host.sources.map(sourceMarkup).join("");
     return `<li class="addhost-host-row" data-host-row data-host-id="${escapeHtml(host.id)}" data-unavailable="${String(host.alreadyAdded)}">
       <label class="addhost-host-select" data-touch-target>
         <input type="checkbox" data-host-choice aria-label="Select ${escapeHtml(host.id)}" value="${escapeHtml(host.id)}" ${host.alreadyAdded ? "disabled" : ""} ${selected ? "checked" : ""} />
-        <span class="addhost-checkmark" aria-hidden="true"></span>
-        <span class="addhost-host-copy">
-          <span class="addhost-host-name">${escapeHtml(host.id)}</span>
-          <span class="addhost-host-system">${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span>
-          <span class="addhost-host-sources">${sourceChips}</span>
-        </span>
       </label>
-      <span class="addhost-host-status" data-ssh-status data-status="${host.reachability}">${status}</span>
-      <button type="button" class="addhost-ip-action" data-addhost-action="show-ip" data-host-id="${escapeHtml(host.id)}" aria-label="Show IP for ${escapeHtml(host.id)}">Show IP</button>
+      <span class="addhost-host-copy">
+        <span class="addhost-host-name">${escapeHtml(host.id)}</span>
+        <span class="addhost-host-secondary"><span class="addhost-host-system">${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span>${sourceChips}</span>
+      </span>
+      <span class="addhost-host-trailing">
+        <span class="addhost-host-status" data-ssh-status data-status="${host.alreadyAdded ? "added" : host.reachability}">${status}</span>
+        <button type="button" class="addhost-ip-action" data-addhost-action="show-ip" data-host-id="${escapeHtml(host.id)}" aria-label="Show IP for ${escapeHtml(host.id)}">Show IP</button>
+      </span>
     </li>`;
   }
 
@@ -297,8 +297,8 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
       <article class="addhost-consent-card">
         ${roots.map((host) => `<div class="addhost-consent-host"><strong>${escapeHtml(host.user)}@${escapeHtml(host.id)}</strong><span>${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span></div>`).join("")}
         <p class="addhost-consent-copy">Installing the infraternal agent as root gives it access to every file on the host. <strong>Trust is one thing we can't get back once lost.</strong></p>
-        <label class="addhost-consent-label"><input type="checkbox" data-root-consent aria-label="I trust ${escapeHtml(rootNames)} with root access" /><span class="addhost-consent-tick" aria-hidden="true"></span><span>I trust infraternal with root access on ${escapeHtml(rootNames)}.</span></label>
-        ${roots.length > 1 ? `<label class="addhost-consent-label"><input type="checkbox" data-consent-all aria-label="Apply to all ${roots.length} hosts that allow sudo" /><span class="addhost-consent-tick" aria-hidden="true"></span><span>Apply to all ${roots.length} hosts that allow sudo</span></label>` : ""}
+        <label class="addhost-consent-label"><input type="checkbox" data-root-consent aria-label="I trust ${escapeHtml(rootNames)} with root access" /><span>I trust infraternal with root access on ${escapeHtml(rootNames)}.</span></label>
+        ${roots.length > 1 ? `<label class="addhost-consent-label"><input type="checkbox" data-consent-all aria-label="Apply to all ${roots.length} hosts that allow sudo" /><span>Apply to all ${roots.length} hosts that allow sudo</span></label>` : ""}
       </article>`;
     const consentInput = body.querySelector<HTMLInputElement>("[data-root-consent]");
     if (consentInput) springCheckbox(consentInput);
@@ -311,28 +311,27 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     body.innerHTML = `<div class="addhost-heading"><h1>Installing infraternal agent</h1><p>The system check is read-only. Host facts are gathered after installation.</p></div>
       <ul class="addhost-progress-list" aria-live="polite">${installHosts.map((host) => `<li class="addhost-progress-host" data-progress-host="${escapeHtml(host.id)}">
         <h2>${escapeHtml(host.id)} · ${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</h2>
-        <ol class="addhost-progress-steps">${BOOTSTRAP_STEPS.map((item) => `<li class="addhost-progress-step" data-bootstrap-step="${item.id}" data-state="pending"><span class="addhost-progress-mark" aria-hidden="true"></span><span>${item.label}</span><span class="addhost-spinner" hidden></span></li>`).join("")}</ol>
+        <ol class="addhost-progress-steps">${BOOTSTRAP_STEPS.map((item) => `<li class="addhost-progress-step" data-bootstrap-step="${item.id}" data-state="pending"><span class="addhost-progress-mark"></span><span>${item.label}</span></li>`).join("")}</ol>
       </li>`).join("")}</ul>
       ${priorFailures.map((item) => `<p class="addhost-policy-evidence">${escapeHtml(item.host.id)} could not connect. The other hosts continue independently.</p>`).join("")}`;
     setFooter("");
-    progressTicks = new Map();
+    progressMarks = new Map();
     for (const host of installHosts) {
       const row = one<HTMLElement>(body, `[data-progress-host="${CSS.escape(host.id)}"]`);
       const markers = [...row.querySelectorAll<HTMLElement>(".addhost-progress-mark")];
-      progressTicks.set(host.id, markers.map((marker) => tick(marker, false)));
+      progressMarks.set(host.id, markers.map((marker) => mountStepStatus(marker)));
     }
     const advance = (completed: number): void => {
       for (const host of installHosts) {
         const row = one<HTMLElement>(body, `[data-progress-host="${CSS.escape(host.id)}"]`);
-        const hostTicks = progressTicks.get(host.id) ?? [];
+        const hostMarks = progressMarks.get(host.id) ?? [];
         const rows = [...row.querySelectorAll<HTMLElement>("[data-bootstrap-step]")];
         rows.forEach((stepRow, index) => {
           const done = index < completed;
-          const active = index === completed && completed < BOOTSTRAP_STEPS.length;
-          stepRow.dataset.state = done ? "done" : active ? "active" : "pending";
-          hostTicks[index]?.set(done, false);
-          const spinner = stepRow.querySelector<HTMLElement>(".addhost-spinner");
-          if (spinner) spinner.hidden = !active;
+          const running = index === completed && completed < BOOTSTRAP_STEPS.length;
+          const state: StepStatus = done ? "done" : running ? "running" : "pending";
+          stepRow.dataset.state = state;
+          hostMarks[index]?.set(state);
         });
       }
       if (completed >= BOOTSTRAP_STEPS.length) {
@@ -347,6 +346,8 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
   function makeTerminalWindow(host: AddHostFixture, rootless: boolean): { group: HTMLElement; card: HTMLElement; host: AddHostFixture } {
     const terminalGroup = document.createElement("section");
     terminalGroup.className = "window-group addhost-result-group";
+    // Keep the first host window wholly outside the success view until the toast opens it.
+    if (!panes.querySelector(".addhost-result-group")) terminalGroup.classList.add("addhost-result-first");
     terminalGroup.setAttribute("aria-label", `Canvas window for ${host.id}`);
     const terminalCard = document.createElement("section");
     terminalCard.className = "pane-card window-card addhost-result-window";
@@ -404,9 +405,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
           cancelLabel: "No",
           onConfirm: () => {
             const original = rootPill.textContent ?? "Root available";
-            const spinner = document.createElement("span");
-            spinner.className = "addhost-spinner";
-            spinner.setAttribute("aria-hidden", "true");
+            const spinner = createSpinner();
             rootPill.prepend(spinner);
             showTip(rootPill, "Starting root agent", 1800);
             window.setTimeout(() => {
@@ -425,21 +424,29 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     const ready = installHosts;
     const first = ready[0];
     if (!first) { setStep("discovery"); return; }
-    title.textContent = `${first.user}@${first.id}`;
     body.innerHTML = `<div class="addhost-success">
-      <div class="addhost-heading"><h1>${escapeHtml(first.id)} is ready</h1><p>Its terminal window is open on the canvas. The canvas stayed where it was.</p></div>
+      <div class="addhost-heading"><h1>${escapeHtml(first.id)} is ready</h1><p>Its terminal window is open on the canvas.</p></div>
       <p class="addhost-ready-line"><span aria-hidden="true">✓</span> Connected · ${escapeHtml(first.operatingSystem)} · ${escapeHtml(first.architecture)}</p>
       ${priorFailures.map((item) => `<p class="addhost-policy-evidence">${escapeHtml(item.host.id)} could not be added. Other selected hosts continued.</p>`).join("")}
+      <button type="button" class="addhost-success-next" data-addhost-action="back">Add another host</button>
       <pre class="addhost-terminal-output" aria-label="Terminal output">${escapeHtml(`${first.operatingSystem} · ${first.architecture}\n\n${first.user}@${first.id}:~$ `)}</pre>
     </div>`;
-    setFooter(`<button type="button" class="addhost-secondary" data-addhost-action="back">Add another host</button>`);
+    setFooter("");
     clearTerminalWindows();
     terminalWindows = ready.map((host) => makeTerminalWindow(host, !installAsRoot));
     const firstWindow = terminalWindows[0];
     if (firstWindow) {
       toast.show({
         message: `${first.id} is ready`,
-        action: { label: "Go to window", onSelect: () => firstWindow.card.focus({ preventScroll: true }) },
+        action: {
+          label: "Go to window",
+          onSelect: () => {
+            group.hidden = true;
+            firstWindow.group.classList.remove("addhost-result-first");
+            panes.scrollLeft = 0;
+            firstWindow.card.focus({ preventScroll: true });
+          },
+        },
       });
     }
   }
@@ -461,22 +468,42 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     setStep("failure");
   }
 
+  function retryFailure(): void {
+    if (!failure) return;
+    if (failure.kind === "authentication") {
+      selectedHosts = [failure.host];
+      setStep("credentials");
+      return;
+    }
+    const next = failureFor(failure.host);
+    if (next) showFailure(next);
+  }
+
   function renderFailure(): void {
     if (!failure) { setStep("discovery"); return; }
     const copy = failure.kind === "unreachable"
-      ? { heading: "Host unreachable", message: "No SSH response on port 22." }
+      ? {
+          heading: "Host unreachable",
+          happened: `SSH to ${failure.host.id} got no response on TCP 22.`,
+          next: "Check that the host is online and SSH is listening, then retry.",
+        }
       : failure.kind === "authentication"
-        ? { heading: "SSH key refused", message: "The host answered, but it did not accept this key." }
-        : { heading: "SSH blocked by mesh policy", message: "The host is reachable on the mesh, but its access policy blocks SSH on port 22." };
-    title.textContent = failure.host.id;
-    body.innerHTML = `<div class="addhost-heading"><h1>${copy.heading}</h1><p>${escapeHtml(failure.host.user)}@${escapeHtml(failure.host.id)} · ${escapeHtml(failure.host.operatingSystem)}</p></div>
+        ? {
+            heading: "SSH key refused",
+            happened: `SSH to ${failure.host.id} reached the host, but the selected identity was refused.`,
+            next: "Choose another SSH identity or correct its access, then retry.",
+          }
+        : {
+            heading: "SSH blocked by mesh policy",
+            happened: `SSH to ${failure.host.id} is blocked by the mesh access policy (TCP 22).`,
+            next: "Ask a mesh admin to allow TCP 22 from this server, then retry.",
+          };
+    body.innerHTML = `<div class="addhost-heading"><h1>${copy.heading}</h1></div>
       <article class="addhost-error" data-failure="${failure.kind}">
-        <p>${copy.message}</p>
-        <p class="addhost-policy-evidence">${escapeHtml(failure.host.evidence)}</p>
-        ${failure.kind === "mesh-policy" ? `<p class="addhost-policy-note">Ask a mesh admin to allow TCP 22 from this server.</p>` : ""}
-        <details><summary>Browse logs</summary><pre>${escapeHtml(failure.logs)}</pre></details>
+        <p>${escapeHtml(copy.happened)}</p>
+        <p class="addhost-policy-note">${escapeHtml(copy.next)}</p>
       </article>`;
-    setFooter(`<button type="button" class="addhost-secondary" data-addhost-action="back">Back to hosts</button>${failure.kind === "authentication" ? `<button type="button" class="addhost-primary" data-addhost-action="retry-identity">Try another identity</button>` : ""}`);
+    setFooter(`<button type="button" class="addhost-secondary" data-addhost-action="back">Back to hosts</button><button type="button" class="addhost-primary" data-addhost-action="retry">Retry</button>`);
   }
 
   function openRootChoice(): void {
@@ -565,7 +592,9 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
   }
 
   function setWindowTitle(): void {
-    if (step !== "success" && step !== "failure") title.textContent = "Add hosts";
+    const host = step === "success" ? installHosts[0] : step === "failure" ? failure?.host : undefined;
+    hostPill.hidden = !host;
+    if (host) title.textContent = `${host.user}@${host.id}`;
   }
 
   function render(): void {
@@ -625,7 +654,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
         setStep("discovery");
       } else if (step === "credentials" && selectedHosts.length === 1 && selectedHosts[0]?.id !== "nix-cache") setStep("discovery");
       else setStep("discovery");
-    } else if (action === "retry-identity") setStep("credentials");
+    } else if (action === "retry") retryFailure();
     else if (action === "show-ip") revealIp(button);
     else if (action === "root-available") {
       const hostId = button.dataset.hostId;
