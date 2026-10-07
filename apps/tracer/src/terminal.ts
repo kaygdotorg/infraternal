@@ -16,16 +16,20 @@ const INPUT_FRAME_LIMIT = 16 * 1024;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
+const THEME_ROWS_PER_FRAME = 4;
 const encoder = new TextEncoder();
 
 /** Private hooks on the pinned Ghostty build, kept at the renderer boundary for idle parking. */
 interface GhosttyActivityControls {
   startRenderLoop(): void;
   cancelRenderLoop(): void;
+  scrollbarOpacity: number;
   renderer?: {
     setCursorBlink(enabled: boolean): void;
     setTheme(theme: ITheme): void;
-    render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown): void;
+    render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown, scrollbarOpacity?: number): void;
+    renderLine?(line: unknown, row: number, cols: number): void;
+    renderCursor?(x: number, y: number): void;
   };
 }
 
@@ -179,6 +183,8 @@ export class TerminalClient {
   private connectionIsResume = false;
   private pingTimer = 0;
   private renderIdleTimer = 0;
+  private themePaintFrame = 0;
+  private rendererCursorBlinking = false;
   private nextPingNonce = 0n;
   private readonly pendingPings = new Map<bigint, number>();
   private inputModifier: "ctrl" | "alt" | undefined;
@@ -201,6 +207,7 @@ export class TerminalClient {
     window.visualViewport?.addEventListener("resize", this.onViewportChange);
     window.visualViewport?.addEventListener("scroll", this.onViewportChange);
     this.terminal.onResize(({ cols, rows }) => {
+      this.cancelThemePaint();
       const rect = config.host.getBoundingClientRect();
       this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
       if (this.attached) this.sendFrame(TERMINAL_STREAM, { type: "Resize", ...this.lastSize });
@@ -333,10 +340,7 @@ export class TerminalClient {
     this.terminal.options.theme = theme;
     const renderer = this.ghostty.renderer;
     renderer?.setTheme(theme);
-    // Theme selection is a state update, not a reason to restart the idle loop.
-    if (renderer && this.terminal.wasmTerm) {
-      renderer.render(this.terminal.wasmTerm, true, this.terminal.viewportY, this.terminal);
-    }
+    this.repaintTheme();
   }
 
   /** Forces a WebSocket close for the opt-in resume probe. */
@@ -354,6 +358,7 @@ export class TerminalClient {
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
     this.config.onConnectionChange?.(false);
     window.clearTimeout(this.retryTimer);
+    this.cancelThemePaint();
     this.stopPings();
     this.resizeObserver.disconnect();
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
@@ -889,6 +894,7 @@ export class TerminalClient {
     if (this.closed) return;
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = window.setTimeout(() => this.pauseTerminal(), RENDER_IDLE_MS);
+    this.rendererCursorBlinking = true;
     this.ghostty.renderer?.setCursorBlink(true);
     this.ghostty.startRenderLoop();
     if (this.attached && this.pingTimer === 0) this.startPings();
@@ -899,8 +905,57 @@ export class TerminalClient {
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = 0;
     this.ghostty.cancelRenderLoop();
+    this.rendererCursorBlinking = false;
     this.ghostty.renderer?.setCursorBlink(false);
     this.stopPings(false);
+  }
+
+  /** Repaints a theme in bounded row batches because Ghostty exposes no theme invalidation. */
+  private repaintTheme(): void {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer) return;
+    this.cancelThemePaint();
+
+    // The pinned renderer's full redraw walks every cell synchronously. Its row painter
+    // already handles selection and graphemes, so repaint a few visible rows per frame.
+    if (!renderer.renderLine) {
+      renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+      return;
+    }
+    const { cols, rows } = buffer.getDimensions();
+    const viewportY = this.terminal.viewportY;
+    const scrollbackRows = this.terminal.getScrollbackLength();
+    let row = 0;
+    const paint = (): void => {
+      this.themePaintFrame = 0;
+      const end = Math.min(rows, row + THEME_ROWS_PER_FRAME);
+      for (; row < end; row += 1) {
+        const line = viewportY > 0 && row < viewportY
+          ? this.terminal.getScrollbackLine(scrollbackRows - Math.floor(viewportY) + row)
+          : buffer.getLine(row - Math.floor(viewportY));
+        if (line) renderer.renderLine?.(line, row, cols);
+      }
+      if (row < rows) {
+        this.themePaintFrame = requestAnimationFrame(paint);
+        return;
+      }
+
+      // Refresh small overlays after the rows. The normal renderer skips its cursor
+      // while scrolled back and its idle cursor blink is parked.
+      renderer.render(buffer, false, viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+      if (viewportY === 0 && !this.rendererCursorBlinking) {
+        const cursor = buffer.getCursor();
+        if (cursor.visible) renderer.renderCursor?.(cursor.x, cursor.y);
+      }
+    };
+    this.themePaintFrame = requestAnimationFrame(paint);
+  }
+
+  private cancelThemePaint(): void {
+    if (!this.themePaintFrame) return;
+    cancelAnimationFrame(this.themePaintFrame);
+    this.themePaintFrame = 0;
   }
 
   private acceptPong(nonce: bigint): void {
