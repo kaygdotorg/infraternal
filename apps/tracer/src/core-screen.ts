@@ -198,8 +198,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     void backdropModule?.then((renderer) => renderer.releaseBackdrop());
   };
 
-  const applyLook = (): void => {
+  const applyLook = (instant = false): void => {
     const active = THEMES[currentThemeId]!;
+    stage.toggleAttribute("data-no-motion", instant);
     ROOT.dataset.theme = currentThemeId;
     ROOT.dataset.bg = background;
     stage.dataset.theme = currentThemeId;
@@ -342,7 +343,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       event.preventDefault();
     } else if (event.key === "Enter") {
       const entry = visibleEntries[selected];
-      if (entry) runAction(entry.action ?? "");
+      if (entry) runAction(entry.action ?? "", "keyboard");
       setPalette(false, "keyboard");
       event.preventDefault();
     }
@@ -352,7 +353,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (!(target instanceof Element)) return;
     const result = target.closest<HTMLButtonElement>(".result");
     if (!result) return;
-    runAction(result.dataset.action ?? "");
+    runAction(result.dataset.action ?? "", "pointer");
     setPalette(false, "pointer");
   });
   window.addEventListener("keydown", keydown, true);
@@ -394,16 +395,16 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   keybar.addEventListener("pointerdown", keybarPointerDown);
   keybar.addEventListener("click", keybarClick);
 
-  function runAction(action: string): void {
+  function runAction(action: string, source: "keyboard" | "pointer"): void {
     const [kind, value] = action.split(":");
     if (kind === "theme" && themeId(value ?? null)) {
       currentThemeId = value!;
       writeLocal("tracer.theme", currentThemeId);
-      applyLook();
+      applyLook(source === "keyboard");
     } else if (kind === "bg" && (value === "mesh" || value === "none")) {
       background = value;
       writeLocal("tracer.background", value);
-      applyLook();
+      applyLook(source === "keyboard");
     } else if (kind === "session" || kind === "host") {
       terminalHost.focus({ preventScroll: true });
     }

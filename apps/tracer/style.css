@@ -219,6 +219,7 @@ button { color: inherit; }
   isolation: isolate;
 }
 .backdrop { position: fixed; z-index: 0; inset: 0; pointer-events: none; opacity: 0; transition: opacity 240ms ease-out; }
+.terminal-screen[data-no-motion] .backdrop { transition: none; }
 .terminal-screen[data-bg="mesh"] .backdrop { opacity: 1; background: var(--mesh-image, none) center / cover no-repeat, var(--bg); }
 .terminal-screen[data-bg="mesh"] .backdrop::before {
   content: ""; position: absolute; inset: 0; pointer-events: none;
