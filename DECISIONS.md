@@ -984,3 +984,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      pfSense, OPNsense) are **deferred**; the ranking in #71 is kept for
      later. The first release covers the enterprise Linux set; macOS and
      Windows follow as the next platforms.
+162. **No new UI reaches the product without mockup rounds:** every new
+     screen, flow or component goes through an in-product prototype (behind
+     a flag, on the preview, never deployed to production) and several
+     refinement rounds with the owner before it is integrated. Fixes to
+     already-approved UI may ship directly. The recovery sign-in flow (#45),
+     built without a mockup, is held back from production until it has had
+     its mockup rounds.
