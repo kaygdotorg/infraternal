@@ -991,3 +991,75 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      already-approved UI may ship directly. The recovery sign-in flow (#45),
      built without a mockup, is held back from production until it has had
      its mockup rounds.
+163. **Our own WireGuard mesh, a role of the one binary (grill #79):** the
+     mesh is ours and open source (AGPL). Any server or infraternal agent
+     node can be a mesh peer, a relay (D131) and/or a backup host (D147).
+     - **Stages:** stage 1 joins nodes (the server and infraternal agents);
+       stage 2 adds user devices as native clients, **macOS first, then
+       iOS**. A browser cannot be a mesh peer: it reaches mesh hosts
+       through infraternal (terminals, VNC). Mesh stays optional (N2).
+     - **Stage 1 platforms:** Linux only (D161 set), using **kernel
+       WireGuard**. macOS and Windows nodes follow with a **userspace
+       engine** chosen by the owner from measured candidates
+       (AGPL-compatible).
+     - **Privileges:** the mesh runs with root privileges. Kept simple: no
+       split helper and no unprivileged fallback mode.
+     - **Coordination:** the infraternal server coordinates: it hands out
+       addresses, distributes public keys and the rules. Each node creates
+       its own private key, which never leaves it.
+     - **Paths:** nodes try a direct path first and fall back through the
+       server, which always runs a relay, or through any other relay; they
+       move back to direct when it opens. One relay role serves terminals
+       and the mesh.
+     - **infraternal's own traffic** (terminal, VNC, backups) moves to a
+       mesh path automatically when it measures faster, falls back without
+       breaking the session, and needs no arrow (session permissions
+       already cover it).
+     - **Interfaces:** CLI (`infraternal mesh status` and friends), API and
+       MCP expose everything; the UI is the primary way to use it.
+164. **Mesh membership and access:**
+     - **Automatic join:** every infraternal agent joins the mesh.
+     - **Deny by default:** a joined node reaches only the server until
+       access is granted.
+     - **Arrows grant access (stage 1: nodes and tags):** on the canvas, an
+       arrow A → B lets A open connections to B (replies flow back); a
+       double-headed arrow allows both ways. All ports by default,
+       narrowable to ports or discovered services. Endpoints switch easily
+       between node and tag; "user" is shown greyed out ("Arrives with
+       devices") until stage 2, when a user arrow means "this person's
+       devices can reach this". Each arrow is a D154 grant.
+     - **Arrow display:** solid = direct, dashed = via relay (named), RTT
+       on hover or tap only, and a quiet marker when a rule has not reached
+       a peer yet.
+     - Subnet routes and exit nodes come later; stage 1 stays simple.
+165. **Mesh addressing and names:**
+     - **IPv4:** a fixed range per deployment, **10.254.0.0/16** by default.
+       Setup checks it against routes in use and offers another range on
+       overlap; it never changes silently.
+     - **IPv6:** each node also gets a fixed private (ULA) address, used
+       for routing; the UI shows IPv4.
+     - **DNS:** every node gets a name, `<host>.internal` by default. The
+       suffix is changeable to any domain (e.g. `vpn.kayg.org`). The
+       infraternal agent's resolver answers only that suffix and never
+       takes over the host's DNS.
+166. **Mesh keys and failure behaviour:**
+     - **Rotation:** each node replaces its own key silently every **7
+       days** by default (configurable), with no dropped connections.
+     - **No expiry:** node membership never expires; nodes stay until
+       removed. Removal makes the server tell every peer to drop the key at
+       once, so the removed node is cut off even if it is offline. User
+       devices (stage 2) are decided separately.
+     - **Server unreachable:** the mesh keeps working on the last known
+       rules with no time limit. A removal reaches each peer when it
+       reconnects; the UI shows peers that are behind on rules.
+167. **Mesh build order and performance gates:** the mesh core (join, keys
+     and rotation, direct and relayed paths, DNS, deny by default, CLI,
+     API, MCP) is built first, with **no UI**; in parallel a job measures
+     the userspace engines. The arrows and every other mesh UI go through
+     mockup rounds (D162) after the canvas is approved, even if that means
+     the UI comes much later. **Performance is measured in every round** of
+     backend work, not only at the end: throughput and added latency per
+     path (direct, relayed, India ↔ Germany), CPU and memory per peer ×
+     the expected peer count, idle cost, join time, rule-propagation time
+     and rotation impact. A round that regresses a number needs a
+     benchmark that justifies it (priority 1).
