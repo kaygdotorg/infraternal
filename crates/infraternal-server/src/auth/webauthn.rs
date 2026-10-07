@@ -147,6 +147,7 @@ impl Auth {
             Authority::Recovery(token) => {
                 if sqlx::query("DELETE FROM recovery WHERE user_id=? AND token_hash=? AND ready<=? AND expires>?")
                     .bind(&registration.user).bind(token).bind(now).bind(now).execute(&mut *tx).await?.rows_affected() != 1 { return Err(Error::Denied); }
+                super::recovery::record(&mut tx, &registration.user, "complete", now).await?;
                 for table in ["sessions", "api_keys", "approvals", "passkeys", "wraps"] {
                     sqlx::query(&format!("DELETE FROM {table} WHERE user_id=?"))
                         .bind(&registration.user)
@@ -177,6 +178,7 @@ impl Auth {
         tx.commit().await?;
         if matches!(registration.authority, Authority::Recovery(_)) {
             self.revocations.send_replace(());
+            self.recovery_changes.send_replace(());
         }
         Ok(token)
     }

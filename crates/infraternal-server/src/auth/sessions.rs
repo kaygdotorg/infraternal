@@ -4,11 +4,17 @@ use super::{Auth, Error, FRESH, Result, Row, SESSION, Serialize, hash};
 /// Authenticated browser device, including the last successful passkey verification.
 #[derive(Serialize)]
 pub struct Session {
+    pub recovery_pending: Option<RecoveryPending>,
     pub user_id: String,
     pub username: String,
     pub display_name: String,
     pub device: String,
     pub fresh: i64,
+}
+/// Pending recovery discloses only its original deadline, including after bearer expiry.
+#[derive(Serialize)]
+pub struct RecoveryPending {
+    pub ready_at: i64,
 }
 impl Session {
     pub(super) fn require_fresh(&self, now: i64) -> Result<()> {
@@ -33,7 +39,7 @@ impl Auth {
     }
 
     async fn read_session(&self, token: &str, now: i64, pending: bool) -> Result<Session> {
-        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name")
+        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name,(SELECT ready FROM recovery WHERE user_id=sessions.user_id) AS recovery_ready")
             .bind(now + SESSION).bind(hash(token)).bind(now).bind(pending).fetch_optional(&self.pool).await?;
         let Some(row) = row else {
             // Successful sessions keep the original single write; cleanup runs only on denial.
@@ -45,6 +51,9 @@ impl Auth {
             return Err(Error::Denied);
         };
         Ok(Session {
+            recovery_pending: row
+                .get::<Option<i64>, _>("recovery_ready")
+                .map(|ready_at| RecoveryPending { ready_at }),
             user_id: row.get("user_id"),
             username: row.get("username"),
             display_name: row.get("display_name"),

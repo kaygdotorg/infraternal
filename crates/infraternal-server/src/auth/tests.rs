@@ -2724,3 +2724,60 @@ async fn audit_recovery_after_page_discard_can_resume_at_original_deadline() {
         "re-entering correct words after 24h cannot recover the pending capability; denied until 48h then another 24h wait"
     );
 }
+
+#[tokio::test]
+async fn audit_recovery_pending_is_visible_to_signed_in_device() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let _capability = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    let app = router(f.auth.clone());
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (status, _, body) = http_post_json_with_cookie(&app, "session", json!({}), &cookie).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let disclosed = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .any(|key| key.contains("recovery"));
+    assert!(
+        disclosed,
+        "signed-in session exposes no pending recovery information; no notification/cancel entry exists in browser code"
+    );
+}
+
+#[tokio::test]
+async fn recovery_audit_commits_once_with_start_cancel_and_complete() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let (token, ready) = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    let (next, again) = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), NOW + 1)
+        .await
+        .unwrap();
+    assert_eq!(ready, again);
+    assert!(f.auth.recovery_ready(&token, NOW + DAY).await.is_err());
+    f.auth.recovery_cancel(&f.session, NOW + 2).await.unwrap();
+    f.auth.recovery_cancel(&f.session, NOW + 3).await.unwrap();
+    assert!(f.auth.recovery_ready(&next, NOW + DAY).await.is_err());
+    let (token, _) = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), NOW + 4)
+        .await
+        .unwrap();
+    let start = f.auth.recovery_ready(&token, NOW + DAY + 4).await.unwrap();
+    finish_replacement(&f, &start, &Software::new(), NOW + DAY + 4).await;
+    let events: Vec<String> = sqlx::query_scalar("SELECT event FROM recovery_audit ORDER BY id")
+        .fetch_all(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(events, ["start", "cancel", "start", "complete"]);
+}

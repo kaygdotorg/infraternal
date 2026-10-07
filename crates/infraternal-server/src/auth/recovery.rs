@@ -80,6 +80,11 @@ impl Auth {
         } else {
             false
         };
+        let existed: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM recovery WHERE user_id=?)")
+                .bind(user)
+                .fetch_one(&mut *tx)
+                .await?;
         let now_ready = if live { now } else { now + DAY };
         let token = random();
         let ready: Option<i64> = if resume {
@@ -95,7 +100,11 @@ impl Auth {
                 .fetch_optional(&mut *tx).await?
         };
         let ready = ready.ok_or(Error::Denied)?;
+        if !existed {
+            record(&mut tx, user, "start", now).await?;
+        }
         tx.commit().await?;
+        self.recovery_changes.send_replace(());
         Ok((token, ready, (ready - now).max(0)))
     }
 
@@ -108,7 +117,7 @@ impl Auth {
             .execute(&mut *tx)
             .await?;
         if sqlx::query(
-            "SELECT user_id FROM sessions WHERE token_hash=? AND user_id=? AND expires>?",
+            "SELECT user_id FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?",
         )
         .bind(hash(token))
         .bind(&session.user_id)
@@ -119,12 +128,34 @@ impl Auth {
         {
             return Err(Error::Denied);
         }
-        sqlx::query("DELETE FROM recovery WHERE user_id=?")
-            .bind(session.user_id)
+        let deleted = sqlx::query("DELETE FROM recovery WHERE user_id=?")
+            .bind(&session.user_id)
             .execute(&mut *tx)
-            .await?;
+            .await?
+            .rows_affected();
+        if deleted != 0 {
+            record(&mut tx, &session.user_id, "cancel", now).await?;
+        }
         tx.commit().await?;
+        self.recovery_changes.send_replace(());
         Ok(())
+    }
+
+    /// Current account-scoped recovery state; callers must already hold session authority.
+    #[allow(dead_code)] // Consumed by the next WebSocket subscription slice.
+    pub(crate) async fn pending_recovery(&self, user: &str) -> Result<Option<i64>> {
+        Ok(
+            sqlx::query_scalar("SELECT ready FROM recovery WHERE user_id=?")
+                .bind(user)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Coalesced changes wake existing authenticated sockets without idle polling.
+    #[allow(dead_code)] // Consumed by the next WebSocket subscription slice.
+    pub(crate) fn recovery_events(&self) -> tokio::sync::watch::Receiver<()> {
+        self.recovery_changes.subscribe()
     }
 
     /// Release the old recovery envelope only after the delay, then enroll a replacement passkey.
@@ -144,4 +175,20 @@ impl Auth {
         registration["old_recovery_wrap"] = serde_json::from_str(row.get("blob"))?;
         Ok(registration)
     }
+}
+
+// Audit writes share the writer transaction; notifications are emitted only after commit.
+pub(super) async fn record(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user: &str,
+    event: &str,
+    now: i64,
+) -> Result<()> {
+    sqlx::query("INSERT INTO recovery_audit(user_id,event,occurred_at) VALUES (?,?,?)")
+        .bind(user)
+        .bind(event)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
