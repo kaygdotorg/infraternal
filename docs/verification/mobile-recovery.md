@@ -99,7 +99,8 @@ review work; this job's authorization does not extend to modifying that host.
 The following page-loss limitation describes the original `18d5035` slice and
 is superseded by the [recovery audit fixes](recovery-audit.md) on #45. Modern
 recovery now resumes at the original server deadline and uses browser-only words,
-with an explicitly selected one-time migration for older keys.
+and signed-in replacement for older keys, as corrected by the
+[recovery review fixes](recovery-review-fixes.md).
 
 The original frozen contract rejects a second start while recovery is active. The request
 and words remain in memory, so reloading/closing the waiting page loses the

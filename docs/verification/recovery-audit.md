@@ -1,4 +1,4 @@
-<!-- Recovery audit fixes, browser-only derivation, legacy exception and reviewer evidence for #45. -->
+<!-- Recovery audit fixes, browser-only derivation, historical review and superseding recovery evidence for #45. -->
 # Recovery audit verification
 
 This slice continues `mobile-recovery` from `18d5035`, using the audit on
@@ -32,17 +32,13 @@ WebCrypto wraps the original DEK locally. Metadata separately versions verifier
 and envelope derivation, so upgrading an old verifier never relabels ciphertext.
 There is no dependency or engine addition.
 
-An existing mnemonic PHC cannot authenticate the HKDF output without the words
-or a different proof protocol. The approved compatibility exception is explicit:
-select **Upgrade an older recovery key** after entering the key. Its disclosure
-note says the old words reach the server once to upgrade authentication. The
-browser probes the verifier first, including retries after a lost successful
-response. Capacity exhaustion is generic 429, not a credential-denial 401; neither
-429 nor service failure triggers phrase migration. The transaction admits one
-upgrade, preserving the old envelope and original recovery deadline. Replacement
-then creates local rotated words and a v2 envelope. The contract threat note
-explains that preserved DEKs cannot erase knowledge retained by an old server.
-Fresh v2 protocol disclosure contains no material that unwraps the DEK.
+The independent review rejected the phrase-admission exception described in the
+original slice. That behavior is superseded by [recovery-review-fixes.md](recovery-review-fixes.md).
+No route admits words. Legacy accounts replace their recovery words from a
+fresh signed-in device holding the DEK: wrapping stays local and only an envelope
+and independent verifier reach the server. The callable replacement function has
+no new UI, pending the owner's D162 mockup approval. Historical migration logs
+below describe rejected behavior, not a supported protocol.
 
 ## Evidence
 
