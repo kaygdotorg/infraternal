@@ -476,3 +476,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      export/import for libghostty-vt in our own fork and test it with our
      differential suite. Propose it upstream as a PR only after it is
      proven here (#26).
+111. **Auth backdrop keeps animating until sign-in completes:** the
+     faulty-terminal field (D96) runs continuously on the setup and sign-in
+     screens (at most 30 fps, half resolution, paused when hidden or
+     off-screen, one still frame under reduced motion) and stops for good
+     once sign-in completes. It is not frozen after its intro (#40).
+112. **Steady cursor when idle:** the terminal stops rendering, cursor blink
+     included, after 700 ms of inactivity and wakes on input, output,
+     resize, scroll or pointer, so idle CPU stays at zero (D81). A steady
+     cursor at idle is accepted (#40).
