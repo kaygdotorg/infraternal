@@ -4,7 +4,7 @@ import { cp, mkdir, rm } from "node:fs/promises";
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist/fonts", { recursive: true });
 const build = await Bun.build({
-  entrypoints: ["src/main.ts", "../../packages/ui/src/backdrop.worker.ts"],
+  entrypoints: ["src/main.ts", "../../packages/ui/src/backdrop.worker.ts", "../../packages/ui/src/faulty-terminal.worker.ts"],
   outdir: "dist",
   naming: { entry: "[name].js" },
   minify: true,
