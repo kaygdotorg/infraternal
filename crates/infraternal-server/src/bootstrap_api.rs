@@ -151,7 +151,8 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: String)
                 if !authorized(&api, &token, &owner).await { break; }
             }
             incoming = socket.recv() => {
-                let Some(Ok(Message::Text(text))) = incoming else { break; };
+                match incoming {
+                    Some(Ok(Message::Text(text))) => {
                 if !authorized(&api, &token, &owner).await { break; }
                 expiry.as_mut().reset(tokio::time::Instant::now() + Duration::from_hours(30 * 24));
                 let Ok(request) = serde_json::from_str::<Request>(&text) else {
@@ -171,6 +172,10 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: String)
                 };
                 if let Err(error) = result
                     && send_live(&mut socket, &api, &owner, &token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":error})).ok()).await.is_err() { break; }
+                    }
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    _ => break,
+                }
             }
             () = async { match &mut changed { Some(receiver) => { let _ = receiver.changed().await; }, None => std::future::pending::<()>().await } } => {}
         }
