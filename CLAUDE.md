@@ -24,6 +24,8 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
   bits-ui is for headless primitives only. Use sveltebits.xyz only as a
   visual reference. Never copy its code: its license (MIT + Commons Clause)
   is not compatible with AGPL.
+- Taste: read `docs/design/TASTE.md` before any UI work and check your work
+  against it. Every annoyance the owner spots is added there the same day.
 - Review UI from screenshots of a real production build. Codex jobs attach the
   screenshots. They do not judge their own visual quality.
 - Code explains itself. Use module docs and comments for choices and
