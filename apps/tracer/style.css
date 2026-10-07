@@ -413,7 +413,7 @@ button { color: inherit; }
 }
 .keytray::-webkit-scrollbar { display: none; }
 [data-focus-ring="on"] .keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.keybar button { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out), background-color 140ms var(--ease-out), color 140ms var(--ease-out); }
+.keybar button { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
 .keybar button svg { width: 24px; height: 24px; stroke-width: 1.75; }
 .keybar .key-word { font: 600 15px/1 var(--font-ui); letter-spacing: 0.01em; }
 /* Armed modifiers use a soft fill; locked modifiers add a small dot as a second cue. */
@@ -477,3 +477,4 @@ button { color: inherit; }
 .recovery-notice .capsule { min-width: 44px; min-height: 44px; }
 .recovery-toast { position: absolute; z-index: 9; bottom: calc(env(safe-area-inset-bottom) + 76px); left: 50%; transform: translateX(-50%); width: min(520px, calc(100% - 24px)); padding: 12px 16px; }
 .recovery-notice[hidden], .recovery-toast[hidden] { display: none; }
+
