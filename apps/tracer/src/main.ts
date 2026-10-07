@@ -32,6 +32,10 @@ declare global {
 }
 
 const app = document.querySelector<HTMLElement>("#app") ?? missingMount();
+type UiFont = "sans" | "mono";
+
+const uiFont = uiFontPreference();
+document.documentElement.dataset.uiFont = uiFont;
 
 let activeUserId: string | undefined;
 let checkingResume = false;
@@ -108,6 +112,7 @@ function installForegroundListener(): void {
 }
 
 function renderUnavailable(message: string): void {
+  document.documentElement.removeAttribute("data-ui-font");
   app.innerHTML = `<section class="auth-screen"><section class="auth-card auth-signin">
     <div class="auth-mark">infraternal</div><h1>Could not reach the server</h1>
     <p id="status-error" class="auth-message" role="alert"></p>
@@ -118,6 +123,7 @@ function renderUnavailable(message: string): void {
 }
 
 function renderAuth(setupRequired: boolean, message = ""): void {
+  document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
     saveBrowserId("tracer.user-id", userId);
     activeUserId = userId;
@@ -128,6 +134,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
 }
 
 function showWelcome(displayName: string, instant = false): void {
+  document.documentElement.removeAttribute("data-ui-font");
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
   app.innerHTML = `<section class="auth-screen auth-welcome" aria-live="polite"><div class="welcome-copy"><h1 id="welcome-title"></h1><p></p></div></section>`;
@@ -214,7 +221,11 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   let screen: import("./core-screen").CoreScreen | undefined;
   try {
     const { mountCoreScreen } = await import("./core-screen");
-    await document.fonts.load('450 14px "Geist Sans"');
+    // The screen mounts only after its selected face is ready, preventing a one-frame
+    // fallback and keeping the mobile layout stable while the font loads.
+    await document.fonts.load(uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"');
+    // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
+    document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode });
   } catch (error: unknown) {
     renderUnavailable(safeMessage(error));
@@ -279,6 +290,20 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   } catch (error: unknown) {
     const status = document.querySelector<HTMLElement>("#connection-status");
     if (status) status.textContent = safeMessage(error);
+  }
+}
+
+/** URL choices win and are remembered when storage is available; private mode still works. */
+function uiFontPreference(): UiFont {
+  const requested = new URLSearchParams(location.search).get("ui");
+  if (requested === "sans" || requested === "mono") {
+    try { window.localStorage.setItem("tracer.ui-font", requested); } catch { /* The URL remains the preference without storage. */ }
+    return requested;
+  }
+  try {
+    return window.localStorage.getItem("tracer.ui-font") === "mono" ? "mono" : "sans";
+  } catch {
+    return "sans";
   }
 }
 
