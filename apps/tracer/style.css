@@ -348,6 +348,8 @@ body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge 
   display: flex; align-items: center; gap: 9px; width: 100%; min-height: 44px; padding: 0 8px; border-radius: var(--r-sm);
   color: var(--fg-2); text-align: left; cursor: default; transition: transform 140ms var(--ease-out);
 }
+/* Desktop follows the macOS scale (TASTE: sidebar rows about 28 px); touch keeps 44 px targets. */
+@media (hover: hover) and (pointer: fine) { .bm-head.ui-list-row, .bm-leaf.ui-list-row { min-height: 28px; } }
 .bm-head:active:not(:disabled), .bm-leaf:active:not(:disabled) { transform: scale(0.98); }
 [data-focus-ring="on"] :is(.bm-head, .bm-leaf, .result):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .bm-head:disabled { opacity: 0.8; }
