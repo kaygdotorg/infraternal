@@ -323,3 +323,9 @@
 @media (prefers-reduced-motion: reduce) {
   .segmented-tab { transition: none; }
 }
+
+/* Shared step transitions (pane-stepper.ts): leaving panes stack over the incoming one. */
+.ui-pane-viewport { position: relative; }
+.ui-pane-viewport.is-moving { overflow: hidden; }
+.ui-pane.is-leaving { position: absolute; top: 0; right: 0; left: 0; pointer-events: none; }
+
