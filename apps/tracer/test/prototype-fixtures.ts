@@ -1,4 +1,5 @@
-/** Test-double host and terminal data for the gated windows prototype. */
+/** Test-double host and terminal data for the gated windows and add-host prototypes. */
+import type { AddHostFixture } from "../src/add-host-contract";
 
 export interface PrototypeSessionFixture {
   id: string;
@@ -103,5 +104,45 @@ export const prototypeHosts: PrototypeHostFixture[] = [
       { id: "release-notes", name: "release-notes", lastOutput: "working tree clean", age: "4h 24m", viewers: 1, size: "38 KB", fresh: true, started: "Today at 07:32", scrollback: "804 lines", screen: ["macOS Sequoia 15.1 · arm64", "", "mira@studio-mac:~/src/infraternal$ git status --short", "", "mira@studio-mac:~/src/infraternal$ git log -1 --oneline", "cecc7ec fix(tracer): hide the iOS native caret", "", "mira@studio-mac:~/src/infraternal$ xcodebuild -version", "Xcode 16.1", "Build version 16B40", "", "mira@studio-mac:~/src/infraternal$ _"] },
       { id: "local-api", name: "local-api", lastOutput: "listening on 127.0.0.1:4100", age: "7h 03m", viewers: 0, size: "72 KB", fresh: false, started: "Today at 04:53", scrollback: "1,460 lines", screen: ["mira@studio-mac:~$ lsof -iTCP:4100 -sTCP:LISTEN", "COMMAND  PID USER  FD  TYPE  NAME", "node    812 mira  21u IPv4  TCP localhost:4100 (LISTEN)", "", "mira@studio-mac:~$ _"] },
     ],
+  },
+];
+
+/** Discovery and SSH-only probe outcomes used by the add-host mock, with no login attempt. */
+export const addHostFixtures: AddHostFixture[] = [
+  {
+    id: "build-01", user: "ops", address: "10.69.69.71", operatingSystem: "Ubuntu 24.04",
+    architecture: "x86_64", sources: ["netbird", "ssh-config"], reachability: "ready",
+    evidence: "SSH answers on port 22.", alreadyAdded: true, rootAvailable: true,
+    credentialRequired: false, authentication: "accepted",
+  },
+  {
+    id: "edge-arm", user: "ops", address: "10.69.69.72", operatingSystem: "Debian 12",
+    architecture: "aarch64", sources: ["tailscale", "known-hosts"], reachability: "ready",
+    evidence: "SSH answers on port 22.", alreadyAdded: false, rootAvailable: true,
+    credentialRequired: false, authentication: "accepted",
+  },
+  {
+    id: "nix-cache", user: "builder", address: "10.69.69.73", operatingSystem: "RHEL 9.5",
+    architecture: "x86_64", sources: ["ssh-config"], reachability: "ready",
+    evidence: "SSH answers on port 22.", alreadyAdded: false, rootAvailable: true,
+    credentialRequired: true, authentication: "refused",
+  },
+  {
+    id: "pve01", user: "root", address: "10.69.69.74", operatingSystem: "Proxmox VE 8.4",
+    architecture: "x86_64", sources: ["netbird"], reachability: "mesh-policy",
+    evidence: "The mesh peer is connected, but its policy denies TCP 22.", alreadyAdded: false,
+    rootAvailable: false, credentialRequired: false, authentication: "accepted",
+  },
+  {
+    id: "rhel-build", user: "builder", address: "10.69.69.75", operatingSystem: "RHEL 9.5",
+    architecture: "x86_64", sources: ["known-hosts", "ssh-config"], reachability: "ready",
+    evidence: "SSH answers on port 22.", alreadyAdded: false, rootAvailable: true,
+    credentialRequired: false, authentication: "accepted",
+  },
+  {
+    id: "archive-01", user: "ops", address: "10.69.69.76", operatingSystem: "Debian 12",
+    architecture: "x86_64", sources: ["known-hosts"], reachability: "unreachable",
+    evidence: "A TCP connection to port 22 timed out; no login was attempted.",
+    alreadyAdded: false, rootAvailable: false, credentialRequired: false, authentication: "accepted",
   },
 ];
