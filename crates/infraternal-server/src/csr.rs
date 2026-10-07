@@ -156,47 +156,112 @@ fn validate_tree(mut input: &[u8], depth: u8) -> Result<(), CsrError> {
         if tag & 0xc0 == 0 && (tag & 0x20 != 0) != matches!(tag & 0x1f, 16 | 17) {
             return Err(CsrError);
         }
+        // This CSR profile accepts universal values and only PKCS10's outer
+        // implicit attributes SET. Unknown implicit types cannot be validated
+        // without their schema; accepting them would claim canonicality blindly.
+        if tag & 0xc0 != 0 && !(tag == 0xa0 && depth == 1) {
+            return Err(CsrError);
+        }
         if tag & 0x20 != 0 {
             if tag == 0x31 {
                 validate_set(body)?;
             }
             validate_tree(body, depth + 1)?;
         } else {
-            match tag {
-                1 if body != [0] && body != [0xff] => return Err(CsrError),
-                2 if body.is_empty()
-                    || (body.len() > 1
-                        && ((body[0] == 0 && body[1] & 0x80 == 0)
-                            || (body[0] == 0xff && body[1] & 0x80 != 0))) =>
-                {
-                    return Err(CsrError);
-                }
-                3 => {
-                    let unused = *body.first().ok_or(CsrError)?;
-                    if unused > 7
-                        || (body.len() == 1 && unused != 0)
-                        || (unused != 0 && body.last().ok_or(CsrError)? & ((1 << unused) - 1) != 0)
-                    {
-                        return Err(CsrError);
-                    }
-                }
-                5 if !body.is_empty() => return Err(CsrError),
-                6 => {
-                    if body.is_empty() || body.last().ok_or(CsrError)? & 0x80 != 0 {
-                        return Err(CsrError);
-                    }
-                    let mut start = true;
-                    for byte in body {
-                        if start && *byte == 0x80 {
-                            return Err(CsrError);
-                        }
-                        start = byte & 0x80 == 0;
-                    }
-                }
-                _ => {}
-            }
+            validate_value(tag, body)?;
         }
         input = rest;
+    }
+    Ok(())
+}
+
+// Validate accepted universal value types; attributes are ignored, not trusted.
+fn validate_value(tag: u8, body: &[u8]) -> Result<(), CsrError> {
+    match tag {
+        1 => {
+            if body != [0] && body != [0xff] {
+                return Err(CsrError);
+            }
+        }
+        2 | 10 => {
+            if body.is_empty()
+                || (body.len() > 1
+                    && ((body[0] == 0 && body[1] & 0x80 == 0)
+                        || (body[0] == 0xff && body[1] & 0x80 != 0)))
+            {
+                return Err(CsrError);
+            }
+        }
+        3 => {
+            let unused = *body.first().ok_or(CsrError)?;
+            if unused > 7
+                || (body.len() == 1 && unused != 0)
+                || (unused != 0 && body.last().ok_or(CsrError)? & ((1 << unused) - 1) != 0)
+            {
+                return Err(CsrError);
+            }
+        }
+        4 => {} // Extension OCTET STRING contents are opaque, never copied.
+        5 => {
+            if !body.is_empty() {
+                return Err(CsrError);
+            }
+        }
+        6 => {
+            if body.is_empty() || body.last().ok_or(CsrError)? & 0x80 != 0 {
+                return Err(CsrError);
+            }
+            let mut start = true;
+            for byte in body {
+                if start && *byte == 0x80 {
+                    return Err(CsrError);
+                }
+                start = byte & 0x80 == 0;
+            }
+        }
+        12 => {
+            std::str::from_utf8(body).map_err(|_| CsrError)?;
+        }
+        18 => {
+            if !body.iter().all(|b| b.is_ascii_digit() || *b == b' ') {
+                return Err(CsrError);
+            }
+        }
+        19 => {
+            if !body
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || b" '()+,-./:=?".contains(b))
+            {
+                return Err(CsrError);
+            }
+        }
+        22 => {
+            if !body.is_ascii() {
+                return Err(CsrError);
+            }
+        }
+        28 => {
+            if !body.len().is_multiple_of(4)
+                || !body.as_chunks::<4>().0.iter().all(|bytes| {
+                    char::from_u32(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                        .is_some()
+                })
+            {
+                return Err(CsrError);
+            }
+        }
+        30 => {
+            if !body.len().is_multiple_of(2)
+                || body.as_chunks::<2>().0.iter().any(|bytes| {
+                    (0xd800..=0xdfff).contains(&u16::from_be_bytes([bytes[0], bytes[1]]))
+                })
+            {
+                return Err(CsrError);
+            }
+        }
+        // Reject REAL, time and legacy string types instead of writing
+        // unrelated canonicalizers for ignored requested attributes.
+        _ => return Err(CsrError),
     }
     Ok(())
 }
@@ -300,6 +365,22 @@ mod tests {
         assert!(request.verify(&request.public_key().unwrap()).unwrap());
         assert_eq!(request.to_der().unwrap(), der);
         assert!(ValidatedCsr::parse(&der).is_err());
+    }
+
+    #[test]
+    fn signed_noncanonical_ignored_values_are_refused() {
+        for attribute in [
+            vec![
+                0x30, 0x10, 6, 2, 0x2a, 3, 0x31, 0x0a, 0x30, 8, 0x0a, 2, 0, 1, 4, 2, b'A', b'A',
+            ],
+            vec![0x30, 9, 6, 2, 0x2a, 3, 0x31, 3, 0x0c, 1, 0xff],
+        ] {
+            let der = signed_shape(false, true, false, &attribute);
+            let request = X509Req::from_der(&der).unwrap();
+            assert!(request.verify(&request.public_key().unwrap()).unwrap());
+            assert_eq!(request.to_der().unwrap(), der);
+            assert!(ValidatedCsr::parse(&der).is_err());
+        }
     }
 
     #[test]
