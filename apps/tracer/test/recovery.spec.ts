@@ -288,3 +288,20 @@ test("remaining recovery wait uses server duration with a skewed browser clock",
   await expect(page.getByRole("button", { name: "Continue recovery" })).toBeDisabled();
   await expect(page.locator("#recovery-ready-time")).toContainText("60 minutes remaining");
 });
+
+test("terminal startup reuses its authenticated recovery snapshot", async ({ page }) => {
+  await page.context().request.post("/__mock/reset");
+  await page.context().request.post("/__mock/open-terminal");
+  let sessionReads = 0;
+  await page.route("**/auth/session", route => {
+    sessionReads++;
+    return route.fulfill(sessionReads === 1 ? { json: {
+      user_id: userId, username: "fixture_owner", display_name: "Fixture owner", hostname: "fixture-host",
+      recovery_pending: { ready_at: Math.floor(Date.now() / 1000) + 3600 },
+    } } : { status: 503, json: { error: "unavailable" } });
+  });
+  await page.goto("/?mock=1");
+  await expect(page.locator("#recovery-notice")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected())).toBe(true);
+  expect(sessionReads).toBe(1);
+});

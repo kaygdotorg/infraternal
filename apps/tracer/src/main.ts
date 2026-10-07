@@ -84,7 +84,7 @@ async function showAuthState(setupRequired: boolean): Promise<void> {
   const session = setupRequired ? undefined : await checkSession();
   if (session) {
     activeUserId = session.user_id;
-    await showTerminal(sessionHostname(session));
+    await showTerminal(session);
   } else {
     renderAuth(setupRequired);
   }
@@ -200,9 +200,11 @@ function stopBackdrop(instant = false): void {
   }, 260);
 }
 
-async function showTerminal(serverHostname?: string, instant = false): Promise<void> {
-  const identity = await checkSession();
-  const hostName = serverHostname ?? sessionHostname(identity);
+async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSession>>, instant = false): Promise<void> {
+  // Startup already authenticated this snapshot. Reuse it rather than adding
+  // another network round trip; the socket still checks authority on connection.
+  const identity = knownSession ?? await checkSession();
+  const hostName = sessionHostname(identity);
   if (!hostName) {
     renderUnavailable("The authenticated session did not include the server hostname.");
     return;
