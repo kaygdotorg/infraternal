@@ -166,6 +166,9 @@ async fn run_socket(
     // One absolute budget covers server Hello, authority reads, client Hello and Resume.
     // Starting a fresh five seconds after a slow initial write would retain admission too long.
     let handshake_deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut recovery_events = state.auth.recovery_events();
+    let mut recovery_subscribed = false;
+    let mut recovery_snapshot = RecoverySnapshot::Unread;
     let mut revocations = state.auth.revocation_events();
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
@@ -241,6 +244,12 @@ async fn run_socket(
         .unwrap_or_else(|()| tokio::time::Instant::now());
     loop {
         tokio::select! {
+            changed = recovery_events.changed(), if recovery_subscribed => {
+                if changed.is_err() { break; }
+                if while_authorized(&state, &user_id, &session_token, false,
+                    send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
+                ).await.is_err() { break; }
+            }
             changed = revocations.changed() => {
                 if changed.is_err() { break; }
                 let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
@@ -264,6 +273,20 @@ async fn run_socket(
                         if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
                     }
                     Inbound::Frame(wire) => {
+                    if let Ok(decoded) = decode_muxed_frame(&wire)
+                        && decoded.stream_id == CONTROL_STREAM
+                        && let Frame::Subscribe { sub_id: 45, filter_json } = decoded.frame
+                        && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
+                            == Some(json!({"topic":"auth.recovery"})) {
+                        // Subscribe before reading the snapshot. A concurrent commit
+                        // remains visible in the watch generation and cannot be lost.
+                        recovery_subscribed = true;
+                        recovery_snapshot = RecoverySnapshot::Unread;
+                        if while_authorized(&state, &user_id, &session_token, true,
+                            send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
+                        ).await.is_err() { break; }
+                        continue;
+                    }
                     if let Ok(decoded) = decode_muxed_frame(&wire)
                         && decoded.stream_id == CONTROL_STREAM
                         && let Frame::Close { code, .. } = decoded.frame {
@@ -371,6 +394,46 @@ async fn while_authorized<T>(
             }
         }
     }
+}
+
+// Initial subscription must distinguish an unread state from a known absence.
+#[derive(PartialEq)]
+enum RecoverySnapshot {
+    Unread,
+    Read(Option<i64>),
+}
+
+// Reuse the existing event frame; account scope comes only from socket authority.
+async fn send_recovery_snapshot<K>(
+    state: &WebSocketState,
+    user: &str,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+    last: &mut RecoverySnapshot,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let pending = state.auth.pending_recovery(user).await.map_err(|_| ())?;
+    // A global wake must never reveal another account's recovery timing.
+    if *last == RecoverySnapshot::Read(pending) {
+        return Ok(());
+    }
+    let event = serde_json::to_vec(&json!({"topic":"auth.recovery",
+        "pending":pending.map(|ready_at| json!({"ready_at":ready_at}))}))
+    .map_err(|_| ())?;
+    send_frame(
+        sink,
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id: 45,
+            event_json: &event,
+        },
+        encode,
+    )
+    .await?;
+    *last = RecoverySnapshot::Read(pending);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

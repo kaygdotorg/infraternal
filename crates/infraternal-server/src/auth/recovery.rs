@@ -142,7 +142,6 @@ impl Auth {
     }
 
     /// Current account-scoped recovery state; callers must already hold session authority.
-    #[allow(dead_code)] // Consumed by the next WebSocket subscription slice.
     pub(crate) async fn pending_recovery(&self, user: &str) -> Result<Option<i64>> {
         Ok(
             sqlx::query_scalar("SELECT ready FROM recovery WHERE user_id=?")
@@ -153,7 +152,6 @@ impl Auth {
     }
 
     /// Coalesced changes wake existing authenticated sockets without idle polling.
-    #[allow(dead_code)] // Consumed by the next WebSocket subscription slice.
     pub(crate) fn recovery_events(&self) -> tokio::sync::watch::Receiver<()> {
         self.recovery_changes.subscribe()
     }

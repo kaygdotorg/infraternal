@@ -331,3 +331,86 @@ async fn incomplete_rfc_message_still_loses_authority_on_revocation() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn recovery_subscription_updates_every_signed_in_socket() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let mut devices = Vec::new();
+    for _ in 0..2 {
+        let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+            .await
+            .unwrap();
+        assert_server_hello(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "recovery-notice",
+            },
+        )
+        .await;
+        read_welcome(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Subscribe {
+                sub_id: 45,
+                filter_json: br#"{"topic":"auth.recovery"}"#,
+            },
+        )
+        .await;
+        let bytes = read_client_frame(&mut socket).await;
+        let decoded = decode_muxed_frame(&bytes).unwrap();
+        let Frame::Event {
+            sub_id: 45,
+            event_json,
+        } = decoded.frame
+        else {
+            panic!("missing recovery snapshot")
+        };
+        assert!(serde_json::from_slice::<Value>(event_json).unwrap()["pending"].is_null());
+        devices.push(socket);
+    }
+    f.auth
+        .recovery_resume(&f.user, f.words.clone(), now)
+        .await
+        .unwrap();
+    for socket in &mut devices {
+        let bytes = read_client_frame(socket).await;
+        let Frame::Event {
+            sub_id: 45,
+            event_json,
+        } = decode_muxed_frame(&bytes).unwrap().frame
+        else {
+            panic!("missing start event")
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(event_json).unwrap()["pending"]["ready_at"],
+            now + DAY
+        );
+    }
+    f.auth.recovery_cancel(&f.session, now).await.unwrap();
+    for socket in &mut devices {
+        let bytes = read_client_frame(socket).await;
+        let Frame::Event {
+            sub_id: 45,
+            event_json,
+        } = decode_muxed_frame(&bytes).unwrap().frame
+        else {
+            panic!("missing cancel event")
+        };
+        assert!(serde_json::from_slice::<Value>(event_json).unwrap()["pending"].is_null());
+    }
+    server.abort();
+}
