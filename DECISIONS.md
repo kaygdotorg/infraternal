@@ -539,3 +539,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      floating icons over a progressive blur) with the multiplexer actions:
      split vertically or horizontally, and the session manager. Local
      attach from the host itself (`infraternal attach`) comes later.
+122. **High latency is the design case:** the owner keeps the server on
+     monitor01 (Germany) on purpose, while the owner and targets are in
+     India. The India → Germany → India round trip is measurable and felt,
+     and high latency is more often the truth than not. Optimise for it;
+     do not "fix" it by moving the server (N4, #47).
+123. **Any browser works:** a normal browser outside NetBird or Tailscale
+     must work fully; mesh membership is never required (N2).
+124. **Enterprise scale test target:** 500 concurrent terminal sessions and
+     50 remote desktop sessions per server, up to 5 viewers per session
+     (N5, D117).
