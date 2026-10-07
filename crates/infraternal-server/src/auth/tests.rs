@@ -50,6 +50,7 @@ struct Software {
     id: Vec<u8>,
     prf_key: PKey<Private>,
     counter: u32,
+    aaguid: Uuid,
 }
 impl Software {
     fn new() -> Self {
@@ -59,6 +60,7 @@ impl Software {
             id: rand::random::<[u8; 32]>().to_vec(),
             prf_key: PKey::hmac(&rand::random::<[u8; 32]>()).unwrap(),
             counter: 0,
+            aaguid: Uuid::nil(),
         }
     }
     fn client_data(start: &Value, kind: &str, origin: &str) -> Vec<u8> {
@@ -98,7 +100,7 @@ impl Software {
             (Cbor::Integer(-3), Cbor::Bytes(y.to_vec_padded(32).unwrap())),
         ]));
         let mut data = self.auth_data(if uv { 0x45 } else { 0x41 });
-        data.extend_from_slice(&[0; 16]);
+        data.extend_from_slice(self.aaguid.as_bytes());
         data.extend_from_slice(&u16::try_from(self.id.len()).unwrap().to_be_bytes());
         data.extend_from_slice(&self.id);
         data.extend_from_slice(&serde_cbor_2::to_vec(&key).unwrap());
@@ -2472,3 +2474,195 @@ mod socket_tests;
 
 #[path = "review3_tests.rs"]
 mod review3_tests;
+
+#[tokio::test]
+#[ignore = "regression specified before the additive provider implementation"]
+async fn registration_aaguid_survives_none_attestation_and_binds_session_provider() {
+    let _guard = SERIAL.lock().await;
+    let (auth, token) = empty().await;
+    let start = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let user = str_field(&start, "user_id");
+    let mut software = Software::new();
+    software.aaguid = Uuid::parse_str("bada5566-a7aa-401f-bd96-45619a55120d").unwrap();
+    let dek = [7; 32];
+    let session = auth
+        .registration_finish(
+            str_field(&start, "ceremony"),
+            software.registration(&start, ORIGIN, true),
+            browser_wrap(&software.prf(&start), &dek, user, "passkey"),
+            Some(browser_wrap(
+                &recovery_ikm(str_field(&start, "recovery_words")),
+                &dek,
+                user,
+                "recovery",
+            )),
+            NOW,
+        )
+        .await
+        .unwrap();
+    let aaguid: Option<String> = sqlx::query_scalar("SELECT aaguid FROM passkeys WHERE user_id=?")
+        .bind(user)
+        .fetch_one(&auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        aaguid.as_deref(),
+        Some("bada5566-a7aa-401f-bd96-45619a55120d")
+    );
+    let identity = serde_json::to_value(auth.session(&session, NOW).await.unwrap()).unwrap();
+    assert_eq!(identity["passkey_provider"], "1Password");
+    let second_start = auth.add_start(&session, NOW + 1).await.unwrap();
+    let mut second = Software::new();
+    second.aaguid = Uuid::parse_str("d548826e-79b4-db40-a3d8-11116f7e8349").unwrap();
+    let second_session = auth
+        .registration_finish(
+            str_field(&second_start, "ceremony"),
+            second.registration(&second_start, ORIGIN, true),
+            browser_wrap(&second.prf(&second_start), &dek, user, "passkey"),
+            None,
+            NOW + 1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(auth.session(&second_session, NOW + 1).await.unwrap()).unwrap()["passkey_provider"],
+        "Bitwarden"
+    );
+    assert_eq!(
+        serde_json::to_value(auth.session(&session, NOW + 1).await.unwrap()).unwrap()["passkey_provider"],
+        "1Password"
+    );
+    let login = auth.login_start(user, NOW + 2).await.unwrap();
+    let logged_in = auth
+        .login_finish(
+            str_field(&login, "ceremony"),
+            second.login(&login, ORIGIN, true),
+            "desktop",
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(auth.session(&logged_in, NOW + 2).await.unwrap()).unwrap()["passkey_provider"],
+        "Bitwarden"
+    );
+    // Old sessions and credentials remain usable without manufacturing a provider.
+    sqlx::query("UPDATE sessions SET passkey_id=NULL")
+        .execute(&auth.pool)
+        .await
+        .unwrap();
+    assert!(serde_json::to_value(auth.session(&session, NOW + 3).await.unwrap()).unwrap()["passkey_provider"].is_null());
+}
+
+#[tokio::test]
+#[ignore = "regression specified before the additive provider implementation"]
+async fn redacted_unknown_and_failed_registrations_do_not_claim_a_provider() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let aaguid: Option<String> = sqlx::query_scalar("SELECT aaguid FROM passkeys WHERE user_id=?")
+        .bind(&f.user)
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert!(aaguid.is_none());
+    assert!(serde_json::to_value(f.auth.session(&f.session, NOW).await.unwrap()).unwrap()["passkey_provider"].is_null());
+    sqlx::query("UPDATE passkeys SET aaguid=?")
+        .bind(Uuid::new_v4().to_string())
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert!(serde_json::to_value(f.auth.session(&f.session, NOW).await.unwrap()).unwrap()["passkey_provider"].is_null());
+    let start = f.auth.add_start(&f.session, NOW + 1).await.unwrap();
+    let mut software = Software::new();
+    software.aaguid = Uuid::parse_str("bada5566-a7aa-401f-bd96-45619a55120d").unwrap();
+    let result = f
+        .auth
+        .registration_finish(
+            str_field(&start, "ceremony"),
+            software.registration(&start, "https://wrong.example", true),
+            browser_wrap(&software.prf(&start), &f.dek, &f.user, "passkey"),
+            None,
+            NOW + 1,
+        )
+        .await;
+    assert!(result.is_err());
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM passkeys")
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+#[ignore = "regression specified before the additive provider implementation"]
+async fn aaguid_migration_preserves_legacy_credentials_and_sessions() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    // Build an actual v8 database with its recorded migration checksums, then upgrade.
+    let mut old = sqlx::migrate!("./migrations");
+    old.migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 8);
+    old.run(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('legacy','Legacy',1,'fixture','legacy','Legacy')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO passkeys(id,user_id,credential,prf_input) VALUES ('key','legacy','{}','fixture-input')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh) VALUES ('hash','legacy','desktop',?,?)").bind(NOW + DAY).bind(NOW).execute(&pool).await.unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let row = sqlx::query("SELECT credential,prf_input,aaguid FROM passkeys WHERE id='key'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<String, _>("credential"), "{}");
+    assert_eq!(row.get::<String, _>("prf_input"), "fixture-input");
+    assert!(row.get::<Option<String>, _>("aaguid").is_none());
+    let row =
+        sqlx::query("SELECT device,unlocked,passkey_id FROM sessions WHERE token_hash='hash'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row.get::<String, _>("device"), "desktop");
+    assert_eq!(row.get::<i64, _>("unlocked"), 1);
+    assert!(row.get::<Option<String>, _>("passkey_id").is_none());
+}
+
+#[tokio::test]
+#[ignore = "local auth session scale measurement; run without concurrent builds"]
+async fn provider_session_latency_at_50_devices() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let key: String = sqlx::query_scalar("SELECT id FROM passkeys WHERE user_id=?")
+        .bind(&f.user)
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE passkeys SET aaguid='bada5566-a7aa-401f-bd96-45619a55120d'")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let mut tokens = Vec::new();
+    for index in 0..50 {
+        let token = random();
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,passkey_id) VALUES (?,?,?,?,?,?)")
+            .bind(hash(&token)).bind(&f.user).bind(format!("scale-{index}")).bind(NOW + DAY).bind(NOW).bind(&key).execute(&f.auth.pool).await.unwrap();
+        tokens.push(token);
+    }
+    let mut samples = Vec::new();
+    for _ in 0..20 {
+        for token in &tokens {
+            let start = Instant::now();
+            let session = f.auth.session(token, NOW).await.unwrap();
+            samples.push(start.elapsed().as_nanos());
+            assert_eq!(session.user_id, f.user);
+        }
+    }
+    samples.sort_unstable();
+    println!(
+        "PROVIDER_SESSION_50_DEVICES samples={} p50_ns={} p99_ns={}",
+        samples.len(),
+        samples[500],
+        samples[990]
+    );
+}
