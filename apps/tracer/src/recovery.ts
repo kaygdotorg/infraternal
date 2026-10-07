@@ -5,7 +5,7 @@ import { AuthError } from "./auth";
 import { startRecovery, replacePasskey, type RecoveryRequest } from "./recovery-auth";
 import { recoveryWords } from "./recovery-words";
 import { loading } from "../../../packages/ui/src/countup";
-import { tick } from "../../../packages/ui/src/tick";
+import { tick, springCheckbox } from "../../../packages/ui/src/tick";
 
 const dictionary = new Set(wordlist);
 const titles = ["Use your recovery key", "Recovery started", "Create a new passkey", "Save your new recovery key"];
@@ -14,7 +14,7 @@ const titles = ["Use your recovery key", "Recovery started", "Create a new passk
 export function mountRecovery(host: HTMLElement, back: () => void,
   complete: (userId: string, firstSetup: boolean, displayName?: string, instant?: boolean) => void,
 ): void {
-  let step = 0, busy = false, instant = false, saved = false;
+  let step = 0, busy = false, instant = false, saved = false, legacyUpgrade = false;
   let words = Array<string>(24).fill(""), username = "", nextWords: string[] = [];
   let request: RecoveryRequest | undefined;
   let finish: (() => Promise<void>) | undefined, acknowledged: (() => void) | undefined;
@@ -103,7 +103,14 @@ export function mountRecovery(host: HTMLElement, back: () => void,
   }
   function renderEntry(): void {
     body.innerHTML = `<label class="auth-label" for="recovery-username">username</label><input class="auth-input" id="recovery-username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" />
-      <p class="auth-label recovery-word-label">recovery words</p><ol class="auth-word-inputs"></ol><p class="auth-hint" id="recovery-word-error" role="status"></p>`;
+      <p class="auth-label recovery-word-label">recovery words</p><ol class="auth-word-inputs"></ol><p class="auth-hint" id="recovery-word-error" role="status"></p>
+      <label class="auth-check"><input id="recovery-upgrade" type="checkbox" /><span>Upgrade an older recovery key</span></label>
+      <p class="auth-hint" id="recovery-upgrade-note" hidden>For an older account only: your old words are sent to the server once to upgrade its verifier. New recovery keys stay in your browser.</p>`;
+    const upgrade = body.querySelector<HTMLInputElement>("#recovery-upgrade")!;
+    upgrade.checked = legacyUpgrade; springCheckbox(upgrade);
+    const upgradeNote = body.querySelector<HTMLElement>("#recovery-upgrade-note")!;
+    upgradeNote.hidden = !legacyUpgrade;
+    upgrade.addEventListener("change", () => { legacyUpgrade = upgrade.checked; upgradeNote.hidden = !legacyUpgrade; });
     const identity = body.querySelector<HTMLInputElement>("#recovery-username")!;
     identity.value = username;
     identity.addEventListener("input", () => { username = identity.value.trim().toLowerCase(); error.textContent = ""; update(); });
@@ -150,7 +157,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     busy = true; update(); markMotion(true); error.textContent = "";
     const waiting = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
     try {
-      if (step === 0) { request = await startRecovery(username, words.join(" ")); step = 1; }
+      if (step === 0) { request = await startRecovery(username, words.join(" "), legacyUpgrade); step = 1; }
       else if (step === 1) { step = 2; }
       else if (step === 2) {
         const result = await replacePasskey(request!.token, words.join(" "), async (rotated, commit) => {
@@ -172,7 +179,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
       }
     } catch (failure: unknown) {
       error.textContent = failure instanceof AuthError && failure.status === 401
-        ? step === 0 ? "Recovery could not start. Check the username and recovery key." : "Recovery is not ready, expired or was cancelled. Check the available time or start again."
+        ? step === 0 ? "Recovery could not start. Check the username and recovery key. For a key from an older account, select the upgrade option." : "Recovery is not ready, expired or was cancelled. Check the available time or start again."
         : failure instanceof DOMException && failure.name === "InvalidStateError" ? "This device already has a passkey for this account. Choose another passkey provider or remove the old passkey from your device."
         : failure instanceof DOMException && failure.name === "NotAllowedError" ? "The passkey prompt was cancelled. Try again when you are ready."
         : failure instanceof AuthError ? failure.message : "Recovery could not be completed. Try again.";
