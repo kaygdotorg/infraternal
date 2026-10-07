@@ -59,8 +59,11 @@ const SCREEN = `
         <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal" tabindex="0" data-captures-keys></div>
       </section>
     </div>
+    <!-- The one sidebar toggle. It lives outside the top bar so it can travel into the sidebar's
+         header when the sidebar opens (see .sidebar-toggle in style.css); a spacer keeps its slot. -->
+    <button class="ui-pill ui-pill-icon sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false" aria-controls="sidebar">${SVG.menu}</button>
     <header class="top" aria-label="Terminal controls">
-      <button class="ui-pill ui-pill-icon" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false">${SVG.menu}</button>
+      <span class="top-spacer" aria-hidden="true"></span>
       <button class="ui-pill capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
@@ -384,6 +387,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
 
   const setSidebar = (open: boolean, instant = false): void => {
     dockPanes(open, instant);
+    // The toggle travels between the top bar and the sidebar header on a transform transition.
+    sidebarToggle.classList.toggle("instant", instant);
+    stage.toggleAttribute("data-sidebar-open", open);
+    if (instant) window.setTimeout(() => sidebarToggle.classList.remove("instant"), 0);
+    else if (reducedMotion.matches) sidebarToggle.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
     sidebar.hidden = !open;
     sidebarToggle.setAttribute("aria-expanded", String(open));
     sidebarToggle.setAttribute("aria-label", open ? "Hide hosts" : "Show hosts");

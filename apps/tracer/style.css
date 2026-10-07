@@ -274,6 +274,21 @@ button { color: inherit; }
   pointer-events: none;
 }
 .top > * { pointer-events: auto; }
+.top > .top-spacer { width: var(--pill-h); height: var(--pill-h); pointer-events: none; }
+
+/* The sidebar toggle is one pill that travels: top-left of the UI while the sidebar is closed, the
+   right end of the sidebar's header row while it is open. Only its transform moves (GPU, and a
+   CSS transition retargets if the person toggles again mid-flight). --sb-w and --sb-head-y
+   describe where the sidebar's header row sits relative to the closed position; the 9 px is the
+   sidebar's 1 px border plus its 8 px padding, so the pill lines up with the header row exactly. */
+.sidebar-toggle {
+  --sb-w: 292px; --sb-head-y: calc(var(--pill-h) + 12px + 9px);
+  position: absolute; z-index: 6; top: calc(10px + env(safe-area-inset-top)); left: var(--gutter);
+  transition: transform 260ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.terminal-screen[data-sidebar-open] .sidebar-toggle { transform: translate(calc(var(--sb-w) - 9px - var(--pill-h)), var(--sb-head-y)); }
+.terminal-screen[data-sidebar-open] .sidebar-toggle:active:not(:disabled) { transform: translate(calc(var(--sb-w) - 9px - var(--pill-h)), var(--sb-head-y)) scale(0.97); }
+.sidebar-toggle.instant { transition: none; }
 .keybar button:active { transform: scale(0.97); }
 .capsule {
   justify-self: center; min-width: min(420px, 100%); padding: 0 8px 0 14px; justify-content: flex-start;
@@ -301,7 +316,7 @@ button { color: inherit; }
 /* Floating host tree: it can open without taking a permanent column from the terminal. */
 .sidebar {
   position: absolute; z-index: 5; top: calc(env(safe-area-inset-top) + 10px + var(--pill-h) + 12px); left: var(--gutter); bottom: 16px; width: 292px;
-  display: flex; flex-direction: column; padding: 12px 8px 8px; overflow: auto;
+  display: flex; flex-direction: column; padding: 8px; overflow: auto;
   border: 1px solid var(--overlay-line); border-radius: var(--r-lg); background: var(--overlay); box-shadow: var(--shadow);
   -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
   transform-origin: top left; transition: transform 240ms var(--ease-drawer), opacity 180ms ease-out;
@@ -311,8 +326,13 @@ button { color: inherit; }
 /* Desktop: the open sidebar takes a column beside the windows (see dockPanes in core-screen.ts). */
 @media (hover: hover) and (pointer: fine) and (min-width: 1024px) {
   .terminal-screen[data-sidebar="docked"] .panes { left: calc(var(--gutter) + 292px + 12px); }
+  /* Docked, the sidebar starts level with the top bar; the toggle slides across and 8 px down
+     into the header row, the same 8 px inset the sidebar keeps on every side. */
+  .sidebar { top: calc(env(safe-area-inset-top) + 10px); }
+  .sidebar-toggle { --sb-head-y: 9px; }
 }
-.sidebar-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 0 8px 8px; }
+/* The header row is exactly one pill tall so the travelling toggle sits on it, right-aligned. */
+.sidebar-head { display: flex; align-items: center; gap: 8px; height: var(--pill-h); margin-bottom: 4px; padding: 0 calc(var(--pill-h) + 8px) 0 8px; }
 .sidebar-title { font-weight: 600; letter-spacing: -0.01em; }
 .bm { --bm-line: color-mix(in oklab, var(--fg) 16%, transparent); position: relative; margin-left: 4px; padding-left: 14px; }
 .bm-trunk { position: absolute; left: 0; top: -10px; bottom: -10px; width: 1.5px; }
@@ -430,6 +450,7 @@ button { color: inherit; }
   .capsule { width: 100%; min-width: 0; justify-self: stretch; }
   .capsule-kbd { display: none; }
   .sidebar { width: auto; right: var(--gutter); bottom: calc(60px + env(safe-area-inset-bottom)); }
+  .sidebar-toggle { --sb-w: calc(100vw - 2 * var(--gutter)); }
   .palette { top: calc(max(62px, env(safe-area-inset-top) + 54px)); }
 }
 @media (max-width: 360px) {
@@ -442,7 +463,7 @@ button { color: inherit; }
   .bm-fold { transition: none; }
   .keybar button { transition: none; }
   .sidebar[hidden] { transform: none; }
-  .sidebar.instant, .palette[data-open-kind="keyboard"] { transition: none; }
+  .sidebar.instant, .palette[data-open-kind="keyboard"], .sidebar-toggle { transition: none; }
   .keybar.is-away { transform: none; }
   .backdrop { transition: opacity 240ms ease; }
   .keybar button:active,
