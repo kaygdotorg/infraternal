@@ -17,7 +17,6 @@ const INPUT_FRAME_LIMIT = 16 * 1024;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
-const THEME_ROWS_PER_FRAME = 4;
 const encoder = new TextEncoder();
 
 /** Private hooks on the pinned Ghostty build, kept at the renderer boundary for idle parking. */
@@ -29,9 +28,25 @@ interface GhosttyActivityControls {
     setCursorBlink(enabled: boolean): void;
     setTheme(theme: ITheme): void;
     render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown, scrollbarOpacity?: number): void;
-    renderLine?(line: unknown, row: number, cols: number): void;
-    renderCursor?(x: number, y: number): void;
   };
+}
+
+interface ThemeRebuild {
+  overlay: HTMLCanvasElement | undefined;
+  viewportY: number;
+  phase: "closing" | "replay";
+  targetSequence: bigint | undefined;
+}
+
+/** Compares the effective fields that Ghostty serializes into its WASM terminal. */
+function sameTheme(left: ITheme | undefined, right: ITheme): boolean {
+  if (!left) return false;
+  const fields: (keyof ITheme)[] = [
+    "foreground", "background", "cursor", "cursorAccent", "selectionBackground", "selectionForeground",
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
+  ];
+  return fields.every((field) => left[field] === right[field]);
 }
 
 export interface TerminalHooks {
@@ -215,6 +230,7 @@ export class TerminalClient {
   private nextPingNonce = 0n;
   private readonly pendingPings = new Map<bigint, number>();
   private inputModifiers: InputModifiers = { ctrl: "off", alt: "off" };
+  private themeRebuild: ThemeRebuild | undefined;
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
   private readonly onViewportChange = (): void => this.syncVisualViewport();
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
@@ -239,7 +255,6 @@ export class TerminalClient {
     window.visualViewport?.addEventListener("resize", this.onViewportChange);
     window.visualViewport?.addEventListener("scroll", this.onViewportChange);
     this.terminal.onResize(({ cols, rows }) => {
-      this.cancelThemePaint();
       this.wakeTerminal();
       const rect = config.host.getBoundingClientRect();
       this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
@@ -294,6 +309,8 @@ export class TerminalClient {
     cellWidth: number;
     cellHeight: number;
     configuredScrollback: number;
+    cursorX: number;
+    cursorY: number;
     receivedSequence: string;
     outputSequence: string;
     scrollbackRows: number;
@@ -310,6 +327,8 @@ export class TerminalClient {
       cellWidth: cell.width,
       cellHeight: cell.height,
       configuredScrollback: this.terminal.options.scrollback ?? 10_000,
+      cursorX: wasmTerm?.getCursor().x ?? 0,
+      cursorY: wasmTerm?.getCursor().y ?? 0,
       receivedSequence: this.receivedOutSeq.toString(),
       outputSequence: this.lastOutSeq.toString(),
       scrollbackRows: wasmTerm?.getScrollbackLength() ?? 0,
@@ -385,13 +404,49 @@ export class TerminalClient {
     };
   }
 
-  /** Updates both Ghostty's option record and renderer palette without rebuilding the session. */
+  /** Rebuilds Ghostty with the new palette, replaying the owned session before swapping canvases. */
   setTheme(theme: ITheme): void {
+    if (sameTheme(this.config.theme, theme)) return;
+
+    if (this.themeRebuild) {
+      this.updateTheme(theme);
+      if (this.themeRebuild.phase === "replay") {
+        this.themeRebuild.phase = "closing";
+        this.themeRebuild.targetSequence = undefined;
+        if (this.socket) this.socket.close(4000, "terminal theme changed");
+        else this.prepareThemeReplay();
+      }
+      return;
+    }
+
+    const rebuild: ThemeRebuild = {
+      overlay: this.captureTerminalCanvas(),
+      viewportY: this.terminal.viewportY,
+      phase: "closing",
+      targetSequence: undefined,
+    };
+    this.updateTheme(theme);
+
+    // Before the first output there is no server state to replay. Reset the
+    // empty WASM terminal now so a theme selected while init() was awaiting
+    // uses the latest palette on its first byte.
+    if (this.receivedOutSeq === 0n && this.lastOutSeq === 0n && this.outputQueue.length === 0
+      && !this.outputWriteInFlight && !this.snapshotWriteInFlight && !this.pendingSnapshot) {
+      this.terminal.reset();
+      this.paintEmptyTerminalBackground();
+      rebuild.overlay?.remove();
+      return;
+    }
+
+    this.themeRebuild = rebuild;
+    if (this.socket) this.socket.close(4000, "terminal theme changed");
+    else this.prepareThemeReplay();
+  }
+
+  private updateTheme(theme: ITheme): void {
     this.config.theme = theme;
     this.terminal.options.theme = theme;
-    const renderer = this.ghostty.renderer;
-    renderer?.setTheme(theme);
-    this.repaintTheme();
+    this.ghostty.renderer?.setTheme(theme);
   }
 
   /** Forces a WebSocket close for the opt-in resume probe. */
@@ -410,7 +465,8 @@ export class TerminalClient {
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
     this.config.onConnectionChange?.(false);
     window.clearTimeout(this.retryTimer);
-    this.cancelThemePaint();
+    this.themeRebuild?.overlay?.remove();
+    this.themeRebuild = undefined;
     this.stopPings();
     this.resizeObserver.disconnect();
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
@@ -426,7 +482,7 @@ export class TerminalClient {
 
   private connect(): void {
     if (this.closed) return;
-    this.setStatus(this.sessionId ? "Connection lost; resuming…" : "Connecting…");
+    if (!this.themeRebuild) this.setStatus(this.sessionId ? "Connection lost; resuming…" : "Connecting…");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const traceQuery = this.config.traceMockServer ? "?trace=1" : "";
     const socket = new WebSocket(`${protocol}//${location.host}/v1/ws${traceQuery}`);
@@ -470,15 +526,24 @@ export class TerminalClient {
         this.protocolFailure("server sent an invalid wire frame");
       }
     };
-    socket.onerror = () => this.setStatus("Connection interrupted; reconnecting…");
+    socket.onerror = () => {
+      if (!this.themeRebuild) this.setStatus("Connection interrupted; reconnecting…");
+    };
     socket.onclose = () => {
       if (this.socket !== socket || this.closed) return;
       this.socket = undefined;
       this.decoder = undefined;
       this.attached = false;
       this.attachRequested = false;
-      this.config.onConnectionChange?.(false);
       this.stopPings();
+      if (this.themeRebuild) {
+        this.forcedDrop = false;
+        this.setStatus("");
+        if (this.themeRebuild.phase === "closing") this.prepareThemeReplay();
+        else this.scheduleReconnect();
+        return;
+      }
+      this.config.onConnectionChange?.(false);
       const forced = this.forcedDrop;
       this.forcedDrop = false;
       this.config.hooks?.onDisconnected?.(forced);
@@ -648,7 +713,7 @@ export class TerminalClient {
     this.config.onConnectionChange?.(true);
     this.startPings();
     this.wakeTerminal();
-    this.config.hooks?.onAttached?.(this.connectionIsResume, this);
+    if (!this.themeRebuild) this.config.hooks?.onAttached?.(this.connectionIsResume, this);
   }
 
   private resendUnacknowledgedInput(): void {
@@ -798,6 +863,7 @@ export class TerminalClient {
         this.returnCredit(snapshot.bytes.byteLength);
         this.drainOutput();
         this.tryAttach();
+        this.finishThemeRebuildIfPainted();
       });
       return;
     }
@@ -827,9 +893,11 @@ export class TerminalClient {
         this.returnCredit(consumed);
         this.drainOutput();
         this.tryAttach();
+        this.finishThemeRebuildIfPainted();
       });
       return;
     }
+    this.prepareThemeReplay();
     this.tryAttach();
   }
 
@@ -983,52 +1051,69 @@ export class TerminalClient {
     this.ghostty.renderer?.setCursorBlink(false);
   }
 
-  /** Repaints a theme in bounded row batches because Ghostty exposes no theme invalidation. */
-  private repaintTheme(): void {
-    const renderer = this.ghostty.renderer;
-    const buffer = this.terminal.wasmTerm;
-    if (!renderer || !buffer) return;
-    this.cancelThemePaint();
-
-    // The pinned renderer's full redraw walks every cell synchronously. Its row painter
-    // already handles selection and graphemes, so repaint a few visible rows per frame.
-    if (!renderer.renderLine) {
-      renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
-      return;
-    }
-    const { cols, rows } = buffer.getDimensions();
-    const viewportY = this.terminal.viewportY;
-    const scrollbackRows = this.terminal.getScrollbackLength();
-    let row = 0;
-    const paint = (): void => {
-      this.themePaintFrame = 0;
-      const end = Math.min(rows, row + THEME_ROWS_PER_FRAME);
-      for (; row < end; row += 1) {
-        const line = viewportY > 0 && row < viewportY
-          ? this.terminal.getScrollbackLine(scrollbackRows - Math.floor(viewportY) + row)
-          : buffer.getLine(row - Math.floor(viewportY));
-        if (line) renderer.renderLine?.(line, row, cols);
-      }
-      if (row < rows) {
-        this.themePaintFrame = requestAnimationFrame(paint);
-        return;
-      }
-
-      // Refresh small overlays after the rows. The normal renderer skips its cursor
-      // while scrolled back and its idle cursor blink is parked.
-      renderer.render(buffer, false, viewportY, this.terminal, this.ghostty.scrollbarOpacity);
-      if (viewportY === 0 && !this.rendererCursorBlinking) {
-        const cursor = buffer.getCursor();
-        if (cursor.visible) renderer.renderCursor?.(cursor.x, cursor.y);
-      }
-    };
-    this.themePaintFrame = requestAnimationFrame(paint);
+  /** Copies the painted canvas so resetting WASM never exposes an empty frame. */
+  private captureTerminalCanvas(): HTMLCanvasElement | undefined {
+    const source = this.config.host.querySelector<HTMLCanvasElement>("canvas");
+    if (!source) return undefined;
+    const sourceRect = source.getBoundingClientRect();
+    const hostRect = this.config.host.getBoundingClientRect();
+    const overlay = document.createElement("canvas");
+    const context = overlay.getContext("2d");
+    if (!context) return undefined;
+    overlay.width = source.width;
+    overlay.height = source.height;
+    context.drawImage(source, 0, 0);
+    overlay.style.position = "absolute";
+    overlay.style.left = `${sourceRect.left - hostRect.left}px`;
+    overlay.style.top = `${sourceRect.top - hostRect.top}px`;
+    overlay.style.width = `${sourceRect.width}px`;
+    overlay.style.height = `${sourceRect.height}px`;
+    overlay.style.zIndex = "2";
+    overlay.style.pointerEvents = "none";
+    overlay.dataset.themeHold = "true";
+    this.config.host.append(overlay);
+    return overlay;
   }
 
-  private cancelThemePaint(): void {
-    if (!this.themePaintFrame) return;
-    cancelAnimationFrame(this.themePaintFrame);
-    this.themePaintFrame = 0;
+  /** Drains pre-close writes, then asks the existing attach path for a full replay. */
+  private prepareThemeReplay(): void {
+    const rebuild = this.themeRebuild;
+    if (!rebuild || rebuild.phase !== "closing" || this.outputWriteInFlight || this.snapshotWriteInFlight
+      || this.pendingSnapshot || this.outputQueue.length > 0 || this.closed) return;
+
+    rebuild.targetSequence = this.receivedOutSeq;
+    rebuild.phase = "replay";
+    // The shim replays from the output origin or emits its bounded Snapshot if
+    // that origin has rotated out of the ring. Both produce a fresh VT state.
+    this.lastOutSeq = 0n;
+    this.receivedOutSeq = 0n;
+    this.terminal.reset();
+    this.wakeTerminal();
+    this.setStatus("");
+    if (!this.socket && this.retryTimer === 0) this.scheduleReconnect();
+  }
+
+  /** Repaints the empty canvas cheaply while the first session bytes are pending. */
+  private paintEmptyTerminalBackground(): void {
+    const canvas = this.config.host.querySelector<HTMLCanvasElement>("canvas");
+    const context = canvas?.getContext("2d");
+    const background = this.config.theme?.background;
+    if (!canvas || !context || !background) return;
+    context.fillStyle = background;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  /** Restores the prior scroll position only after the requested replay is painted. */
+  private finishThemeRebuildIfPainted(): void {
+    const rebuild = this.themeRebuild;
+    if (!rebuild || rebuild.phase !== "replay" || rebuild.targetSequence === undefined
+      || this.lastOutSeq < rebuild.targetSequence) return;
+    this.terminal.scrollToLine(Math.min(rebuild.viewportY, this.terminal.getScrollbackLength()));
+    // Ghostty invokes write callbacks after its render-loop paint. A forced
+    // full-canvas redraw here would duplicate that work in one long main-thread task.
+    rebuild.overlay?.remove();
+    this.themeRebuild = undefined;
+    this.setStatus("");
   }
 
   private acceptPong(nonce: bigint): void {
