@@ -128,6 +128,13 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
   let current: HTMLElement | undefined;
   let text = "";
   let selected: AddHostFixture[] = [];
+  /** Hosts typed by hand and ticked; they live in the list like discovered ones. */
+  let manualHosts: AddHostFixture[] = [];
+  const allHosts = (): AddHostFixture[] => [...manualHosts, ...hosts];
+  /** Autofocus only with a fine pointer: on touch it would raise the keyboard over the list. */
+  const focusField = (page: ParentNode | undefined): void => {
+    if (matchMedia("(pointer: fine)").matches) page?.querySelector<HTMLInputElement>(".ah-input")?.focus({ preventScroll: true });
+  };
   let installing: AddHostFixture[] = [];
   let skipped: Failure[] = [];
   let failure: Failure | undefined;
@@ -202,7 +209,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     else renderSuccess(page);
     show(page, dir);
     if (next === "progress") startProgress();
-    if (next === "discovery") page.querySelector<HTMLInputElement>(".ah-input")?.focus({ preventScroll: true });
+    if (next === "discovery") focusField(page);
   }
 
   // ── Empty state ─────────────────────────────────────────────────────────────
@@ -214,7 +221,8 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
 
   // ── Discovery: one field, one list ──────────────────────────────────────────
   function hostRow(host: AddHostFixture): string {
-    const status = statusOf(host);
+    const typed = manualHosts.includes(host);
+    const status = typed ? { label: "Checked on continue", tone: "none" as const } : statusOf(host);
     const sources = host.sources.map((source) =>
       `<span class="ah-src">${hostSourceIconMarkup(source)}${SOURCE_LABELS[source]}</span>`).join("");
     const checked = selected.some((item) => item.id === host.id);
@@ -223,11 +231,11 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
         aria-label="${escapeHtml(host.id)}, ${escapeHtml(status.label)}" /></span>
       <span class="ah-main">
         <span class="ah-name">${escapeHtml(host.id)}</span>
-        <span class="ah-meta"><span class="ah-os">${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span>${sources}</span>
+        <span class="ah-meta">${typed ? `<span class="ah-os">Typed by hand · ${escapeHtml(host.user)}@${escapeHtml(host.address)}</span>` : `<span class="ah-os">${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span>${sources}`}</span>
       </span>
       <span class="ah-side">
         <span class="ah-status" data-tone="${status.tone}">${status.label}</span>
-        <button class="ah-ip" type="button" data-ah="ip" data-id="${escapeHtml(host.id)}">Show IP</button>
+        ${typed ? "" : `<button class="ah-ip" type="button" data-ah="ip" data-id="${escapeHtml(host.id)}">Show IP</button>`}
       </span>
     </label>`;
   }
@@ -238,41 +246,56 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
       <input class="ah-input" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
         placeholder="Find a host or type user@host" aria-label="Find a host or type user@host" value="${escapeHtml(text)}" />
       <div class="ah-label" aria-hidden="true">Reachable from this server</div>
-      <div class="ah-list" role="group" aria-label="Discovered hosts">${hosts.map(hostRow).join("")}
-        <button class="ah-manual" type="button" data-ah="manual" hidden>${PLUS_ICON}<span>Add <span class="ah-manual-target"></span> manually</span></button>
-        <p class="ah-none" hidden>No discovered host matches.</p>
-      </div>`;
-    for (const input of page.querySelectorAll<HTMLInputElement>(".ah-row input")) springCheckbox(input);
-    applyFilter(page, false);
+      <div class="ah-list" role="group" aria-label="Hosts"></div>`;
+    renderList(page);
     setFoot(`<span class="ah-count" aria-live="polite"></span><button class="ah-primary" type="button" data-ah="continue">Continue</button>`);
     updateCount();
   }
 
-  /** Shows rows that match the field; unmatched text offers a manual row. */
+  /** Builds the list: a manual candidate row first, then typed and discovered hosts. */
+  function renderList(page: HTMLElement): void {
+    const list = page.querySelector<HTMLElement>(".ah-list")!;
+    list.innerHTML = `<label class="ah-row ah-candidate" hidden>
+        <span class="ah-check check"><input type="checkbox" data-candidate aria-label="Add the typed host" /></span>
+        <span class="ah-main"><span class="ah-name">Add <span class="ah-manual-target"></span></span>
+          <span class="ah-meta"><span class="ah-os">Not discovered · checked when you continue</span></span></span>
+      </label>
+      ${allHosts().map(hostRow).join("")}
+      <p class="ah-none" hidden>No discovered host matches.</p>`;
+    for (const input of list.querySelectorAll<HTMLInputElement>(".ah-row input")) springCheckbox(input);
+    applyFilter(page, false);
+  }
+
+  /**
+   * Shows rows that match the field. Selected rows always stay visible, so nothing
+   * selected is ever hidden; text that names no other host offers the candidate row.
+   */
   function applyFilter(page: HTMLElement = current!, animate = true): void {
     const needle = text.trim().toLocaleLowerCase();
     let visible = 0;
     let exact = false;
-    for (const row of page.querySelectorAll<HTMLElement>(".ah-row")) {
-      const host = hosts.find((item) => item.id === row.dataset.host)!;
+    for (const row of page.querySelectorAll<HTMLElement>(".ah-row[data-host]")) {
+      const host = allHosts().find((item) => item.id === row.dataset.host)!;
+      const isSelected = selected.some((item) => item.id === host.id);
       const haystack = `${host.user}@${host.id} ${host.address} ${host.operatingSystem} ${host.architecture}`.toLocaleLowerCase();
       const target = parseTarget(needle);
       const match = !needle || haystack.includes(needle) || (!!target && (host.id === target.host || host.address === target.host));
       if (target && (host.id === target.host.toLowerCase() || host.address === target.host)) exact = true;
       const wasHidden = row.hidden;
-      row.hidden = !match;
-      if (match) visible++;
-      if (animate && wasHidden && match && !reducedMotion()) row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE });
+      row.hidden = !match && !isSelected;
+      if (match && !isSelected) visible++;
+      if (animate && wasHidden && !row.hidden && !reducedMotion()) row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE });
     }
-    const manual = page.querySelector<HTMLElement>(".ah-manual")!;
+    const manual = page.querySelector<HTMLElement>(".ah-candidate")!;
     const target = parseTarget(text);
     const offerManual = !!target && !exact && visible === 0;
     if (offerManual && manual.hidden && animate && !reducedMotion()) manual.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE });
     manual.hidden = !offerManual;
     if (target) page.querySelector<HTMLElement>(".ah-manual-target")!.textContent = text.trim();
-    page.querySelector<HTMLElement>(".ah-none")!.hidden = visible > 0 || offerManual;
+    const shown = page.querySelectorAll(".ah-row[data-host]:not([hidden])").length;
+    page.querySelector<HTMLElement>(".ah-none")!.hidden = shown > 0 || offerManual || !needle;
     const label = page.querySelector<HTMLElement>(".ah-label");
-    if (label) label.hidden = visible === 0;
+    if (label) label.hidden = shown === 0 && !offerManual;
   }
 
   function updateCount(): void {
@@ -287,7 +310,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
   function manualHost(): AddHostFixture | undefined {
     const target = parseTarget(text);
     if (!target) return undefined;
-    const known = hosts.find((host) => host.id === target.host.toLowerCase() || host.address === target.host);
+    const known = allHosts().find((host) => host.id === target.host.toLowerCase() || host.address === target.host);
     if (known) return { ...known, user: target.user ?? known.user };
     return {
       id: target.host,
@@ -305,11 +328,24 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     };
   }
 
+  /** Ticks the typed host: it joins the list as a selected row and the field clears. */
   function addManual(): void {
     const host = manualHost();
-    if (!host) return;
-    selected = [host];
-    proceed();
+    if (!host || !current) return;
+    const existing = allHosts().find((item) => item.id === host.id);
+    if (existing) {
+      if (!selected.some((item) => item.id === existing.id)) selected = [...selected, existing];
+    } else {
+      manualHosts = [host, ...manualHosts];
+      selected = [...selected, host];
+    }
+    text = "";
+    const input = current.querySelector<HTMLInputElement>(".ah-input");
+    if (input) input.value = "";
+    renderList(current);
+    const row = current.querySelector<HTMLElement>(`.ah-row[data-host="${CSS.escape(host.id)}"]`);
+    if (row && !reducedMotion()) row.animate([{ opacity: 0, transform: "translateY(-4px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: EASE });
+    updateCount();
   }
 
   // ── After selection ─────────────────────────────────────────────────────────
@@ -510,8 +546,8 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     group.hidden = false;
     if (animate && !reducedMotion()) { windowSpring.set(0, true); requestAnimationFrame(() => windowSpring.set(1)); }
     else windowSpring.set(1, true);
-    if (step === "success" || step === "failure") { selected = []; text = ""; go("discovery", 0); }
-    else current?.querySelector<HTMLInputElement>(".ah-input")?.focus({ preventScroll: true });
+    if (step === "success" || step === "failure") { selected = []; manualHosts = []; text = ""; go("discovery", 0); }
+    else focusField(current);
   }
 
   function closeWindow(): void {
@@ -528,7 +564,6 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     if (action === "close" || action === "done") { toast.dismiss(); closeWindow(); }
     else if (action === "begin") go("discovery");
     else if (action === "continue") proceed();
-    else if (action === "manual") addManual();
     else if (action === "credentials") afterCredentials();
     else if (action === "as-root") startInstall(true);
     else if (action === "as-user") startInstall(false);
@@ -536,7 +571,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
       const host = failure?.host;
       if (host) { selected = [{ ...host, reachability: "ready", authentication: "accepted" }]; skipped = []; proceed(); }
     } else if (action === "back") go("discovery", -1);
-    else if (action === "again") { selected = []; text = ""; skipped = []; toast.dismiss(); go("discovery", -1); }
+    else if (action === "again") { selected = []; manualHosts = []; text = ""; skipped = []; toast.dismiss(); go("discovery", -1); }
     else if (action === "ip") {
       event.preventDefault();
       const host = hosts.find((item) => item.id === target.dataset.id);
@@ -547,8 +582,9 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
   function onChange(event: Event): void {
     const input = event.target;
     if (!(input instanceof HTMLInputElement)) return;
+    if (input.matches("[data-candidate]")) { if (input.checked) addManual(); return; }
     if (input.closest(".ah-row")) {
-      const host = hosts.find((item) => item.id === input.value);
+      const host = allHosts().find((item) => item.id === input.value);
       if (!host) return;
       selected = input.checked ? [...selected.filter((item) => item.id !== host.id), host] : selected.filter((item) => item.id !== host.id);
       updateCount();
@@ -572,7 +608,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     if (event.key === "Escape" && !group.hidden) { closeWindow(); return; }
     if (event.key !== "Enter" || !(event.target instanceof HTMLInputElement) || !event.target.matches(".ah-input")) return;
     event.preventDefault();
-    const manual = current?.querySelector<HTMLElement>(".ah-manual");
+    const manual = current?.querySelector<HTMLElement>(".ah-candidate");
     if (manual && !manual.hidden) { addManual(); return; }
     const rows = [...(current?.querySelectorAll<HTMLElement>(".ah-row:not([hidden]):not(.is-added)") ?? [])];
     if (rows.length === 1 && selected.length === 0) rows[0]!.querySelector<HTMLInputElement>("input")!.click();

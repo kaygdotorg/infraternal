@@ -200,24 +200,8 @@
   .ah-check { margin-top: 2px; }
   .ah-side { grid-column: 2; display: flex; justify-content: space-between; margin-top: 4px; }
 }
-.ah-manual {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: calc(var(--ah-control) + 8px);
-  padding: var(--ah-row-pad) 10px;
-  border: 0;
-  border-radius: var(--r-sm, 8px);
-  background: none;
-  color: var(--fg);
-  font: inherit;
-  letter-spacing: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.ah-manual svg { width: var(--ah-check); height: 14px; flex: none; fill: none; stroke: var(--fg-2); stroke-width: 1.6; stroke-linecap: round; }
 .ah-manual-target { font-weight: 600; }
-@media (hover: hover) and (pointer: fine) { .ah-manual:hover { background: color-mix(in oklab, var(--fg) 4%, transparent); } }
+.ah-candidate .ah-name { font-weight: 450; }
 .ah-none { margin: 12px 10px 0; color: var(--fg-2); }
 
 /* ── Choices ──────────────────────────────────────────────────────────────── */
