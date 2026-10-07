@@ -1,0 +1,71 @@
+/** Window canvas (src/canvas.ts) and its details popover (src/canvas-popover.ts). */
+
+/* The canvas replaces the single pane grid; the viewport clips, the layer pans. */
+.terminal-screen[data-canvas="on"] .panes { display: block; overflow: visible; }
+.canvas-viewport {
+  position: absolute; inset: 0; overflow: hidden;
+  /* Windows cast shadows past the viewport edge; give them room without clipping. */
+  margin: 0 calc(var(--gutter) * -1) -16px; padding: 0 var(--gutter) 16px;
+  touch-action: none;
+}
+.canvas-viewport[data-grab="ready"] { cursor: grab; }
+.canvas-viewport[data-grab="dragging"] { cursor: grabbing; }
+.canvas-viewport[data-grab] .ui-window { pointer-events: none; }
+.canvas-layer { display: flex; gap: 12px; height: 100%; transform-origin: 0 0; will-change: transform; }
+.canvas-layer > .ui-window { flex: none; width: var(--window-w, 100%); height: var(--window-h, 100%); }
+
+/* The live terminal fills its window body exactly as it filled the pane card. */
+.canvas-layer .ui-window-body > .terminal-host { position: absolute; inset: 0; }
+
+/* Static previews use the terminal's face and metrics, so a preview and the live terminal
+   read the same: 14 px on desktop (13 px on touch) with the renderer's font-box line. */
+.canvas-preview {
+  --preview-font: 14px;
+  position: absolute; inset: 0; margin: 0; padding: 14px 16px; overflow: auto;
+  color: var(--fg); font: 400 var(--preview-font)/1.2857 "Geist Mono", ui-monospace, monospace;
+  letter-spacing: 0; white-space: pre; tab-size: 8;
+  overscroll-behavior: contain; scrollbar-width: none; touch-action: pan-x pan-y;
+  -webkit-user-select: text; user-select: text;
+}
+.canvas-preview::-webkit-scrollbar { display: none; }
+@media (pointer: coarse) { .canvas-preview { --preview-font: 13px; } }
+.canvas-prompt { color: var(--accent); }
+.canvas-cmd { color: var(--fg); }
+.canvas-out { color: color-mix(in oklab, var(--fg) 82%, var(--bg)); }
+
+/* On narrow screens the host and session matter more than the user: drop `user@`. */
+@media (max-width: 480px) { .canvas-layer .ui-window-user { display: none; } }
+
+/* Window marks are filled glyphs. */
+.ui-host-mark { width: 100%; height: 100%; fill: currentColor; }
+
+/* ---- details popover ------------------------------------------------------------- */
+.canvas-popover {
+  position: absolute; z-index: 6; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  border-radius: 14px; color: var(--fg);
+}
+.canvas-popover-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px 12px; }
+.canvas-popover-logo { display: grid; flex: none; place-items: center; width: 24px; height: 24px; color: var(--fg); }
+.canvas-popover-names { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.canvas-popover-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.canvas-popover-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.canvas-popover-tabs { display: flex; padding: 0 16px 10px; }
+.canvas-popover-scroll {
+  min-height: 0; overflow: auto; padding: 2px 16px 10px; overscroll-behavior: contain;
+  border-top: 1px solid var(--line); scrollbar-width: thin;
+  -webkit-mask-image: linear-gradient(transparent, #000 10px, #000 calc(100% - 10px), transparent);
+  mask-image: linear-gradient(transparent, #000 10px, #000 calc(100% - 10px), transparent);
+}
+@media (pointer: coarse) {
+  .canvas-popover { border-radius: 18px; }
+  .canvas-popover-head { padding: 16px 16px 12px; }
+  .canvas-popover-logo { width: 28px; height: 28px; }
+}
+
+/* The mock badge sits in the bottom corner, clear of window headers, and never on top of
+   an open popover. */
+.terminal-screen[data-canvas="on"] .test-double-badge { top: auto; bottom: 24px; right: calc(var(--gutter) + 10px); }
+@media (pointer: coarse) {
+  .terminal-screen[data-canvas="on"] .test-double-badge { bottom: calc(84px + env(safe-area-inset-bottom)); }
+}
+.terminal-screen:has(.canvas-popover) .test-double-badge { opacity: 0; }

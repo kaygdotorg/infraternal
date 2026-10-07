@@ -20,6 +20,8 @@ export interface CoreScreenOptions {
 
 export interface CoreScreen {
   stage: HTMLElement;
+  /** The pane area under the top bar; the window canvas mounts here (src/canvas.ts). */
+  panes: HTMLElement;
   terminalHost: HTMLElement;
   status: HTMLElement;
   probePanel: HTMLElement;
@@ -648,6 +650,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   cancelRecovery?.addEventListener("click", cancelClick);
   return {
     stage,
+    panes,
     terminalHost,
     status,
     probePanel,

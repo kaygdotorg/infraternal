@@ -237,6 +237,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   welcomeEffect = undefined;
   stopBackdrop(instant);
   currentTerminal?.dispose();
+  canvasPrototype?.dispose();
+  canvasPrototype = undefined;
   coreScreen?.dispose();
   performanceProbe?.dispose();
   currentTerminal = undefined;
@@ -265,6 +267,11 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     return;
   }
   coreScreen = screen;
+  if (mockMode && query.get("proto") === "windows") {
+    // Gated mockup (D162): the window canvas, built against the test double only.
+    const { mountCanvas } = await import("./canvas");
+    canvasPrototype = mountCanvas(screen, hostName);
+  }
   if (probeMode) performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
   const probeHooks = performanceProbe?.hooks();
   // Session continuity across reloads (integration, #34): the tab remembers its
@@ -366,6 +373,8 @@ async function showRecovery(): Promise<void> {
 
 /** URL choices win and are remembered when storage is available; private mode still works. */
 function uiFontPreference(): UiFont {
+  // The canvas mockup is monospace throughout (owner rule, docs/design/TASTE.md §2).
+  if (new URLSearchParams(location.search).get("proto") === "windows") return "mono";
   const requested = new URLSearchParams(location.search).get("ui");
   if (requested === "sans" || requested === "mono") {
     try { window.localStorage.setItem("tracer.ui-font", requested); } catch { /* The URL remains the preference without storage. */ }
@@ -391,6 +400,7 @@ function probeCount(value: string | null): number {
 }
 
 let recoveryNoticeGeneration = 0;
+let canvasPrototype: { dispose(): void } | undefined;
 
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;

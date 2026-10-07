@@ -1,0 +1,570 @@
+/**
+ * The window canvas (DECISIONS 118, 125, 158–159; prototype behind `?proto=windows`).
+ *
+ * Every session is a window card (packages/ui window-card) on one pannable canvas. The
+ * live terminal keeps its renderer: its host element is moved into the first window, and
+ * the other windows show static previews from the test double.
+ *
+ * Panning is one GPU transform on the canvas layer, never scrollLeft:
+ * - trackpad: horizontal swipes pan anywhere, even over a terminal; vertical swipes scroll
+ *   a terminal they are over and pan the canvas over gaps and headers; Shift+wheel pans
+ *   horizontally; Space+drag and middle-drag pan with momentum;
+ * - touch: one finger scrolls the terminal it is on (and pans over gaps), two fingers pan
+ *   the canvas, a pinch changes the font size of the window under it.
+ * At rest the offset snaps to whole device pixels, so text renders exactly as it does
+ * outside the canvas (TASTE §5, crisp text).
+ *
+ * Activation: a tap or click on an inactive window only activates it (accent hairline),
+ * without focusing input, so no iPhone keyboard appears; a second tap types. The header
+ * pill opens the details popover (machine, connection, session).
+ */
+import { Spring } from "../../../packages/ui/src/spring";
+import { createWindowCard, type WindowCard } from "../../../packages/ui/src/window-card";
+import { hostIconMarkup, type HostPlatform } from "../../../packages/ui/src/host-icons";
+import { openDetailsPopover, type DetailsPopover } from "./canvas-popover";
+import type { CoreScreen } from "./core-screen";
+
+export interface CanvasSession {
+  id: string;
+  name: string;
+  lastOutput: string;
+  age: string;
+  viewers: number;
+  size: string;
+  started: string;
+  scrollback: string;
+  screen: string[];
+}
+
+export interface CanvasHost {
+  id: string;
+  user: string;
+  name: string;
+  os: HostPlatform;
+  osName: string;
+  version: string;
+  architecture: string;
+  model: string;
+  cpu: string;
+  cores: number;
+  memory: number;
+  disk: number;
+  uptime: string;
+  load: string;
+  kernel: string;
+  init: string;
+  virtualization: string;
+  shell: string;
+  locale: string;
+  ips: string[];
+  engines: string[];
+  mode: "rootless" | "root";
+  status: "live" | "reconnecting";
+  connection: {
+    route: string;
+    transport: string;
+    mesh: string;
+    certificate: string;
+    roundTrip: string;
+    bytes: string;
+    reconnects: number;
+  };
+  sessions: CanvasSession[];
+}
+
+interface CanvasWindow {
+  id: string;
+  host: CanvasHost;
+  session: CanvasSession;
+  card: WindowCard;
+  live: boolean;
+  preview?: HTMLElement;
+  fontSize: number;
+}
+
+const HOSTS_URL = "/__mock/proto/windows";
+const GAP = 12;
+const TAP_SLOP = 8;
+const PAN_THRESHOLD = 10;
+const PINCH_THRESHOLD = 24;
+const REST_DELAY = 140;
+const DECELERATION = 0.998;
+
+const coarse = matchMedia("(pointer: coarse)");
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+})[char]!);
+
+/** Splits a prompt line into its prompt and command so previews colour them like a shell. */
+function previewLine(line: string): string {
+  const match = /^(\S+@\S+:[^$#]*[$#])(.*)$/.exec(line);
+  if (!match) return `<span class="canvas-out">${escapeHtml(line) || " "}</span>`;
+  return `<span class="canvas-prompt">${escapeHtml(match[1]!)}</span><span class="canvas-cmd">${escapeHtml(match[2]!)}</span>`;
+}
+
+/** Mounts the canvas into the core screen's pane area and returns its disposer. */
+export function mountCanvas(core: CoreScreen, hostName: string): { dispose(): void } {
+  const stage = core.stage;
+  const panes = core.panes;
+  stage.dataset.canvas = "on";
+  const viewport = document.createElement("div");
+  viewport.className = "canvas-viewport";
+  const layer = document.createElement("div");
+  layer.className = "canvas-layer";
+  viewport.append(layer);
+
+  // The live terminal moves into its window; the plain pane card it lived in goes away.
+  const oldCard = core.terminalHost.closest(".pane-card");
+  const windows: CanvasWindow[] = [];
+  let active: CanvasWindow | undefined;
+  let popover: DetailsPopover | undefined;
+
+  const events = new AbortController();
+  const signal = events.signal;
+
+  // ---- offset, springs and rest snapping ---------------------------------------------
+  let x = 0, y = 0;
+  let minX = 0, minY = 0;
+  let moving = false;
+  let restTimer = 0;
+  const dpr = (): number => devicePixelRatio || 1;
+  const snap = (value: number): number => Math.round(value * dpr()) / dpr();
+  // The layer stays composited (will-change in canvas.css): promoting it on the first pan
+  // frame and demoting it at rest re-rasterised every window and dropped frames. Text stays
+  // crisp because the resting offset is always a whole number of device pixels.
+  const paint = (): void => {
+    moving = true;
+    layer.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  };
+  const rest = (): void => {
+    window.clearTimeout(restTimer);
+    restTimer = 0;
+    x = snap(x);
+    y = snap(y);
+    moving = false;
+    layer.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  };
+  const restSoon = (): void => {
+    window.clearTimeout(restTimer);
+    restTimer = window.setTimeout(rest, REST_DELAY);
+  };
+  let targetX = 0, targetY = 0;
+  const springX = new Spring(0, (value) => { x = value; paint(); if (Math.abs(value - targetX) < 0.01) restSoon(); }, { visualDuration: 0.42, bounce: 0 });
+  const springY = new Spring(0, (value) => { y = value; paint(); if (Math.abs(value - targetY) < 0.01) restSoon(); }, { visualDuration: 0.42, bounce: 0 });
+  const stopSprings = (): void => {
+    springX.set(x, true);
+    springY.set(y, true);
+  };
+  const clampX = (value: number): number => Math.min(0, Math.max(minX, value));
+  const clampY = (value: number): number => Math.min(0, Math.max(minY, value));
+  const rubber = (value: number, min: number, size: number): number => {
+    const over = value > 0 ? value : value < min ? value - min : 0;
+    if (!over) return value;
+    const damped = (over * size * 0.55) / (size + 0.55 * Math.abs(over));
+    return (value > 0 ? 0 : min) + damped;
+  };
+  const glideTo = (nextX: number, nextY: number, instant = false): void => {
+    popover?.close("pointer");
+    targetX = clampX(nextX);
+    targetY = clampY(nextY);
+    if (instant || reducedMotion.matches) {
+      stopSprings();
+      x = targetX; y = targetY;
+      springX.set(x, true); springY.set(y, true);
+      paint();
+      rest();
+      return;
+    }
+    springX.value = x; springY.value = y;
+    springX.set(targetX);
+    springY.set(targetY);
+  };
+  // Measured once per resize (layout()); panning never reads layout, so it cannot force
+  // a synchronous reflow while terminals stream output.
+  let viewWidth = 0, viewHeight = 0;
+  const panBy = (dx: number, dy: number, elastic: boolean): void => {
+    popover?.close("pointer");
+    stopSprings();
+    x = elastic ? rubber(x + dx, minX, viewWidth) : clampX(x + dx);
+    y = elastic ? rubber(y + dy, minY, viewHeight) : clampY(y + dy);
+    springX.set(x, true);
+    springY.set(y, true);
+    paint();
+  };
+
+  // ---- layout -----------------------------------------------------------------------
+  // The viewport is padded by the gutter so window shadows are never clipped; all layout
+  // math uses its content box.
+  const inner = (): { width: number; height: number } => {
+    const style = getComputedStyle(viewport);
+    return {
+      width: viewport.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+      height: viewport.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+    };
+  };
+  const layout = (): void => {
+    const rect = inner();
+    viewWidth = rect.width;
+    viewHeight = rect.height;
+    // Desktop shows two windows and a peek of the third (the canvas invites a pan);
+    // phones show one window and a sliver of the next.
+    const width = coarse.matches || rect.width < 720
+      ? Math.max(260, rect.width - 28)
+      : Math.max(420, Math.min(860, (rect.width - GAP * 2) / 2.25));
+    const height = rect.height;
+    layer.style.setProperty("--window-w", `${Math.round(width)}px`);
+    layer.style.setProperty("--window-h", `${Math.round(height)}px`);
+    const content = windows.length * Math.round(width) + Math.max(0, windows.length - 1) * GAP;
+    minX = Math.min(0, rect.width - content);
+    minY = 0;
+    x = clampX(x);
+    y = clampY(y);
+    rest();
+  };
+
+  // ---- windows ----------------------------------------------------------------------
+  const icons = {
+    machine: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
+    connection: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+    session: '<path d="m5 8 4 4-4 4"/><path d="M12 16h7"/>',
+  };
+  const updateCapsule = (window: CanvasWindow): void => {
+    const hostLabel = stage.querySelector<HTMLElement>("#capsule-host");
+    const sessionLabel = stage.querySelector<HTMLElement>(".capsule-session");
+    if (hostLabel) hostLabel.textContent = window.live ? hostName : `${window.host.user}@${window.host.name}`;
+    if (sessionLabel) sessionLabel.textContent = window.session.name;
+  };
+  const activate = (target: CanvasWindow, reveal: boolean): void => {
+    if (active === target) return;
+    // Keystrokes belong to the active window only: leaving the live terminal blurs it.
+    if (!target.live && core.terminalHost.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+    active?.card.setActive(false);
+    active = target;
+    target.card.setActive(true);
+    updateCapsule(target);
+    if (reveal) revealWindow(target);
+  };
+  const revealWindow = (target: CanvasWindow): void => {
+    const rect = { width: viewWidth, height: viewHeight };
+    const index = windows.indexOf(target);
+    const width = parseFloat(layer.style.getPropertyValue("--window-w")) || rect.width;
+    const left = index * (width + GAP);
+    const right = left + width;
+    // Touch pages window by window, so a revealed window lands on its page position.
+    if (coarse.matches) { glideTo(-left, y); return; }
+    if (left + x < 0) glideTo(-left, y);
+    else if (right + x > rect.width) glideTo(rect.width - right, y);
+  };
+  const togglePopover = (target: CanvasWindow, source: "pointer" | "keyboard"): void => {
+    if (popover?.windowId === target.id) { popover.close(source); return; }
+    popover?.close("keyboard");
+    popover = openDetailsPopover(stage, target.card.pill, {
+      windowId: target.id,
+      host: target.host,
+      session: target.session,
+      hostLabel: target.live ? hostName : target.host.name,
+      icons,
+    }, source, () => { popover = undefined; });
+  };
+
+  const addWindow = (host: CanvasHost, session: CanvasSession, live: boolean): CanvasWindow => {
+    const card = createWindowCard({
+      id: `${host.id}:${session.id}`,
+      title: { host: live ? hostName : host.name, user: host.user, session: session.name },
+      icon: hostIconMarkup(host.os, "ui-host-mark"),
+      status: host.status === "live" ? "live" : "connecting",
+    });
+    const entry: CanvasWindow = { id: `${host.id}:${session.id}`, host, session, card, live, fontSize: coarse.matches ? 13 : 14 };
+    if (live) {
+      card.body.append(core.terminalHost);
+    } else {
+      const preview = document.createElement("pre");
+      preview.className = "canvas-preview";
+      preview.setAttribute("aria-label", `Preview of ${host.name}, ${session.name}`);
+      preview.innerHTML = session.screen.map(previewLine).join("\n");
+      card.body.append(preview);
+      entry.preview = preview;
+    }
+    card.pill.addEventListener("click", (event) => {
+      activate(entry, false);
+      togglePopover(entry, event.detail === 0 ? "keyboard" : "pointer");
+    }, { signal });
+    layer.append(card.root);
+    windows.push(entry);
+    return entry;
+  };
+
+  // The live window first, so the terminal is never without a frame.
+  const liveHost: CanvasHost = {
+    id: "live", user: "", name: hostName, os: "unknown", osName: "Linux", version: "", architecture: "", model: "", cpu: "",
+    cores: 0, memory: 0, disk: 0, uptime: "", load: "", kernel: "", init: "", virtualization: "", shell: "", locale: "",
+    ips: [], engines: [], mode: "root", status: "live",
+    connection: { route: "", transport: "", mesh: "", certificate: "", roundTrip: "", bytes: "", reconnects: 0 },
+    sessions: [],
+  };
+  const liveSession: CanvasSession = { id: "shell", name: "SSH shell", lastOutput: "", age: "", viewers: 1, size: "", started: "", scrollback: "", screen: [] };
+  const liveWindow = addWindow(liveHost, liveSession, true);
+  oldCard?.remove();
+  panes.append(viewport);
+  activate(liveWindow, false);
+  layout();
+
+  void fetch(HOSTS_URL, { credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined)
+    .then((data: { hosts?: CanvasHost[] } | undefined) => {
+      if (signal.aborted || !data?.hosts?.length) return;
+      // The live window borrows the first host's machine facts so its details are complete.
+      const [first, ...rest] = data.hosts;
+      Object.assign(liveHost, { ...first!, id: "live", name: hostName, sessions: [] });
+      liveWindow.card.setIcon(hostIconMarkup(liveHost.os, "ui-host-mark"));
+      liveWindow.card.setTitle({ host: hostName, user: liveHost.user, session: liveSession.name });
+      for (const host of [first!, ...rest]) addWindow(host, host.sessions[0]!, false);
+      layout();
+    })
+    .catch(() => undefined);
+
+  // ---- activation without focus -------------------------------------------------------
+  let tap: { window: CanvasWindow; id: number; x: number; y: number } | undefined;
+  let swallowClick = false;
+  const windowOf = (target: EventTarget | null): CanvasWindow | undefined => {
+    const root = (target as Element | null)?.closest?.(".ui-window");
+    return windows.find((entry) => entry.card.root === root);
+  };
+  viewport.addEventListener("pointerdown", (event) => {
+    const target = windowOf(event.target);
+    if (!target || target === active) return;
+    if ((event.target as Element).closest(".ui-window-head")) return; // the pill activates itself
+    // First touch on an inactive window: claim it so the terminal neither focuses nor
+    // opens the keyboard; the release activates it if the finger did not move.
+    event.preventDefault();
+    event.stopPropagation();
+    tap = { window: target, id: event.pointerId, x: event.clientX, y: event.clientY };
+  }, { capture: true, signal });
+  viewport.addEventListener("pointerup", (event) => {
+    if (!tap || tap.id !== event.pointerId) return;
+    const moved = Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > TAP_SLOP;
+    if (!moved && !twoFinger) {
+      activate(tap.window, true);
+      swallowClick = true;
+    }
+    tap = undefined;
+    event.stopPropagation();
+  }, { capture: true, signal });
+  viewport.addEventListener("pointercancel", () => { tap = undefined; }, { capture: true, signal });
+  viewport.addEventListener("click", (event) => {
+    if (!swallowClick) return;
+    swallowClick = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }, { capture: true, signal });
+  // Clicking a window body that is already active still marks it active (no-op) and lets
+  // the terminal take focus as usual.
+
+  // ---- trackpad and wheel -------------------------------------------------------------
+  const inScrollableBody = (target: EventTarget | null): HTMLElement | undefined => {
+    const element = target as Element | null;
+    return element?.closest?.<HTMLElement>(".terminal-host, .canvas-preview") ?? undefined;
+  };
+  viewport.addEventListener("wheel", (event) => {
+    if (event.ctrlKey) return; // browser zoom / trackpad pinch stays with the browser
+    const horizontal = event.shiftKey ? event.deltaY || event.deltaX : event.deltaX;
+    const vertical = event.shiftKey ? 0 : event.deltaY;
+    const overBody = inScrollableBody(event.target);
+    if (Math.abs(horizontal) > Math.abs(vertical)) {
+      panBy(-horizontal, 0, false);
+      restSoon();
+      event.preventDefault();
+      event.stopPropagation();
+    } else if (!overBody && vertical) {
+      // Over gaps and headers a vertical swipe moves along the canvas.
+      panBy(minY < 0 ? 0 : -vertical, minY < 0 ? -vertical : 0, false);
+      restSoon();
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, { capture: true, passive: false, signal });
+
+  // ---- Space+drag and middle-drag -----------------------------------------------------
+  let spaceHeld = false;
+  window.addEventListener("keydown", (event) => {
+    if (event.code !== "Space" || event.repeat) return;
+    const typing = (event.target as Element | null)?.closest?.("input, textarea, [contenteditable], .terminal-host");
+    if (!typing) { spaceHeld = true; viewport.dataset.grab = "ready"; }
+  }, { signal });
+  window.addEventListener("keyup", (event) => {
+    if (event.code === "Space") { spaceHeld = false; delete viewport.dataset.grab; }
+  }, { signal });
+
+  type Sample = { t: number; x: number; y: number };
+  let drag: { id: number; lastX: number; lastY: number; samples: Sample[] } | undefined;
+  const velocity = (samples: Sample[]): { vx: number; vy: number } => {
+    const now = samples.at(-1);
+    const from = samples.find((sample) => now && now.t - sample.t <= 90) ?? samples[0];
+    if (!now || !from || now.t === from.t) return { vx: 0, vy: 0 };
+    return { vx: ((now.x - from.x) / (now.t - from.t)) * 1000, vy: ((now.y - from.y) / (now.t - from.t)) * 1000 };
+  };
+  const project = (v: number): number => (v / 1000) * DECELERATION / (1 - DECELERATION);
+  // Touch pans page window by window: the projected landing point picks the direction, but
+  // one gesture moves at most one window from where it started (a flick never skips ahead).
+  const release = (vx: number, vy: number, snapToWindows: boolean, originX = x): void => {
+    let nextX = x + project(vx);
+    const nextY = y + project(vy);
+    if (snapToWindows) {
+      const width = parseFloat(layer.style.getPropertyValue("--window-w")) || 0;
+      const step = width + GAP;
+      if (step > 0) {
+        const origin = Math.round(-originX / step);
+        const wanted = Math.round(-nextX / step);
+        nextX = -Math.max(origin - 1, Math.min(origin + 1, wanted)) * step;
+      }
+    }
+    glideTo(nextX, nextY);
+  };
+  viewport.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "touch") return;
+    const middle = event.button === 1;
+    if (!middle && !(spaceHeld && event.button === 0)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    viewport.setPointerCapture(event.pointerId);
+    viewport.dataset.grab = "dragging";
+    stopSprings();
+    drag = { id: event.pointerId, lastX: event.clientX, lastY: event.clientY, samples: [{ t: event.timeStamp, x: event.clientX, y: event.clientY }] };
+  }, { capture: true, signal });
+  viewport.addEventListener("pointermove", (event) => {
+    if (!drag || drag.id !== event.pointerId) return;
+    panBy(event.clientX - drag.lastX, event.clientY - drag.lastY, true);
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+    drag.samples.push({ t: event.timeStamp, x: event.clientX, y: event.clientY });
+    if (drag.samples.length > 12) drag.samples.shift();
+  }, { signal });
+  const endDrag = (event: PointerEvent): void => {
+    if (!drag || drag.id !== event.pointerId) return;
+    const { vx, vy } = velocity(drag.samples);
+    drag = undefined;
+    viewport.dataset.grab = spaceHeld ? "ready" : "";
+    if (!spaceHeld) delete viewport.dataset.grab;
+    release(vx, vy, false);
+  };
+  viewport.addEventListener("pointerup", endDrag, { signal });
+  viewport.addEventListener("pointercancel", endDrag, { signal });
+  viewport.addEventListener("auxclick", (event) => { if (event.button === 1) event.preventDefault(); }, { signal });
+
+  // ---- touch: one finger on gaps, two fingers anywhere, pinch for font size -----------
+  let twoFinger = false;
+  let touchPan: { mode: "undecided" | "pan" | "pinch" | "single"; cx: number; cy: number; spread: number; startCx: number; startCy: number; samples: Sample[]; window?: CanvasWindow; baseFont: number; originX: number } | undefined;
+  const midpoint = (touches: TouchList): { cx: number; cy: number; spread: number } => {
+    const a = touches[0]!, b = touches[1]!;
+    return { cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2, spread: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) };
+  };
+  viewport.addEventListener("touchstart", (event) => {
+    stopSprings();
+    if (event.touches.length === 2) {
+      twoFinger = true;
+      tap = undefined;
+      const { cx, cy, spread } = midpoint(event.touches);
+      const target = windowOf(event.target);
+      touchPan = { mode: "undecided", cx, cy, spread, startCx: cx, startCy: cy, samples: [{ t: event.timeStamp, x: cx, y: cy }], baseFont: target?.fontSize ?? 14, originX: x, ...(target ? { window: target } : {}) };
+    } else if (event.touches.length === 1 && !inScrollableBody(event.target) && !(event.target as Element).closest("button")) {
+      const touch = event.touches[0]!;
+      touchPan = { mode: "single", cx: touch.clientX, cy: touch.clientY, spread: 0, startCx: touch.clientX, startCy: touch.clientY, samples: [{ t: event.timeStamp, x: touch.clientX, y: touch.clientY }], baseFont: 14, originX: x };
+    }
+  }, { capture: true, passive: true, signal });
+  viewport.addEventListener("touchmove", (event) => {
+    if (!touchPan) return;
+    if (touchPan.mode === "single") {
+      const touch = event.touches[0];
+      if (!touch || event.touches.length !== 1) return;
+      panBy(touch.clientX - touchPan.cx, touch.clientY - touchPan.cy, true);
+      touchPan.cx = touch.clientX;
+      touchPan.cy = touch.clientY;
+      touchPan.samples.push({ t: event.timeStamp, x: touch.clientX, y: touch.clientY });
+      if (touchPan.samples.length > 12) touchPan.samples.shift();
+      event.preventDefault();
+      return;
+    }
+    if (event.touches.length !== 2) return;
+    const { cx, cy, spread } = midpoint(event.touches);
+    if (touchPan.mode === "undecided") {
+      const travelled = Math.hypot(cx - touchPan.startCx, cy - touchPan.startCy);
+      const stretched = Math.abs(spread - touchPan.spread);
+      if (stretched > PINCH_THRESHOLD && stretched > travelled) touchPan.mode = "pinch";
+      else if (travelled > PAN_THRESHOLD) touchPan.mode = "pan";
+      else { event.preventDefault(); event.stopPropagation(); return; }
+    }
+    if (touchPan.mode === "pinch") {
+      // The live terminal pinches itself (terminal-touch.ts); previews change size here.
+      const target = touchPan.window;
+      if (target?.preview) {
+        const size = Math.round(Math.min(24, Math.max(9, touchPan.baseFont * (spread / touchPan.spread))) * 2) / 2;
+        target.fontSize = size;
+        target.preview.style.setProperty("--preview-font", `${size}px`);
+        event.preventDefault();
+      }
+      return;
+    }
+    panBy(cx - touchPan.cx, cy - touchPan.cy, true);
+    touchPan.cx = cx;
+    touchPan.cy = cy;
+    touchPan.samples.push({ t: event.timeStamp, x: cx, y: cy });
+    if (touchPan.samples.length > 12) touchPan.samples.shift();
+    event.preventDefault();
+    event.stopPropagation();
+  }, { capture: true, passive: false, signal });
+  const touchEnd = (event: TouchEvent): void => {
+    if (!touchPan) return;
+    if (event.touches.length > 0 && touchPan.mode !== "single") return;
+    const mode = touchPan.mode;
+    const originX = touchPan.originX;
+    const { vx, vy } = velocity(touchPan.samples);
+    touchPan = undefined;
+    window.setTimeout(() => { twoFinger = false; }, 0);
+    if (mode === "pan" || mode === "single") release(vx, vy, true, originX);
+  };
+  viewport.addEventListener("touchend", touchEnd, { capture: true, signal });
+  viewport.addEventListener("touchcancel", touchEnd, { capture: true, signal });
+
+  // ---- keyboard: move between windows -------------------------------------------------
+  window.addEventListener("keydown", (event) => {
+    if (!(event.ctrlKey && event.shiftKey) || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+    const index = active ? windows.indexOf(active) : 0;
+    const next = windows[Math.max(0, Math.min(windows.length - 1, index + (event.key === "ArrowRight" ? 1 : -1)))];
+    if (!next) return;
+    event.preventDefault();
+    activate(next, false);
+    revealWindow(next);
+  }, { capture: true, signal });
+
+  const resizeObserver = new ResizeObserver(() => layout());
+  resizeObserver.observe(viewport);
+
+  // Test hook (mock mode only): lets browser tests read the offset and stream output.
+  (window as unknown as { __tracerCanvas?: unknown }).__tracerCanvas = {
+    offset: () => ({ x, y, minX, minY, moving, transform: layer.style.transform, willChange: layer.style.willChange }),
+    active: () => active?.id,
+    windows: () => windows.map((entry) => entry.id),
+    stream(lines: number) {
+      for (const entry of windows) {
+        if (!entry.preview) continue;
+        const text = `${entry.host.user}@${entry.host.name}:~$ tail -f build.log · line ${lines}`;
+        entry.preview.insertAdjacentHTML("beforeend", `\n${previewLine(text)}`);
+        while (entry.preview.childNodes.length > 400) entry.preview.firstChild?.remove();
+        entry.preview.scrollTop = entry.preview.scrollHeight;
+      }
+    },
+  };
+
+  return {
+    dispose() {
+      events.abort();
+      resizeObserver.disconnect();
+      popover?.close("keyboard");
+      for (const entry of windows) entry.card.dispose();
+      viewport.remove();
+      delete stage.dataset.canvas;
+      delete (window as unknown as { __tracerCanvas?: unknown }).__tracerCanvas;
+    },
+  };
+}
