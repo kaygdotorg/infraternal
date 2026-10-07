@@ -59,10 +59,30 @@ ssl.stdout.on("data", (bytes) => pem += bytes);
 var [sslCode] = await once(ssl, "exit");
 if (sslCode !== 0)
   throw new Error("in-memory test certificate generation failed");
+const authRequests = new Map();
+let authWindow;
+let authWindowCount = 0;
+/** Pace reloads within the real 30/source/minute policy; never bypass native admission. */
+async function reserveAuthReads(count) {
+  if (authWindow === undefined || authWindowCount + count <= 28) return;
+  const remaining = Math.max(0, 61 - (Math.floor(Date.now() / 1000) - authWindow));
+  if (remaining > 0) {
+    console.log(`Native source admission pacing: ${remaining}s before additional reload reads`);
+    await delay(remaining * 1000);
+  }
+}
 var tls = createHttpsServer({
   key: pem.match(/-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----/)?.[0],
   cert: pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0]
 }, (req, res) => {
+  if (req.url?.startsWith("/auth/")) {
+    authRequests.set(req.url, (authRequests.get(req.url) ?? 0) + 1);
+    if (req.url !== "/auth/logout") {
+      const now = Math.floor(Date.now() / 1000);
+      if (authWindow === undefined || now - authWindow >= 60) { authWindow = now; authWindowCount = 0; }
+      authWindowCount++;
+    }
+  }
   const upstream = httpRequest(backend + (req.url ?? "/"), { method: req.method, headers: req.headers, agent: false }, (response) => {
     res.writeHead(response.statusCode ?? 500, response.headers);
     response.pipe(res);
@@ -134,8 +154,10 @@ async function command(args) {
   });
   const [code] = await once(p, "exit");
   if (code !== 0) {
-    if (args[0] === "python3")
+    if (args[0] === "python3") {
+      if (args[1] === "scripts/idle_canary.py") console.log(out.trim());
       console.log(err.trim());
+    }
     throw new Error("verification child failed");
   }
   return out;
@@ -150,6 +172,10 @@ async function backendConnections() {
     return fields[3] === "01" && Number.parseInt(fields[1].split(":")[1], 16) === port;
   }).length;
 }
+// A controlled in-flight loss proves that resume replays input above the last Ack.
+const lostInputSeq = process.env.MERGED_DROP_INPUT_SEQ === undefined ? undefined : BigInt(process.env.MERGED_DROP_INPUT_SEQ);
+let lostInput = false;
+let lossArmed = false;
 var frontWs = new WebSocketServer({ noServer: true });
 tls.on("upgrade", (request, socket, head) => {
   frontWs.handleUpgrade(request, socket, head, (browserSocket) => {
@@ -158,11 +184,17 @@ tls.on("upgrade", (request, socket, head) => {
     });
     const entry = {
       ws,
+      cookieKey: request.headers.cookie ?? "",
+      outputFrames: [],
+      inboundKinds: {},
+      outboundKinds: {},
       closed: false,
       session: undefined,
       acks: [],
       input: [],
-      output: []
+      output: [],
+      events: [],
+      snapshots: []
     };
     bridges.push(entry);
     const inbound = new WebSocketFrameDecoder;
@@ -170,12 +202,25 @@ tls.on("upgrade", (request, socket, head) => {
     const queued = [];
     browserSocket.on("message", (data) => {
       const bytes = Buffer.from(data);
+      let dropInput = false;
       inbound.feed(new Uint8Array(bytes), (_s, f) => {
+        entry.inboundKinds[f.type] = (entry.inboundKinds[f.type] ?? 0) + 1;
+        if (f.type === "Resume") {
+          const priorId = Buffer.from(f.connectionId).toString("hex");
+          entry.epoch = bridges.findLast((peer) => peer !== entry && peer.connectionId === priorId && peer.cookieKey === entry.cookieKey)?.epoch;
+        }
         if (f.type === "AttachTerm")
           entry.session = Buffer.from(f.sessionId).toString("hex");
-        if (f.type === "Input")
+        if (f.type === "Input") {
           entry.input.push({ seq: f.inSeq, bytes: f.bytes.slice() });
+          if (lossArmed && !lostInput && f.inSeq === lostInputSeq && f.bytes.length === 1) {
+            lostInput = true;
+            dropInput = true;
+            console.log(`Injected one in-flight Input loss at sequence=${String(lostInputSeq)}; resume must replay it`);
+          }
+        }
       });
+      if (dropInput) { ws.terminate(); return; }
       if (ws.readyState === WebSocket.OPEN)
         ws.send(bytes);
       else
@@ -189,11 +234,24 @@ tls.on("upgrade", (request, socket, head) => {
     ws.on("message", (data) => {
       const bytes = Buffer.from(data);
       outbound.feed(new Uint8Array(bytes), (_s, f) => {
+        entry.outboundKinds[f.type] = (entry.outboundKinds[f.type] ?? 0) + 1;
+        if (f.type === "Welcome") {
+          entry.connectionId = Buffer.from(f.connectionId).toString("hex");
+          entry.epoch ??= entry.connectionId;
+        }
         if (f.type === "Ack")
           entry.acks.push(f.inSeqAcked);
-        if (f.type === "Output")
-          entry.output.push(f.bytes.slice());
-        if (f.type === "Close") entry.wireCloseCode = f.code;
+        if (f.type === "Output") {
+          const owned = f.bytes.slice();
+          entry.output.push(owned);
+          entry.outputFrames.push({ seq: f.outSeq, bytes: owned });
+        }
+        if (f.type === "Event") entry.events.push(JSON.parse(new TextDecoder().decode(f.eventJson)));
+        if (f.type === "Snapshot") entry.snapshots.push(f.outSeq);
+        if (f.type === "Close") {
+          entry.wireCloseCode = f.code;
+          entry.closeKind = f.reason.includes("queue full") ? "command_capacity" : f.reason.includes("shim disconnected") ? "shim_transport" : "other";
+        }
       });
       if (browserSocket.readyState === WebSocket.OPEN)
         browserSocket.send(bytes);
@@ -213,7 +271,25 @@ tls.on("upgrade", (request, socket, head) => {
 async function context() {
   return browser.newContext({ viewport: { width: 1280, height: 720 }, ignoreHTTPSErrors: true });
 }
-var output = (entry) => Buffer.concat(entry.output.map((x) => Buffer.from(x))).toString();
+/** Follow one browser document across recovery without confusing the other signed-in device. */
+function currentViewer(entry) {
+  return bridges.findLast((peer) => !peer.closed && peer.cookieKey === entry.cookieKey && peer.session === entry.session && peer.epoch === entry.epoch && peer.acks.length > 0) ?? entry;
+}
+/** Stitch the logical byte stream; replayed ranges count once, fresh reloads use a new epoch. */
+function output(entry) {
+  const frames = bridges.filter((peer) => peer.cookieKey === entry.cookieKey && peer.session === entry.session && peer.epoch === entry.epoch)
+    .flatMap((peer) => peer.outputFrames).sort((a, b) => a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0);
+  let cursor = frames[0]?.seq ?? 0n;
+  const parts = [];
+  for (const frame of frames) {
+    check(frame.seq <= cursor, "logical native viewer output gap");
+    const skip = Number(cursor - frame.seq);
+    if (skip >= frame.bytes.length) continue;
+    parts.push(Buffer.from(frame.bytes.subarray(skip)));
+    cursor = frame.seq + BigInt(frame.bytes.length);
+  }
+  return Buffer.concat(parts).toString();
+}
 var contexts = [];
 async function rawEchoProbe(cookie, session) {
   const socket = new WebSocket(backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: origin, Cookie: cookie } });
@@ -221,17 +297,19 @@ async function rawEchoProbe(cookie, session) {
   const id = Buffer.from(session, "hex");
   let attached = false;
   let pending;
+  let lastAck = 0n;
+  const kinds = {};
   const samples = [];
   const send = (stream, frame) => socket.send(encodeMuxedFrame(stream, frame));
   socket.on("message", (data) => decoder.feed(new Uint8Array(Buffer.from(data)), (_stream, frame) => {
+    kinds[frame.type] = (kinds[frame.type] ?? 0) + 1;
     if (frame.type === "Hello")
       send(0, { type: "Hello", version: 1, caps: 0n, clientInfo: "merged-real-PTY-probe" });
     if (frame.type === "Welcome") {
       send(1, { type: "AttachTerm", sessionId: id, lastOutSeq: 0n, lastInSeq: 0n });
       send(1, { type: "Credit", bytes: 1048576 });
     }
-    if (frame.type === "Ack")
-      attached = true;
+    if (frame.type === "Ack") { attached = true; lastAck = frame.inSeqAcked; }
     if (frame.type === "Output" && pending) {
       check(frame.bytes.length === 1 && frame.bytes[0] === 120, "raw echo probe payload mismatch");
       samples.push(performance.now() - pending.started);
@@ -256,10 +334,86 @@ async function rawEchoProbe(cookie, session) {
     samples.sort((a, b) => a - b);
     console.log(`real leg-A/agent/shim/PTY echo: n=500 p50=${samples[250].toFixed(3)}ms p99=${samples[495].toFixed(3)}ms`);
     checkPerformance(samples[495] < 5, "real PTY echo exceeds decision41 5ms overhead");
+  } catch (error) {
+    console.log("Raw echo metadata: " + JSON.stringify({ kinds, lastAck: String(lastAck), samples: samples.length }));
+    throw error;
   } finally {
     socket.terminate();
   }
 }
+/** Exercise the real leg-A/server/infraternal-agent/shim/PTY path without renderer contention. */
+async function fullPathFlood(cookie) {
+  const socket = new WebSocket(backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: origin, Cookie: cookie } });
+  const decoder = new WebSocketFrameDecoder();
+  const send = (stream, frame) => socket.send(encodeMuxedFrame(stream, frame));
+  let sessionId;
+  let attached = false;
+  let ack = 0n;
+  let sequence = 0n;
+  let refunded = 0;
+  let payload = [];
+  let snapshots = 0;
+  let closed = false;
+  let failure;
+  let cursor = 0n;
+  socket.on("close", () => { closed = true; });
+  socket.on("error", () => { failure = new Error("native flood transport error"); });
+  socket.on("message", (data) => {
+    try {
+      decoder.feed(new Uint8Array(Buffer.from(data)), (_stream, frame) => {
+        if (frame.type === "Hello") send(0, { type: "Hello", version: 1, caps: 0n, clientInfo: "merged-native-flood" });
+        if (frame.type === "Welcome") send(0, { type: "Call", callId: 1, actionId: "ssh.session.open", inputJson: new TextEncoder().encode("{}") });
+        if (frame.type === "Result") {
+          check(frame.ok, "native flood open refused");
+          sessionId = JSON.parse(new TextDecoder().decode(frame.json)).session_id;
+          send(1, { type: "AttachTerm", sessionId: Buffer.from(sessionId.replaceAll("-", ""), "hex"), lastOutSeq: 0n, lastInSeq: 0n });
+          send(1, { type: "Credit", bytes: 1048576 });
+        }
+        if (frame.type === "Ack") { attached = true; ack = frame.inSeqAcked; }
+        if (frame.type === "Output") {
+          check(frame.outSeq === cursor, "native flood output ordering changed");
+          cursor += BigInt(frame.bytes.length);
+          payload.push(Buffer.from(frame.bytes));
+          refunded += frame.bytes.length;
+          // Refund in bounded batches; tiny per-frame commands can saturate the deliberate queue.
+          if (refunded >= 262144) { send(1, { type: "Credit", bytes: refunded }); refunded = 0; }
+        }
+        if (frame.type === "Snapshot") snapshots++;
+
+        if (frame.type === "Close") failure = new Error("native flood terminal stream closed");
+      });
+    } catch { failure = new Error("native flood protocol assertion failed"); }
+  });
+  const until = async (predicate, label) => wait(() => { if (failure) throw failure; check(!closed, "native flood socket closed"); return predicate(); }, label, 120000);
+  const input = async (command) => {
+    const bytes = Buffer.from(command);
+    send(1, { type: "Input", inSeq: sequence, bytes });
+    sequence += BigInt(bytes.length);
+    await until(() => ack === sequence, "native flood input Ack missing");
+  };
+  const text = () => Buffer.concat(payload).toString();
+  try {
+    await until(() => attached, "native flood attachment missing");
+    await input("stty -echo -opost; printf 'FLOOD_%s' READY\n");
+    await until(() => text().includes("FLOOD_READY"), "native flood readiness missing");
+    payload = [];
+    const started = performance.now();
+    await input("yes | head -c 50M; printf 'FLOOD_%s' DONE\n");
+    await until(() => payload.length > 0 && Buffer.concat(payload.slice(-4)).includes("FLOOD_DONE"), "native flood completion missing");
+    const elapsed = (performance.now() - started) / 1000;
+    const bytes = Buffer.concat(payload);
+    const end = bytes.indexOf("FLOOD_DONE");
+    const length = 50 * 1024 * 1024;
+    const start = end - length;
+    check(start >= 0 && snapshots === 0, "native credited flood lost output or substituted repaint");
+    for (let offset = 0; offset < length; offset++) check(bytes[start + offset] === (offset % 2 === 0 ? 121 : 10), "native flood payload mismatch");
+    const rate = length / elapsed / 1e6;
+    console.log(`Native full path flood: ${length} exact payload bytes; ${elapsed.toFixed(3)}s; ${rate.toFixed(3)} MB/s; snapshots=${snapshots}; load=${loadavg().join("/")}`);
+    checkPerformance(rate >= 10, "native full path flood below decision41 10 MB/s");
+    return { sessionId, cursor };
+  } finally { socket.terminate(); }
+}
+
 try {
   console.log(`Native merged proof: machine=${arch()}; cores=${cpus().length}; load=${loadavg().join("/")}; browser=${browser.version()}`);
   await wait(async () => {
@@ -269,6 +423,7 @@ try {
       return false;
     }
   }, "server startup failed");
+
   await delay(1000);
   check(await backendConnections() === 0, "startup probe retained a backend connection");
   console.log((await command([
@@ -318,6 +473,7 @@ try {
   await page.keyboard.type("stty raw -echo; printf 'MERGED_%s' READY; cat", { delay: 20 });
   await page.keyboard.press("Enter");
   await wait(() => output(first).includes("MERGED_READY"), "real PTY command output missing");
+  first = currentViewer(first);
   const session = first.session;
   await page.reload();
   await wait(() => bridges.at(-1) !== first && bridges.at(-1)?.acks.length > 0, "reload did not attach");
@@ -350,6 +506,7 @@ try {
   await page.locator("#terminal-host").click();
   await page.keyboard.type("<DEVICE_A>", { delay: 20 });
   await wait(() => output(first).includes("<DEVICE_A>"), "device A input missing");
+  first = currentViewer(first);
   check(first.acks.some((ack) => ack > 0n), "device A has no positive Ack");
   const b = await context();
   contexts.push(b);
@@ -357,16 +514,61 @@ try {
   const pageB = await b.newPage();
   await pageB.goto(origin + "/?session=" + [session.slice(0, 8), session.slice(8, 12), session.slice(12, 16), session.slice(16, 20), session.slice(20)].join("-"));
   await wait(() => bridges.at(-1) !== first && bridges.at(-1)?.acks.length > 0, "device B attach failed");
-  const second = bridges.at(-1);
+  let second = bridges.at(-1);
   check(second.session === session, "devices did not share the PTY");
   check(second.acks[0] === 0n, "device B inherited device A Ack");
   await pageB.keyboard.type("<DEVICE_B>", { delay: 20 });
   await wait(() => output(first).includes("<DEVICE_A><DEVICE_B>") && output(second).includes("<DEVICE_B>"), "multi-device input missing");
+  first = currentViewer(first);
+  second = currentViewer(second);
   for (const viewer of [first, second]) {
     for (const marker of ["<DEVICE_A>", "<DEVICE_B>"]) {
       check(output(viewer).split(marker).length === 2, "duplicated or lost device input");
     }
   }
+  const reconnectRuns = Number(process.env.MERGED_RECONNECT_RUNS ?? "0");
+  check(Number.isInteger(reconnectRuns) && reconnectRuns >= 0 && reconnectRuns <= 100, "invalid reconnect run count");
+  let stress;
+  if (reconnectRuns > 0 && process.env.MERGED_RECONNECT_STRESS === "1") {
+    stress = spawn("stress-ng", ["--cpu", "8", "--quiet"], { stdio: "ignore" });
+    await delay(500);
+    check(stress.pid && stress.exitCode === null, "stress-ng did not start");
+  }
+  try {
+    for (let trial = 0; trial < reconnectRuns; trial++) {
+      const before = bridges.length;
+      const started = performance.now();
+      // Interrupt both real backend sockets; each browser must resume its own writer.
+      first.ws.terminate();
+      second.ws.terminate();
+      await wait(() => bridges.slice(before).filter((entry) => !entry.closed && entry.session === session && entry.acks.length > 0).length === 2, "two-device reconnect did not attach", 60000);
+      const resumed = performance.now() - started;
+      await reserveAuthReads(8);
+      const restoreFrom = bridges.length;
+      await page.reload();
+      await wait(() => bridges.slice(restoreFrom).some((entry) => !entry.closed && entry.session === session && entry.acks.length > 0), "device-A restoration did not attach", 60000);
+      first = bridges.slice(restoreFrom).find((entry) => !entry.closed && entry.session === session && entry.acks.length > 0);
+      await wait(() => output(first).includes("MERGED_READY"), "device-A restoration did not replay", 60000);
+      second = currentViewer(second);
+      check(second, "device B lost its independent attachment");
+      const markerA = `<RECONNECT_A_${trial}>`;
+      const markerB = `<RECONNECT_B_${trial}>`;
+      await page.locator("#terminal-host").click();
+      await page.keyboard.type(markerA, { delay: 20 });
+      await pageB.locator("#terminal-host").click();
+      await pageB.keyboard.type(markerB, { delay: 20 });
+      await wait(() => [first, second].every((entry) => output(entry).includes(markerA + markerB)), "reconnected devices lost input", 60000);
+      first = currentViewer(first);
+      second = currentViewer(second);
+      for (const entry of [first, second]) {
+        for (const marker of [markerA, markerB]) check(output(entry).split(marker).length === 2, "reconnected device duplicated input");
+      }
+      console.log(`Two-device reconnect trial=${trial + 1}/${reconnectRuns}; resume=${resumed.toFixed(2)}ms; A restoration replay and exact shared input PASS; stress=${Boolean(stress)}; load=${loadavg().join("/")}`);
+    }
+  } finally {
+    if (stress) { stress.kill("SIGTERM"); await once(stress, "exit"); }
+  }
+
   await delay(1000);
   check(await backendConnections() === 2, "idle window includes unintended backend connections");
   console.log("Idle fence: exactly two established backend WebSockets; startup HTTP probe closed");
@@ -392,6 +594,9 @@ try {
   // Measure the per-browser paint budget with one active frontend after the
   // complete two-device acceptance; server throughput at 32 viewers is separate.
   await page.bringToFront();
+  await reserveAuthReads(6);
+  // The probe has a fresh writer; isolate Input loss from the twenty viewer/reload references.
+  lossArmed = true;
   await page.goto(origin + "/?probe=1&n=500");
   await page.locator("#probe-run").waitFor();
   await wait(() => page.locator("#probe-run").isEnabled(), "probe not ready");
@@ -411,14 +616,53 @@ try {
   contexts.length = 0;
   await delay(250);
   await rawEchoProbe(cookieA.map((c) => `${c.name}=${c.value}`).join("; "), session);
+  if (process.env.MERGED_FLOOD === "1") {
+    const flood = await fullPathFlood(cookieA.map((c) => `${c.name}=${c.value}`).join("; "));
+    const gapContext = await context();
+    contexts.push(gapContext);
+    await gapContext.addCookies(cookieA);
+    const gapPage = await gapContext.newPage();
+    const from = bridges.length;
+    await reserveAuthReads(6);
+    await gapPage.goto(origin + "/?session=" + flood.sessionId);
+    await wait(() => bridges.slice(from).some((entry) => entry.snapshots.length === 1 && entry.events.some((event) => event.type === "terminal.snapshot" && event.approximate === true)), "native browser ring-gap recovery notice/repaint missing");
+    const recovered = bridges.slice(from).find((entry) => entry.snapshots.length === 1);
+    const notices = recovered?.events.filter((event) => event.type === "terminal.snapshot" && event.approximate === true) ?? [];
+    // Attach precedes Credit, so an output-paused notice can precede the funded repaint.
+    check(recovered && !recovered.closed && notices.length === 1, "native browser ring-gap recovery retired its stream or repeated approximation");
+    check(recovered.events.every((event) => event.type === "terminal.snapshot" || event.type === "terminal.snapshot_unavailable"), "native browser recovery received an unexpected notice");
+    check(BigInt(notices[0].seq) === recovered.snapshots[0], "native browser notice/repaint ordering changed");
+    await wait(() => gapPage.locator("#connection-status").textContent().then((text) => text?.includes("approximate")), "approximate recovery not labelled in browser");
+    await gapPage.screenshot({ path: "apps/tracer/test-results/merged-approximate-recovery.png" });
+    await gapContext.close();
+    contexts.splice(contexts.indexOf(gapContext), 1);
+    console.log("Native browser ring-gap recovery: exactly one ordered notice/repaint, visible approximation, live stream PASS");
+  }
+  check(lostInputSeq === undefined || lostInput, "configured input loss was not exercised");
   console.log("merged " + buildLabel + " + production tracer functional acceptance: PASS; native setup/sign-in, real PTY output, reload same session, independently signed-in devices, Ack0 on device B, exact shared input, logout socket revocation");
   check(performanceFailures.length === 0, performanceFailures.join("; "));
   console.log("Merged performance budgets: PASS");
 } catch (error) {
+  for (const ctx of contexts) {
+    for (const current of ctx.pages()) {
+      console.log("native page state: " + JSON.stringify(await current.evaluate(() => ({
+        probe: document.querySelector("#probe-run") !== null,
+        terminal: document.querySelector("#terminal-host") !== null,
+        signIn: document.querySelector("#login-passkey") !== null,
+        status: document.querySelector("#connection-status")?.textContent,
+        error: document.querySelector("#status-error")?.textContent,
+      })).catch(() => ({ unavailable: true }))));
+    }
+  }
+  console.log("native DB capacity: " + (await command(["python3", "-c", "import sqlite3,sys,json;db=sqlite3.connect(sys.argv[1]);print(json.dumps({'connections':db.execute('SELECT active,count(*) FROM websocket_connections GROUP BY active').fetchall(),'writers':db.execute('SELECT count(*) FROM terminal_writers').fetchone()[0]}))", `${state}/data/infraternal.sqlite`])).trim());
+  console.log("native auth request counts: " + JSON.stringify(Object.fromEntries(authRequests)));
   console.log(`safe bridge count: ${bridges.length}`);
   console.log("safe bridge diagnostics (first/last): " + JSON.stringify([...bridges.slice(0, 3), ...bridges.slice(-10)].map((entry) => ({
     closed: entry.closed,
     wireCloseCode: entry.wireCloseCode,
+    closeKind: entry.closeKind,
+    inboundKinds: entry.inboundKinds,
+    outboundKinds: entry.outboundKinds,
     transportCloseCode: entry.transportCloseCode,
     inputBytes: entry.input.reduce((n, f) => n + f.bytes.length, 0),
     lastAck: String(entry.acks.at(-1)),

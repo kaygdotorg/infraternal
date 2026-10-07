@@ -18,7 +18,10 @@ try:
     def receive():
         s, kind, body = c.read()
         if kind == 0x11:
-            output[s].extend(body[8:]); c.send(s, 0x14, struct.pack('<I', len(body) - 8))
+            # Initial 1 MiB per viewer covers these tiny observations. Refunding
+            # each prompt fragment can fill the deliberate eight-command queue.
+            output[s].extend(body[8:])
+            assert len(output[s]) < 1024 * 1024, 'geometry probe exceeded bounded initial credit'
         elif kind == 0x13:
             return s, struct.unpack('<Q', body)[0]
         else:

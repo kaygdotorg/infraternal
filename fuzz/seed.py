@@ -49,3 +49,11 @@ for writer in [0, 1, 0x01020304, 0xffffffff]:
     framed = len(raw).to_bytes(4, 'little') + raw
     for suffix, value in [('raw', raw), ('framed', framed), ('twice', framed + framed)]:
         (shim / f'cap1-writer-{writer:x}-{suffix}').write_bytes(value)
+
+# Approximate snapshots use bit 2 and type 28, distinct from deployed writer identity.
+for flags in [0, 1, 2, 255]:
+    for length in [0, 1, 64, 1024]:
+        raw = bytes([0x1c]) + (17).to_bytes(8, 'little') + bytes([flags]) + bytes(length)
+        framed = len(raw).to_bytes(4, 'little') + raw
+        for suffix, value in [('raw', raw), ('framed', framed), ('twice', framed + framed)]:
+            (shim / f'cap2-snapshot-{flags}-{length}-{suffix}').write_bytes(value)

@@ -1,6 +1,6 @@
 //! Long-lived local PTY sessions with frozen v1 resume semantics [13][17].
 //!
-//! Unsafe code is confined to the audited PTY/process boundary; data modules
+//! Unsafe code is confined to the audited PTY/process and Ghostty FFI boundaries; data modules
 //! forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
@@ -16,4 +16,5 @@ pub fn detach() -> std::io::Result<bool> {
 }
 mod session;
 mod terminal;
+mod terminal_native;
 pub use session::{Config, run};

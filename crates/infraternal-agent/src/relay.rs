@@ -3,7 +3,7 @@
 //! This state owns no terminal bytes: retention belongs to the shim. A transport
 //! may hold one bounded frame while credit is exhausted. After 250 ms with
 //! pending output it detaches from the shim, letting the shim update its screen
-//! and ring, and requests a snapshot when credit returns. No idle timer runs.
+//! and ring, and requests replay when credit returns. No idle timer runs.
 
 use std::{
     ops::Range,
@@ -96,9 +96,9 @@ impl Input {
 pub struct Output {
     cursor: u64,
     credit: u64,
-    repaint_debt: u64,
     stalled: Option<Instant>,
     snapshot: bool,
+    required: u64,
 }
 
 impl Output {
@@ -108,9 +108,9 @@ impl Output {
         Self {
             cursor,
             credit: 1024 * 1024,
-            repaint_debt: 0,
             stalled: None,
             snapshot: false,
+            required: 1,
         }
     }
 
@@ -118,16 +118,11 @@ impl Output {
     /// # Errors
     /// Rejects a credit counter overflow without mutating state.
     pub fn grant(&mut self, bytes: u32) -> Result<(), Error> {
-        let grant = u64::from(bytes);
-        let repaid = grant.min(self.repaint_debt);
-        let credit = self
+        self.credit = self
             .credit
-            .checked_add(grant - repaid)
+            .checked_add(u64::from(bytes))
             .ok_or(Error::Overflow)?;
-        self.repaint_debt -= repaid;
-        self.credit = credit;
-        // Partial debt repayment must not postpone detachment of pending data.
-        if self.credit > 0 {
+        if self.credit >= self.required {
             self.stalled = None;
         }
         Ok(())
@@ -164,10 +159,10 @@ impl Output {
         Ok(())
     }
 
-    /// Record pending output with no credit; callers arm this one-shot deadline.
+    /// Record an unaffordable pending frame; callers arm this one-shot deadline.
     /// Calling again does not postpone catch-up.
     pub fn pending(&mut self, now: Instant) -> Option<Instant> {
-        if self.credit == 0 && !self.snapshot {
+        if self.credit < self.required && !self.snapshot {
             let start = *self.stalled.get_or_insert(now);
             Some(start + STARVATION)
         } else {
@@ -187,24 +182,44 @@ impl Output {
         self.snapshot
     }
 
-    /// Whether returned credit requires a fresh screen rather than replay bytes.
+    /// Whether returned credit requires reattachment for replay or a repaint.
     #[must_use]
     pub const fn needs_snapshot(&self) -> bool {
-        self.snapshot && self.credit > 0
+        self.snapshot && self.credit >= self.required
     }
 
-    /// Commit one bounded repaint with positive credit, carrying excess as debt.
-    /// Grants repay debt before raw output or another repaint; seq is screen state.
+    /// Resume raw replay at the unchanged cursor after a successful `ReadFrom`.
+    /// Ring coverage is decided by the shim, which may send a repaint instead.
+    pub fn resume_replay(&mut self) {
+        self.snapshot = false;
+        self.stalled = None;
+        self.required = 1;
+    }
+
+    /// Park/retry catch-up without keeping a payload or starting an idle timer.
+    pub fn retry_recovery(&mut self) {
+        self.snapshot = true;
+        self.stalled = None;
+    }
+
+    /// Commit a repaint; its byte length consumes credit but never advances seq.
     /// # Errors
-    /// Rejects regression, oversized repaint or zero usable credit without mutation.
+    /// Rejects regression/overflow without mutation. Insufficient credit records
+    /// the minimum repaint credit, without changing the cursor or consuming credit.
     pub fn repaint(&mut self, seq: u64, len: usize) -> Result<(), Error> {
         let bytes = u64::try_from(len).map_err(|_| Error::Overflow)?;
-        if seq < self.cursor || len > infraternal_shim::frame::MAX_FRAME - 9 || self.credit == 0 {
+        if seq < self.cursor {
             return Err(Error::OutOfRange);
         }
+        if bytes > self.credit {
+            // Remember the frame cost after detaching, so unchanged or still
+            // insufficient credit cannot repeatedly request native serialization.
+            self.required = bytes;
+            return Err(Error::OutOfRange);
+        }
+        self.required = 1;
         self.cursor = seq;
-        self.repaint_debt = bytes.saturating_sub(self.credit);
-        self.credit = self.credit.saturating_sub(bytes);
+        self.credit -= bytes;
         self.snapshot = false;
         self.stalled = None;
         Ok(())

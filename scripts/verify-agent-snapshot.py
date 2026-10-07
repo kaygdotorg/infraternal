@@ -35,14 +35,23 @@ def run(binary):
             while select.select([client.sock], [], [], .5)[0]:
                 client.process(credit=False)
             completed(marker)
-            # Pay prior repaint debt, leaving exactly one byte of usable credit.
-            debt = client.snapshots[-1][1] - 1 if client.snapshots else 0
-            client.send(1, 0x14, struct.pack('<I', debt + 1))
+            # Reviewed repaint accounting is indivisible: one byte must park
+            # recovery without a notice or cursor movement, then full credit
+            # funds exactly one bounded repaint. Never borrow output credit.
             count = len(client.snapshots)
+            cursor = client.out
+            client.send(1, 0x14, struct.pack('<I', 1))
+            deadline = time.monotonic() + .8
+            while time.monotonic() < deadline:
+                if select.select([client.sock], [], [], .05)[0]:
+                    client.process(credit=False)
+            assert len(client.snapshots) == count and client.out == cursor
+            client.send(1, 0x14, struct.pack('<I', 1024 * 1024))
             while len(client.snapshots) == count:
                 client.process(credit=False)
+            assert len(client.snapshots) == count + 1
             assert client.snapshots[-1][1] > 1
-            print(f'catch-up {iteration}: 12 MiB shell completed; credit=1, Snapshot={client.snapshots[-1][1]} bytes seq={client.out}: PASS', flush=True)
+            print(f'catch-up {iteration}: 12 MiB shell completed; 1-byte credit paused; funded Snapshot={client.snapshots[-1][1]} bytes seq={client.out}: PASS', flush=True)
         # No further grant: another full flood still completes after detachment.
         marker = state.resolve() / 'final'
         client.input(f"yes | head -c 12M; : > '{marker}'\n".encode())
@@ -59,7 +68,7 @@ def run(binary):
             client.process(credit=False)
         assert client.out > 8 * 1024 * 1024
         print(f'initial ring-wrap attachment: Snapshot={client.snapshots[-1][1]} bytes seq={client.out}: PASS', flush=True)
-        print('four 12 MiB floods completed; three tiny-credit Snapshots; no Close needed: PASS', flush=True)
+        print('four 12 MiB floods completed; three tiny-credit pauses and funded Snapshots; no Close needed: PASS', flush=True)
     finally:
         if client.child.poll() is None:
             client.kill()

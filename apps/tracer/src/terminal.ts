@@ -164,7 +164,7 @@ export class TerminalClient {
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
-  private pingTimer = 0;
+  private lastPingAt = -Infinity;
   private nextPingNonce = 0n;
   private readonly pendingPings = new Map<bigint, number>();
   private inputModifier: "ctrl" | "alt" | undefined;
@@ -487,6 +487,28 @@ export class TerminalClient {
         this.traceRange(frame.outSeq, frame.bytes.byteLength, "decode", performance.now());
         this.acceptSnapshot(frame.outSeq, frame.bytes);
         return;
+      case "Event": {
+        if (frame.subId !== 0 || frame.eventJson.byteLength > 1024) {
+          this.protocolFailure("invalid terminal notice");
+          return;
+        }
+        try {
+          const notice = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.eventJson)));
+          const session = uuidBytes(requireString(notice.session_id));
+          if (!this.sessionId || session.some((byte, index) => byte !== this.sessionId?.[index])) throw new Error("session mismatch");
+          // Notices describe recovery; only the subsequent wire Snapshot advances the cursor.
+          if (notice.type === "terminal.snapshot" && notice.approximate === true) {
+            this.setStatus("Reconnected with an approximate screen.");
+          } else if (notice.type === "terminal.snapshot_unavailable") {
+            this.setStatus("Output paused; waiting for screen recovery.");
+          } else if (notice.type !== "terminal.exited") {
+            throw new Error("unknown terminal notice");
+          }
+        } catch {
+          this.protocolFailure("invalid terminal notice");
+        }
+        return;
+      }
       case "Ping":
         this.sendFrame(TERMINAL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
         return;
@@ -528,7 +550,8 @@ export class TerminalClient {
       type: "AttachTerm",
       sessionId: this.sessionId,
       lastOutSeq: this.lastOutSeq,
-      lastInSeq: this.nextInSeq,
+      // Only server-confirmed bytes belong in Resume; retained input replays separately.
+      lastInSeq: this.ackedInSeq,
     });
     this.creditAvailable = INITIAL_CREDIT;
     this.sendFrame(TERMINAL_STREAM, { type: "Credit", bytes: INITIAL_CREDIT });
@@ -563,6 +586,7 @@ export class TerminalClient {
   private handleInput(data: string): void {
     if (this.closed || !data) return;
     this.config.onInputActivity?.();
+    this.sampleRoundTrip();
     const modifier = this.inputModifier;
     this.inputModifier = undefined;
     if (modifier === "ctrl" && data.length === 1) {
@@ -667,7 +691,9 @@ export class TerminalClient {
   }
 
   private drainOutput(): void {
-    if (!this.attached || this.outputWriteInFlight || this.snapshotWriteInFlight || this.closed) return;
+    // Received bytes remain owned after disconnect. Finish painting them before Attach
+    // advertises lastOutSeq; returnCredit sends nothing on a detached transport.
+    if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.closed) return;
     if (this.pendingSnapshot) {
       const snapshot = this.pendingSnapshot;
       this.pendingSnapshot = undefined;
@@ -823,29 +849,28 @@ export class TerminalClient {
     this.config.status.hidden = message.length === 0;
   }
 
-  /** Starts one immediate RTT sample and then a single bounded sample every two seconds. */
+  /** Samples RTT on attachment and typing; an idle terminal schedules no wakeups [81]. */
   private startPings(): void {
     this.stopPings();
-    if (!this.attached || this.closed) return;
-    const ping = () => {
-      if (!this.attached || this.closed) return;
-      this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
-      const nonce = this.nextPingNonce;
-      if (this.pendingPings.size >= 8) {
-        const oldest = this.pendingPings.keys().next().value as bigint | undefined;
-        if (oldest !== undefined) this.pendingPings.delete(oldest);
-      }
-      const startedAt = performance.now();
-      this.pendingPings.set(nonce, startedAt);
-      this.sendFrame(TERMINAL_STREAM, { type: "Ping", nonce, sentUs: BigInt(Math.round(startedAt * 1000)) });
-    };
-    ping();
-    this.pingTimer = window.setInterval(ping, 2000);
+    this.sampleRoundTrip();
+  }
+
+  private sampleRoundTrip(): void {
+    const startedAt = performance.now();
+    if (!this.attached || this.closed || startedAt - this.lastPingAt < 2000) return;
+    this.lastPingAt = startedAt;
+    this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
+    const nonce = this.nextPingNonce;
+    if (this.pendingPings.size >= 8) {
+      const oldest = this.pendingPings.keys().next().value as bigint | undefined;
+      if (oldest !== undefined) this.pendingPings.delete(oldest);
+    }
+    this.pendingPings.set(nonce, startedAt);
+    this.sendFrame(CONTROL_STREAM, { type: "Ping", nonce, sentUs: BigInt(Math.round(startedAt * 1000)) });
   }
 
   private stopPings(): void {
-    window.clearInterval(this.pingTimer);
-    this.pingTimer = 0;
+    this.lastPingAt = -Infinity;
     this.pendingPings.clear();
     this.config.onRoundTrip?.(undefined);
   }

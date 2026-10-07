@@ -28,7 +28,7 @@ fn stalled_terminal_never_delays_control_or_sibling_dispatch() {
     probe("scripts/verify-agent-isolation.py");
 }
 #[test]
-fn repeated_tiny_credit_snapshots_preserve_shell_progress() {
+fn repeated_tiny_credit_pauses_preserve_shell_progress() {
     probe("scripts/verify-agent-snapshot.py");
 }
 

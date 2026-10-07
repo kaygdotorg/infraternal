@@ -2,6 +2,17 @@
 # Dispatch repository verification modes and report which gate is not ready yet.
 set -euo pipefail
 
+# Ghostty VT and the musl C dependencies share exactly Zig 0.15.2 [94].
+# Nix supplies the local compiler; CI uses the checksum-verified downloader.
+if ! command -v zig >/dev/null || [[ "$(zig version)" != 0.15.2 ]]; then
+    if command -v nix >/dev/null; then
+        exec nix shell nixpkgs#zig_0_15 -c "$0" "$@"
+    fi
+    "$(dirname -- "${BASH_SOURCE[0]}")/auth-toolchain"
+    export PATH="$PWD/target/auth-tools/zig:$PATH"
+fi
+[[ "$(zig version)" == 0.15.2 ]] || { printf 'Zig 0.15.2 required\n' >&2; exit 1; }
+
 # Nix hosts may expose Rust but omit OpenSSL's native build drivers. CI installs
 # these explicitly; the documented Nix invocation supplies them here when absent.
 if ! command -v make >/dev/null || ! command -v perl >/dev/null; then
@@ -18,7 +29,7 @@ source "${script_dir}/verify.d/rust.sh"
 source "${script_dir}/verify.d/ts.sh"
 
 if [[ $# -ne 1 ]]; then
-    printf 'usage: scripts/verify {fast|integration|browser|bench}\n' >&2
+    printf 'usage: scripts/verify {fast|nightly|integration|browser|bench}\n' >&2
     exit 2
 fi
 
@@ -26,6 +37,24 @@ case "$1" in
     fast)
         rust_verify_fast
         ts_verify_fast
+        ;;
+    nightly)
+        # The ordinary workspace gate already runs the 1k smoke corpus.
+        # Nightly uses optimized Rust/native code for all 20k deterministic
+        # cases, with safe console output even when an assertion fails.
+        vt_nightly_corpus() {
+            # Fresh C and RIS differ in prompt-redraw state in the pinned API.
+            # Report both contexts; never hide that difference by normalization.
+            for initial in RIS fresh-c; do
+                VT_SNAPSHOT_INITIAL="$initial" cargo test --release --locked -p infraternal-shim --lib fidelity_seeded_nightly \
+                    -- --ignored --nocapture --test-threads=1 2>&1 | tr -c '[:print:]\n' '.' || return $?
+            done
+            VT_SNAPSHOT_INITIAL=RIS cargo test --release --locked -p infraternal-shim --lib fidelity_extended_nightly \
+                -- --ignored --nocapture --test-threads=1 2>&1 | tr -c '[:print:]\n' '.'
+        }
+        rust_run_gate "VT nightly corpus" vt_nightly_corpus
+        rust_print_summary
+        exit "$RUST_GATE_FAILED"
         ;;
     browser)
         "${script_dir}/verify-auth-browser"
@@ -35,7 +64,7 @@ case "$1" in
         ;;
     *)
         printf 'unknown verification mode: %s\n' "$1" >&2
-        printf 'usage: scripts/verify {fast|integration|browser|bench}\n' >&2
+        printf 'usage: scripts/verify {fast|nightly|integration|browser|bench}\n' >&2
         exit 2
         ;;
 esac

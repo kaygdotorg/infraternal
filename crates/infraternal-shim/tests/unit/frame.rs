@@ -242,3 +242,39 @@ fn codec_reuse_measurement() {
         }
     }
 }
+
+#[test]
+fn approximate_snapshot_codec_is_bounded_and_canonical() {
+    let mut body = vec![0x1c];
+    body.extend_from_slice(&42_u64.to_le_bytes());
+    body.push(1);
+    body.extend_from_slice(b"repaint");
+    let frame_value = Frame::decode(&body).expect("negotiated additive Snapshot must decode");
+    let wire = frame_value.encode().unwrap();
+    assert!(
+        wire[4..] == body,
+        "additive frame roundtrip must preserve payload"
+    );
+    for split in 0..wire.len() {
+        let mut decoder = Decoder::default();
+        let mut frames = decoder.feed(&wire[..split]).unwrap();
+        frames.extend(decoder.feed(&wire[split..]).unwrap());
+        assert_eq!(frames.len(), 1, "fragmented additive frame");
+    }
+    body[9] = 2;
+    assert!(Frame::decode(&body).is_err(), "reserved flags must reject");
+    assert!(
+        Frame::decode(&body[..9]).is_err(),
+        "missing flags must reject"
+    );
+    let mut maximum = vec![b'x'; MAX_FRAME];
+    maximum[0] = 0x1c;
+    maximum[1..9].copy_from_slice(&42_u64.to_le_bytes());
+    maximum[9] = 1;
+    assert!(Frame::decode(&maximum).is_ok(), "maximum additive payload");
+    maximum.push(b'x');
+    assert!(
+        Frame::decode(&maximum).is_err(),
+        "overflowing additive frame"
+    );
+}

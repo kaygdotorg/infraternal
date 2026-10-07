@@ -16,17 +16,22 @@ unwrap_used = "deny"
 expect_used = "deny"
 
 [dependencies]
-alacritty_terminal.workspace = true
+alacritty_terminal = { workspace = true, optional = true }
 vte.workspace = true
 nix.workspace = true
 
-[dev-dependencies]
-vt100.workspace = true
+vt100 = { workspace = true, optional = true }
 
-# Opt-in candidate only: native Ghostty build requires Zig and fetched sources.
+# Comparison engines are never in the default production dependency graph.
 [features]
-bench-ghostty = ["dep:libghostty-vt"]
+bench-vt = ["dep:alacritty_terminal", "dep:vt100"]
+bench-ghostty = ["bench-vt", "dep:libghostty-vt"]
 
 [dependencies.libghostty-vt]
 workspace = true
 optional = true
+
+# The old engines are retained only for reproducible comparison measurements.
+[[example]]
+name = "vt_compare"
+required-features = ["bench-vt"]

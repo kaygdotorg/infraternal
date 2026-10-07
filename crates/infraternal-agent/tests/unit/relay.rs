@@ -51,8 +51,8 @@ fn starvation_is_one_shot_and_snapshot_length_does_not_advance_sequence() {
     output.grant(4096).unwrap();
     assert!(output.needs_snapshot());
     assert_eq!(output.forward(1), Err(Error::OutOfRange));
-    output.repaint(50_000_000, 4097).unwrap();
-    output.grant(1).unwrap(); // Repays exactly one borrowed byte, no usable credit.
+    assert_eq!(output.repaint(50_000_000, 4097), Err(Error::OutOfRange));
+    output.repaint(50_000_000, 4096).unwrap();
     assert_eq!(output.cursor(), 50_000_000);
     assert!(!output.needs_snapshot());
     assert_eq!(output.suffix(50_000_000, 16), Ok(0..0));
@@ -80,44 +80,46 @@ fn returned_credit_cancels_starvation_and_state_has_no_payload_buffer() {
 }
 
 #[test]
-fn tiny_snapshot_credit_is_one_frame_debt_not_unlimited_output() {
-    let mut output = Output::attach(0);
+fn expired_credit_resumes_retained_bytes_at_the_same_cursor() {
+    let mut output = Output::attach(41);
     output.forward(1024 * 1024).unwrap();
-    assert_eq!(output.repaint(2_000_000, 2000), Err(Error::OutOfRange));
-    output.grant(1).unwrap();
-    output.repaint(2_000_000, 2000).unwrap();
-    assert_eq!(output.cursor(), 2_000_000);
-    assert_eq!(output.forward(1), Err(Error::OutOfRange));
-    assert_eq!(output.repaint(2_000_001, 2000), Err(Error::OutOfRange));
+    let cursor = output.cursor();
+    let now = Instant::now();
+    output.pending(now);
+    assert!(output.expire(now + STARVATION));
+    output.grant(100).unwrap();
+    assert_eq!(output.cursor(), cursor);
+    output.resume_replay();
+    // After a retained ReadFrom response the relay must forward its unseen
+    // suffix, rather than silently discard it while waiting for a repaint.
+    assert_eq!(output.suffix(cursor, 100).unwrap(), 0..100);
+}
+
+#[test]
+fn positive_insufficient_credit_arms_a_one_shot_deadline() {
+    let mut output = Output::attach(0);
+    output.forward(1024 * 1024 - 1).unwrap();
+    let cursor = output.cursor();
+    assert_eq!(output.repaint(cursor + 100, 16_384), Err(Error::OutOfRange));
     let now = Instant::now();
     assert_eq!(output.pending(now), Some(now + STARVATION));
-    output.grant(1).unwrap();
     assert_eq!(
         output.pending(now + Duration::from_millis(100)),
         Some(now + STARVATION)
     );
-    assert!(output.expire(now + STARVATION));
-    output.grant(1998).unwrap();
-    assert!(!output.needs_snapshot());
     output.grant(1).unwrap();
-    assert!(output.needs_snapshot());
     assert_eq!(
-        output.repaint(3_000_000, infraternal_shim::frame::MAX_FRAME),
-        Err(Error::OutOfRange)
+        output.pending(now + Duration::from_millis(200)),
+        Some(now + STARVATION)
     );
-    output.repaint(3_000_000, 10).unwrap();
-}
-
-#[test]
-fn initial_ring_wrap_repaint_with_insufficient_credit_obeys_debt() {
-    let mut output = Output::attach(0);
-    output.forward(1024 * 1024 - 1).unwrap();
-    // Ring wrap and explicit catch-up share the same repaint accounting.
-    output.repaint(12_000_000, 65536).unwrap();
-    output.grant(65535).unwrap();
-    assert_eq!(output.suffix(12_000_000, 1), Ok(0..0));
-    output.grant(1).unwrap();
-    assert_eq!(output.suffix(12_000_000, 1), Ok(0..1));
+    assert!(output.expire(now + STARVATION));
+    assert_eq!(output.cursor(), cursor);
+    assert!(
+        !output.needs_snapshot(),
+        "unchanged credit must park repaint serialization"
+    );
+    output.grant(16_384).unwrap();
+    assert!(output.needs_snapshot());
 }
 
 #[test]

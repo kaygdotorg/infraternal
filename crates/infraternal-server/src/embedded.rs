@@ -4,7 +4,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -26,7 +26,10 @@ const CONTROL_STREAM: u32 = 0;
 // Callers await bounded command capacity; output never waits on a browser receiver.
 const COMMAND_CAPACITY: usize = 64;
 // A full output queue retires only that attachment; reconnect replays from its last offset.
-const OUTPUT_CAPACITY: usize = 4;
+// A default 1MiB grant can arrive in 256 bulk PTY frames while forwarding awaits I/O.
+// Credits bound payload bytes; frame slots separately bound small outputs and notices.
+const OUTPUT_CAPACITY: usize = 256;
+const MAX_OUTPUT_CREDIT: u64 = 8 * 1024 * 1024;
 // Full input queues stop the WebSocket reader and propagate backpressure to the peer.
 const INPUT_CAPACITY: usize = 4;
 const READ_CHUNK: usize = 16 * 1024;
@@ -66,6 +69,8 @@ pub(crate) enum TerminalOutput {
     Output { out_seq: u64, bytes: Bytes },
     /// Repaint bytes valid at the given absolute offset.
     Snapshot { out_seq: u64, bytes: Bytes },
+    /// Ordered, session-bound recovery or lifecycle notice.
+    Event { event_json: Bytes },
     /// Highest input sequence written to the PTY.
     Ack { in_seq_acked: u64 },
     /// The agent retired one terminal stream.
@@ -265,6 +270,10 @@ enum Incoming {
         stream_id: u32,
         out_seq: u64,
         bytes: Bytes,
+    },
+    Event {
+        stream_id: u32,
+        event_json: Bytes,
     },
     Ack {
         stream_id: u32,
@@ -633,7 +642,7 @@ async fn process_command(
                     let Some(credit) = attachment.credit.checked_add(u64::from(bytes)) else {
                         return false;
                     };
-                    if credit > 8 * 1024 * 1024 {
+                    if credit > MAX_OUTPUT_CREDIT {
                         return false;
                     }
                     attachment.credit = credit;
@@ -729,6 +738,54 @@ async fn reattach_all(
     true
 }
 
+/// Content-free notices are bounded and bound to the attached session before forwarding.
+#[derive(Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum TerminalNotice {
+    #[serde(rename = "terminal.snapshot")]
+    Snapshot {
+        session_id: String,
+        seq: u64,
+        approximate: bool,
+    },
+    #[serde(rename = "terminal.snapshot_unavailable")]
+    Unavailable { session_id: String, seq: u64 },
+    #[serde(rename = "terminal.exited")]
+    Exited {
+        session_id: String,
+        status: i32,
+        final_seq: u64,
+    },
+}
+
+impl TerminalNotice {
+    fn session_id(&self) -> &str {
+        // Cursor/status fields validate JSON shape; wire Snapshot/Ack remain authoritative.
+        match self {
+            Self::Snapshot {
+                session_id,
+                seq,
+                approximate,
+            } => {
+                let _ = (seq, approximate);
+                session_id
+            }
+            Self::Unavailable { session_id, seq } => {
+                let _ = seq;
+                session_id
+            }
+            Self::Exited {
+                session_id,
+                status,
+                final_seq,
+            } => {
+                let _ = (status, final_seq);
+                session_id
+            }
+        }
+    }
+}
+
 // Incoming wire cases share actor-owned sequence accounting and bounded output senders.
 #[allow(clippy::too_many_lines)]
 async fn process_incoming(
@@ -782,6 +839,9 @@ async fn process_incoming(
                 )
                 .await;
             }
+            if end - out_seq > attachment.credit {
+                return false;
+            }
             if attachment
                 .output
                 .try_send(TerminalOutput::Output { out_seq, bytes })
@@ -796,8 +856,10 @@ async fn process_incoming(
                 )
                 .await;
             }
-            attachment.credit = attachment.credit.saturating_sub(end - out_seq);
+            attachment.credit -= end - out_seq;
             attachment.last_out_seq = end;
+            // Ready socket bursts otherwise retire a healthy four-frame receiver before it runs.
+            tokio::task::yield_now().await;
             true
         }
         Incoming::Snapshot {
@@ -815,6 +877,9 @@ async fn process_incoming(
                 return false;
             }
             let length = bytes.len() as u64;
+            if length > attachment.credit {
+                return false;
+            }
             if attachment
                 .output
                 .try_send(TerminalOutput::Snapshot { out_seq, bytes })
@@ -829,8 +894,41 @@ async fn process_incoming(
                 )
                 .await;
             }
-            attachment.credit = attachment.credit.saturating_sub(length);
+            attachment.credit -= length;
             attachment.last_out_seq = out_seq;
+            true
+        }
+        Incoming::Event {
+            stream_id,
+            event_json,
+        } => {
+            let Some(attachment_id) = routes.get(&stream_id).copied() else {
+                return true;
+            };
+            let Some(attachment) = attachments.get(&attachment_id) else {
+                return false;
+            };
+            let Ok(notice) = serde_json::from_slice::<TerminalNotice>(&event_json) else {
+                return false;
+            };
+            if decode_session_id(notice.session_id()) != Some(attachment.session_id) {
+                return false;
+            }
+            // The same queue preserves notice/repaint ordering and retires a slow viewer only.
+            if attachment
+                .output
+                .try_send(TerminalOutput::Event { event_json })
+                .is_err()
+            {
+                return retire_slow_stream(
+                    connection,
+                    attachments,
+                    routes,
+                    attachment_id,
+                    stream_id,
+                )
+                .await;
+            }
             true
         }
         Incoming::Ack {
@@ -936,6 +1034,13 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                         out_seq,
                         bytes: share_payload(&wire, bytes)?,
                     },
+                    Frame::Event {
+                        sub_id: 0,
+                        event_json,
+                    } if event_json.len() <= 1024 => Incoming::Event {
+                        stream_id,
+                        event_json: share_payload(&wire, event_json)?,
+                    },
                     Frame::Ack { in_seq_acked } => Incoming::Ack {
                         stream_id,
                         in_seq_acked,
@@ -954,6 +1059,7 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                     &frame,
                     Incoming::Output { .. }
                         | Incoming::Snapshot { .. }
+                        | Incoming::Event { .. }
                         | Incoming::Ack { .. }
                         | Incoming::Close { .. }
                 ) && (stream_id == CONTROL_STREAM || stream_id % 2 != 0)

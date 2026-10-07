@@ -26,6 +26,13 @@ impl Ring {
     pub fn start(&self) -> u64 {
         self.head - self.bytes.len() as u64
     }
+    /// Borrow the complete stream from creation without allocating a replay
+    /// copy. Missing origin bytes cannot certify reconstruction; the caller
+    /// must also certify the historical geometry before replaying these slices.
+    #[must_use]
+    pub fn origin_slices(&self) -> Option<(&[u8], &[u8])> {
+        (self.start() == 0).then_some(self.bytes.as_slices())
+    }
     /// Append output without resetting its identity when the ring wraps.
     /// # Errors
     /// Fails rather than wrapping the absolute offset after `u64::MAX` bytes.
