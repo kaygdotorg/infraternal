@@ -798,6 +798,8 @@ async fn process_incoming(
             }
             attachment.credit = attachment.credit.saturating_sub(end - out_seq);
             attachment.last_out_seq = end;
+            // Ready socket bursts otherwise retire a healthy four-frame receiver before it runs.
+            tokio::task::yield_now().await;
             true
         }
         Incoming::Snapshot {

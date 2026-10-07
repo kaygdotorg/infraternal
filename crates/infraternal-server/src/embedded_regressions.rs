@@ -380,7 +380,6 @@ async fn recovery_event_then_snapshot_keeps_embedded_connection_live() {
 
 /// Immediately-ready native output must give the healthy bounded receiver a turn.
 #[tokio::test]
-#[ignore = "tests-first sustained-output regression; enabled after scheduling fix"]
 async fn healthy_receiver_survives_ready_native_output_burst() {
     let (mut link, _peer) = connection();
     let (tx, mut rx) = mpsc::channel(4);
