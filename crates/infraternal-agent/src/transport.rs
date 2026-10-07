@@ -5,6 +5,7 @@
 //! registration avoid an unsafe fd conversion. Every operation is nonblocking,
 //! regardless of the flags chosen by the spawning server.
 
+use crate::channel::Channel;
 use infraternal_protocol::{
     DecodeError, DecodedMuxedFrame, Frame, MAX_FRAME_LEN, decode_muxed_frame,
     encode_muxed_frame_into,
@@ -86,11 +87,23 @@ impl Socket {
     }
 }
 
+impl Channel for Socket {
+    async fn read(&self, bytes: &mut [u8]) -> io::Result<usize> {
+        Self::read(self, bytes).await
+    }
+
+    async fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        Self::write(self, bytes).await
+    }
+}
+
 /// One retained mux frame plus at most one 16 KiB read of coalesced suffixes.
 pub struct Receive {
     bytes: Vec<u8>,
     consumed: usize,
     chunk: Box<[u8]>,
+    deadline: Option<tokio::time::Instant>,
+    last_arrival: Option<tokio::time::Instant>,
 }
 impl Default for Receive {
     fn default() -> Self {
@@ -99,6 +112,8 @@ impl Default for Receive {
         Self {
             bytes: Vec::new(),
             consumed: 0,
+            deadline: None,
+            last_arrival: None,
             chunk: vec![0; 16 * 1024].into_boxed_slice(),
         }
     }
@@ -107,7 +122,7 @@ impl Receive {
     /// Read until a complete borrowed frame is available.
     /// # Errors
     /// Rejects invalid codec data, EOF inside a frame, and excessive storage.
-    pub async fn next(&mut self, socket: &Socket) -> io::Result<DecodedMuxedFrame<'_>> {
+    pub async fn next(&mut self, socket: &impl Channel) -> io::Result<DecodedMuxedFrame<'_>> {
         // Compact once between messages, never once per fragmented read.
         if self.consumed != 0 {
             self.bytes.drain(..self.consumed);
@@ -119,7 +134,20 @@ impl Receive {
                 Err(DecodeError::Incomplete) => {}
                 Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
             }
-            let n = socket.read(&mut self.chunk).await?;
+            // The first byte arms one deadline retained across select cancellation.
+            // An empty channel has no timer; traffic cannot refresh a partial frame.
+            let n = if let Some(deadline) = self.deadline {
+                if let Ok(result) =
+                    tokio::time::timeout_at(deadline, socket.read(&mut self.chunk)).await
+                {
+                    result?
+                } else {
+                    socket.retire();
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+            } else {
+                socket.read(&mut self.chunk).await?
+            };
             if n == 0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
@@ -131,11 +159,30 @@ impl Receive {
                     "leg B receive bound exceeded",
                 ));
             }
+            // Inherited channels do not pay for clock reads or deadline storage.
+            let timeout = socket.frame_timeout();
+            self.last_arrival = timeout.map(|_| tokio::time::Instant::now());
+            if self.bytes.is_empty() {
+                self.deadline = self
+                    .last_arrival
+                    .zip(timeout)
+                    .map(|(arrival, timeout)| arrival + timeout);
+            }
             self.bytes.extend_from_slice(&self.chunk[..n]);
         }
         let decoded = decode_muxed_frame(&self.bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         self.consumed = decoded.wire_len;
+        // Any suffix first arrived in the final read that completed this frame.
+        // Retain that arrival while complete coalesced frames are consumed, so
+        // delaying the next call cannot postpone a buffered partial-frame expiry.
+        self.deadline = if self.consumed < self.bytes.len() {
+            self.last_arrival
+                .zip(socket.frame_timeout())
+                .map(|(at, timeout)| at + timeout)
+        } else {
+            None
+        };
         Ok(decoded)
     }
 }
@@ -151,11 +198,113 @@ impl Transmit {
     /// Returns codec or socket errors.
     pub async fn send(
         &mut self,
-        socket: &Socket,
+        socket: &impl Channel,
         stream: u32,
         frame: &Frame<'_>,
     ) -> io::Result<()> {
         encode_muxed_frame_into(stream, frame, &mut self.bytes).map_err(io::Error::other)?;
         socket.write(&self.bytes).await
+    }
+}
+
+#[cfg(test)]
+mod remote_deadline_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    struct RemoteSocket {
+        socket: Socket,
+        retired: AtomicBool,
+    }
+    impl Channel for RemoteSocket {
+        fn frame_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_millis(100))
+        }
+        fn retire(&self) {
+            self.retired.store(true, Ordering::Relaxed);
+        }
+        async fn read(&self, bytes: &mut [u8]) -> io::Result<usize> {
+            self.socket.read(bytes).await
+        }
+        async fn write(&self, bytes: &[u8]) -> io::Result<()> {
+            self.socket.write(bytes).await
+        }
+    }
+    // Retain the owned descriptor separately: Socket borrows it just like fd3.
+    fn pair() -> (
+        std::os::unix::net::UnixStream,
+        tokio::net::UnixStream,
+        RemoteSocket,
+    ) {
+        let (owned, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let socket = Socket::inherited(owned.as_raw_fd()).unwrap();
+        (
+            owned,
+            tokio::net::UnixStream::from_std(peer).unwrap(),
+            RemoteSocket {
+                socket,
+                retired: AtomicBool::new(false),
+            },
+        )
+    }
+    fn ping(nonce: u64) -> Vec<u8> {
+        let mut wire = Vec::new();
+        encode_muxed_frame_into(0, &Frame::Ping { nonce, sent_us: 0 }, &mut wire).unwrap();
+        wire
+    }
+    #[tokio::test]
+    async fn remote_partial_frame_deadline_survives_receive_cancellation() {
+        let (_owned, mut peer, channel) = pair();
+        peer.write_all(&ping(7)[..1]).await.unwrap();
+        let mut receive = Receive::default();
+        for _ in 0..15 {
+            match tokio::time::timeout(Duration::from_millis(20), receive.next(&channel)).await {
+                Err(_) => {}
+                Ok(Err(error)) => {
+                    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+                    assert!(channel.retired.load(Ordering::Relaxed));
+                    return;
+                }
+                Ok(Ok(_)) => panic!("partial frame must never decode"),
+            }
+        }
+        panic!("cancellation must not extend the first-byte deadline");
+    }
+    #[tokio::test]
+    async fn wholly_idle_remote_channel_has_no_frame_expiry() {
+        let (_owned, mut peer, channel) = pair();
+        let mut receive = Receive::default();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), receive.next(&channel))
+                .await
+                .is_err()
+        );
+        assert!(!channel.retired.load(Ordering::Relaxed));
+        peer.write_all(&ping(7)).await.unwrap();
+        assert!(matches!(
+            receive.next(&channel).await.unwrap().frame,
+            Frame::Ping { nonce: 7, .. }
+        ));
+    }
+    #[tokio::test]
+    async fn coalesced_partial_suffix_keeps_its_arrival_deadline() {
+        let (_owned, mut peer, channel) = pair();
+        let mut wire = ping(7);
+        wire.extend_from_slice(&ping(9)[..1]);
+        peer.write_all(&wire).await.unwrap();
+        let mut receive = Receive::default();
+        assert!(matches!(
+            receive.next(&channel).await.unwrap().frame,
+            Frame::Ping { nonce: 7, .. }
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let result = tokio::time::timeout(Duration::from_millis(20), receive.next(&channel))
+            .await
+            .expect("buffered partial suffix must retain its original arrival deadline");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(channel.retired.load(Ordering::Relaxed));
     }
 }
