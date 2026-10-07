@@ -35,6 +35,9 @@ interface GhosttyActivityControls {
   cancelRenderLoop(): void;
   scrollbarOpacity: number;
   renderer?: {
+    remeasureFont(): void;
+    resize(cols: number, rows: number): void;
+    getMetrics(): { width: number; height: number };
     setCursorBlink(enabled: boolean): void;
     setTheme(theme: ITheme): void;
     render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown, scrollbarOpacity?: number): void;
@@ -271,9 +274,9 @@ export class TerminalClient {
 
   /** Loads Geist and the WASM terminal once, then opens the one-session client. */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
-    await document.fonts.load('400 14px "Geist Mono"');
+    await document.fonts.load('14px "Geist Mono"');
     await init();
-    return new TerminalClient(config, new Terminal({
+    const terminal = new Terminal({
       fontFamily: '"Geist Mono", ui-monospace, monospace',
       fontSize: matchMedia("(pointer: coarse)").matches ? 13 : 14,
       cursorBlink: false,
@@ -286,7 +289,10 @@ export class TerminalClient {
         cursorAccent: "#101113",
         selectionBackground: "#44485c",
       },
-    }));
+    });
+    const client = new TerminalClient(config, terminal);
+    client.remeasureFont();
+    return client;
   }
 
   get isConnected(): boolean { return this.attached; }
@@ -300,9 +306,13 @@ export class TerminalClient {
     rows: number;
     cellWidth: number;
     cellHeight: number;
+    naturalCellWidth: number;
     configuredScrollback: number;
     cursorX: number;
     cursorY: number;
+    renderCursorX: number;
+    renderCursorY: number;
+    renderCursorVisible: boolean;
     themeColorsMs: number;
     themeRenderMs: number;
     terminalColors?: { background: { r: number; g: number; b: number }; foreground: { r: number; g: number; b: number } };
@@ -315,16 +325,22 @@ export class TerminalClient {
   } {
     const wasmTerm = this.terminal.wasmTerm;
     const memory = (wasmTerm as unknown as { memory?: WebAssembly.Memory } | undefined)?.memory;
+    const renderer = this.ghostty.renderer as unknown as { naturalCellWidth?: number } | undefined;
     const colors = wasmTerm?.getColors();
+    const renderCursor = wasmTerm?.getCursor();
     const cell = this.cellMetrics();
     return {
       cols: this.terminal.cols,
       rows: this.terminal.rows,
       cellWidth: cell.width,
       cellHeight: cell.height,
+      naturalCellWidth: renderer?.naturalCellWidth ?? cell.width,
       configuredScrollback: this.terminal.options.scrollback ?? 10_000,
       cursorX: this.terminal.buffer.active.cursorX,
       cursorY: this.terminal.buffer.active.cursorY,
+      renderCursorX: renderCursor?.x ?? 0,
+      renderCursorY: renderCursor?.y ?? 0,
+      renderCursorVisible: Boolean(renderCursor?.visible),
       themeColorsMs: this.lastThemeColorsMs,
       themeRenderMs: this.lastThemeRenderMs,
       ...(colors ? { terminalColors: { background: colors.background, foreground: colors.foreground } } : {}),
@@ -920,15 +936,101 @@ export class TerminalClient {
   }
 
   private cellMetrics(): { width: number; height: number } {
-    const renderer = (this.terminal as unknown as { renderer?: { metrics?: { width: number; height: number } } }).renderer?.metrics;
-    if (renderer && renderer.width > 0 && renderer.height > 0) return renderer;
-    const context = document.createElement("canvas").getContext("2d");
-    if (!context) return { width: 8, height: 18 };
-    context.font = `400 ${this.terminal.options.fontSize}px ${this.terminal.options.fontFamily}`;
-    const measured = context.measureText("W");
+    const metrics = this.ghostty.renderer?.getMetrics();
+    if (!metrics || metrics.width <= 0 || metrics.height <= 0) {
+      throw new Error("terminal renderer cell metrics are unavailable");
+    }
+    return { width: metrics.width, height: metrics.height };
+  }
+
+  /** Rebuilds backing dimensions from the loaded web font before the first frame. */
+  private remeasureFont(): void {
+    const renderer = this.ghostty.renderer;
+    if (!renderer) throw new Error("terminal renderer is unavailable after font load");
+    renderer.remeasureFont();
+    renderer.resize(this.terminal.cols, this.terminal.rows);
+    this.scheduleFit();
+  }
+
+  /** Times synchronous full-screen redraws for the test-double performance probe. */
+  benchmarkFullRedraw(iterations: number): number[] {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer) throw new Error("terminal renderer is unavailable for redraw benchmark");
+    if (!Number.isInteger(iterations) || iterations < 1 || iterations > 100) {
+      throw new RangeError("redraw benchmark iterations must be from 1 to 100");
+    }
+    const samples: number[] = [];
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      const startedAt = performance.now();
+      renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+      samples.push(performance.now() - startedAt);
+    }
+    return samples;
+  }
+
+  /** Stops cursor blinking and paints one stable frame for canvas pixel tests. */
+  freezeCursorForTest(): void {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer) throw new Error("terminal renderer is unavailable for cursor pixel test");
+    renderer.setCursorBlink(false);
+    renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+  }
+
+  /** Feeds a paced 10 MB/s text stream through Ghostty and waits for its last paint. */
+  async benchmarkOutputAt10MBps(): Promise<{
+    bytes: number;
+    elapsedMs: number;
+    writeCpuMs: number;
+    p95FrameMs: number;
+    maxFrameMs: number;
+    wasmMemoryBytes: number;
+  }> {
+    const bytesPerChunk = 100_000;
+    const chunkCount = 100;
+    const totalBytes = bytesPerChunk * chunkCount;
+    const chunk = new Uint8Array(bytesPerChunk).fill(0x78);
+    await new Promise<void>((resolve) => {
+      this.terminal.write(new TextEncoder().encode("\x1b[?1049h\x1b[2J\x1b[H"), resolve);
+    });
+    const startedAt = performance.now();
+    const frameIntervals: number[] = [];
+    let previousFrameAt = startedAt;
+    let writingDone = false;
+    const sampleFrame = (at: number): void => {
+      frameIntervals.push(at - previousFrameAt);
+      previousFrameAt = at;
+      if (!writingDone || frameIntervals.length < 2) requestAnimationFrame(sampleFrame);
+    };
+    requestAnimationFrame(sampleFrame);
+
+    let writeCpuMs = 0;
+    let lastPaint: Promise<void> | undefined;
+    for (let index = 0; index < chunkCount; index += 1) {
+      const dueAt = startedAt + index * 10;
+      const delay = dueAt - performance.now();
+      if (delay > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+      const writeStartedAt = performance.now();
+      if (index + 1 === chunkCount) {
+        lastPaint = new Promise<void>((resolve) => this.terminal.write(chunk, resolve));
+      } else {
+        this.terminal.write(chunk);
+      }
+      writeCpuMs += performance.now() - writeStartedAt;
+    }
+    writingDone = true;
+    await lastPaint;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const elapsedMs = performance.now() - startedAt;
+    const sortedFrames = frameIntervals.slice().sort((left, right) => left - right);
     return {
-      width: measured.width || 8,
-      height: (measured.fontBoundingBoxAscent ?? this.terminal.options.fontSize) + (measured.fontBoundingBoxDescent ?? 3),
+      bytes: totalBytes,
+      elapsedMs,
+      writeCpuMs,
+      p95FrameMs: sortedFrames[Math.floor((sortedFrames.length - 1) * 0.95)] ?? 0,
+      maxFrameMs: sortedFrames[sortedFrames.length - 1] ?? 0,
+      wasmMemoryBytes: this.rendererMetrics.wasmMemoryBytes,
     };
   }
 

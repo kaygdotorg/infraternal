@@ -48,6 +48,8 @@ async function readSocketCounts(page: Page): Promise<{ opened: number; closed: n
 
 async function readTerminalPixels(page: Page, theme: Theme): Promise<TerminalPixels> {
   return page.evaluate(({ ansi: themeAnsi, background: themeBackground }) => {
+    // Cursor blink is an active-session behavior; freeze it so the color probe is deterministic.
+    window.__tracerTestDouble?.freezeCursorForTest();
     const host = document.querySelector<HTMLElement>("#terminal-host");
     const canvas = host?.querySelector<HTMLCanvasElement>("canvas");
     const metrics = window.__tracerTestDouble?.rendererMetrics();
@@ -322,6 +324,14 @@ test("every curated theme recolors the initial terminal and its existing ANSI te
   await host.hover();
   await page.mouse.wheel(0, -600);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.viewportY ?? 0)).toBeGreaterThan(0);
+  let previousViewportY = await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.viewportY ?? 0);
+  let stableViewportSamples = 0;
+  await expect.poll(async () => {
+    const viewportY = await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.viewportY ?? 0);
+    stableViewportSamples = Math.abs(viewportY - previousViewportY) < 0.001 ? stableViewportSamples + 1 : 0;
+    previousViewportY = viewportY;
+    return stableViewportSamples >= 2;
+  }, { timeout: 5_000, intervals: [50] }).toBe(true);
   const scrolled = await readTerminalState(page);
   await chooseTheme(page, "ink", "Ink");
   await expect.poll(() => readTerminalState(page)).toEqual(scrolled);

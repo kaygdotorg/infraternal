@@ -21,9 +21,13 @@ declare global {
         rows: number;
         cellWidth: number;
         cellHeight: number;
+        naturalCellWidth: number;
         configuredScrollback: number;
         cursorX: number;
         cursorY: number;
+        renderCursorX: number;
+        renderCursorY: number;
+        renderCursorVisible: boolean;
         receivedSequence: string;
         outputSequence: string;
         scrollbackRows: number;
@@ -34,6 +38,16 @@ declare global {
         themeRenderMs: number;
         terminalColors?: { background: { r: number; g: number; b: number }; foreground: { r: number; g: number; b: number } };
       } | undefined;
+      benchmarkFullRedraw: (iterations: number) => number[] | undefined;
+      freezeCursorForTest: () => void;
+      benchmarkOutputAt10MBps: () => Promise<{
+        bytes: number;
+        elapsedMs: number;
+        writeCpuMs: number;
+        p95FrameMs: number;
+        maxFrameMs: number;
+        wasmMemoryBytes: number;
+      }> | undefined;
       trace: () => ProbeTraceSample[];
     };
   }
@@ -293,6 +307,24 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
         graphemeText: () => currentTerminal?.readGraphemeText() ?? "",
         themeHistoryColors: () => currentTerminal?.readThemeHistoryColors() ?? { rows: 0, indexed: [], truecolor: [] },
         rendererMetrics: () => currentTerminal?.rendererMetrics,
+        benchmarkFullRedraw: (iterations) => {
+          if (!currentTerminal) return undefined;
+          return (currentTerminal as unknown as { benchmarkFullRedraw: (count: number) => number[] }).benchmarkFullRedraw(iterations);
+        },
+        freezeCursorForTest: () => currentTerminal?.freezeCursorForTest(),
+        benchmarkOutputAt10MBps: () => {
+          if (!currentTerminal) return undefined;
+          return (currentTerminal as unknown as {
+            benchmarkOutputAt10MBps: () => Promise<{
+              bytes: number;
+              elapsedMs: number;
+              writeCpuMs: number;
+              p95FrameMs: number;
+              maxFrameMs: number;
+              wasmMemoryBytes: number;
+            }>;
+          }).benchmarkOutputAt10MBps();
+        },
         trace: () => performanceProbe?.traceSamples() ?? [],
       };
     }
