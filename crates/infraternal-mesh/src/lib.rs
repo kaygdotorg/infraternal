@@ -8,3 +8,5 @@ pub mod address;
 pub mod names;
 
 pub mod rules;
+
+pub mod view;
