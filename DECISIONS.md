@@ -878,3 +878,33 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        pre-upgrade backup; tested against real old databases.
      - **Browsers (U5):** a toast says infraternal updated, and the page
        reloads when idle with no unsent input; sessions resume.
+156. **Discovery and facts (round D):**
+     - **Extended information (D1, D3):** cheap facts are on by default
+       (opt-out); expensive or sensitive facts and the noisier discovery
+       sources (IPs, listeners, workloads, mesh topology, SSH and firewall
+       posture, updates, disk health; LAN neighbours, mDNS, Proxmox,
+       Docker/Kubernetes contexts, libvirt) sit behind one **"Gather
+       extended information"** switch. Whether it is global, per host or
+       both is still to be grilled and designed.
+     - **Add-host list (D2):** shows names; an IP is revealed on tap with a
+       text-morph animation in the spirit of SwiftUI's numericText (the
+       torph library is the reference), decided against the mockup.
+     - **Platform order (D4–D7):** Windows comes after the first Linux
+       release (an issue carries everything a job needs to start). BSD and
+       appliance priority follows enterprise relevance, to be researched
+       first. Talos and Bottlerocket are unsupported for now; guests (WSL,
+       Termux, Crostini) are labelled as guests. macOS 13 or later, Intel
+       and Apple silicon.
+     - **No one-shot probe (D8), which supersedes the probe mode in D145:**
+       before install, SSH runs only a tiny read-only sniff (OS, CPU
+       architecture, init, passwordless sudo) to pick the binary and ask for
+       root consent. Then the infraternal agent is **installed first**, and
+       it gathers every fact itself, as parallel and async as possible.
+     - **Observe first, manage later (D9):** infraternal is a
+       management/control plane, but management actions (updates, package
+       operations, config changes) come much later, once the base is stable.
+       Until then, collection is strictly read-only: no cloud metadata or
+       credentials, no package refresh or updates, no root without consent,
+       no host-key bypass, no login attempts, no workload dumps, no SMART
+       self-tests, no SSH to shell-less appliances. We iterate slowly and
+       stay stable.
