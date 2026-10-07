@@ -233,6 +233,7 @@ export class TerminalClient {
     cellWidth: number;
     cellHeight: number;
     configuredScrollback: number;
+    receivedSequence: string;
     outputSequence: string;
     scrollbackRows: number;
     wasmMemoryBytes: number;
@@ -246,6 +247,7 @@ export class TerminalClient {
       cellWidth: cell.width,
       cellHeight: cell.height,
       configuredScrollback: this.terminal.options.scrollback ?? 10_000,
+      receivedSequence: this.receivedOutSeq.toString(),
       outputSequence: this.lastOutSeq.toString(),
       scrollbackRows: wasmTerm?.getScrollbackLength() ?? 0,
       wasmMemoryBytes: memory?.buffer.byteLength ?? 0,
@@ -260,6 +262,35 @@ export class TerminalClient {
     for (let row = first; row < buffer.length; row += 1) {
       const line = buffer.getLine(row);
       if (line) lines.push(line.translateToString(true));
+    }
+    return lines.join("\n");
+  }
+
+  /** Reads renderer graphemes from the test-only tail, including ZWJ and modifier codepoints. */
+  readGraphemeText(): string {
+    const buffer = this.terminal.buffer.active;
+    const first = Math.max(0, buffer.length - this.terminal.rows - 256);
+    const wasmTerm = this.terminal.wasmTerm;
+    const scrollbackRows = wasmTerm?.getScrollbackLength() ?? 0;
+    const lines: string[] = [];
+    for (let row = first; row < buffer.length; row += 1) {
+      const line = buffer.getLine(row);
+      if (!line) continue;
+      let text = "";
+      for (let col = 0; col < line.length; col += 1) {
+        const cell = line.getCell(col);
+        if (!cell || cell.getWidth() === 0) continue;
+        if (cell.getCodepoint() === 0) {
+          text += " ";
+        } else if (wasmTerm && row < scrollbackRows) {
+          text += wasmTerm.getScrollbackGraphemeString(row, col);
+        } else if (wasmTerm) {
+          text += wasmTerm.getGraphemeString(row - scrollbackRows, col);
+        } else {
+          text += cell.getChars();
+        }
+      }
+      lines.push(text.trimEnd());
     }
     return lines.join("\n");
   }
@@ -627,6 +658,8 @@ export class TerminalClient {
     this.pendingSnapshot?.bytes.fill(0);
     this.pendingSnapshot = { outSeq: sequence, bytes: bytes.slice() };
 
+    // Drop queued raw bytes that this repaint supersedes. Output received after
+    // this point starts at `sequence` and must survive older write callbacks.
     const keep = this.outputWriteInFlight ? this.outputWriteLength : 0;
     const dropped = this.outputQueue.discardAfter(keep);
     if (dropped > 0) this.returnCredit(dropped);
@@ -652,10 +685,6 @@ export class TerminalClient {
         this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq);
         snapshot.bytes.fill(0);
         this.returnCredit(snapshot.bytes.byteLength);
-        if (this.pendingSnapshot) {
-          const dropped = this.outputQueue.discardAfter(0);
-          if (dropped > 0) this.returnCredit(dropped);
-        }
         this.drainOutput();
         this.tryAttach();
       });
