@@ -930,3 +930,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        - completion: instant local suggestions, and Tab asks the shell;
        - it is offered once by toast when the RTT stays above 150 ms on a
          phone or 250 ms on desktop, and remembered once accepted.
+158. **Machine tab adjustments (owner review of the in-product prototype):**
+     - The OS logo sits **at the top**, always (it looks better). This
+       replaces D126's left/top split.
+     - **No copy icons on rows.** On touch, **double-tap** a value to copy
+       it; on desktop, a **single click**. Feedback is the D103 tick swap
+       inline, plus a warm tooltip "Copied".
+     - The pills (window pill, tab tray) are vertically shorter.
+     - Mobile typography is tightened: one type scale, aligned key and
+       value columns, values that fit without awkward wrapping.
