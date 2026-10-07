@@ -1,9 +1,24 @@
-/** Mounts the mock-only host discovery and SSH bootstrap window on the tracer canvas. */
+/**
+ * The add-host flow (mock only, `?mock=1&proto=addhost`): one window on the canvas.
+ *
+ * Shape (DECISIONS 138–141, 144, 171):
+ * - One field. Typing filters the hosts the server already discovered; text that
+ *   matches no discovered host becomes a quiet "Add <text> manually" row, so there
+ *   is never a mode switch.
+ * - Discovered hosts are one plain list. Selection shows only in the checkbox.
+ * - Credentials appear only when a host needs them; root always asks first.
+ * - Installs run per host, failures explain what happened and what to do, and a
+ *   finished host opens its terminal window while the canvas stays put (H16).
+ *
+ * Every step change animates as one page leaving and the next entering from the
+ * direction of travel (Back reverses it). Pages are swapped with the Web
+ * Animations API so a new step interrupts a running transition from its current
+ * frame instead of restarting from zero.
+ */
 import {
-  enhanceSwitch,
   createSpinner,
   hostSourceIconMarkup,
-  installStretchingCapsule,
+  installFocusRing,
   mountConfirmTip,
   mountStepStatus,
   mountToast,
@@ -12,744 +27,590 @@ import {
   springCheckbox,
   type ConfirmTipController,
   type HostSource,
-  type StepStatus,
   type StepStatusController,
-  type StretchingCapsule,
   type ToastController,
-  type UiSwitch,
 } from "../../../packages/ui/src/index";
 import type { AddHostFixture } from "./add-host-contract";
 import type { CoreScreen } from "./core-screen";
 
 const FIXTURES_URL = "/__mock/proto/addhost";
+const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const SOURCE_LABELS: Record<HostSource, string> = {
   netbird: "NetBird",
   tailscale: "Tailscale",
   "known-hosts": "Known hosts",
   "ssh-config": "SSH config",
-  "already-added": "Already added",
+  "already-added": "Added",
 };
-const ALL_SOURCES: HostSource[] = ["netbird", "tailscale", "known-hosts", "ssh-config"];
 const BOOTSTRAP_STEPS = [
-  { id: "sniff", label: "Read-only system check" },
+  { id: "check", label: "Read-only system check" },
   { id: "install", label: "Install infraternal agent" },
   { id: "facts", label: "Gather host facts" },
   { id: "connect", label: "Connect to server" },
 ] as const;
 
-type AddHostStep = "entry" | "discovery" | "manual" | "credentials" | "root-consent" | "bootstrap" | "failure" | "success";
+type Step = "empty" | "discovery" | "credentials" | "root" | "progress" | "failure" | "success";
 type FailureKind = "unreachable" | "authentication" | "mesh-policy";
-type AddHostFailure = { kind: FailureKind; host: AddHostFixture };
-type ProtoActionDetail = { action?: unknown; source?: unknown };
+type Failure = { kind: FailureKind; host: AddHostFixture };
+type Direction = 1 | -1 | 0;
 
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
 }[char]!));
 
-function one<T extends HTMLElement>(root: ParentNode, selector: string): T {
-  const element = root.querySelector<T>(selector);
-  if (!element) throw new Error(`The add-host window is missing ${selector}`);
-  return element;
-}
+const reducedMotion = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-function failureFor(host: AddHostFixture): AddHostFailure | undefined {
-  if (host.reachability === "unreachable") {
-    return { kind: "unreachable", host };
-  }
-  if (host.reachability === "mesh-policy") {
-    return { kind: "mesh-policy", host };
-  }
-  if (host.authentication === "refused") {
-    return { kind: "authentication", host };
-  }
+function failureFor(host: AddHostFixture): Failure | undefined {
+  if (host.reachability === "unreachable") return { kind: "unreachable", host };
+  if (host.reachability === "mesh-policy") return { kind: "mesh-policy", host };
+  if (host.authentication === "refused") return { kind: "authentication", host };
   return undefined;
 }
 
-/** Loads the test-double inventory and binds the window to existing app entry points. */
+/** Parses `user@host[:port]`; returns undefined for text that cannot name a host. */
+function parseTarget(raw: string): { user: string | undefined; host: string; port: number | undefined } | undefined {
+  const text = raw.trim();
+  const match = /^(?:([a-z_][a-z0-9_.-]*)@)?([a-z0-9][a-z0-9.-]*|\[[0-9a-f:]+\])(?::(\d{1,5}))?$/i.exec(text);
+  if (!match) return undefined;
+  const port = match[3] ? Number(match[3]) : undefined;
+  if (port !== undefined && (port < 1 || port > 65535)) return undefined;
+  return { user: match[1], host: match[2]!, port };
+}
+
+function statusOf(host: AddHostFixture): { label: string; tone: "ok" | "warn" | "off" | "none" } {
+  if (host.alreadyAdded) return { label: "Added", tone: "none" };
+  if (host.reachability === "ready") return { label: "SSH ready", tone: "ok" };
+  if (host.reachability === "mesh-policy") return { label: "Blocked by mesh policy", tone: "warn" };
+  return { label: "No SSH response", tone: "off" };
+}
+
+const CLOSE_ICON = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg>`;
+const CARET_ICON = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg>`;
+const PLUS_ICON = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>`;
+
+/** Loads the test-double inventory and binds the window to the app's entry points. */
 export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose(): void }> {
+  installFocusRing();
   const response = await fetch(FIXTURES_URL, { cache: "no-store" });
   if (!response.ok) throw new Error("The add-host test-double inventory is unavailable");
   const payload = await response.json() as { hosts?: unknown };
-  if (!Array.isArray(payload.hosts) || payload.hosts.length !== 6) throw new Error("The add-host test-double needs six discovery fixtures");
+  if (!Array.isArray(payload.hosts)) throw new Error("The add-host test double returned no hosts");
   const hosts = payload.hosts as AddHostFixture[];
-  const stage = core.stage;
-  const panes = one<HTMLElement>(stage, ".panes");
-  const originalCard = core.terminalHost.closest<HTMLElement>(".pane-card");
-  if (!originalCard) throw new Error("The existing terminal pane is missing");
 
+  const stage = core.stage;
+  const foundPanes = stage.querySelector<HTMLElement>(".panes");
+  const originalCard = core.terminalHost.closest<HTMLElement>(".pane-card");
+  if (!foundPanes || !originalCard) throw new Error("The canvas is missing");
+  const panes: HTMLElement = foundPanes;
   stage.classList.add("has-windows-prototype", "has-addhost-prototype");
   panes.dataset.windowCanvas = "true";
   originalCard.setAttribute("aria-hidden", "true");
 
   const group = document.createElement("section");
-  group.className = "window-group addhost-window-group";
-  group.setAttribute("aria-label", "Add-host window on the canvas");
+  group.className = "ah-group";
   const card = document.createElement("section");
-  card.className = "pane-card window-card addhost-window";
-  card.setAttribute("role", "group");
+  card.className = "pane-card ah";
+  card.setAttribute("role", "dialog");
   card.setAttribute("aria-label", "Add hosts");
-  card.tabIndex = -1;
   card.innerHTML = `
-    <header class="window-header addhost-window-header">
-      <div class="window-host-pill ui-pill ui-overlay-surface" hidden><span class="addhost-window-title"></span></div>
-      <div class="window-header-actions">
-        <button class="window-header-action ui-icon-button ui-overlay-surface" type="button" data-addhost-action="close" aria-label="Close add hosts" data-tip="Close add hosts">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        </button>
-      </div>
-    </header>
-    <div class="addhost-window-body"><div class="addhost-content"></div></div>
-    <footer class="addhost-footer" hidden></footer>`;
+    <button class="ah-close" type="button" data-ah="close" aria-label="Close">${CLOSE_ICON}</button>
+    <div class="ah-scroll"><div class="ah-pages"></div></div>
+    <footer class="ah-foot"></footer>`;
   group.append(card);
   panes.append(group);
-
-  const body = one<HTMLElement>(card, ".addhost-content");
-  const footer = one<HTMLElement>(card, ".addhost-footer");
-  const title = one<HTMLElement>(card, ".addhost-window-title");
-  const hostPill = one<HTMLElement>(card, ".addhost-window-header .window-host-pill");
+  const scroller = card.querySelector<HTMLElement>(".ah-scroll")!;
+  const pages = card.querySelector<HTMLElement>(".ah-pages")!;
+  const foot = card.querySelector<HTMLElement>(".ah-foot")!;
   const toast: ToastController = mountToast(stage);
+
   const query = new URLSearchParams(location.search);
-  const emptyEntry = query.get("empty") === "1";
-  let step: AddHostStep = emptyEntry ? "entry" : "discovery";
-  let selectedHosts: AddHostFixture[] = [];
-  let installHosts: AddHostFixture[] = [];
-  let priorFailures: AddHostFailure[] = [];
-  let failure: AddHostFailure | undefined;
+  let step: Step = query.get("empty") === "1" ? "empty" : "discovery";
+  let current: HTMLElement | undefined;
+  let text = "";
+  let selected: AddHostFixture[] = [];
+  let installing: AddHostFixture[] = [];
+  let skipped: Failure[] = [];
+  let failure: Failure | undefined;
   let rootConsent = false;
-  let installAsRoot = false;
-  let activeSources = new Set<HostSource>(ALL_SOURCES);
-  let discoveryQuery = "";
-  let extendedInformation = false;
-  let tabs: StretchingCapsule | undefined;
+  let asRoot = false;
+  let timers: number[] = [];
+  let resultWindows: Array<{ group: HTMLElement; card: HTMLElement; host: AddHostFixture }> = [];
   let confirmTip: ConfirmTipController | undefined;
-  let sourceSwitches: UiSwitch[] = [];
-  let timerIds: number[] = [];
-  let progressMarks = new Map<string, StepStatusController[]>();
-  let terminalWindows: Array<{ group: HTMLElement; card: HTMLElement; host: AddHostFixture }> = [];
   let disposed = false;
 
-  const disposeControls = (): void => {
-    tabs?.dispose();
-    tabs = undefined;
-    for (const control of sourceSwitches) control.dispose();
-    sourceSwitches = [];
-  };
-  const clearTimers = (): void => {
-    for (const timer of timerIds) window.clearTimeout(timer);
-    timerIds = [];
-  };
-  const setStep = (next: AddHostStep): void => {
+  const clearTimers = (): void => { for (const id of timers) window.clearTimeout(id); timers = []; };
+  const later = (ms: number, fn: () => void): void => { timers.push(window.setTimeout(fn, ms)); };
+
+  // ── Page transitions ────────────────────────────────────────────────────────
+  /** Swaps in a new page, sliding along the direction of travel, interruptibly. */
+  function show(page: HTMLElement, dir: Direction): void {
+    const reduce = reducedMotion();
+    const before = scroller.offsetHeight;
+    for (const leaving of pages.querySelectorAll<HTMLElement>(".ah-page[data-leaving]")) leaving.remove();
+    const old = current;
+    if (old) {
+      // Freeze the leaving page at its current frame so an interrupted entry
+      // leaves from where it is, not from where it was going.
+      for (const animation of old.getAnimations()) { animation.commitStyles(); animation.cancel(); }
+      old.dataset.leaving = "true";
+      old.inert = true;
+      old.style.position = "absolute";
+      old.style.inset = "0 0 auto 0";
+    }
+    page.classList.add("ah-page");
+    pages.append(page);
+    current = page;
+    scroller.scrollTop = 0;
+    card.classList.remove("is-scrolled");
+    const after = scroller.offsetHeight;
+    if (!old) return;
+    const distance = reduce || dir === 0 ? 0 : 14 * dir;
+    const exit = old.animate(
+      [{ opacity: getComputedStyle(old).opacity, transform: getComputedStyle(old).transform === "none" ? "none" : getComputedStyle(old).transform },
+        { opacity: 0, transform: `translateX(${-distance}px)` }],
+      { duration: 150, easing: EASE, fill: "forwards" },
+    );
+    exit.onfinish = () => old.remove();
+    page.animate(
+      [{ opacity: 0, transform: `translateX(${distance}px)` }, { opacity: 1, transform: "translateX(0)" }],
+      { duration: 220, easing: EASE },
+    );
+    if (!reduce && before !== after) {
+      scroller.animate([{ height: `${before}px` }, { height: `${after}px` }], { duration: 220, easing: EASE });
+    }
+  }
+
+  /** Replaces the footer actions with a quick crossfade (they belong to the page). */
+  function setFoot(markup: string): void {
+    foot.innerHTML = markup;
+    foot.hidden = markup === "";
+    if (!reducedMotion() && markup) foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE });
+  }
+
+  function go(next: Step, dir: Direction = 1): void {
+    clearTimers();
     step = next;
     card.dataset.step = next;
-    render();
-  };
-  const activeHosts = (): AddHostFixture[] => hosts.filter((host) =>
-    host.sources.some((source) => activeSources.has(source)) || host.alreadyAdded,
-  );
-  const visibleHosts = (): AddHostFixture[] => {
-    const needle = discoveryQuery.trim().toLocaleLowerCase();
-    return activeHosts().filter((host) => !needle ||
-      `${host.user}@${host.id} ${host.address} ${host.operatingSystem} ${host.architecture}`.toLocaleLowerCase().includes(needle),
-    );
-  };
-  const hostByName = (name: string): AddHostFixture | undefined =>
-    hosts.find((host) => host.id.toLocaleLowerCase() === name.toLocaleLowerCase() || host.address === name);
-
-  function setFooter(markup: string): void {
-    footer.innerHTML = markup;
-    footer.hidden = markup.length === 0;
+    const page = document.createElement("div");
+    page.dataset.page = next;
+    if (next === "empty") renderEmpty(page);
+    else if (next === "discovery") renderDiscovery(page);
+    else if (next === "credentials") renderCredentials(page);
+    else if (next === "root") renderRoot(page);
+    else if (next === "progress") renderProgress(page);
+    else if (next === "failure") renderFailure(page);
+    else renderSuccess(page);
+    show(page, dir);
+    if (next === "progress") startProgress();
+    if (next === "discovery") page.querySelector<HTMLInputElement>(".ah-input")?.focus({ preventScroll: true });
   }
 
-  function updateDiscoveryHostList(): void {
-    const list = body.querySelector<HTMLElement>(".addhost-host-list");
-    if (!list) return;
-    const rows = visibleHosts().map(hostRowMarkup).join("");
-    list.innerHTML = rows || `<li class="addhost-list-empty">No hosts match. Try Manual to check another host.</li>`;
-    for (const input of list.querySelectorAll<HTMLInputElement>("[data-host-choice]")) springCheckbox(input);
+  // ── Empty state ─────────────────────────────────────────────────────────────
+  function renderEmpty(page: HTMLElement): void {
+    page.innerHTML = `<h1 class="ah-title">No hosts yet</h1>
+      <p class="ah-lede">Add a host to open its terminal here.</p>`;
+    setFoot(`<button class="ah-primary" type="button" data-ah="begin">Add a host</button>`);
   }
 
-  function sourceMarkup(source: HostSource): string {
-    return `<span class="addhost-source-chip" data-source="${source}"><span class="addhost-source-separator" aria-hidden="true">·</span>${hostSourceIconMarkup(source)}<span>${SOURCE_LABELS[source]}</span></span>`;
-  }
-
-  function hostRowMarkup(host: AddHostFixture): string {
-    const selected = selectedHosts.some((candidate) => candidate.id === host.id);
-    const status = host.alreadyAdded
-      ? "Already added"
-      : host.reachability === "ready"
-        ? "SSH ready · port 22"
-        : host.reachability === "mesh-policy"
-          ? "SSH blocked · mesh policy"
-          : "No SSH response on port 22";
-    const sourceChips = host.sources.map(sourceMarkup).join("");
-    return `<li class="addhost-host-row" data-host-row data-host-id="${escapeHtml(host.id)}" data-unavailable="${String(host.alreadyAdded)}">
-      <label class="addhost-host-select" data-touch-target>
-        <input type="checkbox" data-host-choice aria-label="Select ${escapeHtml(host.id)}" value="${escapeHtml(host.id)}" ${host.alreadyAdded ? "disabled" : ""} ${selected ? "checked" : ""} />
-      </label>
-      <span class="addhost-host-copy">
-        <span class="addhost-host-name">${escapeHtml(host.id)}</span>
-        <span class="addhost-host-secondary"><span class="addhost-host-system">${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span>${sourceChips}</span>
+  // ── Discovery: one field, one list ──────────────────────────────────────────
+  function hostRow(host: AddHostFixture): string {
+    const status = statusOf(host);
+    const sources = host.sources.map((source) =>
+      `<span class="ah-src">${hostSourceIconMarkup(source)}${SOURCE_LABELS[source]}</span>`).join("");
+    const checked = selected.some((item) => item.id === host.id);
+    return `<label class="ah-row${host.alreadyAdded ? " is-added" : ""}" data-host="${escapeHtml(host.id)}">
+      <span class="ah-check check"><input type="checkbox" value="${escapeHtml(host.id)}" ${host.alreadyAdded ? "disabled" : ""} ${checked ? "checked" : ""}
+        aria-label="${escapeHtml(host.id)}, ${escapeHtml(status.label)}" /></span>
+      <span class="ah-main">
+        <span class="ah-name">${escapeHtml(host.id)}</span>
+        <span class="ah-meta"><span class="ah-os">${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span>${sources}</span>
       </span>
-      <span class="addhost-host-trailing">
-        <span class="addhost-host-status" data-ssh-status data-status="${host.alreadyAdded ? "added" : host.reachability}">${status}</span>
-        <button type="button" class="addhost-ip-action" data-addhost-action="show-ip" data-host-id="${escapeHtml(host.id)}" aria-label="Show IP for ${escapeHtml(host.id)}">Show IP</button>
+      <span class="ah-side">
+        <span class="ah-status" data-tone="${status.tone}">${status.label}</span>
+        <button class="ah-ip" type="button" data-ah="ip" data-id="${escapeHtml(host.id)}">Show IP</button>
       </span>
-    </li>`;
+    </label>`;
   }
 
-  function sourceSwitchMarkup(source: HostSource): string {
-    const checked = activeSources.has(source);
-    return `<label class="addhost-toggle-row"><span>${SOURCE_LABELS[source]}</span><input class="ui-switch" type="checkbox" data-source-toggle="${source}" aria-label="${SOURCE_LABELS[source]}" ${checked ? "checked" : ""} /></label>`;
+  function renderDiscovery(page: HTMLElement): void {
+    page.innerHTML = `<h1 class="ah-title">Add hosts</h1>
+      <p class="ah-lede">Hosts this server can reach. Nothing logs in until you continue.</p>
+      <input class="ah-input" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
+        placeholder="Find a host or type user@host" aria-label="Find a host or type user@host" value="${escapeHtml(text)}" />
+      <div class="ah-label" aria-hidden="true">Reachable from this server</div>
+      <div class="ah-list" role="group" aria-label="Discovered hosts">${hosts.map(hostRow).join("")}
+        <button class="ah-manual" type="button" data-ah="manual" hidden>${PLUS_ICON}<span>Add <span class="ah-manual-target"></span> manually</span></button>
+        <p class="ah-none" hidden>No discovered host matches.</p>
+      </div>`;
+    for (const input of page.querySelectorAll<HTMLInputElement>(".ah-row input")) springCheckbox(input);
+    applyFilter(page, false);
+    setFoot(`<span class="ah-count" aria-live="polite"></span><button class="ah-primary" type="button" data-ah="continue">Continue</button>`);
+    updateCount();
   }
 
-  function renderEntry(): void {
-    body.innerHTML = `<section class="addhost-empty-state" aria-label="No hosts yet">
-      <div class="addhost-heading"><h1>No hosts yet</h1><p>Add a host to open its terminal on the canvas.</p></div>
-      <button type="button" data-addhost-action="begin">Add hosts</button>
-    </section>`;
-    setFooter("");
-  }
-
-  function renderDiscovery(manual = false): void {
-    const tabsMarkup = `<div class="segmented-tabs ui-pill addhost-tabs" role="tablist" aria-label="Add-host method">
-      <span class="segmented-capsule ui-overlay-surface" aria-hidden="true"></span>
-      <button type="button" role="tab" data-tab="discovered" aria-selected="${String(!manual)}">Discovered</button>
-      <button type="button" role="tab" data-tab="manual" aria-selected="${String(manual)}">Manual</button>
-    </div>`;
-    if (manual) {
-      body.innerHTML = `<div class="addhost-heading"><h1>Add hosts</h1><p>Enter a user and host, an IP address, or a name.</p></div>
-        ${tabsMarkup}
-        <label class="addhost-field"><span>Host</span><input class="addhost-host-input" type="text" autocomplete="off" spellcheck="false" placeholder="user@host, IP or name" aria-label="Host" /></label>
-        <p class="addhost-note">The first check reads SSH reachability only. No login starts until you continue.</p>`;
-      setFooter(`<button type="button" class="addhost-primary" data-addhost-action="manual-add">Add host</button>`);
-    } else {
-      const rows = visibleHosts().map(hostRowMarkup).join("") || `<li class="addhost-list-empty">No hosts match. Try Manual to check another host.</li>`;
-      body.innerHTML = `<div class="addhost-heading"><h1>Add hosts</h1><p>Choose a host the server can already reach. Discovery checks SSH without logging in.</p></div>
-        ${tabsMarkup}
-        <label class="addhost-field"><span>Find a host</span><input class="addhost-host-input" type="search" autocomplete="off" spellcheck="false" placeholder="user@host, IP or name" aria-label="Find a host" value="${escapeHtml(discoveryQuery)}" /></label>
-        <ul class="addhost-host-list">${rows}</ul>
-        <div class="addhost-options"><button type="button" class="addhost-options-toggle" data-addhost-action="toggle-sources" aria-expanded="false">Discovery sources</button><div class="addhost-source-options" hidden>
-          ${ALL_SOURCES.map(sourceSwitchMarkup).join("")}
-        </div></div>
-        <div class="addhost-toggle-row addhost-extended-row"><label for="addhost-extended"><span>Gather extended information</span><small>Read-only host facts such as IP addresses, listeners, and workloads.</small></label>
-          <input class="ui-switch" id="addhost-extended" type="checkbox" aria-label="Gather extended information" ${extendedInformation ? "checked" : ""} />
-        </div>`;
-      setFooter(`<button type="button" class="addhost-primary" data-addhost-action="continue" ${selectedHosts.length ? "" : "disabled"}>Continue</button>`);
-      for (const input of body.querySelectorAll<HTMLInputElement>("[data-source-toggle]")) {
-        sourceSwitches.push(enhanceSwitch(input));
-      }
-      const extended = body.querySelector<HTMLInputElement>("#addhost-extended");
-      if (extended) sourceSwitches.push(enhanceSwitch(extended));
-      for (const input of body.querySelectorAll<HTMLInputElement>("[data-host-choice]")) springCheckbox(input);
+  /** Shows rows that match the field; unmatched text offers a manual row. */
+  function applyFilter(page: HTMLElement = current!, animate = true): void {
+    const needle = text.trim().toLocaleLowerCase();
+    let visible = 0;
+    let exact = false;
+    for (const row of page.querySelectorAll<HTMLElement>(".ah-row")) {
+      const host = hosts.find((item) => item.id === row.dataset.host)!;
+      const haystack = `${host.user}@${host.id} ${host.address} ${host.operatingSystem} ${host.architecture}`.toLocaleLowerCase();
+      const target = parseTarget(needle);
+      const match = !needle || haystack.includes(needle) || (!!target && (host.id === target.host || host.address === target.host));
+      if (target && (host.id === target.host.toLowerCase() || host.address === target.host)) exact = true;
+      const wasHidden = row.hidden;
+      row.hidden = !match;
+      if (match) visible++;
+      if (animate && wasHidden && match && !reducedMotion()) row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE });
     }
-    const tablist = body.querySelector<HTMLElement>("[role='tablist']");
-    if (tablist) {
-      tabs = installStretchingCapsule(tablist, manual ? "manual" : "discovered", (id) => {
-        if (id === "manual") setStep("manual");
-        else setStep("discovery");
-      });
-    }
+    const manual = page.querySelector<HTMLElement>(".ah-manual")!;
+    const target = parseTarget(text);
+    const offerManual = !!target && !exact && visible === 0;
+    if (offerManual && manual.hidden && animate && !reducedMotion()) manual.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE });
+    manual.hidden = !offerManual;
+    if (target) page.querySelector<HTMLElement>(".ah-manual-target")!.textContent = text.trim();
+    page.querySelector<HTMLElement>(".ah-none")!.hidden = visible > 0 || offerManual;
+    const label = page.querySelector<HTMLElement>(".ah-label");
+    if (label) label.hidden = visible === 0;
   }
 
-  function renderCredentials(): void {
-    const credentialHosts = selectedHosts.filter((host) => host.credentialRequired);
-    const primary = credentialHosts[0] ?? selectedHosts[0];
-    if (!primary) { setStep("discovery"); return; }
-    body.innerHTML = `<div class="addhost-heading"><h1>SSH identity</h1><p>The server's own key is used in place and never copied. Mesh SSH needs no secret.</p></div>
-      <article class="addhost-access-card">
-        ${credentialHosts.map((host) => `<div class="addhost-access-host"><strong>${escapeHtml(host.user)}@${escapeHtml(host.id)}</strong><span>${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span></div>
-          <label class="addhost-field"><span>SSH key or password for ${escapeHtml(host.id)}</span><input type="password" autocomplete="off" aria-label="SSH key or password for ${escapeHtml(host.id)}" /></label>`).join("")}
-        <div class="addhost-identity">
-          <label class="addhost-identity-option"><input type="radio" name="addhost-identity" checked />Server SSH key · used in place</label>
-          <label class="addhost-identity-option"><input type="radio" name="addhost-identity" />Paste a key · encrypted with your passkey</label>
-          <p class="addhost-note">Pasted keys are encrypted with your passkey. No credential is sent by this preview.</p>
-          ${selectedHosts.length > 1 ? `<label class="addhost-identity-option"><input type="checkbox" data-use-all />Use for all selected</label>` : ""}
-        </div>
-      </article>`;
-    if (selectedHosts.length > 1) {
-      const useAll = body.querySelector<HTMLInputElement>("[data-use-all]");
-      if (useAll) springCheckbox(useAll);
-    }
-    setFooter(`<button type="button" class="addhost-secondary" data-addhost-action="back">Back</button><button type="button" class="addhost-primary" data-addhost-action="credentials-continue">Continue</button>`);
-    void primary;
+  function updateCount(): void {
+    if (step !== "discovery") return;
+    const count = foot.querySelector<HTMLElement>(".ah-count");
+    const primary = foot.querySelector<HTMLButtonElement>("[data-ah='continue']");
+    if (count) count.textContent = selected.length === 0 ? "" : `${selected.length} selected`;
+    if (primary) primary.disabled = selected.length === 0;
   }
 
-  function eligibleHosts(): AddHostFixture[] {
-    return selectedHosts.filter((host) => host.reachability === "ready" && host.authentication === "accepted" && !host.alreadyAdded);
-  }
-
-  function continueAfterCredentials(): void {
-    const rejected = selectedHosts.filter((host) => host.authentication === "refused");
-    priorFailures = [...priorFailures, ...rejected.map((host) => failureFor(host)!).filter(Boolean)];
-    selectedHosts = eligibleHosts();
-    if (selectedHosts.length === 0) {
-      failure = priorFailures[0] ?? failureFor(hosts[2]!);
-      setStep("failure");
-      return;
-    }
-    openRootChoice();
-  }
-
-  function renderRootConsent(): void {
-    const roots = selectedHosts.filter((host) => host.rootAvailable);
-    const rootNames = roots.map((host) => host.id).join(", ");
-    body.innerHTML = `<div class="addhost-heading"><h1>Root access</h1><p>Passwordless sudo is available on this host. That does not grant permission.</p></div>
-      <article class="addhost-consent-card">
-        ${roots.map((host) => `<div class="addhost-consent-host"><strong>${escapeHtml(host.user)}@${escapeHtml(host.id)}</strong><span>${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span></div>`).join("")}
-        <p class="addhost-consent-copy">Installing the infraternal agent as root gives it access to every file on the host. <strong>Trust is one thing we can't get back once lost.</strong></p>
-        <label class="addhost-consent-label"><input type="checkbox" data-root-consent aria-label="I trust ${escapeHtml(rootNames)} with root access" /><span>I trust infraternal with root access on ${escapeHtml(rootNames)}.</span></label>
-        ${roots.length > 1 ? `<label class="addhost-consent-label"><input type="checkbox" data-consent-all aria-label="Apply to all ${roots.length} hosts that allow sudo" /><span>Apply to all ${roots.length} hosts that allow sudo</span></label>` : ""}
-      </article>`;
-    const consentInput = body.querySelector<HTMLInputElement>("[data-root-consent]");
-    if (consentInput) springCheckbox(consentInput);
-    const applyAll = body.querySelector<HTMLInputElement>("[data-consent-all]");
-    if (applyAll) springCheckbox(applyAll);
-    setFooter(`<button type="button" class="addhost-secondary" data-addhost-action="install-user">Install as a user</button><button type="button" class="addhost-primary" data-addhost-action="install-root" ${rootConsent ? "" : "disabled"}>Install as root</button>`);
-  }
-
-  function renderBootstrap(): void {
-    body.innerHTML = `<div class="addhost-heading"><h1>Installing infraternal agent</h1><p>The system check is read-only. Host facts are gathered after installation.</p></div>
-      <ul class="addhost-progress-list" aria-live="polite">${installHosts.map((host) => `<li class="addhost-progress-host" data-progress-host="${escapeHtml(host.id)}">
-        <h2>${escapeHtml(host.id)} · ${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</h2>
-        <ol class="addhost-progress-steps">${BOOTSTRAP_STEPS.map((item) => `<li class="addhost-progress-step" data-bootstrap-step="${item.id}" data-state="pending"><span class="addhost-progress-mark"></span><span>${item.label}</span></li>`).join("")}</ol>
-      </li>`).join("")}</ul>
-      ${priorFailures.map((item) => `<p class="addhost-policy-evidence">${escapeHtml(item.host.id)} could not connect. The other hosts continue independently.</p>`).join("")}`;
-    setFooter("");
-    progressMarks = new Map();
-    for (const host of installHosts) {
-      const row = one<HTMLElement>(body, `[data-progress-host="${CSS.escape(host.id)}"]`);
-      const markers = [...row.querySelectorAll<HTMLElement>(".addhost-progress-mark")];
-      progressMarks.set(host.id, markers.map((marker) => mountStepStatus(marker)));
-    }
-    const advance = (completed: number): void => {
-      for (const host of installHosts) {
-        const row = one<HTMLElement>(body, `[data-progress-host="${CSS.escape(host.id)}"]`);
-        const hostMarks = progressMarks.get(host.id) ?? [];
-        const rows = [...row.querySelectorAll<HTMLElement>("[data-bootstrap-step]")];
-        rows.forEach((stepRow, index) => {
-          const done = index < completed;
-          const running = index === completed && completed < BOOTSTRAP_STEPS.length;
-          const state: StepStatus = done ? "done" : running ? "running" : "pending";
-          stepRow.dataset.state = state;
-          hostMarks[index]?.set(state);
-        });
-      }
-      if (completed >= BOOTSTRAP_STEPS.length) {
-        timerIds.push(window.setTimeout(finishBootstrap, 260));
-      } else {
-        timerIds.push(window.setTimeout(() => advance(completed + 1), 520));
-      }
-    };
-    advance(0);
-  }
-
-  function makeTerminalWindow(host: AddHostFixture, rootless: boolean): { group: HTMLElement; card: HTMLElement; host: AddHostFixture } {
-    const terminalGroup = document.createElement("section");
-    terminalGroup.className = "window-group addhost-result-group";
-    // Keep the first host window wholly outside the success view until the toast opens it.
-    if (!panes.querySelector(".addhost-result-group")) terminalGroup.classList.add("addhost-result-first");
-    terminalGroup.setAttribute("aria-label", `Canvas window for ${host.id}`);
-    const terminalCard = document.createElement("section");
-    terminalCard.className = "pane-card window-card addhost-result-window";
-    terminalCard.dataset.hostId = host.id;
-    terminalCard.setAttribute("role", "group");
-    terminalCard.setAttribute("aria-label", `Terminal window for ${host.id}`);
-    terminalCard.tabIndex = -1;
-    const header = document.createElement("header");
-    header.className = "window-header";
-    const pill = document.createElement("div");
-    pill.className = "window-host-pill ui-pill ui-overlay-surface";
-    const hostLabel = document.createElement("span");
-    hostLabel.className = "window-pill-host";
-    hostLabel.textContent = `${host.user}@${host.id}`;
-    const systemLabel = document.createElement("span");
-    systemLabel.className = "addhost-terminal-system";
-    systemLabel.textContent = `${host.operatingSystem} · ${host.architecture}`;
-    pill.append(hostLabel, systemLabel);
-    const actions = document.createElement("div");
-    actions.className = "window-header-actions";
-    if (rootless && host.rootAvailable) {
-      const rootPill = document.createElement("button");
-      rootPill.type = "button";
-      rootPill.className = "addhost-root-available";
-      rootPill.dataset.addhostAction = "root-available";
-      rootPill.dataset.hostId = host.id;
-      rootPill.textContent = "Root available";
-      actions.append(rootPill);
-    }
-    const status = document.createElement("span");
-    status.className = "dot live";
-    status.setAttribute("aria-label", "Connected");
-    actions.append(status);
-    header.append(pill, actions);
-    const terminal = document.createElement("div");
-    terminal.className = "window-fake-terminal";
-    terminal.setAttribute("role", "application");
-    terminal.setAttribute("aria-label", `Terminal on ${host.id}`);
-    const output = document.createElement("pre");
-    output.className = "window-fake-output";
-    output.textContent = `${host.operatingSystem} · ${host.architecture}\n\n${host.user}@${host.id}:~$ `;
-    terminal.append(output);
-    terminalCard.append(header, terminal);
-    terminalGroup.append(terminalCard);
-    panes.append(terminalGroup);
-    const result = { group: terminalGroup, card: terminalCard, host };
-    if (rootless && host.rootAvailable) {
-      const rootPill = one<HTMLButtonElement>(terminalCard, ".addhost-root-available");
-      rootPill.addEventListener("click", () => {
-        confirmTip?.close(false);
-        confirmTip = mountConfirmTip(rootPill, {
-          label: "Root access confirmation",
-          message: `Install the infraternal agent as root on ${host.id}?`,
-          confirmLabel: "Yes",
-          cancelLabel: "No",
-          onConfirm: () => {
-            const original = rootPill.textContent ?? "Root available";
-            const spinner = createSpinner();
-            rootPill.prepend(spinner);
-            showTip(rootPill, "Starting root agent", 1800);
-            window.setTimeout(() => {
-              spinner.remove();
-              rootPill.textContent = "Root active";
-              showTip(rootPill, "Root agent ready");
-            }, 1250);
-          },
-        });
-      });
-    }
-    return result;
-  }
-
-  function renderSuccess(): void {
-    const ready = installHosts;
-    const first = ready[0];
-    if (!first) { setStep("discovery"); return; }
-    body.innerHTML = `<div class="addhost-success">
-      <div class="addhost-heading"><h1>${escapeHtml(first.id)} is ready</h1><p>Its terminal window is open on the canvas.</p></div>
-      <p class="addhost-ready-line"><span aria-hidden="true">✓</span> Connected · ${escapeHtml(first.operatingSystem)} · ${escapeHtml(first.architecture)}</p>
-      ${priorFailures.map((item) => `<p class="addhost-policy-evidence">${escapeHtml(item.host.id)} could not be added. Other selected hosts continued.</p>`).join("")}
-      <button type="button" class="addhost-success-next" data-addhost-action="back">Add another host</button>
-      <pre class="addhost-terminal-output" aria-label="Terminal output">${escapeHtml(`${first.operatingSystem} · ${first.architecture}\n\n${first.user}@${first.id}:~$ `)}</pre>
-    </div>`;
-    setFooter("");
-    clearTerminalWindows();
-    terminalWindows = ready.map((host) => makeTerminalWindow(host, !installAsRoot));
-    const firstWindow = terminalWindows[0];
-    if (firstWindow) {
-      toast.show({
-        message: `${first.id} is ready`,
-        action: {
-          label: "Go to window",
-          onSelect: () => {
-            group.hidden = true;
-            firstWindow.group.classList.remove("addhost-result-first");
-            panes.scrollLeft = 0;
-            firstWindow.card.focus({ preventScroll: true });
-          },
-        },
-      });
-    }
-  }
-
-  function clearTerminalWindows(): void {
-    for (const windowView of terminalWindows) windowView.group.remove();
-    terminalWindows = [];
-  }
-
-  function finishBootstrap(): void {
-    if (disposed || step !== "bootstrap") return;
-    clearTimers();
-    setStep("success");
-  }
-
-  function showFailure(next: AddHostFailure): void {
-    clearTimers();
-    failure = next;
-    setStep("failure");
-  }
-
-  function retryFailure(): void {
-    if (!failure) return;
-    if (failure.kind === "authentication") {
-      selectedHosts = [failure.host];
-      setStep("credentials");
-      return;
-    }
-    const next = failureFor(failure.host);
-    if (next) showFailure(next);
-  }
-
-  function renderFailure(): void {
-    if (!failure) { setStep("discovery"); return; }
-    const copy = failure.kind === "unreachable"
-      ? {
-          heading: "Host unreachable",
-          happened: `SSH to ${failure.host.id} got no response on TCP 22.`,
-          next: "Check that the host is online and SSH is listening, then retry.",
-        }
-      : failure.kind === "authentication"
-        ? {
-            heading: "SSH key refused",
-            happened: `SSH to ${failure.host.id} reached the host, but the selected identity was refused.`,
-            next: "Choose another SSH identity or correct its access, then retry.",
-          }
-        : {
-            heading: "SSH blocked by mesh policy",
-            happened: `SSH to ${failure.host.id} is blocked by the mesh access policy (TCP 22).`,
-            next: "Ask a mesh admin to allow TCP 22 from this server, then retry.",
-          };
-    body.innerHTML = `<div class="addhost-heading"><h1>${copy.heading}</h1></div>
-      <article class="addhost-error" data-failure="${failure.kind}">
-        <p>${escapeHtml(copy.happened)}</p>
-        <p class="addhost-policy-note">${escapeHtml(copy.next)}</p>
-      </article>`;
-    setFooter(`<button type="button" class="addhost-secondary" data-addhost-action="back">Back to hosts</button><button type="button" class="addhost-primary" data-addhost-action="retry">Retry</button>`);
-  }
-
-  function openRootChoice(): void {
-    rootConsent = false;
-    const roots = selectedHosts.some((host) => host.rootAvailable);
-    if (roots) setStep("root-consent");
-    else startBootstrap(false);
-  }
-
-  function startBootstrap(asRoot: boolean): void {
-    installAsRoot = asRoot;
-    installHosts = [...selectedHosts];
-    if (installHosts.length === 0) {
-      setStep("discovery");
-      return;
-    }
-    clearTimers();
-    setStep("bootstrap");
-  }
-
-  function continueSelection(): void {
-    selectedHosts = selectedHosts.filter((host) => !host.alreadyAdded);
-    priorFailures = [];
-    if (!selectedHosts.length) return;
-    const blocked = selectedHosts.filter((host) => host.reachability !== "ready");
-    const ready = selectedHosts.filter((host) => host.reachability === "ready");
-    if (!ready.length) {
-      showFailure(failureFor(blocked[0]!)!);
-      return;
-    }
-    priorFailures = blocked.map((host) => failureFor(host)!).filter(Boolean);
-    selectedHosts = ready;
-    if (selectedHosts.some((host) => host.credentialRequired)) setStep("credentials");
-    else openRootChoice();
-  }
-
+  /** A typed host that discovery does not know: reachable but asks for an identity (mock). */
   function manualHost(): AddHostFixture | undefined {
-    const raw = body.querySelector<HTMLInputElement>(".addhost-host-input")?.value.trim() ?? "";
-    if (!raw) return undefined;
-    const at = raw.lastIndexOf("@");
-    const user = at >= 0 ? raw.slice(0, at).trim() : "kayg";
-    const name = at >= 0 ? raw.slice(at + 1).trim() : raw;
-    const found = hostByName(name);
-    if (found) return { ...found, user: user || found.user };
+    const target = parseTarget(text);
+    if (!target) return undefined;
+    const known = hosts.find((host) => host.id === target.host.toLowerCase() || host.address === target.host);
+    if (known) return { ...known, user: target.user ?? known.user };
     return {
-      id: name,
-      user: user || "kayg",
-      address: name,
-      operatingSystem: "Unknown Linux host",
-      architecture: "Unknown architecture",
+      id: target.host,
+      user: target.user ?? "root",
+      address: target.host,
+      operatingSystem: "Linux",
+      architecture: "unknown",
       sources: [],
-      reachability: "unreachable",
-      evidence: "A TCP connection to port 22 timed out; no login was attempted.",
+      reachability: target.host.startsWith("10.99.") ? "unreachable" : "ready",
+      evidence: `connect ${target.host}:${target.port ?? 22}: no response after 3 attempts (5 s each); no login was attempted`,
       alreadyAdded: false,
-      rootAvailable: false,
-      credentialRequired: false,
+      rootAvailable: true,
+      credentialRequired: true,
       authentication: "accepted",
     };
   }
 
-  function addManualHost(): void {
+  function addManual(): void {
     const host = manualHost();
     if (!host) return;
-    selectedHosts = [host];
-    priorFailures = [];
-    if (host.reachability !== "ready") {
-      showFailure(failureFor(host)!);
-    } else if (host.credentialRequired) {
-      setStep("credentials");
-    } else {
-      openRootChoice();
+    selected = [host];
+    proceed();
+  }
+
+  // ── After selection ─────────────────────────────────────────────────────────
+  function proceed(): void {
+    const chosen = selected.filter((host) => !host.alreadyAdded);
+    const blocked = chosen.filter((host) => failureFor(host) && host.authentication !== "refused");
+    const ready = chosen.filter((host) => !blocked.includes(host));
+    skipped = blocked.map((host) => failureFor(host)!);
+    if (ready.length === 0) { failure = skipped[0]; if (failure) go("failure"); return; }
+    selected = ready;
+    if (ready.some((host) => host.credentialRequired)) go("credentials");
+    else afterCredentials();
+  }
+
+  function afterCredentials(): void {
+    const refused = selected.filter((host) => host.authentication === "refused");
+    skipped = [...skipped, ...refused.map((host) => failureFor(host)!)];
+    selected = selected.filter((host) => host.authentication !== "refused");
+    if (selected.length === 0) { failure = skipped[skipped.length - 1]; if (failure) go("failure"); return; }
+    rootConsent = false;
+    if (selected.some((host) => host.rootAvailable)) go("root");
+    else startInstall(false);
+  }
+
+  function renderCredentials(page: HTMLElement): void {
+    const needing = selected.filter((host) => host.credentialRequired);
+    const names = needing.map((host) => `${host.user}@${host.id}`);
+    page.innerHTML = `<h1 class="ah-title">SSH identity</h1>
+      <p class="ah-lede">${escapeHtml(names.join(", "))} ${needing.length > 1 ? "need" : "needs"} a way to log in.</p>
+      <div class="ah-options" role="radiogroup" aria-label="SSH identity">
+        <label class="ah-option"><input type="radio" name="ah-identity" value="server" checked /><span class="ah-radio" aria-hidden="true"></span>
+          <span class="ah-option-text"><span>Use this server's SSH key</span><span class="ah-option-hint">Used in place, never copied.</span></span></label>
+        <label class="ah-option"><input type="radio" name="ah-identity" value="paste" /><span class="ah-radio" aria-hidden="true"></span>
+          <span class="ah-option-text"><span>Paste a key or password</span><span class="ah-option-hint">Encrypted with your passkey.</span></span></label>
+      </div>
+      <textarea class="ah-secret" rows="3" spellcheck="false" autocomplete="off" aria-label="SSH key or password" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" hidden></textarea>
+      ${needing.length > 1 ? `<label class="ah-consent check"><input type="checkbox" checked /><span>Use for all ${needing.length} hosts</span></label>` : ""}`;
+    for (const input of page.querySelectorAll<HTMLInputElement>(".ah-consent input")) springCheckbox(input);
+    setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-primary" type="button" data-ah="credentials">Continue</button>`);
+  }
+
+  function renderRoot(page: HTMLElement): void {
+    const roots = selected.filter((host) => host.rootAvailable);
+    const names = roots.map((host) => host.id);
+    const subject = roots.length === 1 ? names[0]! : `${roots.length} hosts`;
+    page.innerHTML = `<h1 class="ah-title">Install as root on ${escapeHtml(subject)}?</h1>
+      <p class="ah-lede">${escapeHtml(names.join(", "))} ${roots.length > 1 ? "allow" : "allows"} passwordless sudo. That alone is not permission.</p>
+      <p class="ah-body">A root infraternal agent can manage packages, services and containers, and can read every file on the host. You can also install as a user now and switch to root later.</p>
+      <p class="ah-quote">Trust is one thing we can't get back once lost.</p>
+      <label class="ah-consent check"><input type="checkbox" data-consent /><span>I trust infraternal with root on ${escapeHtml(subject)}</span></label>`;
+    for (const input of page.querySelectorAll<HTMLInputElement>(".ah-consent input")) springCheckbox(input);
+    setFoot(`<button class="ah-secondary" type="button" data-ah="as-user">Install as user</button><button class="ah-primary" type="button" data-ah="as-root" disabled>Install as root</button>`);
+  }
+
+  // ── Progress ────────────────────────────────────────────────────────────────
+  let marks = new Map<string, StepStatusController[]>();
+
+  function startInstall(root: boolean): void {
+    asRoot = root;
+    installing = [...selected];
+    go("progress");
+  }
+
+  function renderProgress(page: HTMLElement): void {
+    const one = installing.length === 1;
+    page.innerHTML = `<h1 class="ah-title">${one ? `Adding ${escapeHtml(installing[0]!.id)}` : `Adding ${installing.length} hosts`}</h1>
+      <p class="ah-lede">${one ? "This takes a few seconds." : "Each host installs on its own; one failure never blocks another."}</p>
+      ${installing.map((host) => `<section class="ah-host" data-progress="${escapeHtml(host.id)}">
+        <div class="ah-host-head"><span class="ah-name">${escapeHtml(host.id)}</span><span class="ah-os">${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}${asRoot ? " · root" : ""}</span></div>
+        <ol class="ah-steps">${BOOTSTRAP_STEPS.map((item) => `<li data-state="pending"><span class="ah-mark"></span><span>${item.label}</span></li>`).join("")}</ol>
+      </section>`).join("")}
+      ${skipped.map((item) => `<p class="ah-note">${escapeHtml(item.host.id)} was skipped: ${escapeHtml(failureCopy(item).short)}</p>`).join("")}`;
+    marks = new Map();
+    for (const host of installing) {
+      const section = page.querySelector<HTMLElement>(`[data-progress="${CSS.escape(host.id)}"]`)!;
+      marks.set(host.id, [...section.querySelectorAll<HTMLElement>(".ah-mark")].map((mark) => mountStepStatus(mark)));
     }
+    setFoot("");
   }
 
-  function updateFooterState(): void {
-    if (step === "discovery") {
-      const button = footer.querySelector<HTMLButtonElement>("[data-addhost-action='continue']");
-      if (button) button.disabled = selectedHosts.length === 0;
-    } else if (step === "root-consent") {
-      const button = footer.querySelector<HTMLButtonElement>("[data-addhost-action='install-root']");
-      if (button) button.disabled = !rootConsent;
-    } else if (step === "manual") {
-      const button = footer.querySelector<HTMLButtonElement>("[data-addhost-action='manual-add']");
-      if (button) button.disabled = !(body.querySelector<HTMLInputElement>(".addhost-host-input")?.value.trim());
+  function startProgress(): void {
+    const advance = (done: number): void => {
+      if (disposed || step !== "progress") return;
+      for (const host of installing) {
+        const items = [...current!.querySelectorAll<HTMLElement>(`[data-progress="${CSS.escape(host.id)}"] li`)];
+        items.forEach((item, index) => {
+          const state = index < done ? "done" : index === done ? "running" : "pending";
+          item.dataset.state = state;
+          marks.get(host.id)?.[index]?.set(state);
+        });
+      }
+      if (done >= BOOTSTRAP_STEPS.length) later(380, () => go("success"));
+      else later(560, () => advance(done + 1));
+    };
+    later(120, () => advance(0));
+  }
+
+  // ── Success and failure ─────────────────────────────────────────────────────
+  function renderSuccess(page: HTMLElement): void {
+    const first = installing[0]!;
+    const many = installing.length > 1;
+    page.innerHTML = `<div class="ah-done"><span class="ah-done-mark"></span></div>
+      <h1 class="ah-title">${many ? `${installing.length} hosts are ready` : `${escapeHtml(first.id)} is ready`}</h1>
+      <p class="ah-lede">${many ? "Their terminal windows are open on the canvas." : "Its terminal window is open on the canvas."}</p>
+      ${skipped.map((item) => `<p class="ah-note">${escapeHtml(item.host.id)} was not added: ${escapeHtml(failureCopy(item).short)}</p>`).join("")}`;
+    mountStepStatus(page.querySelector<HTMLElement>(".ah-done-mark")!, "done");
+    setFoot(`<button class="ah-secondary" type="button" data-ah="again">Add another host</button><button class="ah-primary" type="button" data-ah="done">Done</button>`);
+    openResultWindows();
+  }
+
+  function failureCopy(item: Failure): { title: string; happened: string; next: string; short: string } {
+    const name = item.host.id;
+    if (item.kind === "unreachable") return {
+      title: `${name} didn't answer`,
+      happened: `Nothing answered on SSH port 22 at ${name}.`,
+      next: "Check that the host is on and SSH is running, then retry.",
+      short: "no SSH response",
+    };
+    if (item.kind === "authentication") return {
+      title: `${name} refused the key`,
+      happened: `${name} answered, but refused the SSH identity.`,
+      next: "Choose another identity, or add this server's key to the host, then retry.",
+      short: "SSH key refused",
+    };
+    return {
+      title: "Blocked by the mesh policy",
+      happened: `The mesh access policy blocks SSH (TCP 22) from this server to ${name}.`,
+      next: "Ask a mesh admin to allow TCP 22 from this server, then retry.",
+      short: "blocked by the mesh policy",
+    };
+  }
+
+  function renderFailure(page: HTMLElement): void {
+    const copy = failureCopy(failure!);
+    page.innerHTML = `<h1 class="ah-title">${escapeHtml(copy.title)}</h1>
+      <p class="ah-lede">${escapeHtml(copy.happened)}</p>
+      <p class="ah-body">${escapeHtml(copy.next)}</p>
+      <details class="ah-details"><summary>${CARET_ICON}<span>Details</span></summary><pre>${escapeHtml(failure!.host.evidence)}</pre></details>`;
+    setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-primary" type="button" data-ah="retry">Retry</button>`);
+  }
+
+  // ── Result windows (finished hosts open their terminal; the canvas stays) ──
+  function openResultWindows(): void {
+    closeResultWindows();
+    for (const host of installing) {
+      const resultGroup = document.createElement("section");
+      resultGroup.className = "window-group ah-result-group";
+      const resultCard = document.createElement("section");
+      resultCard.className = "pane-card window-card ah-result";
+      resultCard.tabIndex = -1;
+      resultCard.setAttribute("aria-label", `Terminal on ${host.id}`);
+      resultCard.innerHTML = `<header class="ah-result-head">
+          <span class="ah-result-host">${escapeHtml(host.user)}@${escapeHtml(host.id)}</span>
+          <span class="ah-os">${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span>
+          ${!asRoot && host.rootAvailable ? `<button class="ah-root-pill" type="button">Root available</button>` : ""}
+          <span class="dot live" aria-label="Connected"></span>
+        </header>
+        <pre class="ah-result-term">${escapeHtml(`${host.operatingSystem} · ${host.architecture}\n\n${host.user}@${host.id}:~$ `)}</pre>`;
+      resultGroup.append(resultCard);
+      panes.append(resultGroup);
+      resultWindows.push({ group: resultGroup, card: resultCard, host });
+      const pill = resultCard.querySelector<HTMLButtonElement>(".ah-root-pill");
+      if (pill) pill.addEventListener("click", () => {
+        confirmTip?.close(false);
+        confirmTip = mountConfirmTip(pill, {
+          label: "Install as root",
+          message: `Install the infraternal agent as root on ${host.id}?`,
+          confirmLabel: "Yes",
+          cancelLabel: "No",
+          onConfirm: () => {
+            const spinner = createSpinner();
+            pill.prepend(spinner);
+            later(1100, () => { spinner.remove(); pill.textContent = "Root active"; pill.disabled = true; showTip(pill, "Root agent ready"); });
+          },
+        });
+      });
     }
+    const first = resultWindows[0];
+    if (!first) return;
+    toast.show({
+      message: `${first.host.id} is ready`,
+      action: { label: "Go to window", onSelect: () => first.card.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", inline: "start", block: "nearest" }) },
+    });
   }
 
-  function setWindowTitle(): void {
-    const host = step === "success" ? installHosts[0] : step === "failure" ? failure?.host : undefined;
-    hostPill.hidden = !host;
-    if (host) title.textContent = `${host.user}@${host.id}`;
+  function closeResultWindows(): void {
+    for (const view of resultWindows) view.group.remove();
+    resultWindows = [];
   }
 
-  function render(): void {
-    disposeControls();
-    card.dataset.step = step;
-    card.dataset.kind = step === "success" ? "flow-success" : "flow";
-    setWindowTitle();
-    if (step === "entry") renderEntry();
-    else if (step === "discovery") renderDiscovery(false);
-    else if (step === "manual") renderDiscovery(true);
-    else if (step === "credentials") renderCredentials();
-    else if (step === "root-consent") renderRootConsent();
-    else if (step === "bootstrap") renderBootstrap();
-    else if (step === "failure") renderFailure();
-    else renderSuccess();
-  }
+  // ── Window open and close ───────────────────────────────────────────────────
+  const windowSpring = new Spring(0, (value) => {
+    card.style.opacity = String(Math.min(1, value));
+    card.style.transform = `translateY(${(1 - value) * 8}px) scale(${0.98 + value * 0.02})`;
+  }, { visualDuration: 0.26, bounce: 0.12 });
 
   function openWindow(animate: boolean): void {
-    const sidebarToggle = stage.querySelector<HTMLButtonElement>("#sidebar-toggle");
-    if (sidebarToggle?.getAttribute("aria-expanded") === "true") sidebarToggle.click();
     group.hidden = false;
-    if (animate) {
-      windowSpring.set(0, true);
-      requestAnimationFrame(() => windowSpring.set(1));
-    } else windowSpring.set(1, true);
+    if (animate && !reducedMotion()) { windowSpring.set(0, true); requestAnimationFrame(() => windowSpring.set(1)); }
+    else windowSpring.set(1, true);
+    if (step === "success" || step === "failure") { selected = []; text = ""; go("discovery", 0); }
+    else current?.querySelector<HTMLInputElement>(".ah-input")?.focus({ preventScroll: true });
   }
 
   function closeWindow(): void {
-    group.hidden = true;
+    if (reducedMotion()) { group.hidden = true; return; }
+    const exit = card.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(4px) scale(0.99)" }], { duration: 140, easing: EASE });
+    exit.onfinish = () => { group.hidden = true; };
   }
 
+  // ── Events ──────────────────────────────────────────────────────────────────
   function onClick(event: MouseEvent): void {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    const button = target.closest<HTMLElement>("[data-addhost-action]");
-    if (!button) return;
-    const action = button.dataset.addhostAction;
-    if (action === "close") closeWindow();
-    else if (action === "begin") setStep("discovery");
-    else if (action === "toggle-sources") {
-      const options = body.querySelector<HTMLElement>(".addhost-source-options");
-      const expanded = button.getAttribute("aria-expanded") !== "true";
-      button.setAttribute("aria-expanded", String(expanded));
-      if (options) options.hidden = !expanded;
+    const target = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-ah]") : null;
+    if (!target) return;
+    const action = target.dataset.ah;
+    if (action === "close" || action === "done") { toast.dismiss(); closeWindow(); }
+    else if (action === "begin") go("discovery");
+    else if (action === "continue") proceed();
+    else if (action === "manual") addManual();
+    else if (action === "credentials") afterCredentials();
+    else if (action === "as-root") startInstall(true);
+    else if (action === "as-user") startInstall(false);
+    else if (action === "retry") {
+      const host = failure?.host;
+      if (host) { selected = [{ ...host, reachability: "ready", authentication: "accepted" }]; skipped = []; proceed(); }
+    } else if (action === "back") go("discovery", -1);
+    else if (action === "again") { selected = []; text = ""; skipped = []; toast.dismiss(); go("discovery", -1); }
+    else if (action === "ip") {
+      event.preventDefault();
+      const host = hosts.find((item) => item.id === target.dataset.id);
+      if (host && target.textContent !== host.address) target.textContent = host.address;
     }
-    else if (action === "continue") continueSelection();
-    else if (action === "manual-add") addManualHost();
-    else if (action === "credentials-continue") continueAfterCredentials();
-    else if (action === "install-root") startBootstrap(true);
-    else if (action === "install-user") startBootstrap(false);
-    else if (action === "back") {
-      if (step === "success") {
-        selectedHosts = [];
-        priorFailures = [];
-        clearTerminalWindows();
-        toast.dismiss();
-        setStep("discovery");
-      } else if (step === "credentials" && selectedHosts.length === 1 && selectedHosts[0]?.id !== "nix-cache") setStep("discovery");
-      else setStep("discovery");
-    } else if (action === "retry") retryFailure();
-    else if (action === "show-ip") revealIp(button);
-    else if (action === "root-available") {
-      const hostId = button.dataset.hostId;
-      const windowView = terminalWindows.find((entry) => entry.host.id === hostId);
-      windowView?.card.focus({ preventScroll: true });
-    }
-  }
-
-  function revealIp(button: HTMLElement): void {
-    const host = hostByName(button.dataset.hostId ?? "");
-    if (!host || button.dataset.revealed === "true") return;
-    button.dataset.revealed = "true";
-    button.setAttribute("aria-label", `IP address for ${host.id}`);
-    button.replaceChildren();
-    const value = document.createElement("span");
-    value.className = "addhost-ip-value";
-    value.dataset.hostIp = "true";
-    value.textContent = host.address;
-    button.append(value);
   }
 
   function onChange(event: Event): void {
-    const target = event.target;
-    if (!(target instanceof HTMLInputElement)) return;
-    if (target.matches("[data-host-choice]")) {
-      const host = hosts.find((candidate) => candidate.id === target.value && !candidate.alreadyAdded);
-      if (target.checked && host && !selectedHosts.some((candidate) => candidate.id === host.id)) selectedHosts.push(host);
-      else if (!target.checked) selectedHosts = selectedHosts.filter((candidate) => candidate.id !== target.value);
-      updateFooterState();
-    } else if (target.matches("[data-source-toggle]")) {
-      const source = target.dataset.sourceToggle as HostSource | undefined;
-      if (!source) return;
-      if (target.checked) activeSources.add(source);
-      else activeSources.delete(source);
-      // Keep the focused switch and disclosure mounted while only the filtered rows change.
-      updateDiscoveryHostList();
-      updateFooterState();
-    } else if (target.id === "addhost-extended") {
-      extendedInformation = target.checked;
-    } else if (target.matches("[data-root-consent]")) {
-      rootConsent = target.checked;
-      updateFooterState();
-    } else if (target.matches(".addhost-host-input")) updateFooterState();
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    if (input.closest(".ah-row")) {
+      const host = hosts.find((item) => item.id === input.value);
+      if (!host) return;
+      selected = input.checked ? [...selected.filter((item) => item.id !== host.id), host] : selected.filter((item) => item.id !== host.id);
+      updateCount();
+    } else if (input.matches("[data-consent]")) {
+      rootConsent = input.checked;
+      const primary = foot.querySelector<HTMLButtonElement>("[data-ah='as-root']");
+      if (primary) primary.disabled = !rootConsent;
+    } else if (input.name === "ah-identity") {
+      const secret = current?.querySelector<HTMLTextAreaElement>(".ah-secret");
+      if (secret) secret.hidden = input.value !== "paste";
+    }
   }
 
   function onInput(event: Event): void {
-    if (!(event.target instanceof HTMLInputElement) || !event.target.matches(".addhost-host-input")) return;
-    if (step === "discovery") {
-      discoveryQuery = event.target.value;
-      updateDiscoveryHostList();
-    }
-    updateFooterState();
+    if (!(event.target instanceof HTMLInputElement) || !event.target.matches(".ah-input")) return;
+    text = event.target.value;
+    applyFilter();
   }
 
   function onKeyDown(event: KeyboardEvent): void {
-    if (step === "manual" && event.key === "Enter" && event.target instanceof HTMLInputElement && event.target.matches(".addhost-host-input")) {
-      event.preventDefault();
-      addManualHost();
-    }
+    if (event.key === "Escape" && !group.hidden) { closeWindow(); return; }
+    if (event.key !== "Enter" || !(event.target instanceof HTMLInputElement) || !event.target.matches(".ah-input")) return;
+    event.preventDefault();
+    const manual = current?.querySelector<HTMLElement>(".ah-manual");
+    if (manual && !manual.hidden) { addManual(); return; }
+    const rows = [...(current?.querySelectorAll<HTMLElement>(".ah-row:not([hidden]):not(.is-added)") ?? [])];
+    if (rows.length === 1 && selected.length === 0) rows[0]!.querySelector<HTMLInputElement>("input")!.click();
+    else if (selected.length) proceed();
   }
 
   function onProtoAction(event: Event): void {
-    const detail = (event as CustomEvent<ProtoActionDetail>).detail;
+    const detail = (event as CustomEvent<{ action?: unknown; source?: unknown }>).detail;
     if (detail?.action === "proto:addhost") openWindow(detail.source !== "keyboard");
   }
 
   const sidebar = stage.querySelector<HTMLElement>("#sidebar");
   const sidebarButton = document.createElement("button");
   sidebarButton.type = "button";
-  sidebarButton.className = "ui-button addhost-sidebar-button";
-  sidebarButton.textContent = "Add hosts";
+  sidebarButton.className = "ah-sidebar-add";
+  sidebarButton.innerHTML = `${PLUS_ICON}<span>Add hosts</span>`;
   const openFromSidebar = (): void => openWindow(true);
   sidebarButton.addEventListener("click", openFromSidebar);
   sidebar?.append(sidebarButton);
 
+  const onScroll = (): void => { card.classList.toggle("is-scrolled", scroller.scrollTop > 4); };
+  scroller.addEventListener("scroll", onScroll, { passive: true });
   card.addEventListener("click", onClick);
   card.addEventListener("change", onChange);
   card.addEventListener("input", onInput);
   card.addEventListener("keydown", onKeyDown);
   window.addEventListener("tracer:proto-action", onProtoAction);
-  const windowSpring = new Spring(0, (value) => {
-    card.style.opacity = String(value);
-    card.style.transform = `translateY(${(1 - value) * 6}px) scale(${0.975 + value * 0.025})`;
-  }, { visualDuration: 0.22, bounce: 0.12 });
-  render();
-  requestAnimationFrame(() => windowSpring.set(1));
-  requestAnimationFrame(() => { if (!disposed) panes.scrollLeft = 0; });
+  go(step, 0);
+  if (reducedMotion()) windowSpring.set(1, true);
+  else requestAnimationFrame(() => windowSpring.set(1));
 
   return {
     dispose() {
       disposed = true;
       clearTimers();
-      disposeControls();
       confirmTip?.close(false);
       toast.dispose();
+      scroller.removeEventListener("scroll", onScroll);
       card.removeEventListener("click", onClick);
       card.removeEventListener("change", onChange);
       card.removeEventListener("input", onInput);
@@ -757,7 +618,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
       window.removeEventListener("tracer:proto-action", onProtoAction);
       sidebarButton.removeEventListener("click", openFromSidebar);
       sidebarButton.remove();
-      clearTerminalWindows();
+      closeResultWindows();
       group.remove();
       originalCard.removeAttribute("aria-hidden");
       panes.removeAttribute("data-window-canvas");

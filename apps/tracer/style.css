@@ -154,7 +154,7 @@ button { color: inherit; }
   font-size: 10px;
   letter-spacing: 0.08em;
 }
-.terminal-screen:has(.window-group:not([hidden]), .addhost-window-group:not([hidden]), .sidebar:not([hidden]), .palette:not([hidden]), .probe-panel:not([hidden]), .window-popover:not([hidden]), .window-share-layer:not([hidden]), .window-end-layer:not([hidden]), .ui-toast:not([hidden])) .test-double-badge,
+.terminal-screen:has(.window-group:not([hidden]), .ah-group:not([hidden]), .sidebar:not([hidden]), .palette:not([hidden]), .probe-panel:not([hidden]), .window-popover:not([hidden]), .window-share-layer:not([hidden]), .window-end-layer:not([hidden]), .ui-toast:not([hidden])) .test-double-badge,
 body:has(.ui-confirm-tip[data-open="true"], .ui-tooltip[data-open="true"], .tip-pos[style*="visibility: visible"]) .terminal-screen .test-double-badge {
   visibility: hidden;
   pointer-events: none;
