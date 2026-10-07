@@ -3,6 +3,10 @@ import { mnemonicToEntropy } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 import { AuthError, recoveryAuth as auth, type AuthStart, type Wrap } from "./auth";
 
+// Resumed deadlines can exceed a day after rollback; cap by the 48-hour
+// recovery capability policy, rather than the original 24-hour start delay.
+const MAX_RECOVERY_WAIT_SECONDS = 48 * 60 * 60;
+
 export interface RecoveryRequest { token: string; delay_seconds: number; ready_at: number }
 
 /** Starts recovery with an optional HttpOnly session; the server alone chooses the delay. */
@@ -13,7 +17,7 @@ export async function startRecovery(username: string, words: string): Promise<Re
     result = await auth.post<RecoveryRequest>("recovery-resume", { username, verifier: derived.verifier });
   } finally { derived.wrap.fill(0); }
   auth.requiredString(result.token, "recovery token");
-  if ((!Number.isSafeInteger(result.delay_seconds) || result.delay_seconds < 0 || result.delay_seconds > 86400) || !Number.isSafeInteger(result.ready_at) || result.ready_at <= 0) {
+  if ((!Number.isSafeInteger(result.delay_seconds) || result.delay_seconds < 0 || result.delay_seconds > MAX_RECOVERY_WAIT_SECONDS) || !Number.isSafeInteger(result.ready_at) || result.ready_at <= 0) {
     throw new AuthError("The server returned an invalid recovery time.");
   }
   return result;
