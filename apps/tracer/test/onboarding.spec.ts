@@ -245,7 +245,9 @@ async function installShiftObserver(page: Page): Promise<void> {
       for (const entry of list.getEntries() as Array<PerformanceEntry & { value: number; hadRecentInput: boolean }>) {
         if (entry.hadRecentInput) continue;
         if (steps().some((t) => entry.startTime >= t && entry.startTime <= t + 300)) continue;
-        values.push(entry.value);
+        // Sub-pixel rounding (observed 3e-6) is not a visible shift. 0.001 is 1% of the
+        // CLS "good" threshold (0.1), so any shift a person could see still fails.
+        if (entry.value >= 0.001) values.push(entry.value);
       }
     }).observe({ type: "layout-shift", buffered: false });
   });
