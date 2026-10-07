@@ -3,6 +3,7 @@
 
 pub mod auth;
 mod embedded;
+pub mod enrollment;
 mod runtime;
 mod web_assets;
 mod websocket;
