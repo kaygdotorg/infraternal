@@ -66,15 +66,23 @@ for (const delay of [0, 86400]) {
     let releaseStart: (() => void) | undefined;
     const readyAt = Math.floor(Date.now() / 1000) + delay;
     const oldWrap = await fixtureWrap();
+    // Every explicit word screenshot uses public deterministic client entropy.
+    await page.addInitScript(() => {
+      const random = crypto.getRandomValues.bind(crypto);
+      crypto.getRandomValues = <T extends ArrayBufferView | null>(value: T): T => {
+        if (value instanceof Uint8Array && value.length === 32) { value.fill(2); return value; }
+        return random(value);
+      };
+    });
     await page.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: false } }));
     await page.route("**/auth/session", (route) => finished
       ? route.fulfill({ json: { user_id: userId, username: "fixture_owner", display_name: "Fixture owner", hostname: "fixture-host" } })
       : route.fulfill({ status: 401, json: {} }));
     await page.route("**/auth/recovery-resume", async route => {
       starts++;
-      const body = route.request().postDataJSON() as { username: string; words: string };
+      const body = route.request().postDataJSON() as { username: string; verifier: string; words?: unknown };
       // Keep failures boolean so no phrase can appear in assertion output.
-      expect(body.username === "fixture_owner" && body.words === phrase).toBe(true);
+      expect(body.username === "fixture_owner" && typeof body.verifier === "string" && body.words === undefined).toBe(true);
       await new Promise<void>((resolve) => { releaseStart = resolve; });
       await route.fulfill({ json: { token: "public-recovery-fixture", delay_seconds: delay, ready_at: readyAt } });
     });
@@ -94,7 +102,7 @@ for (const delay of [0, 86400]) {
       const wrap = body.recovery_wrap;
       const aad = new TextEncoder().encode(`infraternal/keywrap/v1|${userId}|recovery`);
       const key = await crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: Buffer.from(wrap.salt, "base64url"), info: aad },
-        await crypto.subtle.importKey("raw", mnemonicToEntropy(rotated, wordlist), "HKDF", false, ["deriveKey"]),
+        await crypto.subtle.importKey("raw", await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: new ArrayBuffer(0), info: new TextEncoder().encode("infraternal/recovery/wrap/v2") }, await crypto.subtle.importKey("raw", mnemonicToEntropy(rotated, wordlist), "HKDF", false, ["deriveBits"]), 256), "HKDF", false, ["deriveKey"]),
         { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
       const clear = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: Buffer.from(wrap.nonce, "base64url"), additionalData: aad }, key, Buffer.from(wrap.ciphertext, "base64url")));
       expect(clear.every((value, i) => value === dek[i])).toBe(true);
@@ -242,7 +250,7 @@ test("discarded waiting page resumes the original deadline", async ({ page }) =>
   expect(attempts).toBe(2);
 });
 
-test("signed-in device shows a persistent notice and can cancel recovery", async ({ page }) => {
+test("signed-in device shows a persistent notice and can cancel recovery", async ({ page }, info) => {
   await page.context().request.post("/__mock/reset");
   await page.context().request.post("/__mock/open-terminal");
   let pending = true, cancels = 0;
@@ -258,6 +266,7 @@ test("signed-in device shows a persistent notice and can cancel recovery", async
   await page.goto("/?mock=1");
   await expect(page.locator("#recovery-notice")).toBeVisible();
   await expect(page.locator("#recovery-toast")).toContainText("Recovery requested");
+  await capture(page, info, "pending-recovery-notice");
   await page.getByRole("button", { name: "Cancel recovery", exact: true }).click();
   await expect(page.locator("#recovery-notice")).toBeHidden();
   expect(cancels).toBe(1);
