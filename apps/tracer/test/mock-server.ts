@@ -53,6 +53,8 @@ interface MockSession {
   writtenInput: bigint;
   acceptedInputBytes: number;
   echoedText: string;
+  echoMode: "normal" | "none" | "mask" | "wrong";
+  echoDelayMs: number;
 }
 
 interface Connection {
@@ -321,6 +323,30 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     dropNextAck = true;
     return sendJson(response, 200, { ok: true });
   }
+  if (request.method === "POST" && url.pathname === "/__mock/echo-mode") {
+    const body = await readJson(request);
+    const mode = body?.mode;
+    const delay = body?.delay_ms;
+    if (mode !== "normal" && mode !== "none" && mode !== "mask" && mode !== "wrong") {
+      return sendJson(response, 400, { error: "unknown terminal echo mode" });
+    }
+    if (delay !== undefined && (!Number.isInteger(delay) || Number(delay) < 0 || Number(delay) > 2000)) {
+      return sendJson(response, 400, { error: "echo delay is outside the test bound" });
+    }
+    session.echoMode = mode;
+    session.echoDelayMs = delay === undefined ? 0 : Number(delay);
+    return sendJson(response, 200, { mode: session.echoMode, delay_ms: session.echoDelayMs });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/alternate-screen") {
+    const body = await readJson(request);
+    if (typeof body?.active !== "boolean") return sendJson(response, 400, { error: "active must be boolean" });
+    appendEchoOutput(session, new TextEncoder().encode(body.active ? "\u001b[?1049h" : "\u001b[?1049l"));
+    return sendJson(response, 200, { active: body.active });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/screen-reset") {
+    appendEchoOutput(session, new TextEncoder().encode("\u001bc"));
+    return sendJson(response, 200, { ok: true, output_sequence: String(session.outputLength) });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/reset") {
     resetMockState();
     return sendJson(response, 200, { setup_token: setupToken });
@@ -580,12 +606,17 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
       connection.socket.close(1011, "test-double output limit reached");
       return;
     }
-    connection.session.output.set(fresh, connection.session.echoOutputLength);
-    connection.session.echoOutputLength += fresh.byteLength;
-    connection.session.outputLength += fresh.byteLength;
     connection.session.writtenInput += BigInt(fresh.byteLength);
     connection.session.acceptedInputBytes += fresh.byteLength;
     connection.session.echoedText += new TextDecoder().decode(fresh);
+    const echoed = echoBytes(connection.session, fresh);
+    if (echoed && connection.session.echoDelayMs > 0) {
+      const delayedSession = connection.session;
+      const delay = delayedSession.echoDelayMs;
+      setTimeout(() => appendEchoOutput(delayedSession, echoed), delay);
+    } else if (echoed) {
+      appendEchoOutput(connection.session, echoed);
+    }
   }
   if (dropNextAck && fresh.byteLength > 0) {
     dropNextAck = false;
@@ -594,6 +625,26 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
   }
   sendFrame(connection.socket, 1, { type: "Ack", inSeqAcked: connection.session.writtenInput });
   flushOutput(connection);
+}
+
+function echoBytes(target: MockSession, bytes: Uint8Array): Uint8Array | undefined {
+  if (target.echoMode === "none") return undefined;
+  if (target.echoMode === "normal") {
+    if (bytes.byteLength === 1 && bytes[0] === 0x7f) return new TextEncoder().encode("\b \b");
+    return bytes.slice();
+  }
+  if (target.echoMode === "wrong") return new Uint8Array(bytes.byteLength).fill(0x21);
+  return Uint8Array.from(bytes, (byte) => byte >= 0x20 && byte !== 0x7f ? 0x2a : byte);
+}
+
+function appendEchoOutput(target: MockSession, bytes: Uint8Array): void {
+  if (target.echoOutputLength + bytes.byteLength > MAX_MOCK_OUTPUT) return;
+  target.output.set(bytes, target.echoOutputLength);
+  target.echoOutputLength += bytes.byteLength;
+  target.outputLength += bytes.byteLength;
+  for (const connection of connections) {
+    if (connection.session === target) flushOutput(connection);
+  }
 }
 
 function flushOutput(connection: Connection): void {
@@ -745,6 +796,8 @@ function createSession(resumeFrom?: MockSession, fixtureOutput: Uint8Array = new
     writtenInput: 0n,
     acceptedInputBytes: 0,
     echoedText: "",
+    echoMode: "normal",
+    echoDelayMs: 0,
   };
 }
 
