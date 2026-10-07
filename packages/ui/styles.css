@@ -160,7 +160,7 @@
 .ui-toast-marker .tick { width: 18px; height: 18px; }
 @media (pointer: coarse) {
   .ui-toast { min-height: 54px; gap: 12px; padding: 7px 9px 7px 12px; border-radius: 15px; }
-  .ui-toast-message { font-size: 16px; white-space: nowrap; }
+  .ui-toast-message { font-size: 16px; }
   .ui-toast-action { min-height: 44px; padding: 0 10px; font-size: 15px; }
   .ui-toast-marker .tick { width: 20px; height: 20px; }
 }
