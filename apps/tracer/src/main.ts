@@ -372,9 +372,10 @@ function uiFontPreference(): UiFont {
     return requested;
   }
   try {
-    return window.localStorage.getItem("tracer.ui-font") === "mono" ? "mono" : "sans";
+    // Monospace is the product face (TASTE.md section 2); sans stays an explicit opt-in.
+    return window.localStorage.getItem("tracer.ui-font") === "sans" ? "sans" : "mono";
   } catch {
-    return "sans";
+    return "mono";
   }
 }
 

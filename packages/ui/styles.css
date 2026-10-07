@@ -1,5 +1,11 @@
 /** Shared presentation for @infraternal/ui browser primitives. */
 
+/* One type scale per platform (TASTE.md section 2). Desktop follows the macOS sizes, touch the iOS
+   sizes. Every product surface (top bar, sidebar, palette, tooltip, toast, windows) uses these
+   tokens rather than its own pixel values. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input stays 16 px on touch so iOS never zooms. */
+:root { --text-body: 13px; --text-secondary: 12px; --text-caption: 11px; --text-input: 13px; --row: 28px; }
+@media (pointer: coarse) { :root { --text-body: 16px; --text-secondary: 15px; --text-caption: 13px; --text-input: 16px; --row: 44px; } }
+
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
    data-focus-ring="on"); clicks, taps and shortcuts that move focus in script draw none. */
 :focus-visible { outline: none; }
@@ -48,3 +54,36 @@
   .swap svg, [data-done] .is-idle, .swap .is-done, [data-done] .is-done { transform: none; filter: none; }
   .swap .is-done path { stroke-dashoffset: 0; transition: none; }
 }
+
+/* Pill: the one container for floating capsule controls (the top-bar capsule, icon buttons, the
+   sidebar toggle, session tabs). Instances set only their size and content layout; the material,
+   hairline, shadow, radius and press feedback live here so they can never drift apart. */
+.ui-pill {
+  appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 38px);
+  border: 1px solid var(--overlay-line) !important; border-radius: 999px; background: var(--overlay); box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+  transition: transform 140ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+.ui-pill:active:not(:disabled) { transform: scale(0.97); }
+.ui-pill-icon { width: var(--pill-h, 38px); padding: 0; color: var(--fg-2); }
+.ui-pill-icon svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.6; }
+@media (hover: hover) and (pointer: fine) { .ui-pill:hover:not(:disabled) { background: var(--overlay-solid); } }
+@media (prefers-reduced-motion: reduce) { .ui-pill:active:not(:disabled) { transform: none; } }
+
+/* Window: the one card that holds a terminal or a flow on the canvas. */
+.ui-window {
+  position: relative; min-width: 0; min-height: 0; overflow: hidden;
+  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); box-shadow: var(--shadow);
+}
+.ui-window canvas { display: block; }
+
+/* Panel: the material for large floating surfaces such as the sidebar. Thinner than a pill and
+   blurred harder, so whatever sits behind it (the backdrop, a terminal) reads through as soft
+   shapes. A hairline edge and an outer shadow only: no inner highlight. It sits on its own
+   compositing layer so the blur is recomputed only when what's behind it changes. */
+.ui-panel {
+  border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); background: var(--overlay-panel, var(--overlay)); box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6); backdrop-filter: blur(20px) saturate(1.6);
+}
+@media (prefers-reduced-transparency: reduce) { .ui-panel { background: var(--overlay-solid); -webkit-backdrop-filter: none; backdrop-filter: none; } }
