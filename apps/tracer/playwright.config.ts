@@ -5,6 +5,10 @@ const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("TRACER_TEST_PORT must be an integer TCP port");
 }
+const deviceScaleFactor = Number(process.env.TRACER_TEST_DPR ?? "1");
+if (![1, 2, 3].includes(deviceScaleFactor)) {
+  throw new Error("TRACER_TEST_DPR must be 1, 2, or 3");
+}
 const origin = `http://localhost:${port}`;
 
 export default defineConfig({
@@ -19,6 +23,7 @@ export default defineConfig({
   outputDir: "./test-results",
   use: {
     ...devices["Desktop Chrome"],
+    deviceScaleFactor,
     baseURL: origin,
     launchOptions: {
       // Keep a headless visible-surface probe on the renderer's foreground frame cadence.

@@ -17,6 +17,7 @@
     "./themes": "./src/themes.ts",
     "./backdrop": "./src/backdrop.ts",
     "./branched": "./src/branched.ts",
+    "./terminal-text-overlay": "./src/terminal-text-overlay.ts",
     "./styles.css": "./styles.css"
   }
 }
