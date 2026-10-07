@@ -20,19 +20,21 @@ export function mountRecovery(host: HTMLElement, back: () => void,
   let finish: (() => Promise<void>) | undefined, acknowledged: (() => void) | undefined;
   let rejectAcknowledgement: ((failure: unknown) => void) | undefined;
   let readyTimer = 0;
+  let renderedStep = -1;
+  let paneObserver: ResizeObserver | undefined;
   host.innerHTML = `<section class="auth-screen" aria-label="Recover your account"><section class="auth-card" id="recovery-card">
     <div class="auth-mark"><span>infraternal</span></div><ol class="auth-steps" aria-label="Recovery progress"></ol>
     <div class="auth-viewport"><div class="auth-pane"><p class="auth-eyebrow"></p><h1></h1><p class="auth-lede"></p><div class="auth-pane-body"></div></div></div>
     <div class="auth-footer"><button class="auth-back" type="button">← sign in</button><button class="auth-primary" id="recovery-next" type="button"><span></span><span class="busy-count" hidden></span></button></div>
     <p class="auth-message" id="auth-error" role="alert"></p></section></section>`;
   const card = host.querySelector<HTMLElement>("#recovery-card")!;
-  const body = card.querySelector<HTMLElement>(".auth-pane-body")!;
+  let body = card.querySelector<HTMLElement>(".auth-pane-body")!;
   const button = card.querySelector<HTMLButtonElement>("#recovery-next")!;
   const error = card.querySelector<HTMLElement>("#auth-error")!;
   const markMotion = (value: boolean): void => { card.toggleAttribute("data-no-motion", value); };
   card.querySelector<HTMLButtonElement>(".auth-back")!.addEventListener("click", () => {
     if (busy || finish) return;
-    window.clearTimeout(readyTimer); words.fill(""); request = undefined; back();
+    window.clearTimeout(readyTimer); paneObserver?.disconnect(); words.fill(""); request = undefined; back();
   });
   function ready(): boolean {
     if (step === 0) return /^[a-z0-9_-]{2,32}$/.test(username) && validWords();
@@ -43,14 +45,26 @@ export function mountRecovery(host: HTMLElement, back: () => void,
   function update(): void { button.disabled = busy || !ready(); }
   function render(): void {
     markMotion(instant);
+    const viewport = card.querySelector<HTMLElement>(".auth-viewport")!;
+    const changed = renderedStep !== step;
+    const animate = changed && renderedStep >= 0 && !instant;
+    viewport.style.transition = animate ? "" : "none";
+    if (animate) {
+      viewport.style.height = `${viewport.getBoundingClientRect().height}px`;
+      void viewport.offsetHeight; // Capture an interrupted glide before retargeting it.
+    }
     const steps = card.querySelector<HTMLOListElement>(".auth-steps")!;
     steps.innerHTML = titles.map((_, i) => `<li class="${i < step ? "is-done" : i === step ? "is-current" : ""}"><span class="auth-dot" ${i === step ? 'aria-current="step"' : ""} aria-label="Step ${i + 1}${i < step ? ", done" : ""}">${i < step ? '<span class="tick-host"></span>' : i + 1}</span>${i < 3 ? '<span class="auth-step-bar"></span>' : ""}</li>`).join("");
     steps.querySelectorAll<HTMLElement>(".tick-host").forEach((element, i) => {
       const check = tick(element, i < step - 1);
       if (i === step - 1) check.set(true, instant);
     });
-    const pane = card.querySelector<HTMLElement>(".auth-pane")!;
-    pane.dataset.direction = instant ? "none" : "forward";
+    const pane = document.createElement("div");
+    pane.className = "auth-pane";
+    pane.dataset.direction = animate ? "forward" : "none";
+    pane.innerHTML = '<p class="auth-eyebrow"></p><h1></h1><p class="auth-lede"></p><div class="auth-pane-body"></div>';
+    viewport.replaceChildren(pane);
+    body = pane.querySelector<HTMLElement>(".auth-pane-body")!;
     pane.querySelector<HTMLElement>(".auth-eyebrow")!.textContent = `step ${step + 1} of 4`;
     pane.querySelector<HTMLElement>("h1")!.textContent = titles[step]!;
     pane.querySelector<HTMLElement>(".auth-lede")!.textContent = [
@@ -66,6 +80,14 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     } else if (step === 2) body.replaceChildren();
     else recoveryWords(body, nextWords, saved, (value) => { saved = value; update(); }, markMotion);
     button.querySelector<HTMLElement>("span")!.textContent = ["Start recovery", "Continue recovery", "Create passkey", "Open infraternal"][step]!;
+    viewport.style.height = `${pane.offsetHeight}px`;
+    paneObserver?.disconnect();
+    paneObserver = new ResizeObserver(() => {
+      if (!card.isConnected) { paneObserver?.disconnect(); return; }
+      viewport.style.height = `${pane.offsetHeight}px`;
+    });
+    paneObserver.observe(pane);
+    renderedStep = step;
     update();
     window.clearTimeout(readyTimer);
     if (step === 1 && !ready()) {
@@ -134,6 +156,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
           await new Promise<void>((resolve, reject) => { acknowledged = resolve; rejectAcknowledgement = reject; });
         });
         words.fill(""); nextWords.fill(""); request = undefined; finish = undefined;
+        window.clearTimeout(readyTimer); paneObserver?.disconnect();
         complete(result.userId, true, result.displayName, instant);
         return;
       } else {

@@ -163,3 +163,34 @@ test("a signed-in device can open recovery without revoking its session", async 
   })).status);
   expect(status).toBe(200);
 });
+
+test("pointer recovery step changes glide the fitted pane", async ({ page }) => {
+  await page.route("**/auth/status", route => route.fulfill({ json: { setup_required: false } }));
+  await page.route("**/auth/session", route => route.fulfill({ status: 401, json: {} }));
+  await page.route("**/auth/recovery-start", route => route.fulfill({ json: {
+    token: "public-motion-fixture", delay_seconds: 0, ready_at: Math.floor(Date.now() / 1000),
+  } }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "use recovery key", exact: true }).click();
+  await page.locator("#recovery-username").fill("fixture_owner");
+  await paste(page, phrase);
+  await page.getByRole("button", { name: "Start recovery" }).click();
+  await expect(page.getByRole("heading", { name: "Recovery started" })).toBeVisible();
+  await page.waitForTimeout(300);
+  await page.locator("#recovery-next").evaluate(button => {
+    button.addEventListener("click", () => {
+      const samples: number[] = [];
+      Object.assign(window, { __recoveryHeights: samples });
+      const begin = performance.now();
+      const sample = (): void => {
+        samples.push(document.querySelector("#recovery-card .auth-viewport")!.getBoundingClientRect().height);
+        if (performance.now() - begin < 300) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    }, { once: true, capture: true });
+  });
+  await page.getByRole("button", { name: "Continue recovery" }).click();
+  await page.waitForTimeout(350);
+  const heights = await page.evaluate(() => (window as Window & { __recoveryHeights?: number[] }).__recoveryHeights ?? []);
+  expect(Math.max(...heights) - Math.min(...heights)).toBeGreaterThan(8);
+});
