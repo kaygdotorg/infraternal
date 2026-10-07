@@ -128,3 +128,33 @@ Exercise connection loss, process/server restart, 300 ms RTT, renewal during
 50 users, with 10,000-node headroom. Report per-unit memory multiplied by
 the expected count; retained transport pairs are not whole-daemon memory.
 Local primitive measurements are diagnostic, not pinned performance gates.
+
+## Operator and bootstrap enrollment API (#78, #87)
+
+The configured HTTPS API exposes `POST /remote/invitations` and
+`POST /remote/join`. Both accept one JSON body of at most 8192 bytes, reject
+unknown fields, bound each request (including body read) to five seconds and
+share eight admission slots. Never place an invitation in a URL or a log.
+
+Invitation issuance requires an unlocked live browser session cookie, exact
+Origin and current core owner permission. This host-creation permission is
+separate from administrator CA-unlock permission. Its body is
+`{host_id: UUID, mode: "rootless"|"rootful", execution_uid: u32}`; the uid
+comes from the bootstrap probe, or the authorized operator for tests. Issuance
+creates an immutable host record or requires an existing record to match.
+A replacement invitation invalidates the previous token. Its response is
+`{host_id, mode, execution_uid, token, ca_der, endpoint, server_name}`:
+`ca_der` is canonical unpadded base64url public DER trust, `endpoint` is the
+server-selected socket address for QUIC and TCP, and `server_name` is verified
+against the configured TLS certificate. The bootstrap adapter passes this
+response privately through stdin to `infraternal agent join <url>`.
+
+Join requires server-authenticated pinned HTTPS before sending a capability;
+it does not require a client certificate that has yet to be issued. Its body
+is `{host_id, mode, token, csr_der}`, with canonical unpadded base64url PKCS10
+DER of at most 4096 bytes. The server checks the invitation before CSR proof
+or signing, then repeats the authority checks in atomic redemption. Success
+returns `{certificate_der, execution_uid}` only after commit. Admission and
+signer errors expose no secret or detailed crypto diagnostics. The join
+command verifies returned uid and certificate/key correspondence before
+publishing local identity. This API never unlocks a cold CA [168].
