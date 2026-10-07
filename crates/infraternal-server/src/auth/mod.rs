@@ -75,6 +75,7 @@ struct Registration {
     display_name: String,
     authority: Authority,
     recovery_hash: Option<String>,
+    rotate_recovery: bool,
     expires: i64,
     binding: Option<String>,
 }

@@ -190,3 +190,45 @@ pub(super) async fn record(
         .await?;
     Ok(())
 }
+
+// Consume recovery authority and replace all capabilities in one writer transaction.
+pub(super) async fn complete(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user: &str,
+    token: &str,
+    verifier_hash: &str,
+    version: i64,
+    now: i64,
+) -> Result<()> {
+    if sqlx::query(
+        "DELETE FROM recovery WHERE user_id=? AND token_hash=? AND ready<=? AND expires>?",
+    )
+    .bind(user)
+    .bind(token)
+    .bind(now)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected()
+        != 1
+    {
+        return Err(Error::Denied);
+    }
+    record(tx, user, "complete", now).await?;
+    for table in ["sessions", "api_keys", "approvals", "passkeys", "wraps"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE user_id=?"))
+            .bind(user)
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query(
+        "UPDATE users SET recovery_hash=?,recovery_version=?,recovery_wrap_version=? WHERE id=?",
+    )
+    .bind(verifier_hash)
+    .bind(version)
+    .bind(version)
+    .bind(user)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}

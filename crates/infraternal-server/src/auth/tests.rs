@@ -224,7 +224,7 @@ async fn empty() -> (Auth, String) {
 }
 async fn fixture() -> Fixture {
     let (auth, token) = empty().await;
-    let start = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let start = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
     let user = str_field(&start, "user_id").to_owned();
     let words = str_field(&start, "recovery_words").to_owned();
     let software = Software::new();
@@ -241,7 +241,7 @@ async fn fixture() -> Fixture {
         )
         .await
         .unwrap();
-    assert!(auth.setup_start(&token, "attacker", NOW).await.is_err());
+    assert!(auth.legacy_setup(&token, "attacker", NOW).await.is_err());
     Fixture {
         auth,
         software,
@@ -430,10 +430,10 @@ async fn setup_restart_rotation_expiry_and_parallel_redemption() {
         "restart must issue a fresh setup capability"
     );
     assert!(token != old_token, "setup capability must rotate");
-    assert!(auth.setup_start(&old_token, "owner", NOW).await.is_err());
-    assert!(auth.setup_start(&token, "owner", NOW + DAY).await.is_err());
-    let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
-    let b = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    assert!(auth.legacy_setup(&old_token, "owner", NOW).await.is_err());
+    assert!(auth.legacy_setup(&token, "owner", NOW + DAY).await.is_err());
+    let a = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
+    let b = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     for (start, succeeds) in [(&a, true), (&b, false)] {
@@ -486,16 +486,16 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         .recovery_start(&f.user, f.words.clone(), NOW)
         .await
         .unwrap();
-    assert!(f.auth.recovery_ready(&token, NOW + DAY - 1).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + DAY - 1).await.is_err());
     assert!(
         f.auth
             .recovery_start(&f.user, f.words.clone(), NOW + 1)
             .await
             .is_err()
     );
-    let start = f.auth.recovery_ready(&token, NOW + DAY).await.unwrap();
+    let start = f.auth.legacy_ready(&token, NOW + DAY).await.unwrap();
     f.auth.recovery_cancel(&f.session, NOW + DAY).await.unwrap();
-    assert!(f.auth.recovery_ready(&token, NOW + DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + DAY).await.is_err());
     let second = Software::new();
     let pw = browser_wrap(&second.prf(&start), &f.dek, &f.user, "passkey");
     let rw = browser_wrap(
@@ -521,7 +521,7 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         .recovery_start(&f.user, f.words.clone(), NOW + DAY)
         .await
         .unwrap();
-    let start = f.auth.recovery_ready(&token, NOW + 2 * DAY).await.unwrap();
+    let start = f.auth.legacy_ready(&token, NOW + 2 * DAY).await.unwrap();
     let session = finish_replacement(&f, &start, &second, NOW + 2 * DAY).await;
     assert!(
         events.has_changed().unwrap(),
@@ -534,7 +534,7 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
             .is_err()
     );
     assert!(f.auth.session(&f.session, NOW + 2 * DAY).await.is_err());
-    assert!(f.auth.recovery_ready(&token, NOW + 2 * DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + 2 * DAY).await.is_err());
     assert!(
         f.auth
             .recovery_start(&f.user, f.words, NOW + 2 * DAY)
@@ -628,7 +628,7 @@ async fn recovery_live_session_revoked_during_verification_cannot_waive_delay() 
     pause.resume.notify_one();
     let (token, ready) = request.await.unwrap().unwrap();
     assert_eq!(ready, NOW + DAY);
-    assert!(f.auth.recovery_ready(&token, NOW).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW).await.is_err());
 }
 
 #[tokio::test]
@@ -646,8 +646,8 @@ async fn recovery_live_session_cannot_accelerate_an_active_delayed_request() {
             .await
             .is_err()
     );
-    assert!(f.auth.recovery_ready(&token, NOW + DAY - 1).await.is_err());
-    assert!(f.auth.recovery_ready(&token, NOW + DAY).await.is_ok());
+    assert!(f.auth.legacy_ready(&token, NOW + DAY - 1).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + DAY).await.is_ok());
 }
 
 #[tokio::test]
@@ -958,8 +958,8 @@ async fn concurrent_owner_and_optional_passkey_enrollment_fail_closed() {
     let _guard = SERIAL.lock().await;
     let (auth, token) = empty().await;
     let (a, b) = tokio::join!(
-        auth.setup_start(&token, "owner", NOW),
-        auth.setup_start(&token, "owner", NOW)
+        auth.legacy_setup(&token, "owner", NOW),
+        auth.legacy_setup(&token, "owner", NOW)
     );
     let a = a.unwrap();
     let b = b.unwrap();
@@ -1043,13 +1043,13 @@ async fn recovery_expiry_revocation_and_cross_user_isolation() {
         .recovery_start(&f.user, f.words.clone(), NOW)
         .await
         .unwrap();
-    assert!(f.auth.recovery_ready(&token, NOW + 2 * DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + 2 * DAY).await.is_err());
     let token = f
         .auth
         .recovery_start(&f.user, f.words.clone(), NOW + 2 * DAY)
         .await
         .unwrap();
-    let start = f.auth.recovery_ready(&token, NOW + 3 * DAY).await.unwrap();
+    let start = f.auth.legacy_ready(&token, NOW + 3 * DAY).await.unwrap();
     let replacement = Software::new();
     finish_replacement(&f, &start, &replacement, NOW + 3 * DAY).await;
     assert!(f.auth.api_authorize(&api_key, "hosts:read").await.is_err());
@@ -1152,7 +1152,7 @@ async fn review_old_words_race_rotation() {
         tokio::spawn(async move { auth.recovery_start(&user, old_words, NOW + DAY).await });
     // Pause after actual Argon2 verification, then commit the complete replacement.
     pause.verified.notified().await;
-    let start = f.auth.recovery_ready(&first, NOW + DAY).await.unwrap();
+    let start = f.auth.legacy_ready(&first, NOW + DAY).await.unwrap();
     let replacement = Software::new();
     let words = str_field(&start, "recovery_words").to_owned();
     f.auth
@@ -1487,11 +1487,16 @@ pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) ->
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let user_id = str_field(&start, "user_id").to_owned();
-    let words = str_field(&start, "recovery_words").to_owned();
+    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&start), &dek, &user_id, "passkey");
-    let recovery_wrap = browser_wrap(&recovery_ikm(&words), &dek, &user_id, "recovery");
+    let recovery_wrap = browser_wrap(
+        &recovery_material(&words, "wrap"),
+        &dek,
+        &user_id,
+        "recovery",
+    );
     let proof = software.registration(&start, ORIGIN, true);
     let binding = start_headers[axum::http::header::SET_COOKIE]
         .to_str()
@@ -1506,6 +1511,7 @@ pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) ->
             "ceremony":start["ceremony"],
             "proof":proof,
             "passkey_wrap":passkey_wrap,
+            "recovery_verifier":recovery_verifier(&words),
             "recovery_wrap":recovery_wrap,
         }),
         binding,
@@ -1931,8 +1937,8 @@ async fn leg_b_send(socket: &mut UnixStream, stream_id: u32, frame: &Frame<'_>) 
 async fn enrollment_prf_input_matches_discoverable_login() {
     let _guard = SERIAL.lock().await;
     let (auth, token) = empty().await;
-    let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
-    let b = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let a = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
+    let b = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
     assert_ne!(a["user_id"], b["user_id"]);
     assert_eq!(
         a["options"]["publicKey"]["extensions"]["prf"],
@@ -2176,11 +2182,16 @@ async fn setup_start_accepts_username_and_display_name() {
     );
 
     let user_id = str_field(&body, "user_id").to_owned();
-    let words = str_field(&body, "recovery_words").to_owned();
+    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&body), &dek, &user_id, "passkey");
-    let recovery_wrap = browser_wrap(&recovery_ikm(&words), &dek, &user_id, "recovery");
+    let recovery_wrap = browser_wrap(
+        &recovery_material(&words, "wrap"),
+        &dek,
+        &user_id,
+        "recovery",
+    );
     let binding = start_headers[axum::http::header::SET_COOKIE]
         .to_str()
         .unwrap()
@@ -2194,6 +2205,7 @@ async fn setup_start_accepts_username_and_display_name() {
             "ceremony":body["ceremony"],
             "proof":software.registration(&body, ORIGIN, true),
             "passkey_wrap":passkey_wrap,
+            "recovery_verifier":recovery_verifier(&words),
             "recovery_wrap":recovery_wrap
         }),
         binding,
@@ -2764,20 +2776,62 @@ async fn recovery_audit_commits_once_with_start_cancel_and_complete() {
         .await
         .unwrap();
     assert_eq!(ready, again);
-    assert!(f.auth.recovery_ready(&token, NOW + DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + DAY).await.is_err());
     f.auth.recovery_cancel(&f.session, NOW + 2).await.unwrap();
     f.auth.recovery_cancel(&f.session, NOW + 3).await.unwrap();
-    assert!(f.auth.recovery_ready(&next, NOW + DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&next, NOW + DAY).await.is_err());
     let (token, _) = f
         .auth
         .recovery_resume(&f.user, f.words.clone(), NOW + 4)
         .await
         .unwrap();
-    let start = f.auth.recovery_ready(&token, NOW + DAY + 4).await.unwrap();
+    let start = f.auth.legacy_ready(&token, NOW + DAY + 4).await.unwrap();
     finish_replacement(&f, &start, &Software::new(), NOW + DAY + 4).await;
     let events: Vec<String> = sqlx::query_scalar("SELECT event FROM recovery_audit ORDER BY id")
         .fetch_all(&f.auth.pool)
         .await
         .unwrap();
     assert_eq!(events, ["start", "cancel", "start", "complete"]);
+}
+
+// Explicit legacy-enrollment fixtures keep old PHC/envelope migration coverage.
+// Production ceremonies never generate mnemonic entropy or retain a phrase hash.
+impl Auth {
+    async fn legacy_enrollment(&self, mut start: Value) -> Value {
+        let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+        let stored = recovery_hash(words.clone()).await.unwrap();
+        self.pending
+            .lock()
+            .await
+            .registrations
+            .get_mut(str_field(&start, "ceremony"))
+            .unwrap()
+            .recovery_hash = Some(stored);
+        start["recovery_words"] = json!(words);
+        start
+    }
+    async fn legacy_setup(&self, token: &str, name: &str, now: i64) -> Result<Value> {
+        Ok(self
+            .legacy_enrollment(self.setup_start(token, name, now).await?)
+            .await)
+    }
+    async fn legacy_ready(&self, token: &str, now: i64) -> Result<Value> {
+        Ok(self
+            .legacy_enrollment(self.recovery_ready(token, now).await?)
+            .await)
+    }
+}
+fn recovery_material(words: &str, kind: &str) -> [u8; 32] {
+    let entropy = recovery_ikm(words);
+    let mut output = [0; 32];
+    Hkdf::<Sha256>::new(None, &entropy)
+        .expand(
+            format!("infraternal/recovery/{kind}/v2").as_bytes(),
+            &mut output,
+        )
+        .unwrap();
+    output
+}
+fn recovery_verifier(words: &str) -> String {
+    B64.encode(recovery_material(words, "auth"))
 }

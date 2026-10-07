@@ -58,6 +58,7 @@ struct Register {
     proof: Value,
     passkey_wrap: Wrap,
     recovery_wrap: Option<Wrap>,
+    recovery_verifier: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -229,7 +230,14 @@ async fn execute(
             auth.require_ceremony_binding(&b.ceremony, headers).await?;
             return session_response(
                 &auth
-                    .registration_finish(&b.ceremony, b.proof, b.passkey_wrap, b.recovery_wrap, now)
+                    .registration_finish_with_verifier(
+                        &b.ceremony,
+                        b.proof,
+                        b.passkey_wrap,
+                        b.recovery_wrap,
+                        b.recovery_verifier,
+                        now,
+                    )
                     .await?,
             );
         }
