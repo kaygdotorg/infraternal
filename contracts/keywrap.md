@@ -165,6 +165,28 @@ passkeys/envelopes and revokes all sessions/API keys/pending device approvals,
 rotates the recovery hash, and creates a new session atomically. Cancellation
 also invalidates any replacement ceremony already begun.
 
+### Same-device recovery (D113, owner decision on #45)
+
+D113 supersedes the unconditional delay above. `recovery-start` accepts the
+legacy `{user_id,words}` or additive `{username,words}` (exactly one identity).
+It returns `{token,delay_seconds,ready_at}`, where `ready_at` is Unix seconds.
+The words are always verified. Under the same database writer lock as recovery
+creation, an optional browser cookie grants a zero delay only if its session is
+unlocked, unexpired and belongs to the recovered account. Missing, invalid,
+expired, revoked, pending-unlock or other-account sessions retain 86400 seconds.
+API keys cannot shorten the wait. An active request still cannot be reset or
+accelerated by repeating `recovery-start`. Tokens retain the 48-hour expiry and
+the existing cancellation/replacement authority checks.
+
+Username lookup is internal; unknown accounts and wrong words return the same
+401 message. The browser holds the recovery capability and words in memory
+only, shows the server's actual ready time, and asks for the words again after
+a reload. It never fabricates progress or persists recovery secrets. The server
+remains authoritative at `recovery-ready` even if the local clock is wrong.
+Replacement unwraps the original recovery envelope before creating the new
+passkey, wraps that same DEK and requires acknowledgement of the rotated words
+before finish. No existing cryptographic envelope or proof format changes.
+
 Device approvals bind exactly the requested scopes. Show the inspected device
 and scopes before approving. The user code is 96 random bits (may be embedded
 in a QR code); it cannot poll/redeem. Approval expires after ten minutes and
