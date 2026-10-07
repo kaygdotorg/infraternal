@@ -1502,7 +1502,9 @@ where
                 .await
                 .expect("websocket pong"),
             Message::Pong(_) | Message::Frame(_) => {}
-            Message::Close(_) => panic!("server closed websocket unexpectedly"),
+            Message::Close(frame) => {
+                panic!("server closed websocket unexpectedly: {frame:?}")
+            }
             Message::Text(_) => panic!("server sent a text websocket message"),
         }
     }

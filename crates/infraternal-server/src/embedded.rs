@@ -438,8 +438,13 @@ async fn connect_agent(
         }
         Ok::<_, AgentError>((receive, scratch))
     };
-    let Ok(Ok((receive, scratch))) = tokio::time::timeout(Duration::from_secs(5), setup).await
-    else {
+    // Unit fixtures may be starved by host load while running both sides in one test process.
+    // The deployed embedded-agent greeting keeps its fixed five-second cap.
+    #[cfg(test)]
+    let greeting_timeout = Duration::from_secs(30);
+    #[cfg(not(test))]
+    let greeting_timeout = Duration::from_secs(5);
+    let Ok(Ok((receive, scratch))) = tokio::time::timeout(greeting_timeout, setup).await else {
         if let Some(pid) = pid {
             stop_child(pid).await;
         }
