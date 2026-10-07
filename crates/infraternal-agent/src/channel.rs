@@ -6,6 +6,12 @@ use std::{future::Future, io};
 /// Implementations retain partial-read progress; cancellation of a partial write
 /// requires retiring the entire connection to avoid frame interleaving.
 pub trait Channel: Send + Sync {
+    /// Native QUIC channels carry raw frames for one externally bound writer.
+    /// TCP and inherited sockets retain the unchanged mux envelope.
+    fn native_stream_id(&self) -> Option<u32> {
+        None
+    }
+
     /// Active incomplete-frame budget; inherited trusted channels have none.
     /// Remote adapters supply five seconds. Wholly idle reads arm no timer.
     fn frame_timeout(&self) -> Option<std::time::Duration> {

@@ -3,6 +3,7 @@
 pub mod channel;
 pub mod daemon;
 pub mod relay;
+pub mod remote_native;
 pub mod remote_quic;
 pub mod remote_tls;
 pub mod sessions;

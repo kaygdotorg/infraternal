@@ -7,8 +7,8 @@
 
 use crate::channel::Channel;
 use infraternal_protocol::{
-    DecodeError, DecodedMuxedFrame, Frame, MAX_FRAME_LEN, decode_muxed_frame,
-    encode_muxed_frame_into,
+    DecodeError, DecodedMuxedFrame, Frame, MAX_FRAME_LEN, decode_frame, decode_muxed_frame,
+    encode_frame_into, encode_muxed_frame_into,
 };
 use nix::sys::socket::{MsgFlags, recv, send};
 use std::{
@@ -97,7 +97,23 @@ impl Channel for Socket {
     }
 }
 
-/// One retained mux frame plus at most one 16 KiB read of coalesced suffixes.
+fn decode_channel<'a>(
+    bytes: &'a [u8],
+    socket: &impl Channel,
+) -> Result<DecodedMuxedFrame<'a>, DecodeError> {
+    if let Some(stream_id) = socket.native_stream_id() {
+        let decoded = decode_frame(bytes)?;
+        Ok(DecodedMuxedFrame {
+            stream_id,
+            frame: decoded.frame,
+            wire_len: decoded.wire_len,
+        })
+    } else {
+        decode_muxed_frame(bytes)
+    }
+}
+
+/// One retained raw or mux frame plus at most one 16 KiB read of coalesced suffixes.
 pub struct Receive {
     bytes: Vec<u8>,
     consumed: usize,
@@ -140,7 +156,7 @@ impl Receive {
             self.consumed = 0;
         }
         loop {
-            match decode_muxed_frame(&self.bytes) {
+            match decode_channel(&self.bytes, socket) {
                 Ok(_) => break,
                 Err(DecodeError::Incomplete) => {}
                 Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
@@ -185,7 +201,7 @@ impl Receive {
             }
             self.bytes.extend_from_slice(&self.chunk[..n]);
         }
-        let decoded = decode_muxed_frame(&self.bytes)
+        let decoded = decode_channel(&self.bytes, socket)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         self.consumed = decoded.wire_len;
         // Any suffix first arrived in the final read that completed this frame.
@@ -217,7 +233,14 @@ impl Transmit {
         stream: u32,
         frame: &Frame<'_>,
     ) -> io::Result<()> {
-        encode_muxed_frame_into(stream, frame, &mut self.bytes).map_err(io::Error::other)?;
+        if let Some(writer_id) = socket.native_stream_id() {
+            if writer_id != stream {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            encode_frame_into(frame, &mut self.bytes).map_err(io::Error::other)?;
+        } else {
+            encode_muxed_frame_into(stream, frame, &mut self.bytes).map_err(io::Error::other)?;
+        }
         socket.write(&self.bytes).await
     }
 }
