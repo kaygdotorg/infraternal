@@ -1,0 +1,253 @@
+//! Joins bounded CSR proof, server-owned signing and atomic public authority; network adapters supply pinned channels [64][133], #78.
+
+use crate::{
+    ca::{CaKeySource, CertificateAuthority, SignedCertificate},
+    csr::ValidatedCsr,
+    enrollment::{EnrollmentStore, Mode},
+};
+use std::sync::Arc;
+use uuid::Uuid;
+
+/// Adapters expose content-free errors; neither capability nor CSR enters diagnostics.
+#[derive(Debug, thiserror::Error)]
+#[error("remote enrollment refused")]
+pub struct RemoteEnrollmentError;
+
+/// One live unlock source and SQLite authority; constructing the adapter never unlocks the CA.
+pub struct RemoteEnrollment<S: CaKeySource> {
+    source: Arc<S>,
+    store: EnrollmentStore,
+}
+
+impl<S: CaKeySource> RemoteEnrollment<S> {
+    /// Use the configured signing source and already-migrated public authority.
+    #[must_use]
+    pub fn new(source: Arc<S>, store: EnrollmentStore) -> Self {
+        Self { source, store }
+    }
+
+    fn signer(&self) -> Result<CertificateAuthority, RemoteEnrollmentError> {
+        CertificateAuthority::from_source(self.source.as_ref()).map_err(|_| RemoteEnrollmentError)
+    }
+
+    /// Validate/sign before atomic capability consumption; send DER only after commit.
+    /// The caller must authenticate the enrollment server before supplying a capability.
+    /// # Errors
+    /// Refuses malformed CSR, invalid host/mode/invitation, unavailable CA or failed storage.
+    pub async fn join(
+        &self,
+        host: Uuid,
+        mode: Mode,
+        token: &str,
+        csr_der: &[u8],
+        now: i64,
+    ) -> Result<SignedCertificate, RemoteEnrollmentError> {
+        let csr = ValidatedCsr::parse(csr_der).map_err(|_| RemoteEnrollmentError)?;
+        let certificate = self
+            .signer()?
+            .sign_host(host, &csr, now)
+            .map_err(|_| RemoteEnrollmentError)?;
+        self.store
+            .redeem(token, host, mode, now, &certificate.record)
+            .await
+            .map_err(|_| RemoteEnrollmentError)?;
+        Ok(certificate)
+    }
+
+    /// Renew over an authenticated live channel, using its exact admitted predecessor.
+    /// # Errors
+    /// Refuses altered keys, expired/revoked authority, invalid CSR or unavailable issuer/storage.
+    pub async fn renew(
+        &self,
+        predecessor: &[u8; 32],
+        csr_der: &[u8],
+        now: i64,
+    ) -> Result<SignedCertificate, RemoteEnrollmentError> {
+        let identity = self
+            .store
+            .admit(predecessor, now)
+            .await
+            .map_err(|_| RemoteEnrollmentError)?;
+        let csr = ValidatedCsr::parse(csr_der).map_err(|_| RemoteEnrollmentError)?;
+        let certificate = self
+            .signer()?
+            .sign_host(identity.host, &csr, now)
+            .map_err(|_| RemoteEnrollmentError)?;
+        // The atomic write rechecks authority and key equality after signing;
+        // a revocation between admission and publication cannot return authority.
+        self.store
+            .renew(predecessor, &certificate.record, now)
+            .await
+            .map_err(|_| RemoteEnrollmentError)?;
+        Ok(certificate)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use openssl::{
+        hash::MessageDigest,
+        pkey::PKey,
+        x509::{X509NameBuilder, X509Req},
+    };
+
+    fn csr() -> Vec<u8> {
+        let key = PKey::generate_ed25519().unwrap();
+        let mut builder = X509Req::builder().unwrap();
+        builder.set_pubkey(&key).unwrap();
+        builder
+            .set_subject_name(&X509NameBuilder::new().unwrap().build())
+            .unwrap();
+        builder.sign(&key, MessageDigest::null()).unwrap();
+        builder.build().to_der().unwrap()
+    }
+
+    #[tokio::test]
+    async fn invalid_csr_does_not_burn_token_and_join_returns_only_committed_authority() {
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let token = store
+            .issue("owner", host, Mode::Rootless, 1_800_000_000)
+            .await
+            .unwrap();
+        let service =
+            RemoteEnrollment::new(Arc::new(crate::ca::tests::source(true)), store.clone());
+        assert!(
+            service
+                .join(
+                    host,
+                    Mode::Rootless,
+                    token.secret(),
+                    b"malformed",
+                    1_800_000_000
+                )
+                .await
+                .is_err()
+        );
+        let request = csr();
+        let signed = service
+            .join(
+                host,
+                Mode::Rootless,
+                token.secret(),
+                &request,
+                1_800_000_000,
+            )
+            .await
+            .unwrap();
+        let admitted = store
+            .admit(&signed.record.fingerprint, 1_800_000_000)
+            .await
+            .unwrap();
+        assert_eq!(admitted.host, host);
+        assert_eq!(admitted.execution_uid, 1002);
+        assert!(
+            service
+                .join(
+                    host,
+                    Mode::Rootless,
+                    token.secret(),
+                    &request,
+                    1_800_000_000
+                )
+                .await
+                .is_err()
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_certificates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 2); // Fixture predecessor and exactly one real joined identity.
+        let renewed = service
+            .renew(&signed.record.fingerprint, &request, 1_800_086_400)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .admit(&signed.record.fingerprint, 1_800_086_400)
+                .await
+                .is_ok()
+        );
+        assert!(
+            store
+                .admit(&renewed.record.fingerprint, 1_800_086_400)
+                .await
+                .is_ok()
+        );
+        assert!(
+            service
+                .renew(&signed.record.fingerprint, &csr(), 1_800_086_400)
+                .await
+                .is_err()
+        );
+        store.revoke("owner", host, 1_800_086_401).await.unwrap();
+        assert!(
+            service
+                .renew(&renewed.record.fingerprint, &request, 1_800_086_402)
+                .await
+                .is_err()
+        );
+    }
+    struct Administrator(crate::ca::CaMaterial);
+    impl crate::ca_memory::AdministratorCaUnlock for Administrator {
+        fn unlock(&self) -> Result<crate::ca::CaMaterial, crate::ca::CaError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_locked_signer_preserves_admission_and_token_until_authenticated_unlock() {
+        use crate::ca_memory::MemoryCaSource;
+        use std::sync::Arc;
+        let (store, _, host) = crate::enrollment::authority::tests::enrolled().await;
+        let material = crate::ca::tests::test_material();
+        let source = Arc::new(MemoryCaSource::cold_start(material.issuer().clone()));
+        let service = RemoteEnrollment::new(source.clone(), store.clone());
+        let now = 1_800_000_000;
+        let token = store
+            .issue("owner", host, Mode::Rootless, now)
+            .await
+            .unwrap();
+        let request = csr();
+        assert!(
+            service
+                .join(host, Mode::Rootless, token.secret(), &request, now)
+                .await
+                .is_err()
+        );
+        source.unlock_from(&Administrator(material)).unwrap();
+        let signed = service
+            .join(host, Mode::Rootless, token.secret(), &request, now)
+            .await
+            .unwrap();
+        // Cold restart has the same public trust and ledger, with no inherited secret.
+        let cold = Arc::new(MemoryCaSource::cold_start(source.issuer().clone()));
+        let restarted = RemoteEnrollment::new(cold, store.clone());
+        assert!(
+            store
+                .admit(&signed.record.fingerprint, now + 302_400)
+                .await
+                .is_ok()
+        );
+        assert!(
+            restarted
+                .renew(&signed.record.fingerprint, &request, now + 302_400)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .admit(&signed.record.fingerprint, now + 302_401)
+                .await
+                .is_ok()
+        );
+        // The live source remains usable; no terminal authority is removed by locking a signer.
+        assert!(
+            service
+                .renew(&signed.record.fingerprint, &request, now + 302_400)
+                .await
+                .is_ok()
+        );
+    }
+}

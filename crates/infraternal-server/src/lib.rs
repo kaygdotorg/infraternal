@@ -7,6 +7,7 @@ pub mod ca_memory;
 pub mod csr;
 mod embedded;
 pub mod enrollment;
+pub mod remote_enrollment;
 mod runtime;
 mod web_assets;
 mod websocket;
