@@ -281,14 +281,33 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
   await expect(page.locator("#copy-recovery")).toHaveAttribute("data-done", "");
   await page.waitForTimeout(220);
   const copy = await sampleAndEvents(page, "copy-feedback");
-  expect(copy.events.filter((event) => event.property === "filter" || event.property === "stroke-dashoffset")).toEqual([]);
-  console.log(`MOTION_AUDIT copy-feedback ${JSON.stringify(copy)}`);
+  const copyFilter = copy.events.find((event) => event.property === "filter");
+  const copyDraw = copy.events.find((event) => event.property === "stroke-dashoffset");
+  const copyMorph = await page.evaluate(() => {
+    const idle = getComputedStyle(document.querySelector<SVGElement>("#copy-recovery .is-idle")!);
+    const done = getComputedStyle(document.querySelector<SVGElement>("#copy-recovery .is-done")!);
+    return { idleFilter: idle.filter, idleScale: new DOMMatrixReadOnly(idle.transform).a, doneFilter: done.filter };
+  });
+  expect(copyFilter?.duration).toBe("0.2s");
+  expect(copyDraw).toMatchObject({ duration: "0.26s", delay: "0.05s" });
+  expect(copyMorph.idleFilter).toBe("blur(2px)");
+  expect(copyMorph.idleScale).toBeCloseTo(0.6);
+  expect(copyMorph.doneFilter).toBe("none");
+  console.log(`MOTION_AUDIT copy-feedback ${JSON.stringify({ ...copy, copyMorph })}`);
+
+  await page.waitForTimeout(520);
+  await expect(page.locator("#copy-recovery")).toHaveAttribute("data-done", "");
+  await page.evaluate(() => { window.__motionAudit.label = "copy-feedback-return"; window.__motionAudit.startSample(); });
+  await page.waitForTimeout(230);
+  const copyReturn = await sampleAndEvents(page, "copy-feedback-return");
+  expect(copyReturn.events.find((event) => event.selector === "svg.is-done" && event.property === "filter")?.duration).toBe("0.15s, 0.15s, 0.15s");
+  await expect(page.locator("#copy-recovery")).not.toHaveAttribute("data-done");
+  console.log(`MOTION_AUDIT copy-feedback-return ${JSON.stringify(copyReturn)}`);
 
   // Keep both recovery actions in view so the browser does not scroll and reset
   // the tooltip's inline transitions while the trigger moves.
   await page.setViewportSize({ width: 1440, height: 1000 });
-  // Let the 900 ms copy state return before measuring tooltip travel.
-  await page.waitForTimeout(900);
+  // The 900 ms confirmation state and its 150 ms return have completed.
   await page.mouse.move(0, 0);
   await page.waitForTimeout(100);
   await page.evaluate(() => { window.__motionAudit.label = "tooltip-first"; });
@@ -333,27 +352,37 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
   console.log(`MOTION_AUDIT tooltip-during-move ${JSON.stringify({ ...tooltipDuringMove, scrollBeforeTooltipMove, scrollAfterTooltipMove })}`);
   console.log(`MOTION_AUDIT tooltip-move ${JSON.stringify(tooltip)}`);
 
-  await page.locator("#recovery-saved").focus();
-  await page.evaluate(() => { window.__motionAudit.label = "keyboard-checkbox"; window.__motionAudit.startSample(); });
-  await page.keyboard.press("Space");
-  await page.waitForTimeout(260);
-  const checkbox = await sampleAndEvents(page, "keyboard-checkbox");
-  expect(checkbox.events.filter((event) => event.selector === "#setup-next")).toEqual([]);
-  console.log(`MOTION_AUDIT keyboard-checkbox ${JSON.stringify(checkbox)}`);
   await page.mouse.move(0, 0);
   await page.waitForTimeout(150);
   await page.evaluate(() => { window.__motionAudit.label = "pointer-checkbox"; window.__motionAudit.startSample(); });
   await page.locator("label.auth-check").click();
-  await page.waitForTimeout(240);
+  await page.waitForTimeout(50);
+  const pointerTickMid = await page.locator("label.auth-check .tick path").evaluate((path) => ({
+    inlineOffset: (path as SVGPathElement).style.strokeDashoffset,
+    computedOffset: getComputedStyle(path).strokeDashoffset,
+    checked: document.querySelector<HTMLInputElement>("#recovery-saved")!.checked,
+  }));
+  const pointerTickMidOffset = Number.parseFloat(pointerTickMid.inlineOffset);
+  await expect.poll(() => page.locator("label.auth-check .tick path").evaluate((path) => Number.parseFloat((path as SVGPathElement).style.strokeDashoffset)), { timeout: 1_500 }).toBe(0);
+  const pointerTickEndOffset = await page.locator("label.auth-check .tick path").evaluate((path) => getComputedStyle(path).strokeDashoffset);
   const pointerCheckbox = await sampleAndEvents(page, "pointer-checkbox");
-  console.log(`MOTION_AUDIT pointer-checkbox ${JSON.stringify(pointerCheckbox)}`);
-  await page.mouse.move(0, 0);
-  await page.waitForTimeout(150);
-  await page.evaluate(() => { window.__motionAudit.label = "pointer-checkbox-reset"; window.__motionAudit.startSample(); });
-  await page.locator("label.auth-check").click();
-  await page.waitForTimeout(240);
-  const pointerCheckboxReset = await sampleAndEvents(page, "pointer-checkbox-reset");
-  console.log(`MOTION_AUDIT pointer-checkbox-reset ${JSON.stringify(pointerCheckboxReset)}`);
+  console.log(`MOTION_AUDIT checkbox-draw-state ${JSON.stringify({ pointerCheckbox, pointerTickMid, pointerTickEndOffset })}`);
+  expect(pointerTickMidOffset).toBeGreaterThan(0);
+  expect(pointerTickMidOffset).toBeLessThan(1);
+  expect(Number.parseFloat(pointerTickEndOffset)).toBe(0);
+
+  await page.locator("#recovery-saved").focus();
+  await page.evaluate(() => { window.__motionAudit.label = "keyboard-checkbox"; window.__motionAudit.startSample(); });
+  await page.keyboard.press("Space");
+  const keyboardOffOffset = Number.parseFloat(await page.locator("label.auth-check .tick path").evaluate((path) => (path as SVGPathElement).style.strokeDashoffset));
+  await page.keyboard.press("Space");
+  const keyboardTickOffset = Number.parseFloat(await page.locator("label.auth-check .tick path").evaluate((path) => (path as SVGPathElement).style.strokeDashoffset));
+  await page.waitForTimeout(80);
+  const checkbox = await sampleAndEvents(page, "keyboard-checkbox");
+  expect(checkbox.events.filter((event) => event.selector === "#setup-next")).toEqual([]);
+  expect(keyboardOffOffset).toBe(1);
+  expect(keyboardTickOffset).toBe(0);
+  console.log(`MOTION_AUDIT keyboard-checkbox ${JSON.stringify(checkbox)}`);
 
   await page.locator("#copy-recovery").focus();
   await page.evaluate(() => { window.__motionAudit.label = "keyboard-copy"; window.__motionAudit.startSample(); });
@@ -363,6 +392,29 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
   const keyboardCopy = await sampleAndEvents(page, "keyboard-copy");
   expect(keyboardCopy.events.filter((event) => event.selector.startsWith("svg.") || event.selector === "path")).toEqual([]);
   console.log(`MOTION_AUDIT keyboard-copy ${JSON.stringify(keyboardCopy)}`);
+
+  await page.waitForTimeout(650);
+  await expect(page.locator("#copy-recovery")).not.toHaveAttribute("data-done");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.waitForTimeout(180);
+  await page.evaluate(() => { window.__motionAudit.label = "reduced-pointer-copy"; window.__motionAudit.startSample(); });
+  await page.locator("#copy-recovery").click();
+  await page.waitForTimeout(240);
+  const reducedCopy = await sampleAndEvents(page, "reduced-pointer-copy");
+  const reducedCopyStyles = await page.locator("#copy-recovery .is-done, #copy-recovery .is-done path").evaluateAll((elements) => elements.map((element) => {
+    const style = getComputedStyle(element);
+    return { filter: style.filter, transform: style.transform, strokeDashoffset: Number.parseFloat(style.strokeDashoffset) };
+  }));
+  expect(reducedCopy.events.every((event) => event.property === "opacity")).toBe(true);
+  expect(reducedCopy.events.some((event) => event.property === "opacity")).toBe(true);
+  expect(reducedCopyStyles).toEqual([
+    { filter: "none", transform: "none", strokeDashoffset: 0 },
+    { filter: "none", transform: "none", strokeDashoffset: 0 },
+  ]);
+  console.log(`MOTION_AUDIT reduced-copy ${JSON.stringify({ reducedCopy, reducedCopyStyles })}`);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.waitForTimeout(220);
+  await page.waitForTimeout(500); // finish the reduced-copy hold before sampling the keyboard download
 
   await page.locator("#download-recovery").focus();
   await page.evaluate(() => { window.__motionAudit.label = "keyboard-download"; window.__motionAudit.startSample(); });
