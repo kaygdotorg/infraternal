@@ -115,6 +115,7 @@ export function applyTheme(active: Theme, root: HTMLElement): void {
   style.setProperty("--accent-soft", `rgb(${rgb(active.accent)} / 0.16)`);
   style.setProperty("--accent-fg", active.dark ? active.bg : "#ffffff");
   style.setProperty("--ok", active.ok);
+  style.setProperty("--danger", active.ansi[1]);
   style.setProperty("--overlay", overlay.overlay);
   style.setProperty("--overlay-solid", overlay.overlaySolid);
   style.setProperty("--overlay-line", overlay.overlayLine);

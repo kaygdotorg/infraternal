@@ -162,6 +162,7 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .ui-switch::before, .ui-switch::after { transition: none; }
+  .ui-spinner { animation: none; }
   .ui-toast { transition: opacity 150ms ease; transform: none; }
   .ui-toast[data-open="false"] { transform: none; }
 }
@@ -181,7 +182,7 @@
 
 /* One spring drives the fill, tick draw-on and label treatment. */
 .tick { position: relative; display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px;
-  border-radius: 6px; box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.35); color: #000; will-change: transform; }
+  border-radius: 6px; box-shadow: inset 0 0 0 var(--ui-tick-border-width, 1.5px) var(--ui-tick-border-color, rgb(255 255 255 / 0.35)); color: #000; will-change: transform; }
 .tick-fill { position: absolute; inset: 0; border-radius: inherit; background: var(--fg); transform: scale(0); will-change: transform; }
 .tick svg { position: relative; width: 78%; height: 78%; overflow: visible; }
 .tick path { fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; }
@@ -189,6 +190,54 @@
 .check { position: relative; transition: transform 140ms var(--ease); }
 .check[data-pressed] { transform: scale(0.98); }
 .check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
+
+/* One reusable spinner mark; hosts tune size and color through instance variables. */
+.ui-spinner {
+  display: inline-block;
+  width: var(--ui-spinner-size, 16px);
+  height: var(--ui-spinner-size, 16px);
+  flex: none;
+  border: var(--ui-spinner-border-width, 1.5px) solid color-mix(in oklab, var(--ui-spinner-color, var(--accent)) 30%, transparent);
+  border-top-color: var(--ui-spinner-color, var(--accent));
+  border-radius: 50%;
+  animation: ui-spinner-turn 720ms linear infinite;
+}
+.ui-spinner[hidden] { display: none !important; }
+@keyframes ui-spinner-turn { to { transform: rotate(1turn); } }
+
+/* A quiet, non-interactive step mark composes shared spinner and tick behavior. */
+.ui-step-status {
+  --ui-step-status-size: 20px;
+  display: inline-grid;
+  width: var(--ui-step-status-size);
+  height: var(--ui-step-status-size);
+  flex: none;
+  place-items: center;
+  color: var(--fg-3);
+}
+.ui-step-status > .ui-step-status-pending,
+.ui-step-status > .ui-step-status-tick,
+.ui-step-status > .ui-step-status-failed,
+.ui-step-status > .ui-spinner { grid-area: 1 / 1; }
+.ui-step-status-pending {
+  width: var(--ui-step-status-dot-size, 7px);
+  height: var(--ui-step-status-dot-size, 7px);
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+.ui-step-status-tick { display: none; width: 18px; height: 18px; color: var(--bg); }
+.ui-step-status-tick .tick-fill { background: var(--ok); }
+.ui-step-status-tick .tick path { stroke: var(--bg); }
+.ui-step-status-failed { display: none; width: 15px; height: 15px; fill: none; stroke: var(--danger); stroke-width: 1.8; stroke-linecap: round; }
+.ui-step-status[data-state="running"] .ui-step-status-pending,
+.ui-step-status[data-state="running"] .ui-step-status-tick,
+.ui-step-status[data-state="running"] .ui-step-status-failed,
+.ui-step-status[data-state="done"] .ui-step-status-pending,
+.ui-step-status[data-state="done"] .ui-step-status-failed,
+.ui-step-status[data-state="failed"] .ui-step-status-pending,
+.ui-step-status[data-state="failed"] .ui-step-status-tick { display: none; }
+.ui-step-status[data-state="done"] .ui-step-status-tick { display: grid; }
+.ui-step-status[data-state="failed"] .ui-step-status-failed { display: block; }
 
 /* Glitch text is monochrome and settles after its welcome interval. */
 .glitch { position: relative; display: inline-block; white-space: nowrap; }
