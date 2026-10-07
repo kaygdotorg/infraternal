@@ -207,9 +207,9 @@ test("predictive echo draws only when Ghostty reports a visible normal-screen cu
   await inject("Z");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
     .toBe("Z");
-  await expect.poll(() => page.locator(".terminal-text-overlay tspan").textContent()).toBe("Z");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.overlay?.text ?? "")).toBe("Z");
   const movedCursor = await page.evaluate(() => ({
-    x: Number(document.querySelector<SVGTSpanElement>(".terminal-text-overlay tspan")?.getAttribute("x")),
+    x: window.__tracerTestDouble?.predictiveEcho()?.overlay?.glyphs[0]?.x ?? Number.NaN,
     cellWidth: window.__tracerTestDouble?.rendererMetrics()?.cellWidth ?? 0,
     cursorX: window.__tracerTestDouble?.rendererMetrics()?.cursorX ?? 0,
   }));
@@ -271,7 +271,7 @@ test("mutes when the host stops echoing, then resumes after an echo proof", asyn
     window.__tracerTestDouble?.injectInput("p");
     return {
       state: window.__tracerTestDouble?.predictiveEcho(),
-      overlayText: document.querySelector(".terminal-text-overlay")?.textContent ?? "",
+      overlayText: window.__tracerTestDouble?.predictiveEcho()?.overlay?.text ?? "",
     };
   });
   expect(noEchoPrediction.state?.pendingText).toBe("p");
@@ -309,11 +309,11 @@ test("predicted cursor advances across a pending multi-character line", async ({
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
     .toBe(predicted);
 
-  const overlayCursor = await page.locator(".terminal-text-overlay .terminal-text-overlay-cursor").evaluate((node) => ({
-    x: Number(node.getAttribute("x")),
-    y: Number(node.getAttribute("y")),
-    width: Number(node.getAttribute("width")),
-  }));
+  const overlayCursor = await page.evaluate(() => {
+    const cursor = window.__tracerTestDouble?.predictiveEcho()?.overlay?.cursor;
+    if (!cursor) throw new Error("the predicted cursor is not drawn");
+    return { x: cursor.x, y: cursor.y, width: cursor.width };
+  });
   const cell = await page.evaluate(() => ({
     width: window.__tracerTestDouble?.rendererMetrics()?.cellWidth ?? 0,
     height: window.__tracerTestDouble?.rendererMetrics()?.cellHeight ?? 0,
@@ -341,7 +341,7 @@ test(`predicted glyph and cursor pixels match confirmed cells at DPR ${pixelTest
 
   const readGeometry = () => page.evaluate(() => {
     const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas");
-    const cursor = document.querySelector<SVGRectElement>(".terminal-text-overlay-cursor");
+    const drawnCursor = window.__tracerTestDouble?.predictiveEcho()?.overlay?.cursor;
     const metrics = window.__tracerTestDouble?.rendererMetrics();
     if (!canvas || !metrics) throw new Error("renderer canvas or metrics are unavailable");
     const canvasContext = canvas.getContext("2d", { willReadFrequently: true });
@@ -359,7 +359,10 @@ test(`predicted glyph and cursor pixels match confirmed cells at DPR ${pixelTest
     return {
       canvas: toBox(canvas.getBoundingClientRect()),
       backing: { width: canvas.width, height: canvas.height },
-      cursor: cursor ? toBox(cursor.getBoundingClientRect()) : undefined,
+      cursor: drawnCursor ? (() => {
+        const canvasBox = canvas.getBoundingClientRect();
+        return { x: canvasBox.x + drawnCursor.x, y: canvasBox.y + drawnCursor.y, width: drawnCursor.width, height: drawnCursor.height };
+      })() : undefined,
       canvasPixel,
       cellWidth: metrics.cellWidth,
       cellHeight: metrics.cellHeight,
@@ -438,8 +441,8 @@ test(`predicted glyph and cursor pixels match confirmed cells at DPR ${pixelTest
   const beforeBackspace = Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0"));
   const backspaceExpected = stepBack(shortExpected.cursor, 1);
   await page.evaluate(() => window.__tracerTestDouble?.injectInput("\u007f"));
-  await expect.poll(() => page.locator(".terminal-text-overlay-cursor").evaluate((node) => getComputedStyle(node).visibility))
-    .toBe("visible");
+  await expect.poll(() => page.evaluate(() => Boolean(window.__tracerTestDouble?.predictiveEcho()?.overlay?.cursor)))
+    .toBe(true);
   const pendingBackspaceGeometry = await readGeometry();
   const pendingBackspaceBox = pendingBackspaceGeometry.cursor!;
   expect(pendingBackspaceBox.x).toBeCloseTo(pendingBackspaceGeometry.canvas.x + backspaceExpected.x * pendingBackspaceGeometry.cellWidth, 2);
@@ -553,8 +556,9 @@ test("predictive echo captures pending and confirmed glyphs across production vi
         path: pendingPath,
         contentType: "image/png",
       });
-      expect(await capturePage.locator(".terminal-text-overlay").evaluate((node) => getComputedStyle(node).opacity))
-        .toBe("0.68");
+      // The canvas draws predicted text at the theme's prediction alpha; the cursor stays opaque.
+      expect(await capturePage.locator(".terminal-text-overlay").evaluate((node) => getComputedStyle(node).visibility))
+        .toBe("visible");
 
       await expect.poll(async () => {
         const state = await (await context.request.get("/__mock/state")).json() as { echoed_text: string };

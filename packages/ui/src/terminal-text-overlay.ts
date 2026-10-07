@@ -1,4 +1,25 @@
-/** Positions one shared, text-only terminal overlay above a renderer canvas. */
+/**
+ * One shared canvas layer that draws speculative terminal glyphs and a cursor
+ * on top of the renderer's canvas.
+ *
+ * Why a canvas and not DOM/SVG text: the terminal renderer rasterises glyphs
+ * with `CanvasRenderingContext2D.fillText` on a device-pixel backing store.
+ * Text drawn any other way (SVG, DOM) antialiases differently and lands on
+ * different subpixels, so predicted text looked smeared next to real text.
+ * This layer copies the renderer's exact drawing path (same font string,
+ * baseline, cell x, backing size and device-pixel transform), so a predicted
+ * glyph is pixel-identical to the glyph the host echo later paints, apart
+ * from the overlay's opacity cue.
+ *
+ * Cost model (the overlay runs on every keystroke):
+ * - No layout reads per key. The canvas offset inside the host is read only
+ *   on `invalidate()` or when the renderer canvas changes size; both share the
+ *   host's scroll container, so scrolling needs no update.
+ * - Each draw clears only the rows touched by the previous draw and repaints
+ *   the pending run (bounded by the caller), so cost scales with pending
+ *   glyphs, not with the screen.
+ * - No DOM nodes are created per key.
+ */
 
 export interface TerminalTextOverlayPosition {
   canvas: HTMLCanvasElement;
@@ -15,6 +36,8 @@ export interface TerminalTextOverlayPosition {
   baseline: number;
   fontFamily: string;
   fontSize: number;
+  devicePixelRatio?: number | undefined;
+  foreground?: string | undefined;
   cursorStyle?: "block" | "underline" | "bar";
   cursorColor?: string;
 }
@@ -31,132 +54,152 @@ export interface TerminalTextOverlayCursor {
   y: number;
 }
 
-/** Reusable SVG text layer; callers own when text is safe to show. */
+/** What the overlay last drew, in CSS pixels relative to the renderer canvas (for tests and probes). */
+export interface TerminalTextOverlaySnapshot {
+  visible: boolean;
+  text: string;
+  glyphs: Array<{ text: string; x: number; y: number }>;
+  cursor: { x: number; y: number; width: number; height: number } | undefined;
+}
+
 export class TerminalTextOverlay {
-  private readonly svg: SVGSVGElement;
-  private readonly text: SVGTextElement;
-  private readonly cursor: SVGRectElement;
+  private readonly canvas: HTMLCanvasElement;
+  private readonly context: CanvasRenderingContext2D | null;
+  private offsetKey = "";
+  private drawnRows: [number, number] | undefined;
+  private shown = false;
+  private last: TerminalTextOverlaySnapshot = { visible: false, text: "", glyphs: [], cursor: undefined };
+  /** The one subtle cue that a glyph is still unconfirmed; the cursor stays fully opaque. */
+  private readonly textAlpha: number;
 
   constructor(private readonly host: HTMLElement) {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.classList.add("terminal-text-overlay");
-    svg.setAttribute("aria-hidden", "true");
-    svg.setAttribute("preserveAspectRatio", "none");
-    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    text.setAttribute("font-weight", "400");
-    text.setAttribute("fill", "currentColor");
-    const cursor = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    cursor.classList.add("terminal-text-overlay-cursor");
-    svg.append(text);
-    svg.append(cursor);
-    host.append(svg);
-    this.svg = svg;
-    this.text = text;
-    this.cursor = cursor;
+    const canvas = document.createElement("canvas");
+    canvas.className = "terminal-text-overlay";
+    canvas.setAttribute("aria-hidden", "true");
+    canvas.style.visibility = "hidden";
+    host.append(canvas);
+    this.canvas = canvas;
+    this.context = canvas.getContext("2d");
+    const alpha = Number.parseFloat(getComputedStyle(host).getPropertyValue("--terminal-prediction-opacity"));
+    this.textAlpha = Number.isFinite(alpha) && alpha > 0 && alpha <= 1 ? alpha : 0.72;
   }
 
-  /** Places text runs and the cursor on the renderer's cell grid without measuring glyphs here. */
-  show(content: string, position: TerminalTextOverlayPosition): boolean;
+  /** Forgets cached geometry; call after a resize, refit or font change. */
+  invalidate(): void {
+    this.offsetKey = "";
+  }
+
+  /** Draws pending glyphs and the cursor on the renderer's cell grid. Returns false when nothing may be shown. */
   show(
     glyphs: readonly TerminalTextOverlayGlyph[],
     cursor: TerminalTextOverlayCursor | undefined,
     position: TerminalTextOverlayPosition,
-  ): boolean;
-  show(
-    contentOrGlyphs: string | readonly TerminalTextOverlayGlyph[],
-    cursorOrPosition: TerminalTextOverlayCursor | TerminalTextOverlayPosition | undefined,
-    suppliedPosition?: TerminalTextOverlayPosition,
   ): boolean {
-    const legacyContent = typeof contentOrGlyphs === "string" ? contentOrGlyphs : undefined;
-    const glyphs = typeof contentOrGlyphs === "string" ? undefined : contentOrGlyphs;
-    const cursor = legacyContent === undefined ? cursorOrPosition as TerminalTextOverlayCursor | undefined : undefined;
-    const position = legacyContent === undefined
-      ? suppliedPosition
-      : cursorOrPosition as TerminalTextOverlayPosition | undefined;
-    if (!position) return false;
-    if ((!legacyContent && !glyphs?.length && !cursor) || !position.visible || position.alternate || position.viewportY !== 0
+    const context = this.context;
+    if (!context || (!glyphs.length && !cursor) || !position.visible || position.alternate || position.viewportY !== 0
       || position.x < 0 || position.x >= position.columns || position.y < 0 || position.y >= position.rows) {
       this.hide();
       return false;
     }
-
-    const hostRect = this.host.getBoundingClientRect();
-    const canvasRect = position.canvas.getBoundingClientRect();
-    if (canvasRect.width <= 0 || canvasRect.height <= 0) {
+    const source = position.canvas;
+    if (source.width <= 0 || source.height <= 0) {
       this.hide();
       return false;
     }
+    const dpr = position.devicePixelRatio ?? window.devicePixelRatio ?? 1;
+    this.syncGeometry(source, dpr);
 
-    this.svg.style.left = `${canvasRect.left - hostRect.left}px`;
-    this.svg.style.top = `${canvasRect.top - hostRect.top}px`;
-    this.svg.style.width = `${canvasRect.width}px`;
-    this.svg.style.height = `${canvasRect.height}px`;
-    this.svg.setAttribute("viewBox", `0 0 ${canvasRect.width} ${canvasRect.height}`);
-    this.svg.style.visibility = "visible";
-    this.text.setAttribute("font-family", position.fontFamily);
-    this.text.setAttribute("font-size", String(position.fontSize));
-    const cursorStyle = position.cursorStyle ?? "bar";
-    if (legacyContent === undefined) {
-      this.text.setAttribute("letter-spacing", `${position.cellWidth - (position.naturalCellWidth ?? position.cellWidth)}px`);
-    } else {
-      this.text.removeAttribute("letter-spacing");
+    const { cellWidth, cellHeight } = position;
+    // Clear only what the previous draw touched.
+    if (this.drawnRows) {
+      const [from, to] = this.drawnRows;
+      context.clearRect(0, from * cellHeight, source.width / dpr, (to - from + 1) * cellHeight);
     }
-    const firstGlyph = glyphs?.[0];
-    const textOrigin = firstGlyph ?? cursor ?? position;
-    this.text.setAttribute("x", String(textOrigin.x * position.cellWidth));
-    this.text.setAttribute("y", String(textOrigin.y * position.cellHeight + position.baseline));
-    this.text.replaceChildren();
-    if (legacyContent !== undefined) {
-      this.text.textContent = legacyContent;
-      this.cursor.style.visibility = "hidden";
-      return true;
+
+    let minRow = Number.POSITIVE_INFINITY;
+    let maxRow = Number.NEGATIVE_INFINITY;
+    const drawn: TerminalTextOverlaySnapshot["glyphs"] = [];
+    context.font = `${position.fontSize}px ${position.fontFamily}`;
+    context.textBaseline = "alphabetic";
+    context.textAlign = "left";
+    context.fillStyle = position.foreground ?? "currentColor";
+    context.globalAlpha = this.textAlpha;
+    for (const glyph of glyphs) {
+      // Every glyph is placed on its own cell, exactly like the renderer's grid, so runs never drift.
+      const x = glyph.x * cellWidth;
+      const y = glyph.y * cellHeight + position.baseline;
+      context.fillText(glyph.text, x, y);
+      drawn.push({ text: glyph.text, x, y: glyph.y * cellHeight });
+      if (glyph.y < minRow) minRow = glyph.y;
+      if (glyph.y > maxRow) maxRow = glyph.y;
     }
-    const runs: Array<{ x: number; y: number; cells: number; content: string }> = [];
-    for (const glyph of glyphs ?? []) {
-      const last = runs[runs.length - 1];
-      if (last && last.y === glyph.y && last.x + last.cells === glyph.x) {
-        last.content += glyph.text;
-        last.cells += glyph.cells;
-      } else {
-        runs.push({ x: glyph.x, y: glyph.y, cells: glyph.cells, content: glyph.text });
-      }
-    }
-    for (const run of runs) {
-      const tspan = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
-      tspan.setAttribute("x", String(run.x * position.cellWidth));
-      tspan.setAttribute("y", String(run.y * position.cellHeight + position.baseline));
-      tspan.textContent = run.content;
-      this.text.append(tspan);
-    }
+
+    context.globalAlpha = 1;
+    let cursorBox: TerminalTextOverlaySnapshot["cursor"];
     if (cursor) {
-      const x = cursor.x * position.cellWidth;
-      const y = cursor.y * position.cellHeight;
-      let width = position.cellWidth;
-      let height = position.cellHeight;
-      if (cursorStyle === "bar") width = Math.max(2, Math.floor(position.cellWidth * 0.15));
-      if (cursorStyle === "underline") height = Math.max(2, Math.floor(position.cellHeight * 0.15));
-      this.cursor.setAttribute("x", String(x));
-      this.cursor.setAttribute("y", String(cursorStyle === "underline" ? y + position.cellHeight - height : y));
-      this.cursor.setAttribute("width", String(width));
-      this.cursor.setAttribute("height", String(height));
-      this.cursor.setAttribute("fill", position.cursorColor ?? "currentColor");
-      this.cursor.style.visibility = "visible";
-    } else {
-      this.cursor.style.visibility = "hidden";
+      const style = position.cursorStyle ?? "bar";
+      const x = cursor.x * cellWidth;
+      const y = cursor.y * cellHeight;
+      let width = cellWidth;
+      let height = cellHeight;
+      // Same geometry as the renderer's renderCursor().
+      if (style === "bar") width = Math.max(2, Math.floor(cellWidth * 0.15));
+      if (style === "underline") height = Math.max(2, Math.floor(cellHeight * 0.15));
+      const top = style === "underline" ? y + cellHeight - height : y;
+      context.fillStyle = position.cursorColor ?? position.foreground ?? "currentColor";
+      context.fillRect(x, top, width, height);
+      cursorBox = { x, y: top, width, height };
+      if (cursor.y < minRow) minRow = cursor.y;
+      if (cursor.y > maxRow) maxRow = cursor.y;
     }
+
+    this.drawnRows = [minRow, maxRow];
+    if (!this.shown) {
+      this.canvas.style.visibility = "visible";
+      this.shown = true;
+    }
+    this.last = { visible: true, text: glyphs.map((glyph) => glyph.text).join(""), glyphs: drawn, cursor: cursorBox };
     return true;
   }
 
-  /** Removes speculative glyphs immediately when their input is invalidated. */
+  /** Removes speculative pixels immediately when their input is confirmed or invalidated. */
   hide(): void {
-    this.svg.style.visibility = "hidden";
-    this.text.replaceChildren();
-    this.cursor.style.visibility = "hidden";
+    if (this.context && this.drawnRows) {
+      this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+    this.drawnRows = undefined;
+    if (this.shown) {
+      this.canvas.style.visibility = "hidden";
+      this.shown = false;
+    }
+    this.last = { visible: false, text: "", glyphs: [], cursor: undefined };
+  }
+
+  /** What is currently drawn (CSS pixels relative to the renderer canvas). */
+  snapshot(): TerminalTextOverlaySnapshot {
+    return this.last;
   }
 
   dispose(): void {
     this.hide();
-    this.svg.remove();
+    this.canvas.remove();
+  }
+
+  /** Matches the renderer canvas's offset, CSS size and backing size; reads layout only when something changed. */
+  private syncGeometry(source: HTMLCanvasElement, dpr: number): void {
+    const key = `${source.width}x${source.height}@${dpr}`;
+    if (key === this.offsetKey) return;
+    this.offsetKey = key;
+    // Both canvases live in the same scroll container, so offsets (not client rects) stay valid while it scrolls.
+    this.canvas.style.left = `${source.offsetLeft}px`;
+    this.canvas.style.top = `${source.offsetTop}px`;
+    this.canvas.style.width = source.style.width || `${source.width / dpr}px`;
+    this.canvas.style.height = source.style.height || `${source.height / dpr}px`;
+    // Resizing a canvas clears it and resets its transform.
+    this.canvas.width = source.width;
+    this.canvas.height = source.height;
+    this.context?.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.drawnRows = undefined;
   }
 }
 

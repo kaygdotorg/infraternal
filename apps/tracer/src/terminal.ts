@@ -44,6 +44,8 @@ interface GhosttyActivityControls {
     renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
     renderCursor(x: number, y: number, line: unknown[] | null): void;
     naturalCellWidth?: number;
+    devicePixelRatio?: number;
+    theme?: { foreground?: string; cursor?: string };
     render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown, scrollbarOpacity?: number): void;
   };
 }
@@ -255,9 +257,6 @@ export class TerminalClient {
         getPosition: () => this.predictionPosition(),
         onVisible: (sequence, at) => config.hooks?.onTrace?.(sequence, "prediction", at),
         setHostCursorHidden: (hidden) => this.setPredictionCursorHidden(hidden),
-        onRendererPainted: () => {
-          if (this.predictionCursorHidden) this.setPredictionCursorHidden(false);
-        },
       })
       : undefined;
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
@@ -331,6 +330,8 @@ export class TerminalClient {
       pendingText: "",
       muted: false,
       mispredictions: 0,
+      fallbacks: {},
+      overlay: undefined,
       reason: "flag-off",
     };
   }
@@ -1148,43 +1149,46 @@ export class TerminalClient {
       baseline: metrics.baseline,
       fontFamily: this.terminal.options.fontFamily,
       fontSize: this.terminal.options.fontSize,
+      devicePixelRatio: this.ghostty.renderer?.devicePixelRatio,
+      foreground: this.ghostty.renderer?.theme?.foreground ?? (this.terminal.options.theme as ITheme | undefined)?.foreground,
       cursorStyle: this.terminal.options.cursorStyle,
-      cursorColor: (this.terminal.options.theme as ITheme | undefined)?.cursor ?? "#c8ceff",
+      cursorColor: this.ghostty.renderer?.theme?.cursor ?? (this.terminal.options.theme as ITheme | undefined)?.cursor ?? "#c8ceff",
     };
   }
 
-  /** Repaints only the cursor row so the speculative cursor can replace Ghostty's old one. */
+  /**
+   * Hides or restores the renderer's own cursor while a prediction is pending.
+   *
+   * There must be exactly one visible cursor: the predicted one. Repainting the
+   * row once is not enough, because Ghostty redraws its cursor on every render
+   * pass, so the renderer's renderCursor is wrapped once (installCursorGuard)
+   * and skips drawing while hidden. Toggling only repaints the single cursor row.
+   */
   private setPredictionCursorHidden(hidden: boolean): void {
-    if (hidden === this.predictionCursorHidden) {
-      if (!hidden) this.paintHostCursor();
-      return;
-    }
+    if (hidden === this.predictionCursorHidden) return;
+    this.installCursorGuard();
+    this.predictionCursorHidden = hidden;
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
     if (!renderer || !buffer) return;
     const cursor = buffer.getCursor();
     const line = this.cursorLine(cursor.y);
     if (!line) return;
-    if (hidden) {
-      renderer.renderLine(line, cursor.y, this.terminal.cols);
-    } else if (cursor.visible && this.terminal.viewportY === 0) {
-      renderer.renderCursor(cursor.x, cursor.y, line);
-    } else {
-      renderer.renderLine(line, cursor.y, this.terminal.cols);
-    }
-    this.predictionCursorHidden = hidden;
+    renderer.renderLine(line, cursor.y, this.terminal.cols);
+    if (!hidden && cursor.visible && this.terminal.viewportY === 0) renderer.renderCursor(cursor.x, cursor.y, line);
   }
 
-  /** Restores the actual renderer cursor after speculative pixels are removed. */
-  private paintHostCursor(): void {
+  private cursorGuardInstalled = false;
+
+  /** Wraps the pinned renderer's cursor draw once so a pending prediction suppresses it on every pass. */
+  private installCursorGuard(): void {
     const renderer = this.ghostty.renderer;
-    const buffer = this.terminal.wasmTerm;
-    if (!renderer || !buffer) return;
-    const cursor = buffer.getCursor();
-    const line = this.cursorLine(cursor.y);
-    if (!line) return;
-    if (cursor.visible && this.terminal.viewportY === 0) renderer.renderCursor(cursor.x, cursor.y, line);
-    else renderer.renderLine(line, cursor.y, this.terminal.cols);
+    if (this.cursorGuardInstalled || !renderer) return;
+    const draw = renderer.renderCursor.bind(renderer);
+    renderer.renderCursor = (x, y, line) => {
+      if (!this.predictionCursorHidden) draw(x, y, line);
+    };
+    this.cursorGuardInstalled = true;
   }
 
   /** Uses the same viewport slice the renderer uses for its cursor row. */

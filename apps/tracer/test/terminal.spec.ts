@@ -193,9 +193,9 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: 500 } });
   await inject("Z");
   await waitForPendingText("Z");
-  await expect.poll(() => page.locator(".terminal-text-overlay text").textContent()).toBe("Z");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.overlay?.text ?? "")).toBe("Z");
   const movedCursor = await page.evaluate(() => ({
-    x: Number(document.querySelector<SVGTextElement>(".terminal-text-overlay text")?.getAttribute("x")),
+    x: window.__tracerTestDouble?.predictiveEcho()?.overlay?.glyphs[0]?.x ?? Number.NaN,
     cellWidth: window.__tracerTestDouble?.rendererMetrics()?.cellWidth ?? 0,
     cursorX: window.__tracerTestDouble?.rendererMetrics()?.cursorX ?? 0,
   }));

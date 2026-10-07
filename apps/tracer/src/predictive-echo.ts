@@ -50,6 +50,10 @@ export interface PredictiveEchoState {
   muted: boolean;
   mispredictions: number;
   reason: string;
+  /** Printable inputs that were sent without a prediction, by reason (probe evidence for fallbacks). */
+  fallbacks: Record<string, number>;
+  /** What the overlay currently draws, relative to the renderer canvas. */
+  overlay: import("../../../packages/ui/src/terminal-text-overlay").TerminalTextOverlaySnapshot | undefined;
 }
 
 export interface PredictiveEchoOptions {
@@ -84,6 +88,8 @@ export class PredictiveEcho {
   private visibilityFrame = 0;
   private parserState: VtParserState = "text";
   private lastReason = "flag-off";
+  private readonly fallbacks: Record<string, number> = {};
+  private predictedLastInput = false;
 
   constructor(private readonly options: PredictiveEchoOptions) {
     if (!options.optedIn) return;
@@ -106,6 +112,8 @@ export class PredictiveEcho {
       muted: this.muted,
       mispredictions: this.mispredictions,
       reason: !this.options.optedIn ? "flag-off" : enabled ? "ready" : this.lastReason,
+      fallbacks: { ...this.fallbacks },
+      overlay: this.overlay?.snapshot(),
     };
   }
 
@@ -125,6 +133,14 @@ export class PredictiveEcho {
   /** Predicts bounded printable input and safe backspaces; paste and cursor moves await host output. */
   input(data: string, sequence: bigint, bytes: Uint8Array, terminalSafe: boolean): void {
     if (!this.options.optedIn) return;
+    this.predictedLastInput = false;
+    this.predictInput(data, sequence, bytes, terminalSafe);
+    if (!this.predictedLastInput && printableGraphemes(data) && bytes.byteLength <= MAX_PREDICTED_INPUT_BYTES) {
+      this.fallbacks[this.lastReason] = (this.fallbacks[this.lastReason] ?? 0) + 1;
+    }
+  }
+
+  private predictInput(data: string, sequence: bigint, bytes: Uint8Array, terminalSafe: boolean): void {
     if (!terminalSafe) {
       this.clearPending("unsafe-screen");
       this.waitingForOutput = true;
@@ -209,6 +225,7 @@ export class PredictiveEcho {
     }
     const newGlyphs = layout.pendingGlyphs.slice(this.pending.length);
     this.pending.push(...newGlyphs);
+    this.predictedLastInput = true;
     this.lastReason = "ready";
     this.armTimeout();
     // Commit the bounded local glyph before sending its bytes; otherwise a loaded
@@ -284,6 +301,7 @@ export class PredictiveEcho {
 
   /** Drops stale overlay geometry while retaining waits caused by unconfirmed input. */
   layoutChanged(): void {
+    this.overlay?.invalidate();
     if (this.pending.length > 0 || this.pendingBackspaces > 0) {
       this.waitingForOutput = true;
       this.lastReason = "layout-change";

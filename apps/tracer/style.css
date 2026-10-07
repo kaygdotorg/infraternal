@@ -220,7 +220,7 @@ button { color: inherit; }
 
 /* Core terminal shell: one padded pane card keeps the renderer ready for later splits. */
 .terminal-screen {
-  --terminal-prediction-opacity: 0.68;
+  --terminal-prediction-opacity: 0.74;
   --font-mono: "Geist Mono", ui-monospace, monospace;
   --r-sm: 8px;
   --r-md: 12px;
