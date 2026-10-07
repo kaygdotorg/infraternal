@@ -12,6 +12,10 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+#[path = "remote_authority.rs"]
+pub(crate) mod authority;
+pub use authority::HostAuthority;
+
 /// A host's immutable execution mode, bound into its invitation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
