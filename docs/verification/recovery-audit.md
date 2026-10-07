@@ -68,6 +68,14 @@ Failing tests preceded fixes:
 - `startup-read-red.log` / `startup-read-green.log`: failure of an unnecessary
   second identity read blocked startup; the terminal now mounts from the first
   authenticated snapshot. Two production checks pass, with one read.
+- `migration-embedding-red.log` / `migration-embedding-green.log`: a warm build
+  applied 9 migrations when 10 SQL files were present. Directory tracking in the
+  server build script rebuilds the embedded migrator; adding another SQL file
+  without changing Rust then applies 11/11 (`migration-embedding-warm-green.log`).
+  The probe uses real `Auth::new` and SQLite, and is retained as
+  `migration-probe.rs`. The stale-cache archive pass is explicitly invalidated in
+  `atomic-gates/invalidated.json`; pre-fix snapshots refresh the macro input when
+  their migration inventory changes.
 
 The production recovery subset passes checksum/errors, immediate and delayed
 original-DEK rewrap, failed finish retry, reload, persistent cancellation notice,
