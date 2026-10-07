@@ -831,3 +831,29 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      in Firefox on Linux, near Essen, Germany?"). One tap, nothing to
      compare. QR codes expire after 60 seconds. This is the minimum that
      stops QR-login phishing.
+154. **Users, groups and permissions (round G, kept simple):**
+     - **Groups (G2):** groups created in infraternal are free; groups
+       synced from an identity provider (groups claim or SCIM) are paid,
+       read-only and mapped to roles in the UI; both mix.
+     - **Grants (G3):** **who × role × hosts**, where hosts are host tags or
+       all hosts. Access is the union of grants; there are no deny rules.
+       Actions are declared by plugins.
+     - **Roles (G4):** Owner, Admin, Operator, Viewer plus custom roles. The
+       session owner can always see and end their own session.
+       **Simplicity of the permission system is a requirement.**
+     - **Identity-provider mapping (G5):** `infraternal-admins` → Admin and
+       `infraternal-users` → Operator on all hosts, editable. The first
+       OIDC sign-in never becomes owner.
+     - **Group keys (G6):** follow D151; losing access rotates the group key
+       and re-encrypts shared secrets automatically; rotating the real SSH
+       keys on hosts is offered, not forced.
+     - **Removal (G7):** access is rechecked at least every 5 minutes plus
+       back-channel logout; removal cuts all sessions and live terminal
+       connections at once and discards that user's device keys; SCIM
+       removal is immediate (paid).
+     - **Local users (G8):** local accounts by invite link (24 h expiry,
+       passkey registration). **Local users can be turned off entirely**
+       (OIDC-only deployments).
+     - **Audit (G9):** grant changes, sign-ins, device approvals, host
+       changes, session open and end, and shared-credential use are logged
+       and visible in the UI (90 days default, D147).
