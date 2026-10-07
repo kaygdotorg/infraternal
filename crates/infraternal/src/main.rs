@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 mod install;
+mod ssh_askpass;
 
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
@@ -27,6 +28,9 @@ enum Command {
         #[arg(long)]
         state: Option<std::path::PathBuf>,
     },
+    /// Internal OpenSSH prompt responder; stdout is the private credential pipe.
+    #[command(name = "__ssh-askpass", hide = true)]
+    SshAskpass,
     /// Internal session owner; not a public CLI interface.
     #[command(name = "__shim", hide = true)]
     Shim {
@@ -166,6 +170,7 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::SshAskpass => ssh_askpass::run(),
         Command::Shim {
             session,
             uid,
