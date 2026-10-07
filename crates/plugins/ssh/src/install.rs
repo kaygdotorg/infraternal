@@ -224,7 +224,13 @@ mkdir -p "$base/bin" "$(dirname "$launcher")" "$(dirname "$unit")"
 # Rename the old live binary/state into the transaction, not into a disposable
 # upload file. This makes failures after a service stop explicitly reversible.
 : > "$stage/activating"
-$manager stop infraternal-agent.service >/dev/null 2>&1 || :
+# Replacing a running daemon requires an acknowledged stop; otherwise its old
+# authenticated connection could conceal a failed upgrade.
+if [ -f "$stage/was-active" ]; then
+    $manager stop infraternal-agent.service >/dev/null 2>&1
+else
+    $manager stop infraternal-agent.service >/dev/null 2>&1 || :
+fi
 if [ -e "$base/bin/live" ]; then : > "$stage/had-binary"; mv "$base/bin/live" "$stage/previous-binary"; fi
 : > "$stage/replacing-binary"
 mv "$stage/payload" "$base/bin/live"
