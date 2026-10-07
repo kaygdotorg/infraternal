@@ -124,6 +124,7 @@ user kayg, without sudo or inbound host listeners [137]. Remove test
 installations afterward. Retain machine/load, sample counts, reconnect
 p50/p99, exact byte checks, renewal CPU/RSS/bytes and idle scheduler counts.
 Exercise connection loss, process/server restart, 300 ms RTT, renewal during
-50 MiB output and mid-session revocation. Scale toward 500 sessions with
-five viewers [124]; report per-unit memory multiplied by that count.
+50 MiB output and mid-session revocation. Use the owner-selected D170 design point: 1,000 nodes, 200 terminals and
+50 users, with 10,000-node headroom. Report per-unit memory multiplied by
+the expected count; retained transport pairs are not whole-daemon memory.
 Local primitive measurements are diagnostic, not pinned performance gates.
