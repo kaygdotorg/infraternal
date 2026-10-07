@@ -62,7 +62,7 @@ button { color: inherit; }
   padding: 0 12px;
   font-size: 16px;
 }
-.access input:focus { border-color: #a9b5ff; }
+.access input:focus { border-color: color-mix(in oklab, currentColor 32%, transparent); }
 .access button {
   min-height: 46px;
   border-radius: 9px;
@@ -117,7 +117,7 @@ button { color: inherit; }
   scrollbar-width: none;
 }
 .terminal-host::-webkit-scrollbar { display: none; }
-.terminal-host:focus-visible { outline: 2px solid var(--accent, #7a9cff); outline-offset: -3px; }
+[data-focus-ring="on"] .terminal-host:focus-visible { outline: 2px solid var(--accent, #7a9cff); outline-offset: -3px; }
 .connection-status {
   position: absolute;
   z-index: 3;
@@ -342,7 +342,7 @@ button { color: inherit; }
   color: var(--fg-2); text-align: left; cursor: default; transition: transform 140ms var(--ease-out);
 }
 .bm-head:active:not(:disabled), .bm-leaf:active:not(:disabled) { transform: scale(0.98); }
-.bm-head:focus-visible, .bm-leaf:focus-visible, .result:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+[data-focus-ring="on"] :is(.bm-head, .bm-leaf, .result):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .bm-head:disabled { opacity: 0.8; }
 .bm-sec.is-current > .bm-head { color: var(--fg); }
 .bm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
@@ -403,7 +403,7 @@ button { color: inherit; }
   mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 22px), transparent);
 }
 .keytray::-webkit-scrollbar { display: none; }
-.keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+[data-focus-ring="on"] .keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .keybar button { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out), background-color 140ms var(--ease-out), color 140ms var(--ease-out); }
 .keybar button svg { width: 24px; height: 24px; stroke-width: 1.75; }
 .keybar .key-word { font: 600 15px/1 var(--font-ui); letter-spacing: 0.01em; }

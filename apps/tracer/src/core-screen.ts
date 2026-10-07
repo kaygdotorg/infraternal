@@ -56,7 +56,7 @@ const SCREEN = `
     <div class="backdrop" aria-hidden="true"></div>
     <div class="panes" id="panes">
       <section class="pane-card" aria-label="Current terminal pane">
-        <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal" tabindex="0"></div>
+        <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal" tabindex="0" data-captures-keys></div>
       </section>
     </div>
     <header class="top" aria-label="Terminal controls">
