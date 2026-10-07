@@ -606,3 +606,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - order: predictive local echo first (client-only), then the WebRTC
        direct path, then a KCP vs QUIC benchmark on India↔Germany, after the
        remote-agent transport (D114).
+129. **Key tray modifiers on touch:**
+     - Tapping any key-tray key (ctrl, option/alt, esc, tab, arrows) never
+       dismisses the iOS keyboard; focus stays in the terminal.
+     - A single tap of a modifier arms it for the next key only (one-shot).
+     - A **double tap locks it (sticky)**: every following key gets the
+       modifier (double-tap ctrl, then tap c c c → ctrl-c, ctrl-c, ctrl-c)
+       until the modifier is tapped again to release it.
+     - The armed and locked states are visually distinct and subtle, with an
+       accessible state and a warm tooltip ("Control, locked").
