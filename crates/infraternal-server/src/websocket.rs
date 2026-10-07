@@ -171,7 +171,7 @@ async fn upgrade(
 }
 
 /// The auth route's cookie parser is intentionally private; this socket uses the same strict cookie shape.
-fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<&str> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     let mut values = cookies
         .split(';')
