@@ -1,0 +1,228 @@
+/** Canvas window styling for the mock-only add-host flow; all type inherits the UI mono face. */
+.terminal-screen.has-addhost-prototype .panes[data-window-canvas] {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  overflow: auto;
+  gap: 14px;
+}
+.terminal-screen.has-addhost-prototype .panes > .pane-card[aria-hidden="true"] { display: none; }
+.addhost-window-group { display: flex; width: 100%; min-width: 0; height: 100%; align-items: stretch; justify-content: center; }
+.addhost-window-group { flex: 0 0 min(940px, 100%); scroll-snap-align: center; }
+.addhost-window {
+  display: flex;
+  width: 100%;
+  max-width: 940px;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  font-family: var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  transform-origin: center top;
+  will-change: transform, opacity;
+}
+.addhost-window-header { top: 12px; right: 14px; left: 14px; align-items: center; }
+.addhost-window-title { min-width: 0; overflow-wrap: anywhere; font-size: 14px; font-weight: 550; }
+.addhost-window-header .window-header-actions { opacity: 1; }
+.addhost-window-header .window-header-action { --ui-icon-button-size: 46px; }
+.addhost-window-body {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 70px clamp(16px, 3vw, 34px) 12px;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+.addhost-content { width: min(100%, 720px); margin: 0 auto; }
+.addhost-heading { display: grid; gap: 8px; margin: 0 0 18px; }
+.addhost-heading h1, .addhost-heading h2 { margin: 0; color: var(--fg); font-size: clamp(22px, 3vw, 27px); font-weight: 600; line-height: 1.18; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.addhost-heading p { margin: 0; color: var(--fg-2); font-size: 15px; line-height: 1.5; }
+.addhost-tabs { position: relative; margin: 0 0 16px; }
+.addhost-tabs [role="tab"] {
+  position: relative;
+  z-index: 1;
+  min-width: 112px;
+  min-height: 46px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-2);
+  font: 500 14px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  cursor: pointer;
+}
+.addhost-tabs [role="tab"][aria-selected="true"] { color: var(--fg); }
+.addhost-field { display: grid; gap: 7px; }
+.addhost-field label, .addhost-label { color: var(--fg-2); font-size: 14px; font-weight: 500; line-height: 1.4; }
+.addhost-field input, .addhost-field textarea {
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 12px;
+  border: 1px solid var(--overlay-line);
+  border-radius: 10px;
+  outline: none;
+  background: color-mix(in oklab, var(--bg) 82%, var(--overlay));
+  color: var(--fg);
+  font: 450 16px/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+}
+.addhost-field textarea { min-height: 96px; resize: vertical; }
+.addhost-field input:focus, .addhost-field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 26%, transparent); }
+.addhost-field input::placeholder { color: var(--fg-3); opacity: 1; }
+.addhost-note { margin: 8px 0 0; color: var(--fg-2); font-size: 13px; line-height: 1.5; }
+.addhost-host-list { display: grid; gap: 4px; margin: 14px 0 0; padding: 0; list-style: none; }
+.addhost-list-empty { padding: 14px 8px; color: var(--fg-2); font-size: 14px; line-height: 1.45; }
+.addhost-host-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  align-items: center;
+  gap: 2px 10px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  transition: border-color 160ms ease-out, background 160ms ease-out;
+}
+.addhost-host-row:has(input:checked) { border-color: color-mix(in oklab, var(--accent) 54%, var(--overlay-line)); background: color-mix(in oklab, var(--accent) 8%, transparent); }
+.addhost-host-row[data-unavailable="true"] { opacity: .88; }
+.addhost-host-select {
+  display: grid;
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  grid-template-columns: 34px minmax(0, 1fr);
+  min-height: 54px;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.addhost-host-select input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; opacity: 0; }
+.addhost-host-select:focus-within .tick { outline: 2px solid var(--accent); outline-offset: 2px; }
+.addhost-host-select .tick { width: 20px; height: 20px; margin-inline: auto; color: var(--bg); }
+.addhost-host-select .tick-fill { background: var(--accent); }
+.addhost-host-select .tick path { stroke: var(--bg); }
+.addhost-host-copy { display: grid; min-width: 0; gap: 4px; }
+.addhost-host-name { color: var(--fg); font-size: 16px; font-weight: 560; line-height: 1.35; overflow-wrap: anywhere; }
+.addhost-host-system { color: var(--fg-2); font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
+.addhost-host-sources { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.addhost-source-chip { display: inline-flex; min-height: 22px; align-items: center; gap: 4px; color: var(--fg-2); font-size: 13px; line-height: 1.35; }
+.addhost-source-chip .ui-source-icon { color: var(--fg-2); }
+.addhost-source-chip[data-source="already-added"] { color: var(--fg); }
+.addhost-host-status { grid-column: 2; grid-row: 1; justify-self: end; color: var(--fg-2); font-size: 13px; line-height: 1.4; text-align: right; overflow-wrap: anywhere; }
+.addhost-host-status[data-status="ready"] { color: var(--ok); }
+.addhost-host-status[data-status="mesh-policy"] { color: var(--warn, #d8a85f); }
+.addhost-ip-action {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 64px;
+  min-height: 46px;
+  justify-self: end;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--accent);
+  font: 500 13px/1.3 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  text-align: right;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.addhost-ip-action:focus-visible, .addhost-footer button:focus-visible, .addhost-host-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.addhost-ip-action[data-revealed="true"] { color: var(--fg-2); }
+.addhost-ip-value { display: inline-block; animation: addhost-ip-reveal 220ms cubic-bezier(.23, 1, .32, 1) both; }
+@keyframes addhost-ip-reveal { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+.addhost-options { margin-top: 12px; border-top: 1px solid var(--overlay-line); }
+.addhost-options-toggle { display: flex; width: 100%; min-height: 46px; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; color: var(--fg); font: 520 14px/1.3 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: left; cursor: pointer; }
+.addhost-options-toggle::before { width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; transform: rotate(-45deg); transition: transform 160ms ease-out; }
+.addhost-options-toggle[aria-expanded="true"]::before { transform: rotate(45deg); }
+.addhost-toggle-row { display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; color: var(--fg); font-size: 14px; line-height: 1.4; }
+.addhost-toggle-row label { display: grid; gap: 3px; }
+.addhost-toggle-row small { color: var(--fg-2); font-size: 13px; line-height: 1.4; }
+.addhost-toggle-row .ui-switch { margin-inline-end: -2px; }
+.addhost-footer {
+  display: flex;
+  min-height: 66px;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px clamp(16px, 3vw, 34px) max(8px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--overlay-line);
+  background: color-mix(in oklab, var(--bg) 80%, transparent);
+}
+.addhost-footer button { min-width: 112px; min-height: 46px; padding: 0 14px; border: 1px solid var(--overlay-line); border-radius: 9px; background: transparent; color: var(--fg); font: 550 14px/1.3 var(--font-ui, "Geist Mono", ui-monospace, monospace); cursor: pointer; }
+.addhost-footer .addhost-primary { border-color: var(--accent); background: var(--accent); color: var(--bg); font-weight: 600; }
+.addhost-footer .addhost-primary:disabled { opacity: .45; cursor: default; }
+.addhost-footer .addhost-secondary { color: var(--fg-2); }
+.addhost-empty-state { display: grid; min-height: 100%; align-content: center; justify-items: start; gap: 16px; padding: 12px 0 34px; }
+.addhost-empty-state p { max-width: 34rem; margin: 0; color: var(--fg-2); font-size: 15px; line-height: 1.5; }
+.addhost-empty-state button { min-height: 48px; padding: 0 16px; border: 1px solid var(--accent); border-radius: 9px; background: var(--accent); color: var(--bg); font: 600 15px/1.3 var(--font-ui, "Geist Mono", ui-monospace, monospace); cursor: pointer; }
+.addhost-error { display: grid; gap: 12px; margin-top: 18px; padding: 16px; border: 1px solid var(--overlay-line); border-radius: 12px; background: color-mix(in oklab, var(--overlay) 46%, transparent); }
+.addhost-error p { margin: 0; color: var(--fg-2); font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
+.addhost-error details { border-top: 1px solid var(--overlay-line); }
+.addhost-error summary { display: flex; min-height: 46px; align-items: center; gap: 8px; color: var(--fg); font-size: 13px; cursor: pointer; list-style: none; }
+.addhost-error summary::-webkit-details-marker { display: none; }
+.addhost-error summary::before { width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; transform: rotate(-45deg); transition: transform 160ms ease-out; }
+.addhost-error details[open] summary::before { transform: rotate(45deg); }
+.addhost-error pre { margin: 0 0 4px; color: var(--fg-2); font: 450 14px/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.addhost-access-card, .addhost-consent-card, .addhost-progress-card { display: grid; gap: 14px; padding: 14px; border: 1px solid var(--overlay-line); border-radius: 12px; background: color-mix(in oklab, var(--overlay) 44%, transparent); }
+.addhost-access-host, .addhost-consent-host { display: grid; gap: 4px; }
+.addhost-access-host strong, .addhost-consent-host strong { color: var(--fg); font-size: 16px; font-weight: 560; line-height: 1.35; overflow-wrap: anywhere; }
+.addhost-access-host span, .addhost-consent-host span { color: var(--fg-2); font-size: 14px; line-height: 1.45; }
+.addhost-identity { display: grid; gap: 10px; padding-top: 4px; }
+.addhost-identity-option { display: flex; min-height: 46px; align-items: center; gap: 8px; color: var(--fg); font-size: 14px; line-height: 1.4; }
+.addhost-identity-option input { width: 20px; height: 20px; flex: none; accent-color: var(--accent); }
+.addhost-consent-copy { margin: 0; color: var(--fg-2); font-size: 15px; line-height: 1.55; }
+.addhost-consent-copy strong { color: var(--fg); font-weight: 600; }
+.addhost-consent-label { display: flex; min-height: 48px; align-items: center; gap: 10px; color: var(--fg); font-size: 14px; line-height: 1.45; }
+.addhost-consent-label input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); opacity: 0; }
+.addhost-consent-label:focus-within .tick { outline: 2px solid var(--accent); outline-offset: 2px; }
+.addhost-consent-label .tick { width: 20px; height: 20px; flex: none; color: var(--bg); }
+.addhost-consent-label .tick-fill { background: var(--accent); }
+.addhost-consent-label .tick path { stroke: var(--bg); }
+.addhost-progress-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.addhost-progress-host { display: grid; gap: 9px; padding: 12px; border: 1px solid var(--overlay-line); border-radius: 11px; }
+.addhost-progress-host h2 { margin: 0; color: var(--fg); font-size: 16px; font-weight: 560; line-height: 1.35; overflow-wrap: anywhere; }
+.addhost-progress-steps { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.addhost-progress-step { display: flex; min-height: 30px; align-items: center; gap: 9px; color: var(--fg-2); font-size: 14px; line-height: 1.4; }
+.addhost-progress-step .tick { width: 20px; height: 20px; color: var(--bg); }
+.addhost-progress-step .tick-fill { background: var(--ok); }
+.addhost-progress-step .tick path { stroke: var(--bg); }
+.addhost-spinner { width: 15px; height: 15px; flex: none; border: 1.5px solid color-mix(in oklab, var(--accent) 32%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: addhost-spin 720ms linear infinite; }
+@keyframes addhost-spin { to { transform: rotate(1turn); } }
+.addhost-ready-line { display: flex; min-height: 44px; align-items: center; gap: 8px; color: var(--ok); font-size: 14px; font-weight: 550; line-height: 1.4; }
+.addhost-terminal-output { min-height: 230px; margin: 14px 0 0; padding: 16px; overflow: auto; border: 1px solid var(--overlay-line); border-radius: 10px; background: color-mix(in oklab, var(--bg) 88%, transparent); color: var(--fg); font: 450 15px/1.65 var(--font-ui, "Geist Mono", ui-monospace, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.addhost-root-available { min-height: 46px; padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: var(--overlay); color: var(--fg); font: 500 13px/1.3 var(--font-ui, "Geist Mono", ui-monospace, monospace); cursor: pointer; pointer-events: auto; }
+.addhost-result-group { flex: 0 0 min(76vw, 920px); }
+.addhost-result-window .window-pill-host { font-size: 14px; }
+.addhost-terminal-system { max-width: 260px; color: var(--fg-2); font: 450 13px/1.35 var(--font-ui, "Geist Mono", ui-monospace, monospace); overflow-wrap: anywhere; }
+.addhost-result-window .window-fake-terminal { font-size: 15px; }
+.addhost-result-window .window-fake-output { white-space: pre-wrap; overflow-wrap: anywhere; }
+.addhost-window[data-kind="terminal"] .addhost-window-body { padding-top: 72px; }
+.addhost-window[data-kind="terminal"] .addhost-content { max-width: 840px; }
+.addhost-policy-evidence { margin: 0; color: var(--fg-2); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.addhost-policy-note { margin: 0; color: var(--fg-2); font-size: 14px; line-height: 1.5; }
+@media (max-width: 600px) {
+  .terminal-screen.has-addhost-prototype .panes[data-window-canvas] { gap: 0; }
+  .addhost-window { max-width: none; border-radius: 15px; }
+  .addhost-window-group { width: 100%; }
+  .addhost-window-body { padding: 68px 14px 10px; }
+  .addhost-window-header { top: 8px; right: 8px; left: 8px; }
+  .addhost-window-header .window-host-pill { max-width: calc(100% - 54px); }
+  .addhost-host-row { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 7px 6px; }
+  .addhost-host-select { grid-column: 1; grid-row: 1; grid-template-columns: 32px minmax(0, 1fr); min-height: 54px; }
+  .addhost-host-status { grid-column: 1; grid-row: 2; justify-self: start; padding: 2px 0 2px 40px; text-align: left; }
+  .addhost-ip-action { grid-column: 1; grid-row: 3; justify-self: start; margin-left: 40px; padding-left: 0; text-align: left; }
+  .addhost-result-group { flex-basis: calc(100vw - 24px); }
+  .addhost-footer { min-height: 64px; padding-inline: 14px; }
+  .addhost-footer button { min-width: 104px; }
+  .addhost-heading h1, .addhost-heading h2 { font-size: 23px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .addhost-host-row, .addhost-options-toggle, .addhost-error summary { transition: none; }
+  .addhost-ip-value { animation: none; }
+  .addhost-spinner { animation: none; border-top-color: var(--accent); }
+  .addhost-window { will-change: auto; }
+}

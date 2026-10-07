@@ -12,6 +12,7 @@ export interface CoreScreenOptions {
   mockMode: boolean;
   probeMode: boolean;
   windowsPrototype?: boolean;
+  addHostPrototype?: boolean;
 }
 
 export interface CoreScreenTab {
@@ -249,6 +250,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ...(options.windowsPrototype ? [
       { group: "Actions", glyph: "↟", label: "Simulate root promotion", hint: "mock mode only", action: "proto:promotion" },
     ] : []),
+    ...(options.addHostPrototype ? [
+      { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
+    ] : []),
   ];
   let visibleEntries: PaletteEntry[] = [];
   let selected = 0;
@@ -441,7 +445,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       applyLook(source === "keyboard");
     } else if (kind === "session" || kind === "host") {
       terminalHost.focus({ preventScroll: true });
-    } else if (kind === "proto" && options.windowsPrototype) {
+    } else if (kind === "proto" && (options.windowsPrototype || options.addHostPrototype)) {
       window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action, source } }));
     }
   }

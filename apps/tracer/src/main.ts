@@ -34,7 +34,7 @@ declare global {
 const app = document.querySelector<HTMLElement>("#app") ?? missingMount();
 type UiFont = "sans" | "mono";
 
-const uiFont = uiFontPreference();
+const uiFont = new URLSearchParams(location.search).get("proto") === "addhost" ? "mono" : uiFontPreference();
 document.documentElement.dataset.uiFont = uiFont;
 
 let activeUserId: string | undefined;
@@ -42,6 +42,7 @@ let checkingResume = false;
 let currentTerminal: TerminalClient | undefined;
 let coreScreen: import("./core-screen").CoreScreen | undefined;
 let windowsPrototype: { dispose(): void } | undefined;
+let addHostPrototype: { dispose(): void } | undefined;
 let performanceProbe: PerformanceProbe | undefined;
 let backdrop: FaultyTerminal | undefined;
 let welcomeEffect: ReturnType<typeof glitchText> | undefined;
@@ -211,6 +212,8 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   stopBackdrop(instant);
   windowsPrototype?.dispose();
   windowsPrototype = undefined;
+  addHostPrototype?.dispose();
+  addHostPrototype = undefined;
   currentTerminal?.dispose();
   coreScreen?.dispose();
   performanceProbe?.dispose();
@@ -220,6 +223,7 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   const query = new URLSearchParams(location.search);
   const mockMode = query.get("mock") === "1";
   const windowsMode = mockMode && query.get("proto") === "windows";
+  const addHostMode = mockMode && query.get("proto") === "addhost";
   const probeMode = query.get("probe") === "1";
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
@@ -230,14 +234,20 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
     await document.fonts.load(uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"');
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
-    screen = mountCoreScreen(app, { hostName, mockMode, probeMode, windowsPrototype: windowsMode });
+    screen = mountCoreScreen(app, { hostName, mockMode, probeMode, windowsPrototype: windowsMode, addHostPrototype: addHostMode });
     if (windowsMode) {
       const { mountWindowsPrototype } = await import("./windows-prototype");
       windowsPrototype = await mountWindowsPrototype(screen);
     }
+    if (addHostMode) {
+      const { mountAddHostPrototype } = await import("./add-host-prototype");
+      addHostPrototype = await mountAddHostPrototype(screen);
+    }
   } catch (error: unknown) {
     windowsPrototype?.dispose();
     windowsPrototype = undefined;
+    addHostPrototype?.dispose();
+    addHostPrototype = undefined;
     screen?.dispose();
     renderUnavailable(safeMessage(error));
     return;
@@ -342,6 +352,8 @@ async function checkForegroundSession(): Promise<void> {
       performanceProbe = undefined;
       windowsPrototype?.dispose();
       windowsPrototype = undefined;
+      addHostPrototype?.dispose();
+      addHostPrototype = undefined;
       coreScreen?.dispose();
       coreScreen = undefined;
       delete window.__tracerTestDouble;
