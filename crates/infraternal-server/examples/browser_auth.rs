@@ -47,6 +47,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     output.flush()?;
     for line in io::stdin().lock().lines() {
         let message: Value = serde_json::from_str(&line?)?;
+        if message["path"] == "/__test/recovery-elapse" {
+            // IPC-only fixture control: no production route or clock bypass exists.
+            sqlx::query("UPDATE recovery SET ready=0")
+                .execute(&pool)
+                .await?;
+            writeln!(
+                output,
+                "{}",
+                json!({"status":200,"headers":[],"body":{"ok":true}})
+            )?;
+            output.flush()?;
+            continue;
+        }
         let mut request = Request::builder()
             .method("POST")
             .uri(message["path"].as_str().ok_or("missing path")?)
