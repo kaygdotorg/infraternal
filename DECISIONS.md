@@ -733,3 +733,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      owner, with our inner renderer per `docs/design/toast.md`. The build
      tooling (Vite or Bun plugin, and SvelteKit or plain Svelte) is settled
      before the migration starts.
+143. **Svelte tooling is chosen by measurement (F2):** plain Svelte 5 as a
+     static single-page app served by the Rust server; no SvelteKit, since
+     its server rendering is unused. The bundler (Vite with
+     `@sveltejs/vite-plugin-svelte`, or Bun with a Svelte plugin) is the
+     one that measures best on the owner's criterion, **best performance
+     and lowest latency**: first paint and FCP on a throttled phone at
+     high RTT, bundle bytes (raw and gzip), lazy-chunk splitting for the
+     terminal, the latency probe and idle work. Both are prototyped on the
+     same screens and the numbers decide; no default favourite.
