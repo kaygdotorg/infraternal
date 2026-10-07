@@ -64,18 +64,28 @@ struct Open {
     rows: u16,
 }
 
-async fn writer(socket: &impl Channel, mut messages: mpsc::Receiver<Message>) -> io::Result<()> {
+async fn writer(
+    socket: &impl Channel,
+    mut messages: mpsc::Receiver<Message>,
+    greeting: bool,
+) -> io::Result<()> {
     let mut tx = Transmit::default();
-    tx.send(
-        socket,
-        0,
-        &Frame::Hello {
-            version: 1,
-            caps: 0,
-            client_info: "infraternal agent",
-        },
-    )
-    .await?;
+    if greeting {
+        tx.send(
+            socket,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: if socket.native_stream_id().is_some() {
+                    crate::remote_quic::REMOTE_WRITER_BINDING
+                } else {
+                    0
+                },
+                client_info: "infraternal agent",
+            },
+        )
+        .await?;
+    }
     while let Some(message) = messages.recv().await {
         match message {
             Message::Shim(stream, frame) => {
@@ -163,7 +173,9 @@ pub async fn run_authenticated(
     state: Option<PathBuf>,
     execution_uid: u32,
 ) -> io::Result<()> {
-    if execution_uid != nix::unistd::Uid::effective().as_raw() {
+    if channel.native_stream_id().is_some_and(|writer| writer != 0)
+        || execution_uid != nix::unistd::Uid::effective().as_raw()
+    {
         return Err(sessions::invalid(
             "enrolled uid differs from infraternal agent uid",
         ));
@@ -204,7 +216,7 @@ async fn run_channel(
             // authenticated peer. Established idle channels have no timer.
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 let hello = receive.next(socket).await?;
-                if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
+                if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, caps, .. } if socket.native_stream_id().is_none() || caps & crate::remote_quic::REMOTE_WRITER_BINDING != 0) {
                     return Err(sessions::invalid("remote control Hello required"));
                 }
                 Ok(())
@@ -302,7 +314,70 @@ async fn run_channel(
             }
         }
     };
-    tokio::select! { result = dispatch => result, result = writer(socket, rx) => result }
+    tokio::select! { result = dispatch => result, result = writer(socket, rx, true) => result }
+}
+
+/// Run one authenticated, capability-bound native terminal using the common shim relay.
+/// The connection supervisor must cancel this future when server authority is lost;
+/// this function never opens a PTY, accepts a Call or creates its own writer identity.
+/// # Errors
+/// Refuses missing/reserved binding, a missing bounded `AttachTerm`, unknown shim,
+/// malformed post-attachment traffic and overload. Returning never stops the shim.
+#[allow(clippy::too_many_lines)]
+pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) -> io::Result<()> {
+    let writer_id = channel
+        .native_stream_id()
+        .filter(|id| *id != 0 && id & 1 == 0)
+        .ok_or_else(|| sessions::invalid("native terminal writer binding required"))?;
+    let _retire = RetireChannel(channel);
+    let state = sessions::state(state)?;
+    let mut receive = Receive::default();
+    let (id, cursor, input) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let first = receive.next(channel).await?;
+        match first.frame {
+            Frame::AttachTerm {
+                session_id,
+                last_out_seq,
+                last_in_seq,
+            } => Ok((*session_id, last_out_seq, last_in_seq)),
+            _ => Err(sessions::invalid("native terminal AttachTerm required")),
+        }
+    })
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    let path = state
+        .join("sessions")
+        .join(format!("{}.sock", uuid::Uuid::from_bytes(id).simple()));
+    let (tx, rx) = mpsc::channel(8);
+    let (commands, command_rx) = mpsc::channel(8);
+    let dispatch = async {
+        loop {
+            let decoded = receive.next(channel).await?;
+            let command = match decoded.frame {
+                Frame::Input { in_seq, bytes } => Command::Input(in_seq, bytes.to_vec()),
+                Frame::Credit { bytes } => Command::Credit(bytes),
+                Frame::Resize {
+                    cols,
+                    rows,
+                    px_w,
+                    px_h,
+                } => Command::Resize(cols, rows, px_w, px_h),
+                Frame::Close { .. } => return Ok(()),
+                _ => return Err(sessions::invalid("unexpected native terminal request")),
+            };
+            // Bound admission, including while the shim handshake is pending.
+            // A full queue retires this stream only; authoritative shim cursors
+            // permit replay when the server reattaches this same writer.
+            commands
+                .try_send(command)
+                .map_err(|_| sessions::invalid("native terminal command queue unavailable"))?;
+        }
+    };
+    tokio::select! {
+        result = dispatch => result,
+        result = writer(channel, rx, false) => result,
+        result = terminal(path, id, writer_id, cursor, input, command_rx, tx) => result,
+    }
 }
 
 /// One shim connection reuses transmit and cancellation-safe receive storage.
