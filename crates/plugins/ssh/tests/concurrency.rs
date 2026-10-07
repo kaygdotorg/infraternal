@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used)]
 
 use infraternal_plugin_ssh::{
-    bootstrap::{Backend, Bootstrap, Resolved},
+    bootstrap::{Authority, Backend, Bootstrap, Resolved},
     install::{BinaryPaths, JoinMaterial},
     model::{Destination, Failure, InstallMode, MeshEvidence, Step, Target, TargetAddress},
     probe::Check,
@@ -23,7 +23,7 @@ struct HeldBackend {
 impl Backend for HeldBackend {
     fn resolve<'a>(
         &'a self,
-        _: &'a str,
+        _: &'a Authority,
         target: &'a Target,
         credential: Option<&'a str>,
     ) -> Operation<'a, Resolved> {
@@ -50,19 +50,19 @@ impl Backend for HeldBackend {
     }
     fn invitation<'a>(
         &'a self,
-        _: &'a str,
+        _: &'a Authority,
         _: &'a Target,
         _: &'a Check,
     ) -> Operation<'a, JoinMaterial> {
         Box::pin(async { Err(Failure::install("The enrollment runtime is unavailable.")) })
     }
-    fn connected_facts<'a>(&'a self, _: &'a str, _: uuid::Uuid) -> Operation<'a, ()> {
+    fn connected_facts<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
         Box::pin(async { panic!("facts before admission") })
     }
-    fn terminal_canary<'a>(&'a self, _: &'a str, _: uuid::Uuid) -> Operation<'a, ()> {
+    fn terminal_canary<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
         Box::pin(async { panic!("terminal before admission") })
     }
-    fn failed<'a>(&'a self, _: &'a str, _: uuid::Uuid) -> Operation<'a, ()> {
+    fn failed<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
         Box::pin(async { panic!("no host invitation was issued") })
     }
 }

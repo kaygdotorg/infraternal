@@ -4,7 +4,7 @@ use crate::{
     install::{BinaryPaths, Cleanup, Installation, JoinMaterial},
     model::{Destination, Event, Failure, MeshEvidence, Step, Target, identifier},
     probe::{CHECK_SCRIPT, Check},
-    transport::{Credentials, Input, Operation, SshSession, SshTransport},
+    transport::{Credentials, Input, Operation, Secret, SshSession, SshTransport},
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -20,24 +20,51 @@ pub struct Resolved {
     pub mesh: MeshEvidence,
 }
 
+/// Trusted request authority stays in memory and is never Debug or serialized.
+/// Browser enrollment must recheck this exact session atomically, not owner id alone.
+pub struct Authority {
+    pub owner: String,
+    /// Nonsecret batch identity lets backends retire only their own attempt authority.
+    pub batch: uuid::Uuid,
+    session: Option<Secret>,
+}
+impl Authority {
+    /// The opaque live cookie is available only to trusted backend implementations.
+    #[must_use]
+    pub fn session(&self) -> Option<&Secret> {
+        self.session.as_ref()
+    }
+}
+
 /// #78 owns enrollment, CA state, authenticated online status, facts and terminal routing.
-/// Implementations must authorize `owner` at every operation and never treat token redemption as online proof.
+/// Implementations must recheck this exact live session before new work and never treat token redemption as online proof.
+/// Invitation issuance must serialize by host and associate authority with this batch.
+/// `failed` retires only this batch's new invitation/certificate, even after logout;
+/// it must preserve prior enrolled authority and never invalidate another batch.
 pub trait Backend: Send + Sync {
     fn resolve<'a>(
         &'a self,
-        owner: &'a str,
+        authority: &'a Authority,
         target: &'a Target,
         credential: Option<&'a str>,
     ) -> Operation<'a, Resolved>;
     fn invitation<'a>(
         &'a self,
-        owner: &'a str,
+        authority: &'a Authority,
         target: &'a Target,
         check: &'a Check,
     ) -> Operation<'a, JoinMaterial>;
-    fn connected_facts<'a>(&'a self, owner: &'a str, host: uuid::Uuid) -> Operation<'a, ()>;
-    fn terminal_canary<'a>(&'a self, owner: &'a str, host: uuid::Uuid) -> Operation<'a, ()>;
-    fn failed<'a>(&'a self, owner: &'a str, host: uuid::Uuid) -> Operation<'a, ()>;
+    fn connected_facts<'a>(
+        &'a self,
+        authority: &'a Authority,
+        host: uuid::Uuid,
+    ) -> Operation<'a, ()>;
+    fn terminal_canary<'a>(
+        &'a self,
+        authority: &'a Authority,
+        host: uuid::Uuid,
+    ) -> Operation<'a, ()>;
+    fn failed<'a>(&'a self, authority: &'a Authority, host: uuid::Uuid) -> Operation<'a, ()>;
 }
 
 /// Eight concurrent hosts by default across every socket/batch, not eight per request.
@@ -78,6 +105,49 @@ impl Bootstrap {
         targets: Vec<Target>,
         credential: Option<String>,
     ) -> Result<Batch, Failure> {
+        self.start_authority(
+            Authority {
+                owner,
+                batch: uuid::Uuid::new_v4(),
+                session: None,
+            },
+            targets,
+            credential,
+        )
+    }
+
+    /// Carry a browser's already validated live cookie to atomic backend authorization.
+    /// # Errors
+    /// Refuses empty/oversized capabilities and the same bounded batch admission errors.
+    pub fn start_authenticated(
+        &self,
+        owner: String,
+        session: Secret,
+        targets: Vec<Target>,
+        credential: Option<String>,
+    ) -> Result<Batch, Failure> {
+        if session.expose().is_empty() || session.expose().len() > 512 {
+            return Err(Failure::unsupported(
+                "The bootstrap session is unavailable.",
+            ));
+        }
+        self.start_authority(
+            Authority {
+                owner,
+                batch: uuid::Uuid::new_v4(),
+                session: Some(session),
+            },
+            targets,
+            credential,
+        )
+    }
+
+    fn start_authority(
+        &self,
+        authority: Authority,
+        targets: Vec<Target>,
+        credential: Option<String>,
+    ) -> Result<Batch, Failure> {
         if targets.is_empty()
             || targets.len() > 100
             || credential.as_ref().is_some_and(|v| !identifier(v))
@@ -115,7 +185,7 @@ impl Bootstrap {
         let (cancel, _) = watch::channel(false);
         let batch = Batch {
             inner: Arc::new(BatchInner {
-                owner,
+                authority,
                 credential,
                 states: Mutex::new(states),
                 history: Mutex::new(History {
@@ -205,7 +275,7 @@ impl Bootstrap {
                 // backend; it must preserve an existing enrolled installation.
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
-                    self.backend.failed(&batch.owner, host),
+                    self.backend.failed(&batch.authority, host),
                 )
                 .await;
             }
@@ -261,7 +331,7 @@ impl Bootstrap {
         let resolved = self
             .backend
             .resolve(
-                &batch.owner,
+                &batch.authority,
                 target,
                 target.credential.as_deref().or(batch.credential.as_deref()),
             )
@@ -277,7 +347,7 @@ impl Bootstrap {
         // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
         let join = self
             .backend
-            .invitation(&batch.owner, target, &check)
+            .invitation(&batch.authority, target, &check)
             .await?;
         *host = Some(join.host);
         *installation = Some(Installation::new(session, target, &join)?);
@@ -320,7 +390,7 @@ impl Bootstrap {
             started,
             None,
         );
-        self.backend.connected_facts(&batch.owner, host).await?;
+        self.backend.connected_facts(&batch.authority, host).await?;
         emit(
             batch,
             target,
@@ -330,7 +400,7 @@ impl Bootstrap {
             started,
             None,
         );
-        self.backend.terminal_canary(&batch.owner, host).await?;
+        self.backend.terminal_canary(&batch.authority, host).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -339,7 +409,7 @@ impl Bootstrap {
     /// # Errors
     /// Refuses a foreign batch owner, unknown/running/successful host or excessive attempts.
     pub fn retry(&self, batch: &Batch, owner: &str, id: &str) -> Result<(), Failure> {
-        if batch.inner.owner != owner || *batch.inner.cancel.borrow() {
+        if batch.inner.authority.owner != owner || *batch.inner.cancel.borrow() {
             return Err(Failure::unsupported("The bootstrap batch is unavailable."));
         }
         self.schedule(batch.inner.clone(), id)
@@ -388,7 +458,7 @@ struct History {
     events: VecDeque<Event>,
 }
 struct BatchInner {
-    owner: String,
+    authority: Authority,
     credential: Option<String>,
     states: Mutex<HashMap<String, HostState>>,
     history: Mutex<History>,

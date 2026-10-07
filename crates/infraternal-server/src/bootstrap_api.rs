@@ -14,6 +14,7 @@ use axum::{
 use infraternal_plugin_ssh::{
     bootstrap::{Batch, Bootstrap},
     model::Target,
+    transport::Secret,
 };
 use serde::Deserialize;
 use std::{
@@ -81,7 +82,7 @@ async fn upgrade(
     let Ok(permit) = api.sockets.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let token = token.to_owned();
+    let token = Secret::new(token.as_bytes().to_vec());
     ws.max_message_size(32 * 1024)
         .max_frame_size(32 * 1024)
         .on_upgrade(move |socket| async move {
@@ -136,7 +137,10 @@ async fn send_live(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: String) {
+async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret) {
+    let Ok(token) = std::str::from_utf8(token.expose()) else {
+        return;
+    };
     let mut revocation = api.auth.revocation_events();
     let mut batch: Option<Batch> = None;
     let mut changed: Option<tokio::sync::watch::Receiver<u64>> = None;
@@ -148,20 +152,20 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: String)
             biased;
             () = &mut expiry => break,
             _ = revocation.changed() => {
-                if !authorized(&api, &token, &owner).await { break; }
+                if !authorized(&api, token, &owner).await { break; }
             }
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                if !authorized(&api, &token, &owner).await { break; }
+                if !authorized(&api, token, &owner).await { break; }
                 expiry.as_mut().reset(tokio::time::Instant::now() + Duration::from_hours(30 * 24));
                 let Ok(request) = serde_json::from_str::<Request>(&text) else {
-                    if send_live(&mut socket, &api, &owner, &token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":"invalid bootstrap request"})).ok()).await.is_err() { break; }
+                    if send_live(&mut socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":"invalid bootstrap request"})).ok()).await.is_err() { break; }
                     continue;
                 };
                 let result = match request {
                     Request::Start { targets, credential } if batch.is_none() => {
-                        match api.runner.start(owner.clone(), targets, credential) {
+                        match api.runner.start_authenticated(owner.clone(), Secret::new(token.as_bytes().to_vec()), targets, credential) {
                             Ok(started) => { changed = Some(started.subscribe()); batch = Some(started); Ok(()) }
                             Err(error) => Err(error)
                         }
@@ -171,7 +175,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: String)
                     Request::Start { .. } => Err(infraternal_plugin_ssh::model::Failure::unsupported("A host batch is already running.")),
                 };
                 if let Err(error) = result
-                    && send_live(&mut socket, &api, &owner, &token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":error})).ok()).await.is_err() { break; }
+                    && send_live(&mut socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":error})).ok()).await.is_err() { break; }
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
                     _ => break,
@@ -186,7 +190,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: String)
                     &mut socket,
                     &api,
                     &owner,
-                    &token,
+                    token,
                     &mut revocation,
                     serde_json::to_string(&serde_json::json!({"resync":true,"oldest":oldest})).ok(),
                 )
@@ -202,7 +206,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: String)
                     &mut socket,
                     &api,
                     &owner,
-                    &token,
+                    token,
                     &mut revocation,
                     serde_json::to_string(&event).ok(),
                 )
