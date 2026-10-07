@@ -19,6 +19,7 @@ interface AuthSession {
   display_name: string;
   device: string;
   fresh: number;
+  recovery_words_need_replacing?: boolean;
   recovery_pending?: { ready_at: number } | null;
 }
 
@@ -190,14 +191,14 @@ export async function loginWithPasskey(device: string): Promise<string> {
   }
 }
 
-async function post<Result = unknown>(action: string, body: unknown): Promise<Result> {
+async function post<Result = unknown>(action: string, body: unknown, headers: Readonly<Record<string, string>> = {}): Promise<Result> {
   let response: Response;
   try {
     response = await fetch(`/auth/${action}`, {
       method: "POST",
       credentials: "same-origin",
       cache: "no-store",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...headers },
       body: JSON.stringify(body),
     });
   } catch {

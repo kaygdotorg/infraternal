@@ -29,7 +29,7 @@ test('audit recovery words remain inside the browser', async ({ page }) => {
   expect(correctVerifier,'browser sends only the contract HKDF authentication sibling').toBe(true);
 });
 
-test('already-upgraded key never retransmits words when older-key option is selected', async ({ page }) => {
+test('successful verifier path sends no legacy words', async ({ page }) => {
   let phraseRequests = 0;
   await page.route('**/auth/status', route => route.fulfill({json:{setup_required:false}}));
   await page.route('**/auth/session', route => route.fulfill({status:401,json:{}}));
@@ -46,7 +46,7 @@ test('already-upgraded key never retransmits words when older-key option is sele
     const clipboardData=new DataTransfer(); clipboardData.setData('text/plain',value);
     input.dispatchEvent(new ClipboardEvent('paste',{clipboardData,bubbles:true,cancelable:true}));
   },phrase);
-  await page.getByText('Upgrade an older recovery key',{exact:true}).click();
+  await expect(page.getByText('Upgrade an older recovery key',{exact:true})).toHaveCount(0);
   await page.getByRole('button',{name:'Start recovery'}).click();
   await expect(page.getByRole('heading',{name:'Recovery started'})).toBeVisible();
   expect(phraseRequests).toBe(0);
@@ -70,7 +70,7 @@ for (const status of [429, 503]) {
       const clipboardData=new DataTransfer(); clipboardData.setData('text/plain',value);
       input.dispatchEvent(new ClipboardEvent('paste',{clipboardData,bubbles:true,cancelable:true}));
     },phrase);
-    await page.getByText('Upgrade an older recovery key',{exact:true}).click();
+    await expect(page.getByText('Upgrade an older recovery key',{exact:true})).toHaveCount(0);
     await page.getByRole('button',{name:'Start recovery'}).click();
     await expect(page.locator('#auth-error')).not.toHaveText('');
     expect(phraseRequests).toBe(0);
