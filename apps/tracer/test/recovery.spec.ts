@@ -22,6 +22,12 @@ async function fixtureWrap(): Promise<{ salt: string; nonce: string; ciphertext:
 async function capture(page: Page, info: TestInfo, name: string): Promise<void> {
   for (const [width, height] of [[393, 852], [1440, 900]] as const) {
     await page.setViewportSize({ width, height });
+    if (await page.locator(".auth-card").count()) await page.locator(".auth-card").evaluate(async card => {
+      // Measure steady-state targets after the approved 240 ms entrance scale.
+      await Promise.all(card.getAnimations().map(animation => animation.finished));
+    });
+    await expect.poll(() => page.locator("#recovery-card button, #recovery-card .auth-word-inputs input, #recovery-card .auth-check").evaluateAll(elements =>
+      elements.map(element => element.getBoundingClientRect()).filter(rect => rect.width && rect.height).every(rect => rect.width >= 44 && rect.height >= 44))).toBe(true);
     const path = info.outputPath(`${name}-${width}x${height}.png`);
     await page.screenshot({ path, animations: "disabled" });
     await info.attach(`${name}-${width}`, { path, contentType: "image/png" });
@@ -39,6 +45,7 @@ test("sign-in exposes recovery key entry with per-word errors", async ({ page })
   await page.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: false } }));
   await page.route("**/auth/session", (route) => route.fulfill({ status: 401, json: {} }));
   await page.goto("/");
+  await expect.poll(async () => (await page.locator("#use-recovery").boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
   await page.getByRole("button", { name: "use recovery key", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Use your recovery key" })).toBeVisible();
   await page.getByRole("textbox", { name: "Word 1", exact: true }).fill("notaword");
