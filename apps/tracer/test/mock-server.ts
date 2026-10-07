@@ -10,7 +10,7 @@ import { wordlist } from "@scure/bip39/wordlists/english.js";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
-import { prototypeHosts } from "./prototype-fixtures";
+import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 
 const HOST = process.env.TRACER_TEST_HOST?.trim() || "localhost";
 // Other worktrees may run their own production-build browser gate concurrently.
@@ -151,6 +151,9 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   }
   if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
     return sendJson(response, 200, { hosts: prototypeHosts });
+  }
+  if (request.method === "GET" && url.pathname === "/__mock/proto/addhost") {
+    return sendJson(response, 200, { hosts: addHostFixtures });
   }
   if (request.method === "GET" && url.pathname === "/__mock/setup-token") {
     return sendJson(response, 200, { setup_token: setupToken });
@@ -328,7 +331,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method !== "GET" && request.method !== "HEAD") {
     return sendJson(response, 404, { error: "not found" });
   }
-  if ((url.pathname === "/" || url.pathname === "/index.html") && url.searchParams.get("proto") === "windows") {
+  if ((url.pathname === "/" || url.pathname === "/index.html") && ["windows", "addhost"].includes(url.searchParams.get("proto") ?? "")) {
     if (!owner) owner = makeMockOwner();
     activeAuthCookie = newToken();
     unlockPending = false;
