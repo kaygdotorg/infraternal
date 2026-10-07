@@ -334,3 +334,72 @@ async fn interrupted_restore_recreates_links_without_deleting_the_original() {
         old
     );
 }
+
+#[tokio::test]
+async fn writable_installation_is_refused_before_upload_or_cleanup() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    transaction.commit().await.unwrap();
+    std::fs::set_permissions(fixture.base(), std::fs::Permissions::from_mode(0o770)).unwrap();
+    let transaction = fixture.transaction();
+    assert!(
+        transaction.stage(&fixture.binary).await.is_err(),
+        "accepted a writable install root"
+    );
+    assert!(
+        transaction.rollback().await.is_err(),
+        "cleaned an untrusted install root"
+    );
+}
+
+#[tokio::test]
+async fn rejoin_preserves_existing_host_identity_in_the_private_staging_state() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    transaction.commit().await.unwrap();
+    std::fs::write(
+        fixture.base().join("state/public-identity-placeholder"),
+        "prior-public-identity",
+    )
+    .unwrap();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    transaction.commit().await.unwrap();
+    assert!(
+        std::fs::read(fixture.base().join("state/public-identity-placeholder"))
+            .is_ok_and(|value| value == b"prior-public-identity")
+    );
+}
+
+#[tokio::test]
+async fn active_service_stop_failure_never_replaces_live_artifacts() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    transaction.commit().await.unwrap();
+    let old = std::fs::read(fixture.base().join("bin/live")).unwrap();
+    executable(
+        &fixture.binary,
+        &(String::from_utf8(old.clone()).unwrap() + "\n# next fixture version\n"),
+    );
+    executable(
+        &fixture.root.join("tools/systemctl"),
+        "#!/bin/sh\ncase \"$*\" in *stop*) exit 1;; *) exit 0;; esac\n",
+    );
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    assert!(
+        transaction.enroll_and_start(&fixture.join).await.is_err(),
+        "ignored active service stop failure"
+    );
+    assert_eq!(std::fs::read(fixture.base().join("bin/live")).unwrap(), old);
+    transaction.rollback().await.unwrap();
+    assert_eq!(std::fs::read(fixture.base().join("bin/live")).unwrap(), old);
+}

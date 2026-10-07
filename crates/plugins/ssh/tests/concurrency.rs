@@ -23,11 +23,16 @@ struct HeldBackend {
 impl Backend for HeldBackend {
     fn resolve<'a>(
         &'a self,
-        _: &'a Authority,
+        authority: &'a Authority,
         target: &'a Target,
         credential: Option<&'a str>,
     ) -> Operation<'a, Resolved> {
         Box::pin(async move {
+            assert_eq!(authority.owner, "owner");
+            if let Some(session) = authority.session() {
+                // A failed assertion must not format the private capability.
+                assert!(session.expose().eq(b"synthetic-session-capability"));
+            }
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
             self.entered.add_permits(1);
@@ -298,4 +303,61 @@ async fn a_thousand_admitted_targets_keep_eight_active_backend_calls() {
         rss(),
         started.elapsed().as_millis()
     );
+}
+
+#[tokio::test]
+async fn authenticated_batches_retain_an_opaque_session_for_trusted_issuance() {
+    use infraternal_plugin_ssh::transport::Secret;
+    let backend = Arc::new(HeldBackend {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+    });
+    let runner = Bootstrap::new(
+        Arc::new(ReadOnly),
+        backend.clone(),
+        BinaryPaths {
+            x86_64: "unused".into(),
+            aarch64: "unused".into(),
+        },
+    );
+    assert!(
+        runner
+            .start_authenticated(
+                "owner".into(),
+                Secret::new(Vec::new()),
+                targets("b", 1),
+                Some("shared".into())
+            )
+            .is_err()
+    );
+    let batch = runner
+        .start_authenticated(
+            "owner".into(),
+            Secret::new(b"synthetic-session-capability".to_vec()),
+            targets("b", 1),
+            Some("shared".into()),
+        )
+        .unwrap();
+    backend.entered.acquire().await.unwrap().forget();
+    backend.release.add_permits(1);
+    let mut changed = batch.subscribe();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !batch
+            .events(0)
+            .1
+            .iter()
+            .any(|event| event.step == Step::Failed)
+        {
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(batch.events(0).1.iter().all(|event| {
+        !serde_json::to_string(event)
+            .unwrap()
+            .contains("synthetic-session-capability")
+    }));
 }
