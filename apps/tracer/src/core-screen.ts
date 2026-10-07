@@ -1,5 +1,5 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
-import { branchedMenu } from "../../../packages/ui/src/branched";
+import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
 import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
@@ -28,6 +28,8 @@ export interface CoreScreen {
   probePanel: HTMLElement;
   theme(): ITheme;
   bindTerminal(client: TerminalClient): void;
+  /** Replaces the host/session tree (the canvas lists its windows here); returns the new tree. */
+  setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
   setRecoveryPending(readyAt: number | undefined): void;
@@ -170,7 +172,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   get<HTMLElement>("#test-double-badge").hidden = !options.mockMode;
   probePanel.hidden = !options.probeMode;
 
-  const branch = branchedMenu(get<HTMLElement>("#tree"), [
+  let branch = branchedMenu(get<HTMLElement>("#tree"), [
     { id: "current-host", label: hostName, meta: "current", live: true, open: true, leaves: [
       { id: "current-shell", label: "SSH shell", meta: "current" },
     ] },
@@ -665,6 +667,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       client = value;
       client.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
       for (const name of MODIFIER_KEYS) client.setInputModifier(name, modifiers[name]);
+    },
+    setHostTree(sections, activeLeaf, onSelect) {
+      branch.dispose();
+      branch = branchedMenu(get<HTMLElement>("#tree"), sections, { active: activeLeaf, onSelect });
+      return branch;
     },
     setRoundTrip(milliseconds) {
       rtt.textContent = milliseconds === undefined ? "··" : `${Math.round(milliseconds)} ms`;

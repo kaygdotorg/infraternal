@@ -164,6 +164,14 @@ test("the wizard floats over a dimmed window that becomes the host's terminal", 
     await expect(page.locator(".ah-stage")).toHaveCount(0);
     // The OS name keeps its version: "Debian 12 · aarch64".
     await expect(page.locator(".ui-window[data-active] .canvas-preview")).toContainText("Debian 12 · aarch64");
+    // The sidebar tree lists the new host with its session; clicking a row activates and pans to it.
+    await page.locator("[aria-label='Show hosts']").first().click();
+    // (edge-arm also exists on the canvas, so its section lists both sessions.)
+    await expect(page.locator("#tree .bm-sec[data-id='edge-arm'] .bm-leaf", { hasText: "SSH shell" })).toHaveCount(1);
+    await expect(page.locator("#tree .bm-leaf[aria-current]")).toHaveCount(1);
+    await page.locator("#tree .bm-sec[data-id='build-01'] .bm-leaf").click();
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __tracerCanvas: { active(): string } }).__tracerCanvas.active())).toBe("build-01:deploy");
+    await page.locator("[aria-label='Hide hosts']").first().click();
     // The same window became the terminal: no second window opened for a single host.
     expect(await page.locator(".ui-window").count()).toBe(windowsBefore);
     // One window card component: it carries the shared header, not the wizard's own markup.

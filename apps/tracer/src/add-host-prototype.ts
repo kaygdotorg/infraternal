@@ -618,6 +618,15 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         card.root.classList.remove("ah");
         if (!this.asRoot && first.rootAvailable) addRootPill(card, first);
         if (!reduce) for (const child of card.pill.children) child.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: EASE });
+        // The rest of the batch gets windows right after this one, in order, in the same tick as
+        // this window's header change, so the sidebar tree gets all its new rows in one rebuild.
+        // The canvas lays them out and pans to the first with its own pan animation.
+        let after: CanvasWindowHandle = this.win;
+        for (const host of rest) {
+          after = canvas.openHostWindow(canvasHostOf(host, this.asRoot), after.id);
+          if (!this.asRoot && host.rootAvailable) addRootPill(after.card, host);
+        }
+        if (rest.length) canvas.reveal(this.win.id, "start");
       };
       const done2 = (): void => { this.stageEl.remove(); };
       if (reduce) { swapHeader(); done2(); }
@@ -628,14 +637,6 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         fades = [...card.pill.children].map((child) => child.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: EASE, fill: "forwards" }));
         void (fades[0]?.finished ?? Promise.resolve()).then(swapHeader);
       }
-      // The rest of the batch gets windows right after this one, in order; the canvas lays
-      // them out and pans to the first, with its own pan animation.
-      let after: CanvasWindowHandle = this.win;
-      for (const host of rest) {
-        after = canvas.openHostWindow(canvasHostOf(host, this.asRoot), after.id);
-        if (!this.asRoot && host.rootAvailable) addRootPill(after.card, host);
-      }
-      if (rest.length) canvas.reveal(this.win.id, "start");
       const message = failed.length
         ? `${done.length} ${done.length === 1 ? "host" : "hosts"} ready · ${failed.length} need attention`
         : done.length > 1 ? `${done.length} hosts are ready` : `${first.id} is ready`;

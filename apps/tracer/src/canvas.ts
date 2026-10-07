@@ -27,6 +27,7 @@ import { Spring } from "../../../packages/ui/src/spring";
 import { createWindowCard, type WindowCard } from "../../../packages/ui/src/window-card";
 import { hostIconMarkup, type HostPlatform } from "../../../packages/ui/src/host-icons";
 import { openDetailsPopover, type DetailsPopover } from "./canvas-popover";
+import type { BranchSection, BranchedMenu } from "../../../packages/ui/src/branched";
 import type { CoreScreen } from "./core-screen";
 
 export interface CanvasSession {
@@ -271,6 +272,66 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     if (hostLabel) hostLabel.textContent = window.live ? hostName : `${window.host.user ? `${window.host.user}@` : ""}${window.host.name}`;
     if (sessionLabel) sessionLabel.textContent = window.flow ? "" : window.session.name;
   };
+  // ---- the sidebar's host tree lists the canvas's windows ------------------------------
+  // One section per host, one leaf per window (its session); the active window's row is
+  // marked current. The tree is rebuilt in one microtask after any change, so a batch of
+  // new windows is one rebuild; only sections that were not there before animate in.
+  let tree: BranchedMenu | undefined;
+  let treeQueued = false;
+  let treeSeeded = false;
+  const knownSections = new Set<string>();
+  const syncTree = (): void => {
+    treeQueued = false;
+    if (signal.aborted) return;
+    const order: string[] = [];
+    const byHost = new Map<string, CanvasWindow[]>();
+    for (const entry of windows) {
+      if (entry.flow) continue;
+      const list = byHost.get(entry.host.id);
+      if (list) list.push(entry); else { byHost.set(entry.host.id, [entry]); order.push(entry.host.id); }
+    }
+    const sections: BranchSection[] = order.map((id) => {
+      const list = byHost.get(id)!;
+      // The tree's own current marker, branch and colour show the active row (aria-current).
+      return {
+        id, label: list[0]!.live ? hostName : list[0]!.host.name, live: list[0]!.host.status === "live", open: true,
+        leaves: list.map((entry) => ({ id: entry.id, label: entry.session.name })),
+      };
+    });
+    tree = core.setHostTree(sections, active && !active.flow ? active.id : "", (id) => {
+      const target = windows.find((entry) => entry.id === id);
+      if (!target) return;
+      activate(target, false);
+      // The canvas's own pan brings it into view; on a phone the sheet gets out of the way.
+      revealWindow(target);
+      const sidebar = stage.querySelector<HTMLElement>("#sidebar");
+      if (coarse.matches && sidebar && !sidebar.hidden) stage.querySelector<HTMLButtonElement>("#sidebar-toggle")?.click();
+    });
+    if (treeSeeded) {
+      const fresh = [...stage.querySelectorAll<HTMLElement>("#tree .bm-sec")].filter((section) => !knownSections.has(section.dataset.id ?? ""));
+      fresh.forEach((section, index) => {
+        const height = section.offsetHeight;
+        const delay = index * 45;
+        if (reducedMotion.matches) {
+          section.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, delay, easing: "ease", fill: "backwards" });
+        } else {
+          // Height and opacity together, short stagger; no fill so nothing stays clipped at rest.
+          section.style.overflow = "hidden";
+          const animation = section.animate([{ height: "0px", opacity: 0 }, { height: `${height}px`, opacity: 1 }],
+            { duration: 260, delay, easing: "cubic-bezier(0.23, 1, 0.32, 1)", fill: "backwards" });
+          animation.onfinish = animation.oncancel = () => { section.style.overflow = ""; };
+        }
+      });
+    }
+    knownSections.clear();
+    for (const id of order) knownSections.add(id);
+  };
+  const queueTree = (): void => {
+    if (treeQueued) return;
+    treeQueued = true;
+    queueMicrotask(syncTree);
+  };
+
   const activate = (target: CanvasWindow, reveal: boolean): void => {
     if (active === target) return;
     // Keystrokes belong to the active window only: leaving the live terminal blurs it.
@@ -279,6 +340,9 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     active = target;
     target.card.setActive(true);
     updateCapsule(target);
+    // Synchronise the tree's current row without re-notifying (a rebuild is queued by the
+    // callers that change the set of windows).
+    tree?.select(target.id, false, false);
     if (reveal) revealWindow(target);
   };
   const revealWindow = (target: CanvasWindow, align: "start" | "nearest" = "nearest"): void => {
@@ -364,10 +428,12 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   panes.append(viewport);
   activate(liveWindow, false);
   layout();
+  syncTree();
 
   void fetch(HOSTS_URL, { credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined)
     .then((data: { hosts?: CanvasHost[] } | undefined) => {
-      if (signal.aborted || !data?.hosts?.length) return;
+      if (signal.aborted) return;
+      if (!data?.hosts?.length) { treeSeeded = true; return; }
       // The live window borrows the first host's machine facts so its details are complete.
       const [first, ...rest] = data.hosts;
       Object.assign(liveHost, { ...first!, id: "live", name: hostName, sessions: [] });
@@ -379,6 +445,8 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       layout();
       // Windows inserted ahead of a flow window push it to the right; keep it in view.
       if (active && active !== liveWindow) revealWindow(active, "start");
+      syncTree();
+      treeSeeded = true;
     })
     .catch(() => undefined);
 
@@ -629,6 +697,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       entry.card.root.dataset.windowId = entry.id;
       attachPreview(entry);
       if (active === entry) updateCapsule(entry);
+      queueTree();
     },
     remove() {
       const index = windows.indexOf(entry);
@@ -638,6 +707,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       if (active === entry) { active = undefined; const next = windows[Math.max(0, index - 1)]; if (next) activate(next, false); }
       entry.card.dispose();
       layout();
+      queueTree();
     },
   });
   const controller: CanvasController = {
@@ -657,6 +727,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       const session = host.sessions[0] ?? shellSession(host);
       const entry = addWindow(host, session, false, anchor);
       layout();
+      queueTree();
       enter(entry, 120);
       return { id: entry.id, card: entry.card };
     },
