@@ -13,10 +13,13 @@ case "${TARGET:?Cargo target required}" in
     aarch64-unknown-linux-gnu) vt_target=aarch64-linux-gnu ;;
     *) printf 'unsupported libghostty-vt target: %s\n' "$TARGET" >&2; exit 1 ;;
 esac
-mkdir -p "$root/target/vt-tools"
-archive="$root/target/vt-tools/$version.tar.gz"
+target_root="${CARGO_TARGET_DIR:-$root/target}"
+[[ "$target_root" = /* ]] || target_root="$root/$target_root"
+vt_tools="$target_root/vt-tools"
+mkdir -p "$vt_tools"
+archive="$vt_tools/$version.tar.gz"
 if [[ ! -f "$archive" ]]; then
-    temporary="$(mktemp "$root/target/vt-tools/download.XXXXXX")"
+    temporary="$(mktemp "$vt_tools/download.XXXXXX")"
     trap 'rm -f -- "$temporary"' EXIT
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
         "https://codeload.github.com/ghostty-org/ghostty/tar.gz/$version" -o "$temporary"
@@ -30,7 +33,7 @@ printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status
 optimize=ReleaseSafe
 [[ "${PROFILE:-debug}" != release ]] || optimize=ReleaseFast
 key="$( { sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" "$root/scripts/build-vt"; printf '%s %s %s\n' "$checksum" "$vt_target" "$optimize"; } | sha256sum | cut -d ' ' -f1)"
-cache_dir="$root/target/vt-tools/native-$key"
+cache_dir="$vt_tools/native-$key"
 mkdir -p "$cache_dir"
 exec 9> "$cache_dir/lock"
 flock 9
@@ -61,6 +64,6 @@ cd "$source_dir"
 zig build -j2 -Demit-lib-vt=true -Doptimize="$optimize" -Dcpu=baseline \
     -Dtarget="$vt_target" -Demit-xcframework=false -Dapp-runtime=none \
     --prefix "$cache_dir/native" --cache-dir "$cache_dir/zig-cache" \
-    --global-cache-dir "$root/target/vt-tools/zig-cache"
+    --global-cache-dir "$vt_tools/zig-cache"
 rm -rf -- "$output/native"
 ln -s "$cache_dir/native" "$output/native"
