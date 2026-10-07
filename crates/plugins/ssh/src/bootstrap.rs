@@ -273,17 +273,6 @@ impl Bootstrap {
         let output = session.run(CHECK_SCRIPT, Input::Empty).await?;
         let check = Check::parse(&output.stdout)?;
         check.authorize_mode(target.mode)?;
-        if !check.linger && target.mode == crate::model::InstallMode::Rootless {
-            emit(
-                batch,
-                target,
-                attempt,
-                Step::Check,
-                "User linger is off; the service may stop after logout.",
-                started,
-                None,
-            );
-        }
         restore_previous(batch, target, attempt, started, session.clone()).await?;
         // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
         let join = self
@@ -309,6 +298,17 @@ impl Bootstrap {
             .await?;
         transaction.enroll_and_start(&join).await?;
         drop(join); // Capability plaintext is erased immediately after its stdin handoff.
+        if !transaction.enable_linger().await? {
+            emit(
+                batch,
+                target,
+                attempt,
+                Step::Install,
+                "Host policy did not enable user linger; the service may stop after logout.",
+                started,
+                None,
+            );
+        }
         let host =
             host.ok_or_else(|| Failure::install("The enrolled host identity is unavailable."))?;
         emit(
