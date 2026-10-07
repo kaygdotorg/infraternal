@@ -700,3 +700,24 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - Finished hosts open their terminal windows automatically.
      - Failures are plain, human, simplified technical English, with a
        caret that expands to browse the logs.
+141. **Add-host flow, round H2:**
+     - **One list (H10):** discovered hosts are a single deduplicated list
+       with source icons (NetBird, Tailscale, known hosts or SSH config,
+       already added), not grouped lists. Everything is mocked up in the
+       product before any piece is built.
+     - **Sources (H11):** read-only, on by default, with a switch per
+       source.
+     - **SSH identity (H12):** the server's own keys, used in place and
+       never copied, for the owner by default; pasted keys are encrypted
+       with the passkey (D23); mesh SSH needs no secret. When SSH fails
+       because of what looks like a mesh access policy (e.g. NetBird ACL),
+       the UI says so accurately.
+     - **Root consent (H13):** the root consent wording is as proposed, with
+       "apply to all N hosts that allow sudo" for bulk adds.
+     - **Root available later (H14):** the pill shows "Root available";
+       tapping it shows a small tooltip-style confirm with yes and no.
+       Never a popup, never automatic.
+     - **Motion (H15):** per-host steps tick like onboarding, under Emil
+       Kowalski's standards.
+     - **When hosts finish (H16):** the canvas does not move; a toast says
+       the host is ready, with an action to go to its window.
