@@ -1,6 +1,8 @@
 //! One-time owner setup capability and initial enrollment [24,26,53].
 use super::{Auth, Authority, DAY, Error, Result, Uuid, Value, hash, random};
 
+const DUMMY_HASH: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
     /// Rotate the single-use capability at startup until an owner exists [26].
@@ -41,7 +43,6 @@ impl Auth {
         // Stored and candidate SHA-256 hashes are fixed-size base64url strings.
         // Compare a dummy digest when setup is absent so failure still takes the
         // same constant-time comparison path as a wrong or expired capability.
-        const DUMMY_HASH: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         let stored_hash = stored
             .as_ref()
             .map_or(DUMMY_HASH, |(hash, _)| hash.as_str());
