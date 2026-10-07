@@ -121,6 +121,11 @@ export function applyTheme(active: Theme, root: HTMLElement): void {
   style.setProperty("--overlay-line", overlay.overlayLine);
   style.setProperty("--shadow", overlay.shadow);
   style.setProperty("--overlay-shadow-large", overlay.largeShadow);
+  // Elevation for lifted in-page cards (a flow card over its window): a tight contact
+  // shadow plus a wide ambient one. Not glass: no highlight, no blur.
+  style.setProperty("--elevation", active.dark
+    ? "0 0 0 1px rgb(0 0 0 / 0.35), 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 20px -6px rgb(0 0 0 / 0.5), 0 36px 90px -18px rgb(0 0 0 / 0.8)"
+    : "0 0 0 1px rgb(0 0 0 / 0.05), 0 1px 2px rgb(0 0 0 / 0.1), 0 8px 20px -6px rgb(0 0 0 / 0.14), 0 36px 90px -18px rgb(0 0 0 / 0.32)");
   style.setProperty("--overlay-highlight", `rgb(255 255 255 / ${active.dark ? "0.32" : "0.78"})`);
   style.setProperty("--line", `rgb(${rgb(active.fg)} / 0.07)`);
   style.setProperty("--hover", `rgb(${rgb(active.fg)} / 0.06)`);
