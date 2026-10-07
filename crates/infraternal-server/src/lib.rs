@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod ca;
+pub mod ca_memory;
 pub mod csr;
 mod embedded;
 pub mod enrollment;

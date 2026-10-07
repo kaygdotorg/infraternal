@@ -17,7 +17,7 @@ use openssl::{
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// Provisional issuer primitive authorized for continuation; owner policy replaces this one constant.
+/// Issuer primitive selected by the owner in D168.
 pub const CA_KEY_ALGORITHM: CaAlgorithm = CaAlgorithm::Ed25519;
 
 /// The two issuer candidates proposed on #78; host keys stay Ed25519 in either case.
@@ -48,6 +48,7 @@ impl CaAlgorithm {
 pub struct CaError;
 
 /// Unlocked material supplied in memory; no Debug/serialization or implicit key generation.
+#[derive(Clone)]
 pub struct CaMaterial {
     key: PKey<Private>,
     issuer: X509,
@@ -58,10 +59,15 @@ impl CaMaterial {
     pub fn new(key: PKey<Private>, issuer: X509) -> Self {
         Self { key, issuer }
     }
+
+    /// Public trust remains usable while the signing source is locked [168].
+    pub(crate) fn issuer(&self) -> &X509 {
+        &self.issuer
+    }
 }
 
 /// The owner-selected restart/unlock adapter supplies private material, never SQLite.
-pub trait CaKeySource {
+pub trait CaKeySource: Send + Sync {
     /// Load an unlocked key and corresponding public issuer generation.
     /// # Errors
     /// Missing/wrong unlock credentials fail closed without regeneration.
@@ -83,8 +89,11 @@ impl CertificateAuthority {
     /// Validate material obtained from the configured key source.
     /// # Errors
     /// Refuses unavailable or inconsistent CA material.
-    pub fn from_source(source: &impl CaKeySource) -> Result<Self, CaError> {
-        let material = source.load()?;
+    pub fn from_source(source: &(impl CaKeySource + ?Sized)) -> Result<Self, CaError> {
+        Self::from_material(source.load()?)
+    }
+
+    pub(crate) fn from_material(material: CaMaterial) -> Result<Self, CaError> {
         let public = material.issuer.public_key().map_err(|_| CaError)?;
         if !CA_KEY_ALGORITHM.accepts(&material.key)
             || !material.key.public_eq(&public)
@@ -218,7 +227,7 @@ pub(crate) mod tests {
         },
     };
 
-    struct MemorySource {
+    pub(crate) struct MemorySource {
         key: PKey<Private>,
         issuer: X509,
     }
@@ -234,7 +243,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn source(is_ca: bool) -> MemorySource {
+    pub(crate) fn source(is_ca: bool) -> MemorySource {
         let key = PKey::generate_ed25519().unwrap();
         let mut name = X509NameBuilder::new().unwrap();
         name.append_entry_by_text("CN", "infraternal test CA")
@@ -304,6 +313,10 @@ pub(crate) mod tests {
 
     pub(crate) fn test_authority() -> CertificateAuthority {
         CertificateAuthority::from_source(&source(true)).unwrap()
+    }
+
+    pub(crate) fn test_material() -> CaMaterial {
+        source(true).load().unwrap()
     }
 
     #[test]
