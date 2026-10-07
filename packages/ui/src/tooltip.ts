@@ -16,6 +16,8 @@
  * - Touch: a 500 ms long press shows the label. The click that ends that press is
  *   swallowed, because the user asked "what is this?", not "do this".
  * - Reduced motion: opacity only.
+ * - Components can request a timed confirmation label with showTip(); its temporary
+ *   data-tip is restored when the label expires.
  *
  * Which elements: anything with `data-tip`, plus every button or link that has an
  * aria-label and no visible text. The rule is therefore enforced automatically.
@@ -38,6 +40,7 @@ let pos: HTMLDivElement, surface: HTMLDivElement, arrow: HTMLDivElement, measure
 let current: HTMLElement | null = null;
 let openTimer = 0, closeTimer = 0, pressTimer = 0, warmUntil = 0, shown = false;
 let swallowClick = false, press0: { x: number; y: number } | null = null;
+const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; timer: number }>();
 
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1000; pointer-events: none; will-change: transform; }
@@ -160,6 +163,24 @@ const warm = () => shown || performance.now() < warmUntil;
 /** Re-reads the label of `el` if its tooltip is open (for live labels like "Copied"). */
 export function refreshTip(el: HTMLElement) {
   if (shown && current === el) { place(el, false); setLabel(labelOf(el), 0); }
+}
+
+/** Shows a short confirmation beside a control, then restores its normal tooltip label. */
+export function showTip(el: HTMLElement, label: string, duration = 900): void {
+  const previous = temporaryTips.get(el);
+  if (previous) clearTimeout(previous.timer);
+  const normalTip = previous ? previous.previous : el.dataset.tip;
+  el.dataset.tip = label;
+  show(el, "instant");
+  const timer = window.setTimeout(() => {
+    const active = temporaryTips.get(el);
+    if (!active || active.timer !== timer) return;
+    if (current === el) hide();
+    if (normalTip === undefined) delete el.dataset.tip;
+    else el.dataset.tip = normalTip;
+    temporaryTips.delete(el);
+  }, Math.max(0, duration));
+  temporaryTips.set(el, { previous: normalTip, timer });
 }
 
 /** Installs the page-wide tooltip group. Call once; works for elements added later. */
