@@ -235,3 +235,7 @@ async fn join(
         execution_uid: identity.execution_uid,
     }))
 }
+
+#[cfg(test)]
+#[path = "remote_http_tests.rs"]
+mod tests;
