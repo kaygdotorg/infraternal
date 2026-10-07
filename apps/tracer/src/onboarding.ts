@@ -51,6 +51,7 @@ function mountSetup(
   };
   let index = 0;
   let completedStep = -1;
+  const events = new AbortController();
   host.innerHTML = `<section class="auth-screen" aria-label="Set up infraternal">
     <section class="auth-card" id="setup-card" aria-labelledby="setup-title">
       <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
@@ -73,14 +74,14 @@ function mountSetup(
   const markMotion = (instant: boolean): void => {
     host.querySelector<HTMLElement>("#setup-card")!.toggleAttribute("data-no-motion", instant);
   };
-  host.addEventListener("pointerdown", () => markMotion(false), { capture: true });
+  host.addEventListener("pointerdown", () => markMotion(false), { capture: true, signal: events.signal });
   host.addEventListener("focusin", (event) => {
     if (focusingProgrammatically) return;
     const target = event.target;
     if (target instanceof HTMLElement && target.matches("input, button")) {
       markMotion(target.matches(":focus-visible"));
     }
-  });
+  }, { signal: events.signal });
 
   function ready(): boolean {
     if (index === 0) return state.token.trim().length >= 8;
@@ -297,6 +298,14 @@ function mountSetup(
         renderFooter();
         await new Promise<void>((resolve) => { state.completeRecovery = resolve; });
       });
+      // The app host survives authentication; listeners must not retain setup secrets
+      // or address its removed card when terminal controls receive focus/touches.
+      events.abort();
+      paneObserver?.disconnect();
+      state.token = "";
+      state.recoveryWords = [];
+      delete state.finishRegistration;
+      delete state.completeRecovery;
       onAuthenticated(userId, true, displayName, state.instantCompletion);
     } catch (error: unknown) {
       waiting.done();
@@ -381,22 +390,27 @@ function mountSignIn(
     </section>
   </section>`;
   host.querySelector<HTMLElement>("#auth-error")!.textContent = message;
+  const events = new AbortController();
   const button = host.querySelector<HTMLButtonElement>("#login-passkey")!;
   host.querySelector<HTMLButtonElement>("#use-recovery")!.addEventListener("click", () => {
     if (button.disabled) return;
     void import("./recovery").then(({ mountRecovery }) => {
+      events.abort();
       mountRecovery(host, () => mountSignIn(host, "", onAuthenticated), onAuthenticated);
     });
   });
   const card = host.querySelector<HTMLElement>(".auth-card")!;
-  host.addEventListener("pointerdown", () => card.removeAttribute("data-no-motion"), { capture: true });
+  host.addEventListener("pointerdown", () => card.removeAttribute("data-no-motion"), { capture: true, signal: events.signal });
   host.addEventListener("focusin", (event) => {
     if (event.target instanceof HTMLElement && event.target.matches("button")) {
       card.toggleAttribute("data-no-motion", event.target.matches(":focus-visible"));
     }
-  });
+  }, { signal: events.signal });
   button.addEventListener("click", (event) => {
-    void beginLogin(button, host, onAuthenticated, event.detail === 0);
+    void beginLogin(button, host, (...args) => {
+      events.abort();
+      onAuthenticated(...args);
+    }, event.detail === 0);
   });
 }
 
