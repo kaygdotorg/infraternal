@@ -77,7 +77,7 @@ const SCREEN = `
     </aside>
     <div class="palette-scrim" id="scrim" hidden></div>
     <section class="palette" id="palette" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
-      <div class="palette-input">${SVG.search}<input id="palette-input" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
+      <div class="palette-input">${SVG.search}<input id="palette-input" role="searchbox" aria-controls="palette-results" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
     </section>
@@ -238,25 +238,80 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
     ...(recoveryUiEnabled() && options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
   ];
+  const paletteSearchText = new Map(entries.map((entry) => [
+    entry,
+    `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase(),
+  ]));
+  // Normalize IDs once so typing never sanitizes every matching result.
+  const paletteOptionIds = new Map(entries.map((entry, index) => [
+    entry,
+    `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`,
+  ]));
+  const paletteGroupIds = new Map([...new Set(entries.map((entry) => entry.group))].map((group) => [
+    group,
+    `palette-group-${group.toLocaleLowerCase().replaceAll(" ", "-")}`,
+  ]));
   let visibleEntries: PaletteEntry[] = [];
+  let visibleOptions: HTMLButtonElement[] = [];
   let selected = 0;
+  const headingByGroup = new Map<string, HTMLDivElement>();
+
+  const keepPaletteOptionVisible = (option: HTMLButtonElement, index: number): void => {
+    option.scrollIntoView({ block: "nearest", behavior: "instant" });
+    const entry = visibleEntries[index];
+    if (entry && visibleEntries[index - 1]?.group !== entry.group) {
+      headingByGroup.get(entry.group)?.scrollIntoView({ block: "nearest", behavior: "instant" });
+    }
+  };
+
+  const selectPaletteOption = (nextIndex: number): void => {
+    if (!visibleOptions.length) return;
+    const boundedIndex = Math.max(0, Math.min(visibleOptions.length - 1, nextIndex));
+    const previousOption = visibleOptions[selected];
+    const nextOption = visibleOptions[boundedIndex];
+    if (!nextOption) return;
+    if (previousOption !== nextOption) {
+      previousOption?.setAttribute("aria-selected", "false");
+      nextOption.setAttribute("aria-selected", "true");
+      selected = boundedIndex;
+    }
+    if (paletteInput.getAttribute("aria-activedescendant") !== nextOption.id) {
+      paletteInput.setAttribute("aria-activedescendant", nextOption.id);
+    }
+    keepPaletteOptionVisible(nextOption, boundedIndex);
+  };
+
+  const visiblePalettePageSize = (): number => {
+    const port = paletteResults.getBoundingClientRect();
+    const top = port.top + paletteResults.clientTop;
+    const bottom = top + paletteResults.clientHeight;
+    const visibleCount = visibleOptions.reduce((count, option) => {
+      const rect = option.getBoundingClientRect();
+      return rect.top >= top && rect.bottom <= bottom ? count + 1 : count;
+    }, 0);
+    return Math.max(1, visibleCount);
+  };
 
   const renderPalette = (query = ""): void => {
     const needle = query.trim().toLocaleLowerCase();
-    const filtered = entries.filter((entry) => `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase().includes(needle));
-    visibleEntries = filtered;
+    visibleEntries = entries.filter((entry) => paletteSearchText.get(entry)?.includes(needle) ?? false);
     selected = Math.min(selected, Math.max(0, visibleEntries.length - 1));
+    visibleOptions = [];
+    // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
     paletteResults.replaceChildren();
     let previousGroup = "";
-    filtered.forEach((entry, index) => {
+    visibleEntries.forEach((entry, index) => {
       if (entry.group !== previousGroup) {
         const heading = document.createElement("div");
+        heading.id = paletteGroupIds.get(entry.group)!;
         heading.className = "group-label";
         heading.textContent = entry.group;
+        headingByGroup.set(entry.group, heading);
         paletteResults.append(heading);
         previousGroup = entry.group;
       }
       const result = document.createElement("button");
+      result.id = paletteOptionIds.get(entry)!;
       result.type = "button";
       result.className = "result";
       result.setAttribute("role", "option");
@@ -277,9 +332,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       hint.className = "result-hint";
       hint.textContent = entry.hint;
       result.append(icon, label, hint);
+      visibleOptions.push(result);
       paletteResults.append(result);
     });
-    if (!filtered.length) {
+    const selectedOption = visibleOptions[selected];
+    if (selectedOption) {
+      if (paletteInput.getAttribute("aria-activedescendant") !== selectedOption.id) {
+        paletteInput.setAttribute("aria-activedescendant", selectedOption.id);
+      }
+    } else {
+      paletteInput.removeAttribute("aria-activedescendant");
+    }
+    if (!visibleEntries.length) {
       const empty = document.createElement("p");
       empty.className = "palette-empty";
       empty.textContent = "No matching hosts, sessions or actions.";
@@ -302,8 +366,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (open) {
       selected = 0;
       paletteInput.value = "";
+      paletteResults.scrollTop = 0;
       renderPalette();
       paletteInput.focus({ preventScroll: true });
+    } else {
+      paletteInput.removeAttribute("aria-activedescendant");
     }
   };
   const sidebarClick = (event: MouseEvent): void => setSidebar(sidebar.hidden, event.detail === 0);
@@ -361,12 +428,24 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   sidebarToggle.addEventListener("click", sidebarClick);
   capsule.addEventListener("click", capsuleClick);
   scrim.addEventListener("click", scrimClick);
-  paletteInput.addEventListener("input", () => { selected = 0; renderPalette(paletteInput.value); });
+  paletteInput.addEventListener("input", () => {
+    selected = 0;
+    renderPalette(paletteInput.value);
+  });
   paletteInput.addEventListener("keydown", (event) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       const delta = event.key === "ArrowDown" ? 1 : -1;
-      selected = Math.max(0, Math.min(visibleEntries.length - 1, selected + delta));
-      renderPalette(paletteInput.value);
+      selectPaletteOption(selected + delta);
+      event.preventDefault();
+    } else if (event.key === "Home") {
+      selectPaletteOption(0);
+      event.preventDefault();
+    } else if (event.key === "End") {
+      selectPaletteOption(visibleOptions.length - 1);
+      event.preventDefault();
+    } else if (event.key === "PageDown" || event.key === "PageUp") {
+      const delta = visiblePalettePageSize() * (event.key === "PageDown" ? 1 : -1);
+      selectPaletteOption(selected + delta);
       event.preventDefault();
     } else if (event.key === "Enter") {
       const entry = visibleEntries[selected];
