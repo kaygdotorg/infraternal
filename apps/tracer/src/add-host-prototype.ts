@@ -1,39 +1,44 @@
 /**
  * The add-host flow (mock only, `?mock=1&proto=addhost`).
  *
- * The wizard lives inside an ordinary window card on the canvas, the same card
- * and header a terminal uses, with its content centred in the window. When a
- * host is ready, that window becomes the host's terminal in place (a morph:
- * the wizard leaves, the header becomes `user@host`, the terminal appears), so
- * no second window opens beside it. "Add another host" starts a fresh wizard
- * window.
+ * Shape (DECISIONS 138–141, 144, 171; docs/design/TASTE.md):
+ * - A new window opens on the canvas: the future terminal. The wizard is its
+ *   own floating card over that window, which is dimmed behind it. On success
+ *   the card lifts away and the window is the first host's terminal; other
+ *   hosts from the same batch open as their own windows beside it.
+ * - One field with chips (packages/ui chip-input): a discovered host name or a
+ *   `user@host[:port]` becomes a pill as soon as it is unambiguous or ended by
+ *   space, comma or Enter. Chips and list checkboxes are the same selection.
+ * - Steps move with the shared pane stepper (packages/ui pane-stepper):
+ *   overlapping panes on springs, a spring-driven height, Back reverses.
+ * - Batches install concurrently; every host has a row with its current step,
+ *   a status glyph and a thin progress bar; failures stay listed with Retry.
  *
- * Flow shape (DECISIONS 138–141, 144, 171): one field that filters discovered
- * hosts and turns unknown text into a selectable typed-host row; one plain list
- * where selection shows only in the checkbox; credentials only when needed;
- * explicit root consent; per-host progress; failures that say what happened and
- * what to do.
- *
- * Text crispness: every transform is cleared once its animation ends (springs
- * write `transform: none` at rest, page transitions use unfilled Web
- * Animations), so settled text never sits on a fractional transform.
+ * Text crispness: every transform is cleared at rest (springs write
+ * `transform: none` when settled), so settled text never sits on a fractional
+ * transform.
  */
 import {
   createSpinner,
   hostIconMarkup,
+  hostSourceIconMarkup,
   installFocusRing,
+  mountChipInput,
   mountConfirmTip,
   mountStepStatus,
   mountToast,
+  PaneStepper,
   showTip,
   Spring,
   springCheckbox,
+  type Chip,
+  type ChipInputController,
   type ConfirmTipController,
   type HostPlatform,
   type HostSource,
   type StepStatusController,
+  type Tick,
   type ToastController,
-  hostSourceIconMarkup,
 } from "../../../packages/ui/src/index";
 import type { AddHostFixture } from "./add-host-contract";
 import type { CoreScreen } from "./core-screen";
@@ -48,13 +53,13 @@ const SOURCE_LABELS: Record<HostSource, string> = {
   "already-added": "Added",
 };
 const BOOTSTRAP_STEPS = [
-  { id: "check", label: "Read-only system check" },
-  { id: "install", label: "Install infraternal agent" },
-  { id: "facts", label: "Gather host facts" },
-  { id: "connect", label: "Connect to server" },
+  { id: "check", label: "Checking the system" },
+  { id: "install", label: "Installing the agent" },
+  { id: "facts", label: "Gathering host facts" },
+  { id: "connect", label: "Connecting" },
 ] as const;
 
-/** Line icons: 24 px grid, drawn with currentColor at the instance's stroke width. */
+/** Line icons on a 24 px grid, drawn with currentColor at a 1.5 stroke. */
 const ICON = {
   plus: `<path d="M12 5v14M5 12h14"/>`,
   close: `<path d="m7 7 10 10M17 7 7 17"/>`,
@@ -70,6 +75,7 @@ const ICON = {
   pending: `<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>`,
   typed: `<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/>`,
   caret: `<path d="m9 6 6 6-6 6"/>`,
+  retry: `<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/>`,
   rocket: `<path d="M12 15.5 8.5 12c1-4 3.5-7.2 8.5-8.5-1.3 5-4.5 7.5-5 12z"/><path d="M8.5 12 5.5 11.5 8 8.5h3M12 15.5l.5 3 3-2.5v-3M6.5 17.5c-1 .5-1.5 1.5-1.5 2.5 1 0 2-.5 2.5-1.5"/>`,
 } as const;
 const svg = (paths: string, className = "ah-icon"): string => `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
@@ -78,6 +84,8 @@ type Step = "empty" | "discovery" | "credentials" | "root" | "progress" | "failu
 type FailureKind = "unreachable" | "authentication" | "mesh-policy";
 type Failure = { kind: FailureKind; host: AddHostFixture };
 type Direction = 1 | -1 | 0;
+type JobState = "pending" | "running" | "done" | "failed";
+type Job = { host: AddHostFixture; step: number; state: JobState; failure: Failure | undefined; timers: number[] };
 
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
@@ -108,35 +116,38 @@ function parseTarget(raw: string): { user: string | undefined; host: string; por
   if (!match) return undefined;
   const port = match[3] ? Number(match[3]) : undefined;
   if (port !== undefined && (port < 1 || port > 65535)) return undefined;
-  return { user: match[1], host: match[2]!, port };
+  return { user: match[1], host: match[2]!.toLowerCase(), port };
 }
 
 function statusOf(host: AddHostFixture): { label: string; tone: "ok" | "warn" | "off" | "none"; icon: string } {
   if (host.alreadyAdded) return { label: "Added", tone: "none", icon: ICON.added };
   if (host.reachability === "ready") return { label: "SSH ready", tone: "ok", icon: ICON.ready };
-  if (host.reachability === "mesh-policy") return { label: "Blocked by mesh policy", tone: "warn", icon: ICON.blocked };
-  return { label: "No SSH response", tone: "off", icon: ICON.silent };
+  if (host.reachability === "mesh-policy") return { label: "Blocked", tone: "warn", icon: ICON.blocked };
+  return { label: "No answer", tone: "off", icon: ICON.silent };
 }
 
-function failureCopy(item: Failure): { title: string; happened: string; next: string; short: string } {
+function failureCopy(item: Failure): { title: string; happened: string; next: string; short: string; step: number } {
   const name = item.host.id;
   if (item.kind === "unreachable") return {
     title: `${name} didn't answer`,
     happened: `Nothing answered on SSH port 22 at ${name}.`,
     next: "Check that the host is on and SSH is running, then retry.",
-    short: "no SSH response",
+    short: "No SSH answer on port 22",
+    step: 0,
   };
   if (item.kind === "authentication") return {
     title: `${name} refused the key`,
     happened: `${name} answered, but refused the SSH identity.`,
     next: "Choose another identity, or add this server's key to the host, then retry.",
     short: "SSH key refused",
+    step: 1,
   };
   return {
     title: "Blocked by the mesh policy",
     happened: `The mesh access policy blocks SSH (TCP 22) from this server to ${name}.`,
     next: "Ask a mesh admin to allow TCP 22 from this server, then retry.",
-    short: "blocked by the mesh policy",
+    short: "Blocked by the mesh policy",
+    step: 0,
   };
 }
 
@@ -163,137 +174,148 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
   const windows: HTMLElement[] = [];
   let wizard: Wizard | undefined;
   let confirmTip: ConfirmTipController | undefined;
-  let disposed = false;
 
-  /** One wizard window. Its card outlives the wizard: it becomes the host's terminal. */
+  /** One wizard: a floating card over a new window that becomes the first host's terminal. */
   class Wizard {
     readonly group = document.createElement("section");
     readonly card = document.createElement("section");
     private readonly pages: HTMLElement;
     private readonly foot: HTMLElement;
-    private readonly body: HTMLElement;
+    private readonly scroller: HTMLElement;
+    private readonly stageEl: HTMLElement;
+    private readonly float: HTMLElement;
     private readonly pill: HTMLElement;
-    private step: Step;
+    private readonly stepper: PaneStepper;
+    private readonly spring: Spring;
+    private readonly resize: ResizeObserver;
+    private step: Step = "discovery";
     private current: HTMLElement | undefined;
-    private text = "";
+    private chips: ChipInputController | undefined;
+    private ticks = new Map<string, Tick>();
+    private token = "";
     private selected: AddHostFixture[] = [];
     private typed: AddHostFixture[] = [];
-    private installing: AddHostFixture[] = [];
-    private skipped: Failure[] = [];
+    private jobs: Job[] = [];
+    private marks = new Map<string, StepStatusController>();
     private failure: Failure | undefined;
     private asRoot = false;
     private timers: number[] = [];
-    private marks = new Map<string, StepStatusController[]>();
     private alive = true;
-    private readonly spring: Spring;
-    private readonly resize: ResizeObserver;
+    private finished = false;
 
-    constructor(startEmpty: boolean, animate: boolean) {
-      this.step = startEmpty ? "empty" : "discovery";
+    constructor(startEmpty: boolean, animate: boolean, review?: Failure[]) {
       this.group.className = "window-group ah-group";
       this.card.className = "pane-card window-card ah";
       this.card.setAttribute("role", "group");
-      this.card.setAttribute("aria-label", "Add hosts window");
+      this.card.setAttribute("aria-label", "New host window");
       this.card.innerHTML = `
         <header class="window-header">
-          <div class="window-host-pill ui-pill ui-overlay-surface ah-pill">${svg(ICON.plus, "ah-pill-icon")}<span class="window-pill-host">New host</span></div>
-          <div class="window-header-actions ah-actions">
-            <button class="window-header-action ui-icon-button" type="button" data-ah="close" aria-label="Close">${svg(ICON.close, "")}</button>
-          </div>
+          <div class="window-host-pill ui-pill ah-pill">${svg(ICON.plus, "ah-pill-icon")}<span class="window-pill-host">New host</span></div>
+          <div class="window-header-actions ah-actions"></div>
         </header>
-        <div class="ah-body"><div class="ah-panel"><div class="ah-pages"></div><footer class="ah-foot"></footer></div></div>`;
+        <div class="window-fake-terminal ah-terminal" aria-hidden="true"><pre class="window-fake-output"></pre></div>
+        <div class="ah-stage">
+          <div class="ah-scrim"></div>
+          <section class="ah-float" role="dialog" aria-label="Add hosts">
+            <button class="ah-close" type="button" data-ah="close" aria-label="Close" data-tip="Close">${svg(ICON.close, "")}</button>
+            <div class="ah-scroll"><div class="ah-pages"></div></div>
+            <footer class="ah-foot"></footer>
+          </section>
+        </div>`;
       this.group.append(this.card);
       panes.append(this.group);
       this.pages = this.card.querySelector(".ah-pages")!;
       this.foot = this.card.querySelector(".ah-foot")!;
-      this.body = this.card.querySelector(".ah-body")!;
+      this.scroller = this.card.querySelector(".ah-scroll")!;
+      this.stageEl = this.card.querySelector(".ah-stage")!;
+      this.float = this.card.querySelector(".ah-float")!;
       this.pill = this.card.querySelector(".ah-pill")!;
-      const overflow = (): void => { this.body.classList.toggle("is-overflowing", this.body.scrollHeight > this.body.clientHeight + 1); };
+      this.stepper = new PaneStepper(this.pages);
+      const overflow = (): void => { this.float.classList.toggle("is-overflowing", this.scroller.scrollHeight > this.scroller.clientHeight + 1); };
       this.resize = new ResizeObserver(overflow);
-      this.resize.observe(this.body);
+      this.resize.observe(this.scroller);
       this.resize.observe(this.pages);
       this.card.addEventListener("click", this.onClick);
       this.card.addEventListener("change", this.onChange);
-      this.card.addEventListener("input", this.onInput);
       this.card.addEventListener("keydown", this.onKeyDown);
-      // At rest the card carries no transform at all, so its text stays on the pixel grid.
+      // The card rises onto its dimmed stage; at rest it carries no transform at all.
+      const scrim = this.stageEl.querySelector<HTMLElement>(".ah-scrim")!;
       this.spring = new Spring(animate && !reducedMotion() ? 0 : 1, (value) => {
-        if (value === 1) { this.card.style.transform = ""; this.card.style.opacity = ""; return; }
-        this.card.style.opacity = String(Math.min(1, Math.max(0, value)));
-        this.card.style.transform = `translateY(${(1 - value) * 10}px) scale(${0.98 + value * 0.02})`;
-      }, { visualDuration: 0.28, bounce: 0.12 });
-      this.go(this.step, 0);
+        if (value === 1) { this.float.style.transform = ""; this.float.style.opacity = ""; scrim.style.opacity = ""; return; }
+        const clamped = Math.min(1, Math.max(0, value));
+        this.float.style.opacity = String(clamped);
+        this.float.style.transform = `translateY(${(1 - value) * 12}px) scale(${0.97 + value * 0.03})`;
+        scrim.style.opacity = String(clamped);
+      }, { visualDuration: 0.32, bounce: 0.14 });
+      if (review?.length) {
+        this.jobs = review.map((failure) => ({ host: failure.host, step: failureCopy(failure).step, state: "failed", failure, timers: [] }));
+        this.go("progress", 0);
+      } else this.go(startEmpty ? "empty" : "discovery", 0);
       if (animate) requestAnimationFrame(() => this.spring.set(1));
     }
 
     private later(ms: number, fn: () => void): void { this.timers.push(window.setTimeout(fn, ms)); }
     private clearTimers(): void { for (const id of this.timers) window.clearTimeout(id); this.timers = []; }
-    private all(): AddHostFixture[] { return [...this.typed, ...hosts.filter((host) => !added.some((item) => item.id === host.id)), ...hosts.filter((host) => added.some((item) => item.id === host.id)).map((host) => ({ ...host, alreadyAdded: true }))]; }
+    private all(): AddHostFixture[] {
+      const isAdded = (host: AddHostFixture): boolean => added.some((item) => item.id === host.id);
+      return [...this.typed, ...hosts.filter((host) => !isAdded(host)), ...hosts.filter(isAdded).map((host) => ({ ...host, alreadyAdded: true }))];
+    }
     private focusField(): void {
-      if (matchMedia("(pointer: fine)").matches) this.current?.querySelector<HTMLInputElement>(".ah-input")?.focus({ preventScroll: true });
+      if (matchMedia("(pointer: fine)").matches) this.chips?.input.focus({ preventScroll: true });
     }
 
-    // ── Page transitions ──────────────────────────────────────────────────────
-    private show(page: HTMLElement, dir: Direction): void {
-      const reduce = reducedMotion();
-      const before = this.pages.offsetHeight;
-      for (const leaving of this.pages.querySelectorAll<HTMLElement>(".ah-page[data-leaving]")) leaving.remove();
-      const old = this.current;
-      if (old) {
-        for (const animation of old.getAnimations()) { animation.commitStyles(); animation.cancel(); }
-        old.dataset.leaving = "true";
-        old.inert = true;
-      }
-      page.classList.add("ah-page");
-      this.pages.append(page);
-      this.current = page;
-      const after = page.offsetHeight;
-      if (!old) return;
-      const distance = reduce || dir === 0 ? 0 : 14 * dir;
-      const exit = old.animate([{ opacity: getComputedStyle(old).opacity }, { opacity: 0, transform: `translateX(${-distance}px)` }], { duration: 140, easing: EASE, fill: "forwards" });
-      exit.onfinish = () => old.remove();
-      page.animate([{ opacity: 0, transform: `translateX(${distance}px)` }, { opacity: 1, transform: "none" }], { duration: 220, easing: EASE });
-      if (!reduce && before !== after) this.pages.animate([{ height: `${before}px` }, { height: `${after}px` }], { duration: 220, easing: EASE });
-    }
-
-    private setFoot(markup: string): void {
-      this.foot.innerHTML = markup;
-      this.foot.hidden = markup === "";
-      if (!reducedMotion() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE });
-    }
-
-    private hero(icon: string, tone = ""): string {
-      return `<div class="ah-hero"${tone ? ` data-tone="${tone}"` : ""}>${svg(icon)}</div>`;
-    }
-
-    go(next: Step, dir: Direction = 1): void {
+    // ── Steps ─────────────────────────────────────────────────────────────────
+    /** Shared step transition: overlapping panes on springs, spring height, Back reverses. */
+    private go(next: Step, dir: Direction = 1): void {
       this.clearTimers();
       this.step = next;
       this.card.dataset.step = next;
       const page = document.createElement("div");
+      page.className = "ah-page";
       page.dataset.page = next;
+      if (next !== "discovery") this.chips = undefined;
       if (next === "empty") this.renderEmpty(page);
       else if (next === "discovery") this.renderDiscovery(page);
       else if (next === "credentials") this.renderCredentials(page);
       else if (next === "root") this.renderRoot(page);
       else if (next === "progress") this.renderProgress(page);
       else this.renderFailure(page);
-      this.show(page, dir);
-      if (next === "progress") this.startProgress();
+      this.stepper.show(page, dir);
+      this.current = page;
+      this.scroller.scrollTop = 0;
       if (next === "discovery") this.focusField();
     }
 
-    // ── Steps ─────────────────────────────────────────────────────────────────
+    private setFoot(markup: string): void {
+      this.foot.innerHTML = markup;
+      this.foot.hidden = markup === "";
+      if (!reducedMotion() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: EASE });
+    }
+
+    private hero(icon: string, tone = ""): string {
+      return `<div class="ah-hero"${tone ? ` data-tone="${tone}"` : ""}>${svg(icon)}</div>`;
+    }
+
     private renderEmpty(page: HTMLElement): void {
       page.innerHTML = `${this.hero(ICON.servers)}<h1 class="ah-title">No hosts yet</h1>
         <p class="ah-lede">Add a host to open its terminal here.</p>`;
       this.setFoot(`<button class="ah-primary" type="button" data-ah="begin">${svg(ICON.plus)}<span>Add a host</span></button>`);
     }
 
+    // ── Discovery: chips + one list ───────────────────────────────────────────
+    private chipFor(host: AddHostFixture): Chip {
+      const typed = this.typed.includes(host);
+      return {
+        id: host.id,
+        label: typed ? `${host.user}@${host.id}` : host.id,
+        icon: typed ? svg(ICON.typed, "is-line") : hostIconMarkup(platformOf(host), ""),
+      };
+    }
+
     private hostRow(host: AddHostFixture): string {
       const typed = this.typed.includes(host);
-      const status = typed ? { label: "Checked on continue", tone: "none" as const, icon: ICON.pending } : statusOf(host);
-      const sources = host.sources.map((source) => `<span class="ah-src">${hostSourceIconMarkup(source)}${SOURCE_LABELS[source]}</span>`).join("");
+      const status = typed ? { label: "On continue", tone: "none" as const, icon: ICON.pending } : statusOf(host);
+      const sources = host.sources.map((source) => `<span class="ah-src" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
       const checked = this.selected.some((item) => item.id === host.id);
       const mark = typed ? svg(ICON.typed, "ah-os-mark is-line") : hostIconMarkup(platformOf(host), "ah-os-mark");
       return `<label class="ah-row${host.alreadyAdded ? " is-added" : ""}" data-host="${escapeHtml(host.id)}">
@@ -302,24 +324,78 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
         ${mark}
         <span class="ah-main">
           <span class="ah-name">${escapeHtml(host.id)}</span>
-          <span class="ah-meta">${typed ? `<span>${escapeHtml(host.user)}@${escapeHtml(host.address)}</span>` : `<span>${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}</span>${sources}`}</span>
+          <span class="ah-meta"><span>${typed ? `${escapeHtml(host.user)}@${escapeHtml(host.address)}` : `${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}`}</span>${sources ? `<span class="ah-srcs">${sources}</span>` : ""}</span>
         </span>
-        <span class="ah-side">
-          <span class="ah-status" data-tone="${status.tone}">${svg(status.icon, "ah-status-icon")}${status.label}</span>
-          ${typed || host.alreadyAdded ? "" : `<button class="ah-ip" type="button" data-ah="ip" data-id="${escapeHtml(host.id)}">Show IP</button>`}
-        </span>
+        <span class="ah-status" data-tone="${status.tone}">${svg(status.icon, "ah-status-icon")}<span>${status.label}</span></span>
       </label>`;
     }
 
     private renderDiscovery(page: HTMLElement): void {
       page.innerHTML = `<h1 class="ah-title">Add hosts</h1>
         <p class="ah-lede">Hosts this server can reach. Nothing logs in until you continue.</p>
-        <div class="ah-field">${svg(ICON.servers, "ah-field-icon")}
-          <input class="ah-input" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
-            placeholder="Find or type user@host" aria-label="Find a host or type user@host" value="${escapeHtml(this.text)}" /></div>
+        <div class="ah-field">${svg(ICON.servers, "ah-field-icon")}</div>
         <div class="ah-list" role="group" aria-label="Hosts"></div>`;
+      this.chips = mountChipInput(page.querySelector<HTMLElement>(".ah-field")!, {
+        label: "Hosts to add",
+        placeholder: "Find or type user@host",
+        resolve: (token, delimited) => this.resolve(token, delimited),
+        onChange: (chips) => this.syncSelection(chips),
+        onToken: (token) => { this.token = token; this.applyFilter(); },
+        onSubmit: () => { if (this.selected.length) this.proceed(); },
+      });
+      for (const host of this.selected) this.chips.add(this.chipFor(host));
       this.renderList(page);
       this.setFoot(`<span class="ah-count" aria-live="polite"></span><button class="ah-primary" type="button" data-ah="continue"><span>Continue</span></button>`);
+      this.updateCount();
+    }
+
+    /** A token becomes a chip when it names exactly one host, or is ended and parses as user@host. */
+    private resolve(token: string, delimited: boolean): Chip | undefined {
+      const target = parseTarget(token);
+      if (!target) return undefined;
+      const all = this.all().filter((host) => !host.alreadyAdded);
+      const known = all.find((host) => host.id === target.host || host.address === target.host);
+      if (known) {
+        const longer = all.some((host) => host !== known && host.id.startsWith(target.host));
+        if (!delimited && longer) return undefined;
+        const host = target.user && target.user !== known.user ? { ...known, user: target.user } : known;
+        if (host !== known) this.typed = [host, ...this.typed.filter((item) => item.id !== host.id)];
+        return this.chipFor(host);
+      }
+      if (!delimited) return undefined;
+      const host: AddHostFixture = {
+        id: target.host,
+        user: target.user ?? "root",
+        address: target.host,
+        operatingSystem: "Linux",
+        architecture: "unknown",
+        sources: [],
+        reachability: target.host.startsWith("10.99.") ? "unreachable" : "ready",
+        evidence: `connect ${target.host}:${target.port ?? 22}: no response after 3 attempts (5 s each); no login was attempted`,
+        alreadyAdded: false,
+        rootAvailable: true,
+        credentialRequired: false,
+        authentication: "accepted",
+      };
+      this.typed = [host, ...this.typed];
+      if (this.current) this.renderList(this.current);
+      return this.chipFor(host);
+    }
+
+    /** Chips are the selection; checkboxes follow them. */
+    private syncSelection(chips: Chip[]): void {
+      const all = this.all();
+      this.selected = chips.map((chip) => all.find((host) => host.id === chip.id)).filter((host): host is AddHostFixture => !!host);
+      // While a discovery page is being built, `current` is still the previous page; it renders from `selected`.
+      if (this.current?.dataset.page === "discovery") {
+        if (chips.some((chip) => !this.current!.querySelector(`.ah-row[data-host="${CSS.escape(chip.id)}"]`))) this.renderList(this.current);
+        for (const [id, tick] of this.ticks) {
+          const want = this.selected.some((host) => host.id === id);
+          const input = this.current.querySelector<HTMLInputElement>(`.ah-row[data-host="${CSS.escape(id)}"] input`);
+          if (input && input.checked !== want) { input.checked = want; tick.set(want); }
+        }
+        this.applyFilter();
+      }
       this.updateCount();
     }
 
@@ -333,33 +409,35 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
         </label>
         ${this.all().map((host) => this.hostRow(host)).join("")}
         <p class="ah-none" hidden>No discovered host matches.</p>`;
-      for (const input of list.querySelectorAll<HTMLInputElement>(".ah-row input")) springCheckbox(input);
-      this.applyFilter(page, false);
+      this.ticks = new Map();
+      for (const input of list.querySelectorAll<HTMLInputElement>(".ah-row[data-host] input")) this.ticks.set(input.value, springCheckbox(input));
+      for (const input of list.querySelectorAll<HTMLInputElement>(".ah-candidate input")) springCheckbox(input);
+      this.applyFilter(page);
     }
 
-    /** Shows matching rows; selected rows always stay; unmatched text offers the typed-host row. */
-    private applyFilter(page: HTMLElement = this.current!, animate = true): void {
-      const needle = this.text.trim().toLocaleLowerCase();
-      const target = parseTarget(this.text);
+    /** Shows rows matching the unfinished token; selected rows always stay listed. */
+    private applyFilter(page: HTMLElement | undefined = this.current): void {
+      if (!page || page.dataset.page !== "discovery") return;
+      const needle = this.token.toLowerCase();
+      const target = parseTarget(this.token);
       let visible = 0;
       let exact = false;
       for (const row of page.querySelectorAll<HTMLElement>(".ah-row[data-host]")) {
-        const host = this.all().find((item) => item.id === row.dataset.host)!;
+        const host = this.all().find((item) => item.id === row.dataset.host);
+        if (!host) continue;
         const isSelected = this.selected.some((item) => item.id === host.id);
-        const haystack = `${host.user}@${host.id} ${host.address} ${host.operatingSystem} ${host.architecture}`.toLocaleLowerCase();
-        const named = !!target && (host.id === target.host.toLowerCase() || host.address === target.host);
-        const match = !needle || haystack.includes(needle) || named;
+        const named = !!target && (host.id === target.host || host.address === target.host);
+        const match = !needle || `${host.user}@${host.id} ${host.address} ${host.operatingSystem} ${host.architecture}`.toLowerCase().includes(needle) || named;
         if (named) exact = true;
         const wasHidden = row.hidden;
         row.hidden = !match && !isSelected;
         if (match && !isSelected) visible++;
-        if (animate && wasHidden && !row.hidden && !reducedMotion()) row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE });
+        if (wasHidden && !row.hidden && !reducedMotion()) row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE });
       }
       const candidate = page.querySelector<HTMLElement>(".ah-candidate")!;
       const offer = !!target && !exact && visible === 0;
-      if (offer && candidate.hidden && animate && !reducedMotion()) candidate.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE });
       candidate.hidden = !offer;
-      if (target) page.querySelector<HTMLElement>(".ah-manual-target")!.textContent = this.text.trim();
+      if (offer) page.querySelector<HTMLElement>(".ah-manual-target")!.textContent = this.token;
       const shown = page.querySelectorAll(".ah-row[data-host]:not([hidden])").length;
       page.querySelector<HTMLElement>(".ah-none")!.hidden = shown > 0 || offer || !needle;
     }
@@ -372,64 +450,14 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
       if (primary) primary.disabled = this.selected.length === 0;
     }
 
-    private typedHost(): AddHostFixture | undefined {
-      const target = parseTarget(this.text);
-      if (!target) return undefined;
-      const known = this.all().find((host) => host.id === target.host.toLowerCase() || host.address === target.host);
-      if (known) return { ...known, user: target.user ?? known.user };
-      return {
-        id: target.host,
-        user: target.user ?? "root",
-        address: target.host,
-        operatingSystem: "Linux",
-        architecture: "unknown",
-        sources: [],
-        reachability: target.host.startsWith("10.99.") ? "unreachable" : "ready",
-        evidence: `connect ${target.host}:${target.port ?? 22}: no response after 3 attempts (5 s each); no login was attempted`,
-        alreadyAdded: false,
-        rootAvailable: true,
-        credentialRequired: true,
-        authentication: "accepted",
-      };
-    }
-
-    /** Ticks the typed host: it joins the list as a selected row and the field clears. */
-    private addTyped(): void {
-      const host = this.typedHost();
-      if (!host || !this.current) return;
-      const existing = this.all().find((item) => item.id === host.id);
-      if (existing) {
-        if (!this.selected.some((item) => item.id === existing.id)) this.selected = [...this.selected, existing];
-      } else {
-        this.typed = [host, ...this.typed];
-        this.selected = [...this.selected, host];
-      }
-      this.text = "";
-      const input = this.current.querySelector<HTMLInputElement>(".ah-input");
-      if (input) input.value = "";
-      this.renderList(this.current);
-      const row = this.current.querySelector<HTMLElement>(`.ah-row[data-host="${CSS.escape(host.id)}"]`);
-      if (row && !reducedMotion()) row.animate([{ opacity: 0, transform: "translateY(-4px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: EASE });
-      this.updateCount();
-    }
-
     private proceed(): void {
-      const chosen = this.selected.filter((host) => !host.alreadyAdded);
-      const blocked = chosen.filter((host) => failureFor(host) && host.authentication !== "refused");
-      const ready = chosen.filter((host) => !blocked.includes(host));
-      this.skipped = blocked.map((host) => failureFor(host)!);
-      if (ready.length === 0) { this.failure = this.skipped[0]; if (this.failure) this.go("failure"); return; }
-      this.selected = ready;
-      if (ready.some((host) => host.credentialRequired)) this.go("credentials");
+      if (!this.selected.length) return;
+      if (this.selected.some((host) => host.credentialRequired)) this.go("credentials");
       else this.afterCredentials();
     }
 
     private afterCredentials(): void {
-      const refused = this.selected.filter((host) => host.authentication === "refused");
-      this.skipped = [...this.skipped, ...refused.map((host) => failureFor(host)!)];
-      this.selected = this.selected.filter((host) => host.authentication !== "refused");
-      if (this.selected.length === 0) { this.failure = this.skipped[this.skipped.length - 1]; if (this.failure) this.go("failure"); return; }
-      if (this.selected.some((host) => host.rootAvailable)) this.go("root");
+      if (this.selected.some((host) => host.rootAvailable && host.reachability === "ready")) this.go("root");
       else this.startInstall(false);
     }
 
@@ -444,18 +472,18 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
           <label class="ah-option"><input type="radio" name="ah-identity" value="paste" /><span class="ah-radio" aria-hidden="true"></span>
             <span class="ah-option-text"><span>Paste a key or password</span><span class="ah-option-hint">Encrypted with your passkey.</span></span></label>
         </div>
-        <textarea class="ah-secret" rows="3" spellcheck="false" autocomplete="off" aria-label="SSH key or password" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" hidden></textarea>
-        ${needing.length > 1 ? `<label class="ah-consent check"><input type="checkbox" checked /><span>Use for all ${needing.length} hosts</span></label>` : ""}`;
-      for (const input of page.querySelectorAll<HTMLInputElement>(".ah-consent input")) springCheckbox(input);
+        <div class="ah-reveal" data-open="false"><div class="ah-reveal-in">
+          <textarea class="ah-secret" rows="3" spellcheck="false" autocomplete="off" aria-label="SSH key or password" placeholder="Paste a private key or password" tabindex="-1"></textarea>
+        </div></div>`;
       this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-primary" type="button" data-ah="credentials"><span>Continue</span></button>`);
     }
 
     private renderRoot(page: HTMLElement): void {
-      const roots = this.selected.filter((host) => host.rootAvailable);
-      const names = roots.map((host) => host.id);
-      const subject = roots.length === 1 ? names[0]! : `${roots.length} hosts`;
+      const roots = this.selected.filter((host) => host.rootAvailable && host.reachability === "ready");
+      const subject = roots.length === 1 ? roots[0]!.id : `${roots.length} hosts`;
+      const names = roots.length <= 3 ? roots.map((host) => host.id).join(", ") : `${roots.slice(0, 2).map((host) => host.id).join(", ")} and ${roots.length - 2} more`;
       page.innerHTML = `${this.hero(ICON.shield)}<h1 class="ah-title">Install as root on ${escapeHtml(subject)}?</h1>
-        <p class="ah-lede">${escapeHtml(names.join(", "))} ${roots.length > 1 ? "allow" : "allows"} passwordless sudo. That alone is not permission.</p>
+        <p class="ah-lede">${escapeHtml(names)} ${roots.length > 1 ? "allow" : "allows"} passwordless sudo. That alone is not permission.</p>
         <p class="ah-text">A root infraternal agent can manage packages, services and containers, and can read every file on the host. You can also install as a user now and switch to root later.</p>
         <p class="ah-quote">Trust is one thing we can't get back once lost.</p>
         <label class="ah-consent check"><input type="checkbox" data-consent /><span>I trust infraternal with root on ${escapeHtml(subject)}</span></label>`;
@@ -463,44 +491,102 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
       this.setFoot(`<button class="ah-secondary" type="button" data-ah="as-user">Install as user</button><button class="ah-primary" type="button" data-ah="as-root" disabled>${svg(ICON.shieldCheck)}<span>Install as root</span></button>`);
     }
 
+    // ── Progress: every host, concurrently ────────────────────────────────────
     private startInstall(root: boolean): void {
       this.asRoot = root;
-      this.installing = [...this.selected];
+      this.jobs = this.selected.map((host) => ({ host, step: 0, state: "pending", failure: undefined, timers: [] }));
       this.go("progress");
+      this.jobs.forEach((job, index) => this.run(job, 140 + index * 110));
     }
 
     private renderProgress(page: HTMLElement): void {
-      const one = this.installing.length === 1;
-      page.innerHTML = `${this.hero(ICON.rocket)}<h1 class="ah-title">${one ? `Adding ${escapeHtml(this.installing[0]!.id)}` : `Adding ${this.installing.length} hosts`}</h1>
-        <p class="ah-lede">${one ? "This takes a few seconds." : "Each host installs on its own; one failure never blocks another."}</p>
-        ${this.installing.map((host) => `<section class="ah-host" data-progress="${escapeHtml(host.id)}">
-          <div class="ah-host-head">${hostIconMarkup(platformOf(host), "ah-os-mark")}<span class="ah-name">${escapeHtml(host.id)}</span><span class="ah-host-os">${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}${this.asRoot ? " · root" : ""}</span></div>
-          <ol class="ah-steps">${BOOTSTRAP_STEPS.map((item) => `<li data-state="pending"><span class="ah-mark"></span><span>${item.label}</span></li>`).join("")}</ol>
-        </section>`).join("")}
-        ${this.skipped.map((item) => `<p class="ah-note">${svg(ICON.warning)}<span>${escapeHtml(item.host.id)} was skipped: ${escapeHtml(failureCopy(item).short)}</span></p>`).join("")}`;
+      const one = this.jobs.length === 1;
+      page.innerHTML = `${this.hero(ICON.rocket)}<h1 class="ah-title">${one ? `Adding ${escapeHtml(this.jobs[0]!.host.id)}` : `Adding ${this.jobs.length} hosts`}</h1>
+        <p class="ah-lede ah-summary" aria-live="polite"></p>
+        <ol class="ah-jobs">${this.jobs.map((job) => `<li class="ah-job" data-job="${escapeHtml(job.host.id)}">
+          ${hostIconMarkup(platformOf(job.host), "ah-os-mark")}
+          <span class="ah-main"><span class="ah-name">${escapeHtml(job.host.id)}</span><span class="ah-meta ah-job-step"></span></span>
+          <button class="ah-icon-button ah-job-retry" type="button" data-ah="retry-job" data-id="${escapeHtml(job.host.id)}" aria-label="Retry ${escapeHtml(job.host.id)}" data-tip="Retry" hidden>${svg(ICON.retry)}</button>
+          <span class="ah-mark"></span>
+          <span class="ah-bar" aria-hidden="true"><span></span></span>
+        </li>`).join("")}</ol>`;
       this.marks = new Map();
-      for (const host of this.installing) {
-        const section = page.querySelector<HTMLElement>(`[data-progress="${CSS.escape(host.id)}"]`)!;
-        this.marks.set(host.id, [...section.querySelectorAll<HTMLElement>(".ah-mark")].map((mark) => mountStepStatus(mark)));
+      for (const job of this.jobs) {
+        const row = page.querySelector<HTMLElement>(`[data-job="${CSS.escape(job.host.id)}"]`)!;
+        this.marks.set(job.host.id, mountStepStatus(row.querySelector<HTMLElement>(".ah-mark")!, job.state === "running" ? "running" : job.state));
       }
       this.setFoot("");
+      for (const job of this.jobs) this.paint(job, page);
+      this.summarise(page);
     }
 
-    private startProgress(): void {
-      const advance = (done: number): void => {
-        if (!this.alive || this.step !== "progress") return;
-        for (const host of this.installing) {
-          const items = [...this.current!.querySelectorAll<HTMLElement>(`[data-progress="${CSS.escape(host.id)}"] li`)];
-          items.forEach((item, index) => {
-            const state = index < done ? "done" : index === done ? "running" : "pending";
-            item.dataset.state = state;
-            this.marks.get(host.id)?.[index]?.set(state);
-          });
+    /** Mock install: staggered per-host timings; failing hosts stop at the step that fails. */
+    private run(job: Job, delay: number): void {
+      for (const id of job.timers) window.clearTimeout(id);
+      job.timers = [];
+      job.state = "pending";
+      job.step = 0;
+      job.failure = undefined;
+      const fail = failureFor(job.host);
+      const failAt = fail ? failureCopy(fail).step : -1;
+      const tick = (stepIndex: number): void => {
+        if (!this.alive) return;
+        if (stepIndex === failAt) {
+          job.state = "failed";
+          job.failure = fail;
+        } else if (stepIndex >= BOOTSTRAP_STEPS.length) {
+          job.state = "done";
+        } else {
+          job.state = "running";
+          job.step = stepIndex;
+          const pace = 420 + ((job.host.id.length * 97 + stepIndex * 53) % 380);
+          job.timers.push(window.setTimeout(() => tick(stepIndex + 1), stepIndex + 1 === failAt ? pace + 400 : pace));
         }
-        if (done >= BOOTSTRAP_STEPS.length) this.later(420, () => this.finish());
-        else this.later(560, () => advance(done + 1));
+        this.paint(job);
+        this.summarise();
+        if (job.state === "done" || job.state === "failed") this.settle();
       };
-      this.later(120, () => advance(0));
+      job.timers.push(window.setTimeout(() => tick(0), delay));
+      this.paint(job);
+    }
+
+    private paint(job: Job, page: HTMLElement | undefined = this.current): void {
+      const row = page?.querySelector<HTMLElement>(`[data-job="${CSS.escape(job.host.id)}"]`);
+      if (!row) return;
+      row.dataset.state = job.state;
+      const text = job.state === "done" ? (this.asRoot && job.host.rootAvailable ? "Ready · root" : "Ready")
+        : job.state === "failed" ? failureCopy(job.failure!).short
+          : job.state === "running" ? BOOTSTRAP_STEPS[job.step]!.label : "Waiting";
+      row.querySelector<HTMLElement>(".ah-job-step")!.textContent = text;
+      const fraction = job.state === "done" ? 1 : job.state === "pending" ? 0 : (job.step + (job.state === "running" ? 0.5 : 0)) / BOOTSTRAP_STEPS.length;
+      row.querySelector<HTMLElement>(".ah-bar > span")!.style.transform = `scaleX(${fraction})`;
+      row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = job.state !== "failed";
+      this.marks.get(job.host.id)?.set(job.state);
+    }
+
+    private summarise(page: HTMLElement | undefined = this.current): void {
+      const summary = page?.querySelector<HTMLElement>(".ah-summary");
+      if (!summary) return;
+      const done = this.jobs.filter((job) => job.state === "done").length;
+      const failed = this.jobs.filter((job) => job.state === "failed").length;
+      const running = this.jobs.length - done - failed;
+      summary.textContent = this.jobs.length === 1
+        ? (running ? "This takes a few seconds." : done ? "Ready." : "This host needs attention.")
+        : `${done} of ${this.jobs.length} ready${failed ? ` · ${failed} need attention` : ""}${running ? "" : "."}`;
+    }
+
+    /** When nothing is running: open what succeeded; a lone failure gets its own page. */
+    private settle(): void {
+      if (this.jobs.some((job) => job.state === "pending" || job.state === "running") || this.finished) return;
+      const done = this.jobs.filter((job) => job.state === "done").map((job) => job.host);
+      const failed = this.jobs.filter((job) => job.state === "failed").map((job) => job.failure!);
+      if (done.length === 0) {
+        if (this.jobs.length === 1) { this.failure = failed[0]; this.later(500, () => this.go("failure")); }
+        else this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button>`);
+        return;
+      }
+      this.finished = true;
+      this.later(600, () => this.finish(done, failed));
     }
 
     private renderFailure(page: HTMLElement): void {
@@ -509,57 +595,64 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
         <p class="ah-lede">${escapeHtml(copy.happened)}</p>
         <p class="ah-text">${escapeHtml(copy.next)}</p>
         <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(this.failure!.host.evidence)}</pre></details>`;
-      this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-primary" type="button" data-ah="retry"><span>Retry</span></button>`);
+      this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>Retry</span></button>`);
     }
 
-    // ── The morph: this window becomes the first host's terminal ─────────────
-    private finish(): void {
-      const [first, ...rest] = this.installing;
+    // ── The result: this window becomes the first host's terminal ────────────
+    private finish(done: AddHostFixture[], failed: Failure[]): void {
+      const [first, ...rest] = done;
       if (!first) return;
-      added.push(...this.installing);
+      added.push(...done);
       this.retire();
       const reduce = reducedMotion();
-      const panel = this.card.querySelector<HTMLElement>(".ah-panel")!;
-      const terminal = terminalMarkup(first);
-      const swap = (): void => {
-        this.body.replaceWith(terminal);
-        this.card.classList.remove("ah");
+      const output = this.card.querySelector<HTMLElement>(".ah-terminal .window-fake-output")!;
+      output.textContent = `${first.operatingSystem} · ${first.architecture}\n\n${first.user}@${first.id}:~$ `;
+      const terminal = this.card.querySelector<HTMLElement>(".ah-terminal")!;
+      terminal.removeAttribute("aria-hidden");
+      terminal.setAttribute("role", "application");
+      terminal.setAttribute("aria-label", `Terminal on ${first.id}`);
+      const swapHeader = (): void => {
         this.card.dataset.hostId = first.id;
         this.card.setAttribute("aria-label", `${first.user}@${first.id} terminal window`);
         this.pill.innerHTML = `${hostIconMarkup(platformOf(first), "os-mark window-os-mark")}<span class="window-pill-host">${escapeHtml(first.user)}@${escapeHtml(first.id)}</span><span class="dot live" aria-hidden="true"></span>`;
-        this.decorateHeader(first);
-        if (!reduce) {
-          terminal.animate([{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 240, easing: EASE });
-          for (const child of this.pill.children) child.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: EASE });
-        }
+        const actions = this.card.querySelector<HTMLElement>(".ah-actions")!;
+        actions.classList.remove("ah-actions");
+        if (!this.asRoot && first.rootAvailable) actions.append(rootPill(first));
+        if (!reduce) for (const child of this.pill.children) child.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: EASE });
       };
-      if (reduce) swap();
+      const done2 = (): void => { this.stageEl.remove(); this.card.classList.remove("ah"); };
+      if (reduce) { swapHeader(); done2(); }
       else {
-        const out = panel.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-8px)" }], { duration: 180, easing: EASE, fill: "forwards" });
-        for (const child of this.pill.children) child.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: EASE, fill: "forwards" });
-        out.onfinish = swap;
+        const scrim = this.stageEl.querySelector<HTMLElement>(".ah-scrim")!;
+        this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-6px) scale(0.98)" }], { duration: 200, easing: EASE, fill: "forwards" });
+        scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 280, easing: EASE, fill: "forwards" }).onfinish = done2;
+        const fades = [...this.pill.children].map((child) => child.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: EASE, fill: "forwards" }));
+        void (fades[0]?.finished ?? Promise.resolve()).then(swapHeader);
+        output.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 260, delay: 80, easing: EASE, fill: "backwards" });
       }
-      for (const host of rest) openTerminalWindow(host, this.group, !this.asRoot);
-      const message = rest.length ? `${this.installing.length} hosts are ready` : `${first.id} is ready`;
-      toast.show({ message, action: { label: "Add another", onSelect: () => openWizard(true, true) } });
+      // The rest tile to the right; the overview pans out so every new window is in view.
+      let after: HTMLElement = this.group;
+      rest.forEach((host, index) => { after = openTerminalWindow(host, after, !this.asRoot, 160 + index * 60); });
+      if (rest.length) window.setTimeout(() => showOverview(), 320);
+      const message = failed.length
+        ? `${done.length} ${done.length === 1 ? "host" : "hosts"} ready · ${failed.length} need attention`
+        : done.length > 1 ? `${done.length} hosts are ready` : `${first.id} is ready`;
+      toast.show({
+        message,
+        action: failed.length
+          ? { label: "Review", onSelect: () => openWizard(true, true, failed) }
+          : { label: "Add another", onSelect: () => openWizard(true, true) },
+      });
       if (wizard === this) wizard = undefined;
     }
 
-    private decorateHeader(host: AddHostFixture): void {
-      const actions = this.card.querySelector<HTMLElement>(".ah-actions")!;
-      actions.replaceChildren();
-      actions.classList.remove("ah-actions");
-      if (!this.asRoot && host.rootAvailable) actions.append(rootPill(host));
-    }
-
-    /** Stops listening as a wizard; the card stays as a terminal window. */
     private retire(): void {
       this.alive = false;
       this.resize.disconnect();
       this.clearTimers();
+      for (const job of this.jobs) for (const id of job.timers) window.clearTimeout(id);
       this.card.removeEventListener("click", this.onClick);
       this.card.removeEventListener("change", this.onChange);
-      this.card.removeEventListener("input", this.onInput);
       this.card.removeEventListener("keydown", this.onKeyDown);
       windows.push(this.group);
     }
@@ -567,9 +660,11 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     close(): void {
       this.alive = false;
       this.clearTimers();
+      for (const job of this.jobs) for (const id of job.timers) window.clearTimeout(id);
       const remove = (): void => { this.group.remove(); };
       if (reducedMotion()) { remove(); return; }
-      this.card.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(6px) scale(0.985)" }], { duration: 150, easing: EASE, fill: "forwards" }).onfinish = remove;
+      this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(6px) scale(0.98)" }], { duration: 160, easing: EASE, fill: "forwards" });
+      this.card.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, delay: 60, easing: EASE, fill: "forwards" }).onfinish = remove;
     }
 
     focus(): void {
@@ -588,72 +683,59 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
       else if (action === "credentials") this.afterCredentials();
       else if (action === "as-root") this.startInstall(true);
       else if (action === "as-user") this.startInstall(false);
+      else if (action === "back") this.go("discovery", -1);
       else if (action === "retry") {
         const host = this.failure?.host;
-        if (host) { this.selected = [{ ...host, reachability: "ready", authentication: "accepted" }]; this.skipped = []; this.proceed(); }
-      } else if (action === "back") this.go("discovery", -1);
-      else if (action === "ip") {
-        event.preventDefault();
-        const host = this.all().find((item) => item.id === target.dataset.id);
-        if (host && target.textContent !== host.address) target.textContent = host.address;
+        if (!host) return;
+        this.selected = [{ ...host, reachability: "ready", authentication: "accepted" }];
+        this.startInstall(this.asRoot);
+      } else if (action === "retry-job") {
+        const job = this.jobs.find((item) => item.host.id === target.dataset.id);
+        if (!job) return;
+        job.host = { ...job.host, reachability: "ready", authentication: "accepted" };
+        this.finished = false;
+        this.setFoot("");
+        this.run(job, 0);
       }
     };
 
     private readonly onChange = (event: Event): void => {
       const input = event.target;
       if (!(input instanceof HTMLInputElement)) return;
-      if (input.matches("[data-candidate]")) { if (input.checked) this.addTyped(); return; }
-      if (input.closest(".ah-row")) {
+      if (input.matches("[data-candidate]")) {
+        if (input.checked) { input.checked = false; this.chips?.commit(); }
+        return;
+      }
+      if (input.closest(".ah-row[data-host]")) {
         const host = this.all().find((item) => item.id === input.value);
-        if (!host) return;
-        this.selected = input.checked ? [...this.selected.filter((item) => item.id !== host.id), host] : this.selected.filter((item) => item.id !== host.id);
-        this.updateCount();
+        if (!host || !this.chips) return;
+        if (input.checked) this.chips.add(this.chipFor(host));
+        else this.chips.remove(host.id);
       } else if (input.matches("[data-consent]")) {
         const primary = this.foot.querySelector<HTMLButtonElement>("[data-ah='as-root']");
         if (primary) primary.disabled = !input.checked;
       } else if (input.name === "ah-identity") {
-        const secret = this.current?.querySelector<HTMLTextAreaElement>(".ah-secret");
-        if (secret) secret.hidden = input.value !== "paste";
+        const reveal = this.current?.querySelector<HTMLElement>(".ah-reveal");
+        if (!reveal) return;
+        const open = input.value === "paste";
+        reveal.dataset.open = String(open);
+        reveal.querySelector<HTMLTextAreaElement>("textarea")!.tabIndex = open ? 0 : -1;
       }
     };
 
-    private readonly onInput = (event: Event): void => {
-      if (!(event.target instanceof HTMLInputElement) || !event.target.matches(".ah-input")) return;
-      this.text = event.target.value;
-      this.applyFilter();
-    };
-
     private readonly onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") { this.close(); if (wizard === this) wizard = undefined; return; }
-      if (event.key !== "Enter" || !(event.target instanceof HTMLInputElement) || !event.target.matches(".ah-input")) return;
-      event.preventDefault();
-      const candidate = this.current?.querySelector<HTMLElement>(".ah-candidate");
-      if (candidate && !candidate.hidden) { this.addTyped(); return; }
-      const rows = [...(this.current?.querySelectorAll<HTMLElement>(".ah-row[data-host]:not([hidden]):not(.is-added)") ?? [])];
-      if (rows.length === 1 && this.selected.length === 0) rows[0]!.querySelector<HTMLInputElement>("input")!.click();
-      else if (this.selected.length) this.proceed();
+      if (event.key === "Escape") { this.close(); if (wizard === this) wizard = undefined; }
     };
 
     dispose(): void {
       this.alive = false;
       this.clearTimers();
+      for (const job of this.jobs) for (const id of job.timers) window.clearTimeout(id);
       this.group.remove();
     }
   }
 
   // ── Terminal windows ────────────────────────────────────────────────────────
-  function terminalMarkup(host: AddHostFixture): HTMLElement {
-    const terminal = document.createElement("div");
-    terminal.className = "window-fake-terminal ah-terminal";
-    terminal.setAttribute("role", "application");
-    terminal.setAttribute("aria-label", `Terminal on ${host.id}`);
-    const output = document.createElement("pre");
-    output.className = "window-fake-output";
-    output.textContent = `${host.operatingSystem} · ${host.architecture}\n\n${host.user}@${host.id}:~$ `;
-    terminal.append(output);
-    return terminal;
-  }
-
   function rootPill(host: AddHostFixture): HTMLButtonElement {
     const pill = document.createElement("button");
     pill.type = "button";
@@ -663,9 +745,10 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
       confirmTip?.close(false);
       confirmTip = mountConfirmTip(pill, {
         label: "Install as root",
-        message: `Install the infraternal agent as root on ${host.id}?`,
-        confirmLabel: "Yes",
-        cancelLabel: "No",
+        message: `Install as root on ${host.id}?`,
+        detail: "The infraternal agent will have root access to this host.",
+        confirmLabel: "Install as root",
+        cancelLabel: "Cancel",
         onConfirm: () => {
           const spinner = createSpinner();
           pill.querySelector(".ah-root-icon")?.replaceWith(spinner);
@@ -680,8 +763,8 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     return pill;
   }
 
-  /** Extra hosts from a multi-host add open their own windows after the morphed one. */
-  function openTerminalWindow(host: AddHostFixture, after: HTMLElement, offerRoot: boolean): void {
+  /** Opens a finished host's terminal window after `after`; returns its group. */
+  function openTerminalWindow(host: AddHostFixture, after: HTMLElement, offerRoot: boolean, delay: number): HTMLElement {
     const group = document.createElement("section");
     group.className = "window-group";
     const card = document.createElement("section");
@@ -689,20 +772,34 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     card.dataset.hostId = host.id;
     card.setAttribute("aria-label", `${host.user}@${host.id} terminal window`);
     card.innerHTML = `<header class="window-header">
-        <div class="window-host-pill ui-pill ui-overlay-surface">${hostIconMarkup(platformOf(host), "os-mark window-os-mark")}<span class="window-pill-host">${escapeHtml(host.user)}@${escapeHtml(host.id)}</span><span class="dot live" aria-hidden="true"></span></div>
+        <div class="window-host-pill ui-pill">${hostIconMarkup(platformOf(host), "os-mark window-os-mark")}<span class="window-pill-host">${escapeHtml(host.user)}@${escapeHtml(host.id)}</span><span class="dot live" aria-hidden="true"></span></div>
         <div class="window-header-actions"></div>
-      </header>`;
+      </header>
+      <div class="window-fake-terminal" role="application" aria-label="Terminal on ${escapeHtml(host.id)}"><pre class="window-fake-output">${escapeHtml(`${host.operatingSystem} · ${host.architecture}\n\n${host.user}@${host.id}:~$ `)}</pre></div>`;
     if (offerRoot && host.rootAvailable) card.querySelector(".window-header-actions")!.append(rootPill(host));
-    card.append(terminalMarkup(host));
     group.append(card);
     after.after(group);
     windows.push(group);
-    if (!reducedMotion()) card.animate([{ opacity: 0, transform: "translateY(8px)" }, { opacity: 1, transform: "none" }], { duration: 240, easing: EASE });
+    if (!reducedMotion()) card.animate([{ opacity: 0, transform: "translateY(10px) scale(0.98)" }, { opacity: 1, transform: "none" }], { duration: 280, delay, easing: EASE, fill: "backwards" });
+    return group;
   }
 
-  function openWizard(animate: boolean, fresh = false): void {
+  /** Pans out to the canvas overview so every new window is visible; any window click returns. */
+  function showOverview(): void {
+    panes.dataset.overview = "true";
+    const leave = (event: Event): void => {
+      if (!(event.target instanceof Element) || !event.target.closest(".window-card")) return;
+      delete panes.dataset.overview;
+      panes.removeEventListener("pointerdown", leave, true);
+    };
+    panes.addEventListener("pointerdown", leave, true);
+    panes.scrollTo({ left: 0, behavior: reducedMotion() ? "auto" : "smooth" });
+  }
+
+  function openWizard(animate: boolean, fresh = false, review?: Failure[]): void {
     if (wizard && !fresh) { wizard.focus(); return; }
-    wizard = new Wizard(false, animate);
+    delete panes.dataset.overview;
+    wizard = new Wizard(false, animate, review);
     wizard.focus();
   }
 
@@ -717,8 +814,8 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
     const shift = Number.parseFloat(panes.style.getPropertyValue("--ah-shift") || "0");
     let first = Infinity;
     for (const group of panes.querySelectorAll<HTMLElement>(".window-group:not([hidden])")) {
-      const left = group.getBoundingClientRect().left - shift;
-      if (group.getBoundingClientRect().right > 0) first = Math.min(first, left);
+      const rect = group.getBoundingClientRect();
+      if (rect.right > 0) first = Math.min(first, rect.left - shift);
     }
     const needed = Number.isFinite(first) ? Math.max(0, Math.ceil(reach - first)) : 0;
     if (needed) panes.style.setProperty("--ah-shift", `${needed}px`);
@@ -745,8 +842,6 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
 
   return {
     dispose() {
-      disposed = true;
-      void disposed;
       wizard?.dispose();
       for (const group of windows) group.remove();
       confirmTip?.close(false);
@@ -756,6 +851,7 @@ export async function mountAddHostPrototype(core: CoreScreen): Promise<{ dispose
       sidebarButton.removeEventListener("click", openFromSidebar);
       sidebarButton.remove();
       panes.style.removeProperty("--ah-shift");
+      delete panes.dataset.overview;
       originalCard.removeAttribute("aria-hidden");
       panes.removeAttribute("data-window-canvas");
       stage.classList.remove("has-addhost-prototype", "has-windows-prototype");
