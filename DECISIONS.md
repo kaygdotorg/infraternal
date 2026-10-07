@@ -806,3 +806,23 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - OIDC means standard providers (Authentik, Keycloak and similar);
        there is no direct Google or Apple login, and infraternal is never an
        OIDC provider itself.
+151. **Automatic E2EE for everyone via device keys (G1):** every account has
+     one account key (DEK) that the server only ever stores wrapped. Every
+     browser or device creates a non-exportable key pair (WebCrypto) and
+     receives a wrap of the account key, so known devices unlock silently at
+     sign-in, whether the user signed in with a passkey or OIDC. Passkeys
+     (PRF) and the recovery key are further unlockers in the same wrap list.
+     All stored secrets (SSH keys today, anything later) are end-to-end
+     encrypted automatically for local and OIDC users; there is no setting.
+     Group keys are wrapped per member's account key, and pending grants are
+     re-wrapped in the background by any member's device when it comes
+     online; escrow remains an opt-in enterprise policy. This supersedes the
+     passkey-only E2E model of D23, D148 and D150.
+152. **Getting a new device in is simple (G1c):** there are no matching codes.
+     A new device is brought in by:
+     - **scanning a QR code**: the new device shows a QR code; scanning it
+       with an already signed-in phone (camera or in-app) **signs the new
+       device in and unlocks it** in one step;
+     - **the recovery key**;
+     - a synced passkey, for passkey users, which works automatically.
+     The QR binds the request physically, so scanning it is the consent.
