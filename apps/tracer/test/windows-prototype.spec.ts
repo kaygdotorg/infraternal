@@ -413,15 +413,18 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
             key: row.querySelector<HTMLElement>(".machine-key")!.textContent,
             value: text.textContent,
             oneLine: text.getBoundingClientRect().height <= Number.parseFloat(getComputedStyle(text).lineHeight) + 1,
+            fitsValueColumn: text.scrollWidth <= text.clientWidth + 1,
           };
         });
       });
-      expect(compactValues).toEqual([
-        { key: "Model", value: "ThinkCentre M90q Gen 3", oneLine: true },
-        { key: "CPU", value: "i5-12500T · 12 cores", oneLine: true },
-        { key: "Agent mode", value: "root", oneLine: true },
-        { key: "Engines", value: "Podman 5.0 · BuildKit 0.16", oneLine: true },
+      expect(compactValues.map(({ key, value }) => ({ key, value }))).toEqual([
+        { key: "Model", value: "ThinkCentre M90q Gen 3" },
+        { key: "CPU", value: "i5-12500T · 12 cores" },
+        { key: "Agent mode", value: "root" },
+        { key: "Engines", value: "Podman 5.0 · BuildKit 0.16" },
       ]);
+      expect(compactValues.filter(({ key }) => key !== "Engines").every(({ oneLine }) => oneLine)).toBe(true);
+      expect(compactValues.every(({ fitsValueColumn }) => fitsValueColumn)).toBe(true);
       const assertFactGrid = async (selector: string): Promise<void> => {
         const geometry = await details.locator(selector).evaluate((root) => {
           const values = [...root.querySelectorAll<HTMLElement>(".machine-fact .machine-value, .machine-metric .machine-value")];
