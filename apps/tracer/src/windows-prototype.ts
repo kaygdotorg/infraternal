@@ -2,6 +2,7 @@
 import {
   confirmAction,
   copyFeedback,
+  CLIPBOARD,
   installStretchingCapsule,
   refreshTip,
   swapIcon,
@@ -480,7 +481,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   };
   function factsMarkup(rows: Array<[string, string]>): string {
     return rows.map(([label, value]) => `<button type="button" class="machine-fact" data-copy-value="${escapeHtml(value)}" aria-label="Copy ${escapeHtml(label)}: ${escapeHtml(value)}">
-      <span class="machine-key">${escapeHtml(label)}</span><span class="machine-value">${escapeHtml(value)}</span></button>`).join("");
+      <span class="machine-key">${escapeHtml(label)}</span><span class="machine-value">${escapeHtml(value)}</span>${swapIcon(CLIPBOARD)}</button>`).join("");
   }
   function renderMachine(host: Host, more: boolean): string {
     const rows: Array<[string, string]> = [
@@ -509,7 +510,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     </div>`;
   }
   function metricMarkup(label: string, amount: number, id: "memory" | "disk"): string {
-    return `<div class="machine-metric" data-metric="${id}"><div class="machine-metric-heading"><span>${label}</span><button type="button" data-copy-value="${amount}%" aria-label="Copy ${label.toLowerCase()} use">${amount}% used</button></div>
+    return `<div class="machine-metric" data-metric="${id}"><div class="machine-metric-heading"><span>${label}</span><button type="button" class="machine-metric-copy" data-copy-value="${amount}%" aria-label="Copy ${label.toLowerCase()} use"><span>${amount}% used</span>${swapIcon(CLIPBOARD)}</button></div>
       <div class="machine-metric-track" role="progressbar" aria-label="${label} used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${amount}"><span style="width:${amount}%"></span></div></div>`;
   }
   function renderConnection(host: Host): string {
@@ -553,7 +554,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     activeInfoTab = tab;
     machineMore = false;
     popover.dataset.kind = "info";
-    popover.innerHTML = `<div class="window-info-tabs" role="tablist" aria-label="Window information tabs">
+    popover.innerHTML = `<div class="segmented-tabs window-info-tabs" role="tablist" aria-label="Window information tabs">
       <span class="segmented-capsule" aria-hidden="true"></span>
       ${Object.entries(tabLabels).map(([id, data]) => `<button type="button" class="segmented-tab" role="tab" data-tab="${id}" aria-label="${data.title}" data-tip="${data.title}">${icon(data.icon)}</button>`).join("")}
     </div><div class="window-popover-body"></div>`;
@@ -639,7 +640,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     const metric = popover.querySelector<HTMLElement>(`[data-metric="${id}"]`);
     if (!metric) return;
     const amount = host[id];
-    metric.querySelector<HTMLElement>(".machine-metric-heading button")!.textContent = `${amount}% used`;
+    metric.querySelector<HTMLElement>(".machine-metric-copy > span")!.textContent = `${amount}% used`;
     const track = metric.querySelector<HTMLElement>(".machine-metric-track")!;
     track.setAttribute("aria-valuenow", String(amount));
     track.querySelector<HTMLElement>("span")!.style.width = `${amount}%`;
@@ -868,20 +869,12 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     }
     if (infoAction === "share") { openShare(); return; }
     const value = target.closest<HTMLElement>("[data-copy-value]");
-    if (value) void copyValue(value, value.dataset.copyValue ?? "");
+    if (value) void copyValue(value, value.dataset.copyValue ?? "", event.detail === 0);
   }
-  async function copyValue(element: HTMLElement, value: string): Promise<void> {
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error("Clipboard is unavailable");
-      await navigator.clipboard.writeText(value);
-      element.dataset.copied = "true";
-      const announcement = element.closest<HTMLElement>(".machine-content, .connection-facts, .session-info-facts")?.querySelector<HTMLElement>(".window-copy-announcement");
-      if (announcement) announcement.textContent = "Copied";
-      window.setTimeout(() => delete element.dataset.copied, 900);
-    } catch {
-      const announcement = element.closest<HTMLElement>(".machine-content, .connection-facts, .session-info-facts")?.querySelector<HTMLElement>(".window-copy-announcement");
-      if (announcement) announcement.textContent = "Clipboard unavailable";
-    }
+  async function copyValue(element: HTMLElement, value: string, instant: boolean): Promise<void> {
+    const copied = await copyFeedback(element, value, instant);
+    const announcement = element.closest<HTMLElement>(".machine-content, .connection-facts, .session-info-facts")?.querySelector<HTMLElement>(".window-copy-announcement");
+    if (announcement) announcement.textContent = copied ? "Copied" : "Clipboard unavailable";
   }
 
   function addPromotionTreeMark(): void {
