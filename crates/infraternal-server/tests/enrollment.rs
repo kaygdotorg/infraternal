@@ -5,7 +5,7 @@ use infraternal_server::enrollment::{CertificateRecord, EnrollmentError, Enrollm
 use sha2::{Digest, Sha256};
 use sqlx::{
     SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{path::PathBuf, time::Duration};
 use uuid::Uuid;
@@ -31,6 +31,8 @@ impl Database {
                     .filename(&path)
                     .create_if_missing(true)
                     .foreign_keys(true)
+                    .journal_mode(SqliteJournalMode::Wal)
+                    .synchronous(SqliteSynchronous::Normal)
                     .busy_timeout(Duration::from_secs(5)),
             )
             .await
@@ -278,7 +280,9 @@ async fn revocation_tombstone_refuses_existing_and_new_invitations_after_restart
         .connect_with(
             SqliteConnectOptions::new()
                 .filename(&db.path)
-                .foreign_keys(true),
+                .foreign_keys(true)
+                .journal_mode(SqliteJournalMode::Wal)
+                .synchronous(SqliteSynchronous::Normal),
         )
         .await
         .unwrap();
@@ -340,6 +344,24 @@ async fn malformed_capabilities_and_certificate_overflow_are_refused_before_muta
 #[ignore = "explicit 500-host storage measurement; not a remote transport budget"]
 async fn enrollment_storage_at_500_hosts() {
     let db = Database::new().await;
+    // Performance evidence must use the server's WAL/NORMAL policy, rather
+    // than measure fsyncs imposed only by SQLite's DELETE/FULL defaults.
+    let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        journal, "wal",
+        "measurement must match the server journal policy"
+    );
+    assert_eq!(
+        synchronous, 1,
+        "measurement must match the server synchronization policy"
+    );
     let store = db.store();
     let before: i64 = sqlx::query_scalar("PRAGMA page_count")
         .fetch_one(&db.pool)
@@ -386,7 +408,7 @@ async fn enrollment_storage_at_500_hosts() {
     let rss = std::fs::read_to_string("/proc/self/status").unwrap();
     let rss = rss.lines().find(|line| line.starts_with("VmRSS:")).unwrap();
     println!(
-        "500-host SQLite storage: issue_p50_us={} issue_p99_us={} redeem_p50_us={} redeem_p99_us={} page_delta_bytes={} bytes_per_host={} {} load={}",
+        "500-host SQLite WAL/NORMAL storage: issue_p50_us={} issue_p99_us={} redeem_p50_us={} redeem_p99_us={} page_delta_bytes={} bytes_per_host={} {} load={}",
         issue[250],
         issue[495],
         redeem[250],
