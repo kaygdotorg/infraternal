@@ -1,10 +1,25 @@
-//! Delayed recovery, rotation isolation and live-device cancellation [25].
+//! Recovery delay, same-account live-session exemption and rotation isolation [25,D113].
 use super::{Auth, Authority, DAY, Error, Result, Row, Value, hash, random, verify_recovery};
 
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
     /// Start a 24-hour delayed recovery; repeat requests do not reset or accelerate it.
     pub async fn recovery_start(&self, user: &str, words: String, now: i64) -> Result<String> {
+        Ok(self
+            .recovery_start_with_session(user, words, None, now)
+            .await?
+            .0)
+    }
+
+    /// Only an unlocked, unexpired session for this account may waive the delay [D113].
+    /// Returns the recovery capability and its authoritative Unix ready time.
+    pub async fn recovery_start_with_session(
+        &self,
+        user: &str,
+        words: String,
+        session: Option<&str>,
+        now: i64,
+    ) -> Result<(String, i64)> {
         let stored: String = sqlx::query_scalar("SELECT recovery_hash FROM users WHERE id=?")
             .bind(user)
             .fetch_optional(&self.pool)
@@ -27,14 +42,23 @@ impl Auth {
         if current.as_deref() != Some(stored.as_str()) {
             return Err(Error::Denied);
         }
+        // Do not slide or check the cookie before Argon2: revocation/expiry can occur
+        // during verification. This recheck shares the writer lock with request creation.
+        let live: bool = if let Some(token) = session {
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?)")
+                .bind(hash(token)).bind(user).bind(now).fetch_one(&mut *tx).await?
+        } else {
+            false
+        };
+        let ready = if live { now } else { now + DAY };
         let token = random();
         let n = sqlx::query("INSERT INTO recovery(user_id,token_hash,ready,expires) VALUES (?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,ready=excluded.ready,expires=excluded.expires WHERE recovery.expires<=?")
-            .bind(user).bind(hash(&token)).bind(now + DAY).bind(now + 2 * DAY).bind(now).execute(&mut *tx).await?.rows_affected();
+            .bind(user).bind(hash(&token)).bind(ready).bind(now + 2 * DAY).bind(now).execute(&mut *tx).await?.rows_affected();
         if n != 1 {
             return Err(Error::Denied);
         }
         tx.commit().await?;
-        Ok(token)
+        Ok((token, ready))
     }
 
     /// Any signed-in device may cancel recovery without a fresh tap [25].
