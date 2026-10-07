@@ -12,7 +12,7 @@ init=other
 sudo=no
 if [ "$uid" = 0 ] || (command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1); then sudo=yes; fi
 user_systemd=no
-if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then user_systemd=yes; fi
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show --property=Version --value >/dev/null 2>&1; then user_systemd=yes; fi
 linger=no
 if command -v loginctl >/dev/null 2>&1 && [ "$(loginctl show-user "$uid" -p Linger --value 2>/dev/null || :)" = yes ]; then linger=yes; fi
 existing=no
