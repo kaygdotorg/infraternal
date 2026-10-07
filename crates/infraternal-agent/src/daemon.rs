@@ -660,3 +660,7 @@ async fn terminal(
 #[cfg(test)]
 #[path = "daemon_remote_tests.rs"]
 mod remote_tests;
+
+#[cfg(test)]
+#[path = "daemon_readiness_tests.rs"]
+mod readiness_tests;
