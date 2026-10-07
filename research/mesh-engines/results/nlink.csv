@@ -1,0 +1,7 @@
+# Role: Five raw Linux control-plane samples for nlink 0.29.0, including its full-set failure.
+repetition,loadavg_start,loadavg_end,apply_status,apply_1000_us,chunked_baseline_set_1000_us,update_one_of_1000_us,remove_one_of_1000_us,get_peers,get_listen_port,handshake_stats_fields_read,handshake_stats_verified
+1,18.67/20.43/20.06,18.67/20.43/20.06,rejected_einval,2446,64990,58,5651,999,true,1000,true
+2,18.67/20.43/20.06,18.67/20.43/20.06,rejected_einval,2535,85562,78,6085,999,true,1000,true
+3,18.67/20.43/20.06,18.67/20.43/20.06,rejected_einval,5994,56068,52,5864,999,true,1000,true
+4,18.67/20.43/20.06,18.67/20.43/20.06,rejected_einval,3333,79174,43,182,999,true,1000,true
+5,18.67/20.43/20.06,18.67/20.43/20.06,rejected_einval,2499,73355,78,192,999,true,1000,true

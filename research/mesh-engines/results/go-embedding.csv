@@ -1,0 +1,4 @@
+# Role: Repeatable Go c-archive and stripped Rust-host binary size measurements.
+run,source_revision,archive_bytes,stripped_host_bytes,stripped_empty_host_bytes,incremental_bytes
+1,2631ce99a06f27120d581611cf125d68bc6aa565,4331184,3870512,332688,3537824
+2,2631ce99a06f27120d581611cf125d68bc6aa565,4331184,3870512,332688,3537824

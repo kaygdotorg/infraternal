@@ -1,0 +1,7 @@
+# Role: Five raw Linux control-plane samples for the typed minimal Generic Netlink client.
+repetition,loadavg_start,loadavg_end,apply_1000_us,update_one_of_1000_us,remove_one_of_1000_us,get_peers,get_listen_port,handshake_stats_fields_read,handshake_stats_verified
+1,17.31/20.24/19.99,17.31/20.24/19.99,69254,21,198,999,true,2997,true
+2,17.31/20.24/19.99,17.31/20.24/19.99,66333,10,180,999,true,2997,true
+3,17.77/20.29/20.01,17.77/20.29/20.01,70374,12,146,999,true,2997,true
+4,17.77/20.29/20.01,17.77/20.29/20.01,48386,10,543,999,true,2997,true
+5,17.77/20.29/20.01,17.77/20.29/20.01,64357,7,228,999,true,2997,true
