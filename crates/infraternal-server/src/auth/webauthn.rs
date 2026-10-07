@@ -1,4 +1,4 @@
-//! Single-use registration/login ceremonies, ownership and writer-locked counters [24,28].
+//! Single-use registration/login ceremonies, verified metadata and writer-locked counters [24,28].
 use super::{
     Auth, Authority, B64, CEREMONY, Engine, Error, Login, LoginState, Passkey, Pending,
     PublicKeyCredential, RegisterPublicKeyCredential, Registration, Result, Row, Uuid, Value, Wrap,
@@ -93,7 +93,7 @@ impl Auth {
         if registration.expires <= now {
             return Err(Error::Denied);
         }
-        let key = self.validated_registration(
+        let (key, aaguid) = self.validated_registration(
             &registration,
             proof,
             &passkey_wrap,
@@ -160,7 +160,7 @@ impl Auth {
                     .await?;
             }
         }
-        let key_id = store_passkey(&mut tx, &registration.user, &key).await?;
+        let key_id = store_passkey(&mut tx, &registration.user, &key, aaguid.as_deref()).await?;
         put_wrap(
             &mut tx,
             &registration.user,
@@ -188,7 +188,7 @@ impl Auth {
         proof: Value,
         passkey_wrap: &Wrap,
         recovery_wrap: Option<&Wrap>,
-    ) -> Result<Passkey> {
+    ) -> Result<(Passkey, Option<String>)> {
         reject_prf(&proof)?;
         passkey_wrap.validate()?;
         if let Some(w) = recovery_wrap {
@@ -201,9 +201,13 @@ impl Auth {
         if proof.type_ != "public-key" {
             return Err(Error::Denied);
         }
-        self.webauthn
+        let key = self
+            .webauthn
             .finish_passkey_registration(&proof, &registration.state)
-            .map_err(|_| Error::Webauthn)
+            .map_err(|_| Error::Webauthn)?;
+        // Metadata is projected only from a proof the verifier has already accepted.
+        let aaguid = registration_aaguid(&proof)?;
+        Ok((key, aaguid))
     }
 
     pub(super) async fn passkeys(&self, user: &str) -> Result<Vec<Passkey>> {
@@ -485,14 +489,42 @@ async fn store_passkey(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user: &str,
     key: &Passkey,
+    aaguid: Option<&str>,
 ) -> Result<String> {
     let id = B64.encode(key.cred_id().as_ref());
-    sqlx::query("INSERT INTO passkeys(id,user_id,credential,prf_input) VALUES (?,?,?,?)")
+    sqlx::query("INSERT INTO passkeys(id,user_id,credential,prf_input,aaguid) VALUES (?,?,?,?,?)")
         .bind(&id)
         .bind(user)
         .bind(serde_json::to_string(key)?)
         .bind(constant_prf_input())
+        .bind(aaguid)
         .execute(&mut **tx)
         .await?;
     Ok(id)
+}
+
+/// Extract only after webauthn-rs accepts the complete registration proof.
+/// Passkey in pinned webauthn-rs 0.5.5 discards AAGUID for `none` attestation.
+/// Zero values are privacy redaction, not a provider identity. This deliberately
+/// reuses the existing CBOR engine instead of implementing another CBOR parser.
+pub(super) fn registration_aaguid(proof: &RegisterPublicKeyCredential) -> Result<Option<String>> {
+    let value: serde_cbor_2::Value =
+        serde_cbor_2::from_slice(proof.response.attestation_object.as_ref())
+            .map_err(|_| Error::Invalid)?;
+    let serde_cbor_2::Value::Map(fields) = value else {
+        return Err(Error::Invalid);
+    };
+    let Some(serde_cbor_2::Value::Bytes(data)) =
+        fields.get(&serde_cbor_2::Value::Text("authData".into()))
+    else {
+        return Err(Error::Invalid);
+    };
+    // WebAuthn authData: rpIdHash[32], flags[1], signCount[4], AAGUID[16].
+    // The verifier already validated AT, credential ID, COSE key and all lengths.
+    if data.get(32).is_none_or(|flags| flags & 0x40 == 0) {
+        return Err(Error::Invalid);
+    }
+    let id =
+        Uuid::from_slice(data.get(37..53).ok_or(Error::Invalid)?).map_err(|_| Error::Invalid)?;
+    Ok((!id.is_nil()).then(|| id.to_string()))
 }

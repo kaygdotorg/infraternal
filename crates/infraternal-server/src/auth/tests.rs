@@ -2665,3 +2665,36 @@ async fn provider_session_latency_at_50_devices() {
         samples[990]
     );
 }
+
+#[test]
+fn aaguid_projection_rejects_malformed_cbor_corpus() {
+    let mut proof: RegisterPublicKeyCredential = serde_json::from_value(json!({
+        "id": B64.encode([0;32]), "rawId": B64.encode([0;32]), "type": "public-key",
+        "response": {"clientDataJSON": B64.encode(b"{}"), "attestationObject": "AA", "transports": []}, "extensions": {}
+    })).unwrap();
+    // The projection is not a verifier: accepted ceremonies are its caller's invariant.
+    // Exercise the existing CBOR engine's error path without retaining parser diagnostics.
+    let mut seed = 43_u64;
+    for length in 0..1024 {
+        let bytes: Vec<u8> = (0..length)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed.to_le_bytes()[0]
+            })
+            .collect();
+        proof.response.attestation_object = bytes.into();
+        assert!(webauthn::registration_aaguid(&proof).is_err());
+    }
+    for length in [0, 32, 37, 52, 53] {
+        let data = vec![0; length];
+        proof.response.attestation_object = serde_cbor_2::to_vec(&Cbor::Map(BTreeMap::from([(
+            Cbor::Text("authData".into()),
+            Cbor::Bytes(data),
+        )])))
+        .unwrap()
+        .into();
+        assert!(webauthn::registration_aaguid(&proof).is_err());
+    }
+}
