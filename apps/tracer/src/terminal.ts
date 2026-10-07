@@ -15,7 +15,19 @@ const INPUT_RESUME_GUARD = 16 * 1024;
 const INPUT_FRAME_LIMIT = 16 * 1024;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
+const RENDER_IDLE_MS = 700;
 const encoder = new TextEncoder();
+
+/** Private hooks on the pinned Ghostty build, kept at the renderer boundary for idle parking. */
+interface GhosttyActivityControls {
+  startRenderLoop(): void;
+  cancelRenderLoop(): void;
+  renderer?: {
+    setCursorBlink(enabled: boolean): void;
+    setTheme(theme: ITheme): void;
+    render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown): void;
+  };
+}
 
 export interface TerminalHooks {
   /** Only a public session id; writer/resume capabilities remain in memory. */
@@ -134,6 +146,7 @@ class ByteQueue {
 /** The sole terminal session in the tracer; all network and renderer buffers are bounded. */
 export class TerminalClient {
   private readonly terminal: Terminal;
+  private readonly ghostty: GhosttyActivityControls;
   private readonly inputQueue = new ByteQueue(INPUT_QUEUE_LIMIT);
   private readonly outputQueue = new ByteQueue(INITIAL_CREDIT);
   private readonly inputScratch = new Uint8Array(INPUT_FRAME_LIMIT);
@@ -165,17 +178,24 @@ export class TerminalClient {
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
   private pingTimer = 0;
+  private renderIdleTimer = 0;
   private nextPingNonce = 0n;
   private readonly pendingPings = new Map<bigint, number>();
   private inputModifier: "ctrl" | "alt" | undefined;
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
   private readonly onViewportChange = (): void => this.syncVisualViewport();
+  private readonly onTerminalActivity = (): void => this.wakeTerminal();
 
   private constructor(private readonly config: TerminalConfig, terminal: Terminal) {
     this.terminal = terminal;
+    this.ghostty = terminal as unknown as GhosttyActivityControls;
     this.screen = config.screen ?? config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
+    this.pauseTerminal(); // Ghostty opens with one live loop; the client owns its activity window.
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
+    config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
+    config.host.addEventListener("pointermove", this.onTerminalActivity, { passive: true });
+    config.host.addEventListener("wheel", this.onTerminalActivity, { passive: true });
     this.resizeObserver = new ResizeObserver(() => this.scheduleFit());
     this.resizeObserver.observe(config.host);
     window.visualViewport?.addEventListener("resize", this.onViewportChange);
@@ -185,8 +205,9 @@ export class TerminalClient {
       this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
       if (this.attached) this.sendFrame(TERMINAL_STREAM, { type: "Resize", ...this.lastSize });
     });
-    this.terminal.onData((data) => this.handleInput(data));
+    this.terminal.onData((data) => { this.wakeTerminal(); this.handleInput(data); });
     this.terminal.onScroll((offset) => {
+      this.wakeTerminal();
       config.host.dataset.scrolled = String(offset !== 0);
       config.onScroll?.(offset !== 0);
     });
@@ -208,7 +229,7 @@ export class TerminalClient {
     return new TerminalClient(config, new Terminal({
       fontFamily: '"Geist Mono", ui-monospace, monospace',
       fontSize: matchMedia("(pointer: coarse)").matches ? 13 : 14,
-      cursorBlink: true,
+      cursorBlink: false,
       cursorStyle: "bar",
       scrollback: config.scrollbackLimit ?? 10_000,
       theme: config.theme ?? {
@@ -310,8 +331,12 @@ export class TerminalClient {
   setTheme(theme: ITheme): void {
     this.config.theme = theme;
     this.terminal.options.theme = theme;
-    const renderer = (this.terminal as unknown as { renderer?: { setTheme: (next: ITheme) => void } }).renderer;
+    const renderer = this.ghostty.renderer;
     renderer?.setTheme(theme);
+    // Theme selection is a state update, not a reason to restart the idle loop.
+    if (renderer && this.terminal.wasmTerm) {
+      renderer.render(this.terminal.wasmTerm, true, this.terminal.viewportY, this.terminal);
+    }
   }
 
   /** Forces a WebSocket close for the opt-in resume probe. */
@@ -323,6 +348,10 @@ export class TerminalClient {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.pauseTerminal();
+    this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
+    this.config.host.removeEventListener("pointermove", this.onTerminalActivity);
+    this.config.host.removeEventListener("wheel", this.onTerminalActivity);
     this.config.onConnectionChange?.(false);
     window.clearTimeout(this.retryTimer);
     this.stopPings();
@@ -538,6 +567,7 @@ export class TerminalClient {
     this.retryAttempt = 0;
     this.config.onConnectionChange?.(true);
     this.startPings();
+    this.wakeTerminal();
     this.config.hooks?.onAttached?.(this.connectionIsResume, this);
   }
 
@@ -668,6 +698,7 @@ export class TerminalClient {
 
   private drainOutput(): void {
     if (!this.attached || this.outputWriteInFlight || this.snapshotWriteInFlight || this.closed) return;
+    this.wakeTerminal();
     if (this.pendingSnapshot) {
       const snapshot = this.pendingSnapshot;
       this.pendingSnapshot = undefined;
@@ -750,7 +781,10 @@ export class TerminalClient {
       const metrics = this.cellMetrics();
       const cols = clamp(Math.floor(width / metrics.width), 20, 0xffff);
       const rows = clamp(Math.floor(height / metrics.height), 6, 0xffff);
-      if (this.terminal.cols !== cols || this.terminal.rows !== rows) this.terminal.resize(cols, rows);
+      if (this.terminal.cols !== cols || this.terminal.rows !== rows) {
+        this.wakeTerminal();
+        this.terminal.resize(cols, rows);
+      }
     });
   }
 
@@ -825,7 +859,7 @@ export class TerminalClient {
 
   /** Starts one immediate RTT sample and then a single bounded sample every two seconds. */
   private startPings(): void {
-    this.stopPings();
+    this.stopPings(false);
     if (!this.attached || this.closed) return;
     const ping = () => {
       if (!this.attached || this.closed) return;
@@ -843,11 +877,30 @@ export class TerminalClient {
     this.pingTimer = window.setInterval(ping, 2000);
   }
 
-  private stopPings(): void {
+  private stopPings(clearRoundTrip = true): void {
     window.clearInterval(this.pingTimer);
     this.pingTimer = 0;
     this.pendingPings.clear();
-    this.config.onRoundTrip?.(undefined);
+    if (clearRoundTrip) this.config.onRoundTrip?.(undefined);
+  }
+
+  /** Keeps Ghostty drawing only through active input/output and its settling window. */
+  private wakeTerminal(): void {
+    if (this.closed) return;
+    window.clearTimeout(this.renderIdleTimer);
+    this.renderIdleTimer = window.setTimeout(() => this.pauseTerminal(), RENDER_IDLE_MS);
+    this.ghostty.renderer?.setCursorBlink(true);
+    this.ghostty.startRenderLoop();
+    if (this.attached && this.pingTimer === 0) this.startPings();
+  }
+
+  /** Parks the private Ghostty loop and recurring work while the terminal is settled. */
+  private pauseTerminal(): void {
+    window.clearTimeout(this.renderIdleTimer);
+    this.renderIdleTimer = 0;
+    this.ghostty.cancelRenderLoop();
+    this.ghostty.renderer?.setCursorBlink(false);
+    this.stopPings(false);
   }
 
   private acceptPong(nonce: bigint): void {
