@@ -796,3 +796,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        chosen.
 149. **The sidebar is rearrangeable by direct drag and drop:** long-press on
      touch, or press and hold with a mouse, then drag. No drag handles.
+150. **Shared credentials (K6–K7):**
+     - End-to-end group keys by default: a host group's shared secrets are
+       encrypted with a group key, wrapped for each member's passkey; adding
+       a member needs an existing member's browser to rewrap.
+     - Server-held escrow is an opt-in enterprise policy.
+     - A quiet "Only me" vs host-group switch when adding a key.
+     - How groups work, including OIDC, is defined in round G.
+     - OIDC means standard providers (Authentik, Keycloak and similar);
+       there is no direct Google or Apple login, and infraternal is never an
+       OIDC provider itself.
