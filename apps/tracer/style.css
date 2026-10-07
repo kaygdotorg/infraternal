@@ -392,10 +392,14 @@ button { color: inherit; }
   mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 22px), transparent);
 }
 .keytray::-webkit-scrollbar { display: none; }
-.keybar button { flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
+.keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.keybar button { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out), background-color 140ms var(--ease-out), color 140ms var(--ease-out); }
 .keybar button svg { width: 24px; height: 24px; stroke-width: 1.75; }
 .keybar .key-word { font: 600 15px/1 var(--font-ui); letter-spacing: 0.01em; }
-.keybar button[data-armed="true"] { background: var(--accent-soft); color: var(--accent); }
+/* Armed modifiers use a soft fill; locked modifiers add a small dot as a second cue. */
+.keybar button[data-mod-state="armed"], .keybar button[data-mod-state="locked"] { background: var(--accent-soft); color: var(--accent); }
+.keybar button[data-mod-state="locked"]::after { content: ""; position: absolute; right: 8px; bottom: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--overlay); }
+.keybar button[data-instant] { transition: none; }
 .keybar .dpad[hidden] { display: none !important; }
 .keybar.is-away { transform: translateY(calc(100% + 16px)); opacity: 0; pointer-events: none; transition-duration: 180ms, 140ms; }
 .keyblur.is-away { opacity: 0; }
@@ -435,6 +439,7 @@ button { color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .sidebar { transition: opacity 180ms ease; }
   .bm-fold { transition: none; }
+  .keybar button { transition: none; }
   .sidebar[hidden] { transform: none; }
   .sidebar.instant, .palette[data-open-kind="keyboard"] { transition: none; }
   .keybar.is-away { transform: none; }
