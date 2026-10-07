@@ -375,6 +375,8 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       let anchor = liveWindow;
       for (const host of [first!, ...rest]) anchor = addWindow(host, host.sessions[0]!, false, anchor);
       layout();
+      // Windows inserted ahead of a flow window push it to the right; keep it in view.
+      if (active && active !== liveWindow) revealWindow(active, "start");
     })
     .catch(() => undefined);
 
