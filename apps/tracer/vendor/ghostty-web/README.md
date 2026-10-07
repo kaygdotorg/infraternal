@@ -14,13 +14,20 @@ The `ghostty` Git submodule is pinned at
 commits by their immutable SHAs. The script runs the upstream locked install
 and its four constituent build steps. It does not use the upstream aggregate
 `build` task because that task invokes a second, non-frozen `prebuild` install.
+`local-theme-api.patch` adds a WASM API that updates ANSI palette entries and
+default foreground, background, and cursor colors in the existing terminal.
+Cells continue to retain palette indices, and truecolor cells remain literal
+RGB values. The API avoids sending synthetic VT data through the parser or PTY.
 The temporary checkout and Zig outputs live under
-`$HOME/.cache/codex-scratch/t-web/ghostty-builds/` and are removed on exit.
+`$HOME/.cache/codex-scratch/infraternal/ghostty-builds/` by default, can be
+relocated with `GHOSTTY_BUILD_SCRATCH_ROOT`, and are removed on exit.
 
-Rebuild and compare the emitted files with this vendored copy:
+Rebuild and compare the emitted files with this vendored copy, or pass `--update`
+to regenerate the checked-in build outputs and checksum file:
 
 ```sh
 nix shell nixpkgs#zig_0_15 -c apps/tracer/vendor/ghostty-web/build.sh --check
+apps/tracer/vendor/ghostty-web/build.sh --update
 ```
 
 The checked-in browser ESM embeds the WASM as a data URL. The separate WASM
