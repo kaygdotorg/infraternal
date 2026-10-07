@@ -272,6 +272,10 @@ if [ -f "$stage/activating" ]; then
     rm -f "$base/bin/current.new" "$launcher.new" "$unit.new"
     [ -f "$stage/had-launcher" ] || rm -f "$launcher"
     [ ! -f "$stage/replacing-unit" ] || rm -f "$unit"
+    # Retire replacement markers before restoring backups: a retry must never
+    # delete an original already restored by an interrupted rollback. Backups
+    # still present remain sufficient evidence to retry interrupted restoration.
+    rm -f "$stage/replacing-binary" "$stage/replacing-state" "$stage/replacing-unit"
     if [ -f "$stage/previous-binary" ]; then
         mv "$stage/previous-binary" "$base/bin/live"
         ln -s "$base/bin/live" "$base/bin/current"
