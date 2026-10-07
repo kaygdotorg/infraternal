@@ -44,13 +44,13 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
 .tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; white-space: nowrap; overflow: hidden;
-  font: 500 13px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+  font: 500 var(--text-secondary, 12px)/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .tip-label { display: block; }
 .tip-label.is-leaving { position: absolute; left: 10px; top: 6px; }
 .tip-arrow { position: absolute; left: 0; width: 8px; height: 8px; margin-left: -4px; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
 .tip-measure { position: fixed; visibility: hidden; white-space: nowrap; pointer-events: none;
-  font: 500 13px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
+  font: 500 var(--text-secondary, 12px)/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
 .ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(340px, calc(100vw - 24px)); gap: 12px; padding: 14px 14px 12px;
   border-radius: 14px; opacity: 0; transform: scale(0.96); pointer-events: none;
@@ -62,8 +62,8 @@ const STYLE = `
 .ui-confirm-tip[data-side="bottom"] .ui-confirm-tip-arrow { top: -5px; border-right: 0; border-bottom: 0; }
 .ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -5px; border-top: 0; border-left: 0; }
 .ui-confirm-tip-text { display: grid; gap: 3px; }
-.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 13px/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: var(--ui-tracking, -0.01em); }
-.ui-confirm-tip-detail { margin: 0; color: var(--ui-text-secondary, var(--fg-2)); font: var(--ui-type-label, 450 13px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace)); letter-spacing: var(--ui-tracking, -0.01em); }
+.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 13px)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-detail { margin: 0; color: var(--fg-2); font: 450 var(--text-secondary, 12px)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .ui-confirm-tip button { display: inline-grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
   color: var(--fg-2); cursor: pointer;

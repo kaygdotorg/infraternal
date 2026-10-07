@@ -71,6 +71,8 @@ function mix(left: string, right: string, amount: number): string {
 
 export interface OverlayMaterial {
   overlay: string;
+  /** Large floating panels (the sidebar): thinner than pills so content visibly blurs through. */
+  overlayPanel: string;
   overlaySolid: string;
   overlayLine: string;
   shadow: string;
@@ -90,6 +92,7 @@ export function overlayMaterial(active: Theme): OverlayMaterial {
 
   return {
     overlay: `rgb(${rgb(tinted)} / ${opacity})`,
+    overlayPanel: `rgb(${rgb(tinted)} / ${active.dark ? 0.56 : 0.6})`,
     overlaySolid: mix(active.bg, "#ffffff", active.dark ? 0.07 : 0.7),
     overlayLine: `rgb(${rgb(active.fg)} / 0.09)`,
     shadow: active.dark
@@ -117,6 +120,7 @@ export function applyTheme(active: Theme, root: HTMLElement): void {
   style.setProperty("--ok", active.ok);
   style.setProperty("--danger", active.ansi[1]);
   style.setProperty("--overlay", overlay.overlay);
+  style.setProperty("--overlay-panel", overlay.overlayPanel);
   style.setProperty("--overlay-solid", overlay.overlaySolid);
   style.setProperty("--overlay-line", overlay.overlayLine);
   style.setProperty("--shadow", overlay.shadow);

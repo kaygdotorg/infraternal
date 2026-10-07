@@ -45,7 +45,7 @@ function makeSection(section: BranchSection): HTMLElement {
   root.setAttribute("aria-expanded", String(open));
   root.toggleAttribute("data-open", open);
 
-  const head = el("button", "bm-head ui-list-row");
+  const head = el("button", "bm-head");
   head.type = "button";
   head.disabled = section.disabled || section.leaves.length === 0;
   head.setAttribute("aria-label", `${section.label}${section.meta ? `, ${section.meta}` : ""}`);
@@ -88,7 +88,7 @@ function makeSection(section: BranchSection): HTMLElement {
   for (const leaf of section.leaves) {
     const row = el("li", "bm-row");
     row.setAttribute("role", "treeitem");
-    const button = el("button", "bm-leaf ui-list-row");
+    const button = el("button", "bm-leaf");
     button.type = "button";
     button.dataset.id = leaf.id;
     button.disabled = Boolean(leaf.disabled);
@@ -175,7 +175,7 @@ export function branchedMenu(
     marker.style.opacity = currentHead ? "1" : "0";
     if (currentHead) {
       marker.style.transition = animate && !reduced() ? `transform 280ms ${EASE}` : "none";
-      marker.style.transform = `translateY(${currentHead.offsetTop + currentHead.offsetHeight / 2 - 10}px)`;
+      marker.style.transform = `translateY(${Math.round(currentHead.offsetTop + (currentHead.offsetHeight - marker.offsetHeight) / 2)}px)`;
     }
   }
 

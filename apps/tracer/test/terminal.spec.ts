@@ -101,7 +101,17 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
       `budget_ms=${returningSigninBudgetMs} result=${returningSigninP99 <= returningSigninBudgetMs ? "PASS" : "FAIL"}`,
   );
 
+  expect(await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.optedIn)).toBe(false);
+  await page.goto("/?mock=1&predict=1");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0))
+    .toBeGreaterThan(60);
+  await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.cursorVisible ?? false)).toBe(true);
+
   await page.keyboard.press("a");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
+    .toBe("a");
   await expect.poll(async () => {
     const state = await (await context.request.get("/__mock/state")).json() as { echoed_text: string };
     return state.echoed_text;
@@ -117,12 +127,157 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   }).toBe("ab");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("ab");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0))
+    .toBeGreaterThan(60);
   const resumedState = await (await context.request.get("/__mock/state")).json() as {
     echoed_text: string;
     accepted_input_bytes: number;
   };
   expect(resumedState.echoed_text).toBe("ab");
   expect(resumedState.accepted_input_bytes).toBe(2);
+
+  const predictionState = () => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho());
+  const inject = (data: string) => page.evaluate((value) => window.__tracerTestDouble?.injectInput(value), data);
+  const resetScreen = async (): Promise<void> => {
+    const state = await page.evaluate(async () => {
+      const response = await fetch("/__mock/screen-reset", { method: "POST", cache: "no-store" });
+      if (!response.ok) throw new Error(`screen reset returned HTTP ${response.status}`);
+      return await response.json() as { output_sequence: string };
+    });
+    await expect.poll(async () => BigInt(await page.evaluate(
+      () => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0",
+    ))).toBeGreaterThanOrEqual(BigInt(state.output_sequence));
+  };
+  const waitForPendingText = async (expected: string): Promise<void> => {
+    await expect.poll(async () => (await predictionState())?.pendingText ?? "").toBe(expected);
+  };
+
+  // A no-echo prompt clears the one speculative character at its measured echo deadline.
+  await context.request.post("/__mock/echo-mode", { data: { mode: "none" } });
+  await inject("p");
+  await waitForPendingText("p");
+  await expect.poll(async () => (await predictionState())?.muted ?? false, { timeout: 3000 }).toBe(true);
+  await waitForPendingText("");
+  await context.request.post("/__mock/echo-mode", { data: { mode: "normal" } });
+  await inject("q");
+  await expect.poll(async () => (await predictionState())?.muted ?? true).toBe(false);
+
+  // Alternate-screen entry suspends prediction; it resumes after a normal-screen write.
+  await context.request.post("/__mock/alternate-screen", { data: { active: true } });
+  await expect.poll(async () => (await predictionState())?.reason ?? "").toBe("unsafe-screen");
+  await inject("u");
+  await waitForPendingText("");
+  await context.request.post("/__mock/alternate-screen", { data: { active: false } });
+  await expect.poll(async () => (await predictionState())?.enabled ?? false).toBe(true);
+
+  // A wrong echo removes the overlay and three consecutive mismatches mute prediction.
+  await context.request.post("/__mock/echo-mode", { data: { mode: "wrong" } });
+  for (const [index, key] of ["m", "n", "o"].entries()) {
+    await inject(key);
+    await expect.poll(async () => (await predictionState())?.mispredictions ?? 0).toBe(index + 1);
+    await waitForPendingText("");
+  }
+  await expect.poll(async () => (await predictionState())?.muted ?? false).toBe(true);
+  await context.request.post("/__mock/echo-mode", { data: { mode: "normal" } });
+  await inject("r");
+  await expect.poll(async () => (await predictionState())?.muted ?? true).toBe(false);
+
+  // Backspace, horizontal cursor movement and multi-grapheme paste wait for host output.
+  await resetScreen();
+  await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
+  let beforeTyping = Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0"));
+  await inject("ABC");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("ABC");
+  await expect.poll(async () => Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0")))
+    .toBeGreaterThanOrEqual(beforeTyping + 3);
+  const outputBeforeMove = Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0"));
+  const cursorBeforeMove = Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.cursorX ?? 0));
+  await inject("\u001b[D");
+  await expect.poll(async () => Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0")))
+    .toBeGreaterThanOrEqual(outputBeforeMove + 3);
+  const cursorAfterMove = Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.cursorX ?? 0));
+  expect(cursorAfterMove).toBe(cursorBeforeMove - 1);
+  // Late enough to pass the mute deadline (two round trips plus guards), so the muted window is observable.
+  await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: 1500 } });
+  await inject("Z");
+  await waitForPendingText("Z");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.overlay?.text ?? "")).toBe("Z");
+  const movedCursor = await page.evaluate(() => ({
+    x: window.__tracerTestDouble?.predictiveEcho()?.overlay?.glyphs[0]?.x ?? Number.NaN,
+    cellWidth: window.__tracerTestDouble?.rendererMetrics()?.cellWidth ?? 0,
+    cursorX: window.__tracerTestDouble?.rendererMetrics()?.cursorX ?? 0,
+  }));
+  expect(movedCursor.cursorX).toBe(cursorAfterMove);
+  expect(movedCursor.x).toBeCloseTo(movedCursor.cellWidth * cursorAfterMove, 1);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("Z");
+  // This intentionally delayed echo exceeds the mute deadline; require a fresh host proof before resuming.
+  await expect.poll(async () => (await predictionState())?.muted ?? false).toBe(true);
+  await context.request.post("/__mock/echo-mode", { data: { mode: "normal" } });
+  await inject("y");
+  await expect.poll(async () => (await predictionState())?.muted ?? true).toBe(false);
+  await resetScreen();
+  await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
+  await expect.poll(async () => (await predictionState())?.enabled ?? false).toBe(true);
+  beforeTyping = Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0"));
+  await inject("ABCZ");
+  await waitForPendingText("ABCZ");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("ABCZ");
+  await expect.poll(async () => Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0")))
+    .toBeGreaterThanOrEqual(beforeTyping + 4);
+  const beforeBackspace = Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0"));
+  await inject("\u007f");
+  await waitForPendingText("");
+  await expect.poll(async () => Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0")))
+    .toBeGreaterThanOrEqual(beforeBackspace + 3);
+  const afterBackspace = await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "");
+  expect(afterBackspace).toContain("ABC");
+  expect(afterBackspace).not.toContain("ABCZ");
+  beforeTyping = Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0"));
+  await inject("pasted words");
+  await waitForPendingText("");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? ""))
+    .toContain("pasted words");
+  await expect.poll(async () => Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0")))
+    .toBeGreaterThanOrEqual(beforeTyping + 12);
+  await inject("ok");
+  await waitForPendingText("ok");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("ok");
+  await waitForPendingText("");
+  await context.request.post("/__mock/echo-mode", { data: { mode: "normal" } });
+
+  // Seeded key and echo-delay schedules compare the live Ghostty screen to a second Ghostty replay.
+  await resetScreen();
+  await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
+  for (let seed = 1; seed <= 24; seed += 1) {
+    const random = seededRandom(seed);
+    const delayMs = Math.floor(random() * 151);
+    await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: delayMs } });
+    const keys = ["a", "B", " ", "é", "\u007f", "\u001b[D", "\u001b[C", "pasted", "👩🏽‍💻"];
+    for (let index = 0; index < 6; index += 1) {
+      const key = keys[Math.floor(random() * keys.length)] ?? "a";
+      await inject(key);
+      await page.waitForTimeout(Math.floor(random() * 31));
+    }
+    await page.waitForTimeout(delayMs + 350);
+  }
+  const differential = await (await context.request.get("/__mock/state?input_bytes=1")).json() as { input_bytes: number[] };
+  const finalWithPrediction = await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "");
+  let lastReset = -1;
+  for (let index = 0; index + 1 < differential.input_bytes.length; index += 1) {
+    if (differential.input_bytes[index] === 0x1b && differential.input_bytes[index + 1] === 0x63) lastReset = index;
+  }
+  expect(lastReset).toBeGreaterThanOrEqual(0);
+  const replayBytes = [
+    ...differential.input_bytes.slice(0, lastReset + 2),
+    0x24,
+    0x20,
+    ...differential.input_bytes.slice(lastReset + 2),
+  ];
+  const finalWithoutPrediction = await page.evaluate(
+    (bytes) => window.__tracerTestDouble?.baselineScreenText(bytes) ?? Promise.resolve(""),
+    replayBytes,
+  );
+  expect(finalWithPrediction).toBe(finalWithoutPrediction);
 
   const terminalScreenshot = await page.screenshot({ fullPage: true });
   const terminalScreenshotPath = testInfo.outputPath("tracer-terminal.png");
@@ -138,8 +293,11 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   // The throughput probe deliberately starts a fresh PTY; normal reloads now
   // keep the tab's public session id instead of silently opening another shell.
   await page.evaluate(() => sessionStorage.clear());
-  await page.goto(`/?probe=1&n=${probeCount}&mock=1`);
+  await page.goto(`/?probe=1&n=${probeCount}&mock=1&predict=1`);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0))
+    .toBeGreaterThan(60);
+  await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
   const clockCalibration = await page.evaluate(async () => {
     const samples: Array<{ offsetMs: number; roundTripMs: number }> = [];
     for (let index = 0; index < 5; index += 1) {
@@ -156,6 +314,11 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
     samples.sort((left, right) => left.roundTripMs - right.roundTripMs);
     return samples[0] ?? { offsetMs: 0, roundTripMs: 0 };
   });
+  const measuredRttMs = Number(await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0));
+  console.log(
+    `METRIC name=tracer_rtt_measurement source=tracer-production-build configured_ms=${testRttMs} ` +
+      `measured_ms=${measuredRttMs.toFixed(2)} http_clock_sample_ms=${clockCalibration.roundTripMs.toFixed(2)}`,
+  );
   await expect(page.locator("#probe-run")).toBeEnabled();
   await page.locator("#probe-run").click();
   await expect.poll(
@@ -205,27 +368,62 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
     const started = sample.stages.keydown;
     const received = sample.stages.wsMessage;
     const painted = sample.stages.paint;
-    return started !== undefined && received !== undefined && painted !== undefined
-      ? [{ confirmed: received - started, visible: painted - started }]
+    const predicted = sample.stages.prediction;
+    const onData = sample.stages.onData;
+    const sent = sample.stages.wsSend;
+    return started !== undefined && received !== undefined && painted !== undefined &&
+      onData !== undefined && sent !== undefined
+      ? [{
+        received: received - started,
+        confirmed: painted - started,
+        predicted: (predicted ?? painted) - started,
+        overlayVisible: predicted !== undefined,
+        cpu: sent - onData,
+      }]
       : [];
   });
   expect(keySamples).toHaveLength(probeCount);
   const confirmedMs = keySamples.map((sample) => sample.confirmed).sort((left, right) => left - right);
-  const visibleMs = keySamples.map((sample) => sample.visible).sort((left, right) => left - right);
+  const predictedMs = keySamples.map((sample) => sample.predicted).sort((left, right) => left - right);
+  const cpuOnMs = keySamples.map((sample) => sample.cpu).sort((left, right) => left - right);
   const confirmedP50 = percentile(confirmedMs, 0.5);
   const confirmedP99 = percentile(confirmedMs, 0.99);
-  const visibleP50 = percentile(visibleMs, 0.5);
-  const visibleP99 = percentile(visibleMs, 0.99);
-  const echoBudgetMs = testRttMs + 34;
+  const predictedP50 = percentile(predictedMs, 0.5);
+  const predictedP99 = percentile(predictedMs, 0.99);
+  const predictedOverlayCount = keySamples.filter((sample) => sample.overlayVisible).length;
+  const profileJitterMs = testRttMs === 0 ? 0 : 30;
+  const echoBudgetMs = testRttMs + profileJitterMs + 34;
   console.log(
-    `METRIC name=keystroke_echo_confirmed source=tracer-production-build n=${keySamples.length} ` +
+    `METRIC name=keystroke_echo_confirmed_prediction_on source=tracer-production-build n=${keySamples.length} ` +
       `p50_ms=${confirmedP50.toFixed(2)} p99_ms=${confirmedP99.toFixed(2)} ` +
-      `budget_ms=${echoBudgetMs} result=${confirmedP99 <= echoBudgetMs ? "PASS" : "FAIL"}`,
+      `profile_budget_ms=${echoBudgetMs} measured_rtt_ms=${measuredRttMs.toFixed(2)} result=REPORT`,
   );
-  // Predictive echo issue #50 is still open, so the current visible-glyph timing is report-only.
+  const predictedSamples = keySamples.filter((sample) => sample.overlayVisible)
+    .map((sample) => sample.predicted).sort((left, right) => left - right);
+  const predictionFallbackCount = keySamples.length - predictedOverlayCount;
+  const fallbackReasons = await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.fallbacks ?? {});
+  const predictionCost = (await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.inputCostMs ?? []))
+    .slice(-probeCount).sort((left, right) => left - right);
   console.log(
-    `METRIC name=keystroke_glyph_visible source=tracer-production-build n=${keySamples.length} ` +
-      `p50_ms=${visibleP50.toFixed(2)} p99_ms=${visibleP99.toFixed(2)} budget_ms=17 result=REPORT`,
+    `METRIC name=keystroke_prediction_cpu source=tracer-production-build n=${predictionCost.length} ` +
+      `p50_ms=${percentile(predictionCost, 0.5).toFixed(3)} p99_ms=${percentile(predictionCost, 0.99).toFixed(3)} budget_ms=2 ` +
+      `result=${predictionCost.length > 0 && percentile(predictionCost, 0.99) <= 2 ? "PASS" : "FAIL"}`,
+  );
+  console.log(`METRIC name=keystroke_prediction_fallback_reasons source=tracer-production-build reasons=${JSON.stringify(fallbackReasons)} result=REPORT`);
+  console.log(
+    `METRIC name=keystroke_glyph_visible_prediction_on source=tracer-production-build n=${predictedMs.length} ` +
+      `overlay_n=${predictedOverlayCount} fallback_n=${predictionFallbackCount} ` +
+      `p50_ms=${predictedP50.toFixed(2)} p99_ms=${predictedP99.toFixed(2)} budget_ms=17 ` +
+      `result=${predictedP99 <= 17 ? "PASS" : "FAIL"}`,
+  );
+  console.log(
+    `METRIC name=keystroke_predicted_glyph_visible_prediction_on source=tracer-production-build n=${predictedSamples.length} ` +
+      `p50_ms=${percentile(predictedSamples, 0.5).toFixed(2)} p99_ms=${percentile(predictedSamples, 0.99).toFixed(2)} budget_ms=17 ` +
+      `result=${predictedSamples.length > 0 && percentile(predictedSamples, 0.99) <= 17 ? "PASS" : "FAIL"}`,
+  );
+  console.log(
+    `METRIC name=keystroke_browser_cpu_prediction_on source=tracer-production-build n=${cpuOnMs.length} ` +
+      `p50_ms=${percentile(cpuOnMs, 0.5).toFixed(3)} p99_ms=${percentile(cpuOnMs, 0.99).toFixed(3)} unit_ms_per_key result=REPORT`,
   );
   const serverTraceResponse = await context.request.get("/__mock/trace");
   const serverTraceBody = await serverTraceResponse.json() as { events: DoubleTraceEvent[] };
@@ -253,8 +451,45 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   console.log(`S1 screenshots: ${terminalScreenshotPath}, ${probeScreenshotPath}`);
   await page.locator("#probe-copy").click();
   await expect(page.locator("#probe-message")).toContainText(/Results copied|Clipboard unavailable/);
+
+  await page.evaluate(() => window.__tracerTestDouble?.setPredictiveEcho(false));
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.optedIn ?? true)).toBe(false);
+  await expect(page.locator("#probe-run")).toBeEnabled();
+  await page.locator("#probe-run").click();
+  await expect.poll(
+    async () => (await page.locator("#probe-results").textContent()) ?? "",
+    { timeout: 20_000 },
+  ).toContain(`Painted echoes: ${probeCount} / ${probeCount}`);
+  const offTrace = await page.evaluate(() => window.__tracerTestDouble?.trace() ?? []);
+  const offSamples = offTrace.flatMap((sample) => {
+    const started = sample.stages.keydown;
+    const painted = sample.stages.paint;
+    const onData = sample.stages.onData;
+    const sent = sample.stages.wsSend;
+    return started !== undefined && painted !== undefined && painted >= started &&
+      onData !== undefined && sent !== undefined
+      ? [{ confirmed: painted - started, painted: painted - started, cpu: sent - onData }]
+      : [];
+  });
+  expect(offSamples).toHaveLength(probeCount);
+  const offConfirmed = offSamples.map((sample) => sample.confirmed).sort((left, right) => left - right);
+  const offVisible = offSamples.map((sample) => sample.painted).sort((left, right) => left - right);
+  const cpuOff = offSamples.map((sample) => sample.cpu).sort((left, right) => left - right);
+  console.log(
+    `METRIC name=keystroke_glyph_visible_prediction_off source=tracer-production-build n=${offVisible.length} ` +
+      `p50_ms=${percentile(offVisible, 0.5).toFixed(2)} p99_ms=${percentile(offVisible, 0.99).toFixed(2)} budget_ms=17 result=REPORT`,
+  );
+  console.log(
+    `METRIC name=keystroke_echo_confirmed_prediction_off source=tracer-production-build n=${offConfirmed.length} ` +
+      `p50_ms=${percentile(offConfirmed, 0.5).toFixed(2)} p99_ms=${percentile(offConfirmed, 0.99).toFixed(2)} ` +
+      `profile_budget_ms=${echoBudgetMs} measured_rtt_ms=${measuredRttMs.toFixed(2)} result=REPORT`,
+  );
+  console.log(
+    `METRIC name=keystroke_browser_cpu_prediction_off source=tracer-production-build n=${cpuOff.length} ` +
+      `p50_ms=${percentile(cpuOff, 0.5).toFixed(3)} p99_ms=${percentile(cpuOff, 0.99).toFixed(3)} unit_ms_per_key result=REPORT`,
+  );
   expect(returningSigninP99).toBeLessThanOrEqual(returningSigninBudgetMs);
-  expect(confirmedP99).toBeLessThanOrEqual(echoBudgetMs);
+  expect(predictedP99).toBeLessThanOrEqual(17);
   expect(resumeP99).toBeLessThanOrEqual(resumeBudgetMs);
 });
 
@@ -291,7 +526,7 @@ function readResumeDuration(report: string | null): number {
 interface BrowserTraceSample {
   id: string;
   stages: Partial<Record<
-    "keydown" | "onData" | "encode" | "wsSend" | "wsMessage" | "decode" | "termWrite" | "writeCallback" | "paint",
+    "keydown" | "onData" | "encode" | "wsSend" | "wsMessage" | "decode" | "termWrite" | "writeCallback" | "paint" | "prediction",
     number
   >>;
 }
@@ -346,6 +581,15 @@ function summarizeAttribution(
 function percentile(sorted: number[], fraction: number): number {
   const rank = Math.max(0, Math.ceil(sorted.length * fraction) - 1);
   return sorted[rank] ?? 0;
+}
+
+/** Creates repeatable key and echo-delay schedules without shared random state. */
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    return state / 0x1_0000_0000;
+  };
 }
 
 /** Access failures must not expose a guessed form or browser exception details. */

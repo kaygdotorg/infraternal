@@ -119,3 +119,21 @@ test("live terminal: the cursor stays on its text inside the window card", async
   // UI tracking must not reach the renderer: the measured advance equals the cell width.
   expect(Math.abs(metrics.naturalCellWidth - metrics.cellWidth)).toBeLessThan(0.51);
 });
+
+for (const dpr of [1, 2]) {
+  test(`live terminal: an 86-character line puts the cursor at column 86 with 8 px cells at DPR ${dpr} (a window wide enough for 87 columns)`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1920, height: 900 }, deviceScaleFactor: dpr });
+    const page = await context.newPage();
+    try {
+      await openCanvas(page);
+      await page.locator(".ui-window").first().locator(".terminal-host").click();
+      const text = "x".repeat(86);
+      await page.keyboard.type(text);
+      await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.cursorX)).toBe(86);
+      const metrics = await page.evaluate(() => window.__tracerTestDouble!.rendererMetrics()!);
+      expect(metrics.cellWidth).toBe(8);
+    } finally {
+      await context.close();
+    }
+  });
+}

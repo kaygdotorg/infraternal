@@ -60,23 +60,26 @@ const SCREEN = `
   <section class="terminal-screen" id="terminal-screen" aria-label="Terminal">
     <div class="backdrop" aria-hidden="true"></div>
     <div class="panes" id="panes">
-      <section class="pane-card" aria-label="Current terminal pane">
+      <section class="ui-window pane-card" aria-label="Current terminal pane">
         <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal" tabindex="0" data-captures-keys></div>
       </section>
     </div>
+    <!-- The one sidebar toggle. It lives outside the top bar so it can travel into the sidebar's
+         header when the sidebar opens (see .sidebar-toggle in style.css); a spacer keeps its slot. -->
+    <button class="ui-pill ui-pill-icon sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false" aria-controls="sidebar">${SVG.menu}</button>
     <header class="top" aria-label="Terminal controls">
-      <button class="icon-btn ui-icon-button ui-overlay-surface" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false">${SVG.menu}</button>
-      <button class="capsule ui-pill ui-overlay-surface" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
+      <span class="top-spacer" aria-hidden="true"></span>
+      <button class="ui-pill capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
         <span class="capsule-session">SSH shell</span><span class="capsule-rtt" id="rtt" aria-label="Round trip">··</span>
         <kbd class="capsule-kbd">⌘K</kbd>
       </button>
       <nav class="tabs" aria-label="Other sessions">
-        <button class="tab tab-add ui-pill ui-overlay-surface" type="button" disabled aria-label="New session">${SVG.plus}</button>
+        <button class="ui-pill ui-pill-icon tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
       </nav>
     </header>
-    <aside class="sidebar ui-overlay-surface" id="sidebar" data-overlay-size="large" aria-label="Hosts" hidden>
+    <aside class="ui-panel sidebar" id="sidebar" aria-label="Hosts" hidden>
       <div class="sidebar-head"><span class="sidebar-title">Hosts</span></div>
       <div id="tree"></div>
     </aside>
@@ -86,14 +89,14 @@ const SCREEN = `
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
     </section>
-    ${recoveryUiEnabled() ? `<section class="pane-card recovery-notice" id="recovery-notice" aria-label="Pending account recovery" hidden>
-      <p id="recovery-notice-time"></p><button class="capsule" id="recovery-cancel" type="button">Cancel recovery</button>
+    ${recoveryUiEnabled() ? `<section class="ui-window recovery-notice" id="recovery-notice" aria-label="Pending account recovery" hidden>
+      <p id="recovery-notice-time"></p><button class="ui-pill" id="recovery-cancel" type="button">Cancel recovery</button>
       <p id="recovery-cancel-error" role="alert"></p>
     </section>
-    <p class="pane-card recovery-toast" id="recovery-toast" role="status" hidden></p>` : ""}
+    <p class="ui-window recovery-toast" id="recovery-toast" role="status" hidden></p>` : ""}
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
-      <div id="keytray" class="keytray ui-overlay-surface ui-pill" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
+      <div id="keytray" class="keytray ui-pill" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
         <button id="key-escape" type="button" tabindex="-1" data-key="esc" aria-label="Escape" class="key-word">esc</button>
         <button id="key-tab" type="button" tabindex="-1" data-key="tab" aria-label="Tab">${SVG.tab}</button>
         <button id="key-control" type="button" tabindex="-1" data-mod="ctrl" data-mod-state="off" aria-pressed="false" aria-label="Control">${SVG.ctrl}</button>
@@ -219,7 +222,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     void backdropModule?.then((renderer) => renderer.releaseBackdrop());
   };
 
-  const applyLook = (instant = false): void => {
+  const applyLook = (instant = false): Promise<void> => {
     const active = THEMES[currentThemeId]!;
     stage.toggleAttribute("data-no-motion", instant);
     ROOT.dataset.theme = currentThemeId;
@@ -229,10 +232,22 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     applyTheme(active, ROOT);
     THEME_COLOR?.setAttribute("content", active.bg);
     client?.setTheme(terminalTheme(active, background === "mesh"));
-    if (background === "mesh") void paintMesh();
-    else releaseMesh();
+    if (background === "mesh") return paintMesh();
+    releaseMesh();
+    return Promise.resolve();
   };
-  applyLook();
+  void applyLook();
+
+  // Theme and background picks swap every token in one step, with no animation. Measured
+  // at 1440x900 DPR 2: a view-transition crossfade froze rendering for 80-220 ms while it
+  // captured two full-screen snapshots, and the old per-element fades repainted every
+  // blurred surface per frame; the instant swap costs one repaint (p95 16.7-33 ms headless).
+  // The palette closes in the same step so it never fades over a repainting page.
+  const swapLook = (): void => {
+    setPalette(false, "keyboard");
+    void applyLook(true);
+  };
+
 
   const entries: PaletteEntry[] = [
     { group: "Sessions", glyph: "›_", label: "SSH shell", hint: hostName, action: "session:current" },
@@ -322,7 +337,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       const result = document.createElement("button");
       result.id = paletteOptionIds.get(entry)!;
       result.type = "button";
-      result.className = "result ui-button ui-list-row";
+      result.className = "result";
       result.setAttribute("role", "option");
       result.setAttribute("aria-selected", String(index === selected));
       result.dataset.action = entry.action ?? "";
@@ -380,6 +395,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
 
   const setSidebar = (open: boolean, instant = false): void => {
     dockPanes(open, instant);
+    // The toggle travels between the top bar and the sidebar header on a transform transition.
+    sidebarToggle.classList.toggle("instant", instant);
+    stage.toggleAttribute("data-sidebar-open", open);
+    if (instant) window.setTimeout(() => sidebarToggle.classList.remove("instant"), 0);
+    else if (reducedMotion.matches) sidebarToggle.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
     sidebar.hidden = !open;
     sidebarToggle.setAttribute("aria-expanded", String(open));
     sidebarToggle.setAttribute("aria-label", open ? "Hide hosts" : "Show hosts");
@@ -441,7 +461,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const systemThemeChange = (): void => {
     if (!themeId(params.get("theme")) && !themeId(readLocal("tracer.theme"))) {
       currentThemeId = systemDark.matches ? "ink" : "paper";
-      applyLook();
+      void applyLook();
     }
   };
   const viewportChange = (): void => {
@@ -488,8 +508,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (!(target instanceof Element)) return;
     const result = target.closest<HTMLButtonElement>(".result");
     if (!result) return;
-    runAction(result.dataset.action ?? "", "pointer");
-    setPalette(false, "pointer");
+    if (!runAction(result.dataset.action ?? "", "pointer")) setPalette(false, "pointer");
   });
   window.addEventListener("keydown", keydown, true);
   window.addEventListener("resize", resize);
@@ -623,7 +642,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   keybar.addEventListener("click", keybarClick);
   keytray.addEventListener("keydown", keybarKeydown);
 
-  function runAction(action: string, source: "keyboard" | "pointer"): void {
+  /** Runs a palette action; returns true when the action closed the palette itself. */
+  function runAction(action: string, source: "keyboard" | "pointer"): boolean {
     const [kind, value] = action.split(":");
     if (kind === "account" && value === "recovery") {
       setPalette(false, source);
@@ -631,16 +651,19 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else if (kind === "theme" && themeId(value ?? null)) {
       currentThemeId = value!;
       writeLocal("tracer.theme", currentThemeId);
-      applyLook(source === "keyboard");
+      swapLook();
+      return true;
     } else if (kind === "bg" && (value === "mesh" || value === "none")) {
       background = value;
       writeLocal("tracer.background", value);
-      applyLook(source === "keyboard");
+      swapLook();
+      return true;
     } else if (kind === "session" || kind === "host") {
       terminalHost.focus({ preventScroll: true });
     } else if (kind === "proto" && options.addHostPrototype) {
       window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action, source } }));
     }
+    return false;
   }
 
   const recoveryNotice = stage.querySelector<HTMLElement>("#recovery-notice")!;

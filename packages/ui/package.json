@@ -19,6 +19,7 @@
     "./branched": "./src/branched.ts",
     "./host-icons": "./src/host-icons.ts",
     "./segmented": "./src/segmented.ts",
+    "./terminal-text-overlay": "./src/terminal-text-overlay.ts",
     "./styles.css": "./styles.css"
   }
 }

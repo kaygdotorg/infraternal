@@ -1,16 +1,23 @@
 /** Shared presentation for @infraternal/ui browser primitives. */
 
+/* One type scale per platform (TASTE.md section 2). Desktop follows the macOS sizes, touch the iOS
+   sizes. Every product surface (top bar, sidebar, palette, tooltip, toast, windows) uses these
+   tokens rather than its own pixel values. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input stays 16 px on touch so iOS never zooms. */
+:root { --text-body: 13px; --text-secondary: 12px; --text-caption: 11px; --text-input: 13px; --row: 28px; }
+@media (pointer: coarse) { :root { --text-body: 16px; --text-secondary: 15px; --text-caption: 13px; --text-input: 16px; --row: 44px; } }
+
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
    data-focus-ring="on"); clicks, taps and shortcuts that move focus in script draw none. */
 :focus-visible { outline: none; }
 [data-focus-ring="on"] :focus-visible { outline: 2px solid var(--focus-ring, var(--accent, #7a9cff)); outline-offset: 2px; }
 .countup { font-variant-numeric: tabular-nums; }
 .busy-count { font: 500 13px/1 "Geist Mono", ui-monospace, monospace; color: rgb(0 0 0 / 0.6); }
+.terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
 
 /* One theme-aware glass material for every floating surface (D72, D160): popovers, sheets,
    palette, sidebar and tooltips, never in-page controls. No top-edge highlight (TASTE §1).
    Instances can tune the blur, saturation, border or shadow through custom properties. */
-.ui-overlay-surface {
+.ui-overlay-surface, .ui-panel {
   --ui-overlay-blur: 20px;
   --ui-overlay-saturation: 180%;
   background: var(--ui-overlay-background, var(--overlay));
@@ -21,7 +28,6 @@
   backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
 }
 .ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
-.ui-pill { min-height: var(--ui-pill-height, 38px); border-radius: var(--r-pill, 999px); }
 .ui-button {
   min-height: var(--ui-button-height, 44px);
   padding: var(--ui-button-padding, 0 12px);
@@ -31,19 +37,6 @@
   cursor: pointer;
   transition: background 140ms ease, color 140ms ease;
 }
-.ui-icon-button {
-  position: relative;
-  display: grid;
-  width: var(--ui-icon-button-size, 44px);
-  height: var(--ui-icon-button-size, 44px);
-  flex: none;
-  place-items: center;
-  border-radius: var(--ui-icon-button-radius, 50%);
-  color: var(--fg-2);
-}
-.ui-icon-button::before { content: ""; position: absolute; inset: var(--ui-icon-button-hit-inset, 0); background: transparent; }
-.ui-icon-button svg { width: var(--ui-icon-size, 18px); height: var(--ui-icon-size, 18px); stroke-width: var(--ui-icon-stroke, 1.8); }
-.ui-list-row { min-height: 44px; border-radius: 8px; }
 .ui-source-icon { display: block; width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 /* One native switch keeps pointer, keyboard, and assistive-technology state aligned. */
@@ -117,12 +110,12 @@
 .ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
 /* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
 .ui-toast { min-height: 44px; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 14px; }
-.ui-toast-message { min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: 450; line-height: 1.4; }
 .ui-toast-marker { display: grid; width: 22px; height: 22px; flex: none; place-items: center; }
 .ui-toast-marker .tick { width: 20px; height: 20px; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
 .ui-toast-marker .tick svg { width: 14px; height: 14px; stroke: var(--bg); }
-.ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; }
+.ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: 500; white-space: nowrap; }
 .ui-toast-marker .tick { width: 18px; height: 18px; }
 @media (pointer: coarse) {
   .ui-toast { min-height: 54px; gap: 12px; padding: 7px 9px 7px 12px; border-radius: 15px; }
@@ -417,3 +410,23 @@
 @media (hover: hover) and (pointer: fine) { .ui-chip-remove:hover { background: rgb(from var(--fg) r g b / 0.1); color: var(--fg); } }
 .ui-chip[data-armed] { background: rgb(from var(--fg) r g b / 0.2); }
 @media (pointer: coarse) { .ui-chip { height: 34px; font-size: 15px; } .ui-chip-remove { width: 28px; height: 28px; } }
+/* Pill: the one container for floating capsule controls (the top-bar capsule, icon buttons, the
+   sidebar toggle, session tabs). Instances set only their size and content layout; the material,
+   hairline, shadow, radius and press feedback live here so they can never drift apart. */
+.ui-pill {
+  appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 38px);
+  border: 1px solid var(--overlay-line) !important; border-radius: 999px; background: var(--overlay); box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+  transition: transform 140ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+.ui-pill:active:not(:disabled) { transform: scale(0.97); }
+.ui-pill-icon { width: var(--pill-h, 38px); padding: 0; color: var(--fg-2); }
+.ui-pill-icon svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.6; }
+@media (hover: hover) and (pointer: fine) { .ui-pill:hover:not(:disabled) { background: var(--overlay-solid); } }
+@media (prefers-reduced-motion: reduce) { .ui-pill:active:not(:disabled) { transform: none; } }
+
+/* Window: see the window card block above; terminals draw into a block canvas. */
+.ui-window canvas { display: block; }
+
+/* Panel: the same material for large floating surfaces such as the sidebar, a touch thinner. */
+.ui-panel { --ui-overlay-background: var(--overlay-panel, var(--overlay)); --ui-overlay-saturation: 160%; border-radius: var(--r-lg, 18px); }

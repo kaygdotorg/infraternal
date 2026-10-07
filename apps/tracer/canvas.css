@@ -84,3 +84,7 @@
   .terminal-screen[data-canvas="on"] .tabs .tab:not(.tab-add) { display: none; }
 }
 @media (pointer: coarse) { .terminal-screen[data-canvas="on"] .tab-add { width: 44px; } }
+
+/* On a phone the capsule shares its row with the toggle spacer and "+": the round-trip readout
+   gives way so the host name is never cut with an ellipsis. */
+@media (max-width: 480px) { .terminal-screen[data-canvas="on"] .capsule-rtt { display: none; } }

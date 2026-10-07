@@ -81,11 +81,12 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     const material = await page.evaluate(() => {
       const root = getComputedStyle(document.documentElement);
       const stage = document.querySelector<HTMLElement>("#terminal-screen")!;
-      const layers = [".icon-btn", ".capsule"];
+      const layers = ["#sidebar-toggle", ".capsule"];
       if (getComputedStyle(document.querySelector<HTMLElement>(".tabs")!).display !== "none") layers.push(".tab-add");
       if (getComputedStyle(document.querySelector<HTMLElement>(".keybar")!).display !== "none") layers.push(".keytray");
       return {
         root: root.getPropertyValue("--overlay").trim(),
+        rootPanel: root.getPropertyValue("--overlay-panel").trim(),
         rootLine: root.getPropertyValue("--overlay-line").trim(),
         rootShadow: root.getPropertyValue("--shadow").trim(),
         rootLargeShadow: root.getPropertyValue("--overlay-shadow-large").trim(),
@@ -121,7 +122,8 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
       const style = getComputedStyle(element);
       return { background: style.backgroundColor, line: style.borderTopColor, shadow: style.boxShadow };
     });
-    expect(cssChannels(sidebarMaterial.background)).toEqual(cssChannels(material.root));
+    // The sidebar is a large floating surface: the thinner shared panel material, not the pill one.
+    expect(cssChannels(sidebarMaterial.background)).toEqual(cssChannels(material.rootPanel));
     expect(cssChannels(sidebarMaterial.line)).toEqual(cssChannels(material.rootLine));
     expect(material.rootLargeShadow).not.toBe("");
     paths.push(await saveScreenshot(page, testInfo, `${prefix}-sidebar-open`));

@@ -22,3 +22,4 @@ export * from "./step-status";
 export * from "./toast";
 export * from "./pane-stepper";
 export * from "./chip-input";
+export * from "./terminal-text-overlay";
