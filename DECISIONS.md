@@ -974,3 +974,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      info popover and session manager included. It is never opaque and
      never so blurred that it reads as opaque, and it is checked in every
      theme.
+161. **Enterprise OS priority; BSD deferred:** platform work prioritises
+     enterprise operating systems:
+     - **enterprise Linux** (RHEL and its rebuilds Alma and Rocky, SUSE/SLES,
+       Debian, Ubuntu, **Proxmox VE**);
+     - **macOS** (13+, Intel and Apple silicon, D156);
+     - **Windows** (Windows Server and 10/11, #70).
+     BSD and BSD-based appliances (FreeBSD, OpenBSD, NetBSD, TrueNAS,
+     pfSense, OPNsense) are **deferred**; the ranking in #71 is kept for
+     later. The first release covers the enterprise Linux set; macOS and
+     Windows follow as the next platforms.
