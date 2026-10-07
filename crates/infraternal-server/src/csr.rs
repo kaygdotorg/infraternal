@@ -43,19 +43,73 @@ impl ValidatedCsr {
     }
 }
 
-// OpenSSL's d2i entry point accepts a prefix and leaves suffixes unconsumed.
-// Bound the whole request first, requiring one definite, shortest-length SEQUENCE.
-// OpenSSL remains the PKCS10 parser and signature verifier; no requested fields
-// besides its public key are ever copied into certificates.
+// OpenSSL caches signed request-info bytes, so re-encoding cannot establish
+// shortest nested lengths or mandatory PKCS10 fields. This allocation-free
+// preflight bounds nesting before OpenSSL parses and verifies possession.
 fn validate_envelope(der: &[u8]) -> Result<(), CsrError> {
-    if der.len() > MAX_CSR_DER || der.first() != Some(&0x30) {
+    if der.len() > MAX_CSR_DER {
         return Err(CsrError);
     }
-    let first = *der.get(1).ok_or(CsrError)?;
+    let mut input = der;
+    let outer = take(&mut input, 0x30)?;
+    if !input.is_empty() {
+        return Err(CsrError);
+    }
+    validate_tree(outer, 0)?;
+    let mut slots = outer;
+    let mut info = take(&mut slots, 0x30)?;
+    if take(&mut info, 2)? != [0] {
+        return Err(CsrError);
+    }
+    take(&mut info, 0x30)?; // Requested name has no certificate authority.
+    let mut spki = take(&mut info, 0x30)?;
+    ed25519_algorithm(&mut spki)?;
+    let key = take(&mut spki, 3)?;
+    if key.len() != 33 || key[0] != 0 || !spki.is_empty() {
+        return Err(CsrError);
+    }
+    let attributes = take(&mut info, 0xa0)?;
+    validate_set(attributes)?; // Implicit SET OF attributes is mandatory, even empty.
+    if !info.is_empty() {
+        return Err(CsrError);
+    }
+    ed25519_algorithm(&mut slots)?;
+    let signature = take(&mut slots, 3)?;
+    if signature.len() != 65 || signature[0] != 0 || !slots.is_empty() {
+        return Err(CsrError);
+    }
+    Ok(())
+}
+
+fn ed25519_algorithm(input: &mut &[u8]) -> Result<(), CsrError> {
+    // RFC 8410 requires absent parameters, including in signature algorithms.
+    if take(input, 0x30)? != [6, 3, 0x2b, 0x65, 0x70] {
+        return Err(CsrError);
+    }
+    Ok(())
+}
+
+fn take<'a>(input: &mut &'a [u8], tag: u8) -> Result<&'a [u8], CsrError> {
+    if input.first() != Some(&tag) {
+        return Err(CsrError);
+    }
+    let (_, body, rest) = element(input)?;
+    *input = rest;
+    Ok(body)
+}
+
+// Size <=4096 implies at most two length octets. Reject high-tag encodings:
+// PKCS10 names/attributes and Ed25519 fields need none of them.
+fn element(input: &[u8]) -> Result<(u8, &[u8], &[u8]), CsrError> {
+    let tag = *input.first().ok_or(CsrError)?;
+    if tag & 0x1f == 0x1f || tag == 0 {
+        return Err(CsrError);
+    }
+    let first = *input.get(1).ok_or(CsrError)?;
     let (header, length) = match first {
         0..=127 => (2, usize::from(first)),
         0x81 => {
-            let length = usize::from(*der.get(2).ok_or(CsrError)?);
+            let length = usize::from(*input.get(2).ok_or(CsrError)?);
             if length < 128 {
                 return Err(CsrError);
             }
@@ -63,8 +117,8 @@ fn validate_envelope(der: &[u8]) -> Result<(), CsrError> {
         }
         0x82 => {
             let length = usize::from(u16::from_be_bytes([
-                *der.get(2).ok_or(CsrError)?,
-                *der.get(3).ok_or(CsrError)?,
+                *input.get(2).ok_or(CsrError)?,
+                *input.get(3).ok_or(CsrError)?,
             ]));
             if length < 256 {
                 return Err(CsrError);
@@ -73,8 +127,76 @@ fn validate_envelope(der: &[u8]) -> Result<(), CsrError> {
         }
         _ => return Err(CsrError),
     };
-    if header + length != der.len() {
+    let body = input.get(header..header + length).ok_or(CsrError)?;
+    Ok((tag, body, &input[header + length..]))
+}
+
+fn validate_set(mut input: &[u8]) -> Result<(), CsrError> {
+    let mut previous: &[u8] = &[];
+    while !input.is_empty() {
+        let (_, _, rest) = element(input)?;
+        let encoded = &input[..input.len() - rest.len()];
+        if previous > encoded {
+            return Err(CsrError);
+        }
+        previous = encoded;
+        input = rest;
+    }
+    Ok(())
+}
+
+fn validate_tree(mut input: &[u8], depth: u8) -> Result<(), CsrError> {
+    if depth > 16 {
         return Err(CsrError);
+    }
+    while !input.is_empty() {
+        let (tag, body, rest) = element(input)?;
+        // DER has no constructed strings. BER forms accepted and cached by
+        // OpenSSL must not evade canonical admission through ignored attributes.
+        if tag & 0xc0 == 0 && (tag & 0x20 != 0) != matches!(tag & 0x1f, 16 | 17) {
+            return Err(CsrError);
+        }
+        if tag & 0x20 != 0 {
+            if tag == 0x31 {
+                validate_set(body)?;
+            }
+            validate_tree(body, depth + 1)?;
+        } else {
+            match tag {
+                1 if body != [0] && body != [0xff] => return Err(CsrError),
+                2 if body.is_empty()
+                    || (body.len() > 1
+                        && ((body[0] == 0 && body[1] & 0x80 == 0)
+                            || (body[0] == 0xff && body[1] & 0x80 != 0))) =>
+                {
+                    return Err(CsrError);
+                }
+                3 => {
+                    let unused = *body.first().ok_or(CsrError)?;
+                    if unused > 7
+                        || (body.len() == 1 && unused != 0)
+                        || (unused != 0 && body.last().ok_or(CsrError)? & ((1 << unused) - 1) != 0)
+                    {
+                        return Err(CsrError);
+                    }
+                }
+                5 if !body.is_empty() => return Err(CsrError),
+                6 => {
+                    if body.is_empty() || body.last().ok_or(CsrError)? & 0x80 != 0 {
+                        return Err(CsrError);
+                    }
+                    let mut start = true;
+                    for byte in body {
+                        if start && *byte == 0x80 {
+                            return Err(CsrError);
+                        }
+                        start = byte & 0x80 == 0;
+                    }
+                }
+                _ => {}
+            }
+        }
+        input = rest;
     }
     Ok(())
 }
@@ -108,6 +230,76 @@ mod tests {
             )
             .unwrap();
         builder.build().to_der().unwrap()
+    }
+
+    // Sign the exact request-info bytes: mutating a builder's DER afterward
+    // would only exercise signature failure, hiding OpenSSL's encoding cache.
+    fn signed_shape(
+        nonminimal: bool,
+        attributes: bool,
+        null_parameters: bool,
+        attribute: &[u8],
+    ) -> Vec<u8> {
+        fn sequence(body: &[u8]) -> Vec<u8> {
+            let mut encoded = if body.len() < 128 {
+                vec![0x30, u8::try_from(body.len()).unwrap()]
+            } else {
+                vec![0x30, 0x81, u8::try_from(body.len()).unwrap()]
+            };
+            encoded.extend_from_slice(body);
+            encoded
+        }
+        let key = PKey::generate_ed25519().unwrap();
+        let mut info_body = vec![2, 1, 0, 0x30, 0];
+        info_body.extend(key.public_key_to_der().unwrap());
+        if attributes {
+            info_body.extend([0xa0, u8::try_from(attribute.len()).unwrap()]);
+            info_body.extend(attribute);
+        }
+        let mut info = sequence(&info_body);
+        if nonminimal {
+            info.insert(1, 0x81);
+        }
+        let signature = openssl::sign::Signer::new_without_digest(&key)
+            .unwrap()
+            .sign_oneshot_to_vec(&info)
+            .unwrap();
+        let algorithm = if null_parameters {
+            vec![0x30, 7, 6, 3, 0x2b, 0x65, 0x70, 5, 0]
+        } else {
+            vec![0x30, 5, 6, 3, 0x2b, 0x65, 0x70]
+        };
+        let mut body = info;
+        body.extend(algorithm);
+        body.extend([3, 65, 0]);
+        body.extend(signature);
+        sequence(&body)
+    }
+
+    #[test]
+    fn signed_cached_noncanonical_or_incomplete_shapes_are_refused() {
+        assert!(ValidatedCsr::parse(&signed_shape(false, true, false, &[])).is_ok());
+        for parameters in [
+            (true, true, false),
+            (false, false, false),
+            (false, true, true),
+        ] {
+            let der = signed_shape(parameters.0, parameters.1, parameters.2, &[]);
+            let request = X509Req::from_der(&der).unwrap();
+            assert!(request.verify(&request.public_key().unwrap()).unwrap());
+            assert_eq!(request.to_der().unwrap(), der);
+            assert!(ValidatedCsr::parse(&der).is_err(), "shape {parameters:?}");
+        }
+    }
+
+    #[test]
+    fn signed_constructed_primitive_attribute_is_refused() {
+        let attribute = [0x30, 11, 6, 2, 0x2a, 3, 0x31, 5, 0x24, 3, 4, 1, b'A'];
+        let der = signed_shape(false, true, false, &attribute);
+        let request = X509Req::from_der(&der).unwrap();
+        assert!(request.verify(&request.public_key().unwrap()).unwrap());
+        assert_eq!(request.to_der().unwrap(), der);
+        assert!(ValidatedCsr::parse(&der).is_err());
     }
 
     #[test]
