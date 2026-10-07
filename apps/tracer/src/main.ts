@@ -41,6 +41,7 @@ let activeUserId: string | undefined;
 let checkingResume = false;
 let currentTerminal: TerminalClient | undefined;
 let coreScreen: import("./core-screen").CoreScreen | undefined;
+let windowsPrototype: { dispose(): void } | undefined;
 let performanceProbe: PerformanceProbe | undefined;
 let backdrop: FaultyTerminal | undefined;
 let welcomeEffect: ReturnType<typeof glitchText> | undefined;
@@ -208,6 +209,8 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   welcomeEffect?.destroy();
   welcomeEffect = undefined;
   stopBackdrop(instant);
+  windowsPrototype?.dispose();
+  windowsPrototype = undefined;
   currentTerminal?.dispose();
   coreScreen?.dispose();
   performanceProbe?.dispose();
@@ -216,6 +219,7 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   performanceProbe = undefined;
   const query = new URLSearchParams(location.search);
   const mockMode = query.get("mock") === "1";
+  const windowsMode = mockMode && query.get("proto") === "windows";
   const probeMode = query.get("probe") === "1";
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
@@ -226,8 +230,15 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
     await document.fonts.load(uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"');
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
-    screen = mountCoreScreen(app, { hostName, mockMode, probeMode });
+    screen = mountCoreScreen(app, { hostName, mockMode, probeMode, windowsPrototype: windowsMode });
+    if (windowsMode) {
+      const { mountWindowsPrototype } = await import("./windows-prototype");
+      windowsPrototype = await mountWindowsPrototype(screen);
+    }
   } catch (error: unknown) {
+    windowsPrototype?.dispose();
+    windowsPrototype = undefined;
+    screen?.dispose();
     renderUnavailable(safeMessage(error));
     return;
   }
@@ -329,6 +340,8 @@ async function checkForegroundSession(): Promise<void> {
       currentTerminal = undefined;
       performanceProbe?.dispose();
       performanceProbe = undefined;
+      windowsPrototype?.dispose();
+      windowsPrototype = undefined;
       coreScreen?.dispose();
       coreScreen = undefined;
       delete window.__tracerTestDouble;

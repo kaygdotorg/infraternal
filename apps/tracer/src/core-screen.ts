@@ -1,5 +1,5 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
-import { branchedMenu, type BranchSection } from "../../../packages/ui/src/branched";
+import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
 import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import type { TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
@@ -36,8 +36,8 @@ export interface CoreScreen {
   theme(): ITheme;
   bindTerminal(client: TerminalClient): void;
   setIdentity(host: string, session: string, connected: boolean): void;
-  setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): void;
-  setTabs(tabs: CoreScreenTab[], activeId: string, onSelect: (id: string) => void): void;
+  setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
+  setTabs(tabs: CoreScreenTab[], activeId: string, onSelect: (id: string, instant: boolean) => void): void;
   setPrototypePalette(entries: CorePaletteEntry[]): void;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
@@ -182,7 +182,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   ], { active: "current-shell" });
   const liveHost = get<HTMLElement>("#tree .bm-sec");
   liveHost.setAttribute("aria-label", hostName);
-  let onTabSelect: (id: string) => void = () => undefined;
+  let onTabSelect: (id: string, instant: boolean) => void = () => undefined;
 
   const params = new URLSearchParams(location.search);
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
@@ -335,7 +335,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const target = event.target;
     if (!(target instanceof Element)) return;
     const tab = target.closest<HTMLButtonElement>(".tab[data-tab-id]");
-    if (tab?.dataset.tabId) onTabSelect(tab.dataset.tabId);
+    if (tab?.dataset.tabId) onTabSelect(tab.dataset.tabId, event.detail === 0);
   };
   const resize = (): void => {
     window.clearTimeout(resizeTimer);
@@ -439,7 +439,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else if (kind === "session" || kind === "host") {
       terminalHost.focus({ preventScroll: true });
     } else if (kind === "proto" && options.windowsPrototype) {
-      window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: action }));
+      window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action, source } }));
     }
   }
 
@@ -466,6 +466,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     setHostTree(sections, activeLeaf, onSelect) {
       branch.dispose();
       branch = branchedMenu(get<HTMLElement>("#tree"), sections, { active: activeLeaf, onSelect });
+      return branch;
     },
     setTabs(items, activeId, onSelect) {
       onTabSelect = onSelect;

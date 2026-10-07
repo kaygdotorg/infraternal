@@ -21,7 +21,8 @@ export interface BranchSection {
 }
 
 export interface BranchedMenu {
-  select(id: string, instant?: boolean): void;
+  /** `notify` is false only when synchronizing a model update back into the tree. */
+  select(id: string, instant?: boolean, notify?: boolean): void;
   dispose(): void;
 }
 
@@ -202,10 +203,10 @@ export function branchedMenu(
   for (const fold of host.querySelectorAll<HTMLElement>(".bm-fold")) observer.observe(fold);
 
   const api: BranchedMenu = {
-    select(id, instant = false) {
+    select(id, instant = false, notify = true) {
       active = id;
       layout(!instant);
-      opts.onSelect?.(id);
+      if (notify) opts.onSelect?.(id);
     },
     dispose() {
       disposed = true;
