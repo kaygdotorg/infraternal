@@ -1,15 +1,14 @@
 /**
  * Copy feedback (DECISIONS 103): the copy button's own icon turns into a tick, holds,
- * and turns back. Nothing else on the page moves — the owner asked for minimal after a
- * region blur read as maximal. One shared primitive for every such action, so copy
+ * and turns back. The owner found a region-wide blur too much; only the icon changes.
+ * One shared primitive for every such action, so copy
  * and download confirm the same way (owner: download had no feedback).
  *
  * Motion lives in the shared styles.css (`.swap`): this file only toggles
  * `data-done`. Transitions, not keyframes, so a second tap mid-way retargets from the
- * current state instead of restarting. The swap is Emil Kowalski's icon pattern: both
- * glyphs share one cell; the outgoing one fades, shrinks and blurs slightly while the
- * incoming one does the reverse, so the eye reads one morph, not two icons. The tick
- * also draws on (stroke-dashoffset), using the same path as the tick primitive
+ * current state instead of restarting. Both glyphs share one cell; the outgoing one
+ * fades and shrinks slightly while the incoming tick fades and grows, so the eye reads
+ * one morph. The tick uses the same path as the tick primitive
  * (DECISIONS 99). Going back is quicker than coming in (asymmetric timing).
  */
 import { TICK_PATH } from "./tick";

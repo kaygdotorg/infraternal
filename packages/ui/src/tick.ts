@@ -8,7 +8,7 @@
  * bounce 0.2) drives everything:
  *   fill   scale(t)                       — grows from the centre
  *   box    scale(1 + 0.35 · max(0, t − 1)) — swells only on overshoot
- *   tick   strokeDashoffset 1 − clamp(t)   — draws on as the fill grows
+ *   tick   opacity clamp(t)               — appears as the fill grows
  *   label  opacity 1 − (1 − 0.42) · clamp(t), strike scaleX((clamp(t) − 0.12) / 0.72)
  * Pointer toggles animate; keyboard toggles are instant (no animation for keyboard
  * actions). Pressing squishes the row slightly.
@@ -34,7 +34,7 @@ export function tick(host: HTMLElement, checked = false, extras: { word?: HTMLEl
     const held = clamp01(t);
     fill.style.transform = `scale(${Math.max(t, 0)})`;
     host.style.transform = `scale(${1 + SWELL * Math.max(0, t - 1)})`;
-    path.style.strokeDashoffset = String(1 - held);
+    path.style.opacity = String(held);
     if (extras.word) extras.word.style.opacity = String(1 - (1 - DONE_OPACITY) * held);
     if (extras.rule) extras.rule.style.transform = `scaleX(${clamp01((held - STRIKE_LAG) / (RULE_END - STRIKE_LAG))})`;
   });
