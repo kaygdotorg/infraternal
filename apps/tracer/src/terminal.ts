@@ -338,6 +338,15 @@ export class TerminalClient {
     this.inputModifier = modifier ?? undefined;
   }
 
+  /** Resizes the existing renderer with the window canvas's pinch gesture. */
+  setFontSize(size: number): void {
+    const fontSize = clamp(size, 8, 28);
+    if (this.terminal.options.fontSize === fontSize) return;
+    this.terminal.options.fontSize = fontSize;
+    this.wakeTerminal();
+    this.scheduleFit();
+  }
+
   /** Updates both Ghostty's option record and renderer palette without rebuilding the session. */
   setTheme(theme: ITheme): void {
     this.config.theme = theme;

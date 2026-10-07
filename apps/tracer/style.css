@@ -446,9 +446,10 @@ button { color: inherit; }
 /* The gated windows prototype extends the deployed terminal shell without replacing its chrome. */
 .terminal-screen.has-windows-prototype .panes[data-window-canvas] {
   display: flex;
+  align-items: stretch;
   gap: 14px;
-  overflow: auto hidden;
-  overscroll-behavior-x: contain;
+  overflow: auto;
+  overscroll-behavior: contain;
   scrollbar-width: none;
   scroll-snap-type: x proximity;
   touch-action: pan-x pan-y;
@@ -466,6 +467,10 @@ button { color: inherit; }
 .window-split { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; gap: 10px; }
 .window-split[data-axis="vertical"] { flex-direction: row; }
 .window-split[data-axis="horizontal"] { flex-direction: column; }
+.window-group[data-stacked="true"] { height: calc(var(--window-canvas-height) * var(--window-stack-rows)); align-self: flex-start; }
+.window-group[data-stacked="true"] .window-split { flex: 0 0 auto; height: calc(var(--window-canvas-height) * var(--window-node-rows)); }
+.window-group[data-stacked="true"] .window-split[data-axis="horizontal"] > .window-card { flex: 0 0 var(--window-canvas-height); height: var(--window-canvas-height); }
+.window-group[data-stacked="true"] .window-split[data-axis="horizontal"] > .window-split { flex: 0 0 auto; height: calc(var(--window-canvas-height) * var(--window-node-rows)); }
 .window-card {
   position: relative;
   display: flex;
@@ -542,20 +547,23 @@ button { color: inherit; }
   --ui-icon-stroke: 1.9;
   transition: background 140ms ease, color 140ms ease, transform 140ms var(--ease-out);
 }
-.window-header-action svg { width: 16px; height: 16px; }
 .window-header-action:active { transform: scale(.97); }
+/* Keep one-finger scroll inside terminal output; two-finger canvas gestures are handled by the prototype. */
 .window-fake-terminal {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
   padding: 68px 20px 20px;
   color: var(--fg-2);
-  font: 450 12px/1.72 var(--font-mono);
+  font: 450 var(--window-terminal-font-size, 0.75rem)/1.72 var(--font-mono);
   scrollbar-width: thin;
 }
 .window-real-terminal.terminal-host { inset: 0; padding: 66px 16px 16px; }
-.window-fake-output { margin: 0; color: inherit; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.window-fake-output { width: max-content; min-width: 100%; margin: 0; color: inherit; font: inherit; white-space: pre; }
 .window-fake-output::selection { background: var(--accent-soft); }
 .window-card[data-host-id="edge-arm"] .window-fake-output,
 .window-card[data-host-id="nix-cache"] .window-fake-output { color: color-mix(in oklab, var(--accent) 48%, var(--fg-2)); }

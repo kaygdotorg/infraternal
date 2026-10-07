@@ -74,6 +74,7 @@ type WindowView = {
   card: HTMLElement;
   fakeTerminal: HTMLElement;
   fakeOutput: HTMLPreElement;
+  fontSize: number;
   realTerminal?: HTMLElement;
 };
 type InfoTab = "machine" | "connection" | "session";
@@ -111,6 +112,7 @@ const $ = <T extends HTMLElement>(root: ParentNode, selector: string): T => {
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
 }[char]!));
+const clamp = (value: number, minimum: number, maximum: number): number => Math.max(minimum, Math.min(maximum, value));
 const icon = (paths: string): string => `<svg viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
 const hostById = (hosts: Host[], id: string): Host => {
   const host = hosts.find((candidate) => candidate.id === id);
@@ -153,11 +155,30 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   let promotionActivity: string[] = [];
   let ending: EndTarget | undefined;
   let sessionGesture: { pointerId: number; x: number; startedAt: number; row: HTMLElement } | undefined;
-  let canvasPointer: { id: number; x: number; y: number; left: number; top: number } | undefined;
-  let twoFingerOrigin: { x: number; y: number; left: number; top: number } | undefined;
+  let canvasPointer: { id: number; x: number; y: number; left: number; top: number; moved: boolean } | undefined;
+  let ignoreNextStageClick = false;
+  let ignoredClickTimer = 0;
+  let touchGesture: {
+    ids: [number, number];
+    x: number;
+    y: number;
+    distance: number;
+    left: number;
+    top: number;
+    fontSize: number;
+    mode: "pending" | "pan" | "pinch";
+    samples: Array<{ at: number; x: number; y: number }>;
+  } | undefined;
+  let momentumFrame = 0;
+  let canvasResizeObserver: ResizeObserver | undefined;
   let spaceHeld = false;
   let disposed = false;
   const listeners: Array<() => void> = [];
+  const suppressNextStageClick = (): void => {
+    ignoreNextStageClick = true;
+    window.clearTimeout(ignoredClickTimer);
+    ignoredClickTimer = window.setTimeout(() => { ignoreNextStageClick = false; ignoredClickTimer = 0; }, 450);
+  };
 
   stage.classList.add("has-windows-prototype");
   panes.dataset.windowCanvas = "true";
@@ -175,7 +196,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     const output = document.createElement("pre");
     output.className = "window-fake-output";
     fakeTerminal.append(output);
-    const view: WindowView = { id: viewId, hostId: group.host.id, sessionId: session.id, group, card, fakeTerminal, fakeOutput: output, ...(terminalHost ? { realTerminal: terminalHost } : {}) };
+    const view: WindowView = { id: viewId, hostId: group.host.id, sessionId: session.id, group, card, fakeTerminal, fakeOutput: output, fontSize: 12, ...(terminalHost ? { realTerminal: terminalHost } : {}) };
     renderWindow(view, session);
     views.push(view);
     group.views.push(view);
@@ -245,6 +266,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
       view.card.append(view.realTerminal);
     }
     view.fakeOutput.textContent = session.screen.join("\n");
+    view.fakeTerminal.style.setProperty("--window-terminal-font-size", `${view.fontSize}px`);
     view.fakeTerminal.setAttribute("aria-label", `Terminal output for ${session.name} on ${host.name}`);
     view.fakeTerminal.hidden = false;
     view.card.append(view.fakeTerminal);
@@ -278,6 +300,10 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   }
   panes.replaceChildren(...groups.map((group) => group.element));
   for (const group of groups) renderGroup(group);
+  const syncCanvasHeight = (): void => panes.style.setProperty("--window-canvas-height", `${panes.clientHeight}px`);
+  syncCanvasHeight();
+  canvasResizeObserver = new ResizeObserver(syncCanvasHeight);
+  canvasResizeObserver.observe(panes);
   active = views[0];
 
   const popover = document.createElement("section");
@@ -323,15 +349,26 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   document.body.append(copyAnnouncement);
 
   function sessionFor(view: WindowView): Session { return sessionById(hostById(hosts, view.hostId), view.sessionId); }
+  function stackRows(node: ViewNode): number {
+    if (node.kind === "view") return 1;
+    const rows = node.children.map(stackRows);
+    return node.axis === "horizontal" ? rows.reduce((sum, count) => sum + count, 0) : Math.max(...rows, 1);
+  }
   function renderNode(node: ViewNode): HTMLElement {
     if (node.kind === "view") return node.view.card;
     const split = document.createElement("div");
     split.className = "window-split";
     split.dataset.axis = node.axis;
+    split.style.setProperty("--window-node-rows", String(stackRows(node)));
     for (const child of node.children) split.append(renderNode(child));
     return split;
   }
-  function renderGroup(group: Group): void { group.element.replaceChildren(renderNode(group.root)); }
+  function renderGroup(group: Group): void {
+    const rows = stackRows(group.root);
+    group.element.dataset.stacked = String(rows > 1);
+    group.element.style.setProperty("--window-stack-rows", String(rows));
+    group.element.replaceChildren(renderNode(group.root));
+  }
   function addSplit(node: ViewNode, targetId: string, fresh: WindowView, axis: "vertical" | "horizontal"): { node: ViewNode; added: boolean } {
     if (node.kind === "view" && node.view.id === targetId) {
       return { node: { kind: "split", axis, children: [node, { kind: "view", view: fresh }] }, added: true };
@@ -413,6 +450,10 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   }
   function setActiveView(view: WindowView, behavior: ScrollBehavior): void {
     active = view;
+    for (const candidate of views) {
+      if (candidate.realTerminal && candidate !== view) candidate.realTerminal.hidden = true;
+      if (candidate !== view) candidate.fakeTerminal.hidden = false;
+    }
     if (popoverOpen()) closePopover(false);
     const groupLeft = view.group.element.offsetLeft;
     panes.scrollTo({ left: groupLeft, behavior });
@@ -420,6 +461,16 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     syncIdentity();
     syncTree();
     syncTabs();
+  }
+  function focusActiveTerminal(view: WindowView): void {
+    if (view.realTerminal) {
+      view.fakeTerminal.hidden = true;
+      view.realTerminal.hidden = false;
+      core.terminalHost.focus({ preventScroll: true });
+      return;
+    }
+    view.fakeTerminal.tabIndex = 0;
+    view.fakeTerminal.focus({ preventScroll: true });
   }
 
   function openHost(host: Host, behavior: ScrollBehavior = "smooth"): void {
@@ -1023,6 +1074,12 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   function onStageClick(event: MouseEvent): void {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    if (ignoreNextStageClick) {
+      ignoreNextStageClick = false;
+      window.clearTimeout(ignoredClickTimer);
+      ignoredClickTimer = 0;
+      return;
+    }
     const control = target.closest<HTMLButtonElement>("[data-proto-control]");
     if (control) {
       const action = control.dataset.protoControl;
@@ -1032,59 +1089,159 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
       return;
     }
     const actionButton = target.closest<HTMLElement>("[data-window-action]");
-    if (!actionButton) return;
-    const view = views.find((candidate) => candidate.id === actionButton.closest<HTMLElement>(".window-card")?.dataset.windowId);
+    if (actionButton) {
+      const view = views.find((candidate) => candidate.id === actionButton.closest<HTMLElement>(".window-card")?.dataset.windowId);
+      if (!view) return;
+      if (actionButton.dataset.windowAction === "info") openInfo(actionButton, "machine");
+      else if (actionButton.dataset.windowAction === "sessions") openManager(actionButton);
+      else if (actionButton.dataset.windowAction === "split-vertical") splitView(view, "vertical");
+      else if (actionButton.dataset.windowAction === "split-horizontal") splitView(view, "horizontal");
+      return;
+    }
+    const card = target.closest<HTMLElement>(".window-card");
+    if (!card || target.closest("button, input, textarea, select, a, [role='button']")) return;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && card.contains(selection.anchorNode)) return;
+    const view = views.find((candidate) => candidate.id === card.dataset.windowId);
     if (!view) return;
-    if (actionButton.dataset.windowAction === "info") openInfo(actionButton, "machine");
-    else if (actionButton.dataset.windowAction === "sessions") openManager(actionButton);
-    else if (actionButton.dataset.windowAction === "split-vertical") splitView(view, "vertical");
-    else if (actionButton.dataset.windowAction === "split-horizontal") splitView(view, "horizontal");
+    if (view !== active) setActiveView(view, "smooth");
+    else focusActiveTerminal(view);
   }
   function onCanvasScroll(): void { if (popoverOpen()) positionPopover(); }
   function onWheel(event: WheelEvent): void {
     if (event.shiftKey) {
       panes.scrollLeft += event.deltaY || event.deltaX;
       event.preventDefault();
+      return;
+    }
+    const terminal = event.target instanceof Element
+      ? event.target.closest<HTMLElement>(".window-fake-terminal, .window-real-terminal")
+      : null;
+    if (!terminal && (event.deltaY || event.deltaX)) {
+      panes.scrollTop += event.deltaY;
+      panes.scrollLeft += event.deltaX;
+      event.preventDefault();
     }
   }
   function onCanvasPointerDown(event: PointerEvent): void {
     if ((event.button !== 1 && !(spaceHeld && event.button === 0)) || !(event.target instanceof Element)) return;
     if (event.target.closest("button, input, textarea, a")) return;
-    canvasPointer = { id: event.pointerId, x: event.clientX, y: event.clientY, left: panes.scrollLeft, top: panes.scrollTop };
+    cancelAnimationFrame(momentumFrame);
+    canvasPointer = { id: event.pointerId, x: event.clientX, y: event.clientY, left: panes.scrollLeft, top: panes.scrollTop, moved: false };
     panes.setPointerCapture(event.pointerId);
     stage.classList.add("is-panning-canvas");
     event.preventDefault();
   }
   function onCanvasPointerMove(event: PointerEvent): void {
     if (!canvasPointer || canvasPointer.id !== event.pointerId) return;
+    if (Math.hypot(event.clientX - canvasPointer.x, event.clientY - canvasPointer.y) > 4) canvasPointer.moved = true;
     panes.scrollLeft = canvasPointer.left - (event.clientX - canvasPointer.x);
     panes.scrollTop = canvasPointer.top - (event.clientY - canvasPointer.y);
   }
   function onCanvasPointerEnd(event: PointerEvent): void {
     if (canvasPointer?.id !== event.pointerId) return;
+    if (canvasPointer.moved) suppressNextStageClick();
     canvasPointer = undefined;
     stage.classList.remove("is-panning-canvas");
   }
   function onTouchStart(event: TouchEvent): void {
+    // Leave single-finger input to the terminal's native scroller; the canvas only
+    // claims a gesture after a second contact is present.
     if (event.touches.length < 2) return;
-    const centerX = (event.touches[0]!.clientX + event.touches[1]!.clientX) / 2;
-    const centerY = (event.touches[0]!.clientY + event.touches[1]!.clientY) / 2;
-    twoFingerOrigin = { x: centerX, y: centerY, left: panes.scrollLeft, top: panes.scrollTop };
-  }
-  function onTouchMove(event: TouchEvent): void {
-    if (!twoFingerOrigin || event.touches.length < 2) return;
-    const centerX = (event.touches[0]!.clientX + event.touches[1]!.clientX) / 2;
-    const centerY = (event.touches[0]!.clientY + event.touches[1]!.clientY) / 2;
-    panes.scrollLeft = twoFingerOrigin.left - (centerX - twoFingerOrigin.x);
-    panes.scrollTop = twoFingerOrigin.top - (centerY - twoFingerOrigin.y);
+    // TouchList order is not stable, so retain identifiers and re-find those contacts.
+    const points = [...event.touches].sort((left, right) => left.identifier - right.identifier).slice(0, 2);
+    const [first, second] = points;
+    if (!first || !second) return;
+    cancelAnimationFrame(momentumFrame);
+    const centerX = (first.clientX + second.clientX) / 2;
+    const centerY = (first.clientY + second.clientY) / 2;
+    touchGesture = {
+      ids: [first.identifier, second.identifier],
+      x: centerX,
+      y: centerY,
+      distance: Math.max(1, Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY)),
+      left: panes.scrollLeft,
+      top: panes.scrollTop,
+      fontSize: active?.fontSize ?? 12,
+      mode: "pending",
+      samples: [{ at: event.timeStamp, x: panes.scrollLeft, y: panes.scrollTop }],
+    };
     event.preventDefault();
   }
-  function onTouchEnd(event: TouchEvent): void { if (event.touches.length < 2) twoFingerOrigin = undefined; }
+  function onTouchMove(event: TouchEvent): void {
+    const gesture = touchGesture;
+    if (!gesture || event.touches.length < 2) return;
+    const first = [...event.touches].find((point) => point.identifier === gesture.ids[0]);
+    const second = [...event.touches].find((point) => point.identifier === gesture.ids[1]);
+    if (!first || !second) return;
+    const centerX = (first.clientX + second.clientX) / 2;
+    const centerY = (first.clientY + second.clientY) / 2;
+    const distance = Math.max(1, Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY));
+    const translation = Math.hypot(centerX - gesture.x, centerY - gesture.y);
+    const distanceChange = Math.abs(distance - gesture.distance);
+    // Lock the first decisive motion so finger jitter cannot turn a pan into a zoom.
+    // Ignore <12 px drift; pinch needs 12% separation change (at least 14 px).
+    if (gesture.mode === "pending") {
+      if (distanceChange > Math.max(14, gesture.distance * 0.12)) gesture.mode = "pinch";
+      else if (translation > 12) gesture.mode = "pan";
+    }
+    if (gesture.mode === "pan") {
+      panes.scrollLeft = gesture.left - (centerX - gesture.x);
+      panes.scrollTop = gesture.top - (centerY - gesture.y);
+      gesture.samples.push({ at: event.timeStamp, x: panes.scrollLeft, y: panes.scrollTop });
+      // A short trailing sample window captures release speed without stale motion.
+      while (gesture.samples.length > 6 || (gesture.samples[0] && event.timeStamp - gesture.samples[0].at > 120)) gesture.samples.shift();
+      suppressNextStageClick();
+    } else if (gesture.mode === "pinch" && active) {
+      active.fontSize = clamp(gesture.fontSize * distance / gesture.distance, 8, 28);
+      active.fakeTerminal.style.setProperty("--window-terminal-font-size", `${active.fontSize}px`);
+      if (active.realTerminal) core.setTerminalFontSize(active.fontSize);
+      suppressNextStageClick();
+    }
+    if (gesture.mode !== "pending") event.preventDefault();
+  }
+  function startCanvasMomentum(vx: number, vy: number): void {
+    // Velocities are sampled from canvas offsets, so their signs already match scroll.
+    // Time-based decay keeps the release distance stable across frame rates.
+    let previous = performance.now();
+    const step = (now: number): void => {
+      const elapsed = Math.min(32, now - previous);
+      previous = now;
+      const oldLeft = panes.scrollLeft;
+      const oldTop = panes.scrollTop;
+      panes.scrollLeft += vx * elapsed;
+      panes.scrollTop += vy * elapsed;
+      if (panes.scrollLeft === oldLeft) vx = 0;
+      if (panes.scrollTop === oldTop) vy = 0;
+      const decay = Math.pow(0.9, elapsed / 16);
+      vx *= decay;
+      vy *= decay;
+      if (Math.abs(vx) < 0.025 && Math.abs(vy) < 0.025) { momentumFrame = 0; return; }
+      momentumFrame = requestAnimationFrame(step);
+    };
+    if (Math.abs(vx) >= 0.08 || Math.abs(vy) >= 0.08) momentumFrame = requestAnimationFrame(step);
+  }
+  function onTouchEnd(event: TouchEvent): void {
+    if (!touchGesture || event.touches.length >= 2) return;
+    const gesture = touchGesture;
+    touchGesture = undefined;
+    if (gesture.mode !== "pan" || gesture.samples.length < 2) return;
+    const last = gesture.samples.at(-1)!;
+    // Use a recent interval of at least 32 ms to avoid amplifying a single noisy frame.
+    const first = gesture.samples.find((sample) => last.at - sample.at >= 32) ?? gesture.samples[0]!;
+    const elapsed = Math.max(1, last.at - first.at);
+    startCanvasMomentum((last.x - first.x) / elapsed, (last.y - first.y) / elapsed);
+    event.preventDefault();
+  }
   function onGlobalKeyDown(event: KeyboardEvent): void {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
     const editing = target.isContentEditable || Boolean(target.closest("input, textarea, select"));
-    if (event.key === " " && !editing && !event.repeat) { spaceHeld = true; return; }
+    if (event.key === " " && !editing) {
+      spaceHeld = true;
+      event.preventDefault();
+      return;
+    }
     if (event.key === "Escape") {
       if (!shareLayer.hidden) { closeShare(); event.preventDefault(); return; }
       if (!endLayer.hidden) { endLayer.hidden = true; ending = undefined; event.preventDefault(); return; }
@@ -1100,7 +1257,11 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
       event.preventDefault();
     }
   }
-  function onGlobalKeyUp(event: KeyboardEvent): void { if (event.key === " ") spaceHeld = false; }
+  function onGlobalKeyUp(event: KeyboardEvent): void {
+    if (event.key !== " ") return;
+    spaceHeld = false;
+    event.preventDefault();
+  }
   function onManagerPointerDown(event: PointerEvent): void {
     if (event.pointerType !== "touch") return;
     const target = event.target;
@@ -1186,9 +1347,9 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     [panes, "pointermove", onCanvasPointerMove as EventListener, undefined],
     [panes, "pointerup", onCanvasPointerEnd as EventListener, undefined],
     [panes, "pointercancel", onCanvasPointerEnd as EventListener, undefined],
-    [panes, "touchstart", onTouchStart as EventListener, { passive: true }],
+    [panes, "touchstart", onTouchStart as EventListener, { passive: false }],
     [panes, "touchmove", onTouchMove as EventListener, { passive: false }],
-    [panes, "touchend", onTouchEnd as EventListener, { passive: true }],
+    [panes, "touchend", onTouchEnd as EventListener, { passive: false }],
     [window, "resize", positionPopover as EventListener, { passive: true }],
     [window, "tracer:proto-action", handlePaletteAction as EventListener, undefined],
   ];
@@ -1217,6 +1378,9 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
       disposed = true;
       window.clearInterval(liveMetricTimer);
       window.clearTimeout(promotionTimer);
+      window.clearTimeout(ignoredClickTimer);
+      cancelAnimationFrame(momentumFrame);
+      canvasResizeObserver?.disconnect();
       capsule?.dispose();
       for (const remove of listeners) remove();
       for (const view of views) {

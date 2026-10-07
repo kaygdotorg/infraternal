@@ -35,6 +35,7 @@ export interface CoreScreen {
   probePanel: HTMLElement;
   theme(): ITheme;
   bindTerminal(client: TerminalClient): void;
+  setTerminalFontSize(size: number): void;
   setIdentity(host: string, session: string, connected: boolean): void;
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
   setTabs(tabs: CoreScreenTab[], activeId: string, onSelect: (id: string, instant: boolean) => void): void;
@@ -191,6 +192,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ? params.get("bg")!
     : (readLocal("tracer.background") === "mesh" ? "mesh" : "none");
   let client: TerminalClient | undefined;
+  // Keep a pinch size requested before the live terminal binds, then apply it on bind.
+  let terminalFontSize = matchMedia("(pointer: coarse)").matches ? 13 : 14;
   let modifier: "ctrl" | "alt" | null = null;
   let resizeTimer = 0;
   let keyboardOpen = false;
@@ -453,8 +456,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     theme: () => terminalTheme(THEMES[currentThemeId]!, background === "mesh"),
     bindTerminal(value) {
       client = value;
+      client.setFontSize(terminalFontSize);
       client.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
       client.setInputModifier(modifier);
+    },
+    setTerminalFontSize(size) {
+      terminalFontSize = Math.max(8, Math.min(28, size));
+      client?.setFontSize(terminalFontSize);
     },
     setIdentity(host, session, connected) {
       get<HTMLElement>("#capsule-host").textContent = host;
