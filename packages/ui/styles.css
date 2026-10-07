@@ -329,3 +329,50 @@
 .ui-pane-viewport.is-moving { overflow: hidden; }
 .ui-pane.is-leaving { position: absolute; top: 0; right: 0; left: 0; pointer-events: none; }
 
+/* Chip field (chip-input.ts): chips wrap inside a field that grows with a spring. */
+.ui-chip-field {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgb(from var(--fg) r g b / 0.05);
+  cursor: text;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+.ui-chip-field:focus-within { border-color: rgb(from var(--fg) r g b / 0.28); background: rgb(from var(--fg) r g b / 0.09); }
+.ui-chip-flow { display: flex; min-height: 46px; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px 6px var(--ui-chip-field-inset, 14px); }
+.ui-chip-text {
+  min-width: 8ch;
+  height: 32px;
+  flex: 1 1 8ch;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: 450 16px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  letter-spacing: 0.01em;
+}
+.ui-chip-text::placeholder { color: var(--fg-3); opacity: 1; }
+.ui-chip {
+  display: inline-flex;
+  max-width: 100%;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 10px;
+  border-radius: 999px;
+  background: rgb(from var(--fg) r g b / 0.08);
+  color: var(--fg);
+  font: 500 13px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  letter-spacing: -0.01em;
+  transform-origin: left center;
+  transition: background-color 120ms ease;
+}
+.ui-chip > svg:first-child { width: 14px; height: 14px; flex: none; fill: currentColor; color: var(--fg-2); }
+.ui-chip > svg.is-line:first-child { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-chip-remove { display: grid; width: 22px; height: 22px; flex: none; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-3); cursor: pointer; }
+.ui-chip-remove svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+@media (hover: hover) and (pointer: fine) { .ui-chip-remove:hover { background: rgb(from var(--fg) r g b / 0.1); color: var(--fg); } }
+.ui-chip[data-armed] { background: rgb(from var(--fg) r g b / 0.2); }
+@media (pointer: coarse) { .ui-chip { height: 34px; font-size: 15px; } .ui-chip-remove { width: 28px; height: 28px; } }

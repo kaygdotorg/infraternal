@@ -19,3 +19,4 @@ export * from "./toast";
 export * from "./source-icons";
 export * from "./focus-ring";
 export * from "./pane-stepper";
+export * from "./chip-input";
