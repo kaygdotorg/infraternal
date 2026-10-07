@@ -7,14 +7,15 @@ import os
 from pathlib import Path
 import struct
 import time
-from agent_fixture import Binary, cleanup, rss
+from agent_fixture import Binary, cleanup, fixture_state, rss
 from idle_canary import session_shim_pid
+from latency_proxy import LatencyConfig, percentile
 
-state = Path(f'target/ms{os.getpid()}')
+state = fixture_state('ms')
 state.mkdir(mode=0o700)
 c = Binary(Path(sys.argv[sys.argv.index('--binary') + 1]).resolve(), state)
 try:
-    c.open(); c.attach(); c.send(1, 0x14, struct.pack('<I', 1048576)); c.until(b'shim-test')
+    c.open(); c.attach(); c.until(b'shim-test')
     c.input(b"stty raw -echo; printf 'SCALE_%s' READY; cat\n")
     c.until(b'SCALE_READY'); c.wait_ack()
     # Read-only PID discovery avoids consuming a 33rd peer at the limit.
@@ -62,7 +63,16 @@ try:
     assert all(bytes(value) == reference for value in data.values()), 'viewers disagree'
     assert Counter(reference.decode().split(';')[:-1]) == Counter({f'{s:02d}': 200 for s in offsets})
     assert len(latency) == 6400
-    latency.sort()
-    print(f'32 writers/viewers x 200 inputs: PASS; 6400 inputs, 19200 unique accounted bytes/viewer, 614400 delivered bytes; elapsed={elapsed:.3f}s; Input-to-PTY Ack n=6400 p50={latency[3200]:.3f}ms p99={latency[6336]:.3f}ms; daemon RSS={rss(c.child.pid)} KiB; shim RSS={rss(shim_pid)} KiB; machine={os.uname().machine}; cores={os.cpu_count()}; load={os.getloadavg()}')
+    p50 = percentile(latency, 0.50)
+    p99 = percentile(latency, 0.99)
+    budget_ms = LatencyConfig.from_environment().rtt_ms + 34
+    print(
+        f'METRIC name=keystroke_echo_confirmed_32_viewers source=real-agent-pty n={len(latency)} '
+        f'p50_ms={p50:.2f} p99_ms={p99:.2f} budget_ms={budget_ms:.2f} '
+        f'result={"PASS" if p99 <= budget_ms else "FAIL"}',
+        flush=True,
+    )
+    assert p99 <= budget_ms, f'Input-to-PTY Ack exceeded RTT + 2 frames ({budget_ms:.2f} ms)'
+    print(f'32 writers/viewers x 200 inputs: PASS; 6400 inputs, 19200 unique accounted bytes/viewer, 614400 delivered bytes; elapsed={elapsed:.3f}s; daemon RSS={rss(c.child.pid)} KiB; shim RSS={rss(shim_pid)} KiB; machine={os.uname().machine}; cores={os.cpu_count()}; load={os.getloadavg()}')
 finally:
     c.kill(); cleanup(state)

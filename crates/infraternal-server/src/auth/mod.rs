@@ -9,13 +9,14 @@ mod crypto;
 mod devices;
 mod http;
 mod recovery;
+mod recovery_rotation;
 mod sessions;
 mod setup;
 mod webauthn;
 mod wraps;
 
 pub(crate) use crypto::hash;
-use crypto::{constant_prf_input, prf_salt, random, recovery_hash, verify_recovery};
+use crypto::{constant_prf_input, prf_salt, random, recovery_hash};
 pub use sessions::Session;
 use sessions::{insert_session, require_session_tx};
 pub use wraps::Wrap;
@@ -28,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool};
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
@@ -75,6 +76,7 @@ struct Registration {
     display_name: String,
     authority: Authority,
     recovery_hash: Option<String>,
+    rotate_recovery: bool,
     expires: i64,
     binding: Option<String>,
 }
@@ -106,7 +108,9 @@ pub struct Auth {
     origin: String,
     pending: Arc<Mutex<Pending>>,
     ingress: Arc<Mutex<http::Ingress>>,
+    recovery_changes: Arc<tokio::sync::watch::Sender<()>>,
     revocations: Arc<tokio::sync::watch::Sender<()>>,
+    setup_consumed: Arc<watch::Sender<()>>,
     #[cfg(test)]
     recovery_pause: Arc<Mutex<Option<Arc<RecoveryPause>>>>,
 }
@@ -119,6 +123,11 @@ impl Auth {
     #[must_use]
     pub fn origin(&self) -> &str {
         &self.origin
+    }
+
+    /// Subscribe to the successful owner-enrollment event used to retire its CLI socket.
+    pub(crate) fn subscribe_setup_consumed(&self) -> watch::Receiver<()> {
+        self.setup_consumed.subscribe()
     }
 
     /// Migrate storage and pin `WebAuthn` to an HTTPS RP origin without wildcard ports/subdomains.
@@ -139,13 +148,16 @@ impl Auth {
             .build()
             .map_err(|_| Error::Invalid)?;
         sqlx::migrate!("./migrations").run(&pool).await?;
+        let (setup_consumed, _) = watch::channel(());
         Ok(Self {
             pool,
             webauthn: Arc::new(webauthn),
             origin: url.origin().ascii_serialization(),
             pending: Arc::default(),
             ingress: Arc::default(),
+            recovery_changes: Arc::new(tokio::sync::watch::channel(()).0),
             revocations: Arc::new(tokio::sync::watch::channel(()).0),
+            setup_consumed: Arc::new(setup_consumed),
             #[cfg(test)]
             recovery_pause: Arc::default(),
         })

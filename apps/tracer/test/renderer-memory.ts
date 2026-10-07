@@ -1,14 +1,14 @@
 /** Measures production Chromium renderer RSS and Ghostty WASM pages at 1 and 8 sessions. */
 import { createServer } from "node:net";
 import { readFile, rm, mkdir } from "node:fs/promises";
-import { cpus, loadavg, release, totalmem } from "node:os";
+import { cpus, homedir, loadavg, release, totalmem } from "node:os";
 import { resolve } from "node:path";
 import { chromium, type BrowserContext, type CDPSession, type Page } from "playwright";
 
 const APP_ROOT = resolve(import.meta.dir, "..");
-const SCRATCH_ROOT = "/home/kayg/.cache/codex-scratch/t-web/renderer-memory";
-const BASE_URL = "http://localhost:4173";
-const SERVER_PORT = 4173;
+const SERVER_PORT = Number(process.env.TRACER_TEST_PORT ?? "4621");
+const SCRATCH_ROOT = resolve(homedir(), ".cache/codex-scratch", `tracer-renderer-${SERVER_PORT}`);
+const BASE_URL = `http://localhost:${SERVER_PORT}`;
 const BEHEMOTH = "behemoth.txt";
 const BEHEMOTH_BYTES = 50_000_000;
 const SAMPLE_INTERVAL_MS = 75;
@@ -45,8 +45,15 @@ interface MemoryScenario {
 await mkdir(SCRATCH_ROOT, { recursive: true });
 await removeOldProfiles();
 await assertPortAvailable();
-const mockServer = Bun.spawn(["/home/kayg/.nix-profile/bin/bun", "run", "test/mock-server.ts"], {
+const mockServer = Bun.spawn(["python3", "../../scripts/latency_proxy.py", "serve-tracer"], {
   cwd: APP_ROOT,
+  env: {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: process.env.HOME ?? "",
+    TRACER_TEST_PORT: String(SERVER_PORT),
+    TRACER_BACKEND_PORT: String(SERVER_PORT + 1),
+    INFRATERNAL_TEST_RTT: process.env.INFRATERNAL_TEST_RTT ?? "300",
+  },
   stdout: "inherit",
   stderr: "inherit",
 });
@@ -214,13 +221,13 @@ async function waitForMockServer(): Promise<void> {
     } catch { /* server is still binding */ }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
-  throw new Error("mock server did not become ready on port 4173");
+  throw new Error("mock server did not become ready on port " + SERVER_PORT);
 }
 
 async function assertPortAvailable(): Promise<void> {
   await new Promise<void>((resolvePromise, rejectPromise) => {
     const probe = createServer();
-    probe.once("error", () => rejectPromise(new Error("port 4173 is already in use")));
+    probe.once("error", () => rejectPromise(new Error("port " + SERVER_PORT + " is already in use")));
     probe.listen(SERVER_PORT, "127.0.0.1", () => probe.close((error) => error ? rejectPromise(error) : resolvePromise()));
   });
 }

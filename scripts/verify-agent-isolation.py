@@ -7,11 +7,11 @@ import struct
 import sys
 import time
 sys.dont_write_bytecode = True
-from agent_fixture import AckBarrier, Binary, cleanup, varint
+from agent_fixture import AckBarrier, Binary, cleanup, fixture_state, varint
 
 
 def run(binary):
-    state = Path(f'target/ti{os.getpid()}')
+    state = fixture_state('ti')
     state.mkdir(mode=0o700)
     client = Binary(binary.resolve(), state)
     barrier = None
@@ -25,6 +25,7 @@ def run(binary):
         # Open a sibling before holding the first session's handshake.
         client.open()
         client.send(3, 0x16, client.id.bytes + struct.pack('<QQ', 0, 0))
+        client.send(3, 0x14, struct.pack('<I', 1048576))
         barrier = AckBarrier(state, stalled, kind=0x1a)
         barrier.threshold = 0
         client.send(1, 0x16, stalled.bytes + struct.pack('<QQ', cursor, 0))

@@ -10,7 +10,7 @@ import sys
 import time
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path('scripts').resolve()))
-from agent_fixture import AckBarrier, Binary, cleanup, exact
+from agent_fixture import AckBarrier, Binary, cleanup, exact, fixture_state
 
 
 def local(state, identity, caps, kind, payload=b''):
@@ -52,7 +52,7 @@ def release(hold):
 
 
 def run_case(binary, name, fixture):
-    state = Path(f'target/reconnect-{os.getpid()}-{name}')
+    state = fixture_state('vr')
     state.mkdir(mode=0o700)
     client = Binary(binary.resolve(), state)
     proxy = None
@@ -70,6 +70,7 @@ def run_case(binary, name, fixture):
         assert b'overflow' not in frame[3:], 'Unsupported reason must not claim frame overflow'
         client.start(); client.out = 0; client.data.clear()
         client.send(1, 0x16, client.id.bytes + struct.pack('<QQ', 0, client.acked))
+        client.send(1, 0x14, struct.pack('<I', 1024 * 1024))
         while client.out < 1024 * 1024:
             client.process(credit=False)
         time.sleep(.4)
@@ -93,6 +94,7 @@ def run_case(binary, name, fixture):
         assert start > 0 and frame[0] == 0x7f, 'second fixture must combine a gap and Snapshot limit'
         client.start(); client.out = 0; client.data.clear(); client.events.clear(); client.snapshots.clear()
         client.send(1, 0x16, client.id.bytes + struct.pack('<QQ', 0, client.acked))
+        client.send(1, 0x14, struct.pack('<I', 1024 * 1024))
         while not client.snapshots:
             client.process()
         notices = [event for event in client.events if event.get('type') == 'terminal.snapshot']
@@ -104,6 +106,7 @@ def run_case(binary, name, fixture):
         proxy = AckBarrier(state, client.id, caps_mask=3)
         client.start(); client.out = 0; client.events.clear(); client.snapshots.clear()
         client.send(1, 0x16, client.id.bytes + struct.pack('<QQ', 0, client.acked))
+        client.send(1, 0x14, struct.pack('<I', 1024 * 1024))
         while not any(event.get('type') == 'terminal.snapshot_unavailable' for event in client.events):
             client.process()
         assert not client.snapshots, 'legacy peer must not receive approximation'

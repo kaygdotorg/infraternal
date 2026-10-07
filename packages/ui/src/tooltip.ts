@@ -6,8 +6,8 @@
  * - Cold: the first tooltip waits 400 ms, then pops from its trigger (opacity and scale
  *   0.94 → 1, 160 ms strong ease-out, origin on the trigger's side).
  * - Warm: while a tooltip is open, or within 300 ms of one closing, the next trigger
- *   shows its tooltip at once with no pop (Emil: skip delay and animation after the
- *   first). If the surface is still up, it travels to the new trigger and the label
+ *   shows its tooltip at once with no pop (after the first, delay and animation
+ *   are skipped). If the surface is still up, it travels to the new trigger and the label
  *   slides in the direction of travel (140 ms, 10 px).
  * - Leaving waits an 80 ms grace, so crossing the gap between two icons never
  *   flickers closed and open again.

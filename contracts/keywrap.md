@@ -3,8 +3,9 @@
 
 The server never receives a plaintext DEK, PRF output or SSH secret. It receives
 WebAuthn credential proofs, encrypted secrets, and the envelopes specified here.
-Recovery words necessarily reach the server over HTTPS to verify its Argon2id
-hash. Never log request/response bodies on these endpoints. The setup token
+Recovery words, entropy and wrapping material never reach the server, including
+failed attempts and legacy accounts. Only the independent v2 authentication
+verifier may be transmitted. Never log request/response bodies on these endpoints. The setup token
 banner is the sole authorized secret log [26]. Serve the browser on the explicit
 HTTPS origin passed to `Auth::new`; arbitrary proxy origin headers are not trusted.
 
@@ -35,8 +36,9 @@ results before finishing registration. This local get is for key derivation;
 server authentication still requires the server's login challenge.
 
 Passkey wrapping input key material (IKM) is the 32-byte `prf.results.first`.
-For recovery wrapping, parse/check the English BIP-39 24 words and use the
-32-byte entropy (not mnemonic UTF-8, not BIP-39's PBKDF2 seed) as IKM. There is
+For legacy recovery envelopes only, the 32-byte BIP-39 entropy is IKM.
+New recovery envelopes use the browser-only v2 wrapping sibling specified below.
+Neither mnemonic UTF-8 nor BIP-39's PBKDF2 seed is wrapping material. There is
 no optional BIP-39 passphrase. Generate fresh random salt (32 bytes) and nonce
 (12 bytes) for **every wrapping operation**, including rewraps. Never reuse a
 nonce with the same derived key.
@@ -92,8 +94,9 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | session | `{}` | `{user_id,username,display_name,device,fresh}` and refreshed cookie |
 | add-start | `{}` + session | enrollment options; recovery_words=null |
 | wraps | `{}` + session | `[{kind,key_id,wrap}]` for the session user |
-| recovery-start | `{user_id,words}` | `{token,delay_seconds:86400}` |
+| recovery-start | `{username|user_id,verifier}` | `{token,delay_seconds,ready_at}` |
 | recovery-ready | `{token}` | replacement enrollment and old_recovery_wrap |
+| recovery-rotate | `{recovery_wrap,recovery_verifier}` + fresh unlocked session | `{ok:true}` |
 | recovery-cancel | `{}` + any live session | `{ok:true}` |
 | device-start | `{device,scopes}` | `{poll_token,user_code,expires_in:600}` |
 | device-inspect | `{code}` + session | requested device/scopes for approval UI |
@@ -164,6 +167,28 @@ recovery words. Successful finish consumes recovery authorization, removes old
 passkeys/envelopes and revokes all sessions/API keys/pending device approvals,
 rotates the recovery hash, and creates a new session atomically. Cancellation
 also invalidates any replacement ceremony already begun.
+
+### Same-device recovery (D113, owner decision on #45)
+
+D113 supersedes the unconditional delay above. `recovery-start` accepts the
+`{user_id,verifier}` or `{username,verifier}` (exactly one identity).
+It returns `{token,delay_seconds,ready_at}`, where `ready_at` is Unix seconds.
+The independent authentication verifier is always verified. Under the same database writer lock as recovery
+creation, an optional browser cookie grants a zero delay only if its session is
+unlocked, unexpired and belongs to the recovered account. Missing, invalid,
+expired, revoked, pending-unlock or other-account sessions retain 86400 seconds.
+API keys cannot shorten the wait. An active request still cannot be reset or
+accelerated by repeating `recovery-start`. Tokens retain the 48-hour expiry and
+the existing cancellation/replacement authority checks.
+
+Username lookup is internal; unknown accounts and wrong verifiers return the same
+401 message. The browser holds the recovery capability and words in memory
+only, shows the server's actual ready time, and asks for the words again after
+a reload. It never fabricates progress or persists recovery secrets. The server
+remains authoritative at `recovery-ready` even if the local clock is wrong.
+Replacement unwraps the original recovery envelope before creating the new
+passkey, wraps that same DEK and requires acknowledgement of the rotated words
+before finish. No existing cryptographic envelope or proof format changes.
 
 Device approvals bind exactly the requested scopes. Show the inspected device
 and scopes before approving. The user code is 96 random bits (may be embedded
@@ -278,3 +303,126 @@ backend protocol; this fix does not invent one.
 Before owner enrollment, each restart rotates the token and replaces a stale
 private setup-token.sock. The token remains only in process memory and the
 private CLI socket; runtime logs do not disclose it. Enrollment consumes it once.
+
+## Recovery resumption (#45, D25/D113)
+
+Additive `recovery-resume` accepts the same identity and authentication fields
+as recovery-start. It verifies the key on every call and takes the writer lock
+before inspecting pending state. Without a pending row it creates recovery with
+the D113 delay. With a row it reissues a capability and retains **exactly** its
+stored ready time, even after the previous capability expires. Reissuing extends
+only the capability lifetime (48 hours from this verification), never the wait.
+The previous capability and any replacement ceremony bound to it become invalid.
+Cancellation and successful replacement delete the row. Verifier start/resume both preserve existing deadlines.
+
+The result is `{token,ready_at,delay_seconds}` with delay_seconds equal to the
+nonnegative remaining time measured by the server. A browser may discard all
+secret state and resume by supplying the key again, from any device. Its UI
+shows the real remaining time and never promises that its local clock grants
+server authority. No key or capability is persisted by the browser.
+
+## Signed-in recovery visibility and audit (#45, D25)
+
+Authenticated `session` adds `recovery_pending: {ready_at} | null`. It includes
+pending state even after capability expiry because resumption keeps that deadline.
+No words, verifier, capability or requesting-device identity are disclosed.
+
+Browsers subscribe on control stream 0 with the existing Subscribe frame:
+`sub_id=45`, filter JSON exactly `{"topic":"auth.recovery"}`. After subscription
+and whenever state changes the server sends an existing Event frame on stream 0,
+with `sub_id=45` and JSON `{topic:"auth.recovery",pending:{ready_at}|null}`.
+The authenticated account determines the scope; a filter cannot select an account.
+Resubscription/reconnection supplies a current snapshot. Events are coalescible
+state notifications, not an audit stream. No polling timer runs on idle devices.
+A signed-in browser shows a toast once per new deadline and a persistent notice
+with a Cancel recovery control. Session reads on foreground return repair state.
+
+Start (not resume), cancel (when a row existed), and complete audit rows commit in
+the same SQLite transaction as their state changes. Rows contain only account ID,
+event and Unix time. Invalid requests, reissues and repeat cancellation cannot
+invent completion or duplicate start evidence. Notification is after commit.
+
+## Browser-only recovery derivation v2 (#45, D151 owner task)
+
+This revision enforces browser-only words for all production paths. It reuses WebCrypto HKDF-SHA256/AES-256-GCM and the
+existing Argon2id verifier; it adds no cryptographic library or engine. Setup and
+replacement generate 256-bit entropy with browser crypto.getRandomValues and
+encode 24 English BIP-39 words locally. No v2 response generates or includes words.
+
+From that entropy derive two independent 32-byte outputs with HKDF-SHA256,
+a zero-length salt and these exact UTF-8 info strings:
+
+- authentication: `infraternal/recovery/auth/v2`
+- wrapping: `infraternal/recovery/wrap/v2`
+
+The authentication secret is canonical unpadded base64url and is sent as
+`verifier`. The server Argon2id-hashes that string with a fresh random salt;
+only its PHC hash is stored. The wrapping output is browser-only IKM for the
+existing recovery envelope HKDF (fresh 32-byte salt, v1 user/kind info and AAD)
+and AES-GCM encryption. Passkey envelope derivation is unchanged. Independent
+HKDF info strings ensure knowledge of the authentication secret does not permit
+computing entropy or the wrapping output.
+
+Registration-finish adds `recovery_verifier`; it is mandatory for a recovery
+envelope in v2 and absent for additional-passkey enrollment. Setup-start and
+recovery-ready return `recovery_version:2` and recovery_words:null. Replacement
+also returns `old_recovery_wrap_version` (1 or 2), read from stored metadata.
+Authenticated wraps include recovery_wrap_version for recovery envelopes.
+Migration 0010 defaults existing accounts to authentication=1, wrapping=1.
+Successful v2 enrollment/rotation stores authentication=2, wrapping=2 atomically.
+Never silently relabel an old envelope; a v1 envelope unwraps with original entropy.
+
+Recovery-start/resume accept only `{username|user_id,verifier}`. Unknown fields,
+including words, fail closed. Generic denial, the existing Origin/body/admission
+partitions and two concurrent Argon2 slots remain; unknown accounts take the same
+bounded verifier work, with no version/account oracle. Exhausted Argon2 capacity
+uses generic 429 and Retry-After: 60. Both start and resume reissue pending
+authorization without changing an existing deadline.
+
+### Signed-in replacement of legacy recovery words (R1, #45)
+
+The legacy `recovery-upgrade` route and client path are removed. A one-time phrase
+exception cannot satisfy the owner's absolute never-sent rule: old words unwrap
+the retained DEK, and replacing a verifier cannot erase server knowledge of it.
+No production action admits words, even on a failed attempt. The server cannot
+transform an existing phrase hash into a verifier without disclosing wrapping
+material; accounts with an old verifier or envelope need a signed-in device.
+
+Authenticated `session` and `unlock-session` add `recovery_words_need_replacing`,
+true if authentication or wrapping version is still 1. Public `status` retains
+only `setup_required`, avoiding an account-state oracle.
+
+A signed-in device holding the unwrapped DEK generates new words locally and
+wraps that same DEK with the v2 wrapping sibling. After the caller confirms the
+new words are saved, it POSTs only `{recovery_wrap,recovery_verifier}` to
+`recovery-rotate`, with `X-Infraternal-User` pinned to the account used for local
+envelope AAD. The server compares it to the session account, including under the
+writer lock; another tab changing the shared cookie must not retarget rotation.
+The word-acknowledgement callback expires when its display is dismissed.
+A fresh unlocked session [28] is required. Hashing occurs
+off-lock; the writer transaction rechecks live session/freshness and legacy
+metadata, installs both versions as 2 together with the envelope/hash, and
+cancels any pending recovery (including its begun ceremonies). Concurrent
+rotations admit at most one. Passkeys and existing signed-in sessions remain
+usable. No migration screen is added: D162 requires owner mockup approval first.
+The client exposes a callable function for that future screen.
+
+### Remaining wait bounds (R3, #45)
+
+Resumption reports the stored deadline's actual remaining seconds, even above
+24 hours after a clock rollback. The client accepts nonnegative safe integer
+waits through the recovery capability policy maximum of 48 hours (172800 seconds)
+and rejects larger or malformed durations; it does not change the deadline.
+Its monotonic countdown never grants server authority.
+
+### Threat note
+
+The server learns the account identity, a reusable recovery authentication secret,
+its hash, public envelope salt/nonce, ciphertext, timing and recovery lifecycle.
+These authorize recovery after the applicable delay but do not unwrap the DEK.
+A database leak contains the hash, not the bearer secret. A server receiving the
+authentication output cannot derive its HKDF sibling or the 256-bit entropy.
+Historical disclosure cannot be undone by rotating words while retaining the
+DEK. This protocol admits no such disclosure, including for legacy accounts.
+A malicious server that replaces browser JavaScript can collect browser secrets;
+this contract prevents protocol disclosure, not hostile client-code delivery.

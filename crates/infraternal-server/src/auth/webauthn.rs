@@ -39,19 +39,9 @@ impl Auth {
         options["publicKey"]["authenticatorSelection"]["residentKey"] = json!("required");
         options["publicKey"]["authenticatorSelection"]["requireResidentKey"] = json!(true);
         options["publicKey"]["extensions"]["prf"] = json!({"eval":{"first":constant_prf_input()}});
-        let words = if rotate {
-            Some(
-                bip39::Mnemonic::generate_in(bip39::Language::English, 24)
-                    .map_err(|_| Error::Invalid)?
-                    .to_string(),
-            )
-        } else {
-            None
-        };
-        let recovery_hash = match &words {
-            Some(w) => Some(recovery_hash(w.clone()).await?),
-            None => None,
-        };
+        // Recovery entropy is generated only by the browser. Legacy fixtures inject
+        // an old hash explicitly in tests; no production ceremony creates words.
+        let recovery_hash = None;
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
@@ -67,11 +57,14 @@ impl Auth {
                 display_name: display_name.into(),
                 authority,
                 recovery_hash,
+                rotate_recovery: rotate,
                 expires: now + CEREMONY,
                 binding: None,
             },
         );
-        Ok(json!({"ceremony":id,"user_id":user,"options":options,"recovery_words":words}))
+        Ok(
+            json!({"ceremony":id,"user_id":user,"options":options,"recovery_words":null,"recovery_version":2}),
+        )
     }
 
     /// Finish registration and atomically install mandatory passkey/recovery envelopes.
@@ -83,13 +76,46 @@ impl Auth {
         recovery_wrap: Option<Wrap>,
         now: i64,
     ) -> Result<String> {
-        let registration = self
+        self.registration_finish_with_verifier(id, proof, passkey_wrap, recovery_wrap, None, now)
+            .await
+    }
+
+    /// Install only a browser authentication secret; recovery wrapping material stays local.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn registration_finish_with_verifier(
+        &self,
+        id: &str,
+        proof: Value,
+        passkey_wrap: Wrap,
+        recovery_wrap: Option<Wrap>,
+        verifier: Option<String>,
+        now: i64,
+    ) -> Result<String> {
+        self.registration_finish_clock(id, proof, passkey_wrap, recovery_wrap, verifier, || Ok(now))
+            .await
+    }
+
+    // HTTP supplies live authority time; library callers keep deterministic clocks.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)] // Keep all registration authority consumption in one writer transaction.
+    pub(super) async fn registration_finish_clock(
+        &self,
+        id: &str,
+        proof: Value,
+        passkey_wrap: Wrap,
+        recovery_wrap: Option<Wrap>,
+        verifier: Option<String>,
+        clock: impl Fn() -> Result<i64>,
+    ) -> Result<String> {
+        let now = clock()?;
+        let mut registration = self
             .pending
             .lock()
             .await
             .registrations
             .remove(id)
             .ok_or(Error::Denied)?;
+        let setup_consumed = matches!(&registration.authority, Authority::Setup(_));
         if registration.expires <= now {
             return Err(Error::Denied);
         }
@@ -99,15 +125,27 @@ impl Auth {
             &passkey_wrap,
             recovery_wrap.as_ref(),
         )?;
+        let version = registration.install_verifier(verifier).await?;
         let mut tx = self.pool.begin().await?;
         // A write first obtains SQLite's writer lock before any security-sensitive read.
         sqlx::query("UPDATE setup SET expires=expires WHERE singleton=1")
             .execute(&mut *tx)
             .await?;
+        // Hashing and writer contention can outlive any admission timestamp. Sample
+        // again under the writer lock; SQLite also checks the consuming statement.
+        let now: i64 = sqlx::query_scalar("SELECT MAX(?,unixepoch())")
+            .bind(clock()?)
+            .fetch_one(&mut *tx)
+            .await?;
+        if registration.expires <= now {
+            return Err(Error::Denied);
+        }
         match &registration.authority {
             Authority::Setup(token) => {
-                if sqlx::query("DELETE FROM setup WHERE token_hash=? AND expires>?")
+                if sqlx::query("DELETE FROM setup WHERE token_hash=? AND expires>MAX(?,unixepoch()) AND ?>MAX(?,unixepoch())")
                     .bind(token)
+                    .bind(now)
+                    .bind(registration.expires)
                     .bind(now)
                     .execute(&mut *tx)
                     .await?
@@ -124,12 +162,13 @@ impl Auth {
                 if username_exists {
                     return Err(Error::Conflict);
                 }
-                sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,?,1,?,?,?)")
+                sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name,recovery_version,recovery_wrap_version) VALUES (?,?,1,?,?,?,?,?)")
                     .bind(&registration.user)
                     .bind(&registration.display_name)
                     .bind(registration.recovery_hash.as_ref().ok_or(Error::Invalid)?)
                     .bind(&registration.username)
                     .bind(&registration.display_name)
+                    .bind(version).bind(version)
                     .execute(&mut *tx)
                     .await?;
             }
@@ -145,19 +184,16 @@ impl Auth {
                 }
             }
             Authority::Recovery(token) => {
-                if sqlx::query("DELETE FROM recovery WHERE user_id=? AND token_hash=? AND ready<=? AND expires>?")
-                    .bind(&registration.user).bind(token).bind(now).bind(now).execute(&mut *tx).await?.rows_affected() != 1 { return Err(Error::Denied); }
-                for table in ["sessions", "api_keys", "approvals", "passkeys", "wraps"] {
-                    sqlx::query(&format!("DELETE FROM {table} WHERE user_id=?"))
-                        .bind(&registration.user)
-                        .execute(&mut *tx)
-                        .await?;
-                }
-                sqlx::query("UPDATE users SET recovery_hash=? WHERE id=?")
-                    .bind(registration.recovery_hash.as_ref().ok_or(Error::Invalid)?)
-                    .bind(&registration.user)
-                    .execute(&mut *tx)
-                    .await?;
+                super::recovery::complete(
+                    &mut tx,
+                    &registration.user,
+                    token,
+                    registration.recovery_hash.as_ref().ok_or(Error::Invalid)?,
+                    version,
+                    now,
+                    registration.expires,
+                )
+                .await?;
             }
         }
         let user = &registration.user;
@@ -169,8 +205,12 @@ impl Auth {
         let token = random();
         insert_session(&mut tx, &token, user, "enrollment", now, Some(&key_id)).await?;
         tx.commit().await?;
+        if setup_consumed {
+            self.setup_consumed.send_replace(());
+        }
         if matches!(registration.authority, Authority::Recovery(_)) {
             self.revocations.send_replace(());
+            self.recovery_changes.send_replace(());
         }
         Ok(token)
     }
@@ -188,7 +228,7 @@ impl Auth {
         if let Some(w) = recovery_wrap {
             w.validate()?;
         }
-        if registration.recovery_hash.is_some() != recovery_wrap.is_some() {
+        if registration.rotate_recovery != recovery_wrap.is_some() {
             return Err(Error::Invalid);
         }
         let proof: RegisterPublicKeyCredential = serde_json::from_value(proof)?;
@@ -529,4 +569,25 @@ pub(super) fn registration_aaguid(proof: &RegisterPublicKeyCredential) -> Result
     let id =
         Uuid::from_slice(data.get(37..53).ok_or(Error::Invalid)?).map_err(|_| Error::Invalid)?;
     Ok((!id.is_nil()).then(|| id.to_string()))
+}
+
+impl Registration {
+    // Hash outside the writer lock; mandatory recovery envelopes require a verifier.
+    async fn install_verifier(&mut self, verifier: Option<String>) -> Result<i64> {
+        if let Some(verifier) = verifier {
+            if !self.rotate_recovery {
+                return Err(Error::Invalid);
+            }
+            super::crypto::valid_secret(&verifier)?;
+            self.recovery_hash = Some(recovery_hash(verifier).await?);
+            Ok(2)
+        } else {
+            // Explicit test-only legacy fixtures can inject an old PHC hash. Every
+            // production rotating ceremony instead requires the browser secret.
+            if self.rotate_recovery && self.recovery_hash.is_none() {
+                return Err(Error::Invalid);
+            }
+            Ok(1)
+        }
+    }
 }

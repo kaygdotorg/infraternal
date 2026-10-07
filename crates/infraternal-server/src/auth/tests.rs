@@ -1,5 +1,6 @@
 //! Defensive tests with a real ES256 software authenticator and a browser-side PRF/keywrap double.
 //! No verifier is mocked: CBOR attestation, client data, flags and signatures enter webauthn-rs.
+use super::crypto::verify_recovery;
 use super::*;
 use crate::{
     embedded::EmbeddedAgent,
@@ -41,7 +42,7 @@ use tokio_tungstenite::{
 };
 use tower::ServiceExt;
 
-static SERIAL: Mutex<()> = Mutex::const_new(());
+pub(super) static SERIAL: Mutex<()> = Mutex::const_new(());
 const NOW: i64 = 1_800_000_000;
 const ORIGIN: &str = "https://auth.example.test";
 
@@ -226,7 +227,7 @@ async fn empty() -> (Auth, String) {
 }
 async fn fixture() -> Fixture {
     let (auth, token) = empty().await;
-    let start = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let start = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
     let user = str_field(&start, "user_id").to_owned();
     let words = str_field(&start, "recovery_words").to_owned();
     let software = Software::new();
@@ -243,7 +244,7 @@ async fn fixture() -> Fixture {
         )
         .await
         .unwrap();
-    assert!(auth.setup_start(&token, "attacker", NOW).await.is_err());
+    assert!(auth.legacy_setup(&token, "attacker", NOW).await.is_err());
     Fixture {
         auth,
         software,
@@ -432,10 +433,10 @@ async fn setup_restart_rotation_expiry_and_parallel_redemption() {
         "restart must issue a fresh setup capability"
     );
     assert!(token != old_token, "setup capability must rotate");
-    assert!(auth.setup_start(&old_token, "owner", NOW).await.is_err());
-    assert!(auth.setup_start(&token, "owner", NOW + DAY).await.is_err());
-    let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
-    let b = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    assert!(auth.legacy_setup(&old_token, "owner", NOW).await.is_err());
+    assert!(auth.legacy_setup(&token, "owner", NOW + DAY).await.is_err());
+    let a = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
+    let b = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     for (start, succeeds) in [(&a, true), (&b, false)] {
@@ -488,16 +489,16 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         .recovery_start(&f.user, f.words.clone(), NOW)
         .await
         .unwrap();
-    assert!(f.auth.recovery_ready(&token, NOW + DAY - 1).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + DAY - 1).await.is_err());
     assert!(
         f.auth
             .recovery_start(&f.user, f.words.clone(), NOW + 1)
             .await
             .is_err()
     );
-    let start = f.auth.recovery_ready(&token, NOW + DAY).await.unwrap();
+    let start = f.auth.legacy_ready(&token, NOW + DAY).await.unwrap();
     f.auth.recovery_cancel(&f.session, NOW + DAY).await.unwrap();
-    assert!(f.auth.recovery_ready(&token, NOW + DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + DAY).await.is_err());
     let second = Software::new();
     let pw = browser_wrap(&second.prf(&start), &f.dek, &f.user, "passkey");
     let rw = browser_wrap(
@@ -523,7 +524,7 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         .recovery_start(&f.user, f.words.clone(), NOW + DAY)
         .await
         .unwrap();
-    let start = f.auth.recovery_ready(&token, NOW + 2 * DAY).await.unwrap();
+    let start = f.auth.legacy_ready(&token, NOW + 2 * DAY).await.unwrap();
     let session = finish_replacement(&f, &start, &second, NOW + 2 * DAY).await;
     assert!(
         events.has_changed().unwrap(),
@@ -536,7 +537,7 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
             .is_err()
     );
     assert!(f.auth.session(&f.session, NOW + 2 * DAY).await.is_err());
-    assert!(f.auth.recovery_ready(&token, NOW + 2 * DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + 2 * DAY).await.is_err());
     assert!(
         f.auth
             .recovery_start(&f.user, f.words, NOW + 2 * DAY)
@@ -545,6 +546,190 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
     );
     assert_eq!(f.auth.passkeys(&f.user).await.unwrap().len(), 1);
     assert!(f.auth.session(&session, NOW + 2 * DAY).await.is_ok());
+}
+
+#[tokio::test]
+async fn recovery_http_live_same_account_is_immediate() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    let app = router(f.auth.clone());
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (status, _, body) = http_post_json_with_cookie(
+        &app,
+        "recovery-start",
+        json!({"user_id":f.user,"verifier":recovery_verifier(&f.words)}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body["delay_seconds"], 0);
+    let (status, _, _) =
+        http_post_json(&app, "recovery-ready", json!({"token":body["token"]})).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn recovery_http_other_expired_pending_and_missing_sessions_wait() {
+    let _guard = SERIAL.lock().await;
+    for mode in ["other", "expired", "pending", "missing"] {
+        let f = fixture_v2().await;
+        if mode == "other" {
+            sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('other','other',0,'unused','other','Other')")
+                .execute(&f.auth.pool).await.unwrap();
+            sqlx::query("UPDATE sessions SET user_id='other'")
+                .execute(&f.auth.pool)
+                .await
+                .unwrap();
+        } else if mode == "expired" {
+            sqlx::query("UPDATE sessions SET expires=0")
+                .execute(&f.auth.pool)
+                .await
+                .unwrap();
+        } else if mode == "pending" {
+            sqlx::query("UPDATE sessions SET unlocked=0")
+                .execute(&f.auth.pool)
+                .await
+                .unwrap();
+        }
+        let app = router(f.auth.clone());
+        let cookie = format!("__Host-infraternal={}", f.session);
+        let (status, _, body) = http_post_json_with_optional_cookie(
+            &app,
+            "recovery-start",
+            json!({"user_id":f.user,"verifier":recovery_verifier(&f.words)}),
+            if mode == "missing" {
+                None
+            } else {
+                Some(&cookie)
+            },
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["delay_seconds"], DAY);
+        let (status, _, _) =
+            http_post_json(&app, "recovery-ready", json!({"token":body["token"]})).await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[tokio::test]
+async fn recovery_live_session_revoked_during_verification_cannot_waive_delay() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let pause = Arc::new(RecoveryPause::default());
+    *f.auth.recovery_pause.lock().await = Some(pause.clone());
+    let auth = f.auth.clone();
+    let user = f.user.clone();
+    let words = f.words.clone();
+    let session = f.session.clone();
+    let request = tokio::spawn(async move {
+        auth.recovery_start_with_session(&user, words, Some(&session), NOW)
+            .await
+    });
+    pause.verified.notified().await;
+    f.auth.logout(&f.session).await.unwrap();
+    pause.resume.notify_one();
+    let (token, ready) = request.await.unwrap().unwrap();
+    assert_eq!(ready, NOW + DAY);
+    assert!(f.auth.legacy_ready(&token, NOW).await.is_err());
+}
+
+#[tokio::test]
+async fn recovery_live_session_cannot_accelerate_an_active_delayed_request() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let token = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    assert!(
+        f.auth
+            .recovery_start_with_session(&f.user, f.words.clone(), Some(&f.session), NOW + 1)
+            .await
+            .is_err()
+    );
+    assert!(f.auth.legacy_ready(&token, NOW + DAY - 1).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + DAY).await.is_ok());
+}
+
+#[tokio::test]
+async fn recovery_username_identity_is_additive_and_ambiguous_forms_fail() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    let app = router(f.auth.clone());
+    for value in [
+        json!({"verifier":recovery_verifier(&f.words)}),
+        json!({"user_id":f.user,"username":"owner","verifier":recovery_verifier(&f.words)}),
+    ] {
+        assert_eq!(
+            http_post_json(&app, "recovery-start", value).await.0,
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
+    let missing = http_post_json(
+        &app,
+        "recovery-start",
+        json!({"username":"missing","verifier":recovery_verifier(&f.words)}),
+    )
+    .await;
+    let wrong = http_post_json(
+        &app,
+        "recovery-start",
+        json!({"username":"owner","verifier":"invalid"}),
+    )
+    .await;
+    assert_eq!(missing.0, axum::http::StatusCode::UNAUTHORIZED);
+    assert_eq!(missing.0, wrong.0);
+    assert_eq!(missing.2, wrong.2);
+    let (_, _, body) = http_post_json(
+        &app,
+        "recovery-start",
+        json!({"username":"owner","verifier":recovery_verifier(&f.words)}),
+    )
+    .await;
+    assert_eq!(body["delay_seconds"], DAY);
+    assert!(body["ready_at"].as_i64().is_some());
+}
+
+#[tokio::test]
+#[ignore = "release-only recovery measurement at 50 live sessions; run without concurrent compilation"]
+async fn recovery_session_delay_latency_at_capacity() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    sqlx::query("UPDATE sessions SET expires=?")
+        .bind(NOW + 200 * DAY)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    for _ in 1..50 {
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh) VALUES (?,?,'scale',?,?)")
+            .bind(hash(&random())).bind(&f.user).bind(NOW + 200 * DAY).bind(NOW).execute(&f.auth.pool).await.unwrap();
+    }
+    for live in [false, true] {
+        let mut samples = Vec::new();
+        for index in 0..30 {
+            let now = NOW + (index + if live { 30 } else { 0 }) * 2 * DAY;
+            let begin = std::time::Instant::now();
+            let (_, ready) = f
+                .auth
+                .recovery_start_with_session(
+                    &f.user,
+                    f.words.clone(),
+                    live.then_some(f.session.as_str()),
+                    now,
+                )
+                .await
+                .unwrap();
+            samples.push(begin.elapsed().as_micros());
+            assert_eq!(ready, now + if live { 0 } else { DAY });
+        }
+        samples.sort_unstable();
+        println!(
+            "Recovery start (SQLite memory, 50 live session rows, n=30, live={live}): p50 {} us, p99 {} us",
+            samples[14], samples[29]
+        );
+    }
 }
 
 #[tokio::test]
@@ -776,8 +961,8 @@ async fn concurrent_owner_and_optional_passkey_enrollment_fail_closed() {
     let _guard = SERIAL.lock().await;
     let (auth, token) = empty().await;
     let (a, b) = tokio::join!(
-        auth.setup_start(&token, "owner", NOW),
-        auth.setup_start(&token, "owner", NOW)
+        auth.legacy_setup(&token, "owner", NOW),
+        auth.legacy_setup(&token, "owner", NOW)
     );
     let a = a.unwrap();
     let b = b.unwrap();
@@ -861,13 +1046,13 @@ async fn recovery_expiry_revocation_and_cross_user_isolation() {
         .recovery_start(&f.user, f.words.clone(), NOW)
         .await
         .unwrap();
-    assert!(f.auth.recovery_ready(&token, NOW + 2 * DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + 2 * DAY).await.is_err());
     let token = f
         .auth
         .recovery_start(&f.user, f.words.clone(), NOW + 2 * DAY)
         .await
         .unwrap();
-    let start = f.auth.recovery_ready(&token, NOW + 3 * DAY).await.unwrap();
+    let start = f.auth.legacy_ready(&token, NOW + 3 * DAY).await.unwrap();
     let replacement = Software::new();
     finish_replacement(&f, &start, &replacement, NOW + 3 * DAY).await;
     assert!(f.auth.api_authorize(&api_key, "hosts:read").await.is_err());
@@ -970,7 +1155,7 @@ async fn review_old_words_race_rotation() {
         tokio::spawn(async move { auth.recovery_start(&user, old_words, NOW + DAY).await });
     // Pause after actual Argon2 verification, then commit the complete replacement.
     pause.verified.notified().await;
-    let start = f.auth.recovery_ready(&first, NOW + DAY).await.unwrap();
+    let start = f.auth.legacy_ready(&first, NOW + DAY).await.unwrap();
     let replacement = Software::new();
     let words = str_field(&start, "recovery_words").to_owned();
     f.auth
@@ -1305,11 +1490,16 @@ pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) ->
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let user_id = str_field(&start, "user_id").to_owned();
-    let words = str_field(&start, "recovery_words").to_owned();
+    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&start), &dek, &user_id, "passkey");
-    let recovery_wrap = browser_wrap(&recovery_ikm(&words), &dek, &user_id, "recovery");
+    let recovery_wrap = browser_wrap(
+        &recovery_material(&words, "wrap"),
+        &dek,
+        &user_id,
+        "recovery",
+    );
     let proof = software.registration(&start, ORIGIN, true);
     let binding = start_headers[axum::http::header::SET_COOKIE]
         .to_str()
@@ -1324,6 +1514,7 @@ pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) ->
             "ceremony":start["ceremony"],
             "proof":proof,
             "passkey_wrap":passkey_wrap,
+            "recovery_verifier":recovery_verifier(&words),
             "recovery_wrap":recovery_wrap,
         }),
         binding,
@@ -1365,11 +1556,25 @@ async fn http_post_json_with_optional_cookie(
     value: Value,
     cookie: Option<&str>,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
+    http_post_json_with_headers(app, action, value, cookie, axum::http::HeaderMap::new()).await
+}
+
+// Optional metadata remains test-only; all probes use the same production HTTP adapter.
+async fn http_post_json_with_headers(
+    app: &axum::Router,
+    action: &str,
+    value: Value,
+    cookie: Option<&str>,
+    headers: axum::http::HeaderMap,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
     let mut builder = axum::http::Request::builder()
         .method("POST")
         .uri(format!("/auth/{action}"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
         .header(axum::http::header::ORIGIN, ORIGIN);
+    for (name, value) in &headers {
+        builder = builder.header(name, value);
+    }
     if let Some(cookie) = cookie {
         builder = builder.header(axum::http::header::COOKIE, cookie);
     }
@@ -1502,7 +1707,9 @@ where
                 .await
                 .expect("websocket pong"),
             Message::Pong(_) | Message::Frame(_) => {}
-            Message::Close(_) => panic!("server closed websocket unexpectedly"),
+            Message::Close(frame) => {
+                panic!("server closed websocket unexpectedly: {frame:?}")
+            }
             Message::Text(_) => panic!("server sent a text websocket message"),
         }
     }
@@ -1749,8 +1956,8 @@ async fn leg_b_send(socket: &mut UnixStream, stream_id: u32, frame: &Frame<'_>) 
 async fn enrollment_prf_input_matches_discoverable_login() {
     let _guard = SERIAL.lock().await;
     let (auth, token) = empty().await;
-    let a = auth.setup_start(&token, "owner", NOW).await.unwrap();
-    let b = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let a = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
+    let b = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
     assert_ne!(a["user_id"], b["user_id"]);
     assert_eq!(
         a["options"]["publicKey"]["extensions"]["prf"],
@@ -1994,11 +2201,16 @@ async fn setup_start_accepts_username_and_display_name() {
     );
 
     let user_id = str_field(&body, "user_id").to_owned();
-    let words = str_field(&body, "recovery_words").to_owned();
+    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&body), &dek, &user_id, "passkey");
-    let recovery_wrap = browser_wrap(&recovery_ikm(&words), &dek, &user_id, "recovery");
+    let recovery_wrap = browser_wrap(
+        &recovery_material(&words, "wrap"),
+        &dek,
+        &user_id,
+        "recovery",
+    );
     let binding = start_headers[axum::http::header::SET_COOKIE]
         .to_str()
         .unwrap()
@@ -2012,6 +2224,7 @@ async fn setup_start_accepts_username_and_display_name() {
             "ceremony":body["ceremony"],
             "proof":software.registration(&body, ORIGIN, true),
             "passkey_wrap":passkey_wrap,
+            "recovery_verifier":recovery_verifier(&words),
             "recovery_wrap":recovery_wrap
         }),
         binding,
@@ -2479,7 +2692,7 @@ mod review3_tests;
 async fn registration_aaguid_survives_none_attestation_and_binds_session_provider() {
     let _guard = SERIAL.lock().await;
     let (auth, token) = empty().await;
-    let start = auth.setup_start(&token, "owner", NOW).await.unwrap();
+    let start = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
     let user = str_field(&start, "user_id");
     let mut software = Software::new();
     software.aaguid = Uuid::parse_str("bada5566-a7aa-401f-bd96-45619a55120d").unwrap();
@@ -2721,3 +2934,309 @@ fn provider_labels_cover_the_cited_registry_without_guessing() {
     );
     assert_eq!(sessions::provider_name(Some("unknown")), None);
 }
+// Defensive recovery probes; fixture secrets remain in memory and diagnostics contain only outcomes.
+#[tokio::test]
+async fn audit_recovery_session_expiring_during_verification_keeps_delay() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    sqlx::query("UPDATE sessions SET expires=?")
+        .bind(now + 1)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let pause = Arc::new(RecoveryPause::default());
+    *f.auth.recovery_pause.lock().await = Some(pause.clone());
+    let app = router(f.auth.clone());
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let body = json!({"username":"owner","verifier":recovery_verifier(&f.words)});
+    let request = tokio::spawn(async move {
+        http_post_json_with_cookie(&app, "recovery-start", body, &cookie).await
+    });
+    pause.verified.notified().await;
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    pause.resume.notify_one();
+    let (status, _, body) = request.await.unwrap();
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(
+        body["delay_seconds"], DAY,
+        "session expired before recovery transaction but received immediate recovery"
+    );
+}
+
+#[tokio::test]
+async fn audit_recovery_after_page_discard_can_resume_at_original_deadline() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let original = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    // Model page discard by dropping the only clear capability. The unchanged words survive offline.
+    drop(original);
+    let resumed = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), NOW + DAY)
+        .await;
+    let denied_at_day = resumed.is_err();
+    let (_, ready) = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), NOW + 2 * DAY)
+        .await
+        .unwrap();
+    println!(
+        "AUDIT discarded page: retry_at_24h_denied={denied_at_day}; retry_at_48h_ready_offset_hours={}",
+        (ready - NOW) / 3600
+    );
+    assert_eq!(ready, NOW + DAY);
+    assert!(
+        !denied_at_day,
+        "re-entering correct words after 24h cannot recover the pending capability; denied until 48h then another 24h wait"
+    );
+}
+
+#[tokio::test]
+async fn audit_recovery_pending_is_visible_to_signed_in_device() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let _capability = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    let app = router(f.auth.clone());
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (status, _, body) = http_post_json_with_cookie(&app, "session", json!({}), &cookie).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let disclosed = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .any(|key| key.contains("recovery"));
+    assert!(
+        disclosed,
+        "signed-in session exposes no pending recovery information; no notification/cancel entry exists in browser code"
+    );
+}
+
+#[tokio::test]
+async fn recovery_audit_commits_once_with_start_cancel_and_complete() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let (token, ready) = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    let (next, again) = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), NOW + 1)
+        .await
+        .unwrap();
+    assert_eq!(ready, again);
+    assert!(f.auth.legacy_ready(&token, NOW + DAY).await.is_err());
+    f.auth.recovery_cancel(&f.session, NOW + 2).await.unwrap();
+    f.auth.recovery_cancel(&f.session, NOW + 3).await.unwrap();
+    assert!(f.auth.legacy_ready(&next, NOW + DAY).await.is_err());
+    let (token, _) = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), NOW + 4)
+        .await
+        .unwrap();
+    let start = f.auth.legacy_ready(&token, NOW + DAY + 4).await.unwrap();
+    finish_replacement(&f, &start, &Software::new(), NOW + DAY + 4).await;
+    let events: Vec<String> = sqlx::query_scalar("SELECT event FROM recovery_audit ORDER BY id")
+        .fetch_all(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(events, ["start", "cancel", "start", "complete"]);
+}
+
+// Explicit legacy-enrollment fixtures keep old PHC/envelope migration coverage.
+// Production ceremonies never generate mnemonic entropy or retain a phrase hash.
+impl Auth {
+    async fn legacy_enrollment(&self, mut start: Value) -> Value {
+        let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+        let stored = recovery_hash(words.clone()).await.unwrap();
+        self.pending
+            .lock()
+            .await
+            .registrations
+            .get_mut(str_field(&start, "ceremony"))
+            .unwrap()
+            .recovery_hash = Some(stored);
+        start["recovery_words"] = json!(words);
+        start
+    }
+    async fn legacy_setup(&self, token: &str, name: &str, now: i64) -> Result<Value> {
+        Ok(self
+            .legacy_enrollment(self.setup_start(token, name, now).await?)
+            .await)
+    }
+    async fn legacy_ready(&self, token: &str, now: i64) -> Result<Value> {
+        Ok(self
+            .legacy_enrollment(self.recovery_ready(token, now).await?)
+            .await)
+    }
+}
+fn recovery_material(words: &str, kind: &str) -> [u8; 32] {
+    let entropy = recovery_ikm(words);
+    let mut output = [0; 32];
+    Hkdf::<Sha256>::new(None, &entropy)
+        .expand(
+            format!("infraternal/recovery/{kind}/v2").as_bytes(),
+            &mut output,
+        )
+        .unwrap();
+    output
+}
+fn recovery_verifier(words: &str) -> String {
+    B64.encode(recovery_material(words, "auth"))
+}
+async fn fixture_v2() -> Fixture {
+    let f = fixture().await;
+    sqlx::query("UPDATE users SET recovery_hash=?,recovery_version=2 WHERE id=?")
+        .bind(recovery_hash(recovery_verifier(&f.words)).await.unwrap())
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    f
+}
+
+#[tokio::test]
+#[ignore = "release-only v2 diagnostic at 50 live session rows; record host load separately"]
+async fn recovery_verifier_latency_at_capacity() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    let verifier = recovery_verifier(&f.words);
+    sqlx::query("UPDATE sessions SET expires=?")
+        .bind(NOW + 200 * DAY)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    for _ in 1..50 {
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh) VALUES (?,?,'scale',?,?)")
+            .bind(hash(&random())).bind(&f.user).bind(NOW + 200 * DAY).bind(NOW).execute(&f.auth.pool).await.unwrap();
+    }
+    for mode in ["delayed-start", "live-start", "resume"] {
+        let mut samples = Vec::new();
+        let resume = mode == "resume";
+        if resume {
+            sqlx::query("DELETE FROM recovery WHERE user_id=?")
+                .bind(&f.user)
+                .execute(&f.auth.pool)
+                .await
+                .unwrap();
+            f.auth
+                .recovery_start_clock(
+                    &f.user,
+                    super::recovery::RecoveryCredential::Verifier(verifier.clone()),
+                    None,
+                    || Ok(NOW),
+                    true,
+                )
+                .await
+                .unwrap();
+        }
+        for _ in 0..30 {
+            if !resume {
+                // Reset outside the timed request; each start must measure insertion,
+                // not the already-pending deadline-preservation path.
+                sqlx::query("DELETE FROM recovery WHERE user_id=?")
+                    .bind(&f.user)
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            let begin = Instant::now();
+            let (_, ready, delay) = f
+                .auth
+                .recovery_start_clock(
+                    &f.user,
+                    super::recovery::RecoveryCredential::Verifier(verifier.clone()),
+                    (mode == "live-start").then_some(f.session.as_str()),
+                    || Ok(if resume { NOW + DAY } else { NOW }),
+                    true,
+                )
+                .await
+                .unwrap();
+            samples.push(begin.elapsed().as_micros());
+            assert_eq!(ready, NOW + if mode == "live-start" { 0 } else { DAY });
+            assert_eq!(delay, if mode == "delayed-start" { DAY } else { 0 });
+        }
+        samples.sort_unstable();
+        println!(
+            "Recovery verifier (SQLite memory, 50 live session rows, n=30, mode={mode}): p50 {} us, p99 {} us",
+            samples[14], samples[29]
+        );
+    }
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    for row in status
+        .lines()
+        .filter(|row| row.starts_with("VmRSS:") || row.starts_with("VmHWM:"))
+    {
+        println!("Recovery verifier process at 50 session rows: {row}");
+    }
+}
+
+#[tokio::test]
+async fn recovery_unknown_identity_pays_the_same_database_and_verifier_work() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _guard = SERIAL.lock().await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counter = reads.clone();
+    let pool = SqlitePoolOptions::new()
+        .test_before_acquire(false)
+        .max_connections(1)
+        .before_acquire(move |_, _| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                Ok(true)
+            })
+        })
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let auth = Auth::new(pool, "auth.example.test", ORIGIN).await.unwrap();
+    let user = uuid::Uuid::new_v4().to_string();
+    let stored = recovery_hash(random()).await.unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name,recovery_version) VALUES (?,'owner',1,?,'owner','Owner',2)")
+        .bind(&user).bind(stored).execute(&auth.pool).await.unwrap();
+    let wrong_secret = random();
+    let mut attempts = Vec::new();
+    for identity in [&user, "missing"] {
+        reads.store(0, Ordering::Relaxed);
+        assert!(matches!(
+            auth.recovery_start_clock(
+                identity,
+                super::recovery::RecoveryCredential::Verifier(wrong_secret.clone()),
+                None,
+                || Ok(NOW),
+                true
+            )
+            .await,
+            Err(Error::Denied)
+        ));
+        attempts.push(reads.load(Ordering::Relaxed));
+    }
+    // Real SQLite acquisition hooks count actual reads; Argon2 is not mocked.
+    assert_eq!(
+        attempts[0], attempts[1],
+        "known and unknown recovery identities take different database paths"
+    );
+}
+
+#[path = "reviewer_tests.rs"]
+mod reviewer_tests;
+
+#[path = "rotation_tests.rs"]
+mod rotation_tests;

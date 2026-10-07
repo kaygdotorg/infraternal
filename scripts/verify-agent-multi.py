@@ -6,13 +6,13 @@ from pathlib import Path
 import struct
 import time
 sys.path.insert(0, 'scripts')
-from agent_fixture import Binary, cleanup
+from agent_fixture import Binary, cleanup, fixture_state
 
-state = Path(f'target/mw{os.getpid()}')
+state = fixture_state('mw')
 state.mkdir(mode=0o700)
 c = Binary(Path(sys.argv[sys.argv.index('--binary') + 1]).resolve(), state)
 try:
-    c.open(); c.attach(); c.send(1, 0x14, struct.pack('<I', 1048576)); c.until(b'shim-test')
+    c.open(); c.attach(); c.until(b'shim-test')
     c.input(b"stty raw -echo; printf 'MULTI_%s' READY; cat\n")
     c.until(b'MULTI_READY'); c.wait_ack()
     start = c.entered

@@ -36,9 +36,13 @@ rust_print_summary() {
 
 rust_check_static_binary() {
     local target="$1"
-    local binary="target/${target}/release/infraternal"
+    local target_dir="${CARGO_TARGET_DIR:-target}"
+    local binary="${target_dir}/${target}/release/infraternal"
     local description
     local size_bytes
+    local baseline_size_bytes
+    local allowance_bytes=262144
+    local max_size_bytes
 
     if [[ ! -x "$binary" ]]; then
         printf 'expected executable not found: %s\n' "$binary" >&2
@@ -56,8 +60,24 @@ rust_check_static_binary() {
         return 1
     fi
 
+    case "$target" in
+        x86_64-unknown-linux-musl) baseline_size_bytes=16142672 ;;
+        aarch64-unknown-linux-musl) baseline_size_bytes=13555672 ;;
+        *)
+            printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
+            return 1
+            ;;
+    esac
+
+    max_size_bytes=$((baseline_size_bytes + allowance_bytes))
     size_bytes="$(stat -c '%s' "$binary")"
-    printf 'PT_INTERP: absent; size: %s bytes\n' "$size_bytes"
+    printf 'PT_INTERP: absent; size: %s bytes (baseline %s + allowance %s = max %s)\n' \
+        "$size_bytes" "$baseline_size_bytes" "$allowance_bytes" "$max_size_bytes"
+    if ((size_bytes > max_size_bytes)); then
+        printf 'binary exceeds the %s-byte size budget: %s bytes\n' \
+            "$max_size_bytes" "$size_bytes" >&2
+        return 1
+    fi
 }
 
 rust_check_cli_stub() {
@@ -78,7 +98,8 @@ rust_check_cli_stub() {
 rust_static_build_check() {
     local target
     local targets=("x86_64-unknown-linux-musl" "aarch64-unknown-linux-musl")
-    local x86_binary="target/x86_64-unknown-linux-musl/release/infraternal"
+    local target_dir="${CARGO_TARGET_DIR:-target}"
+    local x86_binary="${target_dir}/x86_64-unknown-linux-musl/release/infraternal"
 
     for tool in cargo file readelf stat; do
         if ! command -v "$tool" >/dev/null 2>&1; then

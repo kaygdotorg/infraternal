@@ -1,0 +1,11 @@
+# Raw fresh-process mesh measurement; all original environment and metric lines follow.
+ENVIRONMENT utc=2026-10-07T14:16:18Z machine=infraternal-dev cpu=Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz cores=8 load=26.41 22.09 24.79 weight=10000
+METRIC join nodes=100 total_ns=408099 cpu_total_ns=407473 per_node_ns=4137
+METRIC coordinator_memory nodes=100 arrows_per_node=20 peer_entries=4118 rss_bytes=4665344 incremental_rss_bytes=2457600 bytes_per_node=24576
+METRIC full_compile sample=0 nodes=100 arrows_per_node=20 ns=2354788 cpu_ns=2354695 peak_rss_bytes=6213632
+METRIC full_compile sample=1 nodes=100 arrows_per_node=20 ns=2133187 cpu_ns=2134005 peak_rss_bytes=6213632
+METRIC full_compile sample=2 nodes=100 arrows_per_node=20 ns=2051155 cpu_ns=2052097 peak_rss_bytes=6213632
+METRIC full_compile sample=3 nodes=100 arrows_per_node=20 ns=2210080 cpu_ns=2107519 peak_rss_bytes=6213632
+METRIC full_compile sample=4 nodes=100 arrows_per_node=20 ns=2260631 cpu_ns=2262940 peak_rss_bytes=6213632
+METRIC address_allocate nodes=100 per_node_ns=98 cpu_per_node_ns=92
+METRIC name_lookup iterations=100000 per_lookup_ns=82 cpu_per_lookup_ns=82 peak_rss_bytes=6070272

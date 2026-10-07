@@ -8,7 +8,7 @@ import struct
 import sys
 import threading
 sys.dont_write_bytecode = True
-from agent_fixture import AckBarrier, Binary, cleanup, exact
+from agent_fixture import AckBarrier, Binary, cleanup, exact, fixture_state
 
 
 class StateBarrier(AckBarrier):
@@ -53,7 +53,7 @@ class StateBarrier(AckBarrier):
 
 
 def run(binary):
-    state = Path(f'target/tr{os.getpid()}')
+    state = fixture_state('tr')
     state.mkdir(mode=0o700)
     client = Binary(binary.resolve(), state)
     barrier = None
@@ -85,6 +85,7 @@ def run(binary):
         barrier.restart = True
         client.start()
         client.send(1, 0x16, client.id.bytes + struct.pack('<QQ', client.out, client.acked))
+        client.send(1, 0x14, struct.pack('<I', 1048576))
         assert barrier.held.wait(20)
         with fifo.open('w') as gate:
             gate.write('x')

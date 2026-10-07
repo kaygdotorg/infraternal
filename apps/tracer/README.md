@@ -110,13 +110,16 @@ to selectable report text when clipboard access is unavailable.
 bun run test
 ```
 
-Playwright builds the production bundle, starts `test/mock-server.ts` on
-`localhost:4173`, and uses a virtual authenticator. The server is explicitly a
-test double: its passkey endpoints accept test ceremonies and do not verify
-WebAuthn signatures. Do not use it as an authentication server. The browser
-test sends 500 sequential probe keys, checks for p99 below 20 ms, and saves
-terminal and probe screenshots plus the per-key browser/double attribution
-under `test-results/`. Playwright disables renderer backgrounding by default so
+Playwright builds the production bundle and starts `test/mock-server.ts`
+behind a rootless latency proxy at `TRACER_TEST_PORT` (default
+`localhost:4621`). The browser-to-test-double link defaults to a 300 ms round
+trip with ±30 ms jitter; set `INFRATERNAL_TEST_RTT=0` for a local debug run.
+The suite uses a virtual authenticator. The server is explicitly a test
+double: its passkey endpoints accept test ceremonies and do not verify WebAuthn
+signatures. Do not use it as an authentication server. The browser test sends
+20 sequential probe keys for the p99 latency report and saves terminal and
+probe screenshots plus the per-key browser/double attribution under
+`test-results/`. Playwright disables renderer backgrounding by default so
 headless rAF scheduling reflects an active terminal surface. Set
 `TRACER_CHROMIUM_FLAGS` to override launch flags when comparing browser
 scheduling modes.

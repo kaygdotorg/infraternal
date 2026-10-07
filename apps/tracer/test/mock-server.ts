@@ -5,18 +5,20 @@ import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { extname, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { entropyToMnemonic } from "@scure/bip39";
-import { wordlist } from "@scure/bip39/wordlists/english.js";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 
-const HOST = process.env.TRACER_TEST_HOST?.trim() || "localhost";
-// Other worktrees may run their own production-build browser gate concurrently.
-const PORT = Number(process.env.TRACER_TEST_PORT ?? "4173");
-if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+const HOST = "localhost";
+// The browser connects to TRACER_TEST_PORT; the TCP latency proxy reaches this private upstream port.
+const FRONT_PORT = Number(process.env.TRACER_TEST_PORT ?? "4621");
+const PORT = Number(process.env.TRACER_BACKEND_PORT ?? String(FRONT_PORT + 1));
+if (!Number.isInteger(FRONT_PORT) || FRONT_PORT < 1 || FRONT_PORT > 65535) {
   throw new Error("TRACER_TEST_PORT must be an integer TCP port");
+}
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error("TRACER_BACKEND_PORT must be an integer TCP port");
 }
 const MAX_HTTP_BODY = 32 * 1024;
 const MAX_MOCK_OUTPUT = 1024 * 1024;
@@ -77,7 +79,7 @@ let activeAuthCookie: string | undefined;
 let unlockPending = false;
 let pendingTransaction: string | undefined;
 let setupToken = newToken();
-let pendingRegistration: { ceremony: string; userId: string; username: string; displayName: string; recoveryWords: string; rpId: string; prfInput: string } | undefined;
+let pendingRegistration: { ceremony: string; userId: string; username: string; displayName: string; rpId: string; prfInput: string } | undefined;
 let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
 let selectedFixture: Uint8Array | undefined;
@@ -87,6 +89,9 @@ const traceEvents: TraceEvent[] = [];
 const server = createServer((request, response) => { void routeHttp(request, response); });
 const webSockets = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
 const connections = new Set<Connection>();
+// Theme regression tests compare these counters across a local palette change.
+let socketOpenCount = 0;
+let socketCloseCount = 0;
 
 server.on("upgrade", (request, socket, head) => {
   const path = new URL(request.url ?? "/", `http://${request.headers.host ?? `${HOST}:${PORT}`}`).pathname;
@@ -118,6 +123,7 @@ webSockets.on("connection", (socket, request) => {
     welcomeTimer: undefined,
   };
   connections.add(connection);
+  socketOpenCount += 1;
   socket.on("message", (raw, binary) => {
     const receivedAt = connection.traceEnabled ? process.hrtime.bigint() : 0n;
     if (!binary) {
@@ -132,6 +138,7 @@ webSockets.on("connection", (socket, request) => {
     }
   });
   socket.on("close", () => {
+    socketCloseCount += 1;
     if (connection.welcomeTimer) clearTimeout(connection.welcomeTimer);
     connections.delete(connection);
   });
@@ -164,6 +171,23 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     setAuthCookie(response, activeAuthCookie);
     return sendJson(response, 200, { ok: true });
   }
+  if (request.method === "POST" && url.pathname === "/__mock/text-output") {
+    const body = await readJson(request);
+    if (typeof body?.text !== "string") return sendJson(response, 400, { error: "text output must be a string" });
+    const bytes = new TextEncoder().encode(body.text);
+    if (bytes.byteLength > MAX_MESSAGE) return sendJson(response, 413, { error: "text output exceeds one frame" });
+    const connection = [...connections].find((candidate) => candidate.session === session && candidate.attached && isSocketOpen(candidate.socket));
+    if (!connection || session.outputLength !== 0 || session.echoOutputLength !== 0) {
+      return sendJson(response, 409, { error: "text output requires a fresh attached terminal" });
+    }
+    // Keep the visual metrics fixture on the same bounded Output path as normal PTY output.
+    session.fixtureOutput = bytes;
+    session.ringStartSequence = 0n;
+    session.snapshotFrames = [];
+    session.outputLength = bytes.byteLength;
+    flushOutput(connection);
+    return sendJson(response, 200, { bytes: bytes.byteLength });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/fixture") {
     const body = await readJson(request);
     const name = body?.name;
@@ -193,6 +217,11 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     } catch {
       return sendJson(response, 500, { error: "renderer fixture could not be loaded" });
     }
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/theme-palette-fixture") {
+    if (connections.size > 0) return sendJson(response, 409, { error: "theme palette fixture requires a fresh terminal" });
+    selectedFixture = themePaletteFixture();
+    return sendJson(response, 200, { bytes: selectedFixture.byteLength });
   }
   if (request.method === "POST" && url.pathname === "/__mock/wrapped-ring") {
     if ([...connections].some((connection) => connection.session === session && connection.attached && isSocketOpen(connection.socket))) {
@@ -294,10 +323,16 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     return sendJson(response, 200, {
       ...(owner ? { username: owner.username, display_name: owner.displayName } : {}),
       echoed_text: session.echoedText,
+      ...(url.searchParams.get("input_bytes") === "1"
+        ? { input_bytes: Array.from(session.output.subarray(0, session.echoOutputLength)) }
+        : {}),
       written_input: session.writtenInput.toString(),
       accepted_input_bytes: session.acceptedInputBytes,
       output_sequence: String(session.outputLength),
       snapshot_count: session.snapshotCount,
+      socket_open_count: socketOpenCount,
+      socket_close_count: socketCloseCount,
+      active_socket_count: connections.size,
     });
   }
   if (request.method === "GET" && url.pathname === "/__mock/clock") {
@@ -382,9 +417,8 @@ async function authAction(
       const userId = randomUuid();
       const ceremony = newToken();
       const displayName = typeof suppliedDisplayName === "string" && suppliedDisplayName.trim() ? suppliedDisplayName : username;
-      const recoveryWords = entropyToMnemonic(randomBytes(32), wordlist);
       const prfInput = createHash("sha256").update("infraternal/keywrap/prf/v3").digest("base64url");
-      pendingRegistration = { ceremony, userId, username, displayName, recoveryWords, rpId, prfInput };
+      pendingRegistration = { ceremony, userId, username, displayName, rpId, prfInput };
       const publicKey = {
         challenge: randomBytes(32).toString("base64url"),
         rp: { name: "infraternal test double", id: rpId },
@@ -400,7 +434,7 @@ async function authAction(
         },
         extensions: { prf: { eval: { first: prfInput } } },
       };
-      return sendJson(response, 200, { ceremony, user_id: userId, options: { publicKey }, recovery_words: recoveryWords });
+      return sendJson(response, 200, { ceremony, user_id: userId, options: { publicKey }, recovery_words: null, recovery_version: 2 });
     }
     case "registration-finish": {
       const proof = asRecord(body.proof);
@@ -409,7 +443,7 @@ async function authAction(
         return sendJson(response, 401, { error: "authorization failed" });
       }
       const credentialId = stringValue(proof.rawId);
-      if (!credentialId || !asRecord(body.passkey_wrap) || !asRecord(body.recovery_wrap)) {
+      if (!credentialId || typeof body.recovery_verifier !== "string" || !asRecord(body.passkey_wrap) || !asRecord(body.recovery_wrap)) {
         return sendJson(response, 400, { error: "invalid request" });
       }
       owner = {
@@ -523,6 +557,10 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       });
       return;
     }
+    case "Subscribe":
+      if (frame.subId === 45 && new TextDecoder().decode(frame.filterJson) === '{"topic":"auth.recovery"}') return;
+      connection.socket.close(1002, "unexpected test-double subscription");
+      return;
     case "Ping":
       sendFrame(connection.socket, 0, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
       return;
@@ -604,7 +642,9 @@ function flushOutput(connection: Connection): void {
     const repaintBytes = snapshots.reduce((total, snapshot) => total + snapshot.bytes.byteLength, 0);
     if (snapshots.length === 0 || repaintBytes > connection.credit) return;
     sendFrames(connection.socket, 1, snapshots.map(({ outSeq, bytes }) => ({ type: "Snapshot", outSeq, bytes })));
-    connection.outputCursor = BigInt(connection.session.outputLength);
+    // A Snapshot may predate output that is already in the session ring. Resume
+    // at its absolute cursor so that those later bytes still follow the repaint.
+    connection.outputCursor = snapshots[snapshots.length - 1]!.outSeq;
     connection.credit -= repaintBytes;
     connection.session.snapshotCount += snapshots.length;
   }
@@ -742,6 +782,8 @@ function resetMockState(): void {
   pendingLogin = undefined;
   dropNextAck = false;
   selectedFixture = undefined;
+  socketOpenCount = 0;
+  socketCloseCount = 0;
   traceEvents.length = 0;
   session = createSession();
 }
@@ -765,6 +807,26 @@ function createSession(resumeFrom?: MockSession, fixtureOutput: Uint8Array = new
     acceptedInputBytes: 0,
     echoedText: "",
   };
+}
+
+function themePaletteFixture(): Uint8Array {
+  const history = Array.from({ length: 10_000 }, (_, index) => {
+    const paletteIndex = index % 8;
+    return `theme-history-${String(index).padStart(5, "0")} | \u001b[${30 + paletteIndex}mI\u001b[0m | \u001b[38;2;24;166;196mT\u001b[0m`;
+  });
+  const busyScreen = Array.from({ length: 64 }, (_, index) =>
+    `\u001b[38;5;${30 + (index % 8)}m${"busy output ".repeat(6)}\u001b[0m`);
+  const regular = [30, 31, 32, 33, 34, 35, 36, 37].map((code) => `\u001b[${code}m█ `).join("");
+  const bright = [90, 91, 92, 93, 94, 95, 96, 97].map((code) => `\u001b[${code}m█ `).join("");
+  const text = [
+    "\u001bc",
+    ...history,
+    ...busyScreen,
+    "\u001b[39;49mdefault: █ \u001b[38;2;24;166;196mTRUECOLOR█\u001b[0m",
+    `${regular}\u001b[0m`,
+    `${bright}\u001b[0m`,
+  ].join("\r\n");
+  return new TextEncoder().encode(text);
 }
 
 function contentType(extension: string): string {

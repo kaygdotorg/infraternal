@@ -31,8 +31,8 @@
 
 * { box-sizing: border-box; }
 *[hidden] { display: none !important; }
-html, body, #app { width: 100%; height: 100%; margin: 0; }
-body { overflow: hidden; }
+html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none; }
+body, #app { position: fixed; inset: 0; }
 button, input { font: inherit; }
 button { color: inherit; }
 
@@ -116,10 +116,14 @@ button { color: inherit; }
 .terminal-host {
   position: absolute;
   inset: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   padding: 14px 16px;
-  touch-action: pan-y;
+  touch-action: none;
+  overscroll-behavior: none;
+  scrollbar-width: none;
 }
+.terminal-host::-webkit-scrollbar { display: none; }
 .terminal-host:focus-visible { outline: 2px solid var(--accent, #7a9cff); outline-offset: -3px; }
 .connection-status {
   position: absolute;
@@ -403,10 +407,14 @@ body:has(.ui-confirm-tip[data-open="true"], .ui-tooltip[data-open="true"], .tip-
   mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 22px), transparent);
 }
 .keytray::-webkit-scrollbar { display: none; }
-.keybar button { flex: none; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
+.keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.keybar button { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out), background-color 140ms var(--ease-out), color 140ms var(--ease-out); }
 .keybar button svg { width: 24px; height: 24px; stroke-width: 1.75; }
 .keybar .key-word { font: 600 15px/1 var(--font-ui); letter-spacing: 0.01em; }
-.keybar button[data-armed="true"] { background: var(--accent-soft); color: var(--accent); }
+/* Armed modifiers use a soft fill; locked modifiers add a small dot as a second cue. */
+.keybar button[data-mod-state="armed"], .keybar button[data-mod-state="locked"] { background: var(--accent-soft); color: var(--accent); }
+.keybar button[data-mod-state="locked"]::after { content: ""; position: absolute; right: 8px; bottom: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--overlay); }
+.keybar button[data-instant] { transition: none; }
 .keybar .dpad[hidden] { display: none !important; }
 .keybar.is-away { transform: translateY(calc(100% + 16px)); opacity: 0; pointer-events: none; transition-duration: 180ms, 140ms; }
 .keyblur.is-away { opacity: 0; }
@@ -446,6 +454,7 @@ body:has(.ui-confirm-tip[data-open="true"], .ui-tooltip[data-open="true"], .tip-
 @media (prefers-reduced-motion: reduce) {
   .sidebar { transition: opacity 180ms ease; }
   .bm-fold { transition: none; }
+  .keybar button { transition: none; }
   .sidebar[hidden] { transform: none; }
   .sidebar.instant, .palette[data-open-kind="keyboard"] { transition: none; }
   .keybar.is-away { transform: none; }
@@ -759,3 +768,9 @@ body:has(.ui-confirm-tip[data-open="true"], .ui-tooltip[data-open="true"], .tip-
   .window-session-main, .window-header-actions, .window-header-action, .window-card, .window-info-tabs .segmented-tab { transition: opacity 150ms ease, color 150ms ease; }
   .window-promotion-mark[data-state="running"]::before, .window-promotion-tree-mark[data-state="running"]::before { animation: none; }
 }
+/* Recovery extends the existing floating card/capsule controls; no idle animation or polling. */
+.recovery-notice { position: absolute; z-index: 8; top: calc(env(safe-area-inset-top) + 76px); left: 50%; transform: translateX(-50%); width: min(520px, calc(100% - 24px)); padding: 12px 16px; }
+.recovery-notice p { margin: 0 0 8px; }
+.recovery-notice .capsule { min-width: 44px; min-height: 44px; }
+.recovery-toast { position: absolute; z-index: 9; bottom: calc(env(safe-area-inset-bottom) + 76px); left: 50%; transform: translateX(-50%); width: min(520px, calc(100% - 24px)); padding: 12px 16px; }
+.recovery-notice[hidden], .recovery-toast[hidden] { display: none; }

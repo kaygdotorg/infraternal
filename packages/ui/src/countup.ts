@@ -1,8 +1,7 @@
 /**
- * Count-up (#21): a number that springs from one value to another. Reimplemented from
- * the behaviour of the sveltebits count-up (MIT + Commons Clause, not copied): same
- * spring shaping (stiffness 100/d, damping 20 + 40/d for duration d), the same decimal
- * handling, an optional thousands separator. It reuses our one Spring (spring.ts).
+ * Count-up (#21): a number that springs from one value to another. Spring shaping:
+ * stiffness 100/d and damping 20 + 40/d for duration d, with decimal handling and an
+ * optional thousands separator. It reuses our one Spring (spring.ts).
  *
  * `loading()` is the app-wide rule for waits (DECISIONS 102): nothing is shown for
  * short waits (no flash of a loader), and after the threshold a count-up appears —

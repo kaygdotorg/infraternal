@@ -5,13 +5,13 @@ sys.dont_write_bytecode = True
 import os
 from pathlib import Path
 import struct
-from agent_fixture import Binary, cleanup
+from agent_fixture import Binary, cleanup, fixture_state
 
-state = Path(f'target/mz{os.getpid()}')
+state = fixture_state('mz')
 state.mkdir(mode=0o700)
 c = Binary(Path(sys.argv[sys.argv.index('--binary') + 1]).resolve(), state)
 try:
-    c.open(); c.attach(); c.send(1, 0x14, struct.pack('<I', 1048576)); c.until(b'shim-test')
+    c.open(); c.attach(); c.until(b'shim-test')
     c.send(2, 0x16, c.id.bytes + struct.pack('<QQ', c.out, 0))
     c.send(2, 0x14, struct.pack('<I', 1048576))
     output = {1: bytearray(), 2: bytearray()}

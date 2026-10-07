@@ -1,11 +1,14 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
 import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
 import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
-import type { TerminalClient } from "./terminal";
+import { refreshTip } from "../../../packages/ui/src/tooltip";
+import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
+import { recoveryUiEnabled } from "./recovery-ui";
 
 const ROOT = document.documentElement;
 const THEME_COLOR = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+const MODIFIER_KEYS = ["ctrl", "alt"] as const;
 
 export interface CoreScreenOptions {
   hostName: string;
@@ -13,6 +16,8 @@ export interface CoreScreenOptions {
   probeMode: boolean;
   windowsPrototype?: boolean;
   addHostPrototype?: boolean;
+  onRecovery?: () => void;
+  onCancelRecovery?: () => Promise<void>;
 }
 
 export interface CoreScreenTab {
@@ -43,6 +48,7 @@ export interface CoreScreen {
   setPrototypePalette(entries: CorePaletteEntry[]): void;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
+  setRecoveryPending(readyAt: number | undefined): void;
   setScrolled(scrolled: boolean): void;
   onInputActivity(): void;
   dispose(): void;
@@ -92,27 +98,32 @@ const SCREEN = `
     </aside>
     <div class="palette-scrim" id="scrim" hidden></div>
     <section class="palette ui-overlay-surface" id="palette" data-overlay-size="large" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
-      <div class="palette-input">${SVG.search}<input id="palette-input" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
+      <div class="palette-input">${SVG.search}<input id="palette-input" role="searchbox" aria-controls="palette-results" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
     </section>
+    ${recoveryUiEnabled() ? `<section class="pane-card recovery-notice" id="recovery-notice" aria-label="Pending account recovery" hidden>
+      <p id="recovery-notice-time"></p><button class="capsule" id="recovery-cancel" type="button">Cancel recovery</button>
+      <p id="recovery-cancel-error" role="alert"></p>
+    </section>
+    <p class="pane-card recovery-toast" id="recovery-toast" role="status" hidden></p>` : ""}
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
-      <div class="keytray ui-overlay-surface ui-pill">
-        <button type="button" data-key="esc" aria-label="Escape" class="key-word">esc</button>
-        <button type="button" data-key="tab" aria-label="Tab">${SVG.tab}</button>
-        <button type="button" data-mod="ctrl" aria-label="Control">${SVG.ctrl}</button>
-        <button type="button" data-mod="alt" aria-label="Option">${SVG.alt}</button>
-        <button type="button" data-key="up" aria-label="Up">${SVG.up}</button>
-        <button type="button" data-key="down" aria-label="Down">${SVG.down}</button>
-        <button type="button" data-key="left" aria-label="Left">${SVG.left}</button>
-        <button type="button" data-key="right" aria-label="Right">${SVG.right}</button>
-        <button type="button" data-text="|" aria-label="Pipe">${SVG.pipe}</button>
-        <button type="button" data-text="~" aria-label="Tilde">${SVG.tilde}</button>
-        <button type="button" data-text="/" aria-label="Slash">${SVG.slash}</button>
-        <button type="button" data-text="-" aria-label="Dash">${SVG.dash}</button>
-        <button type="button" data-paste aria-label="Paste">${SVG.paste}</button>
-        <button type="button" class="dpad" data-tip-off aria-label="Arrow keys: drag to move" hidden></button>
+      <div id="keytray" class="keytray ui-overlay-surface ui-pill" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
+        <button id="key-escape" type="button" tabindex="-1" data-key="esc" aria-label="Escape" class="key-word">esc</button>
+        <button id="key-tab" type="button" tabindex="-1" data-key="tab" aria-label="Tab">${SVG.tab}</button>
+        <button id="key-control" type="button" tabindex="-1" data-mod="ctrl" data-mod-state="off" aria-pressed="false" aria-label="Control">${SVG.ctrl}</button>
+        <button id="key-option" type="button" tabindex="-1" data-mod="alt" data-mod-state="off" aria-pressed="false" aria-label="Option">${SVG.alt}</button>
+        <button id="key-up" type="button" tabindex="-1" data-key="up" aria-label="Up">${SVG.up}</button>
+        <button id="key-down" type="button" tabindex="-1" data-key="down" aria-label="Down">${SVG.down}</button>
+        <button id="key-left" type="button" tabindex="-1" data-key="left" aria-label="Left">${SVG.left}</button>
+        <button id="key-right" type="button" tabindex="-1" data-key="right" aria-label="Right">${SVG.right}</button>
+        <button id="key-pipe" type="button" tabindex="-1" data-text="|" aria-label="Pipe">${SVG.pipe}</button>
+        <button id="key-tilde" type="button" tabindex="-1" data-text="~" aria-label="Tilde">${SVG.tilde}</button>
+        <button id="key-slash" type="button" tabindex="-1" data-text="/" aria-label="Slash">${SVG.slash}</button>
+        <button id="key-dash" type="button" tabindex="-1" data-text="-" aria-label="Dash">${SVG.dash}</button>
+        <button id="key-paste" type="button" tabindex="-1" data-paste aria-label="Paste">${SVG.paste}</button>
+        <button id="key-dpad" type="button" tabindex="-1" class="dpad" data-tip-off aria-label="Arrow keys: drag to move" hidden></button>
       </div>
     </aside>
     <p id="connection-status" class="connection-status" role="status">Starting terminal…</p>
@@ -167,6 +178,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const paletteInput = get<HTMLInputElement>("#palette-input");
   const paletteResults = get<HTMLElement>("#palette-results");
   const keybar = get<HTMLElement>("#keybar");
+  const keytray = get<HTMLElement>(".keytray");
   const keyblur = get<HTMLElement>(".keyblur");
   const rtt = get<HTMLElement>("#rtt");
   const dot = get<HTMLElement>("#connection-dot");
@@ -195,7 +207,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let client: TerminalClient | undefined;
   // Keep a pinch size requested before the live terminal binds, then apply it on bind.
   let terminalFontSize = matchMedia("(pointer: coarse)").matches ? 13 : 14;
-  let modifier: "ctrl" | "alt" | null = null;
+  let modifiers: InputModifiers = { ctrl: "off", alt: "off" };
+  const modifierTapAt: Record<keyof InputModifiers, number> = { ctrl: -Infinity, alt: -Infinity };
+  const modifierPointerTimes: Record<keyof InputModifiers, number[]> = { ctrl: [], alt: [] };
+  let terminalFocusTarget: HTMLElement | null = null;
   let resizeTimer = 0;
   let keyboardOpen = false;
   let meshKey = "";
@@ -253,26 +268,82 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ...(options.addHostPrototype ? [
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
+    ...(recoveryUiEnabled() && options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
   ];
+  const paletteSearchText = new Map(entries.map((entry) => [
+    entry,
+    `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase(),
+  ]));
+  // Normalize IDs once so typing never sanitizes every matching result.
+  const paletteOptionIds = new Map(entries.map((entry, index) => [
+    entry,
+    `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`,
+  ]));
+  const paletteGroupIds = new Map([...new Set(entries.map((entry) => entry.group))].map((group) => [
+    group,
+    `palette-group-${group.toLocaleLowerCase().replaceAll(" ", "-")}`,
+  ]));
   let visibleEntries: PaletteEntry[] = [];
+  let visibleOptions: HTMLButtonElement[] = [];
   let selected = 0;
+  const headingByGroup = new Map<string, HTMLDivElement>();
+
+  const keepPaletteOptionVisible = (option: HTMLButtonElement, index: number): void => {
+    option.scrollIntoView({ block: "nearest", behavior: "instant" });
+    const entry = visibleEntries[index];
+    if (entry && visibleEntries[index - 1]?.group !== entry.group) {
+      headingByGroup.get(entry.group)?.scrollIntoView({ block: "nearest", behavior: "instant" });
+    }
+  };
+
+  const selectPaletteOption = (nextIndex: number): void => {
+    if (!visibleOptions.length) return;
+    const boundedIndex = Math.max(0, Math.min(visibleOptions.length - 1, nextIndex));
+    const previousOption = visibleOptions[selected];
+    const nextOption = visibleOptions[boundedIndex];
+    if (!nextOption) return;
+    if (previousOption !== nextOption) {
+      previousOption?.setAttribute("aria-selected", "false");
+      nextOption.setAttribute("aria-selected", "true");
+      selected = boundedIndex;
+    }
+    if (paletteInput.getAttribute("aria-activedescendant") !== nextOption.id) {
+      paletteInput.setAttribute("aria-activedescendant", nextOption.id);
+    }
+    keepPaletteOptionVisible(nextOption, boundedIndex);
+  };
+
+  const visiblePalettePageSize = (): number => {
+    const port = paletteResults.getBoundingClientRect();
+    const top = port.top + paletteResults.clientTop;
+    const bottom = top + paletteResults.clientHeight;
+    const visibleCount = visibleOptions.reduce((count, option) => {
+      const rect = option.getBoundingClientRect();
+      return rect.top >= top && rect.bottom <= bottom ? count + 1 : count;
+    }, 0);
+    return Math.max(1, visibleCount);
+  };
 
   const renderPalette = (query = ""): void => {
     const needle = query.trim().toLocaleLowerCase();
-    const filtered = entries.filter((entry) => `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase().includes(needle));
-    visibleEntries = filtered;
+    visibleEntries = entries.filter((entry) => paletteSearchText.get(entry)?.includes(needle) ?? false);
     selected = Math.min(selected, Math.max(0, visibleEntries.length - 1));
+    visibleOptions = [];
+    // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
     paletteResults.replaceChildren();
     let previousGroup = "";
-    filtered.forEach((entry, index) => {
+    visibleEntries.forEach((entry, index) => {
       if (entry.group !== previousGroup) {
         const heading = document.createElement("div");
+        heading.id = paletteGroupIds.get(entry.group)!;
         heading.className = "group-label";
         heading.textContent = entry.group;
+        headingByGroup.set(entry.group, heading);
         paletteResults.append(heading);
         previousGroup = entry.group;
       }
       const result = document.createElement("button");
+      result.id = paletteOptionIds.get(entry)!;
       result.type = "button";
       result.className = "result ui-button ui-list-row";
       result.setAttribute("role", "option");
@@ -293,9 +364,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       hint.className = "result-hint";
       hint.textContent = entry.hint;
       result.append(icon, label, hint);
+      visibleOptions.push(result);
       paletteResults.append(result);
     });
-    if (!filtered.length) {
+    const selectedOption = visibleOptions[selected];
+    if (selectedOption) {
+      if (paletteInput.getAttribute("aria-activedescendant") !== selectedOption.id) {
+        paletteInput.setAttribute("aria-activedescendant", selectedOption.id);
+      }
+    } else {
+      paletteInput.removeAttribute("aria-activedescendant");
+    }
+    if (!visibleEntries.length) {
       const empty = document.createElement("p");
       empty.className = "palette-empty";
       empty.textContent = "No matching hosts, sessions or actions.";
@@ -318,8 +398,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (open) {
       selected = 0;
       paletteInput.value = "";
+      paletteResults.scrollTop = 0;
       renderPalette();
       paletteInput.focus({ preventScroll: true });
+    } else {
+      paletteInput.removeAttribute("aria-activedescendant");
     }
   };
   const sidebarClick = (event: MouseEvent): void => setSidebar(sidebar.hidden, event.detail === 0);
@@ -327,6 +410,17 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const scrimClick = (): void => setPalette(false, "pointer");
 
   const keydown = (event: KeyboardEvent): void => {
+    if (event.key === "F6") {
+      if (event.shiftKey || keytray.contains(event.target as Node)) {
+        if (client) client.focus();
+        else terminalHost.focus({ preventScroll: true });
+      } else {
+        keytray.focus({ preventScroll: true });
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       event.stopPropagation();
@@ -372,12 +466,24 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   sidebarToggle.addEventListener("click", sidebarClick);
   capsule.addEventListener("click", capsuleClick);
   scrim.addEventListener("click", scrimClick);
-  paletteInput.addEventListener("input", () => { selected = 0; renderPalette(paletteInput.value); });
+  paletteInput.addEventListener("input", () => {
+    selected = 0;
+    renderPalette(paletteInput.value);
+  });
   paletteInput.addEventListener("keydown", (event) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       const delta = event.key === "ArrowDown" ? 1 : -1;
-      selected = Math.max(0, Math.min(visibleEntries.length - 1, selected + delta));
-      renderPalette(paletteInput.value);
+      selectPaletteOption(selected + delta);
+      event.preventDefault();
+    } else if (event.key === "Home") {
+      selectPaletteOption(0);
+      event.preventDefault();
+    } else if (event.key === "End") {
+      selectPaletteOption(visibleOptions.length - 1);
+      event.preventDefault();
+    } else if (event.key === "PageDown" || event.key === "PageUp") {
+      const delta = visiblePalettePageSize() * (event.key === "PageDown" ? 1 : -1);
+      selectPaletteOption(selected + delta);
       event.preventDefault();
     } else if (event.key === "Enter") {
       const entry = visibleEntries[selected];
@@ -404,7 +510,100 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const keyInput: Record<string, string> = {
     esc: "\x1b", tab: "\t", up: "\x1b[A", down: "\x1b[B", left: "\x1b[D", right: "\x1b[C",
   };
-  const keybarPointerDown = (event: PointerEvent): void => { event.preventDefault(); };
+  const markInstant = (button: HTMLButtonElement): void => {
+    button.dataset.instant = "";
+    requestAnimationFrame(() => requestAnimationFrame(() => { delete button.dataset.instant; }));
+  };
+  const renderModifiers = (instant = false): void => {
+    const names: Record<keyof InputModifiers, string> = { ctrl: "Control", alt: "Option" };
+    for (const button of keybar.querySelectorAll<HTMLButtonElement>("[data-mod]")) {
+      const name = button.dataset.mod as keyof InputModifiers;
+      const state: InputModifierState = modifiers[name];
+      button.dataset.modState = state;
+      button.setAttribute("aria-pressed", state === "locked" ? "mixed" : String(state === "armed"));
+      button.setAttribute("aria-label", state === "off" ? names[name] : `${names[name]}, ${state}`);
+      if (instant) markInstant(button);
+      refreshTip(button);
+    }
+    for (const name of MODIFIER_KEYS) client?.setInputModifier(name, modifiers[name]);
+  };
+  const isTerminalFocus = (element: Element | null): element is HTMLElement =>
+    element instanceof HTMLElement && (element === terminalHost || terminalHost.contains(element));
+  const restoreTerminalFocus = (): void => {
+    if (isTerminalFocus(document.activeElement)) {
+      terminalFocusTarget = null;
+      return;
+    }
+    if (terminalFocusTarget?.isConnected) terminalFocusTarget.focus({ preventScroll: true });
+    else if (client) client.focus();
+    else terminalHost.focus({ preventScroll: true });
+    terminalFocusTarget = null;
+  };
+  const rememberTerminalFocus = (): void => {
+    const active = document.activeElement;
+    terminalFocusTarget = isTerminalFocus(active) ? active : null;
+  };
+  const keybarPointerDown = (event: PointerEvent): void => {
+    event.preventDefault();
+    rememberTerminalFocus();
+    if (!(event.target instanceof Element)) return;
+    const modifierButton = event.target.closest<HTMLButtonElement>("button[data-mod]");
+    if (modifierButton?.dataset.mod) {
+      const name = modifierButton.dataset.mod as keyof InputModifiers;
+      const now = performance.now();
+      const pointerTimes = modifierPointerTimes[name];
+      // iOS may delay the synthetic click; preserve pointerdown order for a real fast double tap.
+      while (pointerTimes[0] !== undefined && pointerTimes[0] < now - 300) pointerTimes.shift();
+      pointerTimes.push(now);
+    }
+  };
+  const keybarPointerCancel = (): void => {
+    modifierPointerTimes.ctrl.length = 0;
+    modifierPointerTimes.alt.length = 0;
+  };
+  const keybarKeydown = (event: KeyboardEvent): void => {
+    const buttons = [...keytray.querySelectorAll<HTMLButtonElement>("button:not([hidden]):not(:disabled):not(.dpad)")];
+    if (!buttons.length) return;
+    const currentId = keytray.getAttribute("aria-activedescendant");
+    const currentIndex = Math.max(0, buttons.findIndex((button) => button.id === currentId));
+    let nextIndex: number | undefined;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1) % buttons.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (currentIndex + buttons.length - 1) % buttons.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = buttons.length - 1;
+    else if (event.key === "Enter" || event.key === " ") {
+      buttons[currentIndex]!.click();
+      event.preventDefault();
+      return;
+    }
+    if (nextIndex !== undefined) {
+      const nextButton = buttons[nextIndex]!;
+      keytray.setAttribute("aria-activedescendant", nextButton.id);
+      nextButton.scrollIntoView({ block: "nearest", inline: "nearest" });
+      event.preventDefault();
+    }
+  };
+  const modifierClick = (button: HTMLButtonElement, event: MouseEvent): void => {
+    const name = button.dataset.mod as keyof InputModifiers;
+    const state = modifiers[name];
+    const now = event.detail === 0 ? performance.now() : modifierPointerTimes[name].shift() ?? performance.now();
+    if (event.detail === 0) modifierPointerTimes[name].length = 0;
+    if (state === "locked") {
+      modifiers[name] = "off";
+      modifierTapAt[name] = -Infinity;
+    } else if (state === "armed") {
+      const age = now - modifierTapAt[name];
+      modifiers[name] = age >= 0 && age <= 300 ? "locked" : "off";
+      modifierTapAt[name] = -Infinity;
+    } else {
+      modifiers[name] = "armed";
+      modifierTapAt[name] = now;
+    }
+    renderModifiers(event.detail === 0);
+  };
+  const injectKey = (data: string): void => {
+    try { client?.injectInput(data); } catch { /* connection state is announced in the status line */ }
+  };
   const keybarClick = (event: MouseEvent): void => {
     const target = event.target;
     if (!(target instanceof Element)) return;
@@ -413,29 +612,30 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const key = button.dataset.key;
     const text = button.dataset.text;
     if (button.dataset.mod) {
-      const next = modifier === button.dataset.mod ? null : button.dataset.mod as "ctrl" | "alt";
-      modifier = next;
-      for (const modButton of keybar.querySelectorAll<HTMLButtonElement>("[data-mod]")) {
-        modButton.dataset.armed = String(modifier === modButton.dataset.mod);
-      }
-      client?.setInputModifier(modifier);
+      modifierClick(button, event);
     } else if (key && keyInput[key]) {
-      try { client?.injectInput(keyInput[key]!); } catch { /* connection state is announced in the status line */ }
+      injectKey(keyInput[key]!);
     } else if (text) {
-      try { client?.injectInput(text); } catch { /* connection state is announced in the status line */ }
+      injectKey(text);
     } else if ("paste" in button.dataset) {
       void navigator.clipboard?.readText().then((value) => {
         if (!value) return;
-        try { client?.injectInput(value); } catch { /* connection state is announced in the status line */ }
+        injectKey(value);
       }).catch(() => undefined);
     }
+    restoreTerminalFocus();
   };
   keybar.addEventListener("pointerdown", keybarPointerDown);
+  keybar.addEventListener("pointercancel", keybarPointerCancel);
   keybar.addEventListener("click", keybarClick);
+  keytray.addEventListener("keydown", keybarKeydown);
 
   function runAction(action: string, source: "keyboard" | "pointer"): void {
     const [kind, value] = action.split(":");
-    if (kind === "theme" && themeId(value ?? null)) {
+    if (kind === "account" && value === "recovery") {
+      setPalette(false, source);
+      options.onRecovery?.();
+    } else if (kind === "theme" && themeId(value ?? null)) {
       currentThemeId = value!;
       writeLocal("tracer.theme", currentThemeId);
       applyLook(source === "keyboard");
@@ -452,6 +652,19 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
 
   tabNav.addEventListener("click", tabSelect);
 
+  const recoveryNotice = stage.querySelector<HTMLElement>("#recovery-notice")!;
+  const recoveryToast = stage.querySelector<HTMLElement>("#recovery-toast")!;
+  const cancelRecovery = stage.querySelector<HTMLButtonElement>("#recovery-cancel")!;
+  let recoveryReady: number | undefined, recoveryToastTimer = 0;
+  const cancelClick = (): void => {
+    cancelRecovery.disabled = true;
+    const error = stage.querySelector<HTMLElement>("#recovery-cancel-error")!;
+    error.textContent = "";
+    void options.onCancelRecovery?.().catch(() => {
+      error.textContent = "Recovery could not be cancelled. Try again.";
+    }).finally(() => { cancelRecovery.disabled = false; });
+  };
+  cancelRecovery?.addEventListener("click", cancelClick);
   return {
     stage,
     terminalHost,
@@ -462,7 +675,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       client = value;
       client.setFontSize(terminalFontSize);
       client.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
-      client.setInputModifier(modifier);
+      for (const name of MODIFIER_KEYS) client.setInputModifier(name, modifiers[name]);
     },
     setTerminalFontSize(size) {
       terminalFontSize = Math.max(8, Math.min(28, size));
@@ -522,17 +735,43 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       dot.classList.toggle("connecting", !connected);
       stage.dataset.connected = String(connected);
     },
+    setRecoveryPending(readyAt) {
+      // Keep consuming session/socket state while unapproved presentation stays absent.
+      if (!recoveryUiEnabled()) return;
+      recoveryNotice.hidden = readyAt === undefined;
+      if (readyAt !== undefined) {
+        stage.querySelector<HTMLElement>("#recovery-notice-time")!.textContent = `Account recovery requested · Available ${new Date(readyAt * 1000).toLocaleString()}`;
+        if (recoveryReady !== readyAt) {
+          recoveryToast.textContent = "Recovery requested. You can cancel it from this device.";
+          recoveryToast.hidden = false;
+          window.clearTimeout(recoveryToastTimer);
+          recoveryToastTimer = window.setTimeout(() => { recoveryToast.hidden = true; }, 5000);
+        }
+      } else {
+        window.clearTimeout(recoveryToastTimer); recoveryToast.hidden = true;
+      }
+      recoveryReady = readyAt;
+    },
     setScrolled(scrolled) {
-      keybar.classList.toggle("is-away", scrolled && !keyboardOpen);
-      keyblur.classList.toggle("is-away", scrolled && !keyboardOpen);
+      // Scrollback belongs to the card; mobile input controls stay in place [#44].
+      stage.dataset.scrolled = String(scrolled);
     },
     onInputActivity() {
-      modifier = null;
-      for (const modButton of keybar.querySelectorAll<HTMLButtonElement>("[data-mod]")) modButton.dataset.armed = "false";
+      let changed = false;
+      for (const name of MODIFIER_KEYS) {
+        if (modifiers[name] === "armed") {
+          modifiers[name] = "off";
+          modifierTapAt[name] = -Infinity;
+          changed = true;
+        }
+      }
+      if (changed) renderModifiers(true);
       keybar.classList.remove("is-away");
       keyblur.classList.remove("is-away");
     },
     dispose() {
+      window.clearTimeout(recoveryToastTimer);
+      cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
       tabNav.removeEventListener("click", tabSelect);
       sidebarToggle.removeEventListener("click", sidebarClick);
@@ -544,7 +783,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       window.visualViewport?.removeEventListener("resize", viewportChange);
       window.visualViewport?.removeEventListener("scroll", viewportChange);
       keybar.removeEventListener("pointerdown", keybarPointerDown);
+      keybar.removeEventListener("pointercancel", keybarPointerCancel);
       keybar.removeEventListener("click", keybarClick);
+      keytray.removeEventListener("keydown", keybarKeydown);
       window.clearTimeout(resizeTimer);
       releaseMesh();
       delete ROOT.dataset.kb;

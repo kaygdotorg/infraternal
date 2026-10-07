@@ -63,6 +63,12 @@ pub(crate) struct WebSocketState {
     auth: Auth,
     pool: SqlitePool,
     agent: EmbeddedAgent,
+    #[cfg(test)]
+    handshake_timeout: Duration,
+    #[cfg(test)]
+    authority_read_timeout: Duration,
+    #[cfg(test)]
+    terminal_connect_timeout: Duration,
     connections: Arc<Semaphore>,
     users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
 }
@@ -74,9 +80,36 @@ impl WebSocketState {
             auth,
             pool,
             agent,
+            #[cfg(test)]
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+            #[cfg(test)]
+            authority_read_timeout: AUTHORITY_READ_TIMEOUT,
+            #[cfg(test)]
+            terminal_connect_timeout: TERMINAL_CONNECT_TIMEOUT,
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             users: Arc::default(),
         }
+    }
+
+    /// Keep production's terminal deadline fixed while allowing deadline tests to run quickly.
+    #[cfg(test)]
+    pub(crate) fn with_terminal_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.terminal_connect_timeout = timeout;
+        self
+    }
+
+    /// Keep production's handshake deadline fixed while tolerating a loaded test host.
+    #[cfg(test)]
+    pub(crate) fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
+        self
+    }
+
+    /// Keep production's authority-read deadline fixed while tests run on loaded hosts.
+    #[cfg(test)]
+    pub(crate) fn with_authority_read_timeout(mut self, timeout: Duration) -> Self {
+        self.authority_read_timeout = timeout;
+        self
     }
 
     /// Reserve per-user capacity before Hello. Weak entries disappear when the last socket drops.
@@ -165,7 +198,14 @@ async fn run_socket(
 ) {
     // One absolute budget covers server Hello, authority reads, client Hello and Resume.
     // Starting a fresh five seconds after a slow initial write would retain admission too long.
-    let handshake_deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+    #[cfg(test)]
+    let handshake_timeout = state.handshake_timeout;
+    #[cfg(not(test))]
+    let handshake_timeout = HANDSHAKE_TIMEOUT;
+    let handshake_deadline = tokio::time::Instant::now() + handshake_timeout;
+    let mut recovery_events = state.auth.recovery_events();
+    let mut recovery_subscribed = false;
+    let mut recovery_snapshot = RecoverySnapshot::Unread;
     let mut revocations = state.auth.revocation_events();
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
@@ -241,6 +281,12 @@ async fn run_socket(
         .unwrap_or_else(|()| tokio::time::Instant::now());
     loop {
         tokio::select! {
+            changed = recovery_events.changed(), if recovery_subscribed => {
+                if changed.is_err() { break; }
+                if while_authorized(&state, &user_id, &session_token, false,
+                    send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
+                ).await.is_err() { break; }
+            }
             changed = revocations.changed() => {
                 if changed.is_err() { break; }
                 let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
@@ -264,6 +310,20 @@ async fn run_socket(
                         if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
                     }
                     Inbound::Frame(wire) => {
+                    if let Ok(decoded) = decode_muxed_frame(&wire)
+                        && decoded.stream_id == CONTROL_STREAM
+                        && let Frame::Subscribe { sub_id: 45, filter_json } = decoded.frame
+                        && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
+                            == Some(json!({"topic":"auth.recovery"})) {
+                        // Subscribe before reading the snapshot. A concurrent commit
+                        // remains visible in the watch generation and cannot be lost.
+                        recovery_subscribed = true;
+                        recovery_snapshot = RecoverySnapshot::Unread;
+                        if while_authorized(&state, &user_id, &session_token, true,
+                            send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
+                        ).await.is_err() { break; }
+                        continue;
+                    }
                     if let Ok(decoded) = decode_muxed_frame(&wire)
                         && decoded.stream_id == CONTROL_STREAM
                         && let Frame::Close { code, .. } = decoded.frame {
@@ -371,6 +431,46 @@ async fn while_authorized<T>(
             }
         }
     }
+}
+
+// Initial subscription must distinguish an unread state from a known absence.
+#[derive(PartialEq)]
+enum RecoverySnapshot {
+    Unread,
+    Read(Option<i64>),
+}
+
+// Reuse the existing event frame; account scope comes only from socket authority.
+async fn send_recovery_snapshot<K>(
+    state: &WebSocketState,
+    user: &str,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+    last: &mut RecoverySnapshot,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let pending = state.auth.pending_recovery(user).await.map_err(|_| ())?;
+    // A global wake must never reveal another account's recovery timing.
+    if *last == RecoverySnapshot::Read(pending) {
+        return Ok(());
+    }
+    let event = serde_json::to_vec(&json!({"topic":"auth.recovery",
+        "pending":pending.map(|ready_at| json!({"ready_at":ready_at}))}))
+    .map_err(|_| ())?;
+    send_frame(
+        sink,
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id: 45,
+            event_json: &event,
+        },
+        encode,
+    )
+    .await?;
+    *last = RecoverySnapshot::Read(pending);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1026,7 +1126,11 @@ async fn authority_deadline(
     renew: bool,
 ) -> Result<tokio::time::Instant, ()> {
     let now = unix_seconds()?;
-    let expiry = tokio::time::timeout(AUTHORITY_READ_TIMEOUT, async {
+    #[cfg(test)]
+    let read_timeout = state.authority_read_timeout;
+    #[cfg(not(test))]
+    let read_timeout = AUTHORITY_READ_TIMEOUT;
+    let expiry = tokio::time::timeout(read_timeout, async {
         if renew {
             state.auth.socket_activity(token, user_id, now).await
         } else {
@@ -1044,9 +1148,13 @@ async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> 
     let Ok(now) = unix_seconds() else {
         return false;
     };
+    #[cfg(test)]
+    let read_timeout = state.authority_read_timeout;
+    #[cfg(not(test))]
+    let read_timeout = AUTHORITY_READ_TIMEOUT;
     matches!(
         tokio::time::timeout(
-            AUTHORITY_READ_TIMEOUT,
+            read_timeout,
             state.auth.socket_activity(token, user_id, now)
         )
         .await,
@@ -1096,8 +1204,12 @@ async fn open_terminal(
     session_token: &str,
     size: TerminalOpen,
 ) -> Result<[u8; 16], ()> {
+    #[cfg(test)]
+    let connect_timeout = state.terminal_connect_timeout;
+    #[cfg(not(test))]
+    let connect_timeout = TERMINAL_CONNECT_TIMEOUT;
     let session_id = tokio::time::timeout(
-        TERMINAL_CONNECT_TIMEOUT,
+        connect_timeout,
         state.agent.open(TerminalSize {
             cols: size.cols,
             rows: size.rows,
@@ -1348,3 +1460,7 @@ async fn require_socket_authority_tx(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "recovery_notification_bench.rs"]
+mod recovery_notification_bench;
