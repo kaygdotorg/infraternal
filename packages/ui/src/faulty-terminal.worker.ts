@@ -1,4 +1,4 @@
-/** Runs the intro shader off the UI thread and stops scheduling frames at rest. */
+/** Runs the auth shader off the UI thread, continuously while visible, at no more than 30 fps. */
 import { createFaultyTerminalRenderer, type FaultyTerminalRenderer } from "./faulty-terminal";
 
 interface StartMessage {
@@ -23,29 +23,43 @@ interface WorkerScope {
 
 const scope = globalThis as unknown as WorkerScope;
 const mouse = { x: -1, y: -1 }, glow = { x: -1, y: -1 };
+const FRAME_INTERVAL_MS = 1000 / 30;
 let renderer: FaultyTerminalRenderer | undefined;
 let reduced = false, visible = false, alive = true;
-let raf = 0, last = 0, activeUntil = 0;
+let frameTimer: ReturnType<typeof setTimeout> | undefined;
+let width = -1, height = -1, dpr = -1, stillDirty = true;
 
 function pause(): void {
-  if (raf) cancelAnimationFrame(raf);
-  raf = 0;
+  if (frameTimer !== undefined) clearTimeout(frameTimer);
+  frameTimer = undefined;
+}
+
+function drawStill(): void {
+  if (!alive || !renderer || !visible || !reduced || !stillDirty) return;
+  renderer.draw(performance.now(), true, mouse, glow);
+  stillDirty = false;
+}
+
+function drawFrame(): void {
+  frameTimer = undefined;
+  if (!alive || !renderer || !visible || reduced) return;
+  renderer.draw(performance.now(), false, mouse, glow);
+  // Schedule after drawing so slow frames can only lower, never exceed, the 30 fps cap.
+  frameTimer = setTimeout(drawFrame, FRAME_INTERVAL_MS);
 }
 
 function wake(): void {
-  if (!alive || !renderer || !visible || reduced) return;
-  activeUntil = Math.max(activeUntil, performance.now() + 700);
-  if (!raf) raf = requestAnimationFrame(loop);
+  if (!alive || !renderer || !visible) return;
+  if (reduced) drawStill();
+  else if (frameTimer === undefined) drawFrame();
 }
 
-function loop(now: number): void {
-  if (!alive || !renderer || !visible) { raf = 0; return; }
-  if (now - last >= 1000 / 30) {
-    last = now;
-    renderer.draw(now, false, mouse, glow);
-  }
-  if (now >= activeUntil) { raf = 0; return; }
-  raf = requestAnimationFrame(loop);
+function resize(nextWidth: number, nextHeight: number, nextDpr: number): void {
+  if (!renderer || (width === nextWidth && height === nextHeight && dpr === nextDpr)) return;
+  width = nextWidth; height = nextHeight; dpr = nextDpr;
+  renderer.resize(width, height, dpr);
+  stillDirty = true;
+  drawStill();
 }
 
 function start(message: StartMessage): void {
@@ -53,11 +67,9 @@ function start(message: StartMessage): void {
   if (!renderer) { scope.postMessage({ type: "ready", ok: false }); return; }
   reduced = message.reduced;
   visible = message.visible;
-  renderer.resize(message.width, message.height, message.dpr);
-  activeUntil = performance.now() + 1200;
+  resize(message.width, message.height, message.dpr);
   scope.postMessage({ type: "ready", ok: true });
-  if (reduced) renderer.draw(performance.now(), true, mouse, glow);
-  else wake();
+  wake();
 }
 
 scope.addEventListener("message", (event) => {
@@ -65,9 +77,8 @@ scope.addEventListener("message", (event) => {
   if (message.type === "start") { start(message); return; }
   if (!renderer || !alive) return;
   if (message.type === "resize") {
-    renderer.resize(message.width, message.height, message.dpr);
-    if (reduced) renderer.draw(performance.now(), true, mouse, glow);
-    else wake();
+    resize(message.width, message.height, message.dpr);
+    wake();
   } else if (message.type === "pointer") {
     mouse.x = message.x; mouse.y = message.y;
     wake();

@@ -4,10 +4,9 @@
  * occasional horizontal glitch band. Black and white. Written from scratch after
  * the sveltebits.xyz effect, whose code cannot be copied (MIT + Commons Clause).
  *
- * Budget (DECISIONS 81): renders at half resolution, at most 30 fps, and only during
- * its 1.2 s intro or briefly after pointer activity. At rest it holds the last frame
- * with no rAF or timer. It also pauses when hidden or offscreen, stops on `destroy()`
- * (after sign-in), and draws one still frame under prefers-reduced-motion.
+ * Budget (DECISION 96): renders continuously at half resolution and at most 30 fps
+ * while visible. It pauses when the tab is hidden or the canvas is offscreen, stops
+ * on `destroy()` after sign-in, and draws one still frame under prefers-reduced-motion.
  * Glyphs come from a small atlas drawn once with the terminal font, so the shader
  * samples a texture instead of building characters procedurally.
  */
@@ -63,8 +62,7 @@ void main() {
 }`;
 
 const GLYPHS = "01<>/\\|=+-_:;{}[]()#$%&*!?~^".split("");
-const INTRO_MS = 1200;
-const QUIET_MS = 700;
+const FRAME_INTERVAL_MS = 1000 / 30;
 
 export interface FaultyTerminal { destroy(): void }
 
@@ -148,7 +146,7 @@ export function createFaultyTerminalRenderer(canvas: OffscreenCanvas, font: stri
   return createRenderer(canvas, font);
 }
 
-/** Keeps fallback WebGL work bounded to active moments when canvas workers are unavailable. */
+/** Keeps fallback WebGL work at the approved cadence when canvas workers are unavailable. */
 function mountOnMainThread(canvas: HTMLCanvasElement, font: string): FaultyTerminal | undefined {
   const renderer = createRenderer(canvas, font);
   if (!renderer) return undefined;
@@ -166,51 +164,51 @@ function mountOnMainThread(canvas: HTMLCanvasElement, font: string): FaultyTermi
   window.addEventListener("pointerleave", onLeave);
   window.addEventListener("pointerdown", onPointerDown, { passive: true });
 
-  let ready = false, raf = 0, idleTimer = 0, last = 0, activeUntil = performance.now() + INTRO_MS, visible = true, alive = true;
+  let ready = false, frameTimer: number | undefined, width = -1, height = -1, dpr = -1;
+  let stillDirty = true, visible = true, alive = true;
   const resize = (): void => {
-    renderer.resize(canvas.clientWidth, canvas.clientHeight, devicePixelRatio);
-    if (ready) {
-      if (reduced) renderer.draw(performance.now(), true, mouse, glow);
-      else wake();
-    }
+    const nextWidth = canvas.clientWidth, nextHeight = canvas.clientHeight, nextDpr = devicePixelRatio;
+    if (width === nextWidth && height === nextHeight && dpr === nextDpr) return;
+    width = nextWidth; height = nextHeight; dpr = nextDpr;
+    renderer.resize(width, height, dpr);
+    stillDirty = true;
+    if (ready) { if (reduced) drawStill(); else wake(); }
   };
   const ro = new ResizeObserver(resize);
   ro.observe(canvas);
   resize();
 
-  const loop = (now: number): void => {
-    if (!alive || !visible || document.hidden) { raf = 0; return; }
-    if (now - last >= 1000 / 30) {
-      last = now;
-      renderer.draw(now, false, mouse, glow);
-    }
-    if (now >= activeUntil) { raf = 0; return; }
-    raf = requestAnimationFrame(loop);
-  };
   function pause(): void {
-    window.clearTimeout(idleTimer);
-    idleTimer = 0;
-    if (raf) cancelAnimationFrame(raf);
-    raf = 0;
+    if (frameTimer !== undefined) window.clearTimeout(frameTimer);
+    frameTimer = undefined;
+  }
+  function drawStill(): void {
+    if (!alive || !visible || document.hidden || !reduced || !stillDirty) return;
+    renderer.draw(performance.now(), true, mouse, glow);
+    stillDirty = false;
+  }
+  function drawFrame(): void {
+    frameTimer = undefined;
+    if (!alive || !visible || document.hidden || reduced) return;
+    renderer.draw(performance.now(), false, mouse, glow);
+    // Schedule after drawing so slow frames can only lower, never exceed, the 30 fps cap.
+    frameTimer = window.setTimeout(drawFrame, FRAME_INTERVAL_MS);
   }
   function wake(): void {
-    if (!alive || !visible || document.hidden || reduced) return;
-    activeUntil = Math.max(activeUntil, performance.now() + QUIET_MS);
-    window.clearTimeout(idleTimer);
-    idleTimer = window.setTimeout(pause, Math.max(0, activeUntil - performance.now()));
-    if (!raf) raf = requestAnimationFrame(loop);
+    if (!alive || !visible || document.hidden) return;
+    if (reduced) drawStill();
+    else if (frameTimer === undefined) drawFrame();
   }
-  const onVisibilityChange = (): void => { if (document.hidden) pause(); else wake(); };
+  const onVisibilityChange = (): void => { if (document.hidden) pause(); else { drawStill(); wake(); } };
   const io = new IntersectionObserver(([entry]) => {
     visible = !!entry?.isIntersecting;
-    if (visible) wake(); else pause();
+    if (visible) { drawStill(); wake(); } else pause();
   });
   io.observe(canvas);
   document.addEventListener("visibilitychange", onVisibilityChange);
   ready = true;
   canvas.dataset.ready = "true";
-  if (reduced) renderer.draw(performance.now(), true, mouse, glow);
-  else wake();
+  wake();
 
   return {
     destroy() {
