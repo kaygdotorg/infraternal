@@ -318,3 +318,24 @@ nonnegative remaining time measured by the server. A browser may discard all
 secret state and resume by supplying the key again, from any device. Its UI
 shows the real remaining time and never promises that its local clock grants
 server authority. No key or capability is persisted by the browser.
+
+## Signed-in recovery visibility and audit (#45, D25)
+
+Authenticated `session` adds `recovery_pending: {ready_at} | null`. It includes
+pending state even after capability expiry because resumption keeps that deadline.
+No words, verifier, capability or requesting-device identity are disclosed.
+
+Browsers subscribe on control stream 0 with the existing Subscribe frame:
+`sub_id=45`, filter JSON exactly `{"topic":"auth.recovery"}`. After subscription
+and whenever state changes the server sends an existing Event frame on stream 0,
+with `sub_id=45` and JSON `{topic:"auth.recovery",pending:{ready_at}|null}`.
+The authenticated account determines the scope; a filter cannot select an account.
+Resubscription/reconnection supplies a current snapshot. Events are coalescible
+state notifications, not an audit stream. No polling timer runs on idle devices.
+A signed-in browser shows a toast once per new deadline and a persistent notice
+with a Cancel recovery control. Session reads on foreground return repair state.
+
+Start (not resume), cancel (when a row existed), and complete audit rows commit in
+the same SQLite transaction as their state changes. Rows contain only account ID,
+event and Unix time. Invalid requests, reissues and repeat cancellation cannot
+invent completion or duplicate start evidence. Notification is after commit.
