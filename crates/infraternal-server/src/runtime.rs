@@ -180,8 +180,18 @@ pub enum ServerError {
 ///
 /// Returns a sanitized startup, storage, migration, TLS, or listener error.
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
+    serve_with_enrollment(config, None).await
+}
+
+/// Mount host enrollment using the trusted runtime's D168 signing source.
+/// # Errors
+/// Returns sanitized startup, storage, migration, TLS or listener failures.
+pub async fn serve_with_enrollment(
+    config: ServerConfig,
+    enrollment: Option<crate::remote_http::EnrollmentService>,
+) -> Result<(), ServerError> {
     init_logging();
-    let (app, setup_token) = build_router(config.clone(), None).await?;
+    let (app, setup_token) = build_router_with_enrollment(config.clone(), None, enrollment).await?;
     if let Some(token) = setup_token {
         start_setup_token_socket(&config.data_dir, token)?;
     }
@@ -231,9 +241,18 @@ pub(crate) async fn router_with_agent(
         .ok_or(ServerError::InvalidConfiguration)
 }
 
+#[cfg(test)]
 async fn build_router(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
+) -> Result<(Router, Option<String>), ServerError> {
+    build_router_with_enrollment(config, supplied_agent, None).await
+}
+
+async fn build_router_with_enrollment(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+    enrollment: Option<crate::remote_http::EnrollmentService>,
 ) -> Result<(Router, Option<String>), ServerError> {
     validate_config(&config)?;
     if let Some(web_root) = &config.web_root
@@ -278,12 +297,20 @@ async fn build_router(
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
         EmbeddedAgent::spawn(executable)
     };
+    let remote_api = enrollment.map(|service| {
+        crate::remote_http::router(auth.clone(), pool.clone(), service.source, service.endpoint)
+    });
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent);
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
         .merge(auth::router(auth))
         .merge(websocket::router(ws_state));
+    let app = if let Some(remote_api) = remote_api {
+        app.merge(remote_api)
+    } else {
+        app
+    };
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
     } else {

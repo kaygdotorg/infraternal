@@ -14,12 +14,12 @@ use uuid::Uuid;
 pub struct RemoteEnrollmentError;
 
 /// One live unlock source and SQLite authority; constructing the adapter never unlocks the CA.
-pub struct RemoteEnrollment<S: CaKeySource> {
+pub struct RemoteEnrollment<S: CaKeySource + ?Sized> {
     source: Arc<S>,
     store: EnrollmentStore,
 }
 
-impl<S: CaKeySource> RemoteEnrollment<S> {
+impl<S: CaKeySource + ?Sized> RemoteEnrollment<S> {
     /// Use the configured signing source and already-migrated public authority.
     #[must_use]
     pub fn new(source: Arc<S>, store: EnrollmentStore) -> Self {

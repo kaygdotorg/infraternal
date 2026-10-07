@@ -8,8 +8,11 @@ pub mod csr;
 mod embedded;
 pub mod enrollment;
 pub mod remote_enrollment;
+pub mod remote_http;
 mod runtime;
 mod web_assets;
 mod websocket;
 
-pub use runtime::{ProxyNetwork, ServerConfig, ServerError, TlsFiles, serve};
+pub use runtime::{
+    ProxyNetwork, ServerConfig, ServerError, TlsFiles, serve, serve_with_enrollment,
+};

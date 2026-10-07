@@ -17,7 +17,8 @@ pub(crate) mod authority;
 pub use authority::HostAuthority;
 
 /// A host's immutable execution mode, bound into its invitation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// Runs as the enrolled non-root user.
     Rootless,
@@ -26,7 +27,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Rootless => "rootless",
             Self::Rootful => "rootful",
@@ -126,6 +127,32 @@ impl EnrollmentStore {
         mode: Mode,
         now: i64,
     ) -> Result<JoinToken, EnrollmentError> {
+        self.issue_authorized(owner, host, mode, now, None).await
+    }
+
+    /// Issue only while the exact authenticated browser session remains live at publication.
+    /// # Errors
+    /// Refuses revoked, pending, expired or switched browser authority and invalid hosts.
+    pub(crate) async fn issue_for_session(
+        &self,
+        owner: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+        session_hash: &str,
+    ) -> Result<JoinToken, EnrollmentError> {
+        self.issue_authorized(owner, host, mode, now, Some(session_hash))
+            .await
+    }
+
+    async fn issue_authorized(
+        &self,
+        owner: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+        session_hash: Option<&str>,
+    ) -> Result<JoinToken, EnrollmentError> {
         let expires = now
             .checked_add(900)
             .filter(|_| now >= 0)
@@ -138,6 +165,9 @@ impl EnrollmentStore {
             "INSERT INTO remote_join_tokens (host_id, mode, digest, issued_at, expires_at) \
              SELECT id, mode, ?, ?, ? FROM remote_hosts \
              WHERE id = ? AND owner_id = ? AND mode = ? AND revoked_at IS NULL \
+             AND (? IS NULL OR EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
+             WHERE s.token_hash=? AND s.user_id=remote_hosts.owner_id AND s.unlocked=1 \
+             AND s.expires>unixepoch() AND u.owner=1)) \
              ON CONFLICT(host_id) DO UPDATE SET digest=excluded.digest, \
              issued_at=excluded.issued_at, expires_at=excluded.expires_at, consumed_at=NULL",
         )
@@ -147,6 +177,8 @@ impl EnrollmentStore {
         .bind(host.as_bytes().as_slice())
         .bind(owner)
         .bind(mode.as_str())
+        .bind(session_hash)
+        .bind(session_hash)
         .execute(&self.0)
         .await?
         .rows_affected();

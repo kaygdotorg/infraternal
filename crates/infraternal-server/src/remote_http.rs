@@ -1,0 +1,237 @@
+//! Serves bounded, host-bound remote enrollment over the configured HTTPS API; signer unlock remains a trusted D168 adapter, #78.
+
+use crate::{
+    auth::Auth,
+    ca::CaKeySource,
+    enrollment::{EnrollmentStore, Mode},
+    remote_enrollment::RemoteEnrollment,
+};
+use axum::{
+    Json, Router,
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode, header},
+    middleware::{Next, from_fn_with_state},
+    response::{IntoResponse, Response},
+    routing::post,
+};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::sync::Semaphore;
+use uuid::Uuid;
+
+/// Public transport coordinates are selected by the server, never by a joining host.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JoinInvitation {
+    /// Bound host authority.
+    pub host_id: Uuid,
+    /// Immutable privilege mode.
+    pub mode: Mode,
+    /// Bound execution uid from the trusted bootstrap probe.
+    pub execution_uid: u32,
+    /// One-time capability: pass privately through stdin, never print or log it.
+    pub token: String,
+    /// Base64url DER public CA pin for authenticated enrollment and leg B.
+    pub ca_der: String,
+    /// Dial-out UDP/TCP address (same port).
+    pub endpoint: std::net::SocketAddr,
+    /// TLS name verified against the configured server certificate.
+    pub server_name: String,
+}
+
+/// Server-owned public transport metadata, independent of the signer lock.
+#[derive(Clone)]
+pub struct EnrollmentEndpoint {
+    /// DER issuer pin, never private key material.
+    pub ca_der: Vec<u8>,
+    /// Reachable dial-out UDP/TCP address.
+    pub endpoint: std::net::SocketAddr,
+    /// Certificate SAN used for both legs.
+    pub server_name: String,
+}
+
+/// Trusted runtime supplies the D168 source; mounting routes never unlocks it.
+#[derive(Clone)]
+pub struct EnrollmentService {
+    /// Configured signer or cold-locked source.
+    pub source: Arc<dyn CaKeySource>,
+    /// Server-selected public trust and dial-out address.
+    pub endpoint: EnrollmentEndpoint,
+}
+
+#[derive(Clone)]
+struct Api {
+    auth: Auth,
+    pool: SqlitePool,
+    source: Arc<dyn CaKeySource>,
+    endpoint: EnrollmentEndpoint,
+    admission: Arc<Semaphore>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InvitationRequest {
+    host_id: Uuid,
+    mode: Mode,
+    execution_uid: u32,
+}
+
+/// Canonical bounded enrollment body; adapter never forwards requested identity extensions.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JoinRequest {
+    /// Host bound by the invitation.
+    pub host_id: Uuid,
+    /// Mode bound by the invitation.
+    pub mode: Mode,
+    /// Canonical 256-bit capability, not a URL parameter.
+    pub token: String,
+    /// Canonical base64url PKCS10 DER, at most 4096 decoded bytes.
+    pub csr_der: String,
+}
+
+/// Committed public identity; the private host key never leaves its process.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JoinResponse {
+    /// Base64url DER seven-day client certificate.
+    pub certificate_der: String,
+    /// Host's trusted enrolled uid.
+    pub execution_uid: u32,
+}
+
+/// Build enrollment routes around the migrated runtime database and a D168 signer.
+/// The listener must authenticate HTTPS before the join capability is transmitted.
+pub fn router(
+    auth: Auth,
+    pool: SqlitePool,
+    source: Arc<dyn CaKeySource>,
+    endpoint: EnrollmentEndpoint,
+) -> Router {
+    let api = Api {
+        auth,
+        pool,
+        source,
+        endpoint,
+        admission: Arc::new(Semaphore::new(8)),
+    };
+    Router::new()
+        .route("/remote/invitations", post(invite))
+        .route("/remote/join", post(join))
+        .layer(axum::extract::DefaultBodyLimit::max(8192))
+        .layer(from_fn_with_state(api.clone(), admission))
+        .with_state(api)
+}
+
+async fn admission(State(api): State<Api>, request: Request, next: Next) -> Response {
+    let Ok(_permit) = api.admission.try_acquire() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
+    // Includes body extraction: a slow upload cannot hold a signer slot indefinitely.
+    tokio::time::timeout(Duration::from_secs(5), next.run(request))
+        .await
+        .unwrap_or_else(|_| StatusCode::REQUEST_TIMEOUT.into_response())
+}
+
+fn now() -> Result<i64, StatusCode> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+async fn invite(
+    State(api): State<Api>,
+    headers: HeaderMap,
+    Json(request): Json<InvitationRequest>,
+) -> Result<Json<JoinInvitation>, StatusCode> {
+    if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(api.auth.origin()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let now = now()?;
+    let session_hash = crate::auth::hash(
+        crate::auth::session_cookie_from_headers(&headers).map_err(|_| StatusCode::UNAUTHORIZED)?,
+    );
+    let session = api
+        .auth
+        .session(
+            crate::auth::session_cookie_from_headers(&headers)
+                .map_err(|_| StatusCode::UNAUTHORIZED)?,
+            now,
+        )
+        .await
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    // Current core policy permits host enrollment to the owner. CA unlock remains
+    // a separate administrator/passkey policy; this check never unlocks a signer.
+    let owner: bool = sqlx::query_scalar("SELECT owner=1 FROM users WHERE id=?")
+        .bind(&session.user_id)
+        .fetch_one(&api.pool)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if !owner || (request.mode == Mode::Rootless) == (request.execution_uid == 0) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // An existing id must have exactly the same authority: collisions cannot move a host.
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) SELECT ?,?,?,?,? FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>unixepoch() AND u.owner=1 ON CONFLICT(id) DO NOTHING")
+        .bind(request.host_id.as_bytes().as_slice()).bind(&session.user_id).bind(request.mode.as_str())
+        .bind(i64::from(request.execution_uid)).bind(now).bind(&session_hash).bind(&session.user_id).execute(&api.pool).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let uid: Option<i64> = sqlx::query_scalar("SELECT execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND mode=? AND revoked_at IS NULL")
+        .bind(request.host_id.as_bytes().as_slice()).bind(&session.user_id).bind(request.mode.as_str())
+        .fetch_optional(&api.pool).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if uid != Some(i64::from(request.execution_uid)) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let token = EnrollmentStore::new(api.pool)
+        .issue_for_session(
+            &session.user_id,
+            request.host_id,
+            request.mode,
+            now,
+            &session_hash,
+        )
+        .await
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    Ok(Json(JoinInvitation {
+        host_id: request.host_id,
+        mode: request.mode,
+        execution_uid: request.execution_uid,
+        token: token.secret().to_owned(),
+        ca_der: B64.encode(&api.endpoint.ca_der),
+        endpoint: api.endpoint.endpoint,
+        server_name: api.endpoint.server_name,
+    }))
+}
+
+async fn join(
+    State(api): State<Api>,
+    Json(request): Json<JoinRequest>,
+) -> Result<Json<JoinResponse>, StatusCode> {
+    if request.csr_der.len() > 5462 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let der = B64
+        .decode(&request.csr_der)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if B64.encode(&der) != request.csr_der {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let store = EnrollmentStore::new(api.pool);
+    let certificate = RemoteEnrollment::new(api.source, store.clone())
+        .join(request.host_id, request.mode, &request.token, &der, now()?)
+        .await
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let identity = store
+        .admit(&certificate.record.fingerprint, now()?)
+        .await
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    Ok(Json(JoinResponse {
+        certificate_der: B64.encode(certificate.der),
+        execution_uid: identity.execution_uid,
+    }))
+}
