@@ -331,3 +331,90 @@ async fn real_agent_canonical_uuid_result_is_accepted() {
     );
     assert_eq!(result.await.unwrap(), Ok([1; 16]));
 }
+
+/// Recovery notices are ordered terminal traffic, so they cannot retire leg B.
+#[tokio::test]
+#[ignore = "tests-first recovery-event regression; enabled after adapter fix"]
+async fn recovery_event_then_snapshot_keeps_embedded_connection_live() {
+    use tokio::io::AsyncWriteExt;
+    let (mut link, mut peer) = connection();
+    let json = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.snapshot", "session_id": uuid::Uuid::from_bytes([1; 16]),
+        "seq": 17, "approximate": true
+    }))
+    .unwrap();
+    let mut wire = Vec::new();
+    encode_muxed_frame_into(
+        2,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: &json,
+        },
+        &mut wire,
+    )
+    .unwrap();
+    peer.write_all(&wire).await.unwrap();
+    let incoming = tokio::time::timeout(Duration::from_secs(1), read_incoming(&mut link))
+        .await
+        .unwrap();
+    assert!(
+        incoming.is_some(),
+        "ordered recovery Event retired the embedded connection"
+    );
+    wire.clear();
+    encode_muxed_frame_into(
+        2,
+        &Frame::Snapshot {
+            out_seq: 17,
+            bytes: b"repaint",
+        },
+        &mut wire,
+    )
+    .unwrap();
+    peer.write_all(&wire).await.unwrap();
+    assert!(matches!(
+        read_incoming(&mut link).await,
+        Some(Incoming::Snapshot { out_seq: 17, .. })
+    ));
+}
+
+/// Immediately-ready native output must give the healthy bounded receiver a turn.
+#[tokio::test]
+#[ignore = "tests-first sustained-output regression; enabled after scheduling fix"]
+async fn healthy_receiver_survives_ready_native_output_burst() {
+    let (mut link, _peer) = connection();
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(1, attachment(tx))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let received = tokio::spawn(async move {
+        let mut count = 0;
+        while let Some(event) = rx.recv().await {
+            if matches!(event, TerminalOutput::Output { .. }) {
+                count += 1;
+            }
+        }
+        count
+    });
+    for out_seq in 0..128 {
+        assert!(
+            process_incoming(
+                Incoming::Output {
+                    stream_id: 2,
+                    out_seq,
+                    bytes: Bytes::from_static(b"x")
+                },
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut HashMap::new()
+            )
+            .await
+        );
+    }
+    drop(attachments);
+    assert_eq!(
+        received.await.unwrap(),
+        128,
+        "healthy native viewer was retired during an immediately-ready burst"
+    );
+}
