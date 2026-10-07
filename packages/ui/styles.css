@@ -77,3 +77,13 @@
   border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); box-shadow: var(--shadow);
 }
 .ui-window canvas { display: block; }
+
+/* Panel: the material for large floating surfaces such as the sidebar. Thinner than a pill and
+   blurred harder, so whatever sits behind it (the backdrop, a terminal) reads through as soft
+   shapes. A hairline edge and an outer shadow only: no inner highlight. It sits on its own
+   compositing layer so the blur is recomputed only when what's behind it changes. */
+.ui-panel {
+  border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); background: var(--overlay-panel, var(--overlay)); box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6); backdrop-filter: blur(20px) saturate(1.6);
+}
+@media (prefers-reduced-transparency: reduce) { .ui-panel { background: var(--overlay-solid); -webkit-backdrop-filter: none; backdrop-filter: none; } }

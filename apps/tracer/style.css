@@ -317,8 +317,6 @@ button { color: inherit; }
 .sidebar {
   position: absolute; z-index: 5; top: calc(env(safe-area-inset-top) + 10px + var(--pill-h) + 12px); left: var(--gutter); bottom: 16px; width: 292px;
   display: flex; flex-direction: column; padding: 8px; overflow: auto;
-  border: 1px solid var(--overlay-line); border-radius: var(--r-lg); background: var(--overlay); box-shadow: var(--shadow);
-  -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
   transform-origin: top left; transition: transform 240ms var(--ease-drawer), opacity 180ms ease-out;
 }
 .sidebar[hidden] { display: flex !important; visibility: hidden; opacity: 0; transform: translateX(-8px) scale(0.98); }
