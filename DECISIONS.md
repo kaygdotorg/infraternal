@@ -411,9 +411,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     The passkey is created with name = username and displayName = display
     name. The wizard step "name" becomes username + display name (the
     display name is pre-filled from the username).
-98. **Sign-in:** one usernameless "Continue with passkey" button, plus a quiet
-    secondary "use a different passkey…" that opens the browser's QR or
-    security-key flow. Typing a username is never required.
+98. **Sign-in (updated by owner 2026-10-07, #32):** one usernameless
+    "Continue with passkey" button. Discoverable sign-in opens the platform
+    chooser, which lists every passkey for this site. A secondary alternate
+    passkey link is unnecessary; typing a username is never required.
 99. **One tick, everywhere.** Each checkmark (checkboxes, stepper steps,
     completed bootstrap steps, "copied") uses one shared spring-tick
     primitive, reimplemented from the sveltebits spring-check behaviour: one

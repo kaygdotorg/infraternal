@@ -1,5 +1,5 @@
 /** Exercises the authenticated core screen and saves the requested production-build views. */
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "playwright/test";
@@ -16,6 +16,35 @@ async function saveScreenshot(page: Page, testInfo: TestInfo, name: string): Pro
   await mkdir(resolve(path, ".."), { recursive: true });
   await page.screenshot({ path, animations: "disabled" });
   await testInfo.attach(name, { path, contentType: "image/png" });
+  return path;
+}
+
+async function saveFontComparison(
+  page: Page,
+  testInfo: TestInfo,
+  name: string,
+  sansPath: string,
+  monoPath: string,
+  width: number,
+  height: number,
+): Promise<string> {
+  const [sans, mono] = await Promise.all([readFile(sansPath), readFile(monoPath)]);
+  const headingHeight = 30;
+  await page.setViewportSize({ width: width * 2, height: height + headingHeight });
+  await page.setContent(`<!doctype html><html><head><style>
+    *{box-sizing:border-box}html,body{margin:0;background:#101113;color:#e6e7e9;font:12px/30px ui-monospace,monospace}
+    main{display:grid;grid-template-columns:${width}px ${width}px;width:${width * 2}px}
+    figure{margin:0;width:${width}px;height:${height + headingHeight}px;overflow:hidden}
+    figcaption{height:${headingHeight}px;padding:0 12px;background:#191a1d}
+    img{display:block;width:${width}px;height:${height}px}
+  </style></head><body><main>
+    <figure><figcaption>Geist Sans · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${sans.toString("base64")}"></figure>
+    <figure><figcaption>Geist Mono · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${mono.toString("base64")}"></figure>
+  </main></body></html>`);
+  await page.locator("img").evaluateAll((images) => Promise.all(images.map((image) => (image as HTMLImageElement).decode())));
+  const path = resolve(process.cwd(), "test-results", "core-screen", `${name}-comparison.png`);
+  await page.screenshot({ path, animations: "disabled", fullPage: true });
+  await testInfo.attach(`${name}-comparison`, { path, contentType: "image/png" });
   return path;
 }
 
@@ -208,4 +237,170 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
 
   expect(screenshotPaths).toHaveLength(12);
   console.log(`Core-screen screenshots (production build):\n${screenshotPaths.join("\n")}`);
+});
+
+test("UI font choice persists and captures ink screenshots at phone and desktop sizes", async ({ browser, page }, testInfo) => {
+  test.setTimeout(180_000);
+  await page.context().request.post("/__mock/reset");
+  await page.context().request.post("/__mock/open-terminal");
+
+  const captures = new Map<string, string>();
+  const sizes = [
+    { width: 1440, height: 900 },
+    { width: 393, height: 852 },
+  ];
+
+  async function capture(pageToUse: Page, width: number, height: number, font: "sans" | "mono", state: "sidebar-open" | "palette-open"): Promise<void> {
+    await pageToUse.setViewportSize({ width, height });
+    await pageToUse.goto(`/?mock=1&theme=ink&bg=none&ui=${font}`);
+    await waitForAttached(pageToUse);
+    await expect(pageToUse.locator("html")).toHaveAttribute("data-ui-font", font);
+    const typography = await pageToUse.evaluate(() => {
+      const stage = document.querySelector<HTMLElement>("#terminal-screen")!;
+      return {
+        family: getComputedStyle(stage).fontFamily,
+        selectedFaceLoaded: document.fonts.check(document.documentElement.dataset.uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"'),
+        stored: localStorage.getItem("tracer.ui-font"),
+      };
+    });
+    expect(typography.family).toContain(font === "mono" ? "Geist Mono" : "Geist Sans");
+    expect(typography.selectedFaceLoaded).toBe(true);
+    expect(typography.stored).toBe(font);
+
+    if (width === 393) {
+      await expect(pageToUse.locator(".tabs")).toBeHidden();
+      const mobileLayout = await pageToUse.evaluate(() => {
+        const capsule = document.querySelector<HTMLElement>("#capsule")!;
+        const capsuleRect = capsule.getBoundingClientRect();
+        const host = document.querySelector<HTMLElement>(".capsule-host")!;
+        const children = [...capsule.children].map((child) => {
+          const rect = child.getBoundingClientRect();
+          return { left: rect.left, right: rect.right, width: rect.width };
+        }).filter((rect) => rect.width > 0);
+        const controls = [...document.querySelectorAll<HTMLElement>("#sidebar-toggle, #capsule, #keybar button:not([hidden])")]
+          .map((element) => {
+            const rect = element.getBoundingClientRect();
+            return { width: rect.width, height: rect.height };
+          });
+        return {
+          capsule: { left: capsuleRect.left, right: capsuleRect.right, width: capsuleRect.width, height: capsuleRect.height },
+          hostOverflowMode: getComputedStyle(host).textOverflow,
+          hostWhiteSpace: getComputedStyle(host).whiteSpace,
+          children,
+          controls,
+        };
+      });
+      expect(mobileLayout.capsule.left).toBeGreaterThanOrEqual(0);
+      expect(mobileLayout.capsule.right).toBeLessThanOrEqual(393);
+      expect(mobileLayout.capsule.height).toBe(44);
+      expect(mobileLayout.children.every((item, index, all) => index === 0 || all[index - 1]!.right <= item.left + 1)).toBe(true);
+      expect(mobileLayout.hostOverflowMode).toBe("ellipsis");
+      expect(mobileLayout.hostWhiteSpace).toBe("nowrap");
+      expect(mobileLayout.controls.every((rect) => rect.width >= 44 && rect.height >= 44)).toBe(true);
+    } else {
+      const desktopTabs = await pageToUse.locator(".tabs").boundingBox();
+      expect(desktopTabs).not.toBeNull();
+      expect(desktopTabs!.x + desktopTabs!.width).toBeLessThanOrEqual(width);
+    }
+
+    if (state === "sidebar-open") {
+      await pageToUse.locator("#sidebar-toggle").click();
+      await expect(pageToUse.locator("#sidebar")).toBeVisible();
+    } else {
+      await pageToUse.keyboard.press("Control+k");
+      await expect(pageToUse.getByRole("dialog", { name: "Go to anything" })).toBeVisible();
+    }
+    const name = `ui-${width}x${height}-${state}-${font}`;
+    captures.set(name, await saveScreenshot(pageToUse, testInfo, name));
+  }
+
+  for (const size of sizes) {
+    if (size.width === 393) {
+      const mobileContext = await browser.newContext({
+        baseURL: new URL(page.url()).origin,
+        viewport: { width: size.width, height: size.height },
+        deviceScaleFactor: 1,
+        isMobile: true,
+        hasTouch: true,
+      });
+      try {
+        await mobileContext.request.post("/__mock/open-terminal");
+        const mobilePage = await mobileContext.newPage();
+        for (const font of ["sans", "mono"] as const) {
+          await capture(mobilePage, size.width, size.height, font, "sidebar-open");
+          await mobilePage.keyboard.press("Escape");
+          await capture(mobilePage, size.width, size.height, font, "palette-open");
+          await mobilePage.keyboard.press("Escape");
+        }
+      } finally {
+        await mobileContext.close();
+      }
+    } else {
+      for (const font of ["sans", "mono"] as const) {
+        await capture(page, size.width, size.height, font, "sidebar-open");
+        await page.keyboard.press("Escape");
+        await capture(page, size.width, size.height, font, "palette-open");
+        await page.keyboard.press("Escape");
+      }
+    }
+  }
+
+  // A query choice overrides storage; a later visit without `ui` uses the saved choice.
+  await page.goto("/?mock=1&theme=ink&bg=none&ui=mono");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("tracer.ui-font"))).toBe("mono");
+  await page.goto("/?mock=1&theme=ink&bg=none");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("tracer.ui-font"))).toBe("mono");
+  await page.goto("/?mock=1&theme=ink&bg=none&ui=sans");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("tracer.ui-font"))).toBe("sans");
+
+  const storedPreferenceContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  try {
+    await storedPreferenceContext.addInitScript(() => localStorage.setItem("tracer.ui-font", "mono"));
+    await storedPreferenceContext.request.post("/__mock/open-terminal");
+    const storedPreferencePage = await storedPreferenceContext.newPage();
+    await storedPreferencePage.goto("/?mock=1&theme=ink&bg=none");
+    await waitForAttached(storedPreferencePage);
+    await expect(storedPreferencePage.locator("html")).toHaveAttribute("data-ui-font", "mono");
+    const storedFamily = await storedPreferencePage.locator("#terminal-screen").evaluate((stage) => getComputedStyle(stage).fontFamily);
+    expect(storedFamily).toContain("Geist Mono");
+  } finally {
+    await storedPreferenceContext.close();
+  }
+
+  // Blocked storage must not stop a URL-selected face from rendering.
+  const blockedStorageContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  try {
+    await blockedStorageContext.addInitScript(() => {
+      Object.defineProperty(window, "localStorage", {
+        configurable: true,
+        get: () => { throw new DOMException("Storage is disabled", "SecurityError"); },
+      });
+    });
+    await blockedStorageContext.request.post("/__mock/open-terminal");
+    const blockedStoragePage = await blockedStorageContext.newPage();
+    await blockedStoragePage.goto("/?mock=1&theme=ink&bg=none&ui=mono");
+    await waitForAttached(blockedStoragePage);
+    await expect(blockedStoragePage.locator("html")).toHaveAttribute("data-ui-font", "mono");
+    const blockedFamily = await blockedStoragePage.locator("#terminal-screen").evaluate((stage) => getComputedStyle(stage).fontFamily);
+    expect(blockedFamily).toContain("Geist Mono");
+  } finally {
+    await blockedStorageContext.close();
+  }
+
+  for (const size of sizes) {
+    for (const state of ["sidebar-open", "palette-open"] as const) {
+      const base = `ui-${size.width}x${size.height}-${state}`;
+      const composite = await saveFontComparison(
+        page,
+        testInfo,
+        base,
+        captures.get(`${base}-sans`)!,
+        captures.get(`${base}-mono`)!,
+        size.width,
+        size.height,
+      );
+      console.log(`UI font comparison (production build): ${composite}`);
+    }
+  }
+  expect(captures.size).toBe(8);
 });

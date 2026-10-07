@@ -416,13 +416,12 @@ function mountSignIn(
       <h1 id="signin-title">Welcome back</h1>
       <p class="auth-lede">Your passkey is all you need.</p>
       <button class="auth-primary auth-login" id="login-passkey" type="button">${KEY_MARK}<span>Continue with passkey</span></button>
-      <div class="auth-signin-secondary"><button class="auth-text-button" id="login-other" type="button">use a different passkey…</button></div>
       <p class="auth-loading" id="login-loading" role="status" aria-live="polite"><span class="busy-count" hidden></span></p>
       <p class="auth-message" id="auth-error" role="alert"></p>
     </section>
   </section>`;
   host.querySelector<HTMLElement>("#auth-error")!.textContent = message;
-  const buttons = [host.querySelector<HTMLButtonElement>("#login-passkey")!, host.querySelector<HTMLButtonElement>("#login-other")!];
+  const button = host.querySelector<HTMLButtonElement>("#login-passkey")!;
   const card = host.querySelector<HTMLElement>(".auth-card")!;
   host.addEventListener("pointerdown", () => card.removeAttribute("data-no-motion"), { capture: true });
   host.addEventListener("focusin", (event) => {
@@ -430,20 +429,20 @@ function mountSignIn(
       card.toggleAttribute("data-no-motion", event.target.matches(":focus-visible"));
     }
   });
-  for (const button of buttons) button.addEventListener("click", (event) => {
-    void beginLogin(buttons, host, onAuthenticated, event.detail === 0);
+  button.addEventListener("click", (event) => {
+    void beginLogin(button, host, onAuthenticated, event.detail === 0);
   });
 }
 
 async function beginLogin(
-  buttons: HTMLButtonElement[],
+  button: HTMLButtonElement,
   host: HTMLElement,
   onAuthenticated: (userId: string, firstSetup: boolean, welcomeName?: string, instant?: boolean) => void,
   instant: boolean,
 ): Promise<void> {
-  if (buttons[0]!.disabled) return;
+  if (button.disabled) return;
   host.querySelector<HTMLElement>(".auth-card")!.toggleAttribute("data-no-motion", instant);
-  buttons.forEach((button) => { button.disabled = true; });
+  button.disabled = true;
   host.querySelector<HTMLElement>("#auth-error")!.textContent = "";
   const counter = host.querySelector<HTMLElement>("#login-loading .busy-count")!;
   const waiting: Loading = loading(counter, 400);
@@ -453,7 +452,7 @@ async function beginLogin(
     onAuthenticated(userId, false, undefined, instant);
   } catch (error: unknown) {
     waiting.done();
-    buttons.forEach((button) => { button.disabled = false; });
+    button.disabled = false;
     host.querySelector<HTMLElement>("#auth-error")!.textContent = safeAuthMessage(error);
   }
 }
