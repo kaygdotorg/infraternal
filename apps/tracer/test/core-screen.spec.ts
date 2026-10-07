@@ -81,7 +81,7 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     const material = await page.evaluate(() => {
       const root = getComputedStyle(document.documentElement);
       const stage = document.querySelector<HTMLElement>("#terminal-screen")!;
-      const layers = [".icon-btn", ".capsule"];
+      const layers = ["#sidebar-toggle", ".capsule"];
       if (getComputedStyle(document.querySelector<HTMLElement>(".tabs")!).display !== "none") layers.push(".tab-add");
       if (getComputedStyle(document.querySelector<HTMLElement>(".keybar")!).display !== "none") layers.push(".keytray");
       return {

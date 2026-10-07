@@ -54,3 +54,26 @@
   .swap svg, [data-done] .is-idle, .swap .is-done, [data-done] .is-done { transform: none; filter: none; }
   .swap .is-done path { stroke-dashoffset: 0; transition: none; }
 }
+
+/* Pill: the one container for floating capsule controls (the top-bar capsule, icon buttons, the
+   sidebar toggle, session tabs). Instances set only their size and content layout; the material,
+   hairline, shadow, radius and press feedback live here so they can never drift apart. */
+.ui-pill {
+  appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 38px);
+  border: 1px solid var(--overlay-line) !important; border-radius: 999px; background: var(--overlay); box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+  transition: transform 140ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+.ui-pill:active:not(:disabled) { transform: scale(0.97); }
+.ui-pill-icon { width: var(--pill-h, 38px); padding: 0; color: var(--fg-2); }
+.ui-pill-icon svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.6; }
+@media (hover: hover) and (pointer: fine) { .ui-pill:hover:not(:disabled) { background: var(--overlay-solid); } }
+@media (prefers-reduced-motion: reduce) { .ui-pill:active:not(:disabled) { transform: none; } }
+
+/* Window: the one card that holds a terminal or a flow on the canvas. */
+.ui-window {
+  position: relative; min-width: 0; min-height: 0; overflow: hidden;
+  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); box-shadow: var(--shadow);
+}
+.ui-window canvas { display: block; }

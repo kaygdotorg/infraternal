@@ -55,20 +55,20 @@ const SCREEN = `
   <section class="terminal-screen" id="terminal-screen" aria-label="Terminal">
     <div class="backdrop" aria-hidden="true"></div>
     <div class="panes" id="panes">
-      <section class="pane-card" aria-label="Current terminal pane">
+      <section class="ui-window pane-card" aria-label="Current terminal pane">
         <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal" tabindex="0" data-captures-keys></div>
       </section>
     </div>
     <header class="top" aria-label="Terminal controls">
-      <button class="icon-btn" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false">${SVG.menu}</button>
-      <button class="capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
+      <button class="ui-pill ui-pill-icon" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false">${SVG.menu}</button>
+      <button class="ui-pill capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
         <span class="capsule-session">SSH shell</span><span class="capsule-rtt" id="rtt" aria-label="Round trip">··</span>
         <kbd class="capsule-kbd">⌘K</kbd>
       </button>
       <nav class="tabs" aria-label="Other sessions">
-        <button class="tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
+        <button class="ui-pill ui-pill-icon tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
       </nav>
     </header>
     <aside class="sidebar" id="sidebar" aria-label="Hosts" hidden>
@@ -81,11 +81,11 @@ const SCREEN = `
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
     </section>
-    ${recoveryUiEnabled() ? `<section class="pane-card recovery-notice" id="recovery-notice" aria-label="Pending account recovery" hidden>
-      <p id="recovery-notice-time"></p><button class="capsule" id="recovery-cancel" type="button">Cancel recovery</button>
+    ${recoveryUiEnabled() ? `<section class="ui-window recovery-notice" id="recovery-notice" aria-label="Pending account recovery" hidden>
+      <p id="recovery-notice-time"></p><button class="ui-pill" id="recovery-cancel" type="button">Cancel recovery</button>
       <p id="recovery-cancel-error" role="alert"></p>
     </section>
-    <p class="pane-card recovery-toast" id="recovery-toast" role="status" hidden></p>` : ""}
+    <p class="ui-window recovery-toast" id="recovery-toast" role="status" hidden></p>` : ""}
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
       <div id="keytray" class="keytray" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
