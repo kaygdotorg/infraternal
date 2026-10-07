@@ -1,0 +1,156 @@
+/** Runs the onboarding-styled recovery flow, holding words and capabilities only in this mount [D113]. */
+import { validateMnemonic } from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english.js";
+import { AuthError } from "./auth";
+import { startRecovery, replacePasskey, type RecoveryRequest } from "./recovery-auth";
+import { recoveryWords } from "./recovery-words";
+import { loading } from "../../../packages/ui/src/countup";
+import { tick } from "../../../packages/ui/src/tick";
+
+const dictionary = new Set(wordlist);
+const titles = ["Use your recovery key", "Recovery started", "Create a new passkey", "Save your new recovery key"];
+
+/** Reuses auth card, pane motion, stepper ticks and saved-word controls from onboarding. */
+export function mountRecovery(host: HTMLElement, back: () => void,
+  complete: (userId: string, firstSetup: boolean, displayName?: string, instant?: boolean) => void,
+): void {
+  let step = 0, busy = false, instant = false, saved = false;
+  let words = Array<string>(24).fill(""), username = "", nextWords: string[] = [];
+  let request: RecoveryRequest | undefined;
+  let finish: (() => Promise<void>) | undefined, acknowledged: (() => void) | undefined;
+  let rejectAcknowledgement: ((failure: unknown) => void) | undefined;
+  let readyTimer = 0;
+  host.innerHTML = `<section class="auth-screen" aria-label="Recover your account"><section class="auth-card" id="recovery-card">
+    <div class="auth-mark"><span>infraternal</span></div><ol class="auth-steps" aria-label="Recovery progress"></ol>
+    <div class="auth-viewport"><div class="auth-pane"><p class="auth-eyebrow"></p><h1></h1><p class="auth-lede"></p><div class="auth-pane-body"></div></div></div>
+    <div class="auth-footer"><button class="auth-back" type="button">← sign in</button><button class="auth-primary" id="recovery-next" type="button"><span></span><span class="busy-count" hidden></span></button></div>
+    <p class="auth-message" id="auth-error" role="alert"></p></section></section>`;
+  const card = host.querySelector<HTMLElement>("#recovery-card")!;
+  const body = card.querySelector<HTMLElement>(".auth-pane-body")!;
+  const button = card.querySelector<HTMLButtonElement>("#recovery-next")!;
+  const error = card.querySelector<HTMLElement>("#auth-error")!;
+  const markMotion = (value: boolean): void => { card.toggleAttribute("data-no-motion", value); };
+  card.querySelector<HTMLButtonElement>(".auth-back")!.addEventListener("click", () => {
+    if (busy || finish) return;
+    window.clearTimeout(readyTimer); words.fill(""); request = undefined; back();
+  });
+  function ready(): boolean {
+    if (step === 0) return /^[a-z0-9_-]{2,32}$/.test(username) && validWords();
+    if (step === 1) return request !== undefined && (request.delay_seconds === 0 || Date.now() >= request.ready_at * 1000);
+    return step !== 3 || saved;
+  }
+  function validWords(): boolean { return words.every((word) => dictionary.has(word)) && validateMnemonic(words.join(" "), wordlist); }
+  function update(): void { button.disabled = busy || !ready(); }
+  function render(): void {
+    markMotion(instant);
+    const steps = card.querySelector<HTMLOListElement>(".auth-steps")!;
+    steps.innerHTML = titles.map((_, i) => `<li class="${i < step ? "is-done" : i === step ? "is-current" : ""}"><span class="auth-dot" ${i === step ? 'aria-current="step"' : ""} aria-label="Step ${i + 1}${i < step ? ", done" : ""}">${i < step ? '<span class="tick-host"></span>' : i + 1}</span>${i < 3 ? '<span class="auth-step-bar"></span>' : ""}</li>`).join("");
+    steps.querySelectorAll<HTMLElement>(".tick-host").forEach((element, i) => {
+      const check = tick(element, i < step - 1);
+      if (i === step - 1) check.set(true, instant);
+    });
+    const pane = card.querySelector<HTMLElement>(".auth-pane")!;
+    pane.dataset.direction = instant ? "none" : "forward";
+    pane.querySelector<HTMLElement>(".auth-eyebrow")!.textContent = `step ${step + 1} of 4`;
+    pane.querySelector<HTMLElement>("h1")!.textContent = titles[step]!;
+    pane.querySelector<HTMLElement>(".auth-lede")!.textContent = [
+      "Enter your username and the 24 words you saved. You can paste the whole key into any word field.",
+      request?.delay_seconds === 0 ? "This browser has a live session for your account. You can recover immediately." : "Recovery waits 24 hours. A signed-in device can cancel it. Keep this page open; your key stays only in memory.",
+      "Your new passkey will protect the same account key. Your saved SSH keys stay accessible.",
+      "Your old recovery key will stop working. Store these new words somewhere safe and offline.",
+    ][step]!;
+    if (step === 0) renderEntry();
+    else if (step === 1) {
+      body.innerHTML = '<p id="recovery-ready-time" role="status"></p>';
+      body.querySelector<HTMLElement>("p")!.textContent = request?.delay_seconds === 0 ? "Ready now" : `Available ${new Date(request!.ready_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
+    } else if (step === 2) body.replaceChildren();
+    else recoveryWords(body, nextWords, saved, (value) => { saved = value; update(); }, markMotion);
+    button.querySelector<HTMLElement>("span")!.textContent = ["Start recovery", "Continue recovery", "Create passkey", "Open infraternal"][step]!;
+    update();
+    window.clearTimeout(readyTimer);
+    if (step === 1 && !ready()) {
+      const checkReady = (): void => {
+        if (!card.isConnected || step !== 1) return;
+        update();
+        if (!ready()) readyTimer = window.setTimeout(checkReady, Math.min(60_000, Math.max(1, request!.ready_at * 1000 - Date.now())));
+      };
+      readyTimer = window.setTimeout(checkReady, Math.min(60_000, Math.max(1, request!.ready_at * 1000 - Date.now())));
+    }
+  }
+  function renderEntry(): void {
+    body.innerHTML = `<label class="auth-label" for="recovery-username">username</label><input class="auth-input" id="recovery-username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" />
+      <p class="auth-label recovery-word-label">recovery words</p><ol class="auth-word-inputs"></ol><p class="auth-hint" id="recovery-word-error" role="status"></p>`;
+    const identity = body.querySelector<HTMLInputElement>("#recovery-username")!;
+    identity.value = username;
+    identity.addEventListener("input", () => { username = identity.value.trim().toLowerCase(); error.textContent = ""; update(); });
+    const list = body.querySelector<HTMLOListElement>("ol")!;
+    for (let i = 0; i < 24; i++) {
+      const item = document.createElement("li");
+      item.innerHTML = `<span aria-hidden="true">${i + 1}</span><input aria-label="Word ${i + 1}" maxlength="8" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="recovery-word-error" />`;
+      const input = item.querySelector<HTMLInputElement>("input")!;
+      input.value = words[i]!;
+      input.addEventListener("input", () => { words[i] = input.value.trim().toLowerCase(); validate(); });
+      input.addEventListener("paste", (event) => {
+        const text = event.clipboardData?.getData("text/plain");
+        if (!text) return;
+        if (text.length > 2048) { event.preventDefault(); error.textContent = "Paste a 24-word recovery key."; return; }
+        const pasted = text.toLowerCase().replace(/\b\d+[.)]\s*/g, "").trim().split(/[\s,]+/);
+        if (pasted.length <= 1) return;
+        event.preventDefault();
+        const offset = pasted.length === 24 ? 0 : i;
+        if (offset + pasted.length > 24) { error.textContent = "Enter exactly 24 words."; return; }
+        pasted.forEach((word, index) => { words[offset + index] = word; });
+        list.querySelectorAll<HTMLInputElement>("input").forEach((field, index) => { field.value = words[index]!; });
+        validate();
+      });
+      list.append(item);
+    }
+    function validate(): void {
+      error.textContent = "";
+      let invalid = -1;
+      list.querySelectorAll<HTMLInputElement>("input").forEach((field, index) => {
+        const bad = Boolean(words[index]) && !dictionary.has(words[index]!);
+        field.setAttribute("aria-invalid", String(bad));
+        if (bad && invalid < 0) invalid = index;
+      });
+      body.querySelector<HTMLElement>("#recovery-word-error")!.textContent = invalid >= 0 ? `Word ${invalid + 1} is not in the recovery word list.` : words.every(Boolean) && !validWords() ? "These words do not make a valid recovery key. Check their order." : "";
+      update();
+    }
+  }
+  button.addEventListener("click", (event) => {
+    if (busy || !ready()) return;
+    instant = event.detail === 0;
+    void advance();
+  });
+  async function advance(): Promise<void> {
+    busy = true; update(); markMotion(true); error.textContent = "";
+    const waiting = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
+    try {
+      if (step === 0) { request = await startRecovery(username, words.join(" ")); step = 1; }
+      else if (step === 1) { step = 2; }
+      else if (step === 2) {
+        const result = await replacePasskey(request!.token, words.join(" "), async (rotated, commit) => {
+          waiting.done(); busy = false; step = 3; nextWords = rotated.split(" "); finish = commit; render();
+          await new Promise<void>((resolve, reject) => { acknowledged = resolve; rejectAcknowledgement = reject; });
+        });
+        words.fill(""); nextWords.fill(""); request = undefined; finish = undefined;
+        complete(result.userId, true, result.displayName, instant);
+        return;
+      } else {
+        try { await finish!(); }
+        catch (failure) {
+          // Finish consumes its ceremony even on failure; recreate it for a safe retry.
+          step = 2; finish = undefined; saved = false; nextWords.fill("");
+          rejectAcknowledgement?.(failure); throw failure;
+        }
+        acknowledged?.(); return;
+      }
+    } catch (failure: unknown) {
+      error.textContent = failure instanceof AuthError && failure.status === 401
+        ? step === 0 ? "The username or recovery key did not match." : "Recovery is not ready, expired or was cancelled. Check the available time or start again."
+        : failure instanceof DOMException && failure.name === "NotAllowedError" ? "The passkey prompt was cancelled. Try again when you are ready."
+        : failure instanceof AuthError ? failure.message : "Recovery could not be completed. Try again.";
+    } finally { waiting.done(); busy = false; if (card.isConnected) render(); }
+  }
+  render();
+}

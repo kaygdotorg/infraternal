@@ -376,11 +376,18 @@ function mountSignIn(
       <p class="auth-lede">Your passkey is all you need.</p>
       <button class="auth-primary auth-login" id="login-passkey" type="button">${KEY_MARK}<span>Continue with passkey</span></button>
       <p class="auth-loading" id="login-loading" role="status" aria-live="polite"><span class="busy-count" hidden></span></p>
+      <button class="auth-text-button" id="use-recovery" type="button">use recovery key</button>
       <p class="auth-message" id="auth-error" role="alert"></p>
     </section>
   </section>`;
   host.querySelector<HTMLElement>("#auth-error")!.textContent = message;
   const button = host.querySelector<HTMLButtonElement>("#login-passkey")!;
+  host.querySelector<HTMLButtonElement>("#use-recovery")!.addEventListener("click", () => {
+    if (button.disabled) return;
+    void import("./recovery").then(({ mountRecovery }) => {
+      mountRecovery(host, () => mountSignIn(host, "", onAuthenticated), onAuthenticated);
+    });
+  });
   const card = host.querySelector<HTMLElement>(".auth-card")!;
   host.addEventListener("pointerdown", () => card.removeAttribute("data-no-motion"), { capture: true });
   host.addEventListener("focusin", (event) => {

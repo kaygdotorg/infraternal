@@ -228,7 +228,7 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
     await document.fonts.load(uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"');
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
-    screen = mountCoreScreen(app, { hostName, mockMode, probeMode });
+    screen = mountCoreScreen(app, { hostName, mockMode, probeMode, onRecovery: () => { void showRecovery(); } });
   } catch (error: unknown) {
     renderUnavailable(safeMessage(error));
     return;
@@ -293,6 +293,22 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
     const status = document.querySelector<HTMLElement>("#connection-status");
     if (status) status.textContent = safeMessage(error);
   }
+}
+
+/** Opens same-device recovery without revoking the live cookie that authorizes D113. */
+async function showRecovery(): Promise<void> {
+  const { mountRecovery } = await import("./recovery");
+  currentTerminal?.dispose(); currentTerminal = undefined;
+  coreScreen?.dispose(); coreScreen = undefined;
+  performanceProbe?.dispose(); performanceProbe = undefined;
+  delete window.__tracerTestDouble;
+  document.documentElement.removeAttribute("data-ui-font");
+  mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
+    activeUserId = userId;
+    saveBrowserId("tracer.user-id", userId);
+    showWelcome(displayName ?? "", instant);
+  });
+  scheduleBackdrop();
 }
 
 /** URL choices win and are remembered when storage is available; private mode still works. */

@@ -11,6 +11,7 @@ export interface CoreScreenOptions {
   hostName: string;
   mockMode: boolean;
   probeMode: boolean;
+  onRecovery?: () => void;
 }
 
 export interface CoreScreen {
@@ -221,6 +222,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     })),
     { group: "Background", glyph: "▦", label: "Mesh from the theme", hint: "one still · no idle work", action: "bg:mesh" },
     { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
+    ...(options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
   ];
   let visibleEntries: PaletteEntry[] = [];
   let selected = 0;
@@ -397,7 +399,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
 
   function runAction(action: string, source: "keyboard" | "pointer"): void {
     const [kind, value] = action.split(":");
-    if (kind === "theme" && themeId(value ?? null)) {
+    if (kind === "account" && value === "recovery") {
+      setPalette(false, source);
+      options.onRecovery?.();
+    } else if (kind === "theme" && themeId(value ?? null)) {
       currentThemeId = value!;
       writeLocal("tracer.theme", currentThemeId);
       applyLook(source === "keyboard");
