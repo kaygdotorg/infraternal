@@ -638,3 +638,37 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      Trust with the server is established with a one-line join shown in the
      UI (a one-time token); nothing else to configure. The CLI is designed
      to be human-friendly throughout.
+132. **The user never runs commands (T1):** commands exist and stay
+     trivially simple, but the product never makes the user run one. Adding
+     a host installs and enrolls its infraternal agent automatically. A
+     relay is a subtle checkbox in the host's UI ("Run a relay here"):
+     tick, spinner, then "Relay running on port N". Smooth, fast and out of
+     the way. Manual `agent join` / `relay` commands are for operators,
+     tests and automation only.
+133. **Agent certificates (T2):** 7-day agent certificates, renewed
+     automatically over the existing connection well before expiry. Renewal
+     is measured to be invisible: no session interruption, negligible
+     CPU/RSS/bytes, no wakeups beyond the renewal itself. The server CA
+     stays on the server, with overlap-based rotation.
+134. **Removal (T3):** removing a host revokes its certificate at once; the
+     agent removes itself, its services and its state on next contact
+     (minimal footprint). An uninstall action exists for hosts that can no
+     longer reach the server.
+135. **Lockstep agent updates, proven resilient (T4):** the server ships the
+     agent binary matching its own version, with an A/B slot swap and an
+     automatic rollback when the canary fails. Every update and swap
+     scenario is tested, and the tests actively try to break it: power or
+     network loss mid-swap, a corrupt or partial download, a disk-full or
+     read-only slot, an agent crash during the canary, a concurrent root
+     promotion, a server version jump, a downgrade.
+136. **One server per agent; the server is the trust anchor (T5–T6):** an
+     agent enrolls with exactly one server. The server is trusted and must
+     be running: it is a single point of failure by design; agents keep
+     sessions alive and fail closed when it is gone (D128). High
+     availability is planned later as a commercial (`ee/`) feature, not in
+     the open product.
+137. **Transport proof before UI (T7):** the orchestrator enrolls o1, o2 and
+     minipc01 with the operator join command and runs chaos tests
+     (NetBird/Tailscale restarts, agent restarts, network loss, a 300 ms+
+     RTT, renewal under load, update and swap failures) and reports before
+     the owner tests the add-host flow.
