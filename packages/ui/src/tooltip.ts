@@ -52,17 +52,36 @@ const STYLE = `
 .tip-measure { position: fixed; visibility: hidden; white-space: nowrap; pointer-events: none;
   font: 500 13px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
-.ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(320px, calc(100vw - 24px)); gap: 10px; padding: 12px;
-  border-radius: 13px; opacity: 0; transform: translateY(5px) scale(.97); pointer-events: none;
-  transition: opacity 160ms ease-out, transform 180ms cubic-bezier(.23, 1, .32, 1); }
+.ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(340px, calc(100vw - 24px)); gap: 12px; padding: 14px 14px 12px;
+  border-radius: 14px; opacity: 0; transform: scale(0.96); pointer-events: none;
+  transition: opacity 150ms ease-out, transform 180ms cubic-bezier(0.23, 1, 0.32, 1); }
 .ui-confirm-tip[hidden] { display: none !important; }
 .ui-confirm-tip[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
-.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 15px/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
+.ui-confirm-tip-arrow { position: absolute; left: var(--ui-confirm-tail, 50%); width: 10px; height: 10px; margin-left: -5px; background: inherit;
+  border: inherit; border-radius: 2px; transform: rotate(45deg); }
+.ui-confirm-tip[data-side="bottom"] .ui-confirm-tip-arrow { top: -5px; border-right: 0; border-bottom: 0; }
+.ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -5px; border-top: 0; border-left: 0; }
+.ui-confirm-tip-text { display: grid; gap: 3px; }
+.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 13px/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: -0.01em; }
+.ui-confirm-tip-detail { margin: 0; color: var(--fg-2); font: 450 12px/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: -0.01em; }
 .ui-confirm-tip-actions { display: flex; justify-content: flex-end; gap: 6px; }
-.ui-confirm-tip button { min-width: 58px; min-height: 44px; padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 8px;
-  background: transparent; color: var(--fg); font: 550 14px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); cursor: pointer; }
-.ui-confirm-tip button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.ui-confirm-tip .ui-confirm-yes { border-color: var(--accent); background: var(--accent); color: var(--bg); }
+.ui-confirm-tip button { display: inline-grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
+  color: var(--fg-2); cursor: pointer;
+  transition: transform 120ms cubic-bezier(0.23, 1, 0.32, 1), background-color 120ms ease, color 120ms ease; }
+.ui-confirm-tip button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-confirm-tip button:active { transform: scale(0.97); }
+.ui-confirm-tip button:focus { outline: none; }
+:root[data-focus-ring="on"] .ui-confirm-tip button:focus-visible { outline: 2px solid color-mix(in oklab, var(--fg) 55%, transparent); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) { .ui-confirm-tip button:not(.ui-confirm-yes):hover { background: var(--hover); color: var(--fg); } }
+.ui-confirm-tip .ui-confirm-yes { background: var(--fg); color: var(--bg); }
+.ui-confirm-tip .ui-confirm-yes svg { stroke-width: 2; }
+@media (pointer: coarse) {
+  .ui-confirm-tip { gap: 14px; padding: 16px; }
+  .ui-confirm-tip-message { font-size: 15px; }
+  .ui-confirm-tip-detail { font-size: 14px; }
+  .ui-confirm-tip button { width: 44px; height: 44px; }
+  .ui-confirm-tip button svg { width: 18px; height: 18px; }
+}
 @media (prefers-reduced-motion: reduce) { .ui-confirm-tip { transition: opacity 120ms ease; transform: none; } }
 `;
 
@@ -84,7 +103,10 @@ function build() {
 export interface ConfirmTipOptions {
   /** Accessible name for the small, trigger-anchored confirmation group. */
   label: string;
+  /** The question, at body size. */
   message: string;
+  /** One secondary line explaining the consequence. */
+  detail?: string;
   confirmLabel: string;
   cancelLabel: string;
   onConfirm(): void;
@@ -109,21 +131,39 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   tip.setAttribute("aria-label", options.label);
   tip.dataset.open = "false";
 
+  const arrow = document.createElement("span");
+  arrow.className = "ui-confirm-tip-arrow";
+  arrow.setAttribute("aria-hidden", "true");
+  const text = document.createElement("div");
+  text.className = "ui-confirm-tip-text";
   const message = document.createElement("p");
   message.className = "ui-confirm-tip-message";
   message.textContent = options.message;
+  text.append(message);
+  if (options.detail) {
+    const detail = document.createElement("p");
+    detail.className = "ui-confirm-tip-detail";
+    detail.textContent = options.detail;
+    text.append(detail);
+  }
 
   const actions = document.createElement("div");
   actions.className = "ui-confirm-tip-actions";
+  // Icon buttons with warm tooltips: × cancels, ✓ confirms; the label names each action.
   const cancel = document.createElement("button");
   cancel.type = "button";
-  cancel.textContent = options.cancelLabel;
+  cancel.className = "ui-confirm-no";
+  cancel.setAttribute("aria-label", options.cancelLabel);
+  cancel.dataset.tip = options.cancelLabel;
+  cancel.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>`;
   const confirm = document.createElement("button");
   confirm.type = "button";
   confirm.className = "ui-confirm-yes";
-  confirm.textContent = options.confirmLabel;
+  confirm.setAttribute("aria-label", options.confirmLabel);
+  confirm.dataset.tip = options.confirmLabel;
+  confirm.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4 4 9-9"/></svg>`;
   actions.append(cancel, confirm);
-  tip.append(message, actions);
+  tip.append(arrow, text, actions);
   document.body.append(tip);
 
   anchor.setAttribute("aria-expanded", "true");
@@ -143,7 +183,10 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
     const top = side === "bottom" ? anchorRect.bottom + 8 : Math.max(12, anchorRect.top - height - 8);
     tip.style.left = `${left}px`;
     tip.style.top = `${top}px`;
-    tip.style.transformOrigin = `${Math.max(12, Math.min(width - 12, anchorRect.left + anchorRect.width / 2 - left))}px ${side === "bottom" ? "0%" : "100%"}`;
+    const tail = Math.max(16, Math.min(width - 16, anchorRect.left + anchorRect.width / 2 - left));
+    tip.style.setProperty("--ui-confirm-tail", `${tail}px`);
+    // Grow from the tail, so the popover visibly comes out of its trigger.
+    tip.style.transformOrigin = `${tail}px ${side === "bottom" ? "0%" : "100%"}`;
     tip.dataset.side = side;
   };
   const onKeyDown = (event: KeyboardEvent): void => {
@@ -334,7 +377,8 @@ export function installTooltips() {
   // Keyboard: at once, no motion (no animation for keyboard actions).
   document.addEventListener("focusin", (e) => {
     const el = triggerOf(e.target);
-    if (el && (e.target as HTMLElement).matches(":focus-visible")) show(el, "instant");
+    // Only real Tab navigation shows a tooltip on focus; programmatic focus stays quiet.
+    if (el && document.documentElement.dataset.focusRing !== "off" && (e.target as HTMLElement).matches(":focus-visible")) show(el, "instant");
   });
   document.addEventListener("focusout", (e) => { if (triggerOf(e.target) === current) hide(true); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") hide(true); });
