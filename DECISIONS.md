@@ -942,3 +942,22 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - The bottom toolbar (key tray) never touches a window card: a
        consistent gap separates them, and the toolbar pill is vertically
        shorter (touch targets kept by padding).
+159. **Touch and pointer model for windows on the canvas (refines D118/D125):**
+     - **Activation:** one tap or click on an inactive window activates it
+       (accent border) without opening the iOS keyboard; a tap on the
+       already-active window focuses the terminal and opens the keyboard.
+       The sidebar is never required to switch windows.
+     - **One finger inside a window** scrolls that terminal: scrollback
+       vertically, and horizontally when its content is wider. At the end it
+       stops and never drags the canvas by accident.
+     - **Two fingers anywhere pan the canvas** in both axes, with momentum.
+       This is how a horizontal split (stacked windows) is reached on a
+       phone. iOS Safari delivers multi-touch to web apps, so this works
+       there.
+     - **Pinch** changes the terminal font size (as the owner asked
+       earlier); it is distinguished from a two-finger pan by finger spread
+       vs common translation. The canvas overview is the toolbar's grid
+       button, with toolbar ← → stepping between windows.
+     - **Desktop:** the trackpad or wheel scrolls the terminal under the
+       pointer; Shift is horizontal; Space+drag or middle-drag pans the
+       canvas; a click activates a window.
