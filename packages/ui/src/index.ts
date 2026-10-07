@@ -12,3 +12,6 @@ export * from "./backdrop";
 export * from "./branched";
 export * from "./host-icons";
 export * from "./segmented";
+export * from "./switch";
+export * from "./toast";
+export * from "./source-icons";
