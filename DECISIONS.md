@@ -766,3 +766,33 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      same binary then runs once in a one-shot probe mode over that session,
      returns the structured report and exits, without being installed.
      After install, the agent refreshes facts itself per D126.
+146. **Everything is configurable in the UI (B1):** no setting or operation
+     is CLI-only. Every action is defined once and exposed through the UI,
+     the API and MCP, with the CLI as one more adapter (round 6). Backups,
+     restore, migrate, relays, discovery sources, retention: all have UI.
+147. **Backups (B1–B4):**
+     - A backup is a consistent snapshot (SQLite backup API) of the
+       database, the CA key and the configuration, encrypted with a key
+       derived from the recovery words.
+     - App data is kept intentionally small, so backups can be pushed to
+       any host. Any host can be an infraternal agent, a relay and/or a
+       **backup host** once chosen in the UI.
+     - Defaults: local, daily, 7 kept, plus one before every upgrade or
+       migration.
+     - `infraternal restore` shares its code with migrate (#59).
+     - The audit log is kept 90 days, configurable; longer retention and
+       export are enterprise.
+148. **Stored SSH secrets (K1–K5):**
+     - Used only for installing agents, and only while the owner is
+       present; never by unattended tasks.
+     - A rebuilt host waits ("needs you").
+     - Decrypted only in the browser with the passkey; sent to the
+       infraternal agent doing the SSH; held in memory for that session
+       only, then wiped. Never stored decrypted.
+     - Keys can be pasted, uploaded or generated (Ed25519, public key
+       shown) with a very simple flow; keys are stored encrypted by
+       default.
+     - Passwords are asked each time unless "remember (encrypted)" is
+       chosen.
+149. **The sidebar is rearrangeable by direct drag and drop:** long-press on
+     touch, or press and hold with a mouse, then drag. No drag handles.
