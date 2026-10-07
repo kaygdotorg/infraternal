@@ -485,3 +485,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      included, after 700 ms of inactivity and wakes on input, output,
      resize, scroll or pointer, so idle CPU stays at zero (D81). A steady
      cursor at idle is accepted (#40).
+113. **Recovery delay:** recovery with the 24 recovery words completes
+     immediately when started from a device that already holds a live
+     session for the account. Started from a device without a session, it
+     waits 24 hours (the existing contract delay), so a stranger with stolen
+     words cannot take over before the owner notices. The sign-in card
+     offers "use recovery key" instead of "use a different passkey" (#45).
