@@ -45,7 +45,7 @@ function makeSection(section: BranchSection): HTMLElement {
   root.setAttribute("aria-expanded", String(open));
   root.toggleAttribute("data-open", open);
 
-  const head = el("button", "bm-head");
+  const head = el("button", "bm-head ui-list-row");
   head.type = "button";
   head.disabled = section.disabled || section.leaves.length === 0;
   head.setAttribute("aria-label", `${section.label}${section.meta ? `, ${section.meta}` : ""}`);
@@ -88,7 +88,7 @@ function makeSection(section: BranchSection): HTMLElement {
   for (const leaf of section.leaves) {
     const row = el("li", "bm-row");
     row.setAttribute("role", "treeitem");
-    const button = el("button", "bm-leaf");
+    const button = el("button", "bm-leaf ui-list-row");
     button.type = "button";
     button.dataset.id = leaf.id;
     button.disabled = Boolean(leaf.disabled);

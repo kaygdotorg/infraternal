@@ -74,13 +74,14 @@ export interface OverlayMaterial {
   overlaySolid: string;
   overlayLine: string;
   shadow: string;
+  largeShadow: string;
   surface: string;
 }
 
 /** Keeps dark glass close to its palette and computes the same alpha composite used by the contrast audit. */
 export function overlayMaterial(active: Theme): OverlayMaterial {
   const tinted = mix(active.bg, "#ffffff", active.dark ? 0.06 : 0.6);
-  const opacity = active.dark ? 0.68 : 0.72;
+  const opacity = active.dark ? 0.68 : 0.66;
   const channels = (hex: string) => [1, 3, 5].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
   const rgb = (hex: string) => channels(hex).join(" ");
   const tint = channels(tinted);
@@ -94,6 +95,9 @@ export function overlayMaterial(active: Theme): OverlayMaterial {
     shadow: active.dark
       ? "0 1px 1px rgb(0 0 0 / 0.3), 0 12px 32px -8px rgb(0 0 0 / 0.6)"
       : "0 1px 1px rgb(0 0 0 / 0.04), 0 8px 24px -6px rgb(0 0 0 / 0.12)",
+    largeShadow: active.dark
+      ? "0 2px 3px rgb(0 0 0 / 0.34), 0 24px 56px -10px rgb(0 0 0 / 0.72)"
+      : "0 2px 4px rgb(0 0 0 / 0.08), 0 20px 48px -8px rgb(0 0 0 / 0.24)",
     surface,
   };
 }
@@ -115,6 +119,8 @@ export function applyTheme(active: Theme, root: HTMLElement): void {
   style.setProperty("--overlay-solid", overlay.overlaySolid);
   style.setProperty("--overlay-line", overlay.overlayLine);
   style.setProperty("--shadow", overlay.shadow);
+  style.setProperty("--overlay-shadow-large", overlay.largeShadow);
+  style.setProperty("--overlay-highlight", `rgb(255 255 255 / ${active.dark ? "0.32" : "0.78"})`);
   style.setProperty("--line", `rgb(${rgb(active.fg)} / 0.07)`);
   style.setProperty("--hover", `rgb(${rgb(active.fg)} / 0.06)`);
   root.style.colorScheme = active.dark ? "dark" : "light";

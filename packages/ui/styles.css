@@ -2,6 +2,96 @@
 .countup { font-variant-numeric: tabular-nums; }
 .busy-count { font: 500 13px/1 "Geist Mono", ui-monospace, monospace; color: rgb(0 0 0 / 0.6); }
 
+/* One theme-aware glass material for every floating surface. Instances can tune the
+   blur, saturation, border, or shadow through custom properties without cloning chrome. */
+.ui-overlay-surface {
+  --ui-overlay-blur: 20px;
+  --ui-overlay-saturation: 180%;
+  background: var(--ui-overlay-background, var(--overlay));
+  border: 1px solid var(--ui-overlay-border, var(--overlay-line));
+  box-shadow: var(--ui-overlay-shadow, var(--shadow)), inset 0 1px 0 var(--overlay-highlight, rgb(255 255 255 / 0.42));
+  color: var(--ui-overlay-color, var(--fg));
+  -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
+  backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
+}
+.ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
+.ui-pill { min-height: var(--ui-pill-height, 38px); border-radius: var(--r-pill, 999px); }
+.ui-button {
+  min-height: var(--ui-button-height, 44px);
+  padding: var(--ui-button-padding, 0 12px);
+  border-radius: var(--ui-button-radius, 8px);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.ui-icon-button {
+  position: relative;
+  display: grid;
+  width: var(--ui-icon-button-size, 44px);
+  height: var(--ui-icon-button-size, 44px);
+  flex: none;
+  place-items: center;
+  border-radius: var(--ui-icon-button-radius, 50%);
+  color: var(--fg-2);
+}
+.ui-icon-button::before { content: ""; position: absolute; inset: var(--ui-icon-button-hit-inset, 0); background: transparent; }
+.ui-icon-button svg { width: var(--ui-icon-size, 18px); height: var(--ui-icon-size, 18px); stroke-width: var(--ui-icon-stroke, 1.8); }
+.ui-data-row {
+  display: grid;
+  grid-template-columns: var(--ui-data-key-width, 94px) minmax(0, 1fr);
+  min-height: 44px;
+  align-items: center;
+  gap: 0 10px;
+  padding: 2px 10px;
+  border-radius: 8px;
+}
+.ui-data-key {
+  min-width: 0;
+  color: var(--fg-2);
+  font: 550 var(--ui-data-key-size, 0.875rem)/1.45 var(--font-mono, ui-monospace, monospace);
+  letter-spacing: 0.025em;
+  white-space: nowrap;
+}
+.ui-data-value {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 17px;
+  min-width: 0;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  font: 450 var(--ui-data-value-size, 1rem)/1.45 var(--font-mono, ui-monospace, monospace);
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.ui-data-value:focus-visible, .ui-button:focus-visible, .ui-icon-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ui-list-row { min-height: 44px; border-radius: 8px; }
+
+@media (prefers-reduced-transparency: reduce) {
+  .ui-overlay-surface {
+    --ui-overlay-background: color-mix(in srgb, var(--overlay) 55%, var(--bg));
+    --ui-overlay-blur: 0px;
+    --ui-overlay-saturation: 100%;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+@media (prefers-contrast: more) {
+  .ui-overlay-surface { --ui-overlay-border: color-mix(in srgb, var(--fg) 72%, transparent); }
+}
+
 /* One spring drives the fill, tick draw-on and label treatment. */
 .tick { position: relative; display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px;
   border-radius: 6px; box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.35); color: #000; will-change: transform; }
@@ -56,12 +146,7 @@
   justify-content: center;
   gap: 0;
   padding: 5px;
-  border: 1px solid var(--overlay-line);
   border-radius: var(--r-pill, 999px);
-  background: var(--overlay);
-  box-shadow: var(--shadow);
-  -webkit-backdrop-filter: blur(18px) saturate(1.4);
-  backdrop-filter: blur(18px) saturate(1.4);
   isolation: isolate;
 }
 .segmented-capsule {

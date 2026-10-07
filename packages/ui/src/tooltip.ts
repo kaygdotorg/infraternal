@@ -45,13 +45,11 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1000; pointer-events: none; will-change: transform; }
 .tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; white-space: nowrap; overflow: hidden;
-  font: 500 12.5px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0;
-  background: var(--tip-bg, var(--fg, #f4f4f5)); color: var(--tip-fg, var(--bg, #0a0a0a));
-  box-shadow: 0 6px 20px -6px rgb(0 0 0 / 0.45); }
+  font: 500 12.5px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .tip-label { display: block; }
 .tip-label.is-leaving { position: absolute; left: 10px; top: 6px; }
 .tip-arrow { position: absolute; left: 0; width: 8px; height: 8px; margin-left: -4px; transform-origin: center;
-  background: var(--tip-bg, var(--fg, #f4f4f5)); border-radius: 1.5px; }
+  background: var(--overlay, var(--fg)); border-radius: 1.5px; }
 .tip-measure { position: fixed; visibility: hidden; white-space: nowrap; pointer-events: none;
   font: 500 12.5px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
@@ -67,6 +65,7 @@ function build() {
   pos.innerHTML = `<div class="tip"><span class="tip-label"></span></div><div class="tip-arrow"></div>`;
   pos.style.visibility = "hidden";
   surface = pos.querySelector(".tip")!;
+  surface.classList.add("ui-overlay-surface");
   arrow = pos.querySelector(".tip-arrow")!;
   measure = document.createElement("span");
   measure.className = "tip-measure";

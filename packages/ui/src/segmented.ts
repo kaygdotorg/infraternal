@@ -18,6 +18,7 @@ export function installStretchingCapsule(
 ): StretchingCapsule {
   const indicator = tablist.querySelector<HTMLElement>(".segmented-capsule");
   if (!indicator) throw new Error("Segmented tablist is missing its shared capsule");
+  tablist.classList.add("ui-overlay-surface", "ui-pill");
   let selectedId = initialId;
   let leftSpring: Spring | undefined;
   let rightSpring: Spring | undefined;
