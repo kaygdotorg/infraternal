@@ -5,7 +5,7 @@ import { wordlist } from "@scure/bip39/wordlists/english.js";
 const KEY_CONTEXT = "infraternal/keywrap/v1";
 const encoder = new TextEncoder();
 
-interface AuthStart {
+export interface AuthStart {
   ceremony: string;
   user_id?: string;
   recovery_words?: string | null;
@@ -20,7 +20,7 @@ interface AuthSession {
   fresh: number;
 }
 
-interface Wrap {
+export interface Wrap {
   salt: string;
   nonce: string;
   ciphertext: string;
@@ -418,3 +418,9 @@ function canonicalUuid(value: unknown, name: string): string {
   }
   return result;
 }
+
+/** Shares the existing ceremony/crypto implementation with recovery; binary handling stays here. */
+export const recoveryAuth = {
+  post, creationOptions, prfInputFrom, credentialOutputs, prfFrom, credentialPrf,
+  credentialProof, wrapDek, unwrapDek, requiredString, canonicalUuid,
+};
