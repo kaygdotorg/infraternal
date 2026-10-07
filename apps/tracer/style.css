@@ -314,14 +314,13 @@ button { color: inherit; }
 .bm-sec.is-current > .bm-head { color: var(--fg); }
 .bm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .bm-meta { margin-left: auto; color: var(--fg-3); font: 500 10px/1.2 var(--font-mono); white-space: nowrap; }
-.bm-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out); }
+.bm-fold { display: grid; grid-template-rows: 0fr; }
 .bm-sec[data-open] > .bm-fold { grid-template-rows: 1fr; }
-.bm-sec.no-motion > .bm-fold { transition: none; }
 .bm-fold-in { position: relative; min-height: 0; overflow: hidden; }
 .bm-list { --bm-x: 12px; list-style: none; margin: 0 0 4px; padding: 0 0 0 calc(var(--bm-x) + 8px + 12px + 6px); }
 .bm-branches { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; fill: none; stroke-linecap: round; }
 .bm-dim path { stroke: var(--bm-line); stroke-width: 1.5; }
-.bm-lit { stroke: var(--fg); stroke-width: 1.5; stroke-dasharray: 1; }
+.bm-lit { stroke: var(--fg); stroke-width: 1.5; opacity: 0; }
 .bm-leaf { height: 34px; color: var(--fg-2); }
 .bm-leaf:disabled { opacity: 0.56; cursor: default; }
 .glyph { width: 18px; flex: none; color: var(--fg-3); font: 500 11px/1 var(--font-mono); }
@@ -416,6 +415,8 @@ button { color: inherit; }
   .sidebar.instant, .palette[data-open-kind="keyboard"] { transition: none; }
   .keybar.is-away { transform: none; }
   .backdrop { transition: opacity 240ms ease; }
+  .icon-btn:active, .capsule:active, .tab:active:not(:disabled), .keybar button:active,
+  .bm-head:active:not(:disabled), .bm-leaf:active:not(:disabled) { transform: none; transition: none; }
 }
 :root[data-kb="open"] .keybar { bottom: 8px; }
 :root[data-kb="open"] .panes { bottom: 64px; }

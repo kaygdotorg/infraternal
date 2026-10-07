@@ -1,4 +1,4 @@
-/** Draws the animated host/session tree used by the tracer sidebar. */
+/** Builds the accessible host/session tree and updates its current-host indicators. */
 
 export interface BranchLeaf {
   id: string;
@@ -96,7 +96,7 @@ function makeSection(section: BranchSection): HTMLElement {
 }
 
 /**
- * Builds a tree with a fading trunk, a moving current-host marker, and a draw-on branch.
+ * Builds a tree with a fading trunk, a moving current-host marker, and a highlighted branch.
  * Identifiers and labels are installed as DOM text/data rather than interpolated HTML.
  */
 export function branchedMenu(
@@ -140,18 +140,11 @@ export function branchedMenu(
       }));
       const leaves = [...list.querySelectorAll<HTMLElement>(".bm-leaf")];
       const mine = leaves.find((leaf) => leaf.dataset.id === active);
-      if (animate) lit.getAnimations().forEach((animation) => animation.cancel());
+      lit.style.transition = animate && !reduced() ? `opacity 150ms ${EASE}` : "none";
       if (mine) {
         lit.setAttribute("d", branch(list, mine.parentElement!));
-        if (animate && !reduced()) lit.animate(
-          [{ strokeDashoffset: 1 }, { strokeDashoffset: 0 }],
-          { duration: 280, easing: EASE, fill: "both" },
-        );
         lit.style.opacity = "1";
       } else {
-        if (lit.style.opacity !== "0" && animate && !reduced()) {
-          lit.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: EASE });
-        }
         lit.style.opacity = "0";
       }
       for (const leaf of leaves) leaf.toggleAttribute("aria-current", leaf.dataset.id === active);
@@ -180,11 +173,10 @@ export function branchedMenu(
     const open = !section.hasAttribute("data-open");
     section.toggleAttribute("data-open", open);
     section.setAttribute("aria-expanded", String(open));
-    section.classList.toggle("no-motion", event.detail === 0);
   };
   host.addEventListener("click", onClick);
 
-  // Observe folds as well as the host: grid-row transitions change branch geometry while open.
+  // Observe folds as well as the host so branch geometry stays aligned after a fold toggles.
   const observer = new ResizeObserver(() => layout(false));
   observer.observe(host);
   for (const fold of host.querySelectorAll<HTMLElement>(".bm-fold")) observer.observe(fold);
