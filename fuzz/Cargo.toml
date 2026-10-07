@@ -10,6 +10,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+infraternal-plugin-ssh = { version = "0.1.0", path = "../crates/plugins/ssh" }
 libfuzzer-sys.workspace = true
 infraternal-shim.workspace = true
 infraternal-protocol.workspace = true

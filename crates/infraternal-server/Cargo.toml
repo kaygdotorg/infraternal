@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0" }
 argon2.workspace = true
 axum.workspace = true
 axum-server.workspace = true

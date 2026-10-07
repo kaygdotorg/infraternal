@@ -1310,6 +1310,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "infraternal-agent",
+ "infraternal-plugin-ssh",
  "infraternal-server",
  "infraternal-shim",
  "nix",
@@ -1341,6 +1342,7 @@ name = "infraternal-fuzz"
 version = "0.1.0"
 dependencies = [
  "infraternal-agent",
+ "infraternal-plugin-ssh",
  "infraternal-protocol",
  "infraternal-server",
  "infraternal-shim",
@@ -1398,6 +1400,7 @@ dependencies = [
  "futures-util",
  "hkdf",
  "http-body-util",
+ "infraternal-plugin-ssh",
  "infraternal-protocol",
  "nix",
  "openssl",
