@@ -497,7 +497,8 @@ export class TerminalClient {
       type: "AttachTerm",
       sessionId: this.sessionId,
       lastOutSeq: this.lastOutSeq,
-      lastInSeq: this.nextInSeq,
+      // Only server-confirmed bytes belong in Resume; retained input replays separately.
+      lastInSeq: this.ackedInSeq,
     });
     this.creditAvailable = INITIAL_CREDIT;
     this.sendFrame(TERMINAL_STREAM, { type: "Credit", bytes: INITIAL_CREDIT });
