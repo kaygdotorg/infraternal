@@ -1,0 +1,451 @@
+//! Real-QUIC regressions for retained greeting bytes and rootless uid admission [64], #78.
+use super::*;
+use crate::remote_tls::tests::{leaf, root};
+use infraternal_protocol::Frame;
+
+struct StateDirectory(PathBuf);
+impl StateDirectory {
+    fn new() -> Self {
+        let parent = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/remote-agents");
+        std::fs::create_dir_all(&parent).unwrap();
+        let path = parent.join(format!("client-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        Self(path)
+    }
+}
+impl Drop for StateDirectory {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn rootless_uid_mismatch_is_refused_before_dial() {
+    let ca = root();
+    let identity = RemoteIdentity {
+        identity: leaf(&ca, false),
+        roots: vec![ca.certificate],
+        endpoint: "127.0.0.1:1".parse().unwrap(),
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw().wrapping_add(1),
+    };
+    let result = run(&identity, None).await.unwrap_err();
+    assert_eq!(result.kind(), io::ErrorKind::PermissionDenied);
+}
+
+#[tokio::test]
+async fn prefixed_control_keeps_coalesced_suffix_and_suppresses_only_its_greeting() {
+    let ca = root();
+    let server_identity = leaf(&ca, true);
+    let client_identity = leaf(&ca, false);
+    let server = quinn::Endpoint::server(
+        remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+            .unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client.set_default_client_config(
+        remote_quic::client_config(&client_identity, &[ca.certificate]).unwrap(),
+    );
+    let (dialed, admitted) = tokio::join!(
+        client
+            .connect(server.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { server.accept().await.unwrap().await.unwrap() }
+    );
+    let dialed = dialed.unwrap();
+    let (mut send, recv) = dialed.open_bi().await.unwrap();
+    let greeting = Frame::Hello {
+        version: 1,
+        caps: remote_quic::REMOTE_WRITER_BINDING,
+        client_info: "fixture",
+    };
+    let mut greeting_bytes = Vec::new();
+    encode_frame_into(&greeting, &mut greeting_bytes).unwrap();
+    send.write_all(&greeting_bytes).await.unwrap();
+    let (peer_send, peer_recv) = admitted.accept_bi().await.unwrap();
+    let peer = NativeChannel::control(peer_send, peer_recv).unwrap();
+    let mut peer_rx = Receive::default();
+    assert!(matches!(
+        peer_rx.next(&peer).await.unwrap().frame,
+        Frame::Hello { .. }
+    ));
+    let mut combined = greeting_bytes.clone();
+    let ping = Frame::Ping {
+        nonce: 42,
+        sent_us: 17,
+    };
+    let mut ping_bytes = Vec::new();
+    encode_frame_into(&ping, &mut ping_bytes).unwrap();
+    combined.extend_from_slice(&ping_bytes);
+    peer.write(&combined).await.unwrap();
+    let channel = NativeChannel::control(send, recv).unwrap();
+    let mut receive = Receive::default();
+    let hello = receive.next(&channel).await.unwrap();
+    let mut prefix = Vec::new();
+    encode_frame_into(&hello.frame, &mut prefix).unwrap();
+    let control = PrefixedControl {
+        channel,
+        prefix: Mutex::new(prefix),
+        sent_greeting: Mutex::new(Some(greeting_bytes.clone())),
+        receive: Mutex::new(receive),
+    };
+    control.write(&greeting_bytes).await.unwrap();
+    control.write(&ping_bytes).await.unwrap();
+    let mut consumer = Receive::default();
+    assert!(matches!(
+        consumer.next(&control).await.unwrap().frame,
+        Frame::Hello { .. }
+    ));
+    assert!(matches!(
+        consumer.next(&control).await.unwrap().frame,
+        Frame::Ping { nonce: 42, .. }
+    ));
+    assert!(matches!(
+        peer_rx.next(&peer).await.unwrap().frame,
+        Frame::Ping { nonce: 42, .. }
+    ));
+    dialed.close(0u32.into(), b"");
+    server.close(0u32.into(), b"");
+    client.close(0u32.into(), b"");
+}
+#[tokio::test]
+async fn unavailable_udp_does_not_add_seconds_before_tcp_admission() {
+    let ca = root();
+    let server_identity = leaf(&ca, true);
+    let client_identity = leaf(&ca, false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let tls =
+        remote_tls::server_config(&server_identity, std::slice::from_ref(&ca.certificate)).unwrap();
+    let identity = RemoteIdentity {
+        identity: client_identity,
+        roots: vec![ca.certificate],
+        endpoint: address,
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    let state = StateDirectory::new();
+    let state_path = state.0.clone();
+    let supervisor = tokio::spawn(async move { run(&identity, Some(state_path)).await });
+    let started = tokio::time::Instant::now();
+    let admitted = tokio::time::timeout(Duration::from_secs(2), async {
+        let (socket, _) = listener.accept().await.unwrap();
+        remote_tls::accept(socket, &tls).await.unwrap()
+    })
+    .await;
+    supervisor.abort();
+    let _ = supervisor.await;
+    println!(
+        "fallback_local_admission_us={}",
+        started.elapsed().as_micros()
+    );
+    assert!(
+        admitted.is_ok(),
+        "UDP unavailability delayed TCP establishment by seconds"
+    );
+}
+
+#[tokio::test]
+async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
+    use tokio::io::AsyncReadExt;
+    let ca = root();
+    let server_identity = leaf(&ca, true);
+    let client_identity = leaf(&ca, false);
+    let server = quinn::Endpoint::server(
+        remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+            .unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let (proxy_address, proxy) =
+        crate::transport_diagnostics::udp_proxy(server.local_addr().unwrap()).await;
+    let tcp = tokio::net::TcpListener::bind(proxy_address).await.unwrap();
+    let identity = RemoteIdentity {
+        identity: client_identity,
+        roots: vec![ca.certificate],
+        endpoint: proxy_address,
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    let state = StateDirectory::new();
+    let state_path = state.0.clone();
+    let supervisor = tokio::spawn(async move { run(&identity, Some(state_path)).await });
+    let (mut fallback, _) = tokio::time::timeout(Duration::from_secs(2), tcp.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut hello = [0; 4096];
+    assert!(fallback.read(&mut hello).await.unwrap() > 0);
+    let connection = tokio::time::timeout(Duration::from_secs(2), async {
+        server.accept().await.unwrap().await.unwrap()
+    })
+    .await
+    .unwrap();
+    // Accepting control proves QUIC won. Withhold the server Hello so dispatch
+    // stays live while the losing TCP socket must already have been dropped.
+    let control = tokio::time::timeout(Duration::from_secs(2), connection.accept_bi())
+        .await
+        .unwrap()
+        .unwrap();
+    let eof = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if fallback.read(&mut hello).await.unwrap() == 0 {
+                return;
+            }
+        }
+    })
+    .await;
+    supervisor.abort();
+    let _ = supervisor.await;
+    proxy.abort();
+    let _ = proxy.await;
+    drop(control);
+    connection.close(0u32.into(), b"");
+    server.close(0u32.into(), b"");
+    assert!(
+        eof.is_ok(),
+        "losing TLS dial survived the winning QUIC dispatch"
+    );
+}
+
+async fn native_greeting(server: &quinn::Endpoint) -> &'static str {
+    let connection = server.accept().await.unwrap().await.unwrap();
+    let (send, receive) = connection.accept_bi().await.unwrap();
+    let channel = NativeChannel::control(send, receive).unwrap();
+    let mut receive = Receive::default();
+    assert!(matches!(
+        receive.next(&channel).await.unwrap().frame,
+        infraternal_protocol::Frame::Hello { .. }
+    ));
+    connection.close(0u32.into(), b"");
+    "quic"
+}
+async fn tcp_greeting(
+    listener: &tokio::net::TcpListener,
+    tls: &openssl::ssl::SslAcceptor,
+) -> &'static str {
+    loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        let Ok(connection) = remote_tls::accept(socket, tls).await else {
+            continue;
+        };
+        let mut receive = Receive::default();
+        if let Ok(frame) = receive.next(&connection.channel).await {
+            assert!(matches!(
+                frame.frame,
+                infraternal_protocol::Frame::Hello { .. }
+            ));
+            return "tcp";
+        }
+    }
+}
+fn supervisor_identity(
+    ca: &Identity,
+    client: &Identity,
+    endpoint: std::net::SocketAddr,
+) -> RemoteIdentity {
+    RemoteIdentity {
+        identity: Identity {
+            certificate: client.certificate.clone(),
+            key: client.key.clone(),
+        },
+        roots: vec![ca.certificate.clone()],
+        endpoint,
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    }
+}
+#[tokio::test]
+#[ignore = "supervisor establishment diagnostic; run alone without builds or browsers"]
+async fn supervisor_300ms_quic_and_blocked_udp_fallback() {
+    use crate::transport_diagnostics::{tcp_proxy_at, udp_proxy};
+    let ca = root();
+    let server_identity = leaf(&ca, true);
+    let client_identity = leaf(&ca, false);
+    let quic = quinn::Endpoint::server(
+        remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+            .unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let tcp = tokio::net::TcpListener::bind(quic.local_addr().unwrap())
+        .await
+        .unwrap();
+    let tls =
+        remote_tls::server_config(&server_identity, std::slice::from_ref(&ca.certificate)).unwrap();
+    let (proxy_address, mut udp) = udp_proxy(quic.local_addr().unwrap()).await;
+    let (_, proxy_tcp) = tcp_proxy_at(tcp.local_addr().unwrap(), proxy_address).await;
+    let state = StateDirectory::new();
+    for blocked_udp in [false, true] {
+        if blocked_udp {
+            udp.abort();
+            let _ = (&mut udp).await;
+        }
+        let mut timings = Vec::new();
+        for _ in 0..25 {
+            let identity = supervisor_identity(&ca, &client_identity, proxy_address);
+            let state_path = state.0.clone();
+            let started = tokio::time::Instant::now();
+            let supervisor = tokio::spawn(async move { run(&identity, Some(state_path)).await });
+            // Ignore abandoned TLS races: admission means an application Hello,
+            // rather than only successful TLS establishment.
+            let observed = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    result = native_greeting(&quic) => result,
+                    result = tcp_greeting(&tcp,&tls) => result,
+                }
+            })
+            .await;
+            timings.push(started.elapsed().as_micros());
+            supervisor.abort();
+            let _ = supervisor.await;
+            assert_eq!(observed.unwrap(), if blocked_udp { "tcp" } else { "quic" });
+        }
+        timings.sort_unstable();
+        println!(
+            "supervisor_diagnostic rtt_ms=300 udp_blocked={blocked_udp} n=25 first_hello_p50_us={} p99_us={} machine={} load={} excludes=session_open,live_renewal",
+            timings[12],
+            timings[24],
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .unwrap()
+                .trim(),
+            std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+        );
+    }
+    proxy_tcp.abort();
+    let _ = proxy_tcp.await;
+    quic.close(0u32.into(), b"");
+}
+
+#[tokio::test]
+async fn delayed_proxy_keeps_replies_bound_to_the_original_udp_client() {
+    use tokio::net::UdpSocket;
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (address, proxy) =
+        crate::transport_diagnostics::udp_proxy(upstream.local_addr().unwrap()).await;
+    let echo = tokio::spawn(async move {
+        let mut received = Vec::new();
+        for _ in 0..2 {
+            let mut bytes = [0; 16];
+            let (count, peer) = upstream.recv_from(&mut bytes).await.unwrap();
+            received.push((bytes[..count].to_vec(), peer));
+        }
+        for (bytes, peer) in received {
+            upstream.send_to(&bytes, peer).await.unwrap();
+        }
+    });
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    a.send_to(b"first", address).await.unwrap();
+    b.send_to(b"second", address).await.unwrap();
+    let receive = async |socket: &UdpSocket| {
+        let mut bytes = [0; 16];
+        let (count, peer) = socket.recv_from(&mut bytes).await.unwrap();
+        assert_eq!(peer, address);
+        bytes[..count].to_vec()
+    };
+    let replies = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(receive(&a), receive(&b))
+    })
+    .await;
+    proxy.abort();
+    let _ = proxy.await;
+    echo.abort();
+    let _ = echo.await;
+    let replies = replies.expect("the UDP relay reassigned an earlier client's response");
+    assert_eq!(replies.0, b"first");
+    assert_eq!(replies.1, b"second");
+}
+
+#[tokio::test]
+async fn tcp_proxy_preserves_spacing_between_packets_already_in_flight() {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (address, proxy) = crate::transport_diagnostics::tcp_proxy_at(
+        upstream.local_addr().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .await;
+    let mut source = TcpStream::connect(address).await.unwrap();
+    source.set_nodelay(true).unwrap();
+    // Wait out the modeled TCP connect RTT before separating the two writes.
+    let (mut target, _) = upstream.accept().await.unwrap();
+    let sender = tokio::spawn(async move {
+        source.write_all(b"a").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        source.write_all(b"b").await.unwrap();
+    });
+    let mut byte = [0; 1];
+    let observed = tokio::time::timeout(Duration::from_secs(2), async {
+        target.read_exact(&mut byte).await.unwrap();
+        assert_eq!(&byte, b"a");
+        let first = tokio::time::Instant::now();
+        target.read_exact(&mut byte).await.unwrap();
+        assert_eq!(&byte, b"b");
+        first.elapsed()
+    })
+    .await;
+    proxy.abort();
+    let _ = proxy.await;
+    sender.abort();
+    let _ = sender.await;
+    let spacing = observed.unwrap();
+    println!("tcp_proxy_spacing_us={}", spacing.as_micros());
+    assert!(
+        spacing < Duration::from_millis(100),
+        "the relay serialized independent packet flight times"
+    );
+}
+
+#[tokio::test]
+async fn tcp_proxy_flushes_bounded_flood_before_half_close() {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (address, proxy) = crate::transport_diagnostics::tcp_proxy_at(
+        upstream.local_addr().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .await;
+    let mut source = TcpStream::connect(address).await.unwrap();
+    source.set_nodelay(true).unwrap();
+    let (mut target, _) = upstream.accept().await.unwrap();
+    let expected: Vec<u8> = (0..1_500_000)
+        .map(|index| u8::try_from(index % 251).unwrap())
+        .collect();
+    let payload = expected.clone();
+    let sender = tokio::spawn(async move {
+        source.write_all(&payload).await.unwrap();
+        source.shutdown().await.unwrap();
+    });
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut received = Vec::new();
+        target.read_to_end(&mut received).await.unwrap();
+        received
+    })
+    .await;
+    proxy.abort();
+    let _ = proxy.await;
+    sender.abort();
+    let _ = sender.await;
+    let received = received.unwrap();
+    assert_eq!(received.len(), expected.len());
+    assert!(
+        received == expected,
+        "relay flood lost, duplicated or reordered bytes"
+    );
+    println!(
+        "tcp_proxy_flood_bytes={} lost=0 duplicated=0 reordered=0",
+        received.len()
+    );
+}

@@ -214,3 +214,7 @@ async fn quic_session(
     connection.close(0u32.into(), b"");
     result
 }
+
+#[cfg(test)]
+#[path = "remote_client_tests.rs"]
+mod tests;

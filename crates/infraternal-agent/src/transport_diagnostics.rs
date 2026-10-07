@@ -5,6 +5,7 @@ use crate::{
     remote_tls::tests::{leaf, root},
 };
 use std::{
+    collections::{HashMap, VecDeque},
     io,
     net::SocketAddr,
     sync::Arc,
@@ -58,17 +59,44 @@ async fn delayed_copy(
     mut writer: impl AsyncWrite + Unpin,
 ) -> io::Result<()> {
     let mut bytes = vec![0; 16 * 1024];
+    let mut pending = VecDeque::<(tokio::time::Instant, Vec<u8>)>::new();
+    let mut eof = false;
     loop {
-        let n = reader.read(&mut bytes).await?;
-        if n == 0 {
-            return Ok(());
+        if eof && pending.is_empty() {
+            return writer.shutdown().await;
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        writer.write_all(&bytes[..n]).await?;
+        let deadline = pending
+            .front()
+            .map_or_else(tokio::time::Instant::now, |(deadline, _)| *deadline);
+        tokio::select! {
+            biased;
+            ()=tokio::time::sleep_until(deadline),if !pending.is_empty()=>{
+                let (_,payload) = pending.pop_front().unwrap();
+                // Complete each write outside select: cancelling a partial
+                // write_all on a new read would duplicate its already-sent prefix.
+                writer.write_all(&payload).await?;
+            }
+            count=reader.read(&mut bytes),if !eof && pending.len()<64=>{
+                let count = count?;
+                if count==0 { eof=true; } else {
+                    // Flight time starts when the chunk arrives, independently
+                    // of earlier chunks. A 1 MiB FIFO bounds pressure and flushes
+                    // all retained bytes before forwarding a half-close.
+                    pending.push_back((tokio::time::Instant::now()+Duration::from_millis(150),bytes[..count].to_vec()));
+                }
+            }
+        }
     }
 }
+
 async fn tcp_proxy(upstream: SocketAddr) -> (SocketAddr, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    tcp_proxy_at(upstream, "127.0.0.1:0".parse().unwrap()).await
+}
+pub(crate) async fn tcp_proxy_at(
+    upstream: SocketAddr,
+    address: SocketAddr,
+) -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind(address).await.unwrap();
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
         let mut jobs = JoinSet::new();
@@ -91,21 +119,65 @@ async fn tcp_proxy(upstream: SocketAddr) -> (SocketAddr, JoinHandle<()>) {
     });
     (address, task)
 }
-async fn udp_proxy(upstream: SocketAddr) -> (SocketAddr, JoinHandle<()>) {
+async fn delayed_datagram(
+    socket: Arc<UdpSocket>,
+    target: SocketAddr,
+    bytes: Vec<u8>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    let _permit = permit;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let _ = socket.send_to(&bytes, target).await;
+}
+async fn udp_replies(
+    peer: Arc<UdpSocket>,
+    front: Arc<UdpSocket>,
+    client: SocketAddr,
+    pending: Arc<tokio::sync::Semaphore>,
+) {
+    let mut bytes = vec![0; 65535];
+    let mut sends = JoinSet::new();
+    loop {
+        tokio::select! {
+            received=peer.recv(&mut bytes)=>{
+                let count = match received {
+                    Ok(count) => count,
+                    Err(error) if error.kind()==io::ErrorKind::ConnectionRefused => continue,
+                    Err(_) => return,
+                };
+                if let Ok(permit) = pending.clone().try_acquire_owned() {
+                    sends.spawn(delayed_datagram(front.clone(),client,bytes[..count].to_vec(),permit));
+                }
+            }
+            _=sends.join_next(),if !sends.is_empty()=>{}
+        }
+    }
+}
+pub(crate) async fn udp_proxy(upstream: SocketAddr) -> (SocketAddr, JoinHandle<()>) {
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let address = socket.local_addr().unwrap();
     let task = tokio::spawn(async move {
         let mut bytes = vec![0; 65535];
-        let mut client = None;
+        let mut peers = HashMap::<SocketAddr, Arc<UdpSocket>>::new();
+        let pending = Arc::new(tokio::sync::Semaphore::new(4096));
         let mut jobs = JoinSet::new();
         loop {
             tokio::select! {
                 received=socket.recv_from(&mut bytes)=>{
-                    let (n,from)=received.unwrap();
-                    let target=if from==upstream {client} else {client=Some(from);Some(upstream)};
-                    if let Some(target)=target {
-                        let bytes=bytes[..n].to_vec();let socket=socket.clone();
-                        jobs.spawn(async move {tokio::time::sleep(Duration::from_millis(150)).await;let _=socket.send_to(&bytes,target).await;});
+                    let (count,client)=received.unwrap();
+                    // A separate upstream socket fixes reply ownership even when
+                    // supervisors restart with a different local UDP address.
+                    if !peers.contains_key(&client) {
+                        if peers.len()>=1024 { continue; }
+                        let peer = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                        peer.connect(upstream).await.unwrap();
+                        jobs.spawn(udp_replies(peer.clone(),socket.clone(),client,pending.clone()));
+                        peers.insert(client,peer);
+                    }
+                    // Bound delayed ciphertext rather than retaining an unlimited
+                    // flood. QUIC treats exhausted relay capacity as packet loss.
+                    if let Ok(permit) = pending.clone().try_acquire_owned() {
+                        jobs.spawn(delayed_datagram(peers[&client].clone(),upstream,bytes[..count].to_vec(),permit));
                     }
                 }
                 _=jobs.join_next(),if !jobs.is_empty()=>{}
