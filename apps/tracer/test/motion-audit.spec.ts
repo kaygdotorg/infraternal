@@ -31,6 +31,7 @@ declare global {
     __motionAudit: MotionProbe;
     __faultyReadyMarks: number[];
     __faultyWorkerFrames: number[];
+    __faultyWorkerSizes: Array<{ width: number; height: number }>;
     __setMotionAuditHidden(hidden: boolean): void;
   }
 }
@@ -55,7 +56,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   if (type === "webgl2" && context) {
     const draw = context.drawArrays.bind(context);
     context.drawArrays = (...drawArgs) => {
-      postMessage({ type: "__motion-audit-frame", time: performance.now() });
+      postMessage({ type: "__motion-audit-frame", time: performance.now(), width: context.canvas.width, height: context.canvas.height });
       return draw(...drawArgs);
     };
   }
@@ -87,6 +88,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
     const stack = (): string => new Error().stack?.split("\n").slice(2, 5).join(" | ") ?? "";
     const faultyReadyMarks: number[] = [];
     const faultyWorkerFrames: number[] = [];
+    const faultyWorkerSizes: Array<{ width: number; height: number }> = [];
     let motionAuditHidden = false;
     Object.defineProperty(document, "hidden", { configurable: true, get: () => motionAuditHidden });
     const NativeWorker = window.Worker;
@@ -94,8 +96,13 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
       construct(target, args) {
         const worker = Reflect.construct(target, args) as Worker;
         if (String(args[0]).includes("faulty-terminal.worker.js")) {
-          worker.addEventListener("message", (event: MessageEvent<{ type?: string; time?: number }>) => {
-            if (event.data.type === "__motion-audit-frame" && typeof event.data.time === "number") faultyWorkerFrames.push(event.data.time);
+          worker.addEventListener("message", (event: MessageEvent<{ type?: string; time?: number; width?: number; height?: number }>) => {
+            if (event.data.type === "__motion-audit-frame" && typeof event.data.time === "number") {
+              faultyWorkerFrames.push(event.data.time);
+              if (typeof event.data.width === "number" && typeof event.data.height === "number") {
+                faultyWorkerSizes.push({ width: event.data.width, height: event.data.height });
+              }
+            }
           });
         }
         return worker;
@@ -238,6 +245,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
     Object.defineProperty(window, "__motionAudit", { value: probe, configurable: false });
     Object.defineProperty(window, "__faultyReadyMarks", { value: faultyReadyMarks, configurable: false });
     Object.defineProperty(window, "__faultyWorkerFrames", { value: faultyWorkerFrames, configurable: false });
+    Object.defineProperty(window, "__faultyWorkerSizes", { value: faultyWorkerSizes, configurable: false });
     Object.defineProperty(window, "__setMotionAuditHidden", {
       value: (hidden: boolean) => {
         motionAuditHidden = hidden;
@@ -287,6 +295,19 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   expect(authIdle.shaderFrames).toBeGreaterThanOrEqual(20);
   expect(authIdle.shaderFrames).toBeLessThanOrEqual(35);
   expect(authIdle.shaderGaps.every((gap) => gap >= 30)).toBe(true);
+  const shaderSurface = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("#faulty-field")!;
+    const size = window.__faultyWorkerSizes.at(-1)!;
+    return {
+      cssWidth: canvas.clientWidth,
+      cssHeight: canvas.clientHeight,
+      dpr: devicePixelRatio,
+      shaderWidth: size.width,
+      shaderHeight: size.height,
+    };
+  });
+  expect(shaderSurface.shaderWidth).toBe(Math.round(shaderSurface.cssWidth * shaderSurface.dpr * 0.5));
+  expect(shaderSurface.shaderHeight).toBe(Math.round(shaderSurface.cssHeight * shaderSurface.dpr * 0.5));
   const hiddenPause = await page.evaluate(async () => {
     window.__setMotionAuditHidden(true);
     await new Promise((resolve) => window.setTimeout(resolve, 180));
@@ -310,7 +331,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
     return { paused, resumed: window.__faultyWorkerFrames.length > frames };
   });
   expect(offscreenPause).toEqual({ paused: true, resumed: true });
-  console.log(`MOTION_AUDIT auth-visible-loop ${JSON.stringify({ ...authIdle, hiddenPause, offscreenPause })}`);
+  console.log(`MOTION_AUDIT auth-visible-loop ${JSON.stringify({ ...authIdle, shaderSurface, hiddenPause, offscreenPause })}`);
   const authStart = await styles(page, ["#setup-card", ".auth-pane", "#setup-viewport", ".auth-step-bar", "#setup-token", ".auth-dot", "#setup-next"]);
   expect(authStart.find((style) => style.selector === "#setup-card")?.animationDuration).toBe("0.24s");
   expect(authStart.find((style) => style.selector === "#setup-token")?.transitionDuration).toBe("0s");
