@@ -88,6 +88,7 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
         root: root.getPropertyValue("--overlay").trim(),
         rootLine: root.getPropertyValue("--overlay-line").trim(),
         rootShadow: root.getPropertyValue("--shadow").trim(),
+        rootLargeShadow: root.getPropertyValue("--overlay-shadow-large").trim(),
         stage: getComputedStyle(stage).getPropertyValue("--overlay").trim(),
         stageLine: getComputedStyle(stage).getPropertyValue("--overlay-line").trim(),
         stageShadow: getComputedStyle(stage).getPropertyValue("--shadow").trim(),
@@ -122,7 +123,7 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     });
     expect(cssChannels(sidebarMaterial.background)).toEqual(cssChannels(material.root));
     expect(cssChannels(sidebarMaterial.line)).toEqual(cssChannels(material.rootLine));
-    expect(sidebarMaterial.shadow).toBe(material.layers[0]!.shadow);
+    expect(material.rootLargeShadow).not.toBe("");
     paths.push(await saveScreenshot(page, testInfo, `${prefix}-sidebar-open`));
     await page.locator("#sidebar-toggle").click();
     await expect(page.locator("#sidebar")).toBeHidden();
@@ -134,7 +135,8 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     });
     expect(cssChannels(paletteMaterial.background)).toEqual(cssChannels(material.root));
     expect(cssChannels(paletteMaterial.line)).toEqual(cssChannels(material.rootLine));
-    expect(paletteMaterial.shadow).toBe(material.layers[0]!.shadow);
+    expect(paletteMaterial.shadow).toBe(sidebarMaterial.shadow);
+    expect(paletteMaterial.shadow).not.toBe(material.layers[0]!.shadow);
     paths.push(await saveScreenshot(page, testInfo, `${prefix}-palette-open`));
     await page.keyboard.press("Escape");
   }

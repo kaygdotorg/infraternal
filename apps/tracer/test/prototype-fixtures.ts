@@ -140,6 +140,42 @@ export const addHostFixtures: AddHostFixture[] = [
     credentialRequired: false, authentication: "accepted",
   },
   {
+    id: "o1", user: "kayg", address: "10.69.69.41", operatingSystem: "Ubuntu 24.04",
+    architecture: "aarch64", sources: ["netbird"], reachability: "ready",
+    evidence: "SSH answers on port 22.", alreadyAdded: false, rootAvailable: true,
+    credentialRequired: false, authentication: "accepted",
+  },
+  {
+    id: "o2", user: "kayg", address: "10.69.69.52", operatingSystem: "Ubuntu 24.04",
+    architecture: "aarch64", sources: ["netbird", "ssh-config"], reachability: "ready",
+    evidence: "SSH answers on port 22.", alreadyAdded: false, rootAvailable: false,
+    credentialRequired: false, authentication: "accepted",
+  },
+  {
+    id: "remoternal", user: "kayg", address: "10.69.69.60", operatingSystem: "Debian 13",
+    architecture: "x86_64", sources: ["tailscale", "known-hosts"], reachability: "ready",
+    evidence: "SSH answers on port 22.", alreadyAdded: false, rootAvailable: true,
+    credentialRequired: false, authentication: "accepted",
+  },
+  {
+    id: "db-01", user: "ops", address: "10.69.69.81", operatingSystem: "RHEL 9.4",
+    architecture: "x86_64", sources: ["ssh-config"], reachability: "ready",
+    evidence: "SSH answers on port 22.", alreadyAdded: false, rootAvailable: true,
+    credentialRequired: false, authentication: "accepted",
+  },
+  {
+    id: "web-01", user: "deploy", address: "10.69.69.82", operatingSystem: "Ubuntu 22.04",
+    architecture: "x86_64", sources: ["known-hosts"], reachability: "ready",
+    evidence: "SSH answers on port 22.", alreadyAdded: false, rootAvailable: false,
+    credentialRequired: false, authentication: "accepted",
+  },
+  {
+    id: "mon-02", user: "ops", address: "10.69.69.83", operatingSystem: "Debian 12",
+    architecture: "x86_64", sources: ["netbird", "known-hosts"], reachability: "ready",
+    evidence: "SSH answers on port 22.", alreadyAdded: false, rootAvailable: true,
+    credentialRequired: false, authentication: "accepted",
+  },
+  {
     id: "archive-01", user: "ops", address: "10.69.69.76", operatingSystem: "Debian 12",
     architecture: "x86_64", sources: ["known-hosts"], reachability: "unreachable",
     evidence: "A TCP connection to port 22 timed out; no login was attempted.",

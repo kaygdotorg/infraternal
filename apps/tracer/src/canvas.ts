@@ -17,6 +17,11 @@
  * Activation: a tap or click on an inactive window only activates it (accent hairline),
  * without focusing input, so no iPhone keyboard appears; a second tap types. The header
  * pill opens the details popover (machine, connection, session).
+ *
+ * Flows (D160): the add-host flow gets windows from this canvas (`openFlowWindow`), mounts
+ * its card in the window body, and when it succeeds turns the same window into the host's
+ * terminal window (`becomeHost`). New windows are placed by the canvas's own layout (one
+ * row, equal widths, fixed gap, so none can overlap) and revealed with its own pan spring.
  */
 import { Spring } from "../../../packages/ui/src/spring";
 import { createWindowCard, type WindowCard } from "../../../packages/ui/src/window-card";
@@ -72,8 +77,36 @@ export interface CanvasHost {
   sessions: CanvasSession[];
 }
 
+/** A canvas window handed to a flow: its card body is the flow's to fill until `becomeHost`. */
+export interface CanvasWindowHandle {
+  readonly id: string;
+  readonly card: WindowCard;
+}
+
+export interface CanvasFlowWindow extends CanvasWindowHandle {
+  /** Turns this window into the terminal window of a finished host (title, mark, popover, preview). */
+  becomeHost(host: CanvasHost): void;
+  /** Takes the window off the canvas (a cancelled flow). */
+  remove(): void;
+}
+
+export interface CanvasController {
+  dispose(): void;
+  /** Appends a window for a flow, activates it and pans to it. */
+  openFlowWindow(spec: { title: string; icon: string }): CanvasFlowWindow;
+  /** Adds a finished host's terminal window right after `after` (does not pan). Returns its handle. */
+  openHostWindow(host: CanvasHost, after: string): CanvasWindowHandle;
+  /** Makes the window the active one (accent hairline, capsule label); it does not pan. */
+  activate(id: string): void;
+  /** Pans so the window is visible; `start` puts it at the left edge, `nearest` moves minimally. */
+  reveal(id: string, align?: "start" | "nearest"): void;
+  /** Ids of every window in layout order. */
+  windowIds(): string[];
+}
+
 interface CanvasWindow {
   id: string;
+  flow?: boolean;
   host: CanvasHost;
   session: CanvasSession;
   card: WindowCard;
@@ -105,7 +138,7 @@ function previewLine(line: string): string {
 }
 
 /** Mounts the canvas into the core screen's pane area and returns its disposer. */
-export function mountCanvas(core: CoreScreen, hostName: string): { dispose(): void } {
+export function mountCanvas(core: CoreScreen, hostName: string): CanvasController {
   const stage = core.stage;
   const panes = core.panes;
   stage.dataset.canvas = "on";
@@ -233,7 +266,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): { dispose(): vo
   const updateCapsule = (window: CanvasWindow): void => {
     const hostLabel = stage.querySelector<HTMLElement>("#capsule-host");
     const sessionLabel = stage.querySelector<HTMLElement>(".capsule-session");
-    if (hostLabel) hostLabel.textContent = window.live ? hostName : `${window.host.user}@${window.host.name}`;
+    if (hostLabel) hostLabel.textContent = window.live ? hostName : `${window.host.user ? `${window.host.user}@` : ""}${window.host.name}`;
     if (sessionLabel) sessionLabel.textContent = window.session.name;
   };
   const activate = (target: CanvasWindow, reveal: boolean): void => {
@@ -246,14 +279,14 @@ export function mountCanvas(core: CoreScreen, hostName: string): { dispose(): vo
     updateCapsule(target);
     if (reveal) revealWindow(target);
   };
-  const revealWindow = (target: CanvasWindow): void => {
+  const revealWindow = (target: CanvasWindow, align: "start" | "nearest" = "nearest"): void => {
     const rect = { width: viewWidth, height: viewHeight };
     const index = windows.indexOf(target);
     const width = parseFloat(layer.style.getPropertyValue("--window-w")) || rect.width;
     const left = index * (width + GAP);
     const right = left + width;
     // Touch pages window by window, so a revealed window lands on its page position.
-    if (coarse.matches) { glideTo(-left, y); return; }
+    if (coarse.matches || align === "start") { glideTo(-left, y); return; }
     if (left + x < 0) glideTo(-left, y);
     else if (right + x > rect.width) glideTo(rect.width - right, y);
   };
@@ -269,32 +302,51 @@ export function mountCanvas(core: CoreScreen, hostName: string): { dispose(): vo
     }, source, () => { popover = undefined; });
   };
 
-  const addWindow = (host: CanvasHost, session: CanvasSession, live: boolean): CanvasWindow => {
+  const attachPreview = (entry: CanvasWindow): void => {
+    const preview = document.createElement("pre");
+    preview.className = "canvas-preview";
+    preview.setAttribute("aria-label", `Preview of ${entry.host.name}, ${entry.session.name}`);
+    preview.innerHTML = entry.session.screen.map(previewLine).join("\n");
+    entry.card.body.append(preview);
+    entry.preview = preview;
+  };
+  /** Adds a window at the end of the row, or right after `after`; the DOM order is the layout order. */
+  const addWindow = (host: CanvasHost, session: CanvasSession, live: boolean, after?: CanvasWindow, flow = false): CanvasWindow => {
     const card = createWindowCard({
       id: `${host.id}:${session.id}`,
-      title: { host: live ? hostName : host.name, user: host.user, session: session.name },
+      title: { host: live ? hostName : host.name, ...(host.user ? { user: host.user } : {}), ...(flow ? {} : { session: session.name }) },
       icon: hostIconMarkup(host.os, "ui-host-mark"),
-      status: host.status === "live" ? "live" : "connecting",
+      status: flow ? "none" : host.status === "live" ? "live" : "connecting",
     });
-    const entry: CanvasWindow = { id: `${host.id}:${session.id}`, host, session, card, live, fontSize: coarse.matches ? 13 : 14 };
-    if (live) {
-      card.body.append(core.terminalHost);
-    } else {
-      const preview = document.createElement("pre");
-      preview.className = "canvas-preview";
-      preview.setAttribute("aria-label", `Preview of ${host.name}, ${session.name}`);
-      preview.innerHTML = session.screen.map(previewLine).join("\n");
-      card.body.append(preview);
-      entry.preview = preview;
-    }
+    const entry: CanvasWindow = { id: `${host.id}:${session.id}`, host, session, card, live, fontSize: coarse.matches ? 13 : 14, ...(flow ? { flow } : {}) };
+    if (live) card.body.append(core.terminalHost);
+    else if (!flow) attachPreview(entry);
     card.pill.addEventListener("click", (event) => {
       activate(entry, false);
-      togglePopover(entry, event.detail === 0 ? "keyboard" : "pointer");
+      // A window still hosting a flow has no machine to describe yet.
+      if (!entry.flow) togglePopover(entry, event.detail === 0 ? "keyboard" : "pointer");
     }, { signal });
-    layer.append(card.root);
-    windows.push(entry);
+    const index = after ? windows.indexOf(after) + 1 : windows.length;
+    layer.insertBefore(card.root, windows[index]?.card.root ?? null);
+    windows.splice(index, 0, entry);
     return entry;
   };
+  const enter = (entry: CanvasWindow, delay = 0): void => {
+    if (reducedMotion.matches) return;
+    // No fill: nothing stays transformed at rest, so text keeps rendering crisp.
+    entry.card.root.animate([{ opacity: 0, transform: "translateY(10px) scale(0.985)" }, { opacity: 1, transform: "none" }],
+      { duration: 280, delay, easing: "cubic-bezier(0.23, 1, 0.32, 1)", fill: "backwards" });
+  };
+  let serial = 0;
+  const hostFromFixture = (id: string, name: string): CanvasHost => ({
+    id, user: "", name, os: "unknown", osName: "", version: "", architecture: "", model: "", cpu: "", cores: 0, memory: 0, disk: 0,
+    uptime: "", load: "", kernel: "", init: "", virtualization: "", shell: "", locale: "", ips: [], engines: [], mode: "rootless", status: "live",
+    connection: { route: "", transport: "", mesh: "", certificate: "", roundTrip: "", bytes: "", reconnects: 0 }, sessions: [],
+  });
+  const shellSession = (host: CanvasHost): CanvasSession => ({
+    id: "shell", name: "SSH shell", lastOutput: "", age: "just now", viewers: 1, size: "", started: "Just now", scrollback: "",
+    screen: [[host.osName, host.version, host.architecture].filter(Boolean).join(" · "), "", `${host.user}@${host.name}:~$ `],
+  });
 
   // The live window first, so the terminal is never without a frame.
   const liveHost: CanvasHost = {
@@ -319,7 +371,9 @@ export function mountCanvas(core: CoreScreen, hostName: string): { dispose(): vo
       Object.assign(liveHost, { ...first!, id: "live", name: hostName, sessions: [] });
       liveWindow.card.setIcon(hostIconMarkup(liveHost.os, "ui-host-mark"));
       liveWindow.card.setTitle({ host: hostName, user: liveHost.user, session: liveSession.name });
-      for (const host of [first!, ...rest]) addWindow(host, host.sessions[0]!, false);
+      // Inserted after the live window in order, ahead of any flow window already open.
+      let anchor = liveWindow;
+      for (const host of [first!, ...rest]) anchor = addWindow(host, host.sessions[0]!, false, anchor);
       layout();
     })
     .catch(() => undefined);
@@ -364,7 +418,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): { dispose(): vo
   // ---- trackpad and wheel -------------------------------------------------------------
   const inScrollableBody = (target: EventTarget | null): HTMLElement | undefined => {
     const element = target as Element | null;
-    return element?.closest?.<HTMLElement>(".terminal-host, .canvas-preview") ?? undefined;
+    return element?.closest?.<HTMLElement>(".terminal-host, .canvas-preview, [data-canvas-scroll]") ?? undefined;
   };
   viewport.addEventListener("wheel", (event) => {
     if (event.ctrlKey) return; // browser zoom / trackpad pinch stays with the browser
@@ -556,7 +610,61 @@ export function mountCanvas(core: CoreScreen, hostName: string): { dispose(): vo
     },
   };
 
-  return {
+  const byId = (id: string): CanvasWindow | undefined => windows.find((entry) => entry.id === id);
+  const flowWindow = (entry: CanvasWindow): CanvasFlowWindow => ({
+    id: entry.id,
+    card: entry.card,
+    becomeHost(host) {
+      const session = host.sessions[0] ?? shellSession(host);
+      entry.flow = false;
+      entry.host = host;
+      entry.session = session;
+      entry.card.setIcon(hostIconMarkup(host.os, "ui-host-mark"));
+      entry.card.setTitle({ host: host.name, user: host.user, session: session.name });
+      entry.card.setStatus(host.status === "live" ? "live" : "connecting");
+      entry.card.root.dataset.windowId = entry.id;
+      attachPreview(entry);
+      if (active === entry) updateCapsule(entry);
+    },
+    remove() {
+      const index = windows.indexOf(entry);
+      if (index < 0) return;
+      windows.splice(index, 1);
+      if (popover?.windowId === entry.id) popover.close("keyboard");
+      if (active === entry) { active = undefined; const next = windows[Math.max(0, index - 1)]; if (next) activate(next, false); }
+      entry.card.dispose();
+      layout();
+    },
+  });
+  const controller: CanvasController = {
+    openFlowWindow(spec) {
+      const host = hostFromFixture(`new-${++serial}`, spec.title);
+      const entry = addWindow(host, { ...shellSession(host), id: "flow", name: "Add hosts" }, false, undefined, true);
+      entry.card.setIcon(spec.icon);
+      layout();
+      activate(entry, false);
+      updateCapsule(entry);
+      enter(entry);
+      revealWindow(entry, "start");
+      return flowWindow(entry);
+    },
+    openHostWindow(host, after) {
+      const anchor = byId(after);
+      const session = host.sessions[0] ?? shellSession(host);
+      const entry = addWindow(host, session, false, anchor);
+      layout();
+      enter(entry, 120);
+      return { id: entry.id, card: entry.card };
+    },
+    activate(id) {
+      const target = byId(id);
+      if (target) activate(target, false);
+    },
+    reveal(id, align = "nearest") {
+      const target = byId(id);
+      if (target) revealWindow(target, align);
+    },
+    windowIds: () => windows.map((entry) => entry.id),
     dispose() {
       events.abort();
       resizeObserver.disconnect();
@@ -567,4 +675,5 @@ export function mountCanvas(core: CoreScreen, hostName: string): { dispose(): vo
       delete (window as unknown as { __tracerCanvas?: unknown }).__tracerCanvas;
     },
   };
+  return controller;
 }

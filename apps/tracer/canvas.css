@@ -3,7 +3,9 @@
 /* The canvas replaces the single pane grid; the viewport clips, the layer pans. */
 .terminal-screen[data-canvas="on"] .panes { display: block; overflow: visible; }
 .canvas-viewport {
-  position: absolute; inset: 0; overflow: hidden;
+  /* `clip`, not `hidden`: a hidden box can still be scrolled by focus or scrollIntoView, which
+     would shift every window under the canvas's own transform. Panning is the transform only. */
+  position: absolute; inset: 0; overflow: hidden; overflow: clip;
   /* Windows cast shadows past the viewport edge; give them room without clipping. */
   margin: 0 calc(var(--gutter) * -1) -16px; padding: 0 var(--gutter) 16px;
   touch-action: none;
@@ -69,3 +71,12 @@
   .terminal-screen[data-canvas="on"] .test-double-badge { bottom: calc(84px + env(safe-area-inset-bottom)); }
 }
 .terminal-screen:has(.canvas-popover) .test-double-badge { opacity: 0; }
+
+/* The canvas is the overview, so the top bar keeps only the session capsule and "+" even on
+   a phone; the other sessions' tab strip stays hidden there. */
+@media (max-width: 720px) {
+  .terminal-screen[data-canvas="on"] .top { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .terminal-screen[data-canvas="on"] .tabs { display: flex; }
+  .terminal-screen[data-canvas="on"] .tabs .tab:not(.tab-add) { display: none; }
+}
+@media (pointer: coarse) { .terminal-screen[data-canvas="on"] .tab-add { width: 44px; } }

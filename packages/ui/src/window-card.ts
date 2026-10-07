@@ -17,7 +17,8 @@
  *   card.dispose()
  */
 
-export type WindowStatus = "live" | "connecting" | "offline";
+/** `none` hides the dot: a window that is not a connection yet (a flow in progress). */
+export type WindowStatus = "live" | "connecting" | "offline" | "none";
 
 export interface WindowTitle {
   host: string;
@@ -53,7 +54,7 @@ export interface WindowCard {
   dispose(): void;
 }
 
-const STATUS_LABEL: Record<WindowStatus, string> = { live: "connected", connecting: "reconnecting", offline: "offline" };
+const STATUS_LABEL: Record<WindowStatus, string> = { live: "connected", connecting: "reconnecting", offline: "offline", none: "" };
 
 /** Builds a window card; nothing is attached to the document until the caller mounts `root`. */
 export function createWindowCard(options: WindowCardOptions): WindowCard {
@@ -100,7 +101,7 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
   const label = (): void => {
     const name = `${title.user ? `${title.user}@` : ""}${title.host}${title.session ? `, ${title.session}` : ""}`;
     root.setAttribute("aria-label", options.label ?? name);
-    pill.setAttribute("aria-label", `${name}, ${STATUS_LABEL[status]}. Show details`);
+    pill.setAttribute("aria-label", status === "none" ? name : `${name}, ${STATUS_LABEL[status]}. Show details`);
   };
   const setTitle = (next: WindowTitle): void => {
     title = next;

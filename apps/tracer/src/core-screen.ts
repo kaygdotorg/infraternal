@@ -14,6 +14,7 @@ export interface CoreScreenOptions {
   hostName: string;
   mockMode: boolean;
   probeMode: boolean;
+  addHostPrototype?: boolean;
   onRecovery?: () => void;
   onCancelRecovery?: () => Promise<void>;
 }
@@ -62,23 +63,23 @@ const SCREEN = `
       </section>
     </div>
     <header class="top" aria-label="Terminal controls">
-      <button class="icon-btn" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false">${SVG.menu}</button>
-      <button class="capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
+      <button class="icon-btn ui-icon-button ui-overlay-surface" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false">${SVG.menu}</button>
+      <button class="capsule ui-pill ui-overlay-surface" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
         <span class="capsule-session">SSH shell</span><span class="capsule-rtt" id="rtt" aria-label="Round trip">··</span>
         <kbd class="capsule-kbd">⌘K</kbd>
       </button>
       <nav class="tabs" aria-label="Other sessions">
-        <button class="tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
+        <button class="tab tab-add ui-pill ui-overlay-surface" type="button" disabled aria-label="New session">${SVG.plus}</button>
       </nav>
     </header>
-    <aside class="sidebar" id="sidebar" aria-label="Hosts" hidden>
+    <aside class="sidebar ui-overlay-surface" id="sidebar" data-overlay-size="large" aria-label="Hosts" hidden>
       <div class="sidebar-head"><span class="sidebar-title">Hosts</span></div>
       <div id="tree"></div>
     </aside>
     <div class="palette-scrim" id="scrim" hidden></div>
-    <section class="palette" id="palette" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
+    <section class="palette ui-overlay-surface" id="palette" data-overlay-size="large" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
       <div class="palette-input">${SVG.search}<input id="palette-input" role="searchbox" aria-controls="palette-results" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
@@ -90,7 +91,7 @@ const SCREEN = `
     <p class="pane-card recovery-toast" id="recovery-toast" role="status" hidden></p>` : ""}
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
-      <div id="keytray" class="keytray" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
+      <div id="keytray" class="keytray ui-overlay-surface ui-pill" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
         <button id="key-escape" type="button" tabindex="-1" data-key="esc" aria-label="Escape" class="key-word">esc</button>
         <button id="key-tab" type="button" tabindex="-1" data-key="tab" aria-label="Tab">${SVG.tab}</button>
         <button id="key-control" type="button" tabindex="-1" data-mod="ctrl" data-mod-state="off" aria-pressed="false" aria-label="Control">${SVG.ctrl}</button>
@@ -109,7 +110,7 @@ const SCREEN = `
     </aside>
     <p id="connection-status" class="connection-status" role="status">Starting terminal…</p>
     <span id="test-double-badge" class="test-double-badge" hidden>TEST DOUBLE</span>
-    <aside id="probe-panel" class="probe-panel" aria-label="Terminal latency probe" hidden>
+    <aside id="probe-panel" class="probe-panel ui-overlay-surface" data-overlay-size="large" aria-label="Terminal latency probe" hidden>
       <h2>Latency probe</h2><label for="probe-count">Synthetic keys</label>
       <input id="probe-count" type="number" min="1" max="5000" inputmode="numeric" />
       <div class="probe-actions"><button id="probe-run" type="button">Run probe</button><button id="probe-drop" type="button">Drop socket</button><button id="probe-copy" type="button">Copy results</button></div>
@@ -239,6 +240,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     })),
     { group: "Background", glyph: "▦", label: "Mesh from the theme", hint: "one still · no idle work", action: "bg:mesh" },
     { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
+    ...(options.addHostPrototype ? [
+      { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
+    ] : []),
     ...(recoveryUiEnabled() && options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
   ];
   const paletteSearchText = new Map(entries.map((entry) => [
@@ -316,7 +320,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       const result = document.createElement("button");
       result.id = paletteOptionIds.get(entry)!;
       result.type = "button";
-      result.className = "result";
+      result.className = "result ui-button ui-list-row";
       result.setAttribute("role", "option");
       result.setAttribute("aria-selected", String(index === selected));
       result.dataset.action = entry.action ?? "";
@@ -632,6 +636,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       applyLook(source === "keyboard");
     } else if (kind === "session" || kind === "host") {
       terminalHost.focus({ preventScroll: true });
+    } else if (kind === "proto" && options.addHostPrototype) {
+      window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action, source } }));
     }
   }
 

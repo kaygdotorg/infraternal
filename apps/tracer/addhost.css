@@ -1,0 +1,326 @@
+/**
+ * The add-host wizard (mock only). It lives inside the canvas's one window card (packages/ui
+ * window-card), the same card and header a terminal uses, with its content centred both ways.
+ * This file styles the wizard only: the window, its header pill and the canvas are not here.
+ * Vocabulary is borrowed exactly: the sign-in card's pill primary and text
+ * secondary buttons, 12 px field and weights (body 450, names 500, titles 600,
+ * secondary 400 in --fg-2); the palette's 8 px rows. Type follows one scale per
+ * platform (docs/design/TASTE.md): desktop 13 / 12 / 11 px, touch 16 / 15 / 13 px.
+ * Icons are 16 px on desktop and 18 px on touch with a 1.5 stroke. Rings appear
+ * only during Tab navigation (packages/ui focus-ring.ts). Nothing here keeps a
+ * transform or will-change at rest, so text renders like the sign-in card's.
+ */
+
+/* ── Scale: the sign-in card's computed values, role for role (TASTE.md) ──
+   title 21/26.25 600 -0.03em · lede 14/21.7 450 -0.01em fg-2 · label 13/20.15 450 fg-2
+   field 16 450 +0.01em, 48 px, radius 12, padding 0 14 · primary 13.5 600 -0.01em,
+   42 px, padding 0 20 · text button 13.5 500 fg-2 · card padding 36 32 28, radius 22.
+   Rhythm: title +10, lede +24, label +8, footer +26. */
+.terminal-screen {
+  --ah-icon: 16px;
+  --ah-check: 18px;
+  --ah-row-pad: 8px;
+  --ah-control: 42px;
+  --ah-field-h: 48px;
+  --ah-field: rgb(from var(--fg) r g b / 0.05);
+  --ah-field-focus: rgb(from var(--fg) r g b / 0.09);
+  --ah-ring: color-mix(in oklab, var(--fg) 55%, transparent);
+}
+@media (pointer: coarse) {
+  .terminal-screen { --ah-icon: 18px; --ah-check: 22px; --ah-row-pad: 10px; --ah-control: 44px; }
+}
+.ah-icon, .ah-status-icon, .ah-field-icon, .ah-root-icon, .ah-os-mark.is-line {
+  width: var(--ah-icon);
+  height: var(--ah-icon);
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ── Window: the future terminal, dimmed while the flow floats over it ──── */
+.ah { position: relative; --ah-fg2: color-mix(in oklab, var(--fg-2) 80%, var(--fg)); }
+.ah-stage {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: grid;
+  /* A definite row, so the card's max-height: 100% holds and its footer stays on screen. */
+  grid-template-rows: minmax(0, 1fr);
+  padding: 24px;
+  overflow: hidden;
+}
+.ah-scrim { position: absolute; inset: 0; background: rgb(from var(--bg) r g b / 0.5); }
+
+/* ── The floating card: elevated, solid, never glass ──────────────────── */
+.ah-float {
+  position: relative;
+  display: flex;
+  width: min(540px, 100%);
+  max-height: 100%;
+  flex-direction: column;
+  margin: auto;
+  border-radius: 22px;
+  background: var(--overlay-solid);
+  box-shadow: var(--elevation);
+  color: var(--fg);
+  font: 450 14px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  letter-spacing: -0.01em;
+  --ui-tick-border-color: color-mix(in oklab, var(--fg) 34%, transparent);
+  --ui-tick-border-width: 1.5px;
+  /* The sign-in card's secondary text sits closer to its primary (#a1a1aa on #f4f4f5)
+     than the theme's --fg-2 does; the window computes the lift, the card uses it. */
+  --fg-2: var(--ah-fg2);
+}
+.ah-scroll { touch-action: pan-y; min-height: 0; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; padding: 36px 32px 0; scrollbar-width: thin; }
+.ah-pages { display: grid; }
+.ah-page { min-width: 0; }
+.ah-close {
+  position: absolute;
+  z-index: 2;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, transform 120ms var(--ease-out);
+}
+.ah-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.ah-close::before { content: ""; position: absolute; inset: -8px; }
+@media (hover: hover) and (pointer: fine) { .ah-close:hover { background: var(--hover); color: var(--fg); } }
+.ah-close:active { transform: scale(0.94); }
+@media (max-width: 600px) {
+  .ah-stage { padding: 8px; }
+  .ah-float { width: 100%; border-radius: 20px; }
+  .ah-scroll { padding: 28px 22px 0; }
+}
+@media (pointer: coarse) { .ah-close { top: 8px; right: 8px; width: 44px; height: 44px; } .ah-close::before { inset: 0; } }
+
+/* ── Type (sign-in roles) ─────────────────────────────────────────────── */
+.ah-hero {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  margin-bottom: 20px;
+  border-radius: 10px;
+  background: rgb(from var(--fg) r g b / 0.06);
+  color: var(--fg-2);
+}
+.ah-hero .ah-icon { width: 18px; height: 18px; }
+.ah-hero[data-tone="danger"] { background: rgb(from var(--danger) r g b / 0.13); color: var(--danger); }
+.ah-title { margin: 0 40px 10px 0; font-size: 21px; font-weight: 600; line-height: 1.25; letter-spacing: -0.03em; text-wrap: balance; }
+.ah-lede { margin: 0 0 24px; color: var(--fg-2); text-wrap: pretty; }
+.ah-text { margin: -12px 0 18px; color: var(--fg-2); text-wrap: pretty; }
+.ah-quote { margin: 0 0 6px; font-weight: 500; }
+.ah-note { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; color: var(--fg-2); font-size: 13px; }
+.ah-note .ah-icon { color: color-mix(in oklab, var(--danger) 70%, var(--fg-2)); }
+@media (max-width: 480px) { .ah-title { font-size: 23px; } }
+
+/* ── Field: the shared chip field, at the sign-in field's metrics ─────── */
+.ah-field { position: relative; --ui-chip-field-inset: calc(14px + var(--ah-icon) + 10px); }
+.ah-field-icon { position: absolute; z-index: 1; top: 16px; left: 14px; color: var(--fg-3); pointer-events: none; }
+.ah-secret {
+  display: block;
+  width: 100%;
+  min-height: 96px;
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  outline: none;
+  background: var(--ah-field);
+  color: var(--fg);
+  font: 450 14px/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  resize: vertical;
+}
+.ah-secret::placeholder { color: var(--fg-3); opacity: 1; }
+.ah-secret:focus { border-color: rgb(from var(--fg) r g b / 0.28); background: var(--ah-field-focus); }
+/* The revealed field opens with the drawer curve; nothing below snaps. */
+.ah-reveal { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 340ms var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1)), opacity 220ms ease; }
+.ah-reveal[data-open="true"] { grid-template-rows: 1fr; opacity: 1; }
+.ah-reveal-in { min-height: 0; overflow: hidden; }
+
+/* ── List: plain rows, selection only in the checkbox ─────────────────────── */
+.ah-list { display: grid; margin: 14px -10px 0; container-type: inline-size; }
+.ah-row {
+  display: grid;
+  grid-template-columns: var(--ah-check) var(--ah-icon) minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
+  padding: var(--ah-row-pad) 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+@media (hover: hover) and (pointer: fine) { .ah-row:not(.is-added):hover { background: var(--hover); } }
+.ah-row.is-added { cursor: default; }
+.ah-row.is-added :is(.ah-name, .ah-meta, .ah-os-mark) { color: var(--fg-3); }
+.ah-check { display: grid; width: var(--ah-check); height: var(--ah-check); place-items: center; }
+.ah-check .tick, .ah-consent .tick { width: var(--ah-check); height: var(--ah-check); border-radius: 5px; color: var(--bg); }
+.ah-row.is-added .tick { opacity: 0.4; }
+.ah-os-mark { width: var(--ah-icon); height: var(--ah-icon); flex: none; fill: currentColor; color: var(--fg-2); }
+.ah-main { display: grid; min-width: 0; }
+.ah-name { overflow: hidden; color: var(--fg); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.ah-candidate .ah-name { font-weight: 450; }
+.ah-manual-target { font-weight: 500; }
+.ah-meta { display: flex; min-width: 0; align-items: center; gap: 10px; overflow: hidden; color: var(--fg-2); font-size: 13px; line-height: 1.55; white-space: nowrap; }
+.ah-meta > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.ah-srcs { display: inline-flex; flex: none; gap: 6px; }
+.ah-src { display: inline-grid; color: var(--fg-3); }
+.ah-src .ui-source-icon { width: 13px; height: 13px; stroke-width: 1.5; }
+.ah-status { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-2); font-size: 13px; white-space: nowrap; }
+.ah-status-icon { width: 14px; height: 14px; color: var(--fg-3); }
+.ah-status[data-tone="ok"] .ah-status-icon { color: var(--ok); }
+.ah-status[data-tone="warn"] .ah-status-icon { color: color-mix(in oklab, var(--danger) 55%, var(--ok)); }
+.ah-status[data-tone="off"] .ah-status-icon { color: var(--danger); }
+.ah-status[data-tone="none"] { color: var(--fg-3); }
+@container (max-width: 420px) {
+  .ah-status > span { display: none; }
+}
+.ah-none { margin: 12px 10px 0; color: var(--fg-2); }
+
+/* ── Choices ──────────────────────────────────────────────────────────────── */
+.ah-options { display: grid; gap: 4px; margin: 0 -10px; }
+.ah-option { position: relative; display: grid; grid-template-columns: var(--ah-check) minmax(0, 1fr); align-items: start; column-gap: 12px; padding: 10px; border-radius: 12px; cursor: pointer; transition: background-color 200ms ease; }
+.ah-option:has(input:checked) { background: rgb(from var(--fg) r g b / 0.05); }
+@media (hover: hover) and (pointer: fine) { .ah-option:hover { background: color-mix(in oklab, var(--fg) 4%, transparent); } }
+.ah-option input { position: absolute; opacity: 0; pointer-events: none; }
+.ah-radio { width: var(--ah-check); height: var(--ah-check); margin-top: 2px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--ui-tick-border-color); transition: box-shadow 260ms cubic-bezier(0.34, 1.4, 0.64, 1); }
+.ah-option input:checked + .ah-radio { box-shadow: inset 0 0 0 5px var(--fg); }
+.ah-option-text { display: grid; gap: 2px; font-weight: 500; }
+.ah-option-hint { color: var(--fg-2); font-size: 13px; font-weight: 450; }
+.ah-consent { display: flex; align-items: center; gap: 10px; min-height: 44px; margin-top: 12px; color: var(--fg-2); cursor: pointer; }
+
+/* ── Progress: one compact row per host ─────────────────────────────── */
+.ah-jobs { display: grid; gap: 2px; margin: 0 -10px; padding: 0; list-style: none; }
+.ah-job {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--ah-icon) minmax(0, 1fr) auto auto;
+  align-items: center;
+  column-gap: 12px;
+  padding: 8px 10px 10px;
+}
+.ah-job .ah-meta { transition: color 160ms ease; }
+.ah-job[data-state="failed"] .ah-meta { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
+.ah-job[data-state="pending"] :is(.ah-name, .ah-os-mark) { color: var(--fg-3); }
+.ah-bar { position: absolute; right: 10px; bottom: 3px; left: calc(10px + var(--ah-icon) + 12px); height: 2px; overflow: hidden; border-radius: 1px; background: var(--line); }
+.ah-bar > span { display: block; height: 100%; background: var(--fg-2); transform: scaleX(0); transform-origin: left; transition: transform 420ms cubic-bezier(0.23, 1, 0.32, 1), background-color 200ms ease; }
+.ah-job[data-state="done"] .ah-bar > span { background: var(--ok); }
+.ah-job[data-state="failed"] .ah-bar > span { background: var(--danger); }
+.ah-mark { --ui-step-status-size: var(--ah-icon); --ui-spinner-size: 14px; }
+.ah-icon-button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-2); cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms var(--ease-out); }
+.ah-icon-button .ah-icon { width: 16px; height: 16px; }
+.ah-icon-button[hidden] { display: none; }
+@media (hover: hover) and (pointer: fine) { .ah-icon-button:hover { background: var(--hover); color: var(--fg); } }
+.ah-icon-button:active { transform: scale(0.94); }
+@media (pointer: coarse) { .ah-icon-button { width: 44px; height: 44px; } }
+
+/* ── Details ──────────────────────────────────────────────────────────────── */
+.ah-details { margin-top: 4px; }
+.ah-details summary { display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; color: var(--fg-2); cursor: pointer; list-style: none; }
+.ah-details summary::-webkit-details-marker { display: none; }
+.ah-details summary .ah-icon { width: 14px; height: 14px; transition: transform 180ms var(--ease-out); }
+.ah-details[open] summary .ah-icon { transform: rotate(90deg); }
+.ah-details pre { margin: 8px 0 0; padding: 12px 14px; border-radius: 10px; background: var(--ah-field); color: var(--fg-2); font: 450 13px/1.6 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ── Actions (the sign-in card's pill and text buttons) ───────────────────── */
+/* Actions sit in the card's own footer, pinned below its scrolling body. */
+.ah-foot { display: flex; flex: none; align-items: center; gap: 12px; padding: 26px 32px 28px; }
+.ah-foot[hidden] { display: none; }
+.ah-float.is-overflowing .ah-foot { padding-top: 18px; box-shadow: 0 -1px 0 var(--line); }
+@media (max-width: 600px) { .ah-foot { padding: 22px 22px 22px; } }
+.ah-count { color: var(--fg-2); font-size: 13px; }
+.ah-primary {
+  display: inline-flex;
+  min-width: 140px;
+  height: var(--ah-control);
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-left: auto;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--fg);
+  color: var(--bg);
+  font: 600 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: transform 140ms var(--ease-out), background-color 160ms ease;
+}
+.ah-primary .ah-icon { width: 18px; height: 18px; }
+.ah-primary:active:not(:disabled) { transform: scale(0.97); }
+/* Solid, not translucent: a disabled button over scrolled content must not show it through. */
+.ah-primary:disabled { background: color-mix(in oklab, var(--fg) 30%, var(--bg)); color: color-mix(in oklab, var(--bg) 85%, var(--fg)); cursor: default; }
+.ah-secondary {
+  height: var(--ah-control);
+  margin-left: -8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--fg-2);
+  font: 500 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  cursor: pointer;
+  transition: color 120ms ease, transform 140ms var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) { .ah-secondary:hover { color: var(--fg); } }
+.ah-secondary:active { transform: scale(0.97); }
+@media (max-width: 480px) {
+  .ah-foot:has(.ah-secondary) { flex-direction: column-reverse; align-items: stretch; }
+  .ah-foot:has(.ah-secondary) :is(.ah-primary, .ah-secondary) { width: 100%; margin: 0; }
+}
+
+/* ── Focus: rings only during Tab navigation ──────────────────────────────── */
+.ah :focus, .ah-float :focus, .ah-sidebar-add:focus, .ah-root-pill:focus { outline: none; }
+.ah .check input:focus-visible + .tick { outline: none; }
+:root[data-focus-ring="on"] .ah :is(button, summary, .ui-chip-text, .ah-secret):focus-visible,
+:root[data-focus-ring="on"] :is(.ah-sidebar-add, .ah-root-pill):focus-visible { outline: 2px solid var(--ah-ring); outline-offset: 2px; }
+:root[data-focus-ring="on"] .ah .check input:focus-visible + .tick,
+:root[data-focus-ring="on"] .ah-option input:focus-visible + .ah-radio { outline: 2px solid var(--ah-ring); outline-offset: 2px; }
+
+/* ── Sidebar entry, result header ─────────────────────────────────────────── */
+.ah-sidebar-add {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 44px;
+  margin-top: 4px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-sm, 8px);
+  background: none;
+  color: var(--fg-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 140ms var(--ease-out);
+}
+.ah-sidebar-add .ah-icon { width: 16px; height: 16px; }
+@media (hover: hover) and (pointer: fine) { .ah-sidebar-add:hover { background: var(--hover); color: var(--fg); } }
+.ah-sidebar-add:active { transform: scale(0.98); }
+/* The root offer is a second window pill: the shared pill supplies size, hairline and type. */
+.ah-root-pill { gap: 6px; padding: 0 10px 0 8px; color: var(--fg-2); }
+@media (max-width: 480px) { .ah-root-pill { width: var(--ui-control-h); justify-content: center; padding: 0; } .ah-root-pill > span { display: none; } }
+.ah-root-pill .ah-root-icon { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ah-root-pill .ui-spinner { --ui-spinner-size: 12px; }
+.ah-root-pill:disabled { cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ah * { transition-duration: 0ms !important; }
+}
+
+/* A failed host shows its reason and a retry button; the danger cross would read as "dismiss". */
+.ah-job[data-state="failed"] .ah-mark { display: none; }

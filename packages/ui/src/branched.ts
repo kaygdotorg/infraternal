@@ -11,6 +11,8 @@ export interface BranchLeaf {
 export interface BranchSection {
   id: string;
   label: string;
+  /** Optional single-colour detected-platform mark (for example, a Simple Icons path). */
+  icon?: { path: string; viewBox?: string };
   meta?: string;
   live?: boolean;
   open?: boolean;
@@ -19,7 +21,8 @@ export interface BranchSection {
 }
 
 export interface BranchedMenu {
-  select(id: string, instant?: boolean): void;
+  /** `notify` is false only when synchronizing a model update back into the tree. */
+  select(id: string, instant?: boolean, notify?: boolean): void;
   dispose(): void;
 }
 
@@ -42,7 +45,7 @@ function makeSection(section: BranchSection): HTMLElement {
   root.setAttribute("aria-expanded", String(open));
   root.toggleAttribute("data-open", open);
 
-  const head = el("button", "bm-head");
+  const head = el("button", "bm-head ui-list-row");
   head.type = "button";
   head.disabled = section.disabled || section.leaves.length === 0;
   head.setAttribute("aria-label", `${section.label}${section.meta ? `, ${section.meta}` : ""}`);
@@ -50,6 +53,17 @@ function makeSection(section: BranchSection): HTMLElement {
     const dot = el("span", "dot live");
     dot.setAttribute("aria-hidden", "true");
     head.append(dot);
+  }
+  if (section.icon) {
+    const icon = el("span", "bm-icon");
+    icon.setAttribute("aria-hidden", "true");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", section.icon.viewBox ?? "0 0 24 24");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", section.icon.path);
+    svg.append(path);
+    icon.append(svg);
+    head.append(icon);
   }
   const name = el("span", "bm-name");
   name.textContent = section.label;
@@ -74,7 +88,7 @@ function makeSection(section: BranchSection): HTMLElement {
   for (const leaf of section.leaves) {
     const row = el("li", "bm-row");
     row.setAttribute("role", "treeitem");
-    const button = el("button", "bm-leaf");
+    const button = el("button", "bm-leaf ui-list-row");
     button.type = "button";
     button.dataset.id = leaf.id;
     button.disabled = Boolean(leaf.disabled);
@@ -189,10 +203,10 @@ export function branchedMenu(
   for (const fold of host.querySelectorAll<HTMLElement>(".bm-fold")) observer.observe(fold);
 
   const api: BranchedMenu = {
-    select(id, instant = false) {
+    select(id, instant = false, notify = true) {
       active = id;
       layout(!instant);
-      opts.onSelect?.(id);
+      if (notify) opts.onSelect?.(id);
     },
     dispose() {
       disposed = true;

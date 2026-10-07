@@ -246,6 +246,10 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   performanceProbe = undefined;
   const query = new URLSearchParams(location.search);
   const mockMode = query.get("mock") === "1";
+  // One combined preview (D160): `?proto=windows` is the canvas, and the add-host flow opens
+  // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
+  const proto = query.get("proto");
+  const canvasMode = mockMode && (proto === "windows" || proto === "addhost");
   const probeMode = query.get("probe") === "1";
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
@@ -257,20 +261,28 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
+      addHostPrototype: canvasMode,
       ...(recoveryUiEnabled() ? {
         onRecovery: () => { void showRecovery(); },
         onCancelRecovery: async () => { await recoveryAuth.post("recovery-cancel", {}); await checkForegroundSession(); },
       } : {}),
     });
   } catch (error: unknown) {
+    screen?.dispose();
     renderUnavailable(safeMessage(error));
     return;
   }
   coreScreen = screen;
-  if (mockMode && query.get("proto") === "windows") {
-    // Gated mockup (D162): the window canvas, built against the test double only.
+  if (canvasMode) {
+    // Gated mockup (D162): the window canvas and the add-host flow on it, built against the
+    // test double only. The canvas mounts first; the flow hangs its windows on the canvas.
     const { mountCanvas } = await import("./canvas");
-    canvasPrototype = mountCanvas(screen, hostName);
+    const { mountAddHostPrototype } = await import("./add-host-prototype");
+    const canvas = mountCanvas(screen, hostName);
+    let addHost: { dispose(): void } | undefined;
+    try { addHost = await mountAddHostPrototype(screen, canvas, query.get("empty") === "1", proto === "addhost" || query.get("wizard") === "1"); }
+    catch (error: unknown) { canvas.dispose(); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
+    canvasPrototype = { dispose() { addHost?.dispose(); canvas.dispose(); } };
   }
   if (probeMode) performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
   const probeHooks = performanceProbe?.hooks();
@@ -374,7 +386,8 @@ async function showRecovery(): Promise<void> {
 /** URL choices win and are remembered when storage is available; private mode still works. */
 function uiFontPreference(): UiFont {
   // The canvas mockup is monospace throughout (owner rule, docs/design/TASTE.md §2).
-  if (new URLSearchParams(location.search).get("proto") === "windows") return "mono";
+  const proto = new URLSearchParams(location.search).get("proto");
+  if (proto === "windows" || proto === "addhost") return "mono";
   const requested = new URLSearchParams(location.search).get("ui");
   if (requested === "sans" || requested === "mono") {
     try { window.localStorage.setItem("tracer.ui-font", requested); } catch { /* The URL remains the preference without storage. */ }
