@@ -5,6 +5,7 @@ export * from "./glitch";
 export * from "./countup";
 export * from "./copy-feedback";
 export * from "./tooltip";
+export * from "./focus-ring";
 export * from "./faulty-terminal";
 export * from "./color";
 export * from "./themes";

@@ -3,6 +3,7 @@ import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
+import { installFocusRing } from "../../../packages/ui/src/focus-ring";
 import { mountOnboarding } from "./onboarding";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
@@ -74,6 +75,7 @@ let backdropTimer = 0;
 void start();
 
 async function start(): Promise<void> {
+  installFocusRing();
   installForegroundListener();
   const fontsReady = Promise.race([
     document.fonts.load('450 14px "Geist Mono"').then(() => undefined),

@@ -171,7 +171,7 @@
 .auth-loading { min-height: 1em; margin: 14px 0 0; text-align: center; }
 .auth-check { position: relative; display: flex; min-height: 44px; align-items: center; gap: 10px; margin-top: 18px; color: var(--fg-2); font-size: 14px; cursor: pointer; }
 .auth-check input { width: 18px; height: 18px; accent-color: #fff; }
-.auth-check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
+[data-focus-ring="on"] .auth-check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
 .auth-check[data-pressed] { transform: scale(0.98); }
 .auth-check .tick { width: 20px; height: 20px; }
 .auth-words { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 4px 0 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: rgb(255 255 255 / 0.03); counter-reset: recovery; list-style: none; }
@@ -189,7 +189,7 @@
 @keyframes auth-welcome-caption { from { opacity: 0; transform: translateX(10px); } }
 
 .auth-screen button:focus { outline: none; }
-.auth-screen button:focus-visible { outline: 2px solid rgb(255 255 255 / 0.55); outline-offset: 2px; }
+[data-focus-ring="on"] .auth-screen button:focus-visible { outline: 2px solid rgb(255 255 255 / 0.55); outline-offset: 2px; }
 @media (max-width: 480px) {
   .auth-card { padding: 28px 22px 22px; border-radius: 20px; }
   .auth-signin { padding: 30px 22px 28px; }

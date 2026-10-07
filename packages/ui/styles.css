@@ -1,4 +1,9 @@
 /** Shared presentation for @infraternal/ui browser primitives. */
+
+/* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
+   data-focus-ring="on"); clicks, taps and shortcuts that move focus in script draw none. */
+:focus-visible { outline: none; }
+[data-focus-ring="on"] :focus-visible { outline: 2px solid var(--focus-ring, var(--accent, #7a9cff)); outline-offset: 2px; }
 .countup { font-variant-numeric: tabular-nums; }
 .busy-count { font: 500 13px/1 "Geist Mono", ui-monospace, monospace; color: rgb(0 0 0 / 0.6); }
 
@@ -11,7 +16,7 @@
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; opacity: 0; appearance: none; -webkit-appearance: none; margin: 0; }
 .check { position: relative; transition: transform 140ms var(--ease); }
 .check[data-pressed] { transform: scale(0.98); }
-.check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
+[data-focus-ring="on"] .check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
 
 /* Glitch text is monochrome and settles after its welcome interval. */
 .glitch { position: relative; display: inline-block; white-space: nowrap; }
