@@ -52,6 +52,8 @@ export interface PredictiveEchoState {
   reason: string;
   /** Printable inputs that were sent without a prediction, by reason (probe evidence for fallbacks). */
   fallbacks: Record<string, number>;
+  /** Main-thread cost of prediction per printable key, most recent last (ms; bounded). */
+  inputCostMs: number[];
   /** What the overlay currently draws, relative to the renderer canvas. */
   overlay: import("../../../packages/ui/src/terminal-text-overlay").TerminalTextOverlaySnapshot | undefined;
 }
@@ -77,7 +79,8 @@ export class PredictiveEcho {
   private matchedPrefixLength = 0;
   private roundTripMs: number | undefined;
   private muted = false;
-  private proof: Uint8Array | undefined;
+  /** Echoes that would prove the host is echoing again: a timed-out run's late echo and the newest muted key. */
+  private proofs: Uint8Array[] = [];
   private mispredictions = 0;
   private waitingForOutput = false;
   private pendingBackspaces = 0;
@@ -90,6 +93,7 @@ export class PredictiveEcho {
   private lastReason = "flag-off";
   private readonly fallbacks: Record<string, number> = {};
   private predictedLastInput = false;
+  private readonly inputCosts: number[] = [];
 
   constructor(private readonly options: PredictiveEchoOptions) {
     if (!options.optedIn) return;
@@ -113,6 +117,7 @@ export class PredictiveEcho {
       mispredictions: this.mispredictions,
       reason: !this.options.optedIn ? "flag-off" : enabled ? "ready" : this.lastReason,
       fallbacks: { ...this.fallbacks },
+      inputCostMs: [...this.inputCosts],
       overlay: this.overlay?.snapshot(),
     };
   }
@@ -133,8 +138,11 @@ export class PredictiveEcho {
   /** Predicts bounded printable input and safe backspaces; paste and cursor moves await host output. */
   input(data: string, sequence: bigint, bytes: Uint8Array, terminalSafe: boolean): void {
     if (!this.options.optedIn) return;
+    const startedAt = performance.now();
     this.predictedLastInput = false;
     this.predictInput(data, sequence, bytes, terminalSafe);
+    this.inputCosts.push(performance.now() - startedAt);
+    if (this.inputCosts.length > 256) this.inputCosts.shift();
     if (!this.predictedLastInput && printableGraphemes(data) && bytes.byteLength <= MAX_PREDICTED_INPUT_BYTES) {
       this.fallbacks[this.lastReason] = (this.fallbacks[this.lastReason] ?? 0) + 1;
     }
@@ -154,7 +162,7 @@ export class PredictiveEcho {
         || !this.layout(position, this.pending, [], this.pendingBackspaces + 1)) {
         this.clearPending("editing-key");
         this.waitingForOutput = true;
-        this.proof = undefined;
+        this.proofs = [];
         return;
       }
       this.pendingBackspaces += 1;
@@ -169,7 +177,7 @@ export class PredictiveEcho {
     if (!graphemes || bytes.byteLength > MAX_PREDICTED_INPUT_BYTES) {
       this.clearPending(graphemes ? "large-input" : "editing-key");
       this.waitingForOutput = true;
-      this.proof = undefined;
+      this.proofs = [];
       return;
     }
     if (this.waitingForOutput) {
@@ -237,19 +245,17 @@ export class PredictiveEcho {
   paintedOutput(bytes: Uint8Array): void {
     if (!this.options.optedIn || bytes.byteLength === 0) return;
     if (this.waitingForOutput) this.waitingForOutput = false;
-    if (!this.proof && this.pending.length === 0 && this.pendingBackspaces === 0) return;
+    if (this.proofs.length === 0 && this.pending.length === 0 && this.pendingBackspaces === 0) return;
     const visible = this.visibleBytes(bytes);
     if (visible.bytes.byteLength === 0 && visible.backspaces === 0) return;
 
-    if (this.proof) {
-      if (startsWith(visible.bytes, this.proof)) {
-        this.proof = undefined;
-        this.muted = false;
-        this.mispredictions = 0;
-        this.lastReason = "ready";
-      } else {
-        this.proof = undefined;
-      }
+    if (this.proofs.length > 0 && this.proofs.some((proof) => startsWith(visible.bytes, proof))) {
+      // Unmatched proofs are not discarded here: other output (a prompt redraw) may precede the echo.
+      // They expire with their timer instead.
+      this.proofs = [];
+      this.muted = false;
+      this.mispredictions = 0;
+      this.lastReason = "ready";
     }
 
     let offset = 0;
@@ -288,13 +294,13 @@ export class PredictiveEcho {
   /** Clears speculative text before a snapshot replaces the renderer state. */
   resetForSnapshot(): void {
     this.parserState = "text";
-    this.proof = undefined;
+    this.proofs = [];
     this.waitingForOutput = false;
     this.clearPending("snapshot");
   }
 
   unsafeScreen(): void {
-    this.proof = undefined;
+    this.proofs = [];
     this.waitingForOutput = true;
     this.clearPending("unsafe-screen");
   }
@@ -417,8 +423,9 @@ export class PredictiveEcho {
   }
 
   private offerEchoProof(bytes: Uint8Array): void {
-    if (this.proof) return;
-    this.proof = bytes.slice();
+    // The newest key while muted is the most direct proof; keep at most a few candidates.
+    this.proofs.push(bytes.slice());
+    if (this.proofs.length > 4) this.proofs.shift();
     this.armProofTimeout();
   }
 
@@ -428,22 +435,31 @@ export class PredictiveEcho {
     const first = this.pending[0];
     const enteredAt = first?.enteredAt ?? (this.pendingBackspaces > 0 ? this.backspaceEnteredAt : 0);
     if (!enteredAt || this.roundTripMs === undefined) return;
-    const deadline = enteredAt + this.roundTripMs + CONFIRMATION_FRAME_BUDGET_MS + PROFILE_JITTER_GUARD_MS;
+    // A host that is not echoing (a password prompt) never answers; a loaded network answers late. Allow a
+    // whole extra round trip before muting, so ordinary jitter on a 300 ms link never mutes prediction.
+    const deadline = enteredAt + 2 * this.roundTripMs + CONFIRMATION_FRAME_BUDGET_MS + PROFILE_JITTER_GUARD_MS;
     this.timeout = window.setTimeout(() => {
       this.timeout = 0;
       if (this.pending.length === 0 && this.pendingBackspaces === 0) return;
+      // If the echo was merely late, its own bytes prove the host is echoing again, so the next key
+      // is predicted instead of falling back once to fetch a fresh proof.
+      const late = concatBytes(this.pending.map((glyph) => glyph.bytes));
       this.muted = true;
       this.lastReason = "echo-timeout";
       this.clearPending("echo-timeout");
+      if (late.byteLength > 0) {
+        this.proofs.push(late);
+        this.armProofTimeout();
+      }
     }, Math.max(0, deadline - performance.now()));
   }
 
   private armProofTimeout(): void {
     window.clearTimeout(this.timeout);
-    const expectedDelay = (this.roundTripMs ?? CONFIRMATION_FRAME_BUDGET_MS) + CONFIRMATION_FRAME_BUDGET_MS + PROFILE_JITTER_GUARD_MS;
+    const expectedDelay = 2 * (this.roundTripMs ?? CONFIRMATION_FRAME_BUDGET_MS) + CONFIRMATION_FRAME_BUDGET_MS + PROFILE_JITTER_GUARD_MS;
     this.timeout = window.setTimeout(() => {
       this.timeout = 0;
-      this.proof = undefined;
+      this.proofs = [];
     }, expectedDelay);
   }
 
@@ -604,4 +620,16 @@ function commonPrefixLength(left: Uint8Array, right: Uint8Array): number {
   let index = 0;
   while (index < limit && left[index] === right[index]) index += 1;
   return index;
+}
+
+function concatBytes(parts: readonly Uint8Array[]): Uint8Array {
+  let length = 0;
+  for (const part of parts) length += part.byteLength;
+  const joined = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    joined.set(part, offset);
+    offset += part.byteLength;
+  }
+  return joined;
 }

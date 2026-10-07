@@ -331,6 +331,7 @@ export class TerminalClient {
       muted: false,
       mispredictions: 0,
       fallbacks: {},
+      inputCostMs: [],
       overlay: undefined,
       reason: "flag-off",
     };
@@ -844,7 +845,6 @@ export class TerminalClient {
     }
     const firstSequence = this.nextInSeq;
     this.nextInSeq += BigInt(encoded.byteLength);
-    this.prediction?.input(data, firstSequence, encoded, this.predictionSafe());
     if (this.attached) {
       for (let offset = 0; offset < encoded.byteLength;) {
         const length = Math.min(INPUT_FRAME_LIMIT, encoded.byteLength - offset);
@@ -856,6 +856,10 @@ export class TerminalClient {
         offset += length;
       }
     }
+    // Predict after the bytes are on the socket: prediction never delays the send. The overlay is still
+    // drawn in this same task, so no host echo can be processed (and painted) before the prediction is.
+    // `encoded` may alias inputScratch, which the queue has already copied; prediction copies what it keeps.
+    this.prediction?.input(data, firstSequence, encoded, this.predictionSafe());
     if (this.inputQueue.free < INPUT_RESUME_GUARD) {
       this.pauseInput("Input paused: the bounded reconnect buffer is nearly full.");
     }

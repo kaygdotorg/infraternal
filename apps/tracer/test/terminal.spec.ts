@@ -190,7 +190,8 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
     .toBeGreaterThanOrEqual(outputBeforeMove + 3);
   const cursorAfterMove = Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.cursorX ?? 0));
   expect(cursorAfterMove).toBe(cursorBeforeMove - 1);
-  await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: 500 } });
+  // Late enough to pass the mute deadline (two round trips plus guards), so the muted window is observable.
+  await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: 1500 } });
   await inject("Z");
   await waitForPendingText("Z");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.overlay?.text ?? "")).toBe("Z");
@@ -393,6 +394,15 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   const predictedSamples = keySamples.filter((sample) => sample.overlayVisible)
     .map((sample) => sample.predicted).sort((left, right) => left - right);
   const predictionFallbackCount = keySamples.length - predictedOverlayCount;
+  const fallbackReasons = await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.fallbacks ?? {});
+  const predictionCost = (await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.inputCostMs ?? []))
+    .slice(-probeCount).sort((left, right) => left - right);
+  console.log(
+    `METRIC name=keystroke_prediction_cpu source=tracer-production-build n=${predictionCost.length} ` +
+      `p50_ms=${percentile(predictionCost, 0.5).toFixed(3)} p99_ms=${percentile(predictionCost, 0.99).toFixed(3)} budget_ms=2 ` +
+      `result=${predictionCost.length > 0 && percentile(predictionCost, 0.99) <= 2 ? "PASS" : "FAIL"}`,
+  );
+  console.log(`METRIC name=keystroke_prediction_fallback_reasons source=tracer-production-build reasons=${JSON.stringify(fallbackReasons)} result=REPORT`);
   console.log(
     `METRIC name=keystroke_glyph_visible_prediction_on source=tracer-production-build n=${predictedMs.length} ` +
       `overlay_n=${predictedOverlayCount} fallback_n=${predictionFallbackCount} ` +
