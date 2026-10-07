@@ -71,6 +71,20 @@ async function savePopoverCrop(testInfo: TestInfo, page: Page, width: number, he
   return path;
 }
 
+test("mock windows deep link opens with an authenticated fake owner", async ({ browser }) => {
+  const context = await browser.newContext({ baseURL: origin, viewport: { width: 393, height: 852 } });
+  try {
+    const page = await context.newPage();
+    await page.goto(`${origin}/?mock=1&proto=windows&theme=ink&bg=none&ui=sans`);
+    await expect(page.locator(".window-card")).toHaveCount(4, { timeout: 3_000 });
+    await waitForAttached(page);
+    const cookie = (await context.cookies(origin)).find((entry) => entry.name === "infraternal-mock-session");
+    expect(cookie).toMatchObject({ httpOnly: true, secure: false });
+  } finally {
+    await context.close();
+  }
+});
+
 test("window popovers use the shared controls, fastfetch rows, and anchored tabs", async ({ browser }) => {
   const context = await browser.newContext({ baseURL: origin, viewport: { width: 1440, height: 900 } });
   try {
