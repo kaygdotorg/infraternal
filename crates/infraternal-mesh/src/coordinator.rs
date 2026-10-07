@@ -10,6 +10,10 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "coordinator/checkpoint.rs"]
+mod checkpoint;
+pub use checkpoint::{CoordinatorCheckpoint, MemberCheckpoint};
+
 /// Minimum overlap; retirement additionally waits for every current peer's delivery acknowledgement.
 pub const KEY_OVERLAP_SECS: u64 = 120;
 
