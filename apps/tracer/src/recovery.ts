@@ -170,7 +170,8 @@ export function mountRecovery(host: HTMLElement, back: () => void,
       }
     } catch (failure: unknown) {
       error.textContent = failure instanceof AuthError && failure.status === 401
-        ? step === 0 ? "The username or recovery key did not match." : "Recovery is not ready, expired or was cancelled. Check the available time or start again."
+        ? step === 0 ? "Recovery could not start. Check the username and key, or use the recovery page already open." : "Recovery is not ready, expired or was cancelled. Check the available time or start again."
+        : failure instanceof DOMException && failure.name === "InvalidStateError" ? "This device already has a passkey for this account. Choose another passkey provider or remove the old passkey from your device."
         : failure instanceof DOMException && failure.name === "NotAllowedError" ? "The passkey prompt was cancelled. Try again when you are ready."
         : failure instanceof AuthError ? failure.message : "Recovery could not be completed. Try again.";
     } finally { waiting.done(); busy = false; if (card.isConnected) render(); }

@@ -51,6 +51,11 @@ test("sign-in exposes recovery key entry with per-word errors", async ({ page })
   await page.getByRole("textbox", { name: "Word 1", exact: true }).fill("notaword");
   await expect(page.locator("#recovery-word-error")).toHaveText("Word 1 is not in the recovery word list.");
   await expect(page.getByRole("button", { name: "Start recovery" })).toBeDisabled();
+  await page.route("**/auth/recovery-start", route => route.fulfill({ status: 401, json: {} }));
+  await page.locator("#recovery-username").fill("fixture_owner");
+  await paste(page, phrase);
+  await page.getByRole("button", { name: "Start recovery" }).click();
+  await expect(page.locator("#auth-error")).toContainText("recovery page already open");
 });
 
 for (const delay of [0, 86400]) {
@@ -132,6 +137,17 @@ for (const delay of [0, 86400]) {
       await expect(page.locator("#auth-error")).toContainText("Recovery is not ready");
       expect(finishes).toBe(0);
       ready = true; // UI double only; native verification advances the real SQLite fixture.
+    } else {
+      await page.evaluate(() => {
+        const create = navigator.credentials.create.bind(navigator.credentials);
+        let first = true;
+        navigator.credentials.create = async options => {
+          if (first) { first = false; throw new DOMException("Fixture already has an excluded credential", "InvalidStateError"); }
+          return create(options);
+        };
+      });
+      await page.getByRole("button", { name: "Create passkey" }).click();
+      await expect(page.locator("#auth-error")).toContainText("another passkey provider");
     }
     await page.getByRole("button", { name: "Create passkey" }).click();
     await expect(page.getByRole("heading", { name: "Save your new recovery key" })).toBeVisible();
