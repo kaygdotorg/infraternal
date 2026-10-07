@@ -24,6 +24,8 @@ declare global {
         receivedSequence: string;
         outputSequence: string;
         scrollbackRows: number;
+        viewportY: number;
+        fontSize: number;
         wasmMemoryBytes: number;
       } | undefined;
       trace: () => ProbeTraceSample[];

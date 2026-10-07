@@ -31,8 +31,8 @@
 
 * { box-sizing: border-box; }
 *[hidden] { display: none !important; }
-html, body, #app { width: 100%; height: 100%; margin: 0; }
-body { overflow: hidden; }
+html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none; }
+body, #app { position: fixed; inset: 0; }
 button, input { font: inherit; }
 button { color: inherit; }
 
@@ -109,10 +109,14 @@ button { color: inherit; }
 .terminal-host {
   position: absolute;
   inset: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   padding: 14px 16px;
-  touch-action: pan-y;
+  touch-action: none;
+  overscroll-behavior: none;
+  scrollbar-width: none;
 }
+.terminal-host::-webkit-scrollbar { display: none; }
 .terminal-host:focus-visible { outline: 2px solid var(--accent, #7a9cff); outline-offset: -3px; }
 .connection-status {
   position: absolute;
