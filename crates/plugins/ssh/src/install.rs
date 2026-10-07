@@ -278,7 +278,11 @@ if [ -f "$stage/activating" ]; then
     rm -f "$stage/replacing-binary" "$stage/replacing-state" "$stage/replacing-unit"
     if [ -f "$stage/previous-binary" ]; then
         mv "$stage/previous-binary" "$base/bin/live"
-        ln -s "$base/bin/live" "$base/bin/current"
+    fi
+    # Restoration can stop between moving the backup and recreating links.
+    # The original-presence marker survives both operations and makes retry safe.
+    if [ -f "$stage/had-binary" ]; then
+        [ -L "$base/bin/current" ] || ln -s "$base/bin/live" "$base/bin/current"
         [ -L "$launcher" ] || ln -s "$base/bin/current" "$launcher"
     fi
     [ ! -d "$stage/previous-state" ] || mv "$stage/previous-state" "$base/state"
