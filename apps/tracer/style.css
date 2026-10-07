@@ -155,7 +155,7 @@ button { color: inherit; }
   letter-spacing: 0.08em;
 }
 /* Translucent overlays would show the badge blurred through them; it steps aside instead. */
-.terminal-screen:has(.sidebar:not([hidden]), .palette:not([hidden]), .ui-toast:not([hidden])) .test-double-badge,
+.terminal-screen:has(.sidebar:not([hidden]), .palette:not([hidden]), .ui-toast:not([hidden]), .ah-float) .test-double-badge,
 body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge { opacity: 0; }
 .probe-panel {
   position: absolute;
