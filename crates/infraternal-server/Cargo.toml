@@ -18,6 +18,7 @@ bip39.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_cbor_2.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
@@ -36,7 +37,6 @@ openssl.workspace = true
 [dev-dependencies]
 aes-gcm.workspace = true
 hkdf.workspace = true
-serde_cbor_2.workspace = true
 tower.workspace = true
 http-body-util.workspace = true
 tokio-tungstenite.workspace = true
