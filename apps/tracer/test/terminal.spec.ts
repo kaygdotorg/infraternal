@@ -271,10 +271,11 @@ test("status failure, invalid setup token, and cancelled passkey have distinct g
   await page.getByRole("button", { name: "Try again" }).click();
   await page.locator("#setup-token").fill("invalid-input");
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.locator("#setup-username").fill("owner");
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("button", { name: "Create passkey" }).click();
-  await expect(page.locator("#passkey-error")).toContainText("The setup token is invalid or expired.");
+  await expect(page.locator("#setup-token-error")).toContainText(
+    "That token doesn't match. Run infraternal server setup-token on the server.",
+  );
+  await expect(page.locator("#setup-token")).toBeFocused();
+  await expect(page.locator("#setup-username")).toHaveCount(0);
   await page.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: false } }));
   await page.route("**/auth/login-start", (route) => route.fulfill({ json: {
     ceremony: "cancel-test", options: { publicKey: {

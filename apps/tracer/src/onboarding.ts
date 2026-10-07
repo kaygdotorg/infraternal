@@ -1,5 +1,5 @@
 /** Renders the real setup wizard and discoverable passkey sign-in for the tracer. */
-import { AuthError, loginWithPasskey, registerOwner } from "./auth";
+import { AuthError, checkSetupToken, loginWithPasskey, registerOwner } from "./auth";
 import { copyFeedback, confirmAction, swapIcon, CLIPBOARD, DOWNLOAD } from "../../../packages/ui/src/copy-feedback";
 import { loading, type Loading } from "../../../packages/ui/src/countup";
 import { springCheckbox, tick } from "../../../packages/ui/src/tick";
@@ -118,7 +118,7 @@ function mountSetup(
     footer.querySelector<HTMLButtonElement>("#setup-back")!.addEventListener("click", () => moveTo(index - 1));
     footer.querySelector<HTMLButtonElement>("#setup-next")!.addEventListener("click", () => {
       if (state.busy || !ready()) return;
-      if (index === 0) moveTo(1);
+      if (index === 0) void validateSetupToken();
       else if (index === 1) moveTo(2);
       else if (index === 2) void createPasskey();
       else void finishSetup();
@@ -145,13 +145,54 @@ function mountSetup(
   function renderTokenStep(body: HTMLElement): void {
     body.innerHTML = `<label class="auth-label" for="setup-token">setup token</label>
       <input id="setup-token" class="auth-input auth-mono" type="text" autocomplete="off" spellcheck="false" placeholder="paste token" />
+      <p class="auth-error-line" id="setup-token-error" role="alert" hidden></p>
       <div class="auth-command"><code>infraternal server setup-token</code><button class="icon-action" type="button" aria-label="Copy setup token command" data-copy-command>${swapIcon(CLIPBOARD)}</button></div>`;
     const token = body.querySelector<HTMLInputElement>("#setup-token")!;
+    const tokenError = body.querySelector<HTMLElement>("#setup-token-error")!;
     token.value = state.token;
-    token.addEventListener("input", () => { state.token = token.value; updateReady(); });
+    token.addEventListener("input", () => {
+      state.token = token.value;
+      tokenError.hidden = true;
+      token.removeAttribute("aria-invalid");
+      token.removeAttribute("aria-describedby");
+      updateReady();
+    });
     token.addEventListener("keydown", enterToContinue);
     wireCopy(body.querySelector<HTMLButtonElement>("[data-copy-command]")!, "infraternal server setup-token");
     token.focus({ preventScroll: true });
+  }
+
+  async function validateSetupToken(): Promise<void> {
+    const token = host.querySelector<HTMLInputElement>("#setup-token")!;
+    const tokenError = host.querySelector<HTMLElement>("#setup-token-error")!;
+    tokenError.hidden = true;
+    tokenError.replaceChildren();
+    token.removeAttribute("aria-invalid");
+    token.removeAttribute("aria-describedby");
+    state.busy = true;
+    host.querySelector<HTMLElement>("#auth-error")!.textContent = "";
+    renderFooter();
+    const count = host.querySelector<HTMLElement>("#setup-next .busy-count")!;
+    const waiting = loading(count, 400);
+    try {
+      await checkSetupToken(state.token.trim());
+      waiting.done();
+      state.busy = false;
+      moveTo(1);
+    } catch (error: unknown) {
+      waiting.done();
+      state.busy = false;
+      renderFooter();
+      if (error instanceof AuthError && error.status === 401) {
+        tokenError.innerHTML = "That token doesn't match. Run <code>infraternal server setup-token</code> on the server.";
+        tokenError.hidden = false;
+        token.setAttribute("aria-invalid", "true");
+        token.setAttribute("aria-describedby", "setup-token-error");
+        token.focus({ preventScroll: true });
+      } else {
+        host.querySelector<HTMLElement>("#auth-error")!.textContent = safeAuthMessage(error);
+      }
+    }
   }
 
   function renderIdentityStep(body: HTMLElement): void {

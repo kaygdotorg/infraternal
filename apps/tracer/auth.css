@@ -120,14 +120,13 @@
 @keyframes auth-pane-back { from { opacity: 0; transform: translateX(-24px); filter: blur(2px); } }
 .auth-footer { display: flex; min-height: 42px; justify-content: space-between; align-items: center; gap: 12px; margin-top: 26px; }
 .auth-primary {
-  margin-left: auto; /* stays right on step 1, where there is no back button */
   display: inline-flex;
   min-width: 140px;
   height: 42px;
   align-items: center;
   justify-content: center;
   gap: 10px;
-  margin: 0;
+  margin: 0 0 0 auto; /* Keep the primary button at the content edge when the hidden back control is removed. */
   padding: 0 20px;
   border: 0;
   border-radius: 999px;

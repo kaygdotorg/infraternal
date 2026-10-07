@@ -1,5 +1,5 @@
 /** TEST DOUBLE: serves dist/, accepts test-only passkey ceremonies, and echoes wire input. */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
@@ -344,6 +344,18 @@ async function authAction(
   switch (action) {
     case "status":
       return sendJson(response, 200, { setup_required: !owner });
+    case "setup-check": {
+      if (Object.keys(body).length !== 1 || typeof body.token !== "string") {
+        return sendJson(response, 400, { error: "invalid request" });
+      }
+      if (owner) return sendJson(response, 404, { error: "not found" });
+      const candidate = createHash("sha256").update(body.token).digest();
+      const expected = createHash("sha256").update(setupToken).digest();
+      if (!timingSafeEqual(candidate, expected)) return sendJson(response, 401, { error: "authorization failed" });
+      response.writeHead(204);
+      response.end();
+      return;
+    }
     case "session":
       if (unlockPending) return sendJson(response, 401, { error: "authorization failed" });
     case "unlock-session":
