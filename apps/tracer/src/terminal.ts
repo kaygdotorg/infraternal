@@ -456,6 +456,28 @@ export class TerminalClient {
         this.traceRange(frame.outSeq, frame.bytes.byteLength, "decode", performance.now());
         this.acceptSnapshot(frame.outSeq, frame.bytes);
         return;
+      case "Event": {
+        if (frame.subId !== 0 || frame.eventJson.byteLength > 1024) {
+          this.protocolFailure("invalid terminal notice");
+          return;
+        }
+        try {
+          const notice = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.eventJson)));
+          const session = uuidBytes(requireString(notice.session_id));
+          if (!this.sessionId || session.some((byte, index) => byte !== this.sessionId?.[index])) throw new Error("session mismatch");
+          // Notices describe recovery; only the subsequent wire Snapshot advances the cursor.
+          if (notice.type === "terminal.snapshot" && notice.approximate === true) {
+            this.setStatus("Reconnected with an approximate screen.");
+          } else if (notice.type === "terminal.snapshot_unavailable") {
+            this.setStatus("Output paused; waiting for screen recovery.");
+          } else if (notice.type !== "terminal.exited") {
+            throw new Error("unknown terminal notice");
+          }
+        } catch {
+          this.protocolFailure("invalid terminal notice");
+        }
+        return;
+      }
       case "Ping":
         this.sendFrame(TERMINAL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
         return;
