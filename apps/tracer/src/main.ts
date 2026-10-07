@@ -21,6 +21,8 @@ declare global {
         cellWidth: number;
         cellHeight: number;
         configuredScrollback: number;
+        cursorX: number;
+        cursorY: number;
         receivedSequence: string;
         outputSequence: string;
         scrollbackRows: number;

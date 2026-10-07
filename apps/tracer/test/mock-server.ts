@@ -63,6 +63,8 @@ interface Connection {
   resumeAccepted: boolean;
   resumeExpected: boolean;
   welcomeTimer: ReturnType<typeof setTimeout> | undefined;
+  themeSnapshotHeld: boolean;
+  themeSnapshotTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface TraceEvent {
@@ -80,6 +82,8 @@ let pendingRegistration: { ceremony: string; userId: string; username: string; d
 let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
 let selectedFixture: Uint8Array | undefined;
+let themeSnapshotOnResume = false;
+let themeResumeDelayUsed = false;
 let session = createSession();
 const traceEvents: TraceEvent[] = [];
 
@@ -115,6 +119,8 @@ webSockets.on("connection", (socket, request) => {
     resumeAccepted: false,
     resumeExpected: false,
     welcomeTimer: undefined,
+    themeSnapshotHeld: false,
+    themeSnapshotTimer: undefined,
   };
   connections.add(connection);
   socket.on("message", (raw, binary) => {
@@ -132,6 +138,7 @@ webSockets.on("connection", (socket, request) => {
   });
   socket.on("close", () => {
     if (connection.welcomeTimer) clearTimeout(connection.welcomeTimer);
+    if (connection.themeSnapshotTimer) clearTimeout(connection.themeSnapshotTimer);
     connections.delete(connection);
   });
 });
@@ -193,6 +200,12 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     } catch {
       return sendJson(response, 500, { error: "renderer fixture could not be loaded" });
     }
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/theme-palette-fixture") {
+    if (connections.size > 0) return sendJson(response, 409, { error: "theme palette fixture requires a fresh terminal" });
+    selectedFixture = themePaletteFixture();
+    themeSnapshotOnResume = true;
+    return sendJson(response, 200, { bytes: selectedFixture.byteLength });
   }
   if (request.method === "POST" && url.pathname === "/__mock/wrapped-ring") {
     if ([...connections].some((connection) => connection.session === session && connection.attached && isSocketOpen(connection.socket))) {
@@ -535,6 +548,20 @@ function handleTerminalFrame(connection: Connection, frame: WireFrame): void {
       }
       connection.attached = true;
       connection.outputCursor = frame.lastOutSeq;
+      if (themeSnapshotOnResume && connection.resumeAccepted && frame.lastOutSeq === 0n) {
+        const sequence = BigInt(connection.session.outputLength);
+        connection.session.ringStartSequence = sequence;
+        connection.session.snapshotFrames = [{ outSeq: sequence, bytes: connection.session.fixtureOutput }];
+        if (!themeResumeDelayUsed) {
+          themeResumeDelayUsed = true;
+          connection.themeSnapshotHeld = true;
+          connection.themeSnapshotTimer = setTimeout(() => {
+            connection.themeSnapshotTimer = undefined;
+            connection.themeSnapshotHeld = false;
+            flushOutput(connection);
+          }, 500);
+        }
+      }
       sendFrame(connection.socket, 1, { type: "Ack", inSeqAcked: connection.session.writtenInput });
       flushOutput(connection);
       return;
@@ -593,13 +620,15 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
 }
 
 function flushOutput(connection: Connection): void {
-  if (!connection.attached || !isSocketOpen(connection.socket)) return;
+  if (!connection.attached || !isSocketOpen(connection.socket) || connection.themeSnapshotHeld) return;
   if (connection.outputCursor < connection.session.ringStartSequence) {
     const snapshots = connection.session.snapshotFrames;
     const repaintBytes = snapshots.reduce((total, snapshot) => total + snapshot.bytes.byteLength, 0);
     if (snapshots.length === 0 || repaintBytes > connection.credit) return;
     sendFrames(connection.socket, 1, snapshots.map(({ outSeq, bytes }) => ({ type: "Snapshot", outSeq, bytes })));
-    connection.outputCursor = BigInt(connection.session.outputLength);
+    // A Snapshot may predate output that is already in the session ring. Resume
+    // at its absolute cursor so that those later bytes still follow the repaint.
+    connection.outputCursor = snapshots[snapshots.length - 1]!.outSeq;
     connection.credit -= repaintBytes;
     connection.session.snapshotCount += snapshots.length;
   }
@@ -719,6 +748,8 @@ function resetMockState(): void {
   pendingLogin = undefined;
   dropNextAck = false;
   selectedFixture = undefined;
+  themeSnapshotOnResume = false;
+  themeResumeDelayUsed = false;
   traceEvents.length = 0;
   session = createSession();
 }
@@ -742,6 +773,20 @@ function createSession(resumeFrom?: MockSession, fixtureOutput: Uint8Array = new
     acceptedInputBytes: 0,
     echoedText: "",
   };
+}
+
+function themePaletteFixture(): Uint8Array {
+  const history = Array.from({ length: 80 }, (_, index) => `theme-history-${String(index).padStart(3, "0")}`);
+  const regular = [30, 31, 32, 33, 34, 35, 36, 37].map((code) => `\u001b[${code}m█ `).join("");
+  const bright = [90, 91, 92, 93, 94, 95, 96, 97].map((code) => `\u001b[${code}m█ `).join("");
+  const text = [
+    "\u001bc",
+    ...history,
+    "\u001b[39;49mdefault: █",
+    `${regular}\u001b[0m`,
+    `${bright}\u001b[0m`,
+  ].join("\r\n");
+  return new TextEncoder().encode(text);
 }
 
 function contentType(extension: string): string {
