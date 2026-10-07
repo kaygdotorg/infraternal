@@ -339,3 +339,75 @@ Start (not resume), cancel (when a row existed), and complete audit rows commit 
 the same SQLite transaction as their state changes. Rows contain only account ID,
 event and Unix time. Invalid requests, reissues and repeat cancellation cannot
 invent completion or duplicate start evidence. Notification is after commit.
+
+## Browser-only recovery derivation v2 (#45, D151 owner task)
+
+This additive revision supersedes the introductory phrase-transmission rule for
+v2 enrollment and recovery. It reuses WebCrypto HKDF-SHA256/AES-256-GCM and the
+existing Argon2id verifier; it adds no cryptographic library or engine. Setup and
+replacement generate 256-bit entropy with browser crypto.getRandomValues and
+encode 24 English BIP-39 words locally. No v2 response generates or includes words.
+
+From that entropy derive two independent 32-byte outputs with HKDF-SHA256,
+a zero-length salt and these exact UTF-8 info strings:
+
+- authentication: `infraternal/recovery/auth/v2`
+- wrapping: `infraternal/recovery/wrap/v2`
+
+The authentication secret is canonical unpadded base64url and is sent as
+`verifier`. The server Argon2id-hashes that string with a fresh random salt;
+only its PHC hash is stored. The wrapping output is browser-only IKM for the
+existing recovery envelope HKDF (fresh 32-byte salt, v1 user/kind info and AAD)
+and AES-GCM encryption. Passkey envelope derivation is unchanged. Independent
+HKDF info strings ensure knowledge of the authentication secret does not permit
+computing entropy or the wrapping output.
+
+Registration-finish adds `recovery_verifier`; it is mandatory for a recovery
+envelope in v2 and absent for additional-passkey enrollment. Setup-start and
+recovery-ready return `recovery_version:2` and recovery_words:null. Replacement
+also returns `old_recovery_wrap_version` (1 or 2), read from stored metadata.
+Authenticated wraps include recovery_wrap_version for recovery envelopes.
+Migration 0010 defaults existing accounts to authentication=1, wrapping=1.
+Successful v2 enrollment/rotation stores authentication=2, wrapping=2 atomically.
+An authentication upgrade preserves the existing wrapping version and ciphertext.
+Never silently relabel an old envelope; a v1 envelope unwraps with original entropy.
+
+Recovery-start/resume add `{username|user_id,verifier}` as an alternative to legacy
+words. Exactly one authentication form is accepted. Generic denial, the existing
+Origin/body/admission partitions and two concurrent Argon2 slots remain; unknown
+accounts take the same bounded verifier work, with no version/account oracle.
+Words are not accepted for accounts already upgraded to version 2.
+
+### Existing phrase-hash migration: explicit one-time exception
+
+An existing salted Argon2id hash of mnemonic UTF-8 cannot verify an HKDF output:
+the server cannot transform it without either the original phrase or a new proof
+protocol/crypto engine. The owner's task permits the former at most once.
+`recovery-upgrade` therefore accepts `{username|user_id,words,verifier}` only for
+a version-1 account. The browser offers this only after explicit selection of
+“Upgrade an older recovery key” and displays that the old words are sent once
+for migration. It never automatically falls back after a v2 denial. This route
+verifies the old hash, computes the new verifier hash off-lock, and under the
+writer lock rechecks the exact old hash and version, installs the v2 verifier,
+then starts/resumes recovery without resetting an existing deadline. Concurrent
+upgrades admit at most one; version-2 rows reject further words, even if a caller
+knows them. Cancellation does not roll the verifier back. Ordinary replacement
+subsequently installs newly generated local words and a v2 envelope.
+
+This is the sole production phrase-admission exception for legacy envelopes.
+Never log its body. Direct legacy start/resume must not enable indefinite phrase
+transmission: they deny and require explicit upgrade. New enrollment does not
+support server-generated recovery words.
+
+### Threat note
+
+The server learns the account identity, a reusable recovery authentication secret,
+its hash, public envelope salt/nonce, ciphertext, timing and recovery lifecycle.
+These authorize recovery after the applicable delay but do not unwrap the DEK.
+A database leak contains the hash, not the bearer secret. A server receiving the
+authentication output cannot derive its HKDF sibling or the 256-bit entropy.
+The one-time legacy exception exposes the old entropy to the server just as the
+old protocol did; upgrading authentication alone cannot erase that historical
+knowledge. Rotation to browser-generated words protects the new recovery wrap.
+A malicious server that replaces browser JavaScript can collect browser secrets;
+this contract prevents protocol disclosure, not hostile client-code delivery.
