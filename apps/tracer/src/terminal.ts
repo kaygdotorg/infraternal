@@ -41,6 +41,9 @@ interface GhosttyActivityControls {
     getMetrics(): { width: number; height: number; baseline: number };
     setCursorBlink(enabled: boolean): void;
     setTheme(theme: ITheme): void;
+    renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
+    renderCursor(x: number, y: number, line: unknown[] | null): void;
+    naturalCellWidth?: number;
     render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown, scrollbarOpacity?: number): void;
   };
 }
@@ -225,6 +228,7 @@ export class TerminalClient {
   private lastPingAt = -Infinity;
   private renderIdleTimer = 0;
   private rendererCursorBlinking = false;
+  private predictionCursorHidden = false;
   private lastThemeColorsMs = 0;
   private lastThemeRenderMs = 0;
   private nextPingNonce = 0n;
@@ -250,6 +254,10 @@ export class TerminalClient {
         optedIn: true,
         getPosition: () => this.predictionPosition(),
         onVisible: (sequence, at) => config.hooks?.onTrace?.(sequence, "prediction", at),
+        setHostCursorHidden: (hidden) => this.setPredictionCursorHidden(hidden),
+        onRendererPainted: () => {
+          if (this.predictionCursorHidden) this.setPredictionCursorHidden(false);
+        },
       })
       : undefined;
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
@@ -529,6 +537,7 @@ export class TerminalClient {
     startedAt = performance.now();
     renderer?.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
     this.lastThemeRenderMs = performance.now() - startedAt;
+    this.prediction?.rendererPainted();
     this.prediction?.refresh();
   }
 
@@ -961,7 +970,10 @@ export class TerminalClient {
         this.lastOutSeq += BigInt(consumed);
         this.traceRange(writeSequence, consumed, "paint", paintedAt);
         if (this.predictionScreenUnsafe()) this.prediction?.unsafeScreen();
-        else this.prediction?.paintedOutput(region.subarray(0, consumed));
+        else {
+          this.prediction?.rendererPainted();
+          this.prediction?.paintedOutput(region.subarray(0, consumed));
+        }
         this.config.hooks?.onPaintedOutput?.(region.subarray(0, consumed), paintedAt, writeSequence);
         this.outputQueue.consume(consumed);
         this.outputWriteLength = 0;
@@ -1011,12 +1023,17 @@ export class TerminalClient {
     });
   }
 
-  private cellMetrics(): { width: number; height: number; baseline: number } {
+  private cellMetrics(): { width: number; height: number; naturalWidth: number; baseline: number } {
     const metrics = this.ghostty.renderer?.getMetrics();
     if (!metrics || metrics.width <= 0 || metrics.height <= 0) {
       throw new Error("terminal renderer cell metrics are unavailable");
     }
-    return { width: metrics.width, height: metrics.height, baseline: metrics.baseline };
+    return {
+      width: metrics.width,
+      height: metrics.height,
+      naturalWidth: this.ghostty.renderer?.naturalCellWidth ?? metrics.width,
+      baseline: metrics.baseline,
+    };
   }
 
   /** Rebuilds backing dimensions from the loaded web font before the first frame. */
@@ -1127,10 +1144,57 @@ export class TerminalClient {
       rows: this.terminal.rows,
       cellWidth: metrics.width,
       cellHeight: metrics.height,
+      naturalCellWidth: metrics.naturalWidth,
       baseline: metrics.baseline,
       fontFamily: this.terminal.options.fontFamily,
       fontSize: this.terminal.options.fontSize,
+      cursorStyle: this.terminal.options.cursorStyle,
+      cursorColor: (this.terminal.options.theme as ITheme | undefined)?.cursor ?? "#c8ceff",
     };
+  }
+
+  /** Repaints only the cursor row so the speculative cursor can replace Ghostty's old one. */
+  private setPredictionCursorHidden(hidden: boolean): void {
+    if (hidden === this.predictionCursorHidden) {
+      if (!hidden) this.paintHostCursor();
+      return;
+    }
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer) return;
+    const cursor = buffer.getCursor();
+    const line = this.cursorLine(cursor.y);
+    if (!line) return;
+    if (hidden) {
+      renderer.renderLine(line, cursor.y, this.terminal.cols);
+    } else if (cursor.visible && this.terminal.viewportY === 0) {
+      renderer.renderCursor(cursor.x, cursor.y, line);
+    } else {
+      renderer.renderLine(line, cursor.y, this.terminal.cols);
+    }
+    this.predictionCursorHidden = hidden;
+  }
+
+  /** Restores the actual renderer cursor after speculative pixels are removed. */
+  private paintHostCursor(): void {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer) return;
+    const cursor = buffer.getCursor();
+    const line = this.cursorLine(cursor.y);
+    if (!line) return;
+    if (cursor.visible && this.terminal.viewportY === 0) renderer.renderCursor(cursor.x, cursor.y, line);
+    else renderer.renderLine(line, cursor.y, this.terminal.cols);
+  }
+
+  /** Uses the same viewport slice the renderer uses for its cursor row. */
+  private cursorLine(y: number): unknown[] | null {
+    const buffer = this.terminal.wasmTerm;
+    if (!buffer) return null;
+    const viewport = buffer.getViewport?.();
+    return viewport
+      ? viewport.slice(y * this.terminal.cols, (y + 1) * this.terminal.cols)
+      : buffer.getLine(y);
   }
 
   private predictionUnsafe(): boolean {
