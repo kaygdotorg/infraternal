@@ -36,15 +36,35 @@ test("one field filters discovered hosts and turns unknown text into a manual ro
     const input = page.locator(".ah-input");
     await input.fill("edge");
     await expect(page.locator(".ah-row:not([hidden])")).toHaveCount(1);
-    await expect(page.locator(".ah-manual")).toBeHidden();
+    await expect(page.locator(".ah-candidate")).toBeHidden();
+    await input.fill("");
+    await page.locator(".ah-row[data-host='edge-arm']").click();
+    await page.locator(".ah-row[data-host='nix-cache']").click();
     await input.fill("root@pve02");
-    await expect(page.locator(".ah-row:not([hidden])")).toHaveCount(0);
-    await expect(page.locator(".ah-manual")).toBeVisible();
+    // Selected hosts stay listed under the candidate; nothing selected is hidden.
+    await expect(page.locator(".ah-row[data-host]:not([hidden])")).toHaveCount(2);
+    await expect(page.locator(".ah-candidate")).toBeVisible();
     await expect(page.locator(".ah-manual-target")).toHaveText("root@pve02");
     await input.press("Enter");
+    await expect(page.locator(".ah-row[data-host='pve02'] input")).toBeChecked();
+    await expect(page.locator(".ah-count")).toHaveText("3 selected");
+    await expect(input).toHaveValue("");
+    await page.locator("[data-ah='continue']").click();
     await expect(page.locator(".ah-page[data-page='credentials']:not([data-leaving])")).toBeVisible();
   } finally {
     await context.close();
+  }
+});
+
+test("the field autofocuses on desktop but not on touch", async ({ browser }) => {
+  for (const viewport of [DESKTOP, PHONE]) {
+    const { context, page } = await open(browser, viewport);
+    try {
+      const focused = await page.evaluate(() => document.activeElement?.classList.contains("ah-input") ?? false);
+      expect(focused).toBe(!viewport.touch);
+    } finally {
+      await context.close();
+    }
   }
 });
 
@@ -141,7 +161,7 @@ for (const width of [320, 375, 393]) {
     try {
       const overlaps = await page.evaluate(() => {
         const hits: string[] = [];
-        for (const row of document.querySelectorAll<HTMLElement>(".ah-row")) {
+        for (const row of document.querySelectorAll<HTMLElement>(".ah-row[data-host]")) {
           const parts = [".ah-name", ".ah-meta", ".ah-status", ".ah-ip"].map((selector) => row.querySelector<HTMLElement>(selector)!.getBoundingClientRect());
           for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
             const a = parts[i]!, b = parts[j]!;
