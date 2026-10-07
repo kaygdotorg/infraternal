@@ -173,6 +173,23 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     setAuthCookie(response, activeAuthCookie);
     return sendJson(response, 200, { ok: true });
   }
+  if (request.method === "POST" && url.pathname === "/__mock/text-output") {
+    const body = await readJson(request);
+    if (typeof body?.text !== "string") return sendJson(response, 400, { error: "text output must be a string" });
+    const bytes = new TextEncoder().encode(body.text);
+    if (bytes.byteLength > MAX_MESSAGE) return sendJson(response, 413, { error: "text output exceeds one frame" });
+    const connection = [...connections].find((candidate) => candidate.session === session && candidate.attached && isSocketOpen(candidate.socket));
+    if (!connection || session.outputLength !== 0 || session.echoOutputLength !== 0) {
+      return sendJson(response, 409, { error: "text output requires a fresh attached terminal" });
+    }
+    // Keep the visual metrics fixture on the same bounded Output path as normal PTY output.
+    session.fixtureOutput = bytes;
+    session.ringStartSequence = 0n;
+    session.snapshotFrames = [];
+    session.outputLength = bytes.byteLength;
+    flushOutput(connection);
+    return sendJson(response, 200, { bytes: bytes.byteLength });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/fixture") {
     const body = await readJson(request);
     const name = body?.name;
