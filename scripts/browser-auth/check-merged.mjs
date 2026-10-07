@@ -184,6 +184,10 @@ tls.on("upgrade", (request, socket, head) => {
     });
     const entry = {
       ws,
+      cookieKey: request.headers.cookie ?? "",
+      outputFrames: [],
+      inboundKinds: {},
+      outboundKinds: {},
       closed: false,
       session: undefined,
       acks: [],
@@ -200,6 +204,11 @@ tls.on("upgrade", (request, socket, head) => {
       const bytes = Buffer.from(data);
       let dropInput = false;
       inbound.feed(new Uint8Array(bytes), (_s, f) => {
+        entry.inboundKinds[f.type] = (entry.inboundKinds[f.type] ?? 0) + 1;
+        if (f.type === "Resume") {
+          const priorId = Buffer.from(f.connectionId).toString("hex");
+          entry.epoch = bridges.findLast((peer) => peer !== entry && peer.connectionId === priorId && peer.cookieKey === entry.cookieKey)?.epoch;
+        }
         if (f.type === "AttachTerm")
           entry.session = Buffer.from(f.sessionId).toString("hex");
         if (f.type === "Input") {
@@ -225,13 +234,24 @@ tls.on("upgrade", (request, socket, head) => {
     ws.on("message", (data) => {
       const bytes = Buffer.from(data);
       outbound.feed(new Uint8Array(bytes), (_s, f) => {
+        entry.outboundKinds[f.type] = (entry.outboundKinds[f.type] ?? 0) + 1;
+        if (f.type === "Welcome") {
+          entry.connectionId = Buffer.from(f.connectionId).toString("hex");
+          entry.epoch ??= entry.connectionId;
+        }
         if (f.type === "Ack")
           entry.acks.push(f.inSeqAcked);
-        if (f.type === "Output")
-          entry.output.push(f.bytes.slice());
+        if (f.type === "Output") {
+          const owned = f.bytes.slice();
+          entry.output.push(owned);
+          entry.outputFrames.push({ seq: f.outSeq, bytes: owned });
+        }
         if (f.type === "Event") entry.events.push(JSON.parse(new TextDecoder().decode(f.eventJson)));
         if (f.type === "Snapshot") entry.snapshots.push(f.outSeq);
-        if (f.type === "Close") entry.wireCloseCode = f.code;
+        if (f.type === "Close") {
+          entry.wireCloseCode = f.code;
+          entry.closeKind = f.reason.includes("queue full") ? "command_capacity" : f.reason.includes("shim disconnected") ? "shim_transport" : "other";
+        }
       });
       if (browserSocket.readyState === WebSocket.OPEN)
         browserSocket.send(bytes);
@@ -251,7 +271,25 @@ tls.on("upgrade", (request, socket, head) => {
 async function context() {
   return browser.newContext({ viewport: { width: 1280, height: 720 }, ignoreHTTPSErrors: true });
 }
-var output = (entry) => Buffer.concat(entry.output.map((x) => Buffer.from(x))).toString();
+/** Follow one browser document across recovery without confusing the other signed-in device. */
+function currentViewer(entry) {
+  return bridges.findLast((peer) => !peer.closed && peer.cookieKey === entry.cookieKey && peer.session === entry.session && peer.epoch === entry.epoch && peer.acks.length > 0) ?? entry;
+}
+/** Stitch the logical byte stream; replayed ranges count once, fresh reloads use a new epoch. */
+function output(entry) {
+  const frames = bridges.filter((peer) => peer.cookieKey === entry.cookieKey && peer.session === entry.session && peer.epoch === entry.epoch)
+    .flatMap((peer) => peer.outputFrames).sort((a, b) => a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0);
+  let cursor = frames[0]?.seq ?? 0n;
+  const parts = [];
+  for (const frame of frames) {
+    check(frame.seq <= cursor, "logical native viewer output gap");
+    const skip = Number(cursor - frame.seq);
+    if (skip >= frame.bytes.length) continue;
+    parts.push(Buffer.from(frame.bytes.subarray(skip)));
+    cursor = frame.seq + BigInt(frame.bytes.length);
+  }
+  return Buffer.concat(parts).toString();
+}
 var contexts = [];
 async function rawEchoProbe(cookie, session) {
   const socket = new WebSocket(backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: origin, Cookie: cookie } });
@@ -430,6 +468,7 @@ try {
   await page.keyboard.type("stty raw -echo; printf 'MERGED_%s' READY; cat", { delay: 20 });
   await page.keyboard.press("Enter");
   await wait(() => output(first).includes("MERGED_READY"), "real PTY command output missing");
+  first = currentViewer(first);
   const session = first.session;
   await page.reload();
   await wait(() => bridges.at(-1) !== first && bridges.at(-1)?.acks.length > 0, "reload did not attach");
@@ -462,6 +501,7 @@ try {
   await page.locator("#terminal-host").click();
   await page.keyboard.type("<DEVICE_A>", { delay: 20 });
   await wait(() => output(first).includes("<DEVICE_A>"), "device A input missing");
+  first = currentViewer(first);
   check(first.acks.some((ack) => ack > 0n), "device A has no positive Ack");
   const b = await context();
   contexts.push(b);
@@ -474,6 +514,8 @@ try {
   check(second.acks[0] === 0n, "device B inherited device A Ack");
   await pageB.keyboard.type("<DEVICE_B>", { delay: 20 });
   await wait(() => output(first).includes("<DEVICE_A><DEVICE_B>") && output(second).includes("<DEVICE_B>"), "multi-device input missing");
+  first = currentViewer(first);
+  second = currentViewer(second);
   for (const viewer of [first, second]) {
     for (const marker of ["<DEVICE_A>", "<DEVICE_B>"]) {
       check(output(viewer).split(marker).length === 2, "duplicated or lost device input");
@@ -502,7 +544,7 @@ try {
       await wait(() => bridges.slice(restoreFrom).some((entry) => !entry.closed && entry.session === session && entry.acks.length > 0), "device-A restoration did not attach", 60000);
       first = bridges.slice(restoreFrom).find((entry) => !entry.closed && entry.session === session && entry.acks.length > 0);
       await wait(() => output(first).includes("MERGED_READY"), "device-A restoration did not replay", 60000);
-      second = bridges.find((entry) => entry !== first && !entry.closed && entry.session === session && entry.acks.length > 0);
+      second = currentViewer(second);
       check(second, "device B lost its independent attachment");
       const markerA = `<RECONNECT_A_${trial}>`;
       const markerB = `<RECONNECT_B_${trial}>`;
@@ -511,6 +553,8 @@ try {
       await pageB.locator("#terminal-host").click();
       await pageB.keyboard.type(markerB, { delay: 20 });
       await wait(() => [first, second].every((entry) => output(entry).includes(markerA + markerB)), "reconnected devices lost input", 60000);
+      first = currentViewer(first);
+      second = currentViewer(second);
       for (const entry of [first, second]) {
         for (const marker of [markerA, markerB]) check(output(entry).split(marker).length === 2, "reconnected device duplicated input");
       }
@@ -602,11 +646,15 @@ try {
       })).catch(() => ({ unavailable: true }))));
     }
   }
+  console.log("native DB capacity: " + (await command(["python3", "-c", "import sqlite3,sys,json;db=sqlite3.connect(sys.argv[1]);print(json.dumps({'connections':db.execute('SELECT active,count(*) FROM websocket_connections GROUP BY active').fetchall(),'writers':db.execute('SELECT count(*) FROM terminal_writers').fetchone()[0]}))", `${state}/data/infraternal.sqlite`])).trim());
   console.log("native auth request counts: " + JSON.stringify(Object.fromEntries(authRequests)));
   console.log(`safe bridge count: ${bridges.length}`);
   console.log("safe bridge diagnostics (first/last): " + JSON.stringify([...bridges.slice(0, 3), ...bridges.slice(-10)].map((entry) => ({
     closed: entry.closed,
     wireCloseCode: entry.wireCloseCode,
+    closeKind: entry.closeKind,
+    inboundKinds: entry.inboundKinds,
+    outboundKinds: entry.outboundKinds,
     transportCloseCode: entry.transportCloseCode,
     inputBytes: entry.input.reduce((n, f) => n + f.bytes.length, 0),
     lastAck: String(entry.acks.at(-1)),
