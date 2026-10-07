@@ -69,6 +69,7 @@ pub struct Arrow {
     pub from: Endpoint,
     pub to: Endpoint,
     pub both_ways: bool,
+    #[serde(default = "all_ports")]
     pub ports: TrafficPolicy,
 }
 impl Arrow {
@@ -80,4 +81,9 @@ impl Arrow {
         }
         self.ports.validate_grant()
     }
+}
+
+// Arrow creation grants all services by default; compiled filters still default to None.
+const fn all_ports() -> TrafficPolicy {
+    TrafficPolicy::All
 }
