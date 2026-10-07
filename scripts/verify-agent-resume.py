@@ -85,6 +85,7 @@ def run(binary):
         barrier.restart = True
         client.start()
         client.send(1, 0x16, client.id.bytes + struct.pack('<QQ', client.out, client.acked))
+        client.send(1, 0x14, struct.pack('<I', 1048576))
         assert barrier.held.wait(20)
         with fifo.open('w') as gate:
             gate.write('x')

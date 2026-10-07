@@ -14,7 +14,7 @@ state = Path(f'target/ms{os.getpid()}')
 state.mkdir(mode=0o700)
 c = Binary(Path(sys.argv[sys.argv.index('--binary') + 1]).resolve(), state)
 try:
-    c.open(); c.attach(); c.send(1, 0x14, struct.pack('<I', 1048576)); c.until(b'shim-test')
+    c.open(); c.attach(); c.until(b'shim-test')
     c.input(b"stty raw -echo; printf 'SCALE_%s' READY; cat\n")
     c.until(b'SCALE_READY'); c.wait_ack()
     # Read-only PID discovery avoids consuming a 33rd peer at the limit.

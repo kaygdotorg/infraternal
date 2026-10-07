@@ -62,6 +62,9 @@ def run(binary):
         acknowledgments = {stream: 0 for stream in payloads}
         for stream, (session, out, ack) in enumerate(sessions, 1):
             client.send(stream, 0x16, session.bytes + struct.pack('<QQ', out, ack))
+            # The recovery viewer funds echo explicitly; the earlier held
+            # handshake stays unfunded so nine Inputs still test eight slots.
+            client.send(stream, 0x14, struct.pack('<I', 1048576))
         # Admit batches below capacity; wait on PTY Acks before the next batch.
         # The whole original range is replayed even if prior acceptance raced
         # retirement, proving that refusal never silently loses input.
