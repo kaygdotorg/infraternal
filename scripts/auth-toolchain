@@ -8,13 +8,15 @@ case "$(uname -m)" in
     *) printf 'unsupported Zig build host\n' >&2; exit 1 ;;
 esac
 version=0.15.2
-destination="$root/target/auth-tools/zig"
+target_root="${CARGO_TARGET_DIR:-$root/target}"
+[[ "$target_root" = /* ]] || target_root="$root/$target_root"
+destination="$target_root/auth-tools/zig"
 if [[ -x "$destination/zig" && "$("$destination/zig" version)" == "$version" ]]; then
     exit 0
 fi
-mkdir -p "$root/target/auth-tools"
+mkdir -p "$target_root/auth-tools"
 # A failed download or checksum never becomes the executable used by a build.
-staging="$(mktemp -d "$root/target/auth-tools/download.XXXXXX")"
+staging="$(mktemp -d "$target_root/auth-tools/download.XXXXXX")"
 trap 'rm -rf -- "$staging"' EXIT
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
     "https://ziglang.org/download/$version/zig-$host-linux-$version.tar.xz" -o "$staging/zig.tar.xz"

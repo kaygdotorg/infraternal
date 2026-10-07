@@ -5,9 +5,9 @@ sys.dont_write_bytecode = True
 import os
 from pathlib import Path
 import struct
-from agent_fixture import Binary, cleanup
+from agent_fixture import Binary, cleanup, fixture_state
 
-state = Path(f'target/mz{os.getpid()}')
+state = fixture_state('mz')
 state.mkdir(mode=0o700)
 c = Binary(Path(sys.argv[sys.argv.index('--binary') + 1]).resolve(), state)
 try:

@@ -4,12 +4,15 @@ set -euo pipefail
 
 # Ghostty VT and the musl C dependencies share exactly Zig 0.15.2 [94].
 # Nix supplies the local compiler; CI uses the checksum-verified downloader.
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+[[ "$target_dir" = /* ]] || target_dir="$repo_root/$target_dir"
 if ! command -v zig >/dev/null || [[ "$(zig version)" != 0.15.2 ]]; then
     if command -v nix >/dev/null; then
         exec nix shell nixpkgs#zig_0_15 -c "$0" "$@"
     fi
     "$(dirname -- "${BASH_SOURCE[0]}")/auth-toolchain"
-    export PATH="$PWD/target/auth-tools/zig:$PATH"
+    export PATH="$target_dir/auth-tools/zig:$PATH"
 fi
 [[ "$(zig version)" == 0.15.2 ]] || { printf 'Zig 0.15.2 required\n' >&2; exit 1; }
 
@@ -28,13 +31,55 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${script_dir}/verify.d/rust.sh"
 source "${script_dir}/verify.d/ts.sh"
 
+verify_latency() {
+    local repo_dir="$(cd -- "${script_dir}/.." && pwd)"
+    local target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
+    local failed=0
+    export CARGO_TARGET_DIR="$target_dir"
+    export TRACER_TEST_PORT="${TRACER_TEST_PORT:-4621}"
+    mkdir -p "$CARGO_TARGET_DIR"
+
+    report_environment() {
+        local rtt="${INFRATERNAL_TEST_RTT:-300}"
+        local jitter=30
+        [[ "$rtt" == 0 ]] && jitter=0
+        printf 'ENVIRONMENT phase=%s machine=%s arch=%s cores=%s load=%s tracer_test_port=%s rtt_ms=%s jitter_ms=%s\n' \
+            "$1" "$(uname -n)" "$(uname -m)" "$(getconf _NPROCESSORS_ONLN)" "$(cut -d' ' -f1-3 /proc/loadavg)" \
+            "$TRACER_TEST_PORT" "$rtt" "$jitter"
+    }
+
+    report_environment setup
+
+    python3 "${script_dir}/latency_proxy.py" self-test --samples 31 || failed=1
+    if cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl; then
+        report_environment native
+        python3 "${script_dir}/verify-latency.py" \
+            --binary "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/infraternal" || failed=1
+    else
+        failed=1
+    fi
+
+    report_environment auth-browser
+    "${script_dir}/verify-auth-browser" || failed=1
+    (
+        cd -- "$repo_dir/apps/tracer"
+        bun install --frozen-lockfile
+        bun run check
+        report_environment tracer-browser
+        TRACER_TEST_PORT="$TRACER_TEST_PORT" bun x playwright test
+    ) || failed=1
+    report_environment finish
+    return "$failed"
+}
+
 if [[ $# -ne 1 ]]; then
-    printf 'usage: scripts/verify {fast|nightly|integration|browser|bench}\n' >&2
+    printf 'usage: scripts/verify {fast|nightly|integration|browser|latency|bench}\n' >&2
     exit 2
 fi
 
 case "$1" in
     fast)
+        python3 "${script_dir}/latency_proxy.py" self-test --samples 3
         rust_verify_fast
         ts_verify_fast
         ;;
@@ -59,12 +104,15 @@ case "$1" in
     browser)
         "${script_dir}/verify-auth-browser"
         ;;
+    latency)
+        verify_latency
+        ;;
     integration|bench)
         printf '%s: not yet implemented\n' "$1"
         ;;
     *)
         printf 'unknown verification mode: %s\n' "$1" >&2
-        printf 'usage: scripts/verify {fast|nightly|integration|browser|bench}\n' >&2
+        printf 'usage: scripts/verify {fast|nightly|integration|browser|latency|bench}\n' >&2
         exit 2
         ;;
 esac

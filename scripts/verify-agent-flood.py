@@ -7,12 +7,12 @@ import struct
 import sys
 import time
 sys.dont_write_bytecode = True
-from agent_fixture import Binary, cleanup, rss
+from agent_fixture import Binary, cleanup, fixture_state, rss
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, required=True)
 args = parser.parse_args()
-state = Path(f'target/fl{os.getpid()}')
+state = fixture_state('fl')
 state.mkdir(mode=0o700)
 c = Binary(args.binary.resolve(), state)
 try:

@@ -36,7 +36,8 @@ rust_print_summary() {
 
 rust_check_static_binary() {
     local target="$1"
-    local binary="target/${target}/release/infraternal"
+    local target_dir="${CARGO_TARGET_DIR:-target}"
+    local binary="${target_dir}/${target}/release/infraternal"
     local description
     local size_bytes
 
@@ -78,7 +79,8 @@ rust_check_cli_stub() {
 rust_static_build_check() {
     local target
     local targets=("x86_64-unknown-linux-musl" "aarch64-unknown-linux-musl")
-    local x86_binary="target/x86_64-unknown-linux-musl/release/infraternal"
+    local target_dir="${CARGO_TARGET_DIR:-target}"
+    local x86_binary="${target_dir}/x86_64-unknown-linux-musl/release/infraternal"
 
     for tool in cargo file readelf stat; do
         if ! command -v "$tool" >/dev/null 2>&1; then
