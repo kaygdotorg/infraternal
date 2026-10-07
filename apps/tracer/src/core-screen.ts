@@ -73,7 +73,7 @@ const SCREEN = `
     </aside>
     <div class="palette-scrim" id="scrim" hidden></div>
     <section class="palette" id="palette" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
-      <div class="palette-input">${SVG.search}<input id="palette-input" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
+      <div class="palette-input">${SVG.search}<input id="palette-input" role="searchbox" aria-controls="palette-results" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
     </section>
@@ -228,25 +228,70 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     { group: "Background", glyph: "▦", label: "Mesh from the theme", hint: "one still · no idle work", action: "bg:mesh" },
     { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
   ];
+  const paletteSearchText = new Map(entries.map((entry) => [
+    entry,
+    `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase(),
+  ]));
   let visibleEntries: PaletteEntry[] = [];
+  let visibleOptions: HTMLButtonElement[] = [];
   let selected = 0;
+
+  const keepPaletteOptionVisible = (option: HTMLButtonElement): void => {
+    option.scrollIntoView({ block: "nearest", behavior: "instant" });
+    const previous = option.previousElementSibling;
+    if (previous instanceof HTMLElement && previous.classList.contains("group-label")) {
+      previous.scrollIntoView({ block: "nearest", behavior: "instant" });
+    }
+  };
+
+  const selectPaletteOption = (nextIndex: number): void => {
+    if (!visibleOptions.length) return;
+    const boundedIndex = Math.max(0, Math.min(visibleOptions.length - 1, nextIndex));
+    const previousOption = visibleOptions[selected];
+    const nextOption = visibleOptions[boundedIndex];
+    if (!nextOption) return;
+    if (previousOption !== nextOption) {
+      previousOption?.setAttribute("aria-selected", "false");
+      nextOption.setAttribute("aria-selected", "true");
+      selected = boundedIndex;
+    }
+    if (paletteInput.getAttribute("aria-activedescendant") !== nextOption.id) {
+      paletteInput.setAttribute("aria-activedescendant", nextOption.id);
+    }
+    keepPaletteOptionVisible(nextOption);
+  };
+
+  const visiblePalettePageSize = (): number => {
+    const port = paletteResults.getBoundingClientRect();
+    const top = port.top + paletteResults.clientTop;
+    const bottom = top + paletteResults.clientHeight;
+    const visibleCount = visibleOptions.reduce((count, option) => {
+      const rect = option.getBoundingClientRect();
+      return rect.top >= top && rect.bottom <= bottom ? count + 1 : count;
+    }, 0);
+    return Math.max(1, visibleCount);
+  };
 
   const renderPalette = (query = ""): void => {
     const needle = query.trim().toLocaleLowerCase();
-    const filtered = entries.filter((entry) => `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase().includes(needle));
+    const filtered = entries.filter((entry) => paletteSearchText.get(entry)?.includes(needle) ?? false);
     visibleEntries = filtered;
     selected = Math.min(selected, Math.max(0, visibleEntries.length - 1));
-    paletteResults.replaceChildren();
+    visibleOptions = [];
+    const fragment = document.createDocumentFragment();
     let previousGroup = "";
     filtered.forEach((entry, index) => {
       if (entry.group !== previousGroup) {
         const heading = document.createElement("div");
+        heading.id = `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`;
         heading.className = "group-label";
         heading.textContent = entry.group;
-        paletteResults.append(heading);
+        fragment.append(heading);
         previousGroup = entry.group;
       }
       const result = document.createElement("button");
+      const optionId = entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`;
+      result.id = `palette-option-${optionId}`;
       result.type = "button";
       result.className = "result";
       result.setAttribute("role", "option");
@@ -267,13 +312,24 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       hint.className = "result-hint";
       hint.textContent = entry.hint;
       result.append(icon, label, hint);
-      paletteResults.append(result);
+      visibleOptions.push(result);
+      fragment.append(result);
     });
     if (!filtered.length) {
       const empty = document.createElement("p");
       empty.className = "palette-empty";
       empty.textContent = "No matching hosts, sessions or actions.";
-      paletteResults.append(empty);
+      fragment.append(empty);
+    }
+    // Filtering rebuilds this short list; keyboard navigation never calls this render path.
+    paletteResults.replaceChildren(fragment);
+    const selectedOption = visibleOptions[selected];
+    if (selectedOption) {
+      if (paletteInput.getAttribute("aria-activedescendant") !== selectedOption.id) {
+        paletteInput.setAttribute("aria-activedescendant", selectedOption.id);
+      }
+    } else {
+      paletteInput.removeAttribute("aria-activedescendant");
     }
   };
 
@@ -292,8 +348,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (open) {
       selected = 0;
       paletteInput.value = "";
+      paletteResults.scrollTop = 0;
       renderPalette();
       paletteInput.focus({ preventScroll: true });
+    } else {
+      paletteInput.removeAttribute("aria-activedescendant");
     }
   };
   const sidebarClick = (event: MouseEvent): void => setSidebar(sidebar.hidden, event.detail === 0);
@@ -351,12 +410,25 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   sidebarToggle.addEventListener("click", sidebarClick);
   capsule.addEventListener("click", capsuleClick);
   scrim.addEventListener("click", scrimClick);
-  paletteInput.addEventListener("input", () => { selected = 0; renderPalette(paletteInput.value); });
+  paletteInput.addEventListener("input", () => {
+    selected = 0;
+    if (paletteResults.scrollTop !== 0) paletteResults.scrollTop = 0;
+    renderPalette(paletteInput.value);
+  });
   paletteInput.addEventListener("keydown", (event) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       const delta = event.key === "ArrowDown" ? 1 : -1;
-      selected = Math.max(0, Math.min(visibleEntries.length - 1, selected + delta));
-      renderPalette(paletteInput.value);
+      selectPaletteOption(selected + delta);
+      event.preventDefault();
+    } else if (event.key === "Home") {
+      selectPaletteOption(0);
+      event.preventDefault();
+    } else if (event.key === "End") {
+      selectPaletteOption(visibleOptions.length - 1);
+      event.preventDefault();
+    } else if (event.key === "PageDown" || event.key === "PageUp") {
+      const delta = visiblePalettePageSize() * (event.key === "PageDown" ? 1 : -1);
+      selectPaletteOption(selected + delta);
       event.preventDefault();
     } else if (event.key === "Enter") {
       const entry = visibleEntries[selected];
