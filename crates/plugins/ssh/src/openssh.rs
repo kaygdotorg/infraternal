@@ -31,6 +31,10 @@ impl SshTransport for OpenSsh {
         mesh: MeshEvidence,
     ) -> Operation<'_, Arc<dyn SshSession>> {
         Box::pin(async move {
+            // Outer strict checking is not inherited by arbitrary proxy hops.
+            // Refuse those configurations before materializing credentials or
+            // contacting a host; a future adapter must enforce every hop.
+            effective_destination(&self.ssh, &destination).await?;
             let credentials = CredentialSession::prepare(
                 &CredentialConfig {
                     ssh_agent: self.ssh_agent.clone(),
@@ -66,29 +70,7 @@ struct Session {
 
 impl Session {
     async fn observed_fingerprints(&self) -> Vec<String> {
-        // -G must precede the destination, unlike a remote command argument.
-        let mut configuration = Command::new(&self.ssh);
-        configuration
-            .args(["-G", "-l"])
-            .arg(self.destination.user());
-        if let Some(port) = self.destination.port() {
-            configuration.arg("-p").arg(port.to_string());
-        }
-        configuration.arg("--").arg(self.destination.host());
-        let Ok(configuration) = execute_bounded(
-            &mut configuration,
-            Input::Empty,
-            Duration::from_secs(3),
-            65536,
-        )
-        .await
-        else {
-            return Vec::new();
-        };
-        if !configuration.success {
-            return Vec::new();
-        }
-        let Some(destination) = scan_destination(&self.destination, &configuration.stdout) else {
+        let Ok(destination) = effective_destination(&self.ssh, &self.destination).await else {
             return Vec::new();
         };
         // Keyscan is an unauthenticated observation, never an admission path or
@@ -134,6 +116,10 @@ impl Session {
         command.args([
             "-T",
             "-o",
+            "ProxyJump=none",
+            "-o",
+            "ProxyCommand=none",
+            "-o",
             "StrictHostKeyChecking=yes",
             "-o",
             "UpdateHostKeys=no",
@@ -172,6 +158,35 @@ impl Session {
         command.arg("--").arg(self.destination.host());
         command
     }
+}
+
+async fn effective_destination(
+    ssh: &std::path::Path,
+    destination: &Destination,
+) -> Result<Destination, Failure> {
+    let mut configuration = Command::new(ssh);
+    configuration.args(["-G", "-l"]).arg(destination.user());
+    if let Some(port) = destination.port() {
+        configuration.arg("-p").arg(port.to_string());
+    }
+    configuration.arg("--").arg(destination.host());
+    let configuration = execute_bounded(
+        &mut configuration,
+        Input::Empty,
+        Duration::from_secs(3),
+        65536,
+    )
+    .await?;
+    if !configuration.success {
+        return Err(Failure::unsupported(
+            "The SSH configuration cannot be used for bootstrap.",
+        ));
+    }
+    scan_destination(destination, &configuration.stdout).ok_or_else(|| {
+        Failure::unsupported(
+            "SSH proxies or invalid effective addresses are unsupported by bootstrap.",
+        )
+    })
 }
 
 /// Resolve only the effective network endpoint; never scan a different configured port or proxy hop.
