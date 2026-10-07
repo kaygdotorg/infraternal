@@ -1,5 +1,5 @@
 /** TEST DOUBLE: serves dist/, accepts test-only passkey ceremonies, and echoes wire input. */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
@@ -19,6 +19,7 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
 }
 const MAX_HTTP_BODY = 32 * 1024;
 const MAX_MOCK_OUTPUT = 1024 * 1024;
+const MOCK_OUTPUT_RING_CAPACITY = 8 * 1024 * 1024;
 const MAX_MESSAGE = 16 * 1024;
 const MAX_TRACE_EVENTS = 120_000;
 const DIST_ROOT = resolve(import.meta.dirname, "../dist");
@@ -39,6 +40,9 @@ interface MockSession {
   connectionId: Uint8Array;
   resumeToken: Uint8Array;
   fixtureOutput: Uint8Array;
+  ringStartSequence: bigint;
+  snapshotFrames: Array<{ outSeq: bigint; bytes: Uint8Array }>;
+  snapshotCount: number;
   output: Uint8Array;
   echoOutputLength: number;
   outputLength: number;
@@ -190,6 +194,89 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       return sendJson(response, 500, { error: "renderer fixture could not be loaded" });
     }
   }
+  if (request.method === "POST" && url.pathname === "/__mock/wrapped-ring") {
+    if ([...connections].some((connection) => connection.session === session && connection.attached && isSocketOpen(connection.socket))) {
+      return sendJson(response, 409, { error: "wrapped output requires a detached terminal" });
+    }
+    // Model the real 8 MiB shim ring while detached. The mock retains the
+    // produced bytes only as fixture data; AttachTerm still takes the same
+    // contract path and gets a valid repaint at the absolute output cursor.
+    const totalBytes = MOCK_OUTPUT_RING_CAPACITY + 64;
+    const history = new Uint8Array(totalBytes);
+    const line = new TextEncoder().encode("a\r\n");
+    const markerText = "__TRACER_SNAPSHOT_READY__\r\n";
+    const marker = new TextEncoder().encode(markerText);
+    const historyLength = history.byteLength - marker.byteLength;
+    for (let offset = 0; offset < historyLength; offset += line.byteLength) {
+      history.set(line.subarray(0, Math.min(line.byteLength, historyLength - offset)), offset);
+    }
+    history.set(marker, historyLength);
+    const firstSnapshot = new TextEncoder().encode(`\x1bc\x1b[?25l${"a\r\n".repeat(256)}`);
+    const finalSnapshot = new TextEncoder().encode(`\x1bc\x1b[?25l${"a\r\n".repeat(256)}${markerText}`);
+    session.fixtureOutput = history;
+    session.ringStartSequence = BigInt(totalBytes - MOCK_OUTPUT_RING_CAPACITY);
+    // These valid progressive repaints share one websocket message so a second
+    // Snapshot can be pending before the first renderer write reaches rAF.
+    session.snapshotFrames = [
+      { outSeq: BigInt(totalBytes - 1), bytes: firstSnapshot },
+      { outSeq: BigInt(totalBytes), bytes: finalSnapshot },
+    ];
+    session.snapshotCount = 0;
+    session.output.fill(0);
+    session.echoOutputLength = 0;
+    session.outputLength = totalBytes;
+    session.writtenInput = 0n;
+    session.acceptedInputBytes = 0;
+    session.echoedText = "";
+    return sendJson(response, 200, {
+      bytes: totalBytes,
+      ring_capacity: MOCK_OUTPUT_RING_CAPACITY,
+      ring_start_sequence: session.ringStartSequence.toString(),
+      output_sequence: String(session.outputLength),
+    });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/unicode-case") {
+    const body = await readJson(request);
+    const mode = body?.mode;
+    if (mode !== "single" && mode !== "utf8-split" && mode !== "grapheme-split" && mode !== "snapshot") {
+      return sendJson(response, 400, { error: "unknown Unicode write mode" });
+    }
+    if (session.outputLength !== 0) return sendJson(response, 409, { error: "Unicode probe requires a fresh terminal" });
+    const connection = [...connections].find((candidate) => candidate.session === session && candidate.attached && isSocketOpen(candidate.socket));
+    if (!connection) return sendJson(response, 409, { error: "Unicode probe requires an attached terminal" });
+
+    // Place one protocol boundary inside the skin-tone scalar or between the
+    // base emoji and modifier while leaving the UTF-8 bytes unchanged.
+    const paddingLength = mode === "utf8-split" ? MAX_MESSAGE - 7 : mode === "grapheme-split" ? MAX_MESSAGE - 4 : 0;
+    const text = `${"a".repeat(paddingLength)}👩🏽‍💻 👨‍👩‍👧‍👦 🧑🏾‍🚀 🇩🇪 🇺🇳\r\n`;
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.byteLength > connection.credit) return sendJson(response, 409, { error: "Unicode probe exceeds current terminal credit" });
+    session.fixtureOutput = bytes;
+    session.ringStartSequence = 0n;
+    session.snapshotFrames = [];
+    session.snapshotCount = 0;
+    session.output.fill(0);
+    session.echoOutputLength = 0;
+    session.outputLength = bytes.byteLength;
+    session.writtenInput = 0n;
+    session.acceptedInputBytes = 0;
+    session.echoedText = "";
+
+    if (mode === "snapshot") {
+      sendFrame(connection.socket, 1, { type: "Snapshot", outSeq: BigInt(bytes.byteLength), bytes });
+      connection.outputCursor = BigInt(bytes.byteLength);
+      connection.credit -= bytes.byteLength;
+      session.snapshotCount += 1;
+    } else {
+      for (let offset = 0; offset < bytes.byteLength; offset += MAX_MESSAGE) {
+        const chunk = bytes.subarray(offset, Math.min(offset + MAX_MESSAGE, bytes.byteLength));
+        sendFrame(connection.socket, 1, { type: "Output", outSeq: BigInt(offset), bytes: chunk });
+        connection.outputCursor = BigInt(offset + chunk.byteLength);
+        connection.credit -= chunk.byteLength;
+      }
+    }
+    return sendJson(response, 200, { mode, bytes: bytes.byteLength, output_sequence: String(session.outputLength) });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/canary") {
     const fixtureLength = session.fixtureOutput.byteLength;
     const readers = [...connections].filter((connection) => connection.session === session && connection.attached);
@@ -210,6 +297,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       written_input: session.writtenInput.toString(),
       accepted_input_bytes: session.acceptedInputBytes,
       output_sequence: String(session.outputLength),
+      snapshot_count: session.snapshotCount,
     });
   }
   if (request.method === "GET" && url.pathname === "/__mock/clock") {
@@ -256,6 +344,18 @@ async function authAction(
   switch (action) {
     case "status":
       return sendJson(response, 200, { setup_required: !owner });
+    case "setup-check": {
+      if (Object.keys(body).length !== 1 || typeof body.token !== "string") {
+        return sendJson(response, 400, { error: "invalid request" });
+      }
+      if (owner) return sendJson(response, 404, { error: "not found" });
+      const candidate = createHash("sha256").update(body.token).digest();
+      const expected = createHash("sha256").update(setupToken).digest();
+      if (!timingSafeEqual(candidate, expected)) return sendJson(response, 401, { error: "authorization failed" });
+      response.writeHead(204);
+      response.end();
+      return;
+    }
     case "session":
       if (unlockPending) return sendJson(response, 401, { error: "authorization failed" });
     case "unlock-session":
@@ -491,6 +591,15 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
 
 function flushOutput(connection: Connection): void {
   if (!connection.attached || !isSocketOpen(connection.socket)) return;
+  if (connection.outputCursor < connection.session.ringStartSequence) {
+    const snapshots = connection.session.snapshotFrames;
+    const repaintBytes = snapshots.reduce((total, snapshot) => total + snapshot.bytes.byteLength, 0);
+    if (snapshots.length === 0 || repaintBytes > connection.credit) return;
+    sendFrames(connection.socket, 1, snapshots.map(({ outSeq, bytes }) => ({ type: "Snapshot", outSeq, bytes })));
+    connection.outputCursor = BigInt(connection.session.outputLength);
+    connection.credit -= repaintBytes;
+    connection.session.snapshotCount += snapshots.length;
+  }
   const availableEnd = BigInt(connection.session.outputLength);
   while (connection.credit > 0 && connection.outputCursor < availableEnd) {
     const absoluteOffset = Number(connection.outputCursor);
@@ -525,6 +634,13 @@ function sendFrame(socket: WebSocket, streamId: number, frame: WireFrame, traceS
   if (traceStart !== undefined) traceRange(traceStart, traceLength, "doubleEchoEncode", process.hrtime.bigint());
   socket.send(message, { binary: true });
   if (traceStart !== undefined) traceRange(traceStart, traceLength, "doubleEchoSend", process.hrtime.bigint());
+}
+
+/** Sends ordered mock frames in one message to exercise decoder and paint ordering deterministically. */
+function sendFrames(socket: WebSocket, streamId: number, frames: WireFrame[]): void {
+  if (!isSocketOpen(socket)) return;
+  const message = Buffer.concat(frames.map((frame) => Buffer.from(encodeMuxedFrame(streamId, frame))));
+  socket.send(message, { binary: true });
 }
 
 /** Records server-side monotonic marks keyed by the echoed byte-stream offset. */
@@ -613,6 +729,9 @@ function createSession(resumeFrom?: MockSession, fixtureOutput: Uint8Array = new
     connectionId: resumeFrom?.connectionId ?? randomBytes(16),
     resumeToken: resumeFrom?.resumeToken ?? randomBytes(32),
     fixtureOutput,
+    ringStartSequence: 0n,
+    snapshotFrames: [],
+    snapshotCount: 0,
     output: new Uint8Array(MAX_MOCK_OUTPUT),
     echoOutputLength: 0,
     outputLength: fixtureOutput.byteLength,

@@ -57,6 +57,11 @@ export async function checkStatus(): Promise<boolean> {
   return status.setup_required;
 }
 
+/** Validates first-run authority without starting or consuming owner enrollment. */
+export async function checkSetupToken(token: string): Promise<void> {
+  await post<void>("setup-check", { token });
+}
+
 /** Checks the secure cookie when the app starts or returns to the foreground. */
 export async function checkSession(): Promise<AuthSession | undefined> {
   try {
@@ -198,12 +203,14 @@ async function post<Result = unknown>(action: string, body: unknown): Promise<Re
   if (!response.ok) {
     const message = response.status >= 500 ? "The server could not complete the request. Try again."
       : response.status === 429 ? "Too many attempts. Wait a minute and try again."
+      : action === "setup-check" && response.status === 401 ? "That token doesn't match. Run `infraternal server setup-token` on the server."
       : action === "setup-start" && response.status === 401 ? "The setup token is invalid or expired. Get the current token from the server."
       : action === "setup-start" && response.status === 409 ? "That username is already in use. Choose another username."
       : action === "login-finish" ? "This passkey could not sign in. Try your registered passkey."
       : "The request could not be accepted. Check your details and try again.";
     throw new AuthError(message, response.status);
   }
+  if (response.status === 204) return undefined as Result;
   try {
     return (await response.json()) as Result;
   } catch {

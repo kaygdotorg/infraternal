@@ -113,6 +113,36 @@ p99, reconnect below 300 ms without byte loss, PWA first paint below 1 s on a
 mid-range phone, 60 fps at 10 MB/s output, and idle infraternal agent below
 15 MB RSS. These local renderer runs do not prove the pinned perf-VM budgets.
 
+## Unicode stream fidelity (#39)
+
+Issue #38 reported that raw behemoth output lost emoji modifiers and grapheme
+clusters which a native Snapshot retained. This was not reproducible on the
+deployed `0c47cd4` tracer build. The relevant sample is
+`👩🏽‍💻 👨‍👩‍👧‍👦 🧑🏾‍🚀 🇩🇪 🇺🇳`.
+
+`test/unicode-fidelity.spec.ts` drives the production page through one raw
+Output frame, a 16 KiB boundary inside the skin-tone UTF-8 scalar, a boundary
+between the base emoji and modifier codepoints, and a Snapshot frame carrying
+the same VT sample. All five clusters remain in Ghostty's grapheme buffer in
+all four cases. The split payloads are 16,454 B (16,377 B ASCII prefix; seven
+bytes of the first cluster remain in that Output frame) and 16,457 B (16,380 B
+prefix; four bytes remain). The Snapshot control is a minimal protocol repaint,
+not a separately exported native terminal state.
+
+The production behemoth case in `test/renderer-regression.spec.ts` streams all
+50,000,000 B as raw Output frames at 205×56. All five clusters remain present
+after the final painted sequence. That run retained 291 rows and used
+1,053,818,880 B of WASM memory; the test took 21.2 s on Debian 13, kernel
+`6.12.111+deb13-amd64`, Intel i9-9900K, 8 logical CPUs, and 32 GiB RAM. This is
+a correctness run, not a throughput measurement.
+
+The earlier probe reader used the xterm-compatible `translateToString`, which
+does not include Ghostty's separate grapheme buffer. `readGraphemeText()` now
+reads the same `getGraphemeString()` values that the canvas renderer draws.
+Frame chunking and the vendored Ghostty renderer therefore have no reproduced
+loss in this deployed path; the original Snapshot-versus-raw difference remains
+unconfirmed outside the #38 harness.
+
 ## Latency comparison
 
 Both runs sent 500 sequential keys through the tracer probe on the same local

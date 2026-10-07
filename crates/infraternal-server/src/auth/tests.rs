@@ -1395,7 +1395,11 @@ async fn http_post_json_with_optional_cookie(
         .await
         .expect("auth HTTP body")
         .to_bytes();
-    let value = serde_json::from_slice(&body).expect("auth JSON response");
+    let value = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body).expect("auth JSON response")
+    };
     (status, headers, value)
 }
 
@@ -2025,6 +2029,28 @@ async fn setup_start_accepts_username_and_display_name() {
     assert_eq!(session["user_id"], user_id);
     assert_eq!(session["username"], "ada");
     assert_eq!(session["display_name"], "Ada Lovelace");
+}
+
+/// A token check reports validity without consuming the capability used by owner enrollment.
+#[tokio::test]
+async fn setup_check_is_non_consuming_and_closes_after_owner_creation() {
+    let (auth, setup_token) = empty().await;
+    let app = router(auth);
+
+    let (status, _, _) = http_post_json(&app, "setup-check", json!({"token":"wrong-token"})).await;
+    assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+
+    let (status, headers, body) =
+        http_post_json(&app, "setup-check", json!({"token":setup_token})).await;
+    assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+    assert_eq!(headers[axum::http::header::CACHE_CONTROL], "no-store");
+    assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+    assert_eq!(body, Value::Null);
+
+    // A real registration proves the check did not consume the one-shot token.
+    register_over_http(&app, &setup_token).await;
+    let (status, _, _) = http_post_json(&app, "setup-check", json!({"token":setup_token})).await;
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
 }
 
 /// Enrollment rejects invalid usernames, overlong labels and an account-name collision.
