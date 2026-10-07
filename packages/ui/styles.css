@@ -1,6 +1,7 @@
 /** Shared presentation for @infraternal/ui browser primitives. */
 .countup { font-variant-numeric: tabular-nums; }
 .busy-count { font: 500 13px/1 "Geist Mono", ui-monospace, monospace; color: rgb(0 0 0 / 0.6); }
+.terminal-text-overlay { position: absolute; z-index: 2; overflow: hidden; pointer-events: none; color: inherit; opacity: var(--terminal-prediction-opacity, 0.68); }
 
 /* One spring drives the fill, tick draw-on and label treatment. */
 .tick { position: relative; display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px;
