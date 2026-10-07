@@ -297,17 +297,19 @@ async function rawEchoProbe(cookie, session) {
   const id = Buffer.from(session, "hex");
   let attached = false;
   let pending;
+  let lastAck = 0n;
+  const kinds = {};
   const samples = [];
   const send = (stream, frame) => socket.send(encodeMuxedFrame(stream, frame));
   socket.on("message", (data) => decoder.feed(new Uint8Array(Buffer.from(data)), (_stream, frame) => {
+    kinds[frame.type] = (kinds[frame.type] ?? 0) + 1;
     if (frame.type === "Hello")
       send(0, { type: "Hello", version: 1, caps: 0n, clientInfo: "merged-real-PTY-probe" });
     if (frame.type === "Welcome") {
       send(1, { type: "AttachTerm", sessionId: id, lastOutSeq: 0n, lastInSeq: 0n });
       send(1, { type: "Credit", bytes: 1048576 });
     }
-    if (frame.type === "Ack")
-      attached = true;
+    if (frame.type === "Ack") { attached = true; lastAck = frame.inSeqAcked; }
     if (frame.type === "Output" && pending) {
       check(frame.bytes.length === 1 && frame.bytes[0] === 120, "raw echo probe payload mismatch");
       samples.push(performance.now() - pending.started);
@@ -332,6 +334,9 @@ async function rawEchoProbe(cookie, session) {
     samples.sort((a, b) => a - b);
     console.log(`real leg-A/agent/shim/PTY echo: n=500 p50=${samples[250].toFixed(3)}ms p99=${samples[495].toFixed(3)}ms`);
     checkPerformance(samples[495] < 5, "real PTY echo exceeds decision41 5ms overhead");
+  } catch (error) {
+    console.log("Raw echo metadata: " + JSON.stringify({ kinds, lastAck: String(lastAck), samples: samples.length }));
+    throw error;
   } finally {
     socket.terminate();
   }
@@ -622,8 +627,11 @@ try {
     await gapPage.goto(origin + "/?session=" + flood.sessionId);
     await wait(() => bridges.slice(from).some((entry) => entry.snapshots.length === 1 && entry.events.some((event) => event.type === "terminal.snapshot" && event.approximate === true)), "native browser ring-gap recovery notice/repaint missing");
     const recovered = bridges.slice(from).find((entry) => entry.snapshots.length === 1);
-    check(recovered && !recovered.closed && recovered.events.length === 1, "native browser ring-gap recovery retired its stream");
-    check(BigInt(recovered.events[0].seq) === recovered.snapshots[0], "native browser notice/repaint ordering changed");
+    const notices = recovered?.events.filter((event) => event.type === "terminal.snapshot" && event.approximate === true) ?? [];
+    // Attach precedes Credit, so an output-paused notice can precede the funded repaint.
+    check(recovered && !recovered.closed && notices.length === 1, "native browser ring-gap recovery retired its stream or repeated approximation");
+    check(recovered.events.every((event) => event.type === "terminal.snapshot" || event.type === "terminal.snapshot_unavailable"), "native browser recovery received an unexpected notice");
+    check(BigInt(notices[0].seq) === recovered.snapshots[0], "native browser notice/repaint ordering changed");
     await wait(() => gapPage.locator("#connection-status").textContent().then((text) => text?.includes("approximate")), "approximate recovery not labelled in browser");
     await gapPage.screenshot({ path: "apps/tracer/test-results/merged-approximate-recovery.png" });
     await gapContext.close();
