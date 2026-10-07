@@ -110,3 +110,7 @@ impl Channel for NativeChannel {
         result
     }
 }
+
+#[cfg(test)]
+#[path = "remote_native_tests.rs"]
+mod tests;
