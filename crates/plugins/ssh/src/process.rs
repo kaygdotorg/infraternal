@@ -1,0 +1,166 @@
+//! Bounds bootstrap child input/output, deadlines and cancellation; arbitrary helper bytes never become diagnostics.
+
+use crate::{model::Failure, transport::Input};
+use nix::{
+    sys::signal::{Signal, killpg},
+    unistd::Pid,
+};
+use std::{os::unix::process::CommandExt, process::Stdio, time::Duration};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+};
+
+/// Process data is bounded even when a compromised SSH endpoint streams endlessly.
+pub struct Output {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub success: bool,
+    pub ssh_failure: bool,
+}
+
+/// Run one trusted helper with bounded pipes and a total active deadline.
+/// # Errors
+/// Reports helper startup, bounded I/O or active timeout without printing process data.
+pub async fn execute(
+    command: &mut Command,
+    input: Input<'_>,
+    timeout: Duration,
+) -> Result<Output, Failure> {
+    execute_bounded(command, input, timeout, 4096).await
+}
+
+/// Bound larger trusted helper output such as effective SSH configuration; stderr stays at8KiB.
+/// # Errors
+/// Refuses output limits over64KiB, then uses the same bounded process lifecycle.
+pub async fn execute_bounded(
+    command: &mut Command,
+    input: Input<'_>,
+    timeout: Duration,
+    stdout_limit: usize,
+) -> Result<Output, Failure> {
+    if stdout_limit > 65536 {
+        return Err(Failure::install("The SSH helper output limit is invalid."));
+    }
+    command.as_std_mut().process_group(0);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|_| Failure::install("The SSH helper could not start."))?;
+    let group = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .map(Pid::from_raw)
+        .ok_or_else(|| Failure::install("The SSH helper identity is unavailable."))?;
+    // This guard is created after Child so cancellation drops it first, while
+    // the process identity is still owned. Proxies and askpass descendants share
+    // this group; killing only the SSH parent would leave them alive.
+    let mut group = Group {
+        id: group,
+        armed: true,
+    };
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| Failure::install("The SSH input pipe is unavailable."))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Failure::install("The SSH output pipe is unavailable."))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| Failure::install("The SSH diagnostic pipe is unavailable."))?;
+    let operation = async {
+        let write = async {
+            let mut stdin = stdin;
+            match input {
+                Input::Empty => {}
+                Input::Bytes(bytes) => stdin
+                    .write_all(bytes)
+                    .await
+                    .map_err(|_| Failure::install("The SSH upload was interrupted."))?,
+                Input::File(path) => {
+                    let mut file = tokio::fs::File::open(path).await.map_err(|_| {
+                        Failure::install("The matching infraternal binary is unavailable.")
+                    })?;
+                    tokio::io::copy(&mut file, &mut stdin)
+                        .await
+                        .map_err(|_| Failure::install("The SSH upload was interrupted."))?;
+                }
+            }
+            // Broken pipe is expected on pre-command authentication/host-key refusal;
+            // retain the child's bounded diagnostics to classify the real failure.
+            let _ = stdin.shutdown().await;
+            Ok::<(), Failure>(())
+        };
+        let read = async {
+            let (stdout, stderr) =
+                tokio::try_join!(bounded(stdout, stdout_limit), bounded(stderr, 8192))?;
+            Ok::<_, Failure>((stdout, stderr))
+        };
+        let (write, read, status) = tokio::join!(write, read, child.wait());
+        let status =
+            status.map_err(|_| Failure::install("The SSH helper did not exit cleanly."))?;
+        let (stdout, stderr) = read?;
+        if status.success() {
+            write?;
+        }
+        Ok(Output {
+            stdout,
+            stderr,
+            success: status.success(),
+            ssh_failure: status.code() == Some(255),
+        })
+    };
+    if let Ok(result) = tokio::time::timeout(timeout, operation).await {
+        // No await between completed wait/read/write and disarming: an exited
+        // and reaped group identity must not be signalled after pid reuse.
+        group.armed = false;
+        result
+    } else {
+        group.retire();
+        let _ = child.wait().await;
+        Err(Failure::install("The SSH operation timed out."))
+    }
+}
+
+struct Group {
+    id: Pid,
+    armed: bool,
+}
+impl Group {
+    fn retire(&mut self) {
+        if self.armed {
+            let _ = killpg(self.id, Signal::SIGKILL);
+            self.armed = false;
+        }
+    }
+}
+impl Drop for Group {
+    fn drop(&mut self) {
+        self.retire();
+    }
+}
+
+async fn bounded(
+    reader: impl tokio::io::AsyncRead + Unpin,
+    limit: usize,
+) -> Result<Vec<u8>, Failure> {
+    let mut bytes = Vec::new();
+    reader
+        .take(u64::try_from(limit + 1).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| Failure::install("The SSH output was interrupted."))?;
+    if bytes.len() > limit {
+        return Err(Failure::install(
+            "The SSH output exceeded its safety limit.",
+        ));
+    }
+    Ok(bytes)
+}
