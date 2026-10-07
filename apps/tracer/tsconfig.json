@@ -1,3 +1,4 @@
+// Type-checks browser code, build utilities and tests under the tracer strict settings.
 {
   "compilerOptions": {
     "target": "ES2022",
@@ -10,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["bun-types", "node"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "build.ts", "playwright.config.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "*.ts"]
 }

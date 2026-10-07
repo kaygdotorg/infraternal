@@ -12,7 +12,7 @@ state = Path(f'target/mw{os.getpid()}')
 state.mkdir(mode=0o700)
 c = Binary(Path(sys.argv[sys.argv.index('--binary') + 1]).resolve(), state)
 try:
-    c.open(); c.attach(); c.send(1, 0x14, struct.pack('<I', 1048576)); c.until(b'shim-test')
+    c.open(); c.attach(); c.until(b'shim-test')
     c.input(b"stty raw -echo; printf 'MULTI_%s' READY; cat\n")
     c.until(b'MULTI_READY'); c.wait_ack()
     start = c.entered

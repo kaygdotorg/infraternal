@@ -4,6 +4,7 @@
 pub mod auth;
 mod embedded;
 mod runtime;
+mod web_assets;
 mod websocket;
 
 pub use runtime::{ProxyNetwork, ServerConfig, ServerError, TlsFiles, serve};

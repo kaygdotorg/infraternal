@@ -120,6 +120,10 @@ class Binary:
 
     def attach(self):
         self.send(1, 0x16, self.id.bytes + struct.pack('<QQ', self.out, self.acked))
+        # Each new attachment owns a fresh explicit credit window. Old batched
+        # refunds cannot fund a new connection; no grant is implicit in Attach.
+        self.credit_pending = 0
+        self.send(1, 0x14, struct.pack('<I', 1048576))
         self.process()
 
     def input(self, data):

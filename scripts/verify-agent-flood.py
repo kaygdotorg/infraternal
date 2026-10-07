@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report credited Alacritty PTY flood throughput without selecting or changing the VT engine [41]."""
+"""Report credited PTY flood throughput without selecting or changing the VT engine [41]."""
 import argparse
 import os
 from pathlib import Path
@@ -16,7 +16,7 @@ state = Path(f'target/fl{os.getpid()}')
 state.mkdir(mode=0o700)
 c = Binary(args.binary.resolve(), state)
 try:
-    c.open(); c.attach(); c.send(1, 0x14, struct.pack('<I', 1048576)); c.until(b'shim-test')
+    c.open(); c.attach(); c.until(b'shim-test')
     c.input(b"stty -echo -opost; printf 'FLOOD_%s' READY\n")
     c.until(b'FLOOD_READY'); c.wait_ack(); c.data.clear()
     started = time.monotonic()
@@ -39,6 +39,6 @@ try:
     for begin in range(start, end, 65536):
         stop = min(begin + 65536, end)
         assert memoryview(c.data)[begin:stop] == b'y\n' * ((stop - begin) // 2), 'flood payload changed'
-    print(f'Alacritty credited flood: {len(c.data)} bytes / {elapsed:.3f}s = {len(c.data)/elapsed/1024/1024:.3f} MiB/s; daemon RSS={rss(c.child.pid)} KiB; machine={os.uname().machine}; cores={os.cpu_count()}; load={os.getloadavg()}; throughput is nonblocking for #34', flush=True)
+    print(f'credited PTY flood: {len(c.data)} bytes / {elapsed:.3f}s = {len(c.data)/elapsed/1024/1024:.3f} MiB/s; daemon RSS={rss(c.child.pid)} KiB; machine={os.uname().machine}; cores={os.cpu_count()}; load={os.getloadavg()}; throughput is nonblocking for #34', flush=True)
 finally:
     c.kill(); cleanup(state)

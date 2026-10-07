@@ -102,12 +102,14 @@ pub struct Output {
 }
 
 impl Output {
-    /// Start an attachment with the wire's initial 1 MiB credit.
+    /// Start unfunded: only an explicit Credit permits Output or Snapshot.
+    /// An implicit grant races the server's zero-credit relay and causes a
+    /// whole leg-B reconnect when shim replay wins that race (#66).
     #[must_use]
     pub const fn attach(cursor: u64) -> Self {
         Self {
             cursor,
-            credit: 1024 * 1024,
+            credit: 0,
             stalled: None,
             snapshot: false,
             required: 1,

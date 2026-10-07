@@ -2,6 +2,26 @@
 use super::{Error, Input, Output, STARVATION};
 use std::time::{Duration, Instant};
 
+fn funded_output(cursor: u64) -> Output {
+    let mut output = Output::attach(cursor);
+    output.grant(1024 * 1024).unwrap();
+    output
+}
+
+#[test]
+fn attachment_has_no_implicit_output_or_snapshot_credit() {
+    let mut output = Output::attach(4);
+    assert_eq!(output.suffix(4, 3), Ok(0..0));
+    assert_eq!(output.forward(1), Err(Error::OutOfRange));
+    assert_eq!(output.repaint(4, 1), Err(Error::OutOfRange));
+    assert_eq!(output.cursor(), 4);
+    output.grant(2).unwrap();
+    assert_eq!(output.suffix(4, 3), Ok(0..2));
+    output.forward(2).unwrap();
+    assert_eq!(output.suffix(6, 1), Ok(0..0));
+    assert_eq!(output.forward(1), Err(Error::OutOfRange));
+}
+
 #[test]
 fn input_overlap_gap_and_restart_from_confirmed_offset() {
     let mut input = Input::resume(4);
@@ -20,7 +40,7 @@ fn input_overlap_gap_and_restart_from_confirmed_offset() {
 
 #[test]
 fn output_partial_credit_and_dedup() {
-    let mut output = Output::attach(10);
+    let mut output = funded_output(10);
     assert_eq!(output.suffix(8, 6), Ok(2..6));
     output.forward(4).unwrap();
     assert_eq!(output.cursor(), 14);
@@ -36,7 +56,7 @@ fn output_partial_credit_and_dedup() {
 
 #[test]
 fn starvation_is_one_shot_and_snapshot_length_does_not_advance_sequence() {
-    let mut output = Output::attach(0);
+    let mut output = funded_output(0);
     let now = Instant::now();
     assert_eq!(output.pending(now), None); // No timer for idle/credited streams.
     output.forward(1024 * 1024).unwrap();
@@ -60,7 +80,7 @@ fn starvation_is_one_shot_and_snapshot_length_does_not_advance_sequence() {
 
 #[test]
 fn overflowing_ranges_never_mutate_cursors() {
-    let mut output = Output::attach(u64::MAX);
+    let mut output = funded_output(u64::MAX);
     assert_eq!(output.suffix(u64::MAX, 1), Err(Error::Overflow));
     assert_eq!(output.forward(1), Err(Error::Overflow));
     assert_eq!(output.cursor(), u64::MAX);
@@ -69,7 +89,7 @@ fn overflowing_ranges_never_mutate_cursors() {
 
 #[test]
 fn returned_credit_cancels_starvation_and_state_has_no_payload_buffer() {
-    let mut output = Output::attach(0);
+    let mut output = funded_output(0);
     output.forward(1024 * 1024).unwrap();
     let now = Instant::now();
     output.pending(now);
@@ -81,7 +101,7 @@ fn returned_credit_cancels_starvation_and_state_has_no_payload_buffer() {
 
 #[test]
 fn expired_credit_resumes_retained_bytes_at_the_same_cursor() {
-    let mut output = Output::attach(41);
+    let mut output = funded_output(41);
     output.forward(1024 * 1024).unwrap();
     let cursor = output.cursor();
     let now = Instant::now();
@@ -97,7 +117,7 @@ fn expired_credit_resumes_retained_bytes_at_the_same_cursor() {
 
 #[test]
 fn positive_insufficient_credit_arms_a_one_shot_deadline() {
-    let mut output = Output::attach(0);
+    let mut output = funded_output(0);
     output.forward(1024 * 1024 - 1).unwrap();
     let cursor = output.cursor();
     assert_eq!(output.repaint(cursor + 100, 16_384), Err(Error::OutOfRange));

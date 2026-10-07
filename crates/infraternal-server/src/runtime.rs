@@ -33,7 +33,6 @@ use tokio::{
     net::{TcpListener, UnixListener},
     sync::{Mutex, Semaphore},
 };
-use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::EnvFilter;
 
 /// A CIDR network whose peers are permitted to supply `X-Forwarded-For` [keywrap.md].
@@ -274,12 +273,7 @@ async fn build_router(
         .merge(auth::router(auth))
         .merge(websocket::router(ws_state));
     let app = if let Some(web_root) = config.web_root {
-        let fallback = ServeFile::new(web_root.join("index.html"));
-        app.fallback_service(
-            ServeDir::new(web_root)
-                .append_index_html_on_directories(true)
-                .fallback(fallback),
-        )
+        app.fallback_service(crate::web_assets::router(web_root))
     } else {
         app
     };

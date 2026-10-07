@@ -41,3 +41,8 @@ fn two_writers_keep_independent_ack_and_exact_input_after_restart() {
 fn last_typist_selects_its_own_real_pty_dimensions() {
     probe("scripts/verify-agent-writer-size.py");
 }
+
+#[test]
+fn initial_attach_requires_explicit_credit_before_replay() {
+    probe("scripts/verify-agent-attach-credit.py");
+}
