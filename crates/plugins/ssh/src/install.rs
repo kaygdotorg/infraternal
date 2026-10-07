@@ -194,7 +194,11 @@ chmod 700 "$stage/payload"
 stage="$base/.bootstrap-lock"
 [ -f "$stage/kind" ] && [ ! -L "$stage" ] || exit 71
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
-"$stage/payload" agent join {} --state "$stage/state"
+[ ! -e "$stage/state" ] && [ ! -L "$stage/state" ] || exit 71
+# Retain the host's existing identity for immutable same-key re-enrollment.
+# The copy stays in its private host-local transaction, never crossing SSH.
+if [ -d "$base/state" ]; then cp -a "$base/state" "$stage/state"; fi
+"$stage/payload" agent join {} --state "$stage/state" >/dev/null 2>&1
 "#,
             shell_quote(&join.url)
         );
