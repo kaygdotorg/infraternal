@@ -514,3 +514,28 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      horizontally. A keyboard shortcut cycles the active card; arrow keys
      pan the canvas when no card has focus. **The active card shows an
      accent-colour border highlight** (#46).
+119. **Windows on a tiling canvas (W1–W2):** a terminal (later VNC) view is
+     called a **window** ("card" stays the styling term). Windows tile in
+     rows and columns inside groups that live on an infinite canvas you can
+     pan and zoom, with niri-style scrollable tiling as the reference feel.
+     Scrolling follows D118.
+120. **Window pill and info popover (W3–W7):** each window has a small pill
+     (OS logo, user@host, session name, status dot) that opens an info
+     popover with tabs: **Machine** (a GUI fastfetch: OS, kernel,
+     architecture, model, cores, memory, disk, uptime, init,
+     virtualization, agent mode, engines), **Connection** (route and legs,
+     transport, RTT per leg, mesh, certificate expiry, bytes, reconnects)
+     and **Session**. The tabs are centred, correctly padded and icon-only
+     with warm tooltips, and use the MetalForge-style segmented selection
+     logic (behavioural decode only, no copied code). Sharing gives an image
+     or text, with IPs hidden by default. Static facts are read at install
+     and on reconnect; live numbers refresh only while the popover is open.
+     Root-agent promotion shows a very subtle spinner on the pill and the
+     tree, with a warm tooltip carrying the status, a tick on completion and
+     an activity-log line; no undo.
+121. **Attach by default, with multiplexer controls (W8):** opening a host
+     attaches to its last session automatically, and all sessions are one
+     tap away in a session manager. Each window has a header area (no band:
+     floating icons over a progressive blur) with the multiplexer actions:
+     split vertically or horizontally, and the session manager. Local
+     attach from the host itself (`infraternal attach`) comes later.
