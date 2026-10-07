@@ -691,7 +691,9 @@ export class TerminalClient {
   }
 
   private drainOutput(): void {
-    if (!this.attached || this.outputWriteInFlight || this.snapshotWriteInFlight || this.closed) return;
+    // Received bytes remain owned after disconnect. Finish painting them before Attach
+    // advertises lastOutSeq; returnCredit sends nothing on a detached transport.
+    if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.closed) return;
     if (this.pendingSnapshot) {
       const snapshot = this.pendingSnapshot;
       this.pendingSnapshot = undefined;

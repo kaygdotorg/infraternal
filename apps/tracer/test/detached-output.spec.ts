@@ -2,7 +2,6 @@
 import { expect, test } from "playwright/test";
 
 test("owned output drains while detached before the next Attach", async ({ page }) => {
-  test.skip(process.env.TRACER_DETACHED_RED !== "1", "tests-first detached-drain oracle; activated with lifecycle fix");
   const context = page.context();
   await context.request.post("/__mock/reset");
   await context.request.post("/__mock/open-terminal");
