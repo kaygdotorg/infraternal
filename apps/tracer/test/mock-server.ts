@@ -10,8 +10,9 @@ import { wordlist } from "@scure/bip39/wordlists/english.js";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
+import { prototypeHosts } from "./prototype-fixtures";
 
-const HOST = "localhost";
+const HOST = process.env.TRACER_TEST_HOST?.trim() || "localhost";
 // Other worktrees may run their own production-build browser gate concurrently.
 const PORT = Number(process.env.TRACER_TEST_PORT ?? "4173");
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
@@ -147,6 +148,9 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
 
   if (request.method === "GET" && url.pathname === "/health") {
     return sendJson(response, 200, { ok: true });
+  }
+  if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
+    return sendJson(response, 200, { hosts: prototypeHosts });
   }
   if (request.method === "GET" && url.pathname === "/__mock/setup-token") {
     return sendJson(response, 200, { setup_token: setupToken });
