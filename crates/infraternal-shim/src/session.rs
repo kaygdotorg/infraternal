@@ -1,7 +1,9 @@
 //! Single-threaded bounded PTY/socket pump; replay precedes live output at one cursor.
 #![forbid(unsafe_code)]
 use crate::{
-    frame::{Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT},
+    frame::{
+        APPROXIMATE_SNAPSHOT, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT,
+    },
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
     terminal::Terminal,
@@ -99,17 +101,65 @@ impl Peer {
         Ok(())
     }
     fn snapshot(&mut self, terminal: &Terminal, head: u64) -> io::Result<()> {
-        if let Ok(bytes) = terminal.snapshot() {
-            self.queue(&Frame::Snapshot(head, bytes))?;
-            self.cursor = Some(head);
-        } else {
-            self.queue(&Frame::Error(
-                1,
-                "screen repaint exceeds frame limit".into(),
-            ))?;
-            self.cursor = None;
+        match terminal.snapshot() {
+            Ok(bytes) => {
+                self.queue(&Frame::Snapshot(head, bytes))?;
+                self.cursor = Some(head);
+            }
+            Err(_) if self.caps & APPROXIMATE_SNAPSHOT != 0 => {
+                self.queue(&Frame::SnapshotWithFlags(
+                    head,
+                    1,
+                    terminal.approximate_snapshot(),
+                ))?;
+                self.cursor = Some(head);
+            }
+            Err(error) => {
+                // A restoration API gap is not a frame-size overflow. Legacy
+                // peers get the real bounded reason, with no source mutation.
+                let code = if error.kind() == io::ErrorKind::Unsupported {
+                    2
+                } else {
+                    1
+                };
+                self.queue(&Frame::Error(code, error.to_string()))?;
+                self.cursor = None;
+            }
         }
         Ok(())
+    }
+    /// Both explicit resizing and last-typist selection share refusal recovery.
+    /// Accepted input stays owned by the shim even when native geometry is refused.
+    fn resize(
+        &mut self,
+        pty: &mut Pty,
+        terminal: &mut Terminal,
+        ring: &Ring,
+        config: &mut Config,
+    ) -> io::Result<bool> {
+        let (cols, rows, px_w, px_h) = self.size;
+        pty.resize(cols, rows, px_w, px_h)?;
+        // Origin bytes alone cannot certify history at a changed geometry;
+        // the terminal independently verifies provenance before reconstructing.
+        let resized = if ring.start() == 0 {
+            terminal.resize_with_ring(cols, rows, Some(ring))
+        } else {
+            terminal.resize(cols, rows)
+        };
+        if resized.is_err() {
+            pty.resize(config.cols, config.rows, 0, 0)?;
+            // Do not retry the refused geometry on the next accepted key.
+            self.size = (config.cols, config.rows, 0, 0);
+            if self.cursor.is_some() || matches!(self.request, Some(Request::Read(_))) {
+                self.request = Some(Request::Snapshot);
+            }
+            // Control-only peers keep their ordered InputState fence; the
+            // terminal provenance selects a notice on their next ReadFrom.
+            return Ok(false);
+        }
+        config.cols = cols;
+        config.rows = rows;
+        Ok(true)
     }
     fn flush(&mut self) -> io::Result<()> {
         while self.written < self.pending.len() {
@@ -213,7 +263,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
             .as_millis(),
     )
     .map_err(io::Error::other)?;
-    let mut terminal = Terminal::new(config.cols, config.rows);
+    let mut terminal = Terminal::new(config.cols, config.rows)?;
     let mut ring = Ring::new(config.ring_capacity);
     let mut input = VecDeque::new();
     let mut cursors = Inputs::default();
@@ -359,7 +409,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
-                            caps: SEQUENCED_INPUT | MULTI_WRITER,
+                            caps: SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -513,7 +563,7 @@ fn handle<'a>(
             return Err(invalid());
         }
         p.attached = true;
-        p.caps = caps & (SEQUENCED_INPUT | MULTI_WRITER);
+        p.caps = caps & (SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT);
         if p.caps & MULTI_WRITER != 0 {
             if p.caps & SEQUENCED_INPUT == 0 {
                 return Err(invalid());
@@ -537,12 +587,8 @@ fn handle<'a>(
         if cursors.get(p.writer)?.accepted > accepted {
             // Only newly accepted input changes the active size [74]. Replayed
             // duplicate bytes cannot steal the last typist's terminal geometry.
-            let (cols, rows, px_w, px_h) = p.size;
             if cursors.active_writer != Some(writer) {
-                pty.resize(cols, rows, px_w, px_h)?;
-                terminal.resize(cols, rows);
-                config.cols = cols;
-                config.rows = rows;
+                p.resize(pty, terminal, ring, config)?;
                 cursors.active_writer = Some(writer);
             }
         }
@@ -586,16 +632,22 @@ fn handle<'a>(
                 return Err(invalid());
             }
             p.size = (cols, rows, px_w, px_h);
-            if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
-                pty.resize(cols, rows, px_w, px_h)?;
-                terminal.resize(cols, rows);
-                config.cols = cols;
-                config.rows = rows;
+            if (cursors.active_writer.is_none() || cursors.active_writer == p.writer)
+                && p.resize(pty, terminal, ring, config)?
+            {
                 cursors.active_writer = p.writer;
             }
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
-            p.request = Some(Request::Read(seq));
+            // A new peer or a later request can replace the resize's queued
+            // repaint. Lost native state must still be announced, even when
+            // raw bytes cover this viewer's cursor; byte retention alone does
+            // not cover state after historical resizes or omitted output.
+            p.request = Some(if terminal.requires_approximation() {
+                Request::Snapshot
+            } else {
+                Request::Read(seq)
+            });
         }
         Frame::SnapshotRequest => p.request = Some(Request::Snapshot),
         Frame::Signal(signal) if !exited => pty.signal(signal)?,
@@ -651,3 +703,6 @@ mod sequenced_checks;
 fn invalid_input() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid shim writer input")
 }
+#[cfg(test)]
+#[path = "../tests/unit/session_resize.rs"]
+mod resize_checks;

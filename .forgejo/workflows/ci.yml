@@ -29,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           apt-get update
-          apt-get install --yes --no-install-recommends binutils build-essential ca-certificates curl file perl xz-utils
+          apt-get install --yes --no-install-recommends binutils build-essential ca-certificates curl file git perl util-linux xz-utils
           curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
             | sh -s -- --yes --no-modify-path --profile minimal
           export PATH="$HOME/.cargo/bin:$PATH"
@@ -40,6 +40,8 @@ jobs:
             --target x86_64-unknown-linux-musl \
             --target aarch64-unknown-linux-musl
           cargo install cargo-deny --version 0.20.2 --locked
+          scripts/auth-toolchain
+          export PATH="$PWD/target/auth-tools/zig:$PATH"
           # verify fetches checksum-pinned Zig for both musl C targets. The CLI
           # constructs Auth/router, so these builds include actual verifier code.
           scripts/verify fast

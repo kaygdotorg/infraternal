@@ -100,10 +100,10 @@ class Binary:
             # travels exclusively over the fixture socket and is never logged.
             raise AssertionError(f'daemon exit {self.child.returncode}: {self.child.stderr.read().decode()}') from error
 
-    def open(self):
+    def open(self, cols=80, rows=24):
         action = b'terminal.open'
         self.send(0, 0x30, struct.pack('<I', 1) + varint(len(action)) + action +
-            json.dumps(dict(uid=os.getuid(), cols=80, rows=24)).encode())
+            json.dumps(dict(uid=os.getuid(), cols=cols, rows=rows)).encode())
         # A close can race output already queued on the old mux stream. Drain
         # those frames before reusing the stream; the action Result is the fence.
         while True:
@@ -183,7 +183,7 @@ class Binary:
 
 class AckBarrier:
     """Proxy only the local shim leg, holding a real PTY-write Ack before delivery."""
-    def __init__(self, state, session, kind=0x18):
+    def __init__(self, state, session, kind=0x18, caps_mask=None):
         self.path = state / 'sessions' / (session.hex + '.sock')
         self.real = self.path.with_suffix('.upstream')
         self.path.rename(self.real)
@@ -193,6 +193,7 @@ class AckBarrier:
         self.listener.listen()
         self.held = threading.Event()
         self.release = threading.Event()
+        self.caps_mask = caps_mask
         self.kind = kind
         self.threshold = None
         self.phase = {}
@@ -209,6 +210,9 @@ class AckBarrier:
                 length = struct.unpack('<I', prefix)[0]
                 assert 0 < length <= 1024 * 1024, 'oversized shim proxy frame'
                 body = exact(source, length)
+                if direction == 'output' and body[0] == 1 and self.caps_mask is not None:
+                    caps = struct.unpack('<Q', body[3:11])[0] & self.caps_mask
+                    body = body[:3] + struct.pack('<Q', caps) + body[11:]
                 if body[0] == self.kind and self.threshold is not None and struct.unpack('<Q', body[1:9])[0] >= self.threshold:
                     self.phase[direction] = 'barrier'
                     self.held.set()

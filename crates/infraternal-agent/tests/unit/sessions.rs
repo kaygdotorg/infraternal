@@ -89,11 +89,16 @@ async fn cancelled_fragmented_shim_read_retains_header_and_body_progress() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn sequenced_attach_intersects_caps_and_legacy_attach_stays_zero() {
-    use infraternal_shim::frame::{Frame, SEQUENCED_INPUT};
+    use infraternal_shim::frame::{APPROXIMATE_SNAPSHOT, Frame, SEQUENCED_INPUT};
     for (advertised, requested) in [
         (0, SEQUENCED_INPUT),
         (SEQUENCED_INPUT, SEQUENCED_INPUT),
         (SEQUENCED_INPUT, 0),
+        (
+            SEQUENCED_INPUT | APPROXIMATE_SNAPSHOT,
+            SEQUENCED_INPUT | APPROXIMATE_SNAPSHOT,
+        ),
+        (APPROXIMATE_SNAPSHOT, SEQUENCED_INPUT | APPROXIMATE_SNAPSHOT),
     ] {
         let directory = Directory::new();
         let path = state(Some(directory.0.clone()))

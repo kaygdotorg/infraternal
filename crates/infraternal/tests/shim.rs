@@ -229,7 +229,7 @@ fn ring_wrap_snapshot_repaints_real_vim() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../infraternal-shim/tests/fixtures/capture.py");
     let command = format!(
-        "seq 1 4000; vim -u NONE -i NONE -n '{}'\n",
+        "printf '\\033c'; seq 1 4000; vim -u NONE -i NONE -n '{}'\n",
         fixture.display()
     );
     send(&mut peer, Frame::Input(command.into_bytes()));
@@ -426,7 +426,7 @@ fn attached_backpressure_and_detached_progress() {
     until(&mut peer, &mut seq, b"READY_YES\r\n");
     send(
         &mut peer,
-        Frame::Input(b"seq 1 200000; printf 'DETACHED_%s\\n' DONE\n".to_vec()),
+        Frame::Input(b"printf '\\033c'; seq 1 200000; printf 'DETACHED_%s\\n' DONE\n".to_vec()),
     );
     thread::sleep(Duration::from_millis(300));
     // Replacing a stalled reader must be prompt, even with queued PTY output.
