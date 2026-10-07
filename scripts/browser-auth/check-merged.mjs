@@ -359,45 +359,6 @@ try {
       return false;
     }
   }, "server startup failed");
-  const reconnectRuns = Number(process.env.MERGED_RECONNECT_RUNS ?? "0");
-  check(Number.isInteger(reconnectRuns) && reconnectRuns >= 0 && reconnectRuns <= 100, "invalid reconnect run count");
-  let stress;
-  if (reconnectRuns > 0 && process.env.MERGED_RECONNECT_STRESS === "1") {
-    stress = spawn("stress-ng", ["--cpu", "8", "--quiet"], { stdio: "ignore" });
-    await delay(500);
-    check(stress.pid && stress.exitCode === null, "stress-ng did not start");
-  }
-  try {
-    for (let trial = 0; trial < reconnectRuns; trial++) {
-      const before = bridges.length;
-      const started = performance.now();
-      // Interrupt both real backend sockets; each browser must resume its own writer.
-      first.ws.terminate();
-      second.ws.terminate();
-      await wait(() => bridges.slice(before).filter((entry) => !entry.closed && entry.session === session && entry.acks.length > 0).length === 2, "two-device reconnect did not attach", 60000);
-      const resumed = performance.now() - started;
-      const restoreFrom = bridges.length;
-      await page.reload();
-      await wait(() => bridges.slice(restoreFrom).some((entry) => !entry.closed && entry.session === session && entry.acks.length > 0), "device-A restoration did not attach", 60000);
-      first = bridges.slice(restoreFrom).find((entry) => !entry.closed && entry.session === session && entry.acks.length > 0);
-      await wait(() => output(first).includes("MERGED_READY"), "device-A restoration did not replay", 60000);
-      second = bridges.find((entry) => entry !== first && !entry.closed && entry.session === session && entry.acks.length > 0);
-      check(second, "device B lost its independent attachment");
-      const markerA = `<RECONNECT_A_${trial}>`;
-      const markerB = `<RECONNECT_B_${trial}>`;
-      await page.locator("#terminal-host").click();
-      await page.keyboard.type(markerA, { delay: 20 });
-      await pageB.locator("#terminal-host").click();
-      await pageB.keyboard.type(markerB, { delay: 20 });
-      await wait(() => [first, second].every((entry) => output(entry).includes(markerA + markerB)), "reconnected devices lost input", 60000);
-      for (const entry of [first, second]) {
-        for (const marker of [markerA, markerB]) check(output(entry).split(marker).length === 2, "reconnected device duplicated input");
-      }
-      console.log(`Two-device reconnect trial=${trial + 1}/${reconnectRuns}; resume=${resumed.toFixed(2)}ms; A restoration replay and exact shared input PASS; stress=${Boolean(stress)}; load=${loadavg().join("/")}`);
-    }
-  } finally {
-    if (stress) { stress.kill("SIGTERM"); await once(stress, "exit"); }
-  }
 
   await delay(1000);
   check(await backendConnections() === 0, "startup probe retained a backend connection");
@@ -497,6 +458,46 @@ try {
       check(output(viewer).split(marker).length === 2, "duplicated or lost device input");
     }
   }
+  const reconnectRuns = Number(process.env.MERGED_RECONNECT_RUNS ?? "0");
+  check(Number.isInteger(reconnectRuns) && reconnectRuns >= 0 && reconnectRuns <= 100, "invalid reconnect run count");
+  let stress;
+  if (reconnectRuns > 0 && process.env.MERGED_RECONNECT_STRESS === "1") {
+    stress = spawn("stress-ng", ["--cpu", "8", "--quiet"], { stdio: "ignore" });
+    await delay(500);
+    check(stress.pid && stress.exitCode === null, "stress-ng did not start");
+  }
+  try {
+    for (let trial = 0; trial < reconnectRuns; trial++) {
+      const before = bridges.length;
+      const started = performance.now();
+      // Interrupt both real backend sockets; each browser must resume its own writer.
+      first.ws.terminate();
+      second.ws.terminate();
+      await wait(() => bridges.slice(before).filter((entry) => !entry.closed && entry.session === session && entry.acks.length > 0).length === 2, "two-device reconnect did not attach", 60000);
+      const resumed = performance.now() - started;
+      const restoreFrom = bridges.length;
+      await page.reload();
+      await wait(() => bridges.slice(restoreFrom).some((entry) => !entry.closed && entry.session === session && entry.acks.length > 0), "device-A restoration did not attach", 60000);
+      first = bridges.slice(restoreFrom).find((entry) => !entry.closed && entry.session === session && entry.acks.length > 0);
+      await wait(() => output(first).includes("MERGED_READY"), "device-A restoration did not replay", 60000);
+      second = bridges.find((entry) => entry !== first && !entry.closed && entry.session === session && entry.acks.length > 0);
+      check(second, "device B lost its independent attachment");
+      const markerA = `<RECONNECT_A_${trial}>`;
+      const markerB = `<RECONNECT_B_${trial}>`;
+      await page.locator("#terminal-host").click();
+      await page.keyboard.type(markerA, { delay: 20 });
+      await pageB.locator("#terminal-host").click();
+      await pageB.keyboard.type(markerB, { delay: 20 });
+      await wait(() => [first, second].every((entry) => output(entry).includes(markerA + markerB)), "reconnected devices lost input", 60000);
+      for (const entry of [first, second]) {
+        for (const marker of [markerA, markerB]) check(output(entry).split(marker).length === 2, "reconnected device duplicated input");
+      }
+      console.log(`Two-device reconnect trial=${trial + 1}/${reconnectRuns}; resume=${resumed.toFixed(2)}ms; A restoration replay and exact shared input PASS; stress=${Boolean(stress)}; load=${loadavg().join("/")}`);
+    }
+  } finally {
+    if (stress) { stress.kill("SIGTERM"); await once(stress, "exit"); }
+  }
+
   await delay(1000);
   check(await backendConnections() === 2, "idle window includes unintended backend connections");
   console.log("Idle fence: exactly two established backend WebSockets; startup HTTP probe closed");
@@ -564,6 +565,16 @@ try {
   check(performanceFailures.length === 0, performanceFailures.join("; "));
   console.log("Merged performance budgets: PASS");
 } catch (error) {
+  for (const ctx of contexts) {
+    for (const current of ctx.pages()) {
+      console.log("native page state: " + JSON.stringify(await current.evaluate(() => ({
+        probe: document.querySelector("#probe-run") !== null,
+        terminal: document.querySelector("#terminal-host") !== null,
+        signIn: document.querySelector("#login-passkey") !== null,
+        status: document.querySelector("#connection-status")?.textContent,
+      })).catch(() => ({ unavailable: true }))));
+    }
+  }
   console.log(`safe bridge count: ${bridges.length}`);
   console.log("safe bridge diagnostics (first/last): " + JSON.stringify([...bridges.slice(0, 3), ...bridges.slice(-10)].map((entry) => ({
     closed: entry.closed,
