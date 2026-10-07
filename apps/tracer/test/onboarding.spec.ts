@@ -176,6 +176,11 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await expect(page.locator("#login-passkey")).toBeVisible();
+  await expect(page.locator(".auth-signin .auth-mark")).toBeVisible();
+  await expect(page.locator(".auth-signin #signin-title")).toHaveText("Welcome back");
+  await expect(page.locator(".auth-signin .auth-lede")).toHaveText("Your passkey is all you need.");
+  await expect(page.locator(".auth-signin button")).toHaveCount(1);
+  await expect(page.locator("#login-other")).toHaveCount(0);
   await page.evaluate(() => {
     const transitions: string[] = [];
     Object.assign(window, { __signinTransitions: transitions });
