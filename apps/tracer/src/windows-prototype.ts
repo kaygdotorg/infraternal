@@ -2,10 +2,11 @@
 import {
   confirmAction,
   copyFeedback,
-  CLIPBOARD,
   installStretchingCapsule,
   refreshTip,
+  showTip,
   swapIcon,
+  TICK_PATH,
   type BranchSection,
   type HostPlatform,
   type StretchingCapsule,
@@ -480,27 +481,30 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     session: { title: "Session", icon: WINDOW_ICONS.session },
   };
   function factsMarkup(rows: Array<[string, string]>): string {
-    return rows.map(([label, value]) => `<button type="button" class="machine-fact" data-copy-value="${escapeHtml(value)}" aria-label="Copy ${escapeHtml(label)}: ${escapeHtml(value)}">
-      <span class="machine-key">${escapeHtml(label)}</span><span class="machine-value">${escapeHtml(value)}</span>${swapIcon(CLIPBOARD)}</button>`).join("");
+    return rows.map(([label, value]) => `<div class="machine-fact">
+      <span class="machine-key">${escapeHtml(label)}</span><button type="button" class="machine-value" data-copy-value="${escapeHtml(value)}" aria-label="Copy ${escapeHtml(label)}: ${escapeHtml(value)}">
+        <span class="machine-value-text">${escapeHtml(value)}</span>${copyFeedbackMark()}</button></div>`).join("");
   }
   function renderMachine(host: Host, more: boolean): string {
+    // Keep Intel's family/model token on phone widths; the vendor prefix adds no useful detail.
     const rows: Array<[string, string]> = [
-      ["OS", `${host.osName} ${host.version}`],
       ["Kernel", host.kernel],
       ["Architecture", host.architecture],
       ["Model", host.model],
-      ["CPU", `${host.cpu} · ${host.cores} cores`],
+      ["CPU", `${host.cpu.replace(/^Intel\s+Core\s+/i, "")} · ${host.cores} cores`],
       ["Uptime", host.uptime],
       ["Load", host.load],
-      ["Agent mode", `${host.mode} · infraternal agent`],
-      ["Engines", host.engines.join(", ")],
+      ["Agent mode", host.mode],
+      ["Engines", host.engines.join(" · ")],
     ];
     if (more) rows.push(["Init", host.init], ["Virtualization", host.virtualization], ["Shell", host.shell], ["Locale", host.locale], ["IP addresses", host.ips.join(" · ")]);
     return `<div class="machine-content" data-host-id="${escapeHtml(host.id)}">
-      <div class="machine-card-layout">
+      <div class="machine-heading">
         <div class="machine-logo">${hostIconMarkup(host.os, "os-mark machine-os-mark")}</div>
-        <div class="machine-facts">${factsMarkup(rows)}</div>
+        <button type="button" class="machine-value machine-os-title" data-copy-value="${escapeHtml(`${host.osName} ${host.version}`)}" aria-label="Copy operating system: ${escapeHtml(`${host.osName} ${host.version}`)}">
+          <span class="machine-value-text">${escapeHtml(`${host.osName} ${host.version}`)}</span>${copyFeedbackMark()}</button>
       </div>
+      <div class="machine-facts">${factsMarkup(rows)}</div>
       <div class="machine-metrics">
         ${metricMarkup("Memory", host.memory, "memory")}
         ${metricMarkup("Disk", host.disk, "disk")}
@@ -509,8 +513,15 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
       <p class="window-copy-announcement" role="status" aria-live="polite"></p>
     </div>`;
   }
+  /** D103's row-end confirmation is a tick only; idle clipboard glyphs are deliberately absent. */
+  function copyFeedbackMark(): string {
+    return `<span class="machine-copy-feedback" aria-hidden="true"><svg class="is-done" viewBox="0 0 24 24"><path pathLength="1" d="${TICK_PATH}"/></svg></span>`;
+  }
   function metricMarkup(label: string, amount: number, id: "memory" | "disk"): string {
-    return `<div class="machine-metric" data-metric="${id}"><div class="machine-metric-heading"><span>${label}</span><button type="button" class="machine-metric-copy" data-copy-value="${amount}%" aria-label="Copy ${label.toLowerCase()} use"><span>${amount}% used</span>${swapIcon(CLIPBOARD)}</button></div>
+    const visible = `${amount}% used`;
+    return `<div class="machine-metric" data-metric="${id}">
+      <span class="machine-key">${label}</span><button type="button" class="machine-value" data-copy-value="${visible}" aria-label="Copy ${label.toLowerCase()} use: ${visible}">
+        <span class="machine-value-text">${visible}</span>${copyFeedbackMark()}</button>
       <div class="machine-metric-track" role="progressbar" aria-label="${label} used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${amount}"><span style="width:${amount}%"></span></div></div>`;
   }
   function renderConnection(host: Host): string {
@@ -533,6 +544,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     </div>`;
   }
   let machineMore = false;
+  let touchCopyTap: { target: HTMLElement; x: number; y: number; at: number } | undefined;
   function renderInfoBody(): void {
     if (!popoverOpen() || popover.dataset.kind !== "info") return;
     const host = hostById(hosts, infoHostId);
@@ -640,7 +652,11 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     const metric = popover.querySelector<HTMLElement>(`[data-metric="${id}"]`);
     if (!metric) return;
     const amount = host[id];
-    metric.querySelector<HTMLElement>(".machine-metric-copy > span")!.textContent = `${amount}% used`;
+    const value = `${amount}% used`;
+    const copyTarget = metric.querySelector<HTMLButtonElement>(".machine-value")!;
+    copyTarget.dataset.copyValue = value;
+    copyTarget.setAttribute("aria-label", `Copy ${id} use: ${value}`);
+    copyTarget.querySelector<HTMLElement>(".machine-value-text")!.textContent = value;
     const track = metric.querySelector<HTMLElement>(".machine-metric-track")!;
     track.setAttribute("aria-valuenow", String(amount));
     track.querySelector<HTMLElement>("span")!.style.width = `${amount}%`;
@@ -869,12 +885,32 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     }
     if (infoAction === "share") { openShare(); return; }
     const value = target.closest<HTMLElement>("[data-copy-value]");
-    if (value) void copyValue(value, value.dataset.copyValue ?? "", event.detail === 0);
+    if (!value) return;
+    const pointerType = (event as PointerEvent).pointerType;
+    const touch = pointerType === "touch" || (!pointerType && matchMedia("(pointer: coarse)").matches && event.detail !== 0);
+    if (!touch) void copyValue(value, value.dataset.copyValue ?? "", event.detail === 0);
+  }
+  function onCopyPointerUp(event: PointerEvent): void {
+    if (event.pointerType !== "touch") return;
+    const target = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-copy-value]") : null;
+    if (!target) { touchCopyTap = undefined; return; }
+    const prior = touchCopyTap;
+    const elapsed = prior ? event.timeStamp - prior.at : Infinity;
+    // A 350 ms / 24 px same-target pair filters scrolls; touch-action: manipulation disables iOS zoom.
+    const closeEnough = prior && Math.hypot(event.clientX - prior.x, event.clientY - prior.y) <= 24;
+    if (prior?.target === target && elapsed <= 350 && closeEnough) {
+      touchCopyTap = undefined;
+      void copyValue(target, target.dataset.copyValue ?? "", false);
+      return;
+    }
+    // A first tap stays inert; only a nearby second tap on the same value copies.
+    touchCopyTap = { target, x: event.clientX, y: event.clientY, at: event.timeStamp };
   }
   async function copyValue(element: HTMLElement, value: string, instant: boolean): Promise<void> {
     const copied = await copyFeedback(element, value, instant);
     const announcement = element.closest<HTMLElement>(".machine-content, .connection-facts, .session-info-facts")?.querySelector<HTMLElement>(".window-copy-announcement");
     if (announcement) announcement.textContent = copied ? "Copied" : "Clipboard unavailable";
+    if (copied) showTip(element, "Copied");
   }
 
   function addPromotionTreeMark(): void {
@@ -1127,6 +1163,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     [popover, "click", handlePopoverClick as EventListener, undefined],
     [popover, "pointerdown", onManagerPointerDown as EventListener, undefined],
     [popover, "pointermove", onManagerPointerMove as EventListener, undefined],
+    [popover, "pointerup", onCopyPointerUp as EventListener, undefined],
     [popover, "pointerup", onManagerPointerEnd as EventListener, undefined],
     [popover, "pointercancel", onManagerPointerCancel as EventListener, undefined],
     [shareLayer, "click", onShareClick as EventListener, undefined],
@@ -1187,9 +1224,4 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
       copyAnnouncement.remove();
     },
   };
-}
-
-function metricMarkup(label: string, amount: number, id: "memory" | "disk"): string {
-  return `<div class="machine-metric" data-metric="${id}"><div class="machine-metric-heading"><span>${label}</span><button type="button" data-copy-value="${amount}%" aria-label="Copy ${label.toLowerCase()} use">${amount}% used</button></div>
-    <div class="machine-metric-track" role="progressbar" aria-label="${label} used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${amount}"><span style="width:${amount}%"></span></div></div>`;
 }

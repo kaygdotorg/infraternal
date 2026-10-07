@@ -89,9 +89,7 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
   const context = await browser.newContext({ baseURL: origin, viewport: { width: 1440, height: 900 } });
   try {
     const page = await context.newPage();
-    await context.request.post("/__mock/open-terminal");
-    await page.goto(`${origin}/?mock=1&proto=windows&theme=ink&bg=none&ui=sans`);
-    await waitForAttached(page);
+    await openTerminal(context, page, "?mock=1&proto=windows&theme=ink&bg=none&ui=sans");
     await page.locator(".window-card[aria-current='true'] .window-host-pill").click();
     const details = page.getByRole("dialog", { name: "Window details" });
     await expect(details).toBeVisible();
@@ -100,8 +98,9 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
       const tablist = popover.querySelector<HTMLElement>(".window-info-tabs")!;
       const tabs = [...tablist.querySelectorAll<HTMLButtonElement>("[role='tab']")];
       const tabStyle = tabs.map((tab) => getComputedStyle(tab));
-      const row = popover.querySelector<HTMLButtonElement>(".machine-fact")!;
-      const rowStyle = getComputedStyle(row);
+      const row = popover.querySelector<HTMLElement>(".machine-fact")!;
+      const key = row.querySelector<HTMLElement>(".machine-key")!;
+      const value = row.querySelector<HTMLElement>(".machine-value")!;
       const mark = popover.querySelector<SVGElement>(".machine-os-mark")!;
       const markStyle = getComputedStyle(mark);
       const tail = getComputedStyle(popover, "::before");
@@ -117,26 +116,45 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
       const tailX = Number.parseFloat(popoverStyle.getPropertyValue("--tail-x"));
       const capsule = tablist.querySelector<HTMLElement>(".segmented-capsule")!;
       const capsuleStyle = getComputedStyle(capsule);
-      const capsuleWidth = capsuleStyle.width;
-      const factRows = [...popover.querySelectorAll<HTMLButtonElement>(".machine-fact")];
-      const metricCopies = [...popover.querySelectorAll<HTMLButtonElement>(".machine-metric-copy")];
+      const topbarCapsule = document.querySelector<HTMLElement>(".capsule")!;
+      const logo = popover.querySelector<HTMLElement>(".machine-logo")!;
+      const osTitle = popover.querySelector<HTMLElement>(".machine-os-title");
+      const firstFact = popover.querySelector<HTMLElement>(".machine-facts .machine-fact")!;
+      const valueCells = [...popover.querySelectorAll<HTMLElement>(".machine-fact .machine-value, .machine-metric .machine-value")];
+      const valueXs = valueCells.map((cell) => cell.getBoundingClientRect().left);
+      const factRows = [...popover.querySelectorAll<HTMLElement>(".machine-fact, .machine-metric")];
+      const factHeights = factRows.map((fact) => {
+        const text = fact.querySelector<HTMLElement>(".machine-value-text");
+        const lineHeight = Number.parseFloat(getComputedStyle(text ?? fact).lineHeight);
+        return { height: fact.getBoundingClientRect().height, textHeight: text?.getBoundingClientRect().height ?? 0, lineHeight };
+      });
       return {
         allButtonsReset: [...popover.querySelectorAll<HTMLButtonElement>("button")].every((button) => getComputedStyle(button).appearance === "none"),
-        allFactsNoChrome: factRows.every((fact) => getComputedStyle(fact).borderTopWidth === "0px" && getComputedStyle(fact).backgroundColor === "rgba(0, 0, 0, 0)"),
         tabAppearance: tabStyle.map((style) => style.appearance),
         tabBorder: tabStyle.map((style) => style.borderTopWidth),
         tabWidths: tabStyle.map((style) => style.width),
         tabHeights: tabStyle.map((style) => style.height),
-        selectedCapsuleWidth: capsuleWidth,
+        selectedCapsuleWidth: capsuleStyle.width,
         selectedCapsuleBorder: capsuleStyle.borderTopWidth,
         tabTrayRadius: getComputedStyle(tablist).borderRadius,
+        tabTrayHeight: tablist.getBoundingClientRect().height,
+        topbarCapsuleHeight: topbarCapsule.getBoundingClientRect().height,
+        headerPillHeight: document.querySelector<HTMLElement>(".window-card[aria-current='true'] .window-host-pill")!.getBoundingClientRect().height,
         tabsCentered: Math.abs((tabRect.left + tabRect.right) / 2 - (popoverRect.left + popoverRect.right) / 2) < 1,
         tailAlignment: Math.abs(popoverRect.left + tailX - (anchorRect.left + anchorRect.right) / 2),
-        factAppearance: rowStyle.appearance,
-        factBorder: rowStyle.borderTopWidth,
-        factBackground: rowStyle.backgroundColor,
-        factSwapAtEnd: factRows.every((fact) => fact.lastElementChild?.matches(".swap") === true && Boolean(fact.querySelector(".swap .is-done"))),
-        metricCopyTicks: metricCopies.every((button) => button.lastElementChild?.matches(".swap") === true),
+        factAppearance: getComputedStyle(row).appearance,
+        factBorder: getComputedStyle(row).borderTopWidth,
+        factBackground: getComputedStyle(row).backgroundColor,
+        copyIcons: popover.querySelectorAll(".machine-fact .is-idle, .machine-metric .is-idle, .machine-metric-copy").length,
+        feedbackTicks: popover.querySelectorAll(".machine-copy-feedback .is-done").length,
+        valueKeyFontSize: getComputedStyle(value).fontSize,
+        keyFontSize: getComputedStyle(key).fontSize,
+        machineColumns: getComputedStyle(popover.querySelector<HTMLElement>(".machine-card-layout") ?? firstFact.parentElement!).gridTemplateColumns.split(" ").length,
+        logoAtTop: logo.getBoundingClientRect().bottom <= firstFact.getBoundingClientRect().top,
+        logoCentered: Math.abs((logo.getBoundingClientRect().left + logo.getBoundingClientRect().right) / 2 - (popoverRect.left + popoverRect.right) / 2) < 2,
+        osTitle: osTitle?.textContent?.trim() ?? "",
+        valueColumnSpread: Math.max(...valueXs) - Math.min(...valueXs),
+        factHeights,
         metricHeight: getComputedStyle(popover.querySelector<HTMLElement>(".machine-metric-track")!).height,
         markFill: markStyle.fill,
         markStroke: markStyle.stroke,
@@ -149,22 +167,32 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
         side: popover.dataset.side,
       };
     });
+    console.log(`Machine review layout at 1440x900: ${JSON.stringify(machineStyles)}`);
     expect(machineStyles).toMatchObject({
       tabAppearance: ["none", "none", "none"],
       tabBorder: ["0px", "0px", "0px"],
       tabWidths: ["56px", "56px", "56px"],
-      tabHeights: ["44px", "44px", "44px"],
+      tabHeights: ["30px", "30px", "30px"],
       selectedCapsuleWidth: "56px",
       selectedCapsuleBorder: "0px",
       tabTrayRadius: "999px",
+      tabTrayHeight: 38,
       tabsCentered: true,
       allButtonsReset: true,
-      allFactsNoChrome: true,
+      headerPillHeight: 36,
+      topbarCapsuleHeight: 38,
       factAppearance: "none",
       factBorder: "0px",
       factBackground: "rgba(0, 0, 0, 0)",
-      factSwapAtEnd: true,
-      metricCopyTicks: true,
+      copyIcons: 0,
+      feedbackTicks: 11,
+      valueKeyFontSize: "11px",
+      keyFontSize: "11px",
+      machineColumns: 1,
+      logoAtTop: true,
+      logoCentered: true,
+      osTitle: "Ubuntu 24.04.2 LTS",
+      valueColumnSpread: 0,
       metricHeight: "3px",
       markStroke: "none",
       tailContent: "\"\"",
@@ -173,14 +201,45 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
       side: "bottom",
       originY: "0px",
     });
+    expect(machineStyles.factHeights.every(({ height, textHeight, lineHeight }) => textHeight > lineHeight + 1 ? height <= textHeight + 18 : height <= 40)).toBe(true);
     expect(machineStyles.tailAlignment).toBeLessThanOrEqual(1);
     expect(machineStyles.markFill).toBe(machineStyles.markColor);
     expect(machineStyles.markColor).toBe(machineStyles.accentColor);
-    const copiedFact = details.locator(".machine-fact").first();
-    const copiedValue = await copiedFact.locator(".machine-value").textContent();
-    await copiedFact.click();
-    await expect(copiedFact).toHaveAttribute("data-done", "");
+    const copiedValueCell = details.locator(".machine-fact .machine-value").first();
+    const copiedValue = await copiedValueCell.locator(".machine-value-text").textContent();
+    await copiedValueCell.click();
+    await expect(copiedValueCell).toHaveAttribute("data-done", "");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(copiedValue);
+    await expect(page.locator(".tip-label:not(.is-leaving)")).toHaveText("Copied");
+    await expect(details.locator(".machine-fact").first().locator(".machine-copy-feedback")).toHaveCSS("opacity", "1");
+
+    const layoutSpread = async (selector: string): Promise<number> => details.locator(selector).evaluateAll((cells) => {
+      const positions = cells.map((cell) => cell.getBoundingClientRect().left);
+      return positions.length ? Math.max(...positions) - Math.min(...positions) : 0;
+    });
+    expect(await layoutSpread(".machine-fact .machine-value, .machine-metric .machine-value")).toBeLessThanOrEqual(1);
+    for (const [tab, facts] of [["Connection", ".connection-facts"], ["Session", ".session-info-facts"]] as const) {
+      await details.getByRole("tab", { name: tab }).click();
+      expect(await layoutSpread(`${facts} .machine-value`)).toBeLessThanOrEqual(1);
+      const sharedGrid = await details.locator(facts).evaluate((root) => {
+        const rows = [...root.querySelectorAll<HTMLElement>(".machine-fact")];
+        const values = rows.map((row) => row.querySelector<HTMLElement>(".machine-value")!);
+        const keys = rows.map((row) => row.querySelector<HTMLElement>(".machine-key")!);
+        const valueSizes = values.map((value) => getComputedStyle(value).fontSize);
+        const keySizes = keys.map((key) => getComputedStyle(key).fontSize);
+        const measures = rows.map((row) => {
+          const text = row.querySelector<HTMLElement>(".machine-value-text")!;
+          const lineHeight = Number.parseFloat(getComputedStyle(text).lineHeight);
+          const textHeight = text.getBoundingClientRect().height;
+          return { rowHeight: row.getBoundingClientRect().height, textHeight, lineHeight };
+        });
+        return { spread: Math.max(...values.map((value) => value.getBoundingClientRect().left)) - Math.min(...values.map((value) => value.getBoundingClientRect().left)), valueSizes, keySizes, measures };
+      });
+      expect(sharedGrid.spread).toBeLessThanOrEqual(1);
+      expect(sharedGrid.valueSizes.every((size) => size === "11px")).toBe(true);
+      expect(sharedGrid.keySizes.every((size) => size === "11px")).toBe(true);
+      expect(sharedGrid.measures.every(({ rowHeight, textHeight, lineHeight }) => textHeight > lineHeight + 1 ? rowHeight <= textHeight + 18 : rowHeight <= 40)).toBe(true);
+    }
 
     await page.keyboard.press("Escape");
     await page.locator(".window-card[aria-current='true'] [data-window-action='sessions']").click();
@@ -215,14 +274,64 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
   }
 });
 
+test("copying a value needs one desktop click or two touch taps", async ({ browser }) => {
+  const touch = await browser.newContext({
+    baseURL: origin,
+    viewport: { width: 393, height: 852 },
+    deviceScaleFactor: 1,
+    isMobile: true,
+    hasTouch: true,
+  });
+  try {
+    await touch.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const page = await touch.newPage();
+    await openTerminal(touch, page, "?mock=1&proto=windows&theme=ink&bg=none&ui=sans");
+    await page.locator(".window-card[aria-current='true'] .window-host-pill").click();
+    const value = page.locator(".window-popover .machine-value").first();
+    await expect(value).toHaveCSS("touch-action", "manipulation");
+    await expect(value).toHaveCSS("user-select", "none");
+    const visibleValue = await value.locator(".machine-value-text").textContent();
+    const bounds = await value.boundingBox();
+    if (!bounds) throw new Error("The machine value has no touch target");
+    const x = bounds.x + bounds.width / 2;
+    const y = bounds.y + bounds.height / 2;
+    await page.evaluate(() => navigator.clipboard.writeText("unchanged until the second tap"));
+    await page.touchscreen.tap(x, y);
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("unchanged until the second tap");
+    await page.touchscreen.tap(x, y);
+    await expect(value).toHaveAttribute("data-done", "");
+    await expect(page.locator(".tip-label:not(.is-leaving)")).toHaveText("Copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(visibleValue);
+  } finally {
+    await touch.close();
+  }
+
+  const desktop = await browser.newContext({ baseURL: origin, viewport: { width: 1440, height: 900 } });
+  try {
+    await desktop.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const page = await desktop.newPage();
+    await openTerminal(desktop, page, "?mock=1&proto=windows&theme=ink&bg=none&ui=sans");
+    await page.locator(".window-card[aria-current='true'] .window-host-pill").click();
+    const value = page.locator(".window-popover .machine-value").first();
+    const visibleValue = await value.locator(".machine-value-text").textContent();
+    await value.click();
+    await expect(value).toHaveAttribute("data-done", "");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(visibleValue);
+  } finally {
+    await desktop.close();
+  }
+});
+
 test("gated windows, header, popovers, session manager, and phone controls", async ({ browser }, testInfo) => {
   test.setTimeout(600_000);
   await mkdir(outputDirectory, { recursive: true });
   const combinations = [
-    { width: 1440, height: 900, theme: "ink", mobile: false },
-    { width: 1440, height: 900, theme: "paper", mobile: false },
+    { width: 375, height: 667, theme: "ink", mobile: true },
+    { width: 375, height: 667, theme: "paper", mobile: true },
     { width: 393, height: 852, theme: "ink", mobile: true },
     { width: 393, height: 852, theme: "paper", mobile: true },
+    { width: 1440, height: 900, theme: "ink", mobile: false },
+    { width: 1440, height: 900, theme: "paper", mobile: false },
   ] as const;
   const screenshotPaths: string[] = [];
   const popoverCropPaths: string[] = [];
@@ -237,6 +346,12 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
     try {
       await context.grantPermissions(["clipboard-read", "clipboard-write"]);
       const page = await context.newPage();
+      const capturePopover = async (state: string, selector = ".window-popover"): Promise<void> => {
+        const coreStates = ["machine", "machine-more", "connection", "session-info", "session-manager", "end-confirmation"];
+        if (coreStates.includes(state) || (state === "share-card" && combo.width !== 375)) {
+          popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, state, selector));
+        }
+      };
       await openTerminal(context, page, `?mock=1&theme=${combo.theme}&bg=mesh&ui=sans`);
       await expect(page.locator(".window-header")).toHaveCount(0);
       await expect(page.locator(".pane-card")).toHaveCount(1);
@@ -281,6 +396,64 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
       const details = page.getByRole("dialog", { name: "Window details" });
       await expect(details).toBeVisible();
       await expect(details.locator(".machine-os-mark")).toBeVisible();
+      await expect(details.locator(".machine-fact")).toHaveCount(8);
+      await expect(details.locator(".machine-fact .is-idle, .machine-metric .is-idle, .machine-metric-copy")).toHaveCount(0);
+      await expect(details.locator(".machine-os-title .machine-value-text")).toHaveText("Ubuntu 24.04.2 LTS");
+      const machineValues = await details.locator(".machine-facts .machine-value-text").allTextContents();
+      expect(machineValues).toContain("ThinkCentre M90q Gen 3");
+      expect(machineValues).toContain("i5-12500T · 12 cores");
+      expect(machineValues).toContain("root");
+      expect(machineValues).toContain("Podman 5.0 · BuildKit 0.16");
+      const compactValues = await details.locator(".machine-facts .machine-fact").evaluateAll((rows) => {
+        const labels = new Set(["Model", "CPU", "Agent mode", "Engines"]);
+        return rows.filter((row) => labels.has(row.querySelector<HTMLElement>(".machine-key")!.textContent ?? ""))
+          .map((row) => {
+          const text = row.querySelector<HTMLElement>(".machine-value-text")!;
+          return {
+            key: row.querySelector<HTMLElement>(".machine-key")!.textContent,
+            value: text.textContent,
+            oneLine: text.getBoundingClientRect().height <= Number.parseFloat(getComputedStyle(text).lineHeight) + 1,
+          };
+        });
+      });
+      expect(compactValues).toEqual([
+        { key: "Model", value: "ThinkCentre M90q Gen 3", oneLine: true },
+        { key: "CPU", value: "i5-12500T · 12 cores", oneLine: true },
+        { key: "Agent mode", value: "root", oneLine: true },
+        { key: "Engines", value: "Podman 5.0 · BuildKit 0.16", oneLine: true },
+      ]);
+      const assertFactGrid = async (selector: string): Promise<void> => {
+        const geometry = await details.locator(selector).evaluate((root) => {
+          const values = [...root.querySelectorAll<HTMLElement>(".machine-fact .machine-value, .machine-metric .machine-value")];
+          const keys = [...root.querySelectorAll<HTMLElement>(".machine-fact .machine-key, .machine-metric .machine-key")];
+          const rows = [...root.querySelectorAll<HTMLElement>(".machine-fact, .machine-metric")];
+          const rowsFit = rows.every((row) => {
+            const text = row.querySelector<HTMLElement>(".machine-value-text")!;
+            const textHeight = text.getBoundingClientRect().height;
+            const lineHeight = Number.parseFloat(getComputedStyle(text).lineHeight);
+            const rowHeight = row.getBoundingClientRect().height;
+            return textHeight > lineHeight + 1 ? rowHeight <= textHeight + 18 : rowHeight <= 40;
+          });
+          return {
+            spread: values.length ? Math.max(...values.map((value) => value.getBoundingClientRect().left)) - Math.min(...values.map((value) => value.getBoundingClientRect().left)) : 0,
+            valueSizes: values.map((value) => getComputedStyle(value).fontSize),
+            keySizes: keys.map((key) => getComputedStyle(key).fontSize),
+            rowsFit,
+          };
+        });
+        expect(geometry.spread).toBeLessThanOrEqual(1);
+        expect(geometry.valueSizes.every((size) => size === "11px")).toBe(true);
+        expect(geometry.keySizes.every((size) => size === "11px")).toBe(true);
+        expect(geometry.rowsFit).toBe(true);
+      };
+      const assertCapsuleTracksTab = async (): Promise<void> => {
+        await expect.poll(() => details.evaluate((popover) => {
+          const capsule = popover.querySelector<HTMLElement>(".segmented-capsule")!.getBoundingClientRect();
+          const selected = popover.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')!.getBoundingClientRect();
+          return Math.max(Math.abs(capsule.left - selected.left), Math.abs(capsule.right - selected.right));
+        })).toBeLessThanOrEqual(1);
+      };
+      await assertFactGrid(".machine-content");
       const iconTint = await details.locator(".machine-os-mark").evaluate((mark) => {
         const style = getComputedStyle(mark);
         return { color: style.color, fill: style.fill, stroke: style.stroke, logoColor: getComputedStyle(mark.parentElement!).color };
@@ -305,37 +478,67 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
       expect(tailGeometry.growsFromTail).toBe(true);
       expect(tailGeometry.visibleTail).toBe(true);
       expect(tailGeometry.alignment).toBeLessThanOrEqual(1);
-      const machineColumns = await details.locator(".machine-card-layout").evaluate((layout) => getComputedStyle(layout).gridTemplateColumns.split(" ").length);
-      expect(machineColumns).toBe(combo.mobile ? 1 : 2);
+      const capsuleHeights = await details.evaluate((popover) => {
+        const base = document.querySelector<HTMLElement>(".capsule")!;
+        const hostPill = document.querySelector<HTMLElement>(".window-card[aria-current='true'] .window-host-pill")!;
+        const tablist = popover.querySelector<HTMLElement>(".window-info-tabs")!;
+        const touchHeight = (element: HTMLElement): number => {
+          const rect = element.getBoundingClientRect();
+          const before = getComputedStyle(element, "::before");
+          const top = Number.parseFloat(before.top);
+          const bottom = Number.parseFloat(before.bottom);
+          return rect.height - (Number.isFinite(top) ? top : 0) - (Number.isFinite(bottom) ? bottom : 0);
+        };
+        return {
+          base: base.getBoundingClientRect().height,
+          host: hostPill.getBoundingClientRect().height,
+          tray: tablist.getBoundingClientRect().height,
+          hostTouch: touchHeight(hostPill),
+          tabTouch: touchHeight(tablist.querySelector<HTMLElement>("[role='tab']")!),
+        };
+      });
+      expect(capsuleHeights.host).toBeLessThanOrEqual(capsuleHeights.base);
+      expect(capsuleHeights.tray).toBeLessThanOrEqual(capsuleHeights.base);
+      if (combo.mobile) {
+        expect(capsuleHeights.hostTouch).toBeGreaterThanOrEqual(44);
+        expect(capsuleHeights.tabTouch).toBeGreaterThanOrEqual(44);
+      }
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "machine", basePath));
-      popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, "machine"));
+      await capturePopover("machine");
 
       await details.getByRole("button", { name: "More" }).click();
-      await expect(details.locator(".machine-fact")).toHaveCount(14);
+      await expect(details.locator(".machine-fact")).toHaveCount(13);
+      await assertFactGrid(".machine-content");
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "machine-more", basePath));
-      popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, "machine-more"));
+      await capturePopover("machine-more");
       await details.getByRole("tab", { name: "Connection" }).click();
       await expect(details.locator(".connection-facts")).toContainText("WebSocket · TLS 1.3");
+      await assertFactGrid(".connection-facts");
+      await assertCapsuleTracksTab();
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "connection", basePath));
-      popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, "connection"));
+      await capturePopover("connection");
       await details.getByRole("tab", { name: "Session" }).click();
       await expect(details.locator(".session-info-facts")).toContainText("1,842 lines");
+      await assertFactGrid(".session-info-facts");
+      await assertCapsuleTracksTab();
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "session-info", basePath));
-      popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, "session-info"));
+      await capturePopover("session-info");
       await page.keyboard.press("Escape");
 
       await page.locator(".window-card[aria-current='true'] [data-window-action='sessions']").click();
       const manager = page.getByRole("dialog", { name: "Window details" });
       await expect(manager.locator(".window-session-row")).toHaveCount(2);
+      await expect(manager.locator(".window-session-output").first()).toHaveCSS("font-size", "11px");
+      await expect(manager.locator(".window-session-meta").first()).toHaveCSS("font-size", "10px");
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "session-manager", basePath));
-      popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, "session-manager"));
+      await capturePopover("session-manager");
       const endAction = manager.locator(".window-session-row-actions [data-manager-action='end']").first();
       await endAction.hover();
       await endAction.click({ timeout: 5_000 });
       const ending = page.getByRole("dialog", { name: "End session?" });
       await expect(ending).toContainText("vim is running in 'deploy'. End it?");
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "end-confirmation", basePath));
-      popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, "end-confirmation", ".window-end-card"));
+      await capturePopover("end-confirmation", ".window-end-card");
       const cancelEnd = ending.getByRole("button", { name: "Keep session" });
       await cancelEnd.click({ timeout: 5_000 });
 
@@ -359,11 +562,10 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
       await expect(page.getByRole("dialog", { name: "Share machine details" })).toBeVisible();
       await expect(page.locator("[data-share-ips]")).not.toBeChecked();
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "share-card", basePath));
-      popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, "share-card", ".window-share-sheet"));
+      await capturePopover("share-card", ".window-share-sheet");
       await page.locator("[data-share-ips]").check();
       await expect(page.locator(".window-share-card")).toBeVisible();
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "share-card-with-ips", basePath));
-      popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, "share-card-with-ips", ".window-share-sheet"));
       await page.keyboard.press("Escape");
       await page.keyboard.press("Escape");
 
@@ -423,7 +625,6 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
       await page.getByRole("tab", { name: "Session" }).click();
       await expect(page.locator(".session-activity")).toContainText("moved 2 sessions");
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "promotion-session-activity", basePath));
-      popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, "promotion-session-activity"));
 
       await page.keyboard.press("Escape");
       await page.keyboard.press("Escape");
@@ -434,7 +635,6 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "new-shell", basePath));
       await page.locator(".window-card[aria-current='true'] [data-window-action='sessions']").click();
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "session-manager-new-shell", basePath));
-      popoverCropPaths.push(await savePopoverCrop(testInfo, page, combo.width, combo.height, combo.theme, "session-manager-new-shell"));
       const newShellRow = page.locator(".window-session-row[data-session-id='edge-arm-shell-3']");
       await newShellRow.locator("[data-manager-action='rename']").click();
       const renameInput = newShellRow.locator(".window-rename-input");
@@ -454,7 +654,7 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
     }
   }
 
-  expect(screenshotPaths).toHaveLength(80);
+  expect(screenshotPaths).toHaveLength(120);
   expect(popoverCropPaths).toHaveLength(40);
   await writeFile(resolve(outputDirectory, "manifest.txt"), [...screenshotPaths, ...popoverCropPaths].join("\n") + "\n");
   console.log(`Windows prototype side-by-side screenshots (production build):\n${screenshotPaths.join("\n")}`);
