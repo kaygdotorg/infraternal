@@ -562,3 +562,47 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - Tooltips on touch appear on long-press, as everywhere.
      - The Machine tab (M3) and the session manager (M7) each get their own
        interactive design and mockup round.
+126. **Machine tab and share card (MT1–MT6):**
+     - fastfetch style, with the logo on the left when the popover is wide
+       and on top when it is narrow;
+     - default fields: OS and version, kernel, architecture, model, CPU and
+       cores, memory, disk, uptime, load, agent mode, engines; the rest
+       (init, virtualization, IPs hidden by default, shell, locale) behind
+       "more";
+     - thin bars for memory and disk, updated only while the popover is
+       open;
+     - a dedicated share card (square, theme colours and gradients, a small
+       infraternal mark), shared as an image or text with IPs hidden by
+       default;
+     - OS logos from Simple Icons (CC0), single colour and tinted. They also
+       appear in the sidebar once detected, with a generic penguin or
+       machine glyph otherwise;
+     - tapping a value copies it (D103).
+127. **Session manager (SM1–SM6):**
+     - a popover from the header icon, with a tail, scrollable;
+     - rows show name, last output line, age, viewers, size and a new-output
+       dot;
+     - attach by tap, rename inline, open beside as a split, end with
+       confirmation. All of these are GUI actions, with trackpad, Magic
+       Mouse and touch swipe gestures where appropriate;
+     - new sessions are auto-named and open at once ("stay out of the way");
+     - the manager shows only its host's sessions. Everything, everywhere, is
+       reachable through the fast search and command palette;
+     - ending a busy session names what is running.
+128. **Latency and session data path (N1, N3, N6–N9):**
+     - sessions live in the host shim; browsers resume by byte offset over
+       any route, direct or relayed, and fall back mid-session;
+     - D64 stays strict (agents never listen). The direct path is WebRTC
+       with TURN; the TURN relay ships in the same binary (relay mode), the
+       server is a relay by default, and extra relays (e.g. o1 in India) are
+       optional;
+     - if the agent loses the server, direct sessions **fail closed** after
+       a short lease (about 60 s); the shim keeps running;
+     - **audit mode** (per deployment, host group or role) relays all bytes
+       through the server. Session recording is done by the **agent**
+       (signed, uploaded to the server), which works on every path; the
+       server-relay recording remains available where an independent copy is
+       required;
+     - order: predictive local echo first (client-only), then the WebRTC
+       direct path, then a KCP vs QUIC benchmark on India↔Germany, after the
+       remote-agent transport (D114).
