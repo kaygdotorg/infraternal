@@ -2,8 +2,9 @@
 //!
 //! Each terminal owns one pending output frame. Commands have eight slots;
 //! a full queue retires only that stream, cancelling its shim link. Unacknowledged
-//! input is replayed on attachment using shim-owned per-writer cursors. The writer has eight slots
-//! and awaits capacity, applying transport backpressure. Starved sessions close
+//! input is replayed on attachment using shim-owned per-writer cursors. Bulk output has eight slots
+//! and awaits capacity. Control replies use a separate eight-slot lane, selected
+//! first at frame boundaries; reply overload retires the channel without stalling dispatch. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
 //! A closed shim or failed terminal task closes only its mux stream.
@@ -67,6 +68,7 @@ struct Open {
 async fn writer(
     socket: &impl Channel,
     mut messages: mpsc::Receiver<Message>,
+    mut control: Option<mpsc::Receiver<Message>>,
     greeting: bool,
 ) -> io::Result<()> {
     let mut tx = Transmit::default();
@@ -86,7 +88,18 @@ async fn writer(
         )
         .await?;
     }
-    while let Some(message) = messages.recv().await {
+    // Only dispatch owns the control sender. Its closure ends this channel;
+    // bulk events retain their FIFO order, including notice before Snapshot.
+    while let Some(message) = tokio::select! {
+        biased;
+        message = async {
+            match control.as_mut() {
+                Some(receiver) => receiver.recv().await,
+                None => std::future::pending().await,
+            }
+        } => message,
+        message = messages.recv() => message,
+    } {
         match message {
             Message::Shim(stream, frame) => {
                 let wire = match &frame {
@@ -142,6 +155,17 @@ async fn writer(
     }
     Ok(())
 }
+// Shared dispatch must never await the capacity consumed by a stalled writer.
+// Unacknowledged input remains with the shim and can be replayed on reconnect.
+fn reply(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
+    tx.try_send(message).map_err(|error| match error {
+        mpsc::error::TrySendError::Full(_) => {
+            io::Error::new(io::ErrorKind::WouldBlock, "control reply queue full")
+        }
+        mpsc::error::TrySendError::Closed(_) => io::ErrorKind::BrokenPipe.into(),
+    })
+}
+
 async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
     tx.send(message)
         .await
@@ -209,6 +233,7 @@ async fn run_channel(
         drop(session);
     }
     let (tx, rx) = mpsc::channel(8);
+    let (control, control_rx) = mpsc::channel(8);
     let dispatch = async {
         let mut receive = Receive::default();
         if execution_uid.is_some() {
@@ -236,7 +261,7 @@ async fn run_channel(
                     if streams.get(&stream).is_some_and(|entry| entry.commands.is_closed()) {
                         streams.remove(&stream);
                         if result.is_err() {
-                            emit(&tx, Message::Close(stream, "terminal shim disconnected")).await?;
+                            reply(&control, Message::Close(stream, "terminal shim disconnected"))?;
                         }
                     }
                 }
@@ -246,9 +271,9 @@ async fn run_channel(
                         Ok(session) => {
                             let json = serde_json::to_vec(&serde_json::json!({"session_id": uuid::Uuid::from_bytes(session.id)}))?;
                             registry.insert(session.id, session.path.clone());
-                            emit(&tx, Message::Result(stream, call_id, true, json)).await?;
+                            reply(&control, Message::Result(stream, call_id, true, json))?;
                         }
-                        Err(_) => emit(&tx, Message::Result(stream, call_id, false, b"{\"error\":\"terminal open refused\"}".to_vec())).await?,
+                        Err(_) => reply(&control, Message::Result(stream, call_id, false, b"{\"error\":\"terminal open refused\"}".to_vec()))?,
                     }
                 }
                 decoded = receive.next(socket) => {
@@ -259,14 +284,14 @@ async fn run_channel(
                     }
                     match decoded.frame {
                         Frame::Hello {version: 1, ..} if stream == 0 => {}
-                        Frame::Ping {nonce, sent_us} if stream == 0 => emit(&tx, Message::Pong(nonce, sent_us)).await?,
+                        Frame::Ping {nonce, sent_us} if stream == 0 => reply(&control, Message::Pong(nonce, sent_us))?,
                         Frame::Call {call_id, action_id: "terminal.open", input_json} if execution_uid.is_none() || stream == 0 => {
                             let input = serde_json::from_slice::<Open>(input_json);
                             if let Ok(input) = input && execution_uid.is_none_or(|uid| input.uid == uid) && registry.len() + opens.len() < sessions::MAX_SESSIONS {
                                 let exe = exe.clone(); let state = state.clone();
                                 opens.spawn(async move { (stream, call_id, sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await) });
                             } else {
-                                emit(&tx, Message::Result(stream, call_id, false, b"{\"error\":\"invalid terminal open or session limit\"}".to_vec())).await?;
+                                reply(&control, Message::Result(stream, call_id, false, b"{\"error\":\"invalid terminal open or session limit\"}".to_vec()))?;
                             }
                         }
                         Frame::AttachTerm {session_id, last_out_seq, last_in_seq} if stream != 0 => {
@@ -304,7 +329,7 @@ async fn run_channel(
                             });
                             if overloaded {
                                 streams.remove(&stream);
-                                emit(&tx, Message::Close(stream, "terminal command queue full; reattach and replay unacknowledged input")).await?;
+                                reply(&control, Message::Close(stream, "terminal command queue full; reattach and replay unacknowledged input"))?;
                             }
                             // Frames already in flight after a stream closes are
                             // ignored; the terminal task emits its own Close.
@@ -312,9 +337,16 @@ async fn run_channel(
                     }
                 }
             }
+            // A coalesced request burst can consume all slots in one poll,
+            // before the outer select polls an otherwise ready writer. Give
+            // it one scheduling turn at the batch boundary, never wait for
+            // capacity. A genuinely stalled writer still refuses the next reply.
+            if control.capacity() == 0 {
+                tokio::task::yield_now().await;
+            }
         }
     };
-    tokio::select! { result = dispatch => result, result = writer(socket, rx, true) => result }
+    tokio::select! { result = dispatch => result, result = writer(socket, rx, Some(control_rx), true) => result }
 }
 
 /// Run one authenticated, capability-bound native terminal using the common shim relay.
@@ -375,7 +407,7 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
     };
     tokio::select! {
         result = dispatch => result,
-        result = writer(channel, rx, false) => result,
+        result = writer(channel, rx, None, false) => result,
         result = terminal(path, id, writer_id, cursor, input, command_rx, tx) => result,
     }
 }
