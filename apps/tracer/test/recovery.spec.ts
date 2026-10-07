@@ -271,3 +271,20 @@ test("signed-in device shows a persistent notice and can cancel recovery", async
   await expect(page.locator("#recovery-notice")).toBeHidden();
   expect(cancels).toBe(1);
 });
+
+test("remaining recovery wait uses server duration with a skewed browser clock", async ({ page }) => {
+  const serverNow = Date.now();
+  await page.clock.install({ time: new Date(serverNow + 7 * 86400_000) });
+  await page.route("**/auth/status", route => route.fulfill({ json: { setup_required: false } }));
+  await page.route("**/auth/session", route => route.fulfill({ status: 401, json: {} }));
+  await page.route("**/auth/recovery-resume", route => route.fulfill({ json: {
+    token: "public-clock-fixture", ready_at: Math.floor(serverNow / 1000) + 3600, delay_seconds: 3600,
+  } }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "use recovery key", exact: true }).click();
+  await page.locator("#recovery-username").fill("fixture_owner");
+  await paste(page, phrase);
+  await page.getByRole("button", { name: "Start recovery" }).click();
+  await expect(page.getByRole("button", { name: "Continue recovery" })).toBeDisabled();
+  await expect(page.locator("#recovery-ready-time")).toContainText("60 minutes remaining");
+});

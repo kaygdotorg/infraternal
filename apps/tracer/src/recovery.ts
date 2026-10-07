@@ -19,7 +19,8 @@ export function mountRecovery(host: HTMLElement, back: () => void,
   let request: RecoveryRequest | undefined;
   let finish: (() => Promise<void>) | undefined, acknowledged: (() => void) | undefined;
   let rejectAcknowledgement: ((failure: unknown) => void) | undefined;
-  let readyTimer = 0;
+  let readyTimer = 0, readyClock = 0;
+  const lifecycle = new AbortController();
   let renderedStep = -1;
   let paneObserver: ResizeObserver | undefined;
   host.innerHTML = `<section class="auth-screen" aria-label="Recover your account"><section class="auth-card" id="recovery-card">
@@ -34,11 +35,14 @@ export function mountRecovery(host: HTMLElement, back: () => void,
   const markMotion = (value: boolean): void => { card.toggleAttribute("data-no-motion", value); };
   card.querySelector<HTMLButtonElement>(".auth-back")!.addEventListener("click", () => {
     if (busy || finish) return;
-    window.clearTimeout(readyTimer); paneObserver?.disconnect(); words.fill(""); request = undefined; back();
+    lifecycle.abort(); window.clearTimeout(readyTimer); paneObserver?.disconnect(); words.fill(""); request = undefined; back();
   });
+  // Relative monotonic time is calibrated from server duration; wall-clock skew
+  // cannot turn a waiting request into Ready now. Foreground resync covers sleep.
+  function remainingMs(): number { return Math.max(0, readyClock - performance.now()); }
   function ready(): boolean {
     if (step === 0) return /^[a-z0-9_-]{2,32}$/.test(username) && validWords();
-    if (step === 1) return request !== undefined && (request.delay_seconds === 0 || Date.now() >= request.ready_at * 1000);
+    if (step === 1) return request !== undefined && remainingMs() === 0;
     return step !== 3 || saved;
   }
   function validWords(): boolean { return words.every((word) => dictionary.has(word)) && validateMnemonic(words.join(" "), wordlist); }
@@ -69,14 +73,14 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     pane.querySelector<HTMLElement>("h1")!.textContent = titles[step]!;
     pane.querySelector<HTMLElement>(".auth-lede")!.textContent = [
       "Enter your username and the 24 words you saved. You can paste the whole key into any word field.",
-      request?.delay_seconds === 0 ? "This browser has a live session for your account. You can recover immediately." : "Recovery waits 24 hours. A signed-in device can cancel it. You can close this page and resume with your words in any browser. The original deadline stays the same.",
+      request?.delay_seconds === 0 ? "Recovery is ready. You can now create a replacement passkey." : "Recovery waits 24 hours. A signed-in device can cancel it. You can close this page and resume with your words in any browser. The original deadline stays the same.",
       "Your new passkey will protect the same account key. Your saved SSH keys stay accessible.",
       "Your old recovery key will stop working. Store these new words somewhere safe and offline.",
     ][step]!;
     if (step === 0) renderEntry();
     else if (step === 1) {
       body.innerHTML = '<p id="recovery-ready-time" role="status"></p>';
-      body.querySelector<HTMLElement>("p")!.textContent = request?.delay_seconds === 0 ? "Ready now" : `Available ${new Date(request!.ready_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · ${Math.ceil(Math.max(0, request!.ready_at * 1000 - Date.now()) / 60_000)} minutes remaining`;
+      body.querySelector<HTMLElement>("p")!.textContent = request?.delay_seconds === 0 ? "Ready now" : `Available ${new Date(request!.ready_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · ${Math.ceil(remainingMs() / 60_000)} minutes remaining`;
     } else if (step === 2) body.replaceChildren();
     else recoveryWords(body, nextWords, saved, (value) => { saved = value; update(); }, markMotion);
     button.querySelector<HTMLElement>("span")!.textContent = ["Start recovery", "Continue recovery", "Create passkey", "Open infraternal"][step]!;
@@ -94,11 +98,11 @@ export function mountRecovery(host: HTMLElement, back: () => void,
       const checkReady = (): void => {
         if (!card.isConnected || step !== 1) return;
         const remaining = body.querySelector<HTMLElement>("#recovery-ready-time");
-        if (remaining) remaining.textContent = ready() ? "Ready now" : `${Math.ceil(Math.max(0, request!.ready_at * 1000 - Date.now()) / 60_000)} minutes remaining · Available ${new Date(request!.ready_at * 1000).toLocaleString()}`;
+        if (remaining) remaining.textContent = ready() ? "Ready now" : `${Math.ceil(remainingMs() / 60_000)} minutes remaining · Available ${new Date(request!.ready_at * 1000).toLocaleString()}`;
         update();
-        if (!ready()) readyTimer = window.setTimeout(checkReady, Math.min(60_000, Math.max(1, request!.ready_at * 1000 - Date.now())));
+        if (!ready()) readyTimer = window.setTimeout(checkReady, Math.min(60_000, Math.max(1, remainingMs())));
       };
-      readyTimer = window.setTimeout(checkReady, Math.min(60_000, Math.max(1, request!.ready_at * 1000 - Date.now())));
+      readyTimer = window.setTimeout(checkReady, Math.min(60_000, Math.max(1, remainingMs())));
     }
   }
   function renderEntry(): void {
@@ -157,7 +161,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     busy = true; update(); markMotion(true); error.textContent = "";
     const waiting = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
     try {
-      if (step === 0) { request = await startRecovery(username, words.join(" "), legacyUpgrade); step = 1; }
+      if (step === 0) { request = await startRecovery(username, words.join(" "), legacyUpgrade); readyClock = performance.now() + request.delay_seconds * 1000; step = 1; }
       else if (step === 1) { step = 2; }
       else if (step === 2) {
         const result = await replacePasskey(request!.token, words.join(" "), async (rotated, commit) => {
@@ -165,7 +169,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
           await new Promise<void>((resolve, reject) => { acknowledged = resolve; rejectAcknowledgement = reject; });
         });
         words.fill(""); nextWords.fill(""); request = undefined; finish = undefined;
-        window.clearTimeout(readyTimer); paneObserver?.disconnect();
+        lifecycle.abort(); window.clearTimeout(readyTimer); paneObserver?.disconnect();
         complete(result.userId, true, result.displayName, instant);
         return;
       } else {
@@ -185,5 +189,19 @@ export function mountRecovery(host: HTMLElement, back: () => void,
         : failure instanceof AuthError ? failure.message : "Recovery could not be completed. Try again.";
     } finally { waiting.done(); busy = false; if (card.isConnected) render(); }
   }
+  document.addEventListener("visibilitychange", () => {
+    if (!card.isConnected) { lifecycle.abort(); words.fill(""); return; }
+    if (document.hidden || step !== 1 || busy || !request) return;
+    const previous = request;
+    busy = true; update();
+    const waiting = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
+    void startRecovery(username, words.join(" ")).then((resumed) => {
+      if (!card.isConnected || step !== 1 || request !== previous) return;
+      request = resumed;
+      readyClock = performance.now() + resumed.delay_seconds * 1000;
+    }).catch(() => {
+      if (card.isConnected) error.textContent = "The recovery time could not be refreshed. Reopen recovery to check it.";
+    }).finally(() => { waiting.done(); busy = false; if (card.isConnected) render(); });
+  }, { signal: lifecycle.signal });
   render();
 }
