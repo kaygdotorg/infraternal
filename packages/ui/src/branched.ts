@@ -96,7 +96,7 @@ function makeSection(section: BranchSection): HTMLElement {
 }
 
 /**
- * Builds a tree with a fading trunk, a moving current-host marker, and a highlighted branch.
+ * Builds a tree with a fading trunk, a moving current-host marker, and a drawn-on branch.
  * Identifiers and labels are installed as DOM text/data rather than interpolated HTML.
  */
 export function branchedMenu(
@@ -141,8 +141,14 @@ export function branchedMenu(
       const leaves = [...list.querySelectorAll<HTMLElement>(".bm-leaf")];
       const mine = leaves.find((leaf) => leaf.dataset.id === active);
       lit.style.transition = animate && !reduced() ? `opacity 150ms ${EASE}` : "none";
+      if (animate) lit.getAnimations().forEach((animation) => animation.cancel());
       if (mine) {
         lit.setAttribute("d", branch(list, mine.parentElement!));
+        // The owner approved paint-based draw-on for this small, rarely changed tree.
+        if (animate && !reduced()) lit.animate(
+          [{ strokeDashoffset: 1 }, { strokeDashoffset: 0 }],
+          { duration: 300, easing: EASE, fill: "both" },
+        );
         lit.style.opacity = "1";
       } else {
         lit.style.opacity = "0";
@@ -173,6 +179,7 @@ export function branchedMenu(
     const open = !section.hasAttribute("data-open");
     section.toggleAttribute("data-open", open);
     section.setAttribute("aria-expanded", String(open));
+    section.classList.toggle("no-motion", event.detail === 0);
   };
   host.addEventListener("click", onClick);
 

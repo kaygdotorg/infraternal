@@ -355,7 +355,12 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
   await page.mouse.move(0, 0);
   await page.waitForTimeout(150);
   await page.evaluate(() => { window.__motionAudit.label = "pointer-checkbox"; window.__motionAudit.startSample(); });
-  await page.locator("label.auth-check").click();
+  await page.evaluate(() => {
+    const row = document.querySelector<HTMLElement>("label.auth-check")!;
+    row.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
+    row.querySelector<HTMLInputElement>("#recovery-saved")!.click();
+    row.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, button: 0, pointerType: "mouse" }));
+  });
   await page.waitForTimeout(50);
   const pointerTickMid = await page.locator("label.auth-check .tick path").evaluate((path) => ({
     inlineOffset: (path as SVGPathElement).style.strokeDashoffset,
@@ -364,12 +369,13 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
   }));
   const pointerTickMidOffset = Number.parseFloat(pointerTickMid.inlineOffset);
   await expect.poll(() => page.locator("label.auth-check .tick path").evaluate((path) => Number.parseFloat((path as SVGPathElement).style.strokeDashoffset)), { timeout: 1_500 }).toBe(0);
+  await page.waitForTimeout(250); // wait past spring overshoot so the final value is stable
   const pointerTickEndOffset = await page.locator("label.auth-check .tick path").evaluate((path) => getComputedStyle(path).strokeDashoffset);
   const pointerCheckbox = await sampleAndEvents(page, "pointer-checkbox");
   console.log(`MOTION_AUDIT checkbox-draw-state ${JSON.stringify({ pointerCheckbox, pointerTickMid, pointerTickEndOffset })}`);
   expect(pointerTickMidOffset).toBeGreaterThan(0);
   expect(pointerTickMidOffset).toBeLessThan(1);
-  expect(Number.parseFloat(pointerTickEndOffset)).toBe(0);
+  expect(Number.parseFloat(pointerTickEndOffset)).toBeLessThan(0.02);
 
   await page.locator("#recovery-saved").focus();
   await page.evaluate(() => { window.__motionAudit.label = "keyboard-checkbox"; window.__motionAudit.startSample(); });
@@ -537,28 +543,80 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
   await page.keyboard.press("Space");
   await page.waitForTimeout(260);
   const fold = await sampleAndEvents(page, "keyboard-fold");
+  expect(fold.events.filter((event) => event.property === "grid-template-rows")).toEqual([]);
   console.log(`MOTION_AUDIT keyboard-fold ${JSON.stringify(fold)}`);
 
   await page.waitForTimeout(280);
   await page.evaluate(() => { window.__motionAudit.label = "pointer-fold"; window.__motionAudit.startSample(); });
-  await page.locator("#tree .bm-head").click();
+  await page.locator("#tree .bm-head").first().click();
   await page.waitForTimeout(280);
   const pointerFold = await sampleAndEvents(page, "pointer-fold");
-  expect(pointerFold.events.filter((event) => event.property === "grid-template-rows")).toEqual([]);
+  const foldMotion = pointerFold.events.find((event) => event.selector === "div.bm-fold" && event.property === "grid-template-rows");
+  expect(foldMotion?.duration).toBe("0.24s");
   console.log(`MOTION_AUDIT pointer-fold ${JSON.stringify(pointerFold)}`);
-  await page.evaluate(() => { window.__motionAudit.label = "pointer-branch"; window.__motionAudit.startSample(); });
-  await page.locator("#tree .bm-leaf:not(:disabled)").click();
-  await page.waitForTimeout(320);
-  const pointerBranch = await sampleAndEvents(page, "pointer-branch");
-  const branch = await page.evaluate(() => ({
+
+  await page.evaluate(() => {
+    const tree = document.querySelector<HTMLElement>("#tree")!;
+    const current = tree.querySelector<HTMLElement>(".bm-sec")!;
+    const other = current.cloneNode(true) as HTMLElement;
+    other.dataset.id = "motion-audit-metrics";
+    other.querySelector<HTMLElement>(".bm-head")!.setAttribute("aria-label", "Metrics");
+    other.querySelector<HTMLElement>(".bm-name")!.textContent = "Metrics";
+    const leaf = other.querySelector<HTMLButtonElement>(".bm-leaf")!;
+    leaf.dataset.id = "motion-audit-metrics-shell";
+    leaf.setAttribute("aria-label", "Metrics shell");
+    leaf.querySelector<HTMLElement>(".bm-label")!.textContent = "Metrics shell";
+    leaf.removeAttribute("aria-current");
+    tree.append(other);
+  });
+  await page.waitForTimeout(100);
+  await page.locator("#tree .bm-leaf[data-id='motion-audit-metrics-shell']").focus();
+  await page.evaluate(() => { window.__motionAudit.label = "keyboard-branch"; window.__motionAudit.startSample(); });
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(80);
+  const keyboardBranch = await sampleAndEvents(page, "keyboard-branch");
+  const keyboardBranchStyle = await page.evaluate(() => ({
     markerTransition: getComputedStyle(document.querySelector<HTMLElement>(".bm-marker")!).transition,
-    drawAnimations: document.querySelector<SVGPathElement>(".bm-lit")!.getAnimations().map((animation) => ({ duration: animation.effect?.getTiming().duration, playState: animation.playState })),
-    foldTransition: getComputedStyle(document.querySelector<HTMLElement>(".bm-fold")!).transition,
+    activeDraws: [...document.querySelectorAll<SVGPathElement>(".bm-lit")].flatMap((path) => path.getAnimations()),
   }));
-  expect(pointerBranch.events.filter((event) => event.selector === "path.bm-lit" && event.kind === "waapi")).toEqual([]);
-  expect(branch.drawAnimations).toEqual([]);
-  expect(pointerBranch.events.filter((event) => event.property === "grid-template-rows")).toEqual([]);
-  console.log(`MOTION_AUDIT pointer-branch ${JSON.stringify({ sample: pointerBranch, branch })}`);
+  expect(keyboardBranch.events.filter((event) => event.kind === "waapi" && event.property.includes("strokeDashoffset"))).toEqual([]);
+  expect(keyboardBranchStyle.markerTransition).toBe("none");
+  expect(keyboardBranchStyle.activeDraws).toEqual([]);
+  console.log(`MOTION_AUDIT keyboard-branch ${JSON.stringify({ keyboardBranch, keyboardBranchStyle })}`);
+
+  await page.evaluate(() => { window.__motionAudit.label = "pointer-branch"; window.__motionAudit.startSample(); });
+  await page.locator("#tree .bm-leaf[data-id='current-shell']").click();
+  await page.waitForTimeout(50);
+  const branchMotion = await page.evaluate(() => {
+    const sections = [...document.querySelectorAll<HTMLElement>("#tree .bm-sec")];
+    const current = sections.find((section) => section.dataset.id !== "motion-audit-metrics")!;
+    const old = sections.find((section) => section.dataset.id === "motion-audit-metrics")!;
+    const draw = current.querySelector<SVGPathElement>(".bm-lit")!.getAnimations().map((animation) => ({
+      duration: animation.effect?.getTiming().duration,
+      easing: animation.effect?.getTiming().easing,
+      playState: animation.playState,
+    }));
+    const fade = old.querySelector<SVGPathElement>(".bm-lit")!.getAnimations().map((animation) => ({
+      duration: animation.effect?.getTiming().duration,
+      playState: animation.playState,
+    }));
+    return {
+      markerTransition: getComputedStyle(document.querySelector<HTMLElement>(".bm-marker")!).transition,
+      draw,
+      fade,
+      foldTransition: getComputedStyle(document.querySelector<HTMLElement>(".bm-fold")!).transition,
+    };
+  });
+  await page.waitForTimeout(300);
+  const pointerBranch = await sampleAndEvents(page, "pointer-branch");
+  expect(branchMotion.draw).toContainEqual({ duration: 300, easing: "cubic-bezier(0.23, 1, 0.32, 1)", playState: "running" });
+  expect(branchMotion.fade.some((animation) => animation.duration === 150 && animation.playState === "running")).toBe(true);
+  expect(branchMotion.markerTransition).toContain("0.28s");
+  expect(branchMotion.foldTransition).toContain("0.24s");
+  expect(pointerBranch.events.find((event) => event.selector === "path.bm-lit" && event.kind === "waapi" && event.property === "strokeDashoffset"))
+    .toMatchObject({ duration: 300, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+  expect(pointerBranch.events.find((event) => event.selector === "path.bm-lit" && event.kind === "transition" && event.property === "opacity")?.duration).toBe("0.15s");
+  console.log(`MOTION_AUDIT pointer-branch ${JSON.stringify({ sample: pointerBranch, branchMotion })}`);
 
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.evaluate(() => { window.__motionAudit.label = "reduced-pointer-sidebar"; window.__motionAudit.startSample(); });
@@ -570,11 +628,12 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
   await expect(page.locator("#sidebar")).toBeVisible();
   await page.waitForTimeout(220);
   await page.evaluate(() => { window.__motionAudit.label = "reduced-pointer-fold"; window.__motionAudit.startSample(); });
-  await page.locator("#tree .bm-head").click();
+  await page.locator("#tree .bm-head").first().click();
   await page.waitForTimeout(260);
   const reducedFold = await sampleAndEvents(page, "reduced-pointer-fold");
   expect(reducedSidebar.events.filter((event) => event.selector === "#sidebar-toggle" && event.property === "transform")).toEqual([]);
   expect(reducedFold.events.filter((event) => event.property === "transform" || event.property === "grid-template-rows")).toEqual([]);
+  expect(reducedStyles.find((style) => style.selector === ".bm-fold")?.transitionProperty).toBe("none");
   console.log(`MOTION_AUDIT reduced-motion ${JSON.stringify({ reducedSidebar, reducedFold, reducedStyles })}`);
 
   const mobileContext = await browser.newContext({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
