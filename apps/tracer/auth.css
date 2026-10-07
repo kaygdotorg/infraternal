@@ -156,12 +156,10 @@
 }
 .auth-back { padding: 10px 8px; margin-left: -8px; }
 .auth-back[hidden] { display: inline; visibility: hidden; }
-.auth-back:hover, .auth-text-button:hover { color: var(--fg); }
-.auth-signin { padding-bottom: 30px; }
-.auth-signin .auth-lede { margin-bottom: 24px; }
+.auth-back:hover { color: var(--fg); }
+.auth-signin { padding: 40px 32px 36px; }
+.auth-signin .auth-lede { margin-bottom: 28px; }
 .auth-login { width: 100%; height: 48px; border-radius: 12px; font-size: 15px; }
-.auth-signin-secondary { display: flex; justify-content: center; margin-top: 14px; }
-.auth-text-button { padding: 8px; font-size: 12.5px; }
 .auth-loading { min-height: 1em; margin: 14px 0 0; text-align: center; }
 .auth-check { position: relative; display: flex; min-height: 44px; align-items: center; gap: 10px; margin-top: 18px; color: var(--fg-2); font-size: 14px; cursor: pointer; }
 .auth-check input { width: 18px; height: 18px; accent-color: #fff; }
@@ -186,6 +184,7 @@
 .auth-screen button:focus-visible { outline: 2px solid rgb(255 255 255 / 0.55); outline-offset: 2px; }
 @media (max-width: 480px) {
   .auth-card { padding: 28px 22px 22px; border-radius: 20px; }
+  .auth-signin { padding: 30px 22px 28px; }
   .auth-card h1 { font-size: 23px; }
   .auth-words { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
