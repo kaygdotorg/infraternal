@@ -1,5 +1,6 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
+import { terminalTouch } from "./terminal-touch";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
@@ -191,12 +192,14 @@ export class TerminalClient {
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
   private readonly onViewportChange = (): void => this.syncVisualViewport();
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
+  private readonly disposeTouch: () => void;
 
   private constructor(private readonly config: TerminalConfig, terminal: Terminal) {
     this.terminal = terminal;
     this.ghostty = terminal as unknown as GhosttyActivityControls;
     this.screen = config.screen ?? config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
+    this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal());
     this.pauseTerminal(); // Ghostty opens with one live loop; the client owns its activity window.
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
@@ -268,6 +271,8 @@ export class TerminalClient {
     receivedSequence: string;
     outputSequence: string;
     scrollbackRows: number;
+    viewportY: number;
+    fontSize: number;
     wasmMemoryBytes: number;
   } {
     const wasmTerm = this.terminal.wasmTerm;
@@ -282,6 +287,8 @@ export class TerminalClient {
       receivedSequence: this.receivedOutSeq.toString(),
       outputSequence: this.lastOutSeq.toString(),
       scrollbackRows: wasmTerm?.getScrollbackLength() ?? 0,
+      viewportY: this.terminal.viewportY,
+      fontSize: this.terminal.options.fontSize,
       wasmMemoryBytes: memory?.buffer.byteLength ?? 0,
     };
   }
@@ -356,6 +363,7 @@ export class TerminalClient {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.disposeTouch();
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
     this.config.host.removeEventListener("pointermove", this.onTerminalActivity);
