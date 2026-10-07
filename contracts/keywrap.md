@@ -412,6 +412,11 @@ A database leak contains the hash, not the bearer secret. A server receiving the
 authentication output cannot derive its HKDF sibling or the 256-bit entropy.
 The one-time legacy exception exposes the old entropy to the server just as the
 old protocol did; upgrading authentication alone cannot erase that historical
-knowledge. Rotation to browser-generated words protects the new recovery wrap.
+knowledge. Rotation to browser-generated words protects the new recovery wrap,
+but recovery preserves the original DEK: a server that retained old words and
+the old envelope can retain that DEK too. Neither verifier upgrade nor word
+rotation erases such knowledge. Removing it would require client-side DEK and
+encrypted-secret rotation, outside this compatibility migration. The no-unwrap
+property applies to fresh v2 accounts and normal v2 protocol disclosure.
 A malicious server that replaces browser JavaScript can collect browser secrets;
 this contract prevents protocol disclosure, not hostile client-code delivery.
