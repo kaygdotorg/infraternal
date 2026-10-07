@@ -491,3 +491,18 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      waits 24 hours (the existing contract delay), so a stranger with stolen
      words cannot take over before the owner notices. The sign-in card
      offers "use recovery key" instead of "use a different passkey" (#45).
+114. **S1 order: remote infraternal agents first** (transport, enrollment and
+     reconnect), then the SSH bootstrap, then mesh import and the add-host
+     flow (P1, #9).
+115. **First hosts and the add-host flow:** o1, o2 and minipc01 first, added
+     and tested by the owner. The add-host flow is designed with the owner
+     through an extensive grill and mockups before any screen is built
+     ("no slop", "mockup the hell out of it") (P2, P4).
+116. **SSH authentication in the first cut:** NetBird SSH, Tailscale SSH,
+     passwords and keys (keys and passwords encrypted with the user's
+     passkey, D23). Certificates follow (P3).
+117. **Scale target is enterprise, not the owner's own use:** the owner
+     expects 1–2 remote desktop sessions, but budgets and architecture are
+     sized for an enterprise deployment. Phones get a scaled picture and
+     desktops native resolution; H.264 with a persistent encoder shared by
+     subscribers at the same size (P5).
