@@ -161,6 +161,23 @@ export function refreshTip(el: HTMLElement) {
   if (shown && current === el) { place(el, false); setLabel(labelOf(el), 0); }
 }
 
+const flashTimers = new WeakMap<HTMLElement, number>();
+
+/**
+ * Shows a short confirmation ("Copied") on `el` for `duration` ms, then restores it. The
+ * same surface and pop as every tooltip, so confirmations look like the rest of the product.
+ */
+export function flashTip(el: HTMLElement, text: string, duration = 900) {
+  const previous = el.dataset.tip;
+  clearTimeout(flashTimers.get(el));
+  el.dataset.tip = text;
+  show(el, shown ? "instant" : "pop");
+  flashTimers.set(el, window.setTimeout(() => {
+    if (current === el) hide();
+    if (previous === undefined || previous === text) delete el.dataset.tip; else el.dataset.tip = previous;
+  }, duration));
+}
+
 /** Installs the page-wide tooltip group. Call once; works for elements added later. */
 export function installTooltips() {
   const fine = () => matchMedia("(hover: hover) and (pointer: fine)").matches;

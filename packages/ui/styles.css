@@ -48,3 +48,130 @@
   .swap svg, [data-done] .is-idle, .swap .is-done, [data-done] .is-done { transform: none; filter: none; }
   .swap .is-done path { stroke-dashoffset: 0; transition: none; }
 }
+
+/* ---------------------------------------------------------------------------------------
+   Type roles, taken from the sign-in card's computed values (the owner's benchmark,
+   docs/design/TASTE.md §2): the same on desktop and touch. Only row and control heights
+   follow the platform (macOS scale on desktop, 44 px targets on touch).
+     name    600 14px/1     -0.01em  (auth-mark)
+     body    450 14px/1.55  -0.01em  (auth-lede)
+     label   450 13px/1.55  -0.01em  (auth-label)
+     button  500 13.5px/1            (auth-back, auth-text-button)
+     eyebrow 500 12px/1     +0.02em  (auth-eyebrow)
+   --------------------------------------------------------------------------------------- */
+:root {
+  --ui-type-name: 600 14px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-body: 450 14px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-label: 450 13px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-button: 500 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-eyebrow: 500 12px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-tracking: -0.01em;
+  /* Secondary text matches the sign-in card's secondary (rgb 161 161 170 on ink) and
+     adapts to every theme, instead of the dimmer --fg-2. */
+  --ui-text-secondary: color-mix(in oklab, var(--fg) 70%, var(--bg));
+  --ui-row-h: 32px;
+  --ui-control-h: 30px;
+  --ui-icon: 16px;
+}
+@media (pointer: coarse) {
+  :root { --ui-row-h: 44px; --ui-control-h: 44px; --ui-icon: 18px; }
+}
+
+/* Floating overlay material (D72, D160): only popovers, sheets, palette and tooltips use
+   it. Translucent enough that content behind reads as soft shapes; never on in-page
+   controls. Reduced transparency makes it near-solid. */
+.ui-overlay-surface {
+  background: var(--overlay);
+  border: 1px solid var(--overlay-line);
+  box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
+  backdrop-filter: blur(20px) saturate(1.8);
+}
+@media (prefers-reduced-transparency: reduce) {
+  .ui-overlay-surface { background: var(--overlay-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+@media (prefers-contrast: more) {
+  .ui-overlay-surface { border-color: color-mix(in oklab, var(--fg) 60%, transparent); }
+}
+
+/* Window card (window-card.ts): the pane card's surface plus a quiet header. */
+.ui-window {
+  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
+  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); box-shadow: var(--shadow);
+  transition: border-color 180ms var(--ease-out, ease-out);
+}
+.ui-window[data-active] { border-color: color-mix(in oklab, var(--accent) 50%, var(--overlay-line)); }
+.ui-window-head { display: flex; flex: none; align-items: center; gap: 8px; padding: 8px 8px 0 8px; }
+.ui-window-pill {
+  display: inline-flex; align-items: center; gap: 8px; min-width: 0; height: var(--ui-control-h); padding: 0 10px 0 8px;
+  border: 1px solid var(--overlay-line); border-radius: 999px; background: transparent; color: var(--fg);
+  font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: pointer;
+  transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
+}
+.ui-window-pill:active { transform: scale(0.97); }
+.ui-window-mark { display: grid; flex: none; place-items: center; width: var(--ui-icon); height: var(--ui-icon); color: var(--fg-2); }
+.ui-window-mark svg { width: 100%; height: 100%; fill: currentColor; stroke: none; }
+.ui-window-title { display: inline-flex; min-width: 0; overflow: hidden; }
+.ui-window-user { color: var(--ui-text-secondary); font-weight: 450; }
+.ui-window-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ui-window-session { color: var(--fg-3); font-weight: 450; }
+.ui-window-session::before { content: "·"; margin-right: 8px; color: var(--fg-3); }
+.ui-window-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--ok); }
+.ui-window[data-status="connecting"] .ui-window-dot { background: var(--fg-3); }
+.ui-window[data-status="offline"] .ui-window-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
+.ui-window-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.ui-window-action {
+  display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); border: 0; border-radius: 8px;
+  background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
+}
+.ui-window-action:active { transform: scale(0.97); }
+.ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-window-body { position: relative; flex: 1; min-height: 0; }
+@media (hover: hover) and (pointer: fine) {
+  .ui-window-pill:hover { background: var(--hover); }
+  .ui-window-action:hover { background: var(--hover); color: var(--fg-2); }
+}
+
+/* Capsule tabs (capsule-tabs.ts): flat track, one gliding capsule. */
+.ui-tabs { position: relative; display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--hover); isolation: isolate; }
+.ui-tabs-capsule {
+  position: absolute; z-index: -1; top: 3px; bottom: 3px; left: 0; border-radius: 999px;
+  background: var(--overlay-solid); box-shadow: 0 1px 2px rgb(0 0 0 / 0.14), 0 0 0 1px var(--overlay-line);
+}
+.ui-tab {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; height: calc(var(--ui-control-h) - 6px);
+  padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--fg-2); cursor: pointer;
+  font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: color 160ms ease;
+}
+.ui-tab[aria-selected="true"] { color: var(--fg); }
+.ui-tabs[data-compact] .ui-tab[aria-selected="false"] > span { display: none; }
+.ui-tabs[data-compact] .ui-tab[aria-selected="false"] { padding: 0 10px; }
+.ui-tab svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Key/value list (kv-list.ts): keys left, values right, every cell copies. */
+.ui-kv { display: flex; flex-direction: column; }
+.ui-kv-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 16px; align-items: baseline;
+  min-height: var(--ui-row-h); padding: 4px 0; border-bottom: 1px solid var(--line);
+}
+.ui-kv-row:last-child { border-bottom: 0; }
+.ui-kv-cell {
+  display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; margin: 0 -6px; padding: 3px 6px; border: 0; border-radius: 6px;
+  background: none; color: inherit; cursor: copy; text-align: left; font: inherit; transition: background-color 120ms ease;
+  -webkit-user-select: text; user-select: text; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
+.ui-kv-value { justify-self: end; justify-content: flex-end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
+.ui-kv-text { min-width: 0; overflow-wrap: break-word; }
+.ui-kv-tick { width: 12px; height: 12px; flex: none; align-self: center; fill: none; stroke: var(--ok); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 150ms var(--ease-out, ease-out); }
+.ui-kv-cell[data-copied] .ui-kv-tick { opacity: 1; transform: none; }
+.ui-kv-meter { grid-column: 1 / -1; position: relative; height: 3px; margin: 4px 0 2px; overflow: hidden; border-radius: 2px; background: var(--line); }
+.ui-kv-meter::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--accent); transform: scaleX(var(--meter, 0)); transform-origin: left; }
+@media (hover: hover) and (pointer: fine) {
+  .ui-kv-cell:hover { background: var(--hover); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-window-pill:active, .ui-window-action:active { transform: none; }
+  .ui-kv-tick { transform: none; }
+}
