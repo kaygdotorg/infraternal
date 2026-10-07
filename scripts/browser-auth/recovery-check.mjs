@@ -43,7 +43,7 @@ try {
         });
         const wraps = await api.recoveryAuth.post('wraps', {});
         const entropy = api.entropy(globalThis.recoveryWords);
-        globalThis.originalDek = await api.recoveryAuth.unwrapDek(entropy, wraps.find(w => w.kind === 'recovery').wrap, globalThis.recoveryUser, 'recovery');
+        globalThis.originalDek = await api.recoveryAuth.unwrapRecoveryDek(globalThis.recoveryWords, wraps.find(w => w.kind === 'recovery').wrap, globalThis.recoveryUser, 2);
         entropy.fill(0);
       }, initial.setup_token);
       if (!live) await context.clearCookies();
@@ -73,7 +73,7 @@ try {
         if (recovered.userId !== globalThis.recoveryUser) throw new Error('replacement changed account');
         const wraps = await api.recoveryAuth.post('wraps', {});
         const entropy = api.entropy(globalThis.nextRecoveryWords);
-        const dek = await api.recoveryAuth.unwrapDek(entropy, wraps.find(w => w.kind === 'recovery').wrap, globalThis.recoveryUser, 'recovery');
+        const dek = await api.recoveryAuth.unwrapRecoveryDek(globalThis.nextRecoveryWords, wraps.find(w => w.kind === 'recovery').wrap, globalThis.recoveryUser, 2);
         if (!dek.every((value, i) => value === globalThis.originalDek[i])) throw new Error('replacement changed original DEK');
         entropy.fill(0); dek.fill(0); globalThis.originalDek.fill(0);
         const replay = await fetch('/auth/recovery-ready', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: globalThis.recoveryRequest.token }) });
