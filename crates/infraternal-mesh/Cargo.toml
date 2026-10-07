@@ -1,0 +1,16 @@
+# Pure mesh coordination and data-plane contracts (D163–D167).
+[package]
+name = "infraternal-mesh"
+version.workspace = true
+edition.workspace = true
+license = "AGPL-3.0-only"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
