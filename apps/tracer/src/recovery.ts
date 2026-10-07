@@ -4,6 +4,7 @@ import { wordlist } from "@scure/bip39/wordlists/english.js";
 import { AuthError } from "./auth";
 import { startRecovery, replacePasskey, type RecoveryRequest } from "./recovery-auth";
 import { recoveryWords } from "./recovery-words";
+import { recoveryUiEnabled } from "./recovery-ui";
 import { loading } from "../../../packages/ui/src/countup";
 import { tick, springCheckbox } from "../../../packages/ui/src/tick";
 
@@ -14,6 +15,7 @@ const titles = ["Use your recovery key", "Recovery started", "Create a new passk
 export function mountRecovery(host: HTMLElement, back: () => void,
   complete: (userId: string, firstSetup: boolean, displayName?: string, instant?: boolean) => void,
 ): void {
+  if (!recoveryUiEnabled()) { back(); return; }
   let step = 0, busy = false, instant = false, saved = false;
   let words = Array<string>(24).fill(""), username = "", nextWords: string[] = [];
   let request: RecoveryRequest | undefined;

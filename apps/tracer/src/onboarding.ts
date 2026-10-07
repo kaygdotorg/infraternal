@@ -1,5 +1,6 @@
 /** Renders the real setup wizard and discoverable passkey sign-in for the tracer. */
 import { recoveryWords } from "./recovery-words";
+import { recoveryUiEnabled } from "./recovery-ui";
 import { AuthError, checkSetupToken, loginWithPasskey, registerOwner } from "./auth";
 import { copyFeedback, swapIcon, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { loading, type Loading } from "../../../packages/ui/src/countup";
@@ -385,15 +386,15 @@ function mountSignIn(
       <p class="auth-lede">Your passkey is all you need.</p>
       <button class="auth-primary auth-login" id="login-passkey" type="button">${KEY_MARK}<span>Continue with passkey</span></button>
       <p class="auth-loading" id="login-loading" role="status" aria-live="polite"><span class="busy-count" hidden></span></p>
-      <button class="auth-text-button" id="use-recovery" type="button">use recovery key</button>
+      ${recoveryUiEnabled() ? '<button class="auth-text-button" id="use-recovery" type="button">use recovery key</button>' : ""}
       <p class="auth-message" id="auth-error" role="alert"></p>
     </section>
   </section>`;
   host.querySelector<HTMLElement>("#auth-error")!.textContent = message;
   const events = new AbortController();
   const button = host.querySelector<HTMLButtonElement>("#login-passkey")!;
-  host.querySelector<HTMLButtonElement>("#use-recovery")!.addEventListener("click", () => {
-    if (button.disabled) return;
+  host.querySelector<HTMLButtonElement>("#use-recovery")?.addEventListener("click", () => {
+    if (button.disabled || !recoveryUiEnabled()) return;
     void import("./recovery").then(({ mountRecovery }) => {
       events.abort();
       mountRecovery(host, () => mountSignIn(host, "", onAuthenticated), onAuthenticated);

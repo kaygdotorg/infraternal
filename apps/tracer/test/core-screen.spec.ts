@@ -192,7 +192,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   const paletteActions = await palette.locator(".result").evaluateAll((results) =>
     results.map((result) => (result as HTMLButtonElement).dataset.action ?? ""));
   expect(paletteActions.sort()).toEqual([
-    "session:current", "host:current", "bg:mesh", "bg:none", "account:recovery", ...Object.keys(THEMES).map((id) => `theme:${id}`),
+    "session:current", "host:current", "bg:mesh", "bg:none", ...Object.keys(THEMES).map((id) => `theme:${id}`),
   ].sort());
   expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0s");
   const previousMesh = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"));

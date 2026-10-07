@@ -4,6 +4,7 @@ import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
+import { recoveryUiEnabled } from "./recovery-ui";
 
 const ROOT = document.documentElement;
 const THEME_COLOR = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
@@ -80,11 +81,11 @@ const SCREEN = `
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
     </section>
-    <section class="pane-card recovery-notice" id="recovery-notice" aria-label="Pending account recovery" hidden>
+    ${recoveryUiEnabled() ? `<section class="pane-card recovery-notice" id="recovery-notice" aria-label="Pending account recovery" hidden>
       <p id="recovery-notice-time"></p><button class="capsule" id="recovery-cancel" type="button">Cancel recovery</button>
       <p id="recovery-cancel-error" role="alert"></p>
     </section>
-    <p class="pane-card recovery-toast" id="recovery-toast" role="status" hidden></p>
+    <p class="pane-card recovery-toast" id="recovery-toast" role="status" hidden></p>` : ""}
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
       <div id="keytray" class="keytray" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
@@ -235,7 +236,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     })),
     { group: "Background", glyph: "▦", label: "Mesh from the theme", hint: "one still · no idle work", action: "bg:mesh" },
     { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
-    ...(options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
+    ...(recoveryUiEnabled() && options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
   ];
   let visibleEntries: PaletteEntry[] = [];
   let selected = 0;
@@ -542,7 +543,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       error.textContent = "Recovery could not be cancelled. Try again.";
     }).finally(() => { cancelRecovery.disabled = false; });
   };
-  cancelRecovery.addEventListener("click", cancelClick);
+  cancelRecovery?.addEventListener("click", cancelClick);
   return {
     stage,
     terminalHost,
@@ -564,6 +565,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       stage.dataset.connected = String(connected);
     },
     setRecoveryPending(readyAt) {
+      // Keep consuming session/socket state while unapproved presentation stays absent.
+      if (!recoveryUiEnabled()) return;
       recoveryNotice.hidden = readyAt === undefined;
       if (readyAt !== undefined) {
         stage.querySelector<HTMLElement>("#recovery-notice-time")!.textContent = `Account recovery requested · Available ${new Date(readyAt * 1000).toLocaleString()}`;
@@ -597,7 +600,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     dispose() {
       window.clearTimeout(recoveryToastTimer);
-      cancelRecovery.removeEventListener("click", cancelClick);
+      cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
       sidebarToggle.removeEventListener("click", sidebarClick);
       capsule.removeEventListener("click", capsuleClick);

@@ -3,6 +3,8 @@ import { expect, test, type Page, type TestInfo } from "playwright/test";
 import { entropyToMnemonic, mnemonicToEntropy } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
+test.skip(!["preview", "1"].includes(process.env.INFRATERNAL_RECOVERY_UI ?? "off"), "Recovery presentation requires an explicit build flag");
+
 // Public, deterministic fixture material only; screenshots never contain an account's real words.
 const phrase = entropyToMnemonic(new Uint8Array(32).fill(1), wordlist);
 const rotated = entropyToMnemonic(new Uint8Array(32).fill(2), wordlist);
@@ -44,7 +46,7 @@ async function paste(page: Page, text: string): Promise<void> {
 test("sign-in exposes recovery key entry with per-word errors", async ({ page }) => {
   await page.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: false } }));
   await page.route("**/auth/session", (route) => route.fulfill({ status: 401, json: {} }));
-  await page.goto("/");
+  await page.goto("/?mock=1&proto=recovery");
   await expect.poll(async () => (await page.locator("#use-recovery").boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
   await page.getByRole("button", { name: "use recovery key", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Use your recovery key" })).toBeVisible();
@@ -121,7 +123,7 @@ for (const delay of [0, 86400]) {
       hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true,
     } });
     if (delay !== 0) await page.clock.install();
-    await page.goto("/?mock=1");
+    await page.goto("/?mock=1&proto=recovery");
     await page.getByRole("button", { name: "use recovery key", exact: true }).click();
     await capture(page, info, "enter-words-empty");
     await page.locator("#recovery-username").fill("fixture_owner");
@@ -183,7 +185,7 @@ for (const delay of [0, 86400]) {
 test("a signed-in device can open recovery without revoking its session", async ({ page }) => {
   await page.context().request.post("/__mock/reset");
   await page.context().request.post("/__mock/open-terminal");
-  await page.goto("/?mock=1");
+  await page.goto("/?mock=1&proto=recovery");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected())).toBe(true);
   await page.locator("#capsule").click();
   await page.locator("#palette-input").fill("recovery");
@@ -201,7 +203,7 @@ test("pointer recovery step changes glide the fitted pane", async ({ page }) => 
   await page.route("**/auth/recovery-resume", route => route.fulfill({ json: {
     token: "public-motion-fixture", delay_seconds: 0, ready_at: Math.floor(Date.now() / 1000),
   } }));
-  await page.goto("/");
+  await page.goto("/?mock=1&proto=recovery");
   await page.getByRole("button", { name: "use recovery key", exact: true }).click();
   await page.locator("#recovery-username").fill("fixture_owner");
   await paste(page, phrase);
@@ -236,7 +238,7 @@ test("discarded waiting page resumes the original deadline", async ({ page }) =>
     return route.fulfill({ json: { token: "public-resume-fixture", ready_at: readyAt, delay_seconds: 3600 } });
   });
   for (let attempt = 0; attempt < 2; attempt++) {
-    await page.goto("/");
+    await page.goto("/?mock=1&proto=recovery");
     await page.getByRole("button", { name: "use recovery key", exact: true }).click();
     await page.locator("#recovery-username").fill("fixture_owner");
     await paste(page, phrase);
@@ -263,7 +265,7 @@ test("signed-in device shows a persistent notice and can cancel recovery", async
     cancels++; pending = false;
     return route.fulfill({ json: { ok: true } });
   });
-  await page.goto("/?mock=1");
+  await page.goto("/?mock=1&proto=recovery");
   await expect(page.locator("#recovery-notice")).toBeVisible();
   await expect(page.locator("#recovery-toast")).toContainText("Recovery requested");
   await capture(page, info, "pending-recovery-notice");
@@ -280,7 +282,7 @@ test("remaining recovery wait uses server duration with a skewed browser clock",
   await page.route("**/auth/recovery-resume", route => route.fulfill({ json: {
     token: "public-clock-fixture", ready_at: Math.floor(serverNow / 1000) + 3600, delay_seconds: 3600,
   } }));
-  await page.goto("/");
+  await page.goto("/?mock=1&proto=recovery");
   await page.getByRole("button", { name: "use recovery key", exact: true }).click();
   await page.locator("#recovery-username").fill("fixture_owner");
   await paste(page, phrase);
@@ -300,7 +302,7 @@ test("terminal startup reuses its authenticated recovery snapshot", async ({ pag
       recovery_pending: { ready_at: Math.floor(Date.now() / 1000) + 3600 },
     } } : { status: 503, json: { error: "unavailable" } });
   });
-  await page.goto("/?mock=1");
+  await page.goto("/?mock=1&proto=recovery");
   await expect(page.locator("#recovery-notice")).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected())).toBe(true);
   expect(sessionReads).toBe(1);

@@ -2,6 +2,8 @@
 import { expect, test } from 'playwright/test';
 import { entropyToMnemonic } from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english.js';
+
+test.skip(!["preview", "1"].includes(process.env.INFRATERNAL_RECOVERY_UI ?? "off"), "Recovery presentation requires an explicit build flag");
 test('reviewer: explicit legacy path must satisfy absolute words non-disclosure', async ({page}) => {
   let leaked = false;
   await page.route('**/auth/status', r => r.fulfill({json:{setup_required:false}}));
@@ -12,7 +14,7 @@ test('reviewer: explicit legacy path must satisfy absolute words non-disclosure'
     leaked = body.words === entropyToMnemonic(new Uint8Array(32).fill(1),wordlist);
     return r.fulfill({status:401,json:{error:'authorization failed'}});
   });
-  await page.goto('/');
+  await page.goto('/?mock=1&proto=recovery');
   await page.getByRole('button',{name:'use recovery key',exact:true}).click();
   await page.locator('#recovery-username').fill('fixture_owner');
   await page.getByRole('textbox',{name:'Word 1',exact:true}).evaluate(input => {
@@ -32,7 +34,7 @@ test('reviewer: preserved deadline remains resumable after server clock rollback
   await page.route('**/auth/status', r => r.fulfill({json:{setup_required:false}}));
   await page.route('**/auth/session', r => r.fulfill({status:401,json:{}}));
   await page.route('**/auth/recovery-resume', r => r.fulfill({json:{token:'public-rollback-fixture',ready_at:Math.floor(Date.now()/1000)+90000,delay_seconds:90000}}));
-  await page.goto('/');
+  await page.goto('/?mock=1&proto=recovery');
   await page.getByRole('button',{name:'use recovery key',exact:true}).click();
   await page.locator('#recovery-username').fill('fixture_owner');
   await page.getByRole('textbox',{name:'Word 1',exact:true}).evaluate(input => {

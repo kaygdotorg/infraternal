@@ -4,6 +4,7 @@ import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/s
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { mountOnboarding } from "./onboarding";
+import { recoveryUiEnabled } from "./recovery-ui";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
@@ -237,7 +238,12 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     await document.fonts.load(uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"');
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
-    screen = mountCoreScreen(app, { hostName, mockMode, probeMode, onRecovery: () => { void showRecovery(); }, onCancelRecovery: async () => { await recoveryAuth.post("recovery-cancel", {}); await checkForegroundSession(); } });
+    screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
+      ...(recoveryUiEnabled() ? {
+        onRecovery: () => { void showRecovery(); },
+        onCancelRecovery: async () => { await recoveryAuth.post("recovery-cancel", {}); await checkForegroundSession(); },
+      } : {}),
+    });
   } catch (error: unknown) {
     renderUnavailable(safeMessage(error));
     return;
@@ -309,6 +315,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
 
 /** Opens same-device recovery without revoking the live cookie that authorizes D113. */
 async function showRecovery(): Promise<void> {
+  if (!recoveryUiEnabled()) return;
   const { mountRecovery } = await import("./recovery");
   currentTerminal?.dispose(); currentTerminal = undefined;
   coreScreen?.dispose(); coreScreen = undefined;
