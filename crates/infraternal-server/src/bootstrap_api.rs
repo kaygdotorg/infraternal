@@ -229,3 +229,7 @@ fn now() -> Result<i64, ()> {
         .and_then(|v| i64::try_from(v.as_secs()).ok())
         .ok_or(())
 }
+
+#[cfg(test)]
+#[path = "bootstrap_api_tests.rs"]
+mod tests;

@@ -41,7 +41,7 @@ use tokio_tungstenite::{
 };
 use tower::ServiceExt;
 
-static SERIAL: Mutex<()> = Mutex::const_new(());
+pub(crate) static SERIAL: Mutex<()> = Mutex::const_new(());
 const NOW: i64 = 1_800_000_000;
 const ORIGIN: &str = "https://auth.example.test";
 
