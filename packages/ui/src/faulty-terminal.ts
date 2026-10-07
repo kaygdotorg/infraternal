@@ -4,8 +4,9 @@
  * occasional horizontal glitch band. Black and white. Written from scratch after
  * the sveltebits.xyz effect, whose code cannot be copied (MIT + Commons Clause).
  *
- * Budget (DECISIONS 81): renders at half resolution, at most 30 fps, pauses when
- * the tab is hidden or the canvas leaves the screen, stops for good on `destroy()`
+ * Budget (DECISIONS 81): renders at half resolution, at most 30 fps, and only during
+ * its 1.2 s intro or briefly after pointer activity. At rest it holds the last frame
+ * with no rAF or timer. It also pauses when hidden or offscreen, stops on `destroy()`
  * (after sign-in), and draws one still frame under prefers-reduced-motion.
  * Glyphs come from a small atlas drawn once with the terminal font, so the shader
  * samples a texture instead of building characters procedurally.
@@ -62,6 +63,8 @@ void main() {
 }`;
 
 const GLYPHS = "01<>/\\|=+-_:;{}[]()#$%&*!?~^".split("");
+const INTRO_MS = 1200;
+const QUIET_MS = 700;
 
 export interface FaultyTerminal { destroy(): void }
 
@@ -102,18 +105,30 @@ export function mountFaultyTerminal(canvas: HTMLCanvasElement, font = '"Geist Mo
   // each drawn frame; snaps on enter/leave.
   const mouse = { x: -1, y: -1 };
   const glow = { x: -1, y: -1 };
-  const onMove = (e: PointerEvent) => { const r = canvas.getBoundingClientRect(); mouse.x = (e.clientX - r.left) / r.width; mouse.y = 1 - (e.clientY - r.top) / r.height; };
-  const onLeave = () => { mouse.x = mouse.y = -1; };
+  const onMove = (e: PointerEvent) => {
+    const r = canvas.getBoundingClientRect();
+    mouse.x = (e.clientX - r.left) / r.width;
+    mouse.y = 1 - (e.clientY - r.top) / r.height;
+    wake();
+  };
+  const onLeave = () => { mouse.x = mouse.y = -1; wake(); };
+  const onPointerDown = () => wake();
   window.addEventListener("pointermove", onMove, { passive: true });
   window.addEventListener("pointerleave", onLeave);
+  window.addEventListener("pointerdown", onPointerDown, { passive: true });
 
   const SCALE = 0.5; // half resolution: the effect is soft by nature
+  let animationReady = false;
   const resize = () => {
     const w = Math.max(1, Math.round(canvas.clientWidth * devicePixelRatio * SCALE));
     const h = Math.max(1, Math.round(canvas.clientHeight * devicePixelRatio * SCALE));
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); }
     gl.uniform2f(u("res"), w, h);
     gl.uniform1f(u("cell"), Math.max(6, 14 * devicePixelRatio * SCALE));
+    if (animationReady) {
+      if (reduced) draw(performance.now());
+      else wake();
+    }
   };
   const ro = new ResizeObserver(resize);
   ro.observe(canvas);
@@ -121,7 +136,7 @@ export function mountFaultyTerminal(canvas: HTMLCanvasElement, font = '"Geist Mo
 
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const start = performance.now();
-  let raf = 0, last = 0, visible = true, alive = true;
+  let raf = 0, idleTimer = 0, last = 0, activeUntil = start + INTRO_MS, visible = true, alive = true;
   const draw = (now: number) => {
     const s = (now - start) / 1000;
     gl.uniform1f(u("t"), reduced ? 7.0 : s);
@@ -135,20 +150,39 @@ export function mountFaultyTerminal(canvas: HTMLCanvasElement, font = '"Geist Mo
   const loop = (now: number) => {
     if (!alive || !visible || document.hidden) { raf = 0; return; }
     if (now - last >= 1000 / 30) { last = now; draw(now); } // cap at 30 fps
+    if (now >= activeUntil) { raf = 0; return; }
     raf = requestAnimationFrame(loop);
   };
-  const wake = () => { if (alive && visible && !document.hidden && !reduced && !raf) raf = requestAnimationFrame(loop); };
-  const io = new IntersectionObserver(([e]) => { visible = !!e?.isIntersecting; wake(); });
+  function pause(): void {
+    window.clearTimeout(idleTimer);
+    idleTimer = 0;
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+  }
+  function wake(): void {
+    if (!alive || !visible || document.hidden || reduced) return;
+    activeUntil = Math.max(activeUntil, performance.now() + QUIET_MS);
+    window.clearTimeout(idleTimer);
+    idleTimer = window.setTimeout(pause, Math.max(0, activeUntil - performance.now()));
+    if (!raf) raf = requestAnimationFrame(loop);
+  }
+  const onVisibilityChange = () => { if (document.hidden) pause(); else wake(); };
+  const io = new IntersectionObserver(([e]) => {
+    visible = !!e?.isIntersecting;
+    if (visible) wake(); else pause();
+  });
   io.observe(canvas);
-  document.addEventListener("visibilitychange", wake);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  animationReady = true;
   if (reduced) draw(performance.now()); else wake();
 
   return {
     destroy() {
-      alive = false; cancelAnimationFrame(raf);
+      alive = false; pause();
       ro.disconnect(); io.disconnect();
       window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerleave", onLeave);
-      document.removeEventListener("visibilitychange", wake);
+      window.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       gl.getExtension("WEBGL_lose_context")?.loseContext(); // free the GPU context
     },
   };
