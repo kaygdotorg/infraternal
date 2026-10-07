@@ -376,7 +376,7 @@ Recovery-start/resume add `{username|user_id,verifier}` as an alternative to leg
 words. Exactly one authentication form is accepted. Generic denial, the existing
 Origin/body/admission partitions and two concurrent Argon2 slots remain; unknown
 accounts take the same bounded verifier work, with no version/account oracle.
-Words are not accepted for accounts already upgraded to version 2.
+Words are not accepted for accounts already upgraded to version 2. Both v2 start and resume reissue pending authorization without changing an existing deadline.
 
 ### Existing phrase-hash migration: explicit one-time exception
 
@@ -386,7 +386,7 @@ protocol/crypto engine. The owner's task permits the former at most once.
 `recovery-upgrade` therefore accepts `{username|user_id,words,verifier}` only for
 a version-1 account. The browser offers this only after explicit selection of
 “Upgrade an older recovery key” and displays that the old words are sent once
-for migration. It never automatically falls back after a v2 denial. This route
+for migration. A verifier probe always comes first, so retries after a committed upgrade do not retransmit words. A v2 denial alone never permits migration: the older-key option must be selected explicitly. This route
 verifies the old hash, computes the new verifier hash off-lock, and under the
 writer lock rechecks the exact old hash and version, installs the v2 verifier,
 then starts/resumes recovery without resetting an existing deadline. Concurrent
