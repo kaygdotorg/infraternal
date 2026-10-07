@@ -107,6 +107,11 @@ button { color: inherit; }
 :where(.terminal-screen) button { border: 0; background: none; color: inherit; cursor: pointer; font: inherit; -webkit-tap-highlight-color: transparent; }
 .terminal-screen svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 .terminal-host {
+  /* The renderer measures its cells from the host's computed font settings, so UI
+     typography (the mono UI's negative tracking) must never reach it: inherited
+     letter-spacing shrank the measured advance and drew the cursor ahead of the text. */
+  letter-spacing: normal;
+  word-spacing: normal;
   position: absolute;
   inset: 0;
   overflow-x: auto;
