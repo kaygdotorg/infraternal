@@ -826,3 +826,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **the recovery key**;
      - a synced passkey, for passkey users, which works automatically.
      The QR binds the request physically, so scanning it is the consent.
+153. **QR sign-in confirmation (G1d):** after scanning, the phone shows one
+     confirmation naming the new device and its approximate location ("Sign
+     in Firefox on Linux, near Essen, Germany?"). One tap, nothing to
+     compare. QR codes expire after 60 seconds. This is the minimum that
+     stops QR-login phishing.
