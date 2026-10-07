@@ -217,7 +217,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     private finished = false;
 
     constructor(startEmpty: boolean, animate: boolean, review?: Failure[]) {
-      this.win = canvas.openFlowWindow({ title: "New host", icon: svg(ICON.plus, "is-line") });
+      this.win = canvas.openFlowWindow({ title: "Add hosts", icon: svg(ICON.plus, "is-line") });
       this.card = this.win.card.root;
       this.card.classList.add("ah");
       this.win.card.body.innerHTML = `
@@ -328,7 +328,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         ${mark}
         <span class="ah-main">
           <span class="ah-name">${escapeHtml(host.id)}</span>
-          <span class="ah-meta"><span>${typed ? `${escapeHtml(host.user)}@${escapeHtml(host.address)}` : `${escapeHtml(host.operatingSystem)} · ${escapeHtml(host.architecture)}`}</span>${sources ? `<span class="ah-srcs">${sources}</span>` : ""}</span>
+          <span class="ah-meta">${typed ? `<span>${escapeHtml(host.user)}@${escapeHtml(host.address)}</span>` : `<span>${escapeHtml(host.operatingSystem)}</span><span>· ${escapeHtml(host.architecture)}</span>`}${sources ? `<span class="ah-srcs">${sources}</span>` : ""}</span>
         </span>
         <span class="ah-status" data-tone="${status.tone}">${svg(status.icon, "ah-status-icon")}<span>${status.label}</span></span>
       </label>`;

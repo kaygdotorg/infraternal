@@ -146,6 +146,13 @@ test("the wizard floats over a dimmed window that becomes the host's terminal", 
     expect(card.backdrop).toBe("none");
     expect(card.scrimAlpha).toContain("0.5");
     expect(card.pillShadow).not.toContain("inset");
+    // While the flow owns the window, the capsule is its title once: no separator, session or dot.
+    expect((await page.locator("#capsule").innerText()).replace(/\s+/g, " ")).toMatch(/^Add hosts\b(?!.*SSH shell)/);
+    await expect(page.locator("#capsule-host")).toHaveText("Add hosts");
+    await expect(page.locator("#capsule .capsule-sep")).toBeHidden();
+    // No ellipsis in host rows: the secondary line wraps between items instead.
+    const clipped = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".ah-row[data-host] :is(.ah-name, .ah-meta, .ah-meta > span)")].filter((el) => getComputedStyle(el).textOverflow === "ellipsis").length);
+    expect(clipped).toBe(0);
     const windowsBefore = await page.locator(".ui-window").count();
     await page.locator(".ah-row[data-host='edge-arm']").click();
     await page.locator("[data-ah='continue']").click();
@@ -155,6 +162,8 @@ test("the wizard floats over a dimmed window that becomes the host's terminal", 
     await root.click();
     await expect(page.locator(".ui-window[data-active] .ui-window-title")).toHaveText("ops@edge-arm", { timeout: 10_000 });
     await expect(page.locator(".ah-stage")).toHaveCount(0);
+    // The OS name keeps its version: "Debian 12 · aarch64".
+    await expect(page.locator(".ui-window[data-active] .canvas-preview")).toContainText("Debian 12 · aarch64");
     // The same window became the terminal: no second window opened for a single host.
     expect(await page.locator(".ui-window").count()).toBe(windowsBefore);
     // One window card component: it carries the shared header, not the wizard's own markup.

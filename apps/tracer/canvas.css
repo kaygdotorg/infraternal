@@ -64,6 +64,10 @@
   .canvas-popover-logo { width: 28px; height: 28px; }
 }
 
+/* While a flow owns the window the capsule is only its title: no separator, no session, no
+   connection dot. */
+.capsule[data-flow] .capsule-sep, .capsule[data-flow] .capsule-session, .capsule[data-flow] #connection-dot { display: none; }
+
 /* The mock badge sits in the bottom corner, clear of window headers, and never on top of
    an open popover. */
 .terminal-screen[data-canvas="on"] .test-double-badge { top: auto; bottom: 24px; right: calc(var(--gutter) + 10px); }

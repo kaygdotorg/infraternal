@@ -265,9 +265,11 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   };
   const updateCapsule = (window: CanvasWindow): void => {
     const hostLabel = stage.querySelector<HTMLElement>("#capsule-host");
+    // A window that only hosts a flow has no session: the capsule shows its title once.
+    stage.querySelector<HTMLElement>("#capsule")?.toggleAttribute("data-flow", Boolean(window.flow));
     const sessionLabel = stage.querySelector<HTMLElement>(".capsule-session");
     if (hostLabel) hostLabel.textContent = window.live ? hostName : `${window.host.user ? `${window.host.user}@` : ""}${window.host.name}`;
-    if (sessionLabel) sessionLabel.textContent = window.session.name;
+    if (sessionLabel) sessionLabel.textContent = window.flow ? "" : window.session.name;
   };
   const activate = (target: CanvasWindow, reveal: boolean): void => {
     if (active === target) return;
@@ -345,7 +347,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   });
   const shellSession = (host: CanvasHost): CanvasSession => ({
     id: "shell", name: "SSH shell", lastOutput: "", age: "just now", viewers: 1, size: "", started: "Just now", scrollback: "",
-    screen: [[host.osName, host.version, host.architecture].filter(Boolean).join(" · "), "", `${host.user}@${host.name}:~$ `],
+    screen: [[[host.osName, host.version].filter(Boolean).join(" "), host.architecture].filter(Boolean).join(" · "), "", `${host.user}@${host.name}:~$ `],
   });
 
   // The live window first, so the terminal is never without a frame.

@@ -170,11 +170,13 @@
 .ah-row.is-added .tick { opacity: 0.4; }
 .ah-os-mark { width: var(--ah-icon); height: var(--ah-icon); flex: none; fill: currentColor; color: var(--fg-2); }
 .ah-main { display: grid; min-width: 0; }
-.ah-name { overflow: hidden; color: var(--fg); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.ah-name { color: var(--fg); font-weight: 500; overflow-wrap: anywhere; }
 .ah-candidate .ah-name { font-weight: 450; }
 .ah-manual-target { font-weight: 500; }
-.ah-meta { display: flex; min-width: 0; align-items: center; gap: 10px; overflow: hidden; color: var(--fg-2); font-size: 13px; line-height: 1.55; white-space: nowrap; }
-.ah-meta > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.ah-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 0 10px; color: var(--fg-2); font-size: 13px; line-height: 1.55; }
+/* Never an ellipsis (TASTE): the line wraps between items (OS, architecture, source icons). */
+.ah-meta > span { white-space: nowrap; }
+.ah-candidate .ah-meta > span { white-space: normal; }
 .ah-srcs { display: inline-flex; flex: none; gap: 6px; }
 .ah-src { display: inline-grid; color: var(--fg-3); }
 .ah-src .ui-source-icon { width: 13px; height: 13px; stroke-width: 1.5; }
