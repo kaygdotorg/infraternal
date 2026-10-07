@@ -3,11 +3,11 @@ import os, sys, time, struct, select
 from pathlib import Path
 sys.dont_write_bytecode=True
 sys.path.insert(0,str(Path('scripts').resolve()))
-from agent_fixture import Binary, cleanup
+from agent_fixture import Binary, cleanup, fixture_state
 binary=Path(sys.argv[1]).resolve()
 grant=int(sys.argv[2]) if len(sys.argv)>2 else 1
 faithful=len(sys.argv)>3 and sys.argv[3]=="faithful"
-state=Path('target/credit-review-'+str(os.getpid()));state.mkdir(mode=0o700,exist_ok=True)
+state=fixture_state('vc');state.mkdir(mode=0o700,exist_ok=True)
 c=Binary(binary,state)
 try:
  c.open();c.attach();c.until(b'shim-test');c.wait_ack()

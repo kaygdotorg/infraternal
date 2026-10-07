@@ -7,11 +7,11 @@ import struct
 import sys
 import time
 sys.dont_write_bytecode = True
-from agent_fixture import AckBarrier, Binary, cleanup, varint
+from agent_fixture import AckBarrier, Binary, cleanup, fixture_state, varint
 
 
 def run(binary):
-    state = Path(f'target/ti{os.getpid()}')
+    state = fixture_state('ti')
     state.mkdir(mode=0o700)
     client = Binary(binary.resolve(), state)
     barrier = None

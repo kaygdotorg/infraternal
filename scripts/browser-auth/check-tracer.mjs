@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
+import { routeWithLatency } from './latency-route.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 if (!process.argv[2]) throw new Error('provide the production tracer dist directory');
@@ -38,7 +39,7 @@ try {
     hasResidentKey: true, hasUserVerification: true, isUserVerified: true,
     automaticPresenceSimulation: true, hasPrf: true,
   } });
-  await page.route('https://auth.example.test/**', async (route) => {
+  await routeWithLatency(page, 'https://auth.example.test/**', async (route) => {
     const request = route.request();
     if (request.method() === 'GET') {
       const pathname = new URL(request.url()).pathname;

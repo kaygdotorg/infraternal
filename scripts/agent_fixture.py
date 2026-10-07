@@ -12,6 +12,25 @@ import subprocess
 import threading
 import time
 import uuid
+from latency_proxy import LatencyConfig, LatencyDuplex
+
+
+def fixture_state(label):
+    """Return a short per-process private state path for real Unix-socket fixtures."""
+    root = Path(os.environ.get(
+        'INFRATERNAL_TEST_STATE_ROOT',
+        Path.home() / '.cache/codex-scratch/infraternal',
+    ))
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state = root / f'{label}{os.getpid()}'
+    socket_path = state / 'sessions' / ('a' * 32 + '.sock')
+    # Linux sockaddr_un.sun_path includes the trailing NUL in its 108-byte bound.
+    # AckBarrier also connects through a sibling .upstream socket with a longer suffix.
+    paths = (socket_path, socket_path.with_suffix('.upstream'))
+    longest = max(len(os.fsencode(path)) for path in paths)
+    if longest >= 108:
+        raise ValueError(f'test state path is too long for an AF_UNIX socket: {longest} bytes')
+    return state
 
 
 def varint(n):
@@ -60,20 +79,25 @@ class Binary:
         self.credit_pending = 0
         self.events = []
         self.snapshots = []
+        self.link = None
         self.start()
 
     def start(self):
-        self.sock, peer = socket.socketpair()
+        self.sock, test_peer = socket.socketpair()
+        agent_peer, child_peer = socket.socketpair()
         self.sock.settimeout(20)
+        config = LatencyConfig.from_environment()
+        self.link = LatencyDuplex(test_peer, agent_peer, config)
+        self.link.start()
         env = dict(os.environ, ZDOTDIR=str(Path('crates/infraternal/tests/profile').resolve()))
         # Shell duplication closes the original descriptor before exec; the
         # binary's launch wrapper later closes fd 3 before every shim exec.
         # Bash supports closing descriptor numbers above nine, which concurrent
         # fixtures can allocate; POSIX sh redirection only guarantees 0..9.
         self.child = subprocess.Popen([shutil.which('bash'), '-c', 'exec 3<&"$1"; eval "exec $1<&-"; shift; exec "$@"',
-            'leg-b', str(peer.fileno()), str(self.binary), 'agent', '--fd', '3', '--state', str(self.state)],
-            pass_fds=(peer.fileno(),), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        peer.close()
+            'leg-b', str(child_peer.fileno()), str(self.binary), 'agent', '--fd', '3', '--state', str(self.state)],
+            pass_fds=(child_peer.fileno(),), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        child_peer.close()
         stream, kind, _ = self.read()
         assert (stream, kind) == (0, 0)
         self.send(0, 0, struct.pack('<HQ', 1, 0) + varint(6) + b'tracer')
@@ -170,9 +194,13 @@ class Binary:
             self.process()
 
     def kill(self):
-        self.child.kill()
+        if self.child.poll() is None:
+            self.child.kill()
         self.child.wait()
         self.child.stderr.close()
+        if self.link:
+            self.link.close()
+            self.link = None
         self.sock.close()
 
     def restart(self):

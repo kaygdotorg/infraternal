@@ -6,9 +6,9 @@ from pathlib import Path
 import struct
 import time
 sys.path.insert(0, 'scripts')
-from agent_fixture import Binary, cleanup
+from agent_fixture import Binary, cleanup, fixture_state
 
-state = Path(f'target/mw{os.getpid()}')
+state = fixture_state('mw')
 state.mkdir(mode=0o700)
 c = Binary(Path(sys.argv[sys.argv.index('--binary') + 1]).resolve(), state)
 try:

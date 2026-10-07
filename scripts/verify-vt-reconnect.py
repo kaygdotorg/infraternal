@@ -10,7 +10,7 @@ import sys
 import time
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path('scripts').resolve()))
-from agent_fixture import AckBarrier, Binary, cleanup, exact
+from agent_fixture import AckBarrier, Binary, cleanup, exact, fixture_state
 
 
 def local(state, identity, caps, kind, payload=b''):
@@ -52,7 +52,7 @@ def release(hold):
 
 
 def run_case(binary, name, fixture):
-    state = Path(f'target/reconnect-{os.getpid()}-{name}')
+    state = fixture_state('vr')
     state.mkdir(mode=0o700)
     client = Binary(binary.resolve(), state)
     proxy = None

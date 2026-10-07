@@ -8,7 +8,7 @@ import struct
 import sys
 import time
 sys.dont_write_bytecode = True
-from agent_fixture import Binary, cleanup, varint
+from agent_fixture import Binary, cleanup, fixture_state, varint
 
 
 def completed(marker):
@@ -19,7 +19,7 @@ def completed(marker):
 
 
 def run(binary):
-    state = Path(f'target/ts{os.getpid()}')
+    state = fixture_state('ts')
     state.mkdir(mode=0o700)
     client = Binary(binary.resolve(), state)
     try:
