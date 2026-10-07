@@ -1,17 +1,19 @@
 """Run public C behavioral probes with diagnostics retained in evidence files [40]."""
 import argparse
+import os
 from pathlib import Path
 import subprocess
 
+target_root = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
 parser = argparse.ArgumentParser()
 parser.add_argument("probe", choices=["mouse", "allocation"])
 parser.add_argument("--library", type=Path)
-parser.add_argument("--evidence", type=Path, default=Path("target/review-vt3-fixes"))
-parser.add_argument("--build-dir", type=Path, default=Path.home() / ".cache/codex-scratch/fix-vt3/probes")
+parser.add_argument("--evidence", type=Path, default=target_root / "review-vt3-fixes")
+parser.add_argument("--build-dir", type=Path, default=target_root / "vt-probes")
 args = parser.parse_args()
 args.evidence.mkdir(parents=True, exist_ok=True)
 # Select the most recent completed adapter build, never an in-progress archive.
-lib = args.library or max(Path("target/debug/build").glob("infraternal-shim-*/out/native/lib/libghostty-vt.a"), key=lambda p: p.stat().st_mtime)
+lib = args.library or max((target_root / "debug/build").glob("infraternal-shim-*/out/native/lib/libghostty-vt.a"), key=lambda p: p.stat().st_mtime)
 lib = lib.resolve()
 include = lib.parents[2] / "ghostty-source/include"
 source = Path("crates/infraternal-shim/tests/native") / (args.probe + "_probe.c")

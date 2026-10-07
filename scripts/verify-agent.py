@@ -13,8 +13,9 @@ import struct
 import threading
 import time
 
-from agent_fixture import Binary, AckBarrier, cleanup, rss, varint
+from agent_fixture import Binary, AckBarrier, cleanup, fixture_state, rss, varint
 from idle_canary import assert_process_idle, session_shim_pid
+from latency_proxy import LatencyConfig, percentile
 
 
 def run(binary, state, functional=False, seed=20):
@@ -137,8 +138,17 @@ def run(binary, state, functional=False, seed=20):
             client.wait_ack()
             samples.append((time.perf_counter_ns() - before) / 1000)
         samples.sort()
-        assert samples[990] < 5000, "Input-to-PTY upper bound exceeds decision 41"
-        print(f'Input->PTY-write Ack through binary (upper bound): n=1000 p50={samples[500]:.3f} us p99={samples[990]:.3f} us', flush=True)
+        rtt_config = LatencyConfig.from_environment()
+        echo_budget_ms = rtt_config.rtt_ms + 34
+        p50_ms = percentile(samples, 0.50) / 1000
+        p99_ms = percentile(samples, 0.99) / 1000
+        print(
+            f'METRIC name=keystroke_echo_confirmed_native source=real-agent-pty n={len(samples)} '
+            f'p50_ms={p50_ms:.2f} p99_ms={p99_ms:.2f} budget_ms={echo_budget_ms:.2f} '
+            f'result={"PASS" if p99_ms <= echo_budget_ms else "FAIL"}',
+            flush=True,
+        )
+        assert p99_ms <= echo_budget_ms, f'Input-to-PTY Ack exceeded RTT + 2 frames ({echo_budget_ms:.2f} ms)'
         client.send(1, 0x0f, struct.pack('<H', 0) + varint(4) + b'done')
         client.open()
         client.attach()
@@ -197,8 +207,8 @@ def run(binary, state, functional=False, seed=20):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--binary', type=Path, default=Path('target/x86_64-unknown-linux-musl/release/infraternal'))
+    parser.add_argument('--binary', type=Path, default=Path(os.environ.get('CARGO_TARGET_DIR', 'target')) / 'x86_64-unknown-linux-musl/release/infraternal')
     parser.add_argument("--functional", action="store_true", help="run short real-process correctness gates without release measurements")
     parser.add_argument("--seed", type=int, default=20, help="reproducible stop positions and payload sizes")
     args = parser.parse_args()
-    run(args.binary.resolve(), Path(f'target/tb{os.getpid()}'), args.functional, args.seed)
+    run(args.binary.resolve(), fixture_state('tb'), args.functional, args.seed)

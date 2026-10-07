@@ -1,0 +1,3 @@
+# Raw fresh-process mesh measurement; all original environment and metric lines follow.
+ENVIRONMENT utc=2026-10-07T14:16:24Z machine=infraternal-dev cpu=Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz cores=8 load=25.88 22.12 24.77 weight=10000
+METRIC view_memory peers=10000 incremental_rss_bytes=3141632 bytes_per_peer=314 peak_rss_bytes=6270976

@@ -9,9 +9,20 @@ readonly required_bun="1.4.2"
 readonly required_zig="0.15.2"
 readonly vendor_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--check" ) ]]; then
-    printf 'usage: %s [--check]\n' "$0" >&2
+mode="check"
+if [[ $# -gt 1 ]]; then
+    printf 'usage: %s [--check|--update]\n' "$0" >&2
     exit 2
+fi
+if [[ $# -eq 1 ]]; then
+    case "$1" in
+        --check) mode="check" ;;
+        --update) mode="update" ;;
+        *)
+            printf 'usage: %s [--check|--update]\n' "$0" >&2
+            exit 2
+            ;;
+    esac
 fi
 
 bun_bin="${BUN:-bun}"
@@ -33,7 +44,7 @@ if [[ "$actual_bun" != "$required_bun" || "$actual_zig" != "$required_zig" ]]; t
     exit 1
 fi
 
-scratch_root="${HOME}/.cache/codex-scratch/t-web/ghostty-builds"
+scratch_root="${GHOSTTY_BUILD_SCRATCH_ROOT:-${HOME}/.cache/codex-scratch/infraternal/ghostty-builds}"
 mkdir -p "$scratch_root"
 build_dir="$(mktemp -d "${scratch_root}/source.XXXXXX")"
 trap 'rm -rf "$build_dir"' EXIT
@@ -47,6 +58,9 @@ if [[ "$(git -C "$source_dir" rev-parse HEAD)" != "$upstream_commit" ]]; then
     printf 'upstream checkout did not resolve to the pinned commit\n' >&2
     exit 1
 fi
+
+# This local bridge patch sets theme colors directly in the existing terminal state.
+git -C "$source_dir" apply "$vendor_dir/local-theme-api.patch"
 
 git -C "$source_dir" submodule update --quiet --init --recursive --depth=1
 if [[ "$(git -C "$source_dir/ghostty" rev-parse HEAD)" != "$ghostty_commit" ]]; then
@@ -71,17 +85,27 @@ export PATH="$(dirname -- "$zig_path"):$PATH"
     cd -- "$source_dir"
     sha256sum dist/ghostty-web.js dist/ghostty-vt.wasm dist/index.d.ts
 ) >"${build_dir}/SHA256SUMS"
-if ! cmp -s "${build_dir}/SHA256SUMS" "${vendor_dir}/SHA256SUMS"; then
-    printf 'rebuilt artifacts do not match the checked-in SHA256SUMS\n' >&2
-    diff -u "${vendor_dir}/SHA256SUMS" "${build_dir}/SHA256SUMS" || true
-    exit 1
-fi
-for artifact in ghostty-web.js ghostty-vt.wasm index.d.ts; do
-    if ! cmp -s "${source_dir}/dist/${artifact}" "${vendor_dir}/dist/${artifact}"; then
-        printf 'rebuilt dist/%s differs from the checked-in artifact\n' "$artifact" >&2
+if [[ "$mode" == "update" ]]; then
+    cp -- "$source_dir/dist/ghostty-web.js" "$vendor_dir/dist/ghostty-web.js"
+    cp -- "$source_dir/dist/ghostty-vt.wasm" "$vendor_dir/dist/ghostty-vt.wasm"
+    cp -- "$source_dir/dist/index.d.ts" "$vendor_dir/dist/index.d.ts"
+    cp -- "${build_dir}/SHA256SUMS" "$vendor_dir/SHA256SUMS"
+else
+    if ! cmp -s "${build_dir}/SHA256SUMS" "${vendor_dir}/SHA256SUMS"; then
+        printf 'rebuilt artifacts do not match the checked-in SHA256SUMS\n' >&2
+        diff -u "${vendor_dir}/SHA256SUMS" "${build_dir}/SHA256SUMS" || true
         exit 1
     fi
-done
+    for artifact in ghostty-web.js ghostty-vt.wasm index.d.ts; do
+        if ! cmp -s "${source_dir}/dist/${artifact}" "${vendor_dir}/dist/${artifact}"; then
+            printf 'rebuilt dist/%s differs from the checked-in artifact\n' "$artifact" >&2
+            exit 1
+        fi
+    done
+fi
 
-printf 'reproduced ghostty-web %s with Ghostty %s (Bun %s, Zig %s)\n' \
+action="reproduced"
+if [[ "$mode" == "update" ]]; then action="updated"; fi
+printf '%s ghostty-web %s with Ghostty %s (Bun %s, Zig %s)\n' \
+    "$action" \
     "${upstream_commit:0:7}" "${ghostty_commit:0:7}" "$actual_bun" "$actual_zig"

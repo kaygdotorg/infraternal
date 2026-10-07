@@ -4,14 +4,16 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
+import { routeWithLatency } from './latency-route.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
+const targetRoot = process.env.CARGO_TARGET_DIR ?? resolve(root, 'target');
 const browser = await chromium.launch({ headless: true });
 let checks = 0;
 try {
   // Each scenario owns an isolated in-memory database and authenticator.
   for (const mode of ['supported', 'unsupported-prf', 'nonresident', 'no-uv']) {
-    const child = spawn(resolve(root, 'target/debug/examples/browser_auth'), [], { stdio: ['pipe', 'pipe', 'inherit'] });
+    const child = spawn(resolve(targetRoot, 'debug/examples/browser_auth'), [], { stdio: ['pipe', 'pipe', 'inherit'] });
     const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
     const initial = JSON.parse((await lines.next()).value);
     const context = await browser.newContext();
@@ -25,7 +27,7 @@ try {
           isUserVerified: mode !== 'no-uv', automaticPresenceSimulation: true,
           hasPrf: mode !== 'unsupported-prf' }
       });
-      await page.route('https://auth.example.test/**', async (route) => {
+      await routeWithLatency(page, 'https://auth.example.test/**', async (route) => {
         const request = route.request();
         if (request.method() === 'GET') {
           await route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Auth browser verification</title>' });
@@ -36,7 +38,7 @@ try {
         await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: JSON.stringify(response.body) });
       });
       await page.goto('https://auth.example.test/');
-      await page.addScriptTag({ content: await readFile(resolve(root, 'target/auth-rework/entropy.js'), 'utf8') });
+      await page.addScriptTag({ content: await readFile(resolve(targetRoot, 'auth-rework/entropy.js'), 'utf8') });
       const result = await page.evaluate(async ({ mode, token }) => {
         const check = (condition, name) => { if (!condition) throw new Error(name); };
         const enc = new TextEncoder();

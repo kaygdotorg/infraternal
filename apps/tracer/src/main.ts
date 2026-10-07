@@ -15,18 +15,24 @@ declare global {
       dropConnection: () => void;
       screenText: () => string;
       graphemeText: () => string;
+      themeHistoryColors: () => { rows: number; indexed: number[]; truecolor: number[] };
       rendererMetrics: () => {
         cols: number;
         rows: number;
         cellWidth: number;
         cellHeight: number;
         configuredScrollback: number;
+        cursorX: number;
+        cursorY: number;
         receivedSequence: string;
         outputSequence: string;
         scrollbackRows: number;
         viewportY: number;
         fontSize: number;
         wasmMemoryBytes: number;
+        themeColorsMs: number;
+        themeRenderMs: number;
+        terminalColors?: { background: { r: number; g: number; b: number }; foreground: { r: number; g: number; b: number } };
       } | undefined;
       trace: () => ProbeTraceSample[];
     };
@@ -285,6 +291,7 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
         dropConnection: () => currentTerminal?.forceDrop(),
         screenText: () => currentTerminal?.readScreenText() ?? "",
         graphemeText: () => currentTerminal?.readGraphemeText() ?? "",
+        themeHistoryColors: () => currentTerminal?.readThemeHistoryColors() ?? { rows: 0, indexed: [], truecolor: [] },
         rendererMetrics: () => currentTerminal?.rendererMetrics,
         trace: () => performanceProbe?.traceSamples() ?? [],
       };
@@ -312,7 +319,7 @@ function uiFontPreference(): UiFont {
 function testScrollbackLimit(value: string | null): number | undefined {
   if (value === null) return undefined;
   const limit = Number(value);
-  return Number.isInteger(limit) && limit >= 0 && limit <= 100_000 ? limit : undefined;
+  return Number.isInteger(limit) && limit >= 0 && limit <= 64_000_000 ? limit : undefined;
 }
 
 function probeCount(value: string | null): number {

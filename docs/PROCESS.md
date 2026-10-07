@@ -1,3 +1,4 @@
+<!-- Build, review and verification workflow for infraternal contributors. -->
 # How infraternal is built
 
 Adopted by the owner on 2026-10-06 (P1). This file is the standing process.
@@ -79,3 +80,70 @@ Reviews and fixes run at the same time as the next lane's build.
   extra build lanes through Linux VMs (OrbStack).
 - Jobs avoid wording that tooling filters flag. Process-termination tests
   are described neutrally ("abrupt stop", "restart").
+
+## 6. High-latency test profiles [D122, D130]
+
+- Test links default to a 300 ms round trip with ±30 ms round-trip jitter.
+  `INFRATERNAL_TEST_RTT=0` disables delay for a local debug run.
+- `scripts/latency_proxy.py` is a loopback-only, rootless byte-stream relay. It
+  sits between Chromium and the tracer test double, and between native test
+  clients and the real infraternal agent over the fixture socket pair. The
+  relay delays each direction by half the configured RTT. It samples jitter
+  for each active burst and reuses that sample across TCP chunks, because TCP
+  read boundaries can split one HTTP request or WebSocket frame. The relay
+  preserves stream bytes and order; it needs neither root nor `tc`.
+- Native fixtures keep session sockets in a short per-run scratch directory
+  (`INFRATERNAL_TEST_STATE_ROOT`, defaulting to
+  `$HOME/.cache/codex-scratch/infraternal`). `fixture_state` checks that the
+  generated Unix-socket path and its longer `.upstream` test relay path fit
+  Linux `sun_path`; worktree-relative target paths can exceed that kernel
+  limit.
+- `python3 scripts/latency_proxy.py self-test --samples 31` measures the
+  configured loopback RTT and prints `METRIC name=network_rtt_selftest ...`.
+  `scripts/verify fast` runs the short three-sample version. The full
+  `scripts/verify latency` profile runs the relay self-test, a real agent/PTy
+  echo and flood gate, `verify-auth-browser`, and the production tracer browser
+  suite. Playwright uses `TRACER_TEST_PORT` (default 4621); concurrent runs
+  must choose distinct ports.
+- The TCP relay does not emulate the requested 0.5% packet loss: dropping bytes
+  would corrupt a reliable TCP/WebSocket stream, and the available CDP
+  `packetLoss` setting is documented for WebRTC rather than HTTP/WebSocket
+  traffic ([Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/tot/Network/)).
+
+  The gate therefore reports `loss=unsupported`; packet loss needs a separate
+  transport-level mechanism that preserves TCP semantics.
+- The input-to-photon report uses fixed `METRIC` records. Keystroke-to-glyph
+  p99 is report-only until predictive echo #50 lands, then its budget is 17 ms.
+  Echo confirmation is bounded by RTT + 34 ms. Flooding either another PTY or
+  the same PTY may grow echo p99 by at most one 60 Hz frame (16.67 ms).
+  Returning sign-in to a usable terminal uses the 5 s budget tracked in #52.
+  Reconnect-to-resumed is bounded by RTT × 2 + 300 ms; at the default 300 ms
+  RTT this is 900 ms, while D41's under-300 ms reconnect budget remains the
+  zero-network-overhead reference.
+
+## 7. Rust build speed and static binary size
+
+- `scripts/verify fast` checks the stripped, static release binaries against
+  these measured baselines plus a 256 KiB allowance per target:
+
+  | Target | Baseline | Maximum |
+  | --- | ---: | ---: |
+  | `x86_64-unknown-linux-musl` | 16,142,672 bytes | 16,404,816 bytes |
+  | `aarch64-unknown-linux-musl` | 13,555,672 bytes | 13,817,816 bytes |
+
+  The baseline is the #57 measurement on the Debian 13, 8-vCPU build guest.
+  An intentional size increase needs target-specific measurements and a
+  rationale on its issue before the baseline is changed.
+- The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
+  enabled for repeated builds. Put Rust build output in a job-specific
+  `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.
+- Native x86_64 GNU development and test links use mold when installed, with
+  `cc` as the fallback. Static musl release links continue to use the pinned
+  Rust toolchain's LLD. The checksum-pinned Zig toolchain is used for vendored
+  C dependencies; `scripts/auth-toolchain` stages it for the static build.
+- The release profile uses `opt-level = 3`, LTO, one codegen unit and stripping.
+  It keeps `panic = "unwind"` so tokio can isolate a panic to its task rather
+  than ending every session. Change release settings only with measured runtime
+  results from the pinned performance VM, as specified in section 1.
+- For size investigations, use `cargo bloat --release --crates` for native
+  builds or pass the x86_64 musl target to inspect the static release profile.

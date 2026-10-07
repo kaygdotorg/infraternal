@@ -11,11 +11,11 @@ import struct
 import signal
 import socket
 
-from agent_fixture import AckBarrier, Binary, cleanup, exact
+from agent_fixture import AckBarrier, Binary, cleanup, exact, fixture_state
 
 
 def run(binary):
-    state = Path(f'target/tq{os.getpid()}')
+    state = fixture_state('tq')
     state.mkdir(mode=0o700)
     client = Binary(binary.resolve(), state)
     barriers = []

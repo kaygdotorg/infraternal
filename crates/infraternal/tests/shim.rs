@@ -5,7 +5,7 @@ use std::{
     fs,
     io::{Read, Write},
     os::unix::{fs::MetadataExt, net::UnixStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
@@ -162,6 +162,83 @@ impl Drop for Session {
         let _ = fs::remove_dir_all(&self.state);
     }
 }
+/// Read the shim's current output offset without attaching a viewer.
+fn output_head(session: &Session) -> u64 {
+    let mut probe = session.connect();
+    let Frame::Hello { head, .. } = read(&mut probe) else {
+        panic!("no Hello while sampling output progress");
+    };
+    head
+}
+
+/// Wait until an unread attached viewer holds the output head below the producer's completion point.
+fn wait_for_stalled_head(session: &Session, minimum: u64, limit: u64) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut previous = None;
+    let mut unchanged = 0;
+    loop {
+        let head = output_head(session);
+        assert!(
+            head < limit,
+            "attached producer passed the backpressure limit: {head}"
+        );
+        if head >= minimum && previous == Some(head) {
+            unchanged += 1;
+            if unchanged == 64 {
+                return head;
+            }
+        } else {
+            unchanged = 0;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "attached producer never stalled at head {head} (minimum {minimum})"
+        );
+        previous = Some(head);
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Wait for the detached shell's completion marker, then read the retained terminal state.
+fn wait_for_detached_completion(session: &Session, marker: &Path) -> (u64, String) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "detached producer did not write its completion marker"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    // The completion marker is written only after the shell has emitted the flood and final line.
+    // Reattach once after completion, so observation cannot create progress while it is detached.
+    let mut peer = session.attach(0);
+    peer.set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let mut seq = 0;
+    let mut screen = vt100::Parser::new(60, 200, 10000);
+    loop {
+        match read(&mut peer) {
+            Frame::Snapshot(offset, bytes) | Frame::SnapshotWithFlags(offset, _, bytes) => {
+                seq = offset;
+                screen.process(&bytes);
+            }
+            Frame::Output(offset, bytes) => {
+                assert_eq!(offset, seq);
+                seq += bytes.len() as u64;
+                screen.process(&bytes);
+            }
+            frame => panic!("unexpected frame while awaiting detached output: {frame:?}"),
+        }
+        if seq > 1_000_000 && screen.screen().contents().contains("DETACHED_DONE") {
+            return (seq, screen.screen().contents());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "detached output marker is not in retained terminal state"
+        );
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn send(peer: &mut UnixStream, frame: Frame) {
     peer.write_all(&frame.encode().unwrap()).unwrap();
@@ -417,6 +494,11 @@ fn user_scope_survives_parent_unit_stop() {
 #[test]
 fn attached_backpressure_and_detached_progress() {
     let mut session = Session::new(8192, false);
+    let completion_marker = session
+        .state
+        .canonicalize()
+        .unwrap()
+        .join("detached-complete");
     let mut peer = session.attach(0);
     let mut seq = 0;
     send(
@@ -426,9 +508,15 @@ fn attached_backpressure_and_detached_progress() {
     until(&mut peer, &mut seq, b"READY_YES\r\n");
     send(
         &mut peer,
-        Frame::Input(b"printf '\\033c'; seq 1 200000; printf 'DETACHED_%s\\n' DONE\n".to_vec()),
+        Frame::Input(
+            format!(
+                "printf '\\033cFLOOD_%s\\n' START; seq 1 200000; printf 'DETACHED_%s\\n' DONE; : > '{}'\n",
+                completion_marker.display()
+            )
+            .into_bytes(),
+        ),
     );
-    thread::sleep(Duration::from_millis(300));
+    until(&mut peer, &mut seq, b"FLOOD_START\r\n");
     // Replacing a stalled reader must be prompt, even with queued PTY output.
     let start = Instant::now();
     let mut probe = session.connect();
@@ -436,24 +524,20 @@ fn attached_backpressure_and_detached_progress() {
         panic!("no Hello")
     };
     assert!(start.elapsed() < Duration::from_millis(300));
+    let stalled = wait_for_stalled_head(&session, stalled.max(seq.saturating_add(1024)), 1_000_000);
     assert!(
         stalled < 1_000_000,
         "attached producer must backpressure before completing"
     );
     drop(peer);
     drop(probe);
-    thread::sleep(Duration::from_secs(2));
-    let mut peer = session.attach(0);
-    let Frame::Snapshot(seq, bytes) = read(&mut peer) else {
-        panic!("detached output did not wrap")
-    };
+    let (seq, contents) = wait_for_detached_completion(&session, &completion_marker);
     assert!(
         seq > 1_000_000,
         "detached producer must finish without a viewer"
     );
-    let mut screen = vt100::Parser::new(60, 200, 10000);
-    screen.process(&bytes);
-    assert!(screen.screen().contents().contains("DETACHED_DONE"));
+    assert!(contents.contains("DETACHED_DONE"));
+    let peer = session.attach(seq);
     session.finish(peer, seq);
 }
 #[test]

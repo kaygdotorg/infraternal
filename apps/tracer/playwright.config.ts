@@ -1,7 +1,7 @@
-/** Runs browser checks against the built tracer and its clearly marked test double. */
+/** Runs browser checks against the production tracer build through the test latency proxy [#55, D122, D130]. */
 import { defineConfig, devices } from "playwright/test";
 
-const port = Number(process.env.TRACER_TEST_PORT ?? "4173");
+const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("TRACER_TEST_PORT must be an integer TCP port");
 }
@@ -32,7 +32,8 @@ export default defineConfig({
     screenshot: "off",
   },
   webServer: {
-    command: "bun run build && bun run test/mock-server.ts",
+    command: "bun run build && python3 ../../scripts/latency_proxy.py serve-tracer",
+    env: { TRACER_TEST_PORT: String(port) },
     url: `${origin}/health`,
     reuseExistingServer: false,
     timeout: 120_000,

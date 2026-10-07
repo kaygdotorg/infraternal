@@ -11,12 +11,13 @@ import sys
 import time
 sys.dont_write_bytecode = True
 from idle_canary import assert_process_idle
+from agent_fixture import fixture_state
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, required=True)
 parser.add_argument('--seconds', type=float, default=620)
 args = parser.parse_args()
-state = Path(f'target/si{os.getpid()}')
+state = fixture_state('si')
 state.mkdir(mode=0o700)
 runtime = state / 'runtime'
 runtime.mkdir(mode=0o700)

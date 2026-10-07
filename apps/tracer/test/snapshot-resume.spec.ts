@@ -85,12 +85,16 @@ test("a wrapped-ring Snapshot paints echoes and keeps resize, scrollback, and th
   expect(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.scrollbackRows ?? 0)).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain(SNAPSHOT_MARKER);
 
+  const beforeThemeState = await readTerminalState(page);
   const beforeThemePixels = await canvasFingerprint(page);
   await page.keyboard.press("Control+k");
   await page.locator("#palette-input").fill("dracula");
   await page.keyboard.press("Enter");
   await expect(page.locator("#terminal-screen")).toHaveAttribute("data-theme", "dracula");
   await expect.poll(() => canvasFingerprint(page)).not.toBe(beforeThemePixels);
+  // Theme changes reconnect and replay a fresh Snapshot before restoring the
+  // viewport; wait for its painted terminal state instead of the early UI swap.
+  await expect.poll(() => readTerminalState(page), { timeout: 15_000 }).toEqual(beforeThemeState);
   expect(await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain(SNAPSHOT_MARKER);
   await page.locator("#terminal-host").click();
   await page.mouse.wheel(0, 10_000);
@@ -115,5 +119,19 @@ async function canvasFingerprint(page: import("playwright/test").Page): Promise<
     let hash = 2_166_136_261;
     for (const pixel of pixels) hash = Math.imul(hash ^ pixel, 16_777_619);
     return `${canvas.width}x${canvas.height}:${hash >>> 0}`;
+  });
+}
+
+async function readTerminalState(page: import("playwright/test").Page) {
+  return page.evaluate(() => {
+    const terminal = window.__tracerTestDouble;
+    const metrics = terminal?.rendererMetrics();
+    if (!metrics) throw new Error("terminal renderer metrics are unavailable");
+    return {
+      cursorX: metrics.cursorX,
+      cursorRow: metrics.cursorY + metrics.scrollbackRows,
+      viewportY: Math.round(metrics.viewportY * 100) / 100,
+      screenText: terminal?.screenText() ?? "",
+    };
   });
 }

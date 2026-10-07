@@ -1,8 +1,7 @@
 /**
  * "Faulty terminal" backdrop (DECISIONS 96, #21): a field of terminal glyphs that
  * drift in and out of a low-frequency noise, with scanlines, flicker and the
- * occasional horizontal glitch band. Black and white. Written from scratch after
- * the sveltebits.xyz effect, whose code cannot be copied (MIT + Commons Clause).
+ * occasional horizontal glitch band. Black and white.
  *
  * Budget (DECISION 96): renders continuously at half resolution and at most 30 fps
  * while visible. It pauses when the tab is hidden or the canvas is offscreen, stops

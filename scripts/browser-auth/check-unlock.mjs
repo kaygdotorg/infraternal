@@ -8,6 +8,7 @@ import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
+import { routeWithLatency } from './latency-route.mjs';
 import { resolve, extname, sep } from 'node:path';
 
 const root = resolve(import.meta.dirname, '../..');
@@ -40,7 +41,7 @@ try {
     hasResidentKey: true, hasUserVerification: true, isUserVerified: true,
     automaticPresenceSimulation: true, hasPrf: true,
   } });
-  await page.route('https://auth.example.test/**', async (route) => {
+  await routeWithLatency(page, 'https://auth.example.test/**', async (route) => {
     const request = route.request();
     if (request.method() === 'GET') {
       const pathname = new URL(request.url()).pathname;
