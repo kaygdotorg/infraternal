@@ -72,8 +72,13 @@ struct Login {
 struct Recovery {
     user_id: Option<String>,
     username: Option<String>,
-    words: Option<String>,
-    verifier: Option<String>,
+    verifier: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryRotation {
+    recovery_wrap: Wrap,
+    recovery_verifier: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -278,22 +283,10 @@ async fn execute(
             ))
             .into_response());
         }
-        "recovery-start" | "recovery-resume" | "recovery-upgrade" => {
+        "recovery-start" | "recovery-resume" => {
             let b: Recovery = body(value)?;
-            let credential = match (action, b.words, b.verifier) {
-                ("recovery-upgrade", Some(words), Some(verifier)) => {
-                    super::crypto::valid_secret(&verifier)?;
-                    super::recovery::RecoveryCredential::Upgrade { words, verifier }
-                }
-                ("recovery-start" | "recovery-resume", None, Some(secret)) => {
-                    super::crypto::valid_secret(&secret)?;
-                    super::recovery::RecoveryCredential::Verifier(secret)
-                }
-                // Preserve bounded denial for legacy clients without admitting their
-                // phrases repeatedly. Only explicit one-time upgrade can use words.
-                ("recovery-start" | "recovery-resume", Some(_), None) => return Err(Error::Denied),
-                _ => return Err(Error::Invalid),
-            };
+            super::crypto::valid_secret(&b.verifier)?;
+            let credential = super::recovery::RecoveryCredential::Verifier(b.verifier);
             let user = match (b.user_id, b.username) {
                 (Some(user), None) => user,
                 (None, Some(username)) => {
@@ -315,6 +308,22 @@ async fn execute(
                 )
                 .await?;
             json!({"token":token,"delay_seconds":delay,"ready_at":ready})
+        }
+        "recovery-rotate" => {
+            let b: RecoveryRotation = body(value)?;
+            let user = headers
+                .get("x-infraternal-user")
+                .and_then(|value| value.to_str().ok())
+                .ok_or(Error::Denied)?;
+            auth.recovery_rotate_clock(
+                cookie(headers)?,
+                user,
+                b.recovery_wrap,
+                b.recovery_verifier,
+                current_time,
+            )
+            .await?;
+            json!({"ok":true})
         }
         "recovery-ready" => {
             let b: Token = body(value)?;

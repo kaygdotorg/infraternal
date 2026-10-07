@@ -1,5 +1,6 @@
 //! Defensive tests with a real ES256 software authenticator and a browser-side PRF/keywrap double.
 //! No verifier is mocked: CBOR attestation, client data, flags and signatures enter webauthn-rs.
+use super::crypto::verify_recovery;
 use super::*;
 use crate::{
     embedded::EmbeddedAgent,
@@ -1553,11 +1554,25 @@ async fn http_post_json_with_optional_cookie(
     value: Value,
     cookie: Option<&str>,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
+    http_post_json_with_headers(app, action, value, cookie, axum::http::HeaderMap::new()).await
+}
+
+// Optional metadata remains test-only; all probes use the same production HTTP adapter.
+async fn http_post_json_with_headers(
+    app: &axum::Router,
+    action: &str,
+    value: Value,
+    cookie: Option<&str>,
+    headers: axum::http::HeaderMap,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, Value) {
     let mut builder = axum::http::Request::builder()
         .method("POST")
         .uri(format!("/auth/{action}"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
         .header(axum::http::header::ORIGIN, ORIGIN);
+    for (name, value) in &headers {
+        builder = builder.header(name, value);
+    }
     if let Some(cookie) = cookie {
         builder = builder.header(axum::http::header::COOKIE, cookie);
     }
@@ -2847,132 +2862,6 @@ async fn fixture_v2() -> Fixture {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep the legacy-to-v2 rotation authority checks in one fixture.
-async fn recovery_upgrade_is_one_time_preserves_deadline_and_old_envelope() {
-    let _guard = SERIAL.lock().await;
-    let f = fixture().await;
-    let first = f
-        .auth
-        .recovery_start(&f.user, f.words.clone(), NOW)
-        .await
-        .unwrap();
-    let verifier = recovery_verifier(&f.words);
-    let (token, ready, _) = f
-        .auth
-        .recovery_start_clock(
-            &f.user,
-            super::recovery::RecoveryCredential::Upgrade {
-                words: f.words.clone(),
-                verifier: verifier.clone(),
-            },
-            None,
-            || Ok(NOW + 1),
-            true,
-        )
-        .await
-        .unwrap();
-    assert_eq!(ready, NOW + DAY);
-    assert!(f.auth.recovery_ready(&first, NOW + DAY).await.is_err());
-    let metadata: (i64, i64) =
-        sqlx::query_as("SELECT recovery_version,recovery_wrap_version FROM users")
-            .fetch_one(&f.auth.pool)
-            .await
-            .unwrap();
-    assert_eq!(metadata, (2, 1));
-    assert!(
-        f.auth
-            .recovery_start_clock(
-                &f.user,
-                super::recovery::RecoveryCredential::Upgrade {
-                    words: f.words.clone(),
-                    verifier: verifier.clone()
-                },
-                None,
-                || Ok(NOW + 2),
-                true
-            )
-            .await
-            .is_err()
-    );
-    let start = f.auth.recovery_ready(&token, NOW + DAY).await.unwrap();
-    assert!(start["recovery_words"].is_null());
-    assert_eq!(start["old_recovery_wrap_version"], 1);
-    let old: Wrap = serde_json::from_value(start["old_recovery_wrap"].clone()).unwrap();
-    assert_eq!(
-        unwrap_browser(&recovery_ikm(&f.words), &old, &f.user, "recovery").unwrap(),
-        f.dek
-    );
-    assert!(
-        unwrap_browser(
-            &recovery_material(&f.words, "auth"),
-            &old,
-            &f.user,
-            "recovery"
-        )
-        .is_err()
-    );
-    // Independent new output wraps the original DEK; the server gets only its sibling.
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
-    let new_wrap = browser_wrap(
-        &recovery_material(&words, "wrap"),
-        &f.dek,
-        &f.user,
-        "recovery",
-    );
-    assert!(
-        unwrap_browser(
-            &recovery_material(&words, "auth"),
-            &new_wrap,
-            &f.user,
-            "recovery"
-        )
-        .is_err()
-    );
-    let software = Software::new();
-    f.auth
-        .registration_finish_with_verifier(
-            str_field(&start, "ceremony"),
-            software.registration(&start, ORIGIN, true),
-            browser_wrap(&software.prf(&start), &f.dek, &f.user, "passkey"),
-            Some(new_wrap),
-            Some(recovery_verifier(&words)),
-            NOW + DAY,
-        )
-        .await
-        .unwrap();
-    let metadata: (i64, i64) =
-        sqlx::query_as("SELECT recovery_version,recovery_wrap_version FROM users")
-            .fetch_one(&f.auth.pool)
-            .await
-            .unwrap();
-    assert_eq!(metadata, (2, 2));
-    assert!(
-        f.auth
-            .recovery_start_clock(
-                &f.user,
-                super::recovery::RecoveryCredential::Verifier(verifier),
-                None,
-                || Ok(NOW + DAY),
-                true
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        f.auth
-            .recovery_start_clock(
-                &f.user,
-                super::recovery::RecoveryCredential::Verifier(recovery_verifier(&words)),
-                None,
-                || Ok(NOW + DAY),
-                true
-            )
-            .await
-            .is_ok()
-    );
-}
-
-#[tokio::test]
 #[ignore = "release-only v2 diagnostic at 50 live session rows; record host load separately"]
 async fn recovery_verifier_latency_at_capacity() {
     let _guard = SERIAL.lock().await;
@@ -3098,3 +2987,6 @@ async fn recovery_unknown_identity_pays_the_same_database_and_verifier_work() {
 
 #[path = "reviewer_tests.rs"]
 mod reviewer_tests;
+
+#[path = "rotation_tests.rs"]
+mod rotation_tests;

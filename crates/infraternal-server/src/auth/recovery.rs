@@ -1,15 +1,16 @@
 //! Recovery delay, same-account live-session exemption and rotation isolation [25,D113].
-use super::{Auth, Authority, DAY, Error, Result, Row, Value, hash, random, verify_recovery};
+use super::{Auth, Authority, DAY, Error, Result, Row, Value, hash, random};
 
 pub(super) enum RecoveryCredential {
+    #[cfg(test)]
     Legacy(String),
     Verifier(String),
-    Upgrade { words: String, verifier: String },
 }
 
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
     /// Start a 24-hour delayed recovery; repeat requests do not reset or accelerate it.
+    #[cfg(test)]
     pub async fn recovery_start(&self, user: &str, words: String, now: i64) -> Result<String> {
         Ok(self
             .recovery_start_with_session(user, words, None, now)
@@ -19,6 +20,7 @@ impl Auth {
 
     /// Only an unlocked, unexpired session for this account may waive the delay [D113].
     /// Returns the recovery capability and its authoritative Unix ready time.
+    #[cfg(test)]
     pub async fn recovery_start_with_session(
         &self,
         user: &str,
@@ -39,6 +41,7 @@ impl Auth {
     }
 
     /// Reauthenticate after page loss; a pending request always retains its original deadline.
+    #[cfg(test)]
     pub async fn recovery_resume(
         &self,
         user: &str,
@@ -67,8 +70,8 @@ impl Auth {
         clock: impl Fn() -> Result<i64>,
         resume: bool,
     ) -> Result<(String, i64, i64)> {
-        let resume = resume || !matches!(&credential, RecoveryCredential::Legacy(_));
-        let (stored, version, upgrade) = verify_credential(self, user, credential).await?;
+        let resume = resume || matches!(&credential, RecoveryCredential::Verifier(_));
+        let (stored, version) = verify_credential(self, user, credential).await?;
         #[cfg(test)]
         if let Some(pause) = self.recovery_pause.lock().await.take() {
             pause.verified.notify_one();
@@ -85,15 +88,6 @@ impl Auth {
         .await?;
         if current.as_ref() != Some(&(stored.clone(), version)) {
             return Err(Error::Denied);
-        }
-        if let Some(upgraded) = upgrade {
-            // This same transaction permanently disables phrase authentication and
-            // preserves the old wrap version/ciphertext and any original deadline.
-            sqlx::query("UPDATE users SET recovery_hash=?,recovery_version=2 WHERE id=?")
-                .bind(upgraded)
-                .bind(user)
-                .execute(&mut *tx)
-                .await?;
         }
         // Do not slide or check the cookie before Argon2: revocation/expiry can occur
         // during verification. This recheck shares the writer lock with request creation.
@@ -278,39 +272,30 @@ async fn verify_credential(
     auth: &Auth,
     user: &str,
     credential: RecoveryCredential,
-) -> Result<(String, i64, Option<String>)> {
+) -> Result<(String, i64)> {
     // Both identities use one indexed owner/candidate lookup and the same Argon2
     // work. A conditional second query would expose a different denial path,
     // especially when global KDF admission is exhausted. No metadata is published.
     let (known, stored, version): (bool, String, i64) = sqlx::query_as(
         "SELECT candidate.id IS NOT NULL,COALESCE(candidate.recovery_hash,owner.recovery_hash),COALESCE(candidate.recovery_version,owner.recovery_version) FROM users AS owner LEFT JOIN users AS candidate ON candidate.id=? WHERE owner.owner=1",
     ).bind(user).fetch_optional(&auth.pool).await?.ok_or(Error::Denied)?;
-    let upgrade = match credential {
+    match credential {
+        #[cfg(test)]
         RecoveryCredential::Legacy(words) => {
-            verify_recovery(words, stored.clone()).await?;
+            super::crypto::verify_recovery(words, stored.clone()).await?;
             if version != 1 {
                 return Err(Error::Denied);
             }
-            None
         }
         RecoveryCredential::Verifier(secret) => {
             super::crypto::verify_secret(secret, stored.clone()).await?;
             if version != 2 {
                 return Err(Error::Denied);
             }
-            None
         }
-        RecoveryCredential::Upgrade { words, verifier } => {
-            super::crypto::valid_secret(&verifier)?;
-            verify_recovery(words, stored.clone()).await?;
-            if version != 1 {
-                return Err(Error::Denied);
-            }
-            Some(super::recovery_hash(verifier).await?)
-        }
-    };
+    }
     if !known {
         return Err(Error::Denied);
     }
-    Ok((stored, version, upgrade))
+    Ok((stored, version))
 }

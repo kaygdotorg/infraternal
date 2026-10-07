@@ -814,7 +814,7 @@ mod reviewer_admission {
         for action in [
             "recovery-start",
             "recovery-resume",
-            "recovery-upgrade",
+            "recovery-rotate",
             "recovery-ready",
             "recovery-cancel",
         ] {

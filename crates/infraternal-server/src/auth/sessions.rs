@@ -4,6 +4,7 @@ use super::{Auth, Error, FRESH, Result, Row, SESSION, Serialize, hash};
 /// Authenticated browser device, including the last successful passkey verification.
 #[derive(Serialize)]
 pub struct Session {
+    pub recovery_words_need_replacing: bool,
     pub recovery_pending: Option<RecoveryPending>,
     pub user_id: String,
     pub username: String,
@@ -39,7 +40,7 @@ impl Auth {
     }
 
     async fn read_session(&self, token: &str, now: i64, pending: bool) -> Result<Session> {
-        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name,(SELECT ready FROM recovery WHERE user_id=sessions.user_id) AS recovery_ready")
+        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name,(SELECT ready FROM recovery WHERE user_id=sessions.user_id) AS recovery_ready,(SELECT recovery_version=1 OR recovery_wrap_version=1 FROM users WHERE id=sessions.user_id) AS recovery_words_need_replacing")
             .bind(now + SESSION).bind(hash(token)).bind(now).bind(pending).fetch_optional(&self.pool).await?;
         let Some(row) = row else {
             // Successful sessions keep the original single write; cleanup runs only on denial.
@@ -51,6 +52,7 @@ impl Auth {
             return Err(Error::Denied);
         };
         Ok(Session {
+            recovery_words_need_replacing: row.get("recovery_words_need_replacing"),
             recovery_pending: row
                 .get::<Option<i64>, _>("recovery_ready")
                 .map(|ready_at| RecoveryPending { ready_at }),

@@ -9,13 +9,14 @@ mod crypto;
 mod devices;
 mod http;
 mod recovery;
+mod recovery_rotation;
 mod sessions;
 mod setup;
 mod webauthn;
 mod wraps;
 
 pub(crate) use crypto::hash;
-use crypto::{constant_prf_input, prf_salt, random, recovery_hash, verify_recovery};
+use crypto::{constant_prf_input, prf_salt, random, recovery_hash};
 pub use sessions::Session;
 use sessions::{insert_session, require_session_tx};
 pub use wraps::Wrap;

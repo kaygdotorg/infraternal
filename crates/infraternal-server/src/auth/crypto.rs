@@ -21,8 +21,8 @@ pub(super) fn prf_salt(user: Option<&str>) -> String {
 pub(super) fn constant_prf_input() -> String {
     B64.encode(Sha256::digest(b"infraternal/keywrap/prf/v3"))
 }
-// Capacity is account/version independent and retryable. A credential-denial 401
-// could make an explicitly selected legacy client transmit words after a v2 probe.
+// Capacity is account/version independent and retryable. Exhaustion is never
+// reported as a credential denial. Only independent verifier material is admitted.
 static ARGON_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 pub(super) async fn recovery_hash(words: String) -> Result<String> {
     let permit = ARGON_SLOTS.try_acquire().map_err(|_| Error::Throttled)?;
@@ -38,6 +38,7 @@ pub(super) async fn recovery_hash(words: String) -> Result<String> {
     .await
     .map_err(|_| Error::Invalid)?
 }
+#[cfg(test)]
 pub(super) async fn verify_recovery(words: String, stored: String) -> Result<()> {
     let permit = ARGON_SLOTS.try_acquire().map_err(|_| Error::Throttled)?;
     tokio::task::spawn_blocking(move || {
