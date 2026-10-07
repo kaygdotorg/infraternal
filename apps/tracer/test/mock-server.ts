@@ -294,6 +294,9 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     return sendJson(response, 200, {
       ...(owner ? { username: owner.username, display_name: owner.displayName } : {}),
       echoed_text: session.echoedText,
+      ...(url.searchParams.get("input_bytes") === "1"
+        ? { input_bytes: Array.from(session.output.subarray(0, session.echoOutputLength)) }
+        : {}),
       written_input: session.writtenInput.toString(),
       accepted_input_bytes: session.acceptedInputBytes,
       output_sequence: String(session.outputLength),
