@@ -1366,6 +1366,7 @@ name = "infraternal-plugin-ssh"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "nix",
  "serde",
  "serde_json",
  "sha2",
