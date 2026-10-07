@@ -5,6 +5,8 @@
 //! owner creation, recovery replacement, passkey limits and capability redemption.
 
 mod binding;
+#[path = "../bootstrap_authorization.rs"]
+mod bootstrap_authorization;
 mod crypto;
 mod devices;
 mod http;
