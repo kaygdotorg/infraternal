@@ -1,6 +1,7 @@
 /** Bundles the tracer and workers, copies licensed fonts, and writes static compressed encodings. */
 import { cp, mkdir, rm } from "node:fs/promises";
 import { precompress } from "./precompress";
+import { browserFileLoader } from "./browser-build";
 
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist/fonts", { recursive: true });
@@ -11,6 +12,7 @@ const build = await Bun.build({
   minify: true,
   target: "browser",
   splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
+  plugins: [browserFileLoader],
 });
 if (!build.success) {
   throw new Error(build.logs.map((log) => log.message).join("\n"));

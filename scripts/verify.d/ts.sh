@@ -16,7 +16,7 @@ ts_verify_fast() {
     (cd -- "$protocol_dir" && bun x --package typescript@5.9.3 tsc --project tsconfig.json) || return $?
 
     printf '\n==> Tracer compiler, precompression and bundle transfer budget\n'
-    (cd -- "$repo_dir/apps/tracer" && bun install --frozen-lockfile && bun run check && bun test precompress.test.ts && bun run build && bun run transfer-budget.ts) || return $?
+    (cd -- "$repo_dir/apps/tracer" && bun install --frozen-lockfile && bun run check && bun test precompress.test.ts browser-build.test.ts && bun run build && bun run transfer-budget.ts) || return $?
 
     # The Rust/TS differential test runs the Rust stream oracle. Build it first, so
     # the test measures decoding and never times out on a cold compile.
