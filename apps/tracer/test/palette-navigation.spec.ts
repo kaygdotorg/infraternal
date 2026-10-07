@@ -116,7 +116,7 @@ async function measureHandlers(page: Page): Promise<void> {
   console.log(`METRIC name=palette_arrow_handler_ms_per_press value=${millisecondsPerArrow.toFixed(4)} presses=100 viewport=1440x900`);
   console.log(`METRIC name=palette_filter_handler_ms_per_input value=${millisecondsPerFilter.toFixed(4)} inputs=100 viewport=1440x900`);
   expect(millisecondsPerArrow).toBeGreaterThanOrEqual(0);
-  expect(millisecondsPerFilter).toBeGreaterThanOrEqual(0);
+  expect(millisecondsPerFilter).toBeLessThanOrEqual(0.13);
 }
 
 async function walkDownAndUp(page: Page): Promise<void> {

@@ -232,15 +232,25 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     entry,
     `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase(),
   ]));
+  // Normalize IDs once so typing never sanitizes every matching result.
+  const paletteOptionIds = new Map(entries.map((entry, index) => [
+    entry,
+    `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`,
+  ]));
+  const paletteGroupIds = new Map([...new Set(entries.map((entry) => entry.group))].map((group) => [
+    group,
+    `palette-group-${group.toLocaleLowerCase().replaceAll(" ", "-")}`,
+  ]));
   let visibleEntries: PaletteEntry[] = [];
   let visibleOptions: HTMLButtonElement[] = [];
   let selected = 0;
+  const headingByGroup = new Map<string, HTMLDivElement>();
 
-  const keepPaletteOptionVisible = (option: HTMLButtonElement): void => {
+  const keepPaletteOptionVisible = (option: HTMLButtonElement, index: number): void => {
     option.scrollIntoView({ block: "nearest", behavior: "instant" });
-    const previous = option.previousElementSibling;
-    if (previous instanceof HTMLElement && previous.classList.contains("group-label")) {
-      previous.scrollIntoView({ block: "nearest", behavior: "instant" });
+    const entry = visibleEntries[index];
+    if (entry && visibleEntries[index - 1]?.group !== entry.group) {
+      headingByGroup.get(entry.group)?.scrollIntoView({ block: "nearest", behavior: "instant" });
     }
   };
 
@@ -258,7 +268,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (paletteInput.getAttribute("aria-activedescendant") !== nextOption.id) {
       paletteInput.setAttribute("aria-activedescendant", nextOption.id);
     }
-    keepPaletteOptionVisible(nextOption);
+    keepPaletteOptionVisible(nextOption, boundedIndex);
   };
 
   const visiblePalettePageSize = (): number => {
@@ -274,24 +284,24 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
 
   const renderPalette = (query = ""): void => {
     const needle = query.trim().toLocaleLowerCase();
-    const filtered = entries.filter((entry) => paletteSearchText.get(entry)?.includes(needle) ?? false);
-    visibleEntries = filtered;
+    visibleEntries = entries.filter((entry) => paletteSearchText.get(entry)?.includes(needle) ?? false);
     selected = Math.min(selected, Math.max(0, visibleEntries.length - 1));
     visibleOptions = [];
-    const fragment = document.createDocumentFragment();
+    // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
+    paletteResults.replaceChildren();
     let previousGroup = "";
-    filtered.forEach((entry, index) => {
+    visibleEntries.forEach((entry, index) => {
       if (entry.group !== previousGroup) {
         const heading = document.createElement("div");
-        heading.id = `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`;
+        heading.id = paletteGroupIds.get(entry.group)!;
         heading.className = "group-label";
         heading.textContent = entry.group;
-        fragment.append(heading);
+        headingByGroup.set(entry.group, heading);
+        paletteResults.append(heading);
         previousGroup = entry.group;
       }
       const result = document.createElement("button");
-      const optionId = entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`;
-      result.id = `palette-option-${optionId}`;
+      result.id = paletteOptionIds.get(entry)!;
       result.type = "button";
       result.className = "result";
       result.setAttribute("role", "option");
@@ -313,16 +323,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       hint.textContent = entry.hint;
       result.append(icon, label, hint);
       visibleOptions.push(result);
-      fragment.append(result);
+      paletteResults.append(result);
     });
-    if (!filtered.length) {
-      const empty = document.createElement("p");
-      empty.className = "palette-empty";
-      empty.textContent = "No matching hosts, sessions or actions.";
-      fragment.append(empty);
-    }
-    // Filtering rebuilds this short list; keyboard navigation never calls this render path.
-    paletteResults.replaceChildren(fragment);
     const selectedOption = visibleOptions[selected];
     if (selectedOption) {
       if (paletteInput.getAttribute("aria-activedescendant") !== selectedOption.id) {
@@ -330,6 +332,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       }
     } else {
       paletteInput.removeAttribute("aria-activedescendant");
+    }
+    if (!visibleEntries.length) {
+      const empty = document.createElement("p");
+      empty.className = "palette-empty";
+      empty.textContent = "No matching hosts, sessions or actions.";
+      paletteResults.append(empty);
     }
   };
 
@@ -412,7 +420,6 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   scrim.addEventListener("click", scrimClick);
   paletteInput.addEventListener("input", () => {
     selected = 0;
-    if (paletteResults.scrollTop !== 0) paletteResults.scrollTop = 0;
     renderPalette(paletteInput.value);
   });
   paletteInput.addEventListener("keydown", (event) => {
