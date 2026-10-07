@@ -1411,3 +1411,7 @@ async fn require_socket_authority_tx(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "recovery_notification_bench.rs"]
+mod recovery_notification_bench;
