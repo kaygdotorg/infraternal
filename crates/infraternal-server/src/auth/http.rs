@@ -170,6 +170,9 @@ async fn dispatch(
             Json(json!({"error":"authorization failed"})),
         )
             .into_response(),
+        Err(Error::SetupClosed) => {
+            (StatusCode::NOT_FOUND, Json(json!({"error":"not found"}))).into_response()
+        }
         Err(Error::Invalid | Error::Json) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error":"invalid request"})),
@@ -207,6 +210,11 @@ async fn execute(
     )
     .map_err(|_| Error::Invalid)?;
     ingress(auth, action, headers, now).await?;
+    if action == "setup-check" {
+        let b: Token = body(value)?;
+        auth.setup_check(&b.token, now).await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     let payload = match action {
         "status" => public_status(auth, value).await?,
         "setup-start" => setup_start(auth, value, now).await?,

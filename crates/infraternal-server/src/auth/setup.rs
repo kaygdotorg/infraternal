@@ -1,6 +1,8 @@
 //! One-time owner setup capability and initial enrollment [24,26,53].
 use super::{Auth, Authority, DAY, Error, Result, Uuid, Value, hash, random};
 
+const DUMMY_HASH: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
     /// Rotate the single-use capability at startup until an owner exists [26].
@@ -21,6 +23,35 @@ impl Auth {
     pub async fn setup_start(&self, token: &str, name: &str, now: i64) -> Result<Value> {
         self.setup_start_with_identity(token, name, Some(name), now)
             .await
+    }
+
+    /// Check the setup capability without consuming or changing enrollment state.
+    pub async fn setup_check(&self, token: &str, now: i64) -> Result<()> {
+        let owner_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE owner=1)")
+                .fetch_one(&self.pool)
+                .await?;
+        if owner_exists {
+            return Err(Error::SetupClosed);
+        }
+
+        let stored = sqlx::query_as::<_, (String, i64)>(
+            "SELECT token_hash,expires FROM setup WHERE singleton=1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        // Stored and candidate SHA-256 hashes are fixed-size base64url strings.
+        // Compare a dummy digest when setup is absent so failure still takes the
+        // same constant-time comparison path as a wrong or expired capability.
+        let stored_hash = stored
+            .as_ref()
+            .map_or(DUMMY_HASH, |(hash, _)| hash.as_str());
+        let matches = openssl::memcmp::eq(hash(token).as_bytes(), stored_hash.as_bytes());
+        if matches && stored.is_some_and(|(_, expires)| expires > now) {
+            Ok(())
+        } else {
+            Err(Error::Denied)
+        }
     }
 
     /// Start owner enrollment with separate public and display labels.

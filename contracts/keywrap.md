@@ -83,6 +83,7 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 
 | Action | JSON body | Result |
 | --- | --- | --- |
+| setup-check | `{token}` | `204` if current and no owner exists; `401` for wrong/expired tokens; `404` after owner creation |
 | setup-start | legacy `{token,name}` or `{token,username,display_name?}` | `{ceremony,user_id,options,recovery_words}` |
 | registration-finish | `{ceremony,proof,passkey_wrap,recovery_wrap}` | secure session cookie |
 | status | `{}` | `{setup_required: bool}` only |
@@ -101,6 +102,14 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | api-list | `{}` + session | device/scopes and nonsecret revocation `id` |
 | api-revoke | `{id}` + fresh session | `{ok:true}` |
 | logout | `{}` + session | revoked session and expired cookie |
+
+`setup-check` is additive and read-only. While no owner exists, it compares the
+candidate token hash with the stored hash in constant time and returns `204` only
+for the current, unexpired setup token. Wrong or expired tokens return `401`.
+Once an owner exists, it returns `404`. The check uses the same browser admission
+and trusted-ingress source limits as other auth actions; it creates no ceremony,
+sets no cookie and changes no setup state. `setup-start` remains the enrollment
+entry point, and registration finish remains the one-shot token consumption [26,53].
 
 A cookie is `__Host-infraternal=<opaque random id>; Secure; HttpOnly;
 SameSite=Strict; Path=/; Max-Age=2592000` with no Domain. Storage slides 30 days
