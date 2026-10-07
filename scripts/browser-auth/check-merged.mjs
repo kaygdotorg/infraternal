@@ -59,10 +59,30 @@ ssl.stdout.on("data", (bytes) => pem += bytes);
 var [sslCode] = await once(ssl, "exit");
 if (sslCode !== 0)
   throw new Error("in-memory test certificate generation failed");
+const authRequests = new Map();
+let authWindow;
+let authWindowCount = 0;
+/** Pace reloads within the real 30/source/minute policy; never bypass native admission. */
+async function reserveAuthReads(count) {
+  if (authWindow === undefined || authWindowCount + count <= 28) return;
+  const remaining = Math.max(0, 61 - (Math.floor(Date.now() / 1000) - authWindow));
+  if (remaining > 0) {
+    console.log(`Native source admission pacing: ${remaining}s before additional reload reads`);
+    await delay(remaining * 1000);
+  }
+}
 var tls = createHttpsServer({
   key: pem.match(/-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----/)?.[0],
   cert: pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0]
 }, (req, res) => {
+  if (req.url?.startsWith("/auth/")) {
+    authRequests.set(req.url, (authRequests.get(req.url) ?? 0) + 1);
+    if (req.url !== "/auth/logout") {
+      const now = Math.floor(Date.now() / 1000);
+      if (authWindow === undefined || now - authWindow >= 60) { authWindow = now; authWindowCount = 0; }
+      authWindowCount++;
+    }
+  }
   const upstream = httpRequest(backend + (req.url ?? "/"), { method: req.method, headers: req.headers, agent: false }, (response) => {
     res.writeHead(response.statusCode ?? 500, response.headers);
     response.pipe(res);
@@ -475,6 +495,7 @@ try {
       second.ws.terminate();
       await wait(() => bridges.slice(before).filter((entry) => !entry.closed && entry.session === session && entry.acks.length > 0).length === 2, "two-device reconnect did not attach", 60000);
       const resumed = performance.now() - started;
+      await reserveAuthReads(8);
       const restoreFrom = bridges.length;
       await page.reload();
       await wait(() => bridges.slice(restoreFrom).some((entry) => !entry.closed && entry.session === session && entry.acks.length > 0), "device-A restoration did not attach", 60000);
@@ -523,6 +544,7 @@ try {
   // Measure the per-browser paint budget with one active frontend after the
   // complete two-device acceptance; server throughput at 32 viewers is separate.
   await page.bringToFront();
+  await reserveAuthReads(6);
   await page.goto(origin + "/?probe=1&n=500");
   await page.locator("#probe-run").waitFor();
   await wait(() => page.locator("#probe-run").isEnabled(), "probe not ready");
@@ -549,6 +571,7 @@ try {
     await gapContext.addCookies(cookieA);
     const gapPage = await gapContext.newPage();
     const from = bridges.length;
+    await reserveAuthReads(6);
     await gapPage.goto(origin + "/?session=" + flood.sessionId);
     await wait(() => bridges.slice(from).some((entry) => entry.snapshots.length === 1 && entry.events.some((event) => event.type === "terminal.snapshot" && event.approximate === true)), "native browser ring-gap recovery notice/repaint missing");
     const recovered = bridges.slice(from).find((entry) => entry.snapshots.length === 1);
@@ -572,9 +595,11 @@ try {
         terminal: document.querySelector("#terminal-host") !== null,
         signIn: document.querySelector("#login-passkey") !== null,
         status: document.querySelector("#connection-status")?.textContent,
+        error: document.querySelector("#status-error")?.textContent,
       })).catch(() => ({ unavailable: true }))));
     }
   }
+  console.log("native auth request counts: " + JSON.stringify(Object.fromEntries(authRequests)));
   console.log(`safe bridge count: ${bridges.length}`);
   console.log("safe bridge diagnostics (first/last): " + JSON.stringify([...bridges.slice(0, 3), ...bridges.slice(-10)].map((entry) => ({
     closed: entry.closed,
