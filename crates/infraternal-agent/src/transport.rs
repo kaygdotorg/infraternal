@@ -119,6 +119,17 @@ impl Default for Receive {
     }
 }
 impl Receive {
+    fn reject_expired(&self, socket: &impl Channel) -> io::Result<()> {
+        if self
+            .deadline
+            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+        {
+            socket.retire();
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        Ok(())
+    }
+
     /// Read until a complete borrowed frame is available.
     /// # Errors
     /// Rejects invalid codec data, EOF inside a frame, and excessive storage.
@@ -136,6 +147,7 @@ impl Receive {
             }
             // The first byte arms one deadline retained across select cancellation.
             // An empty channel has no timer; traffic cannot refresh a partial frame.
+            self.reject_expired(socket)?;
             let n = if let Some(deadline) = self.deadline {
                 if let Ok(result) =
                     tokio::time::timeout_at(deadline, socket.read(&mut self.chunk)).await
@@ -148,6 +160,9 @@ impl Receive {
             } else {
                 socket.read(&mut self.chunk).await?
             };
+            // A ready read is polled before Tokio checks its timer. Recheck
+            // after the read so scheduling delays cannot accept an expired suffix.
+            self.reject_expired(socket)?;
             if n == 0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
@@ -273,6 +288,28 @@ mod remote_deadline_tests {
         }
         panic!("cancellation must not extend the first-byte deadline");
     }
+    #[tokio::test]
+    async fn queued_suffix_cannot_complete_an_expired_cancelled_frame() {
+        let (_owned, mut peer, channel) = pair();
+        let wire = ping(7);
+        peer.write_all(&wire[..1]).await.unwrap();
+        let mut receive = Receive::default();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), receive.next(&channel))
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Tokio polls a ready inner read before its timeout. Supplying the
+        // suffix before resuming proves an expired frame cannot use that order.
+        peer.write_all(&wire[1..]).await.unwrap();
+        // Prime reactor readiness so the inner read completes on its first poll.
+        drop(channel.socket.descriptor.readable().await.unwrap());
+        let result = receive.next(&channel).await;
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(channel.retired.load(Ordering::Relaxed));
+    }
+
     #[tokio::test]
     async fn wholly_idle_remote_channel_has_no_frame_expiry() {
         let (_owned, mut peer, channel) = pair();
