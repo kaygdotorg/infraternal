@@ -18,6 +18,7 @@ interface AuthSession {
   display_name: string;
   device: string;
   fresh: number;
+  recovery_pending?: { ready_at: number } | null;
 }
 
 export interface Wrap {

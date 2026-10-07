@@ -65,6 +65,7 @@ export interface TerminalConfig {
   onConnectionChange?: (connected: boolean) => void;
   onScroll?: (scrolled: boolean) => void;
   onInputActivity?: () => void;
+  onRecoveryPending?: (readyAt: number | undefined) => void;
   traceMockServer?: boolean;
   /** Reattach this tab's owned session using a new writer after a page reload. */
   initialSessionId?: string;
@@ -465,6 +466,7 @@ export class TerminalClient {
         if (frame.version !== VERSION) this.protocolFailure("server uses an unsupported wire version");
         return;
       case "Welcome":
+        this.sendFrame(CONTROL_STREAM, { type: "Subscribe", subId: 45, filterJson: encoder.encode(JSON.stringify({ topic: "auth.recovery" })) });
         this.resumeCredentials?.connectionId.fill(0);
         this.resumeCredentials?.resumeToken.fill(0);
         this.resumeCredentials = {
@@ -498,6 +500,16 @@ export class TerminalClient {
         } catch {
           this.protocolFailure("terminal.open returned an invalid session id");
         }
+        return;
+      case "Event":
+        if (frame.subId !== 45) return;
+        try {
+          const event = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.eventJson)) as unknown);
+          if (event.topic !== "auth.recovery") throw new Error("unexpected recovery topic");
+          const readyAt = event.pending === null ? undefined : asRecord(event.pending).ready_at;
+          if (event.pending !== null && (typeof readyAt !== "number" || !Number.isSafeInteger(readyAt) || readyAt < 0)) throw new Error("invalid recovery deadline");
+          this.config.onRecoveryPending?.(readyAt as number | undefined);
+        } catch { this.protocolFailure("server returned invalid recovery state"); }
         return;
       case "Ping":
         this.sendFrame(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });

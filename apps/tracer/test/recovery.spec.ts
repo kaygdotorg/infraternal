@@ -241,3 +241,24 @@ test("discarded waiting page resumes the original deadline", async ({ page }) =>
   }
   expect(attempts).toBe(2);
 });
+
+test("signed-in device shows a persistent notice and can cancel recovery", async ({ page }) => {
+  await page.context().request.post("/__mock/reset");
+  await page.context().request.post("/__mock/open-terminal");
+  let pending = true, cancels = 0;
+  const readyAt = Math.floor(Date.now() / 1000) + 3600;
+  await page.route("**/auth/session", route => route.fulfill({ json: {
+    user_id: userId, username: "fixture_owner", display_name: "Fixture owner", hostname: "fixture-host",
+    recovery_pending: pending ? { ready_at: readyAt } : null,
+  } }));
+  await page.route("**/auth/recovery-cancel", route => {
+    cancels++; pending = false;
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.goto("/?mock=1");
+  await expect(page.locator("#recovery-notice")).toBeVisible();
+  await expect(page.locator("#recovery-toast")).toContainText("Recovery requested");
+  await page.getByRole("button", { name: "Cancel recovery", exact: true }).click();
+  await expect(page.locator("#recovery-notice")).toBeHidden();
+  expect(cancels).toBe(1);
+});
