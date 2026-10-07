@@ -1,5 +1,5 @@
 /** Implements the same-origin passkey ceremonies and browser-only key wrapping contract. */
-import { mnemonicToEntropy } from "@scure/bip39";
+import { mnemonicToEntropy, entropyToMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
 const KEY_CONTEXT = "infraternal/keywrap/v1";
@@ -9,6 +9,7 @@ export interface AuthStart {
   ceremony: string;
   user_id?: string;
   recovery_words?: string | null;
+  recovery_version?: number;
   options: { publicKey: Record<string, unknown> };
 }
 
@@ -82,7 +83,7 @@ export async function registerOwner(
 ): Promise<string> {
   const start = await post<AuthStart>("setup-start", { token, username, display_name: displayName });
   const userId = canonicalUuid(start.user_id, "setup user id");
-  const recoveryWords = requiredString(start.recovery_words, "recovery words");
+  const recoveryWords = generateRecoveryWords();
   const publicKey = creationOptions(start.options.publicKey);
   const prfInput = prfInputFrom(publicKey);
   let prf: Uint8Array | undefined;
@@ -102,12 +103,12 @@ export async function registerOwner(
     }
 
     // The recovery phrase is parsed before display so invalid server output cannot be wrapped.
-    const recoveryEntropy = mnemonicToEntropy(recoveryWords, wordlist);
+    const recovery = await recoverySecrets(recoveryWords);
     try {
-      if (recoveryEntropy.byteLength !== 32) throw new AuthError("The recovery phrase is invalid.");
+
       dek = crypto.getRandomValues(new Uint8Array(32));
       const passkeyWrap = await wrapDek(prf, dek, userId, "passkey");
-      const recoveryWrap = await wrapDek(recoveryEntropy, dek, userId, "recovery");
+      const recoveryWrap = await wrapDek(recovery.wrap, dek, userId, "recovery");
       let finishPromise: Promise<void> | undefined;
       await showRecoveryWords(recoveryWords, () => {
         // Keep a single ceremony response if the confirmation button is activated twice.
@@ -117,6 +118,7 @@ export async function registerOwner(
             proof: credentialProof(created),
             passkey_wrap: passkeyWrap,
             recovery_wrap: recoveryWrap,
+            recovery_verifier: recovery.verifier,
           }).then(() => undefined).catch((error: unknown) => {
             // A transient rejection can be retried with the same ceremony proof.
             finishPromise = undefined;
@@ -127,7 +129,7 @@ export async function registerOwner(
       });
       return userId;
     } finally {
-      recoveryEntropy.fill(0);
+      recovery.wrap.fill(0);
     }
   } finally {
     prf?.fill(0);
@@ -326,6 +328,37 @@ function credentialProof(credential: PublicKeyCredential): Record<string, unknow
   };
 }
 
+/** Creates recovery words locally; neither entropy nor the mnemonic reaches enrollment. */
+function generateRecoveryWords(): string {
+  const entropy = crypto.getRandomValues(new Uint8Array(32));
+  try { return entropyToMnemonic(entropy, wordlist); }
+  finally { entropy.fill(0); }
+}
+
+/** Independent HKDF siblings: only verifier is transmitted; wrap always stays local [D151]. */
+async function recoverySecrets(words: string): Promise<{ verifier: string; wrap: Uint8Array }> {
+  const entropy = mnemonicToEntropy(words, wordlist);
+  let authBytes: Uint8Array | undefined;
+  try {
+    if (entropy.byteLength !== 32) throw new AuthError("Enter all 24 recovery words.");
+    const material = await crypto.subtle.importKey("raw", toArrayBuffer(entropy), "HKDF", false, ["deriveBits"]);
+    const derive = async (kind: string): Promise<Uint8Array> => new Uint8Array(await crypto.subtle.deriveBits({
+      name: "HKDF", hash: "SHA-256", salt: new ArrayBuffer(0), info: toArrayBuffer(encoder.encode(`infraternal/recovery/${kind}/v2`)),
+    }, material, 256));
+    authBytes = await derive("auth");
+    const wrap = await derive("wrap");
+    return { verifier: base64url(authBytes), wrap };
+  } finally { entropy.fill(0); authBytes?.fill(0); }
+}
+
+/** Stored metadata determines derivation; old envelopes are never silently relabeled. */
+async function unwrapRecoveryDek(words: string, wrap: Wrap, userId: string, version: number): Promise<Uint8Array> {
+  if (version !== 1 && version !== 2) throw new AuthError("The recovery envelope version is unsupported.");
+  const material = version === 1 ? mnemonicToEntropy(words, wordlist) : (await recoverySecrets(words)).wrap;
+  try { return await unwrapDek(material, wrap, userId, "recovery"); }
+  finally { material.fill(0); }
+}
+
 async function wrapDek(ikm: Uint8Array, dek: Uint8Array, userId: string, kind: "passkey" | "recovery"): Promise<Wrap> {
   const salt = crypto.getRandomValues(new Uint8Array(32));
   const nonce = crypto.getRandomValues(new Uint8Array(12));
@@ -424,4 +457,5 @@ function canonicalUuid(value: unknown, name: string): string {
 export const recoveryAuth = {
   post, creationOptions, prfInputFrom, credentialOutputs, prfFrom, credentialPrf,
   credentialProof, wrapDek, unwrapDek, requiredString, canonicalUuid,
+  generateRecoveryWords, recoverySecrets, unwrapRecoveryDek,
 };
