@@ -203,7 +203,14 @@ async fn dispatch(
 }
 
 // Recovery authority needs a new sample after expensive verification and writer-lock waits.
-fn current_time() -> super::Result<i64> {
+fn current_time(auth: &Auth) -> super::Result<i64> {
+    #[cfg(test)]
+    if let Some(now) = auth.test_http_time() {
+        return Ok(now);
+    }
+    #[cfg(not(test))]
+    let _ = auth;
+
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -221,7 +228,7 @@ async fn execute(
     headers: &HeaderMap,
     value: Value,
 ) -> super::Result<Response> {
-    let now = current_time()?;
+    let now = current_time(auth)?;
     ingress(auth, action, headers, now).await?;
     if action == "setup-check" {
         let b: Token = body(value)?;
@@ -242,7 +249,7 @@ async fn execute(
                         b.passkey_wrap,
                         b.recovery_wrap,
                         b.recovery_verifier,
-                        current_time,
+                        || current_time(auth),
                     )
                     .await?,
             );
@@ -303,7 +310,7 @@ async fn execute(
                     &user,
                     credential,
                     cookie(headers).ok(),
-                    current_time,
+                    || current_time(auth),
                     action != "recovery-start",
                 )
                 .await?;
@@ -320,7 +327,7 @@ async fn execute(
                 user,
                 b.recovery_wrap,
                 b.recovery_verifier,
-                current_time,
+                || current_time(auth),
             )
             .await?;
             json!({"ok":true})

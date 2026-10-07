@@ -181,13 +181,16 @@ async fn expired_finish_after_writer_wait(ceremony_expires: bool) {
     let _guard = SERIAL.lock().await;
     let (f, path) = disk_fixture().await;
     let (token, _, _) = v2_start(&f, NOW).await;
+    // Keep test time ahead of SQLite's unixepoch; only explicit advances can cross expiry.
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
     )
-    .unwrap();
+    .unwrap()
+        + 30 * DAY;
+    f.auth.set_test_http_time(now);
     sqlx::query("UPDATE recovery SET ready=?,expires=?")
         .bind(now - 1)
         .bind(now + if ceremony_expires { 60 } else { 1 })
@@ -246,6 +249,8 @@ async fn expired_finish_after_writer_wait(ceremony_expires: bool) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     tokio::time::sleep(Duration::from_millis(2200)).await;
+    // The writer stays blocked while logical time advances beyond the relevant expiry.
+    f.auth.set_test_http_time(now + 2);
     lock.commit().await.unwrap();
     let (status, _, _) = task.await.unwrap();
     println!("REVIEW finish after expired capability/writer wait: HTTP {status}");
