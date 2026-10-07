@@ -5,8 +5,6 @@ import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { extname, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { entropyToMnemonic } from "@scure/bip39";
-import { wordlist } from "@scure/bip39/wordlists/english.js";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
@@ -80,7 +78,7 @@ let activeAuthCookie: string | undefined;
 let unlockPending = false;
 let pendingTransaction: string | undefined;
 let setupToken = newToken();
-let pendingRegistration: { ceremony: string; userId: string; username: string; displayName: string; recoveryWords: string; rpId: string; prfInput: string } | undefined;
+let pendingRegistration: { ceremony: string; userId: string; username: string; displayName: string; rpId: string; prfInput: string } | undefined;
 let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
 let selectedFixture: Uint8Array | undefined;
@@ -394,9 +392,8 @@ async function authAction(
       const userId = randomUuid();
       const ceremony = newToken();
       const displayName = typeof suppliedDisplayName === "string" && suppliedDisplayName.trim() ? suppliedDisplayName : username;
-      const recoveryWords = entropyToMnemonic(randomBytes(32), wordlist);
       const prfInput = createHash("sha256").update("infraternal/keywrap/prf/v3").digest("base64url");
-      pendingRegistration = { ceremony, userId, username, displayName, recoveryWords, rpId, prfInput };
+      pendingRegistration = { ceremony, userId, username, displayName, rpId, prfInput };
       const publicKey = {
         challenge: randomBytes(32).toString("base64url"),
         rp: { name: "infraternal test double", id: rpId },
@@ -412,7 +409,7 @@ async function authAction(
         },
         extensions: { prf: { eval: { first: prfInput } } },
       };
-      return sendJson(response, 200, { ceremony, user_id: userId, options: { publicKey }, recovery_words: recoveryWords });
+      return sendJson(response, 200, { ceremony, user_id: userId, options: { publicKey }, recovery_words: null, recovery_version: 2 });
     }
     case "registration-finish": {
       const proof = asRecord(body.proof);
@@ -421,7 +418,7 @@ async function authAction(
         return sendJson(response, 401, { error: "authorization failed" });
       }
       const credentialId = stringValue(proof.rawId);
-      if (!credentialId || !asRecord(body.passkey_wrap) || !asRecord(body.recovery_wrap)) {
+      if (!credentialId || typeof body.recovery_verifier !== "string" || !asRecord(body.passkey_wrap) || !asRecord(body.recovery_wrap)) {
         return sendJson(response, 400, { error: "invalid request" });
       }
       owner = {
@@ -535,6 +532,10 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       });
       return;
     }
+    case "Subscribe":
+      if (frame.subId === 45 && new TextDecoder().decode(frame.filterJson) === '{"topic":"auth.recovery"}') return;
+      connection.socket.close(1002, "unexpected test-double subscription");
+      return;
     case "Ping":
       sendFrame(connection.socket, 0, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
       return;

@@ -1,8 +1,9 @@
 /** Renders the real setup wizard and discoverable passkey sign-in for the tracer. */
+import { recoveryWords } from "./recovery-words";
 import { AuthError, checkSetupToken, loginWithPasskey, registerOwner } from "./auth";
-import { copyFeedback, confirmAction, swapIcon, CLIPBOARD, DOWNLOAD } from "../../../packages/ui/src/copy-feedback";
+import { copyFeedback, swapIcon, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { loading, type Loading } from "../../../packages/ui/src/countup";
-import { springCheckbox, tick } from "../../../packages/ui/src/tick";
+import { tick } from "../../../packages/ui/src/tick";
 
 const BRAND_MARK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v7M12 10 5 17M12 10l7 7"/><circle cx="12" cy="3" r="1.2" fill="currentColor"/><circle cx="5" cy="18" r="1.2" fill="currentColor"/><circle cx="19" cy="18" r="1.2" fill="currentColor"/></svg>`;
 const KEY_MARK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H21M17 12v3M20 12v2"/></svg>`;
@@ -50,6 +51,7 @@ function mountSetup(
   };
   let index = 0;
   let completedStep = -1;
+  const events = new AbortController();
   host.innerHTML = `<section class="auth-screen" aria-label="Set up infraternal">
     <section class="auth-card" id="setup-card" aria-labelledby="setup-title">
       <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
@@ -72,14 +74,14 @@ function mountSetup(
   const markMotion = (instant: boolean): void => {
     host.querySelector<HTMLElement>("#setup-card")!.toggleAttribute("data-no-motion", instant);
   };
-  host.addEventListener("pointerdown", () => markMotion(false), { capture: true });
+  host.addEventListener("pointerdown", () => markMotion(false), { capture: true, signal: events.signal });
   host.addEventListener("focusin", (event) => {
     if (focusingProgrammatically) return;
     const target = event.target;
     if (target instanceof HTMLElement && target.matches("input, button")) {
       markMotion(target.matches(":focus-visible"));
     }
-  });
+  }, { signal: events.signal });
 
   function ready(): boolean {
     if (index === 0) return state.token.trim().length >= 8;
@@ -266,52 +268,10 @@ function mountSetup(
   }
 
   function renderRecoveryStep(body: HTMLElement): void {
-    body.innerHTML = `<ol class="auth-words" id="recovery-words"></ol>
-      <div class="auth-actions"><button class="icon-action" id="copy-recovery" type="button" aria-label="Copy recovery key">${swapIcon(CLIPBOARD)}</button>
-        <button class="icon-action" id="download-recovery" type="button" aria-label="Download recovery key">${swapIcon(DOWNLOAD)}</button></div>
-      <p class="auth-recovery-message" id="recovery-message" role="status"></p>
-      <label class="auth-check"><input id="recovery-saved" type="checkbox" /><span>I stored them somewhere safe</span></label>`;
-    const list = body.querySelector<HTMLOListElement>("#recovery-words")!;
-    state.recoveryWords.forEach((word, i) => {
-      const item = document.createElement("li");
-      const number = document.createElement("span");
-      number.className = "auth-word-number";
-      number.textContent = String(i + 1);
-      const value = document.createElement("span");
-      value.textContent = word;
-      item.append(number, value);
-      list.append(item);
-    });
-    const serializedWords = state.recoveryWords.join(" ");
-    body.querySelector<HTMLButtonElement>("#copy-recovery")!.addEventListener("click", async (event) => {
-      const button = event.currentTarget as HTMLButtonElement;
-      markMotion(true); // the copy status can change pane height; only the icon feedback should animate
-      const copied = await copyFeedback(button, serializedWords, event.detail === 0);
-      body.querySelector<HTMLElement>("#recovery-message")!.textContent = copied
-        ? "Copied. Store the words somewhere private."
-        : "Copy is unavailable here. Select and copy the words.";
-      button.blur();
-    });
-    body.querySelector<HTMLButtonElement>("#download-recovery")!.addEventListener("click", (event) => {
-      const button = event.currentTarget as HTMLButtonElement;
-      confirmAction(button, "Downloaded", event.detail === 0);
-      const contents = state.recoveryWords.map((word, i) => `${i + 1}. ${word}`).join("\n") + "\n";
-      const url = URL.createObjectURL(new Blob([contents], { type: "text/plain;charset=utf-8" }));
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = "infraternal-recovery-key.txt";
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
-      button.blur();
-    });
-    const checkbox = body.querySelector<HTMLInputElement>("#recovery-saved")!;
-    checkbox.checked = state.saved;
-    springCheckbox(checkbox);
-    checkbox.addEventListener("change", () => {
-      markMotion(checkbox.matches(":focus-visible"));
-      state.saved = checkbox.checked;
+    recoveryWords(body, state.recoveryWords, state.saved, (saved) => {
+      state.saved = saved;
       updateReady();
-    });
+    }, markMotion);
   }
 
   async function createPasskey(): Promise<void> {
@@ -338,6 +298,14 @@ function mountSetup(
         renderFooter();
         await new Promise<void>((resolve) => { state.completeRecovery = resolve; });
       });
+      // The app host survives authentication; listeners must not retain setup secrets
+      // or address its removed card when terminal controls receive focus/touches.
+      events.abort();
+      paneObserver?.disconnect();
+      state.token = "";
+      state.recoveryWords = [];
+      delete state.finishRegistration;
+      delete state.completeRecovery;
       onAuthenticated(userId, true, displayName, state.instantCompletion);
     } catch (error: unknown) {
       waiting.done();
@@ -417,20 +385,32 @@ function mountSignIn(
       <p class="auth-lede">Your passkey is all you need.</p>
       <button class="auth-primary auth-login" id="login-passkey" type="button">${KEY_MARK}<span>Continue with passkey</span></button>
       <p class="auth-loading" id="login-loading" role="status" aria-live="polite"><span class="busy-count" hidden></span></p>
+      <button class="auth-text-button" id="use-recovery" type="button">use recovery key</button>
       <p class="auth-message" id="auth-error" role="alert"></p>
     </section>
   </section>`;
   host.querySelector<HTMLElement>("#auth-error")!.textContent = message;
+  const events = new AbortController();
   const button = host.querySelector<HTMLButtonElement>("#login-passkey")!;
+  host.querySelector<HTMLButtonElement>("#use-recovery")!.addEventListener("click", () => {
+    if (button.disabled) return;
+    void import("./recovery").then(({ mountRecovery }) => {
+      events.abort();
+      mountRecovery(host, () => mountSignIn(host, "", onAuthenticated), onAuthenticated);
+    });
+  });
   const card = host.querySelector<HTMLElement>(".auth-card")!;
-  host.addEventListener("pointerdown", () => card.removeAttribute("data-no-motion"), { capture: true });
+  host.addEventListener("pointerdown", () => card.removeAttribute("data-no-motion"), { capture: true, signal: events.signal });
   host.addEventListener("focusin", (event) => {
     if (event.target instanceof HTMLElement && event.target.matches("button")) {
       card.toggleAttribute("data-no-motion", event.target.matches(":focus-visible"));
     }
-  });
+  }, { signal: events.signal });
   button.addEventListener("click", (event) => {
-    void beginLogin(button, host, onAuthenticated, event.detail === 0);
+    void beginLogin(button, host, (...args) => {
+      events.abort();
+      onAuthenticated(...args);
+    }, event.detail === 0);
   });
 }
 

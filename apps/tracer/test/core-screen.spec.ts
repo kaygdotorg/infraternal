@@ -163,7 +163,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   await expect(page.locator(".tabs .tab-add")).toBeVisible();
   await expect(page.locator("#tree")).not.toContainText(/static example|name unavailable|not available yet|not connected/i);
   await expect(page.locator(".tabs")).toBeVisible();
-  expect(await page.locator(".pane-card").evaluate((element) => getComputedStyle(element).backdropFilter)).toBe("none");
+  expect(await page.locator("#terminal-host").locator("xpath=..").evaluate((element) => getComputedStyle(element).backdropFilter)).toBe("none");
   await expect(page.locator(".terminal-screen")).not.toContainText(/static example|STATIC|name unavailable|not available yet|not connected/i);
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"))).toContain("blob:");
   await expect.poll(() => backdropWorkers.length).toBe(1);
@@ -192,7 +192,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   const paletteActions = await palette.locator(".result").evaluateAll((results) =>
     results.map((result) => (result as HTMLButtonElement).dataset.action ?? ""));
   expect(paletteActions.sort()).toEqual([
-    "session:current", "host:current", "bg:mesh", "bg:none", ...Object.keys(THEMES).map((id) => `theme:${id}`),
+    "session:current", "host:current", "bg:mesh", "bg:none", "account:recovery", ...Object.keys(THEMES).map((id) => `theme:${id}`),
   ].sort());
   expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0s");
   const previousMesh = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"));

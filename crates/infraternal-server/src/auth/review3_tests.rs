@@ -256,7 +256,7 @@ async fn busy_revocation(mode: &str) {
                 .recovery_start(&f.user, f.words.clone(), NOW)
                 .await
                 .unwrap();
-            let replacement = f.auth.recovery_ready(&request, NOW + DAY).await.unwrap();
+            let replacement = f.auth.legacy_ready(&request, NOW + DAY).await.unwrap();
             finish_replacement(&f, &replacement, &Software::new(), NOW + DAY).await;
         }
         "expiry" => {
@@ -435,7 +435,7 @@ async fn review3_pending_routes_and_idle_expiry_recovery() {
         .recovery_start(&f.user, f.words.clone(), NOW)
         .await
         .unwrap();
-    let replacement = f.auth.recovery_ready(&request, NOW + DAY).await.unwrap();
+    let replacement = f.auth.legacy_ready(&request, NOW + DAY).await.unwrap();
     let second = Software::new();
     finish_replacement(&f, &replacement, &second, NOW + DAY).await;
     let start = Instant::now();

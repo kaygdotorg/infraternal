@@ -10,6 +10,8 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   if (!Number.isInteger(signinTrials) || signinTrials < 1 || signinTrials > 30) {
     throw new Error("INFRATERNAL_SIGNIN_SAMPLES must be an integer from 1 to 30");
   }
+  let pageErrors = 0;
+  page.on("pageerror", () => { pageErrors += 1; });
   await context.request.post("/__mock/reset");
   const authRequests: string[] = [];
   page.on("request", (request) => { if (new URL(request.url()).pathname.startsWith("/auth/")) authRequests.push(new URL(request.url()).pathname); });
@@ -50,6 +52,11 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   await page.getByRole("button", { name: "Open infraternal" }).click();
   await expect(page.getByText("TEST DOUBLE")).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+
+  // The persistent app host must release onboarding listeners before terminal interaction.
+  await page.locator("#capsule").click();
+  await page.keyboard.press("Escape");
+  expect(pageErrors).toBe(0);
 
   // Keep only the resident credential; identity must come from the authenticator.
   await context.clearCookies();
