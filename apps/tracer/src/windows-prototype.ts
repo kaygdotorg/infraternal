@@ -6,7 +6,6 @@ import {
   refreshTip,
   showTip,
   swapIcon,
-  TICK_PATH,
   type BranchSection,
   type HostPlatform,
   type StretchingCapsule,
@@ -149,6 +148,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   let capsule: StretchingCapsule | undefined;
   let liveMetricTimer = 0;
   let promotionTimer = 0;
+  let popoverCloseTimer = 0;
   let promotionState: PromotionState = "idle";
   let promotionActivity: string[] = [];
   let ending: EndTarget | undefined;
@@ -189,7 +189,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     header.dataset.hostId = host.id;
     const pill = document.createElement("button");
     pill.type = "button";
-    pill.className = "window-host-pill";
+    pill.className = "window-host-pill ui-pill ui-overlay-surface";
     pill.dataset.windowAction = "info";
     pill.setAttribute("aria-haspopup", "dialog");
     pill.setAttribute("aria-label", `Machine information for ${host.user}@${host.name}`);
@@ -256,7 +256,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   function actionButton(label: string, action: string, paths: string): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "window-header-action";
+    button.className = "window-header-action ui-icon-button";
     button.dataset.windowAction = action;
     button.setAttribute("aria-label", label);
     button.dataset.tip = label;
@@ -281,7 +281,8 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   active = views[0];
 
   const popover = document.createElement("section");
-  popover.className = "window-popover";
+  popover.className = "window-popover ui-overlay-surface";
+  popover.dataset.overlaySize = "large";
   popover.hidden = true;
   popover.setAttribute("role", "dialog");
   popover.setAttribute("aria-label", "Window details");
@@ -292,14 +293,14 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   shareLayer.setAttribute("aria-modal", "true");
   shareLayer.setAttribute("aria-label", "Share machine details");
   shareLayer.innerHTML = `<div class="window-share-scrim" data-share-close></div>
-    <section class="window-share-sheet">
-      <header class="window-share-heading"><h2>Share this machine</h2><button class="window-panel-close" type="button" data-share-close aria-label="Close share card">${icon(WINDOW_ICONS.close)}</button></header>
+    <section class="window-share-sheet ui-overlay-surface" data-overlay-size="large">
+      <header class="window-share-heading"><h2>Share this machine</h2><button class="window-panel-close ui-icon-button" type="button" data-share-close aria-label="Close share card">${icon(WINDOW_ICONS.close)}</button></header>
       <canvas class="window-share-card" width="720" height="720" aria-label="Machine share card"></canvas>
       <label class="window-share-ips"><input type="checkbox" data-share-ips> Include IP addresses</label>
       <div class="window-share-actions">
-        <button class="window-share-action" type="button" data-share-action="image" aria-label="Copy share card image">${swapIcon(WINDOW_ICONS.copy)}<span>Copy image</span></button>
-        <button class="window-share-action" type="button" data-share-action="text" aria-label="Copy machine details as text">${swapIcon(WINDOW_ICONS.copy)}<span>Copy text</span></button>
-        <button class="window-share-action" type="button" data-share-action="download" aria-label="Download share card image">${swapIcon(WINDOW_ICONS.download)}<span>Save image</span></button>
+        <button class="window-share-action ui-button" type="button" data-share-action="image" aria-label="Copy share card image">${swapIcon(WINDOW_ICONS.copy)}<span>Copy image</span></button>
+        <button class="window-share-action ui-button" type="button" data-share-action="text" aria-label="Copy machine details as text">${swapIcon(WINDOW_ICONS.copy)}<span>Copy text</span></button>
+        <button class="window-share-action ui-button" type="button" data-share-action="download" aria-label="Download share card image">${swapIcon(WINDOW_ICONS.download)}<span>Save image</span></button>
       </div>
       <p class="window-share-status" role="status" aria-live="polite"></p>
     </section>`;
@@ -309,9 +310,9 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   endLayer.setAttribute("role", "dialog");
   endLayer.setAttribute("aria-modal", "true");
   endLayer.setAttribute("aria-labelledby", "window-end-title");
-  endLayer.innerHTML = `<div class="window-end-scrim" data-end-close></div><section class="window-end-card">
+  endLayer.innerHTML = `<div class="window-end-scrim" data-end-close></div><section class="window-end-card ui-overlay-surface" data-overlay-size="large">
     <h2 id="window-end-title">End session?</h2><p class="window-end-message"></p>
-    <div class="window-end-actions"><button type="button" class="window-end-cancel" data-end-close>Keep session</button><button type="button" class="window-end-confirm">End session</button></div>
+    <div class="window-end-actions"><button type="button" class="window-end-cancel ui-button" data-end-close>Keep session</button><button type="button" class="window-end-confirm ui-button">End session</button></div>
   </section>`;
   document.body.append(popover, shareLayer, endLayer);
   const shareCanvas = $(shareLayer, "canvas") as HTMLCanvasElement;
@@ -481,8 +482,8 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     session: { title: "Session", icon: WINDOW_ICONS.session },
   };
   function factsMarkup(rows: Array<[string, string]>): string {
-    return rows.map(([label, value]) => `<div class="machine-fact">
-      <span class="machine-key">${escapeHtml(label)}</span><button type="button" class="machine-value" data-copy-value="${escapeHtml(value)}" aria-label="Copy ${escapeHtml(label)}: ${escapeHtml(value)}">
+    return rows.map(([label, value]) => `<div class="machine-fact ui-data-row">
+      <span class="machine-key ui-data-key">${escapeHtml(label)}</span><button type="button" class="machine-value ui-data-value" data-copy-value="${escapeHtml(value)}" aria-label="Copy ${escapeHtml(label)}: ${escapeHtml(value)}">
         <span class="machine-value-text">${escapeHtml(value)}</span>${copyFeedbackMark()}</button></div>`).join("");
   }
   function renderMachine(host: Host, more: boolean): string {
@@ -501,7 +502,7 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     return `<div class="machine-content" data-host-id="${escapeHtml(host.id)}">
       <div class="machine-heading">
         <div class="machine-logo">${hostIconMarkup(host.os, "os-mark machine-os-mark")}</div>
-        <button type="button" class="machine-value machine-os-title" data-copy-value="${escapeHtml(`${host.osName} ${host.version}`)}" aria-label="Copy operating system: ${escapeHtml(`${host.osName} ${host.version}`)}">
+        <button type="button" class="machine-value ui-data-value machine-os-title" data-copy-value="${escapeHtml(`${host.osName} ${host.version}`)}" aria-label="Copy operating system: ${escapeHtml(`${host.osName} ${host.version}`)}">
           <span class="machine-value-text">${escapeHtml(`${host.osName} ${host.version}`)}</span>${copyFeedbackMark()}</button>
       </div>
       <div class="machine-facts">${factsMarkup(rows)}</div>
@@ -509,18 +510,18 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
         ${metricMarkup("Memory", host.memory, "memory")}
         ${metricMarkup("Disk", host.disk, "disk")}
       </div>
-      <div class="machine-footer"><button type="button" class="machine-more" data-info-action="more" aria-expanded="${String(more)}">${more ? "Less" : "More"}</button><button type="button" class="machine-share" data-info-action="share">${icon(WINDOW_ICONS.share)}<span>Share</span></button></div>
+      <div class="machine-footer"><button type="button" class="machine-more ui-button" data-info-action="more" aria-expanded="${String(more)}">${more ? "Less" : "More"}</button><button type="button" class="machine-share ui-button" data-info-action="share">${icon(WINDOW_ICONS.share)}<span>Share</span></button></div>
       <p class="window-copy-announcement" role="status" aria-live="polite"></p>
     </div>`;
   }
   /** D103's row-end confirmation is a tick only; idle clipboard glyphs are deliberately absent. */
   function copyFeedbackMark(): string {
-    return `<span class="machine-copy-feedback" aria-hidden="true"><svg class="is-done" viewBox="0 0 24 24"><path pathLength="1" d="${TICK_PATH}"/></svg></span>`;
+    return swapIcon("");
   }
   function metricMarkup(label: string, amount: number, id: "memory" | "disk"): string {
     const visible = `${amount}% used`;
-    return `<div class="machine-metric" data-metric="${id}">
-      <span class="machine-key">${label}</span><button type="button" class="machine-value" data-copy-value="${visible}" aria-label="Copy ${label.toLowerCase()} use: ${visible}">
+    return `<div class="machine-metric ui-data-row" data-metric="${id}">
+      <span class="machine-key ui-data-key">${label}</span><button type="button" class="machine-value ui-data-value" data-copy-value="${visible}" aria-label="Copy ${label.toLowerCase()} use: ${visible}">
         <span class="machine-value-text">${visible}</span>${copyFeedbackMark()}</button>
       <div class="machine-metric-track" role="progressbar" aria-label="${label} used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${amount}"><span style="width:${amount}%"></span></div></div>`;
   }
@@ -584,22 +585,22 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
   }
 
   function managerMarkup(host: Host): string {
-    const rows = host.sessions.map((session) => `<article class="window-session-row" data-session-row data-session-id="${escapeHtml(session.id)}">
-      <button type="button" class="window-session-main" data-manager-action="attach" aria-label="Attach to ${escapeHtml(session.name)}">
+    const rows = host.sessions.map((session) => `<article class="window-session-row ui-list-row" data-session-row data-session-id="${escapeHtml(session.id)}">
+      <button type="button" class="window-session-main ui-button" data-manager-action="attach" aria-label="Attach to ${escapeHtml(session.name)}">
         <span class="window-session-topline"><span class="window-session-name">${escapeHtml(session.name)}${session.fresh ? '<i class="window-new-output" aria-label="New output"></i>' : ""}</span><span class="window-session-age">${escapeHtml(session.age)}</span></span>
         <span class="window-session-output">${escapeHtml(session.lastOutput)}</span>
         <span class="window-session-meta"><span>${session.viewers} ${session.viewers === 1 ? "viewer" : "viewers"}</span><span>${escapeHtml(session.size)}</span></span>
       </button>
       <div class="window-session-row-actions">
-        <button type="button" data-manager-action="rename" aria-label="Rename ${escapeHtml(session.name)}" data-tip="Rename session">${icon(WINDOW_ICONS.edit)}</button>
-        <button type="button" data-manager-action="beside" aria-label="Open ${escapeHtml(session.name)} beside" data-tip="Open beside">${icon(WINDOW_ICONS.vertical)}</button>
-        <button type="button" data-manager-action="end" aria-label="End ${escapeHtml(session.name)}" data-tip="End session">${icon(WINDOW_ICONS.end)}</button>
+        <button type="button" class="ui-icon-button" data-manager-action="rename" aria-label="Rename ${escapeHtml(session.name)}" data-tip="Rename session">${icon(WINDOW_ICONS.edit)}</button>
+        <button type="button" class="ui-icon-button" data-manager-action="beside" aria-label="Open ${escapeHtml(session.name)} beside" data-tip="Open beside">${icon(WINDOW_ICONS.vertical)}</button>
+        <button type="button" class="ui-icon-button" data-manager-action="end" aria-label="End ${escapeHtml(session.name)}" data-tip="End session">${icon(WINDOW_ICONS.end)}</button>
       </div>
-      <button type="button" class="window-session-swipe-end" data-manager-action="end" aria-label="End ${escapeHtml(session.name)}">End</button>
+      <button type="button" class="window-session-swipe-end ui-button" data-manager-action="end" aria-label="End ${escapeHtml(session.name)}">End</button>
     </article>`).join("");
-    return `<div class="window-manager-heading"><div><h2>${escapeHtml(host.name)}</h2><span>${host.sessions.length} sessions</span></div><button type="button" class="window-panel-close" data-manager-action="close" aria-label="Close session manager">${icon(WINDOW_ICONS.close)}</button></div>
+    return `<div class="window-manager-heading"><div><h2>${escapeHtml(host.name)}</h2><span>${host.sessions.length} sessions</span></div><button type="button" class="window-panel-close ui-icon-button" data-manager-action="close" aria-label="Close session manager">${icon(WINDOW_ICONS.close)}</button></div>
       <div class="window-session-list">${rows || '<p class="window-session-empty">No sessions on this host.</p>'}</div>
-      <button type="button" class="window-new-session" data-manager-action="new"><span class="window-new-session-plus">${icon('<path d="M12 5v14M5 12h14"/>')}</span><span><strong>New session</strong><small>Start a shell on ${escapeHtml(host.name)}</small></span></button>`;
+      <button type="button" class="window-new-session ui-button" data-manager-action="new"><span class="window-new-session-plus">${icon('<path d="M12 5v14M5 12h14"/>')}</span><span><strong>New session</strong><small>Start a shell on ${escapeHtml(host.name)}</small></span></button>`;
   }
   function openManager(anchor: HTMLElement, behavior: ScrollBehavior = "smooth"): void {
     const viewCard = anchor.closest<HTMLElement>(".window-card");
@@ -614,8 +615,11 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     showPopover(anchor, "manager", behavior === "auto");
   }
   function showPopover(anchor: HTMLElement, kind: "info" | "manager", instant = false): void {
+    window.clearTimeout(popoverCloseTimer);
+    popoverCloseTimer = 0;
     popover.hidden = false;
     popover.dataset.kind = kind;
+    popover.dataset.openKind = instant ? "keyboard" : "pointer";
     popover.dataset.open = String(instant);
     positionPopover();
     if (!instant) requestAnimationFrame(() => { if (!popover.hidden) popover.dataset.open = "true"; });
@@ -672,9 +676,8 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
       updateMetric("disk");
     }, 4800);
   }
-  function closePopover(restoreFocus: boolean): void {
+  function closePopover(restoreFocus: boolean, instant = false): void {
     if (popover.hidden) return;
-    popover.hidden = true;
     popover.dataset.open = "false";
     stopMetricUpdates();
     capsule?.dispose();
@@ -682,6 +685,11 @@ export async function mountWindowsPrototype(core: CoreScreen): Promise<{ dispose
     const anchor = activePopoverAnchor;
     activePopoverAnchor = null;
     if (restoreFocus) anchor?.focus({ preventScroll: true });
+    window.clearTimeout(popoverCloseTimer);
+    popoverCloseTimer = window.setTimeout(() => {
+      if (popover.dataset.open === "false") popover.hidden = true;
+      popoverCloseTimer = 0;
+    }, instant ? 0 : matchMedia("(prefers-reduced-motion: reduce)").matches ? 150 : 140);
   }
 
   function shareText(host: Host, includeIps: boolean): string {

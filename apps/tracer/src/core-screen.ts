@@ -73,23 +73,23 @@ const SCREEN = `
       </section>
     </div>
     <header class="top" aria-label="Terminal controls">
-      <button class="icon-btn" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false">${SVG.menu}</button>
-      <button class="capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
+      <button class="icon-btn ui-icon-button ui-overlay-surface" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false">${SVG.menu}</button>
+      <button class="capsule ui-pill ui-overlay-surface" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
         <span class="capsule-session">SSH shell</span><span class="capsule-rtt" id="rtt" aria-label="Round trip">··</span>
         <kbd class="capsule-kbd">⌘K</kbd>
       </button>
       <nav class="tabs" aria-label="Other sessions">
-        <button class="tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
+        <button class="tab tab-add ui-pill ui-overlay-surface" type="button" disabled aria-label="New session">${SVG.plus}</button>
       </nav>
     </header>
-    <aside class="sidebar" id="sidebar" aria-label="Hosts" hidden>
+    <aside class="sidebar ui-overlay-surface" id="sidebar" data-overlay-size="large" aria-label="Hosts" hidden>
       <div class="sidebar-head"><span class="sidebar-title">Hosts</span></div>
       <div id="tree"></div>
     </aside>
     <div class="palette-scrim" id="scrim" hidden></div>
-    <section class="palette" id="palette" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
+    <section class="palette ui-overlay-surface" id="palette" data-overlay-size="large" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
       <div class="palette-input">${SVG.search}<input id="palette-input" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
@@ -115,7 +115,7 @@ const SCREEN = `
     </aside>
     <p id="connection-status" class="connection-status" role="status">Starting terminal…</p>
     <span id="test-double-badge" class="test-double-badge" hidden>TEST DOUBLE</span>
-    <aside id="probe-panel" class="probe-panel" aria-label="Terminal latency probe" hidden>
+    <aside id="probe-panel" class="probe-panel ui-overlay-surface" data-overlay-size="large" aria-label="Terminal latency probe" hidden>
       <h2>Latency probe</h2><label for="probe-count">Synthetic keys</label>
       <input id="probe-count" type="number" min="1" max="5000" inputmode="numeric" />
       <div class="probe-actions"><button id="probe-run" type="button">Run probe</button><button id="probe-drop" type="button">Drop socket</button><button id="probe-copy" type="button">Copy results</button></div>
@@ -267,7 +267,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       }
       const result = document.createElement("button");
       result.type = "button";
-      result.className = "result";
+      result.className = "result ui-button ui-list-row";
       result.setAttribute("role", "option");
       result.setAttribute("aria-selected", String(index === selected));
       result.dataset.action = entry.action ?? "";
@@ -474,7 +474,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       for (const item of items) {
         const button = document.createElement("button");
         button.type = "button";
-        button.className = "tab";
+        button.className = "tab ui-pill ui-overlay-surface";
         button.dataset.tabId = item.id;
         button.setAttribute("aria-current", String(item.id === activeId));
         button.setAttribute("aria-label", `${item.host}, ${item.session}`);
@@ -489,7 +489,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       }
       const add = document.createElement("button");
       add.type = "button";
-      add.className = "tab tab-add";
+      add.className = "tab tab-add ui-pill ui-overlay-surface";
       add.disabled = true;
       add.setAttribute("aria-label", "New session");
       add.innerHTML = SVG.plus;
