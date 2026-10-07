@@ -96,7 +96,12 @@ review work; this job's authorization does not extend to modifying that host.
 
 ### Remaining product and device limits
 
-The frozen contract rejects a second start while recovery is active. The request
+The following page-loss limitation describes the original `18d5035` slice and
+is superseded by the [recovery audit fixes](recovery-audit.md) on #45. Modern
+recovery now resumes at the original server deadline and uses browser-only words,
+with an explicitly selected one-time migration for older keys.
+
+The original frozen contract rejects a second start while recovery is active. The request
 and words remain in memory, so reloading/closing the waiting page loses the
 capability; restarting does not reset or accelerate the deadline. The UI says to
 keep the page open and start denial points to the recovery page already open.
