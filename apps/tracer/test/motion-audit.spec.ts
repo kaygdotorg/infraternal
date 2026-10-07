@@ -460,18 +460,32 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   await page.mouse.move(0, 0);
   await page.waitForTimeout(150);
   await page.evaluate(() => { window.__motionAudit.label = "pointer-checkbox"; window.__motionAudit.startSample(); });
-  await page.evaluate(() => {
+  const pointerTickMid = await page.evaluate(async () => {
     const row = document.querySelector<HTMLElement>("label.auth-check")!;
+    const path = row.querySelector<SVGPathElement>(".tick path")!;
+    // Observe animation frames in the page: a CDP round trip plus a wall-clock
+    // sleep can miss the entire draw under CPU throttling or concurrent builds.
+    const midpoint = new Promise<{ inlineOffset: string; computedOffset: string; checked: boolean }>((resolve, reject) => {
+      let frame = 0;
+      const timeout = setTimeout(() => {
+        cancelAnimationFrame(frame);
+        reject(new Error("checkbox draw had no intermediate frame"));
+      }, 1_500);
+      const observe = () => {
+        const offset = Number.parseFloat(path.style.strokeDashoffset);
+        if (offset > 0 && offset < 1) {
+          clearTimeout(timeout);
+          resolve({ inlineOffset: path.style.strokeDashoffset, computedOffset: getComputedStyle(path).strokeDashoffset,
+            checked: document.querySelector<HTMLInputElement>("#recovery-saved")!.checked });
+        } else frame = requestAnimationFrame(observe);
+      };
+      frame = requestAnimationFrame(observe);
+    });
     row.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
     row.querySelector<HTMLInputElement>("#recovery-saved")!.click();
     row.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, button: 0, pointerType: "mouse" }));
+    return midpoint;
   });
-  await page.waitForTimeout(50);
-  const pointerTickMid = await page.locator("label.auth-check .tick path").evaluate((path) => ({
-    inlineOffset: (path as SVGPathElement).style.strokeDashoffset,
-    computedOffset: getComputedStyle(path).strokeDashoffset,
-    checked: document.querySelector<HTMLInputElement>("#recovery-saved")!.checked,
-  }));
   const pointerTickMidOffset = Number.parseFloat(pointerTickMid.inlineOffset);
   await expect.poll(() => page.locator("label.auth-check .tick path").evaluate((path) => Number.parseFloat((path as SVGPathElement).style.strokeDashoffset)), { timeout: 1_500 }).toBe(0);
   await page.waitForTimeout(250); // wait past spring overshoot so the final value is stable
