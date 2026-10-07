@@ -1,9 +1,8 @@
 /**
  * Glitch text (#21): two offset copies of the text, clipped to shifting horizontal
- * bands, over the original. Reimplemented from the behaviour of the sveltebits
- * glitch-text (its code is MIT + Commons Clause and is not copied).
+ * bands, over the original.
  *
- * Differences from the reference, on purpose:
+ * Design choices:
  * - Monochrome by default (white and grey offsets), matching the black-and-white
  *   onboarding; pass `colors` for the classic red/cyan.
  * - It plays for a moment and then settles into clean text (`settleAfter`), instead of

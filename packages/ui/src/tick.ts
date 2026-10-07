@@ -3,8 +3,7 @@
  * checkboxes, stepper steps, completed bootstrap steps, "copied" — so the same springy
  * interaction appears wherever a tick appears (code reuse rule).
  *
- * Reimplemented from the behaviour of the sveltebits spring-check (its code is MIT +
- * Commons Clause and is not copied): ONE spring value t (0 → 1, visual duration 0.2 s,
+ * ONE spring value t (0 → 1, visual duration 0.2 s,
  * bounce 0.2) drives everything:
  *   fill   scale(t)                       — grows from the centre
  *   box    scale(1 + 0.35 · max(0, t − 1)) — swells only on overshoot
