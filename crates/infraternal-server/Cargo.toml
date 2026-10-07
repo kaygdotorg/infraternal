@@ -33,6 +33,8 @@ url.workspace = true
 uuid.workspace = true
 webauthn-rs.workspace = true
 openssl.workspace = true
+infraternal-agent = { path = "../infraternal-agent", version = "0.1.0" }
+quinn.workspace = true
 
 [dev-dependencies]
 aes-gcm.workspace = true
