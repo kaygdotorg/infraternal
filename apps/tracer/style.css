@@ -141,6 +141,7 @@ button { color: inherit; }
   padding: 3px 6px;
   pointer-events: none;
   opacity: 0.85;
+  transition: opacity 120ms ease-out;
   border: 1px solid #695643;
   border-radius: 5px;
   background: #211b15;
@@ -148,6 +149,8 @@ button { color: inherit; }
   font-size: 10px;
   letter-spacing: 0.08em;
 }
+/* Translucent overlays would show the badge blurred through them; it steps aside instead. */
+.terminal-screen:has(.sidebar:not([hidden]), .palette:not([hidden])) .test-double-badge { opacity: 0; }
 .probe-panel {
   position: absolute;
   z-index: 5;
