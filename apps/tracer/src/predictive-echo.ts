@@ -1,5 +1,11 @@
 /** Keeps opt-in local keystroke predictions in a removable overlay above the terminal renderer. */
-import { mountTerminalTextOverlay, type TerminalTextOverlayPosition, type TerminalTextOverlay } from "../../../packages/ui/src/terminal-text-overlay";
+import {
+  mountTerminalTextOverlay,
+  type TerminalTextOverlayCursor,
+  type TerminalTextOverlayGlyph,
+  type TerminalTextOverlayPosition,
+  type TerminalTextOverlay,
+} from "../../../packages/ui/src/terminal-text-overlay";
 
 const RTT_THRESHOLD_MS = 60;
 const CONFIRMATION_FRAME_BUDGET_MS = 34;
@@ -12,6 +18,20 @@ const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme
 const encoder = new TextEncoder();
 
 interface PredictionGlyph {
+  text: string;
+  bytes: Uint8Array;
+  sequence: string;
+  cells: number;
+  x: number;
+  y: number;
+  cursorXAfter: number;
+  cursorYAfter: number;
+  wrapPendingAfter: boolean;
+  enteredAt: number;
+  reportedVisible: boolean;
+}
+
+interface PredictionGlyphInput {
   text: string;
   bytes: Uint8Array;
   sequence: string;
@@ -37,9 +57,12 @@ export interface PredictiveEchoOptions {
   optedIn: boolean;
   getPosition: () => PredictionPosition | undefined;
   onVisible: (sequence: string, at: number) => void;
+  setHostCursorHidden?: (hidden: boolean) => void;
+  onRendererPainted?: () => void;
 }
 
 type VtParserState = "text" | "escape" | "csi" | "string" | "string-escape";
+type VisibleOutput = { bytes: Uint8Array; backspaces: number };
 
 /** A single terminal session's bounded, client-only prediction state. */
 export class PredictiveEcho {
@@ -53,6 +76,9 @@ export class PredictiveEcho {
   private proof: Uint8Array | undefined;
   private mispredictions = 0;
   private waitingForOutput = false;
+  private pendingBackspaces = 0;
+  private backspaceEnteredAt = 0;
+  private backspaceEchoState: 0 | 1 | 2 = 0;
   private timeout = 0;
   private renderFrame = 0;
   private visibilityFrame = 0;
@@ -96,12 +122,30 @@ export class PredictiveEcho {
     else this.scheduleRender();
   }
 
-  /** Predicts bounded printable input; longer paste and editing keys wait for host output. */
+  /** Predicts bounded printable input and safe backspaces; paste and cursor moves await host output. */
   input(data: string, sequence: bigint, bytes: Uint8Array, terminalSafe: boolean): void {
     if (!this.options.optedIn) return;
     if (!terminalSafe) {
       this.clearPending("unsafe-screen");
       this.waitingForOutput = true;
+      return;
+    }
+
+    if (data === "\u007f" || data === "\b") {
+      const position = this.options.getPosition();
+      if (!this.isAboveThreshold() || this.waitingForOutput || this.muted || this.mispredictions >= 3
+        || !position || (!this.pending.length && position.x === position.columns - 1)
+        || !this.layout(position, this.pending, [], this.pendingBackspaces + 1)) {
+        this.clearPending("editing-key");
+        this.waitingForOutput = true;
+        this.proof = undefined;
+        return;
+      }
+      this.pendingBackspaces += 1;
+      this.backspaceEnteredAt ||= performance.now();
+      this.lastReason = "ready";
+      this.armTimeout();
+      this.renderNow(performance.now());
       return;
     }
 
@@ -114,6 +158,10 @@ export class PredictiveEcho {
     }
     if (this.waitingForOutput) {
       this.lastReason = "awaiting-output";
+      return;
+    }
+    if (this.pendingBackspaces > 0) {
+      this.lastReason = "awaiting-backspace-echo";
       return;
     }
     if (!this.isAboveThreshold()) {
@@ -132,27 +180,35 @@ export class PredictiveEcho {
       bytes: encoder.encode(text),
       cells: position ? this.cellWidth(text, position) : 0,
     }));
-    const cells = predicted.reduce((total, glyph) => total + glyph.cells, 0);
-    const usedCells = this.pending.reduce((total, glyph) => total + glyph.cells, 0);
-    if (!position || predicted.some((glyph) => glyph.cells < 1) || this.pending.length + predicted.length > MAX_PENDING_GLYPHS || position.x + usedCells + cells >= position.columns) {
+    if (!position || predicted.some((glyph) => glyph.cells < 1) || this.pending.length + predicted.length > MAX_PENDING_GLYPHS
+      || (!this.pending.length && position.x === position.columns - 1)) {
       this.clearPending("line-boundary");
       this.waitingForOutput = true;
       return;
     }
 
-    let byteOffset = 0;
     const enteredAt = performance.now();
-    for (const glyph of predicted) {
-      this.pending.push({
+    let byteOffset = 0;
+    const additions: PredictionGlyphInput[] = predicted.map((glyph) => {
+      const entry = {
         text: glyph.text,
         bytes: bytes.slice(byteOffset, byteOffset + glyph.bytes.byteLength),
         sequence: (sequence + BigInt(byteOffset)).toString(),
         cells: glyph.cells,
         enteredAt,
         reportedVisible: false,
-      });
+      };
       byteOffset += glyph.bytes.byteLength;
+      return entry;
+    });
+    const layout = this.layout(position, this.pending, additions, 0);
+    if (!layout) {
+      this.clearPending("line-boundary");
+      this.waitingForOutput = true;
+      return;
     }
+    const newGlyphs = layout.pendingGlyphs.slice(this.pending.length);
+    this.pending.push(...newGlyphs);
     this.lastReason = "ready";
     this.armTimeout();
     // Commit the bounded local glyph before sending its bytes; otherwise a loaded
@@ -164,12 +220,12 @@ export class PredictiveEcho {
   paintedOutput(bytes: Uint8Array): void {
     if (!this.options.optedIn || bytes.byteLength === 0) return;
     if (this.waitingForOutput) this.waitingForOutput = false;
-    if (!this.proof && this.pending.length === 0) return;
+    if (!this.proof && this.pending.length === 0 && this.pendingBackspaces === 0) return;
     const visible = this.visibleBytes(bytes);
-    if (visible.byteLength === 0) return;
+    if (visible.bytes.byteLength === 0 && visible.backspaces === 0) return;
 
     if (this.proof) {
-      if (startsWith(visible, this.proof)) {
+      if (startsWith(visible.bytes, this.proof)) {
         this.proof = undefined;
         this.muted = false;
         this.mispredictions = 0;
@@ -181,11 +237,11 @@ export class PredictiveEcho {
 
     let offset = 0;
     let matched = false;
-    while (offset < visible.byteLength && this.pending.length > 0) {
+    while (offset < visible.bytes.byteLength && this.pending.length > 0) {
       const first = this.pending[0];
       if (!first) break;
       const expected = first.bytes.subarray(this.matchedPrefixLength);
-      const available = visible.subarray(offset);
+      const available = visible.bytes.subarray(offset);
       const common = commonPrefixLength(available, expected);
       if (common === 0) {
         this.noteMisprediction();
@@ -194,7 +250,7 @@ export class PredictiveEcho {
       offset += common;
       this.matchedPrefixLength += common;
       if (this.matchedPrefixLength < first.bytes.byteLength) {
-        if (offset < visible.byteLength) this.noteMisprediction();
+        if (offset < visible.bytes.byteLength) this.noteMisprediction();
         break;
       }
       this.pending.shift();
@@ -203,7 +259,12 @@ export class PredictiveEcho {
       this.mispredictions = 0;
     }
 
-    if (matched || this.pending.length === 0) this.armTimeout();
+    if (visible.backspaces > 0 && this.pendingBackspaces > 0) {
+      this.pendingBackspaces = Math.max(0, this.pendingBackspaces - visible.backspaces);
+      if (this.pendingBackspaces === 0) this.backspaceEnteredAt = 0;
+    }
+
+    if (matched || this.pending.length === 0 || visible.backspaces > 0) this.armTimeout();
     this.renderNow(performance.now());
   }
 
@@ -223,7 +284,7 @@ export class PredictiveEcho {
 
   /** Drops stale overlay geometry while retaining waits caused by unconfirmed input. */
   layoutChanged(): void {
-    if (this.pending.length > 0) {
+    if (this.pending.length > 0 || this.pendingBackspaces > 0) {
       this.waitingForOutput = true;
       this.lastReason = "layout-change";
       this.hideOverlay();
@@ -246,6 +307,11 @@ export class PredictiveEcho {
 
   refresh(): void {
     this.scheduleRender();
+  }
+
+  /** Marks the canvas cursor fresh after Ghostty paints an output frame. */
+  rendererPainted(): void {
+    this.options.onRendererPainted?.();
   }
 
   dispose(): void {
@@ -273,6 +339,65 @@ export class PredictiveEcho {
     return Math.max(1, Math.min(2, Math.round(measured / position.cellWidth)));
   }
 
+  /** Builds cell positions from Ghostty metrics; the final-column cursor remains there until the next glyph wraps. */
+  private layout(
+    position: PredictionPosition,
+    existing: readonly PredictionGlyph[],
+    additions: readonly PredictionGlyphInput[],
+    backspaces: number,
+  ): { glyphs: TerminalTextOverlayGlyph[]; pendingGlyphs: PredictionGlyph[]; cursor: TerminalTextOverlayCursor } | undefined {
+    if (position.columns < 1 || position.rows < 1 || position.x < 0 || position.x >= position.columns
+      || position.y < 0 || position.y >= position.rows) return undefined;
+
+    let x = position.x;
+    let y = position.y;
+    let wrapPending = false;
+    const glyphs: TerminalTextOverlayGlyph[] = [];
+    const pendingGlyphs = [...existing];
+    for (const glyph of existing) {
+      glyphs.push({ text: glyph.text, x: glyph.x, y: glyph.y, cells: glyph.cells });
+    }
+    const last = existing[existing.length - 1];
+    if (last) {
+      x = last.cursorXAfter;
+      y = last.cursorYAfter;
+      wrapPending = last.wrapPendingAfter;
+    }
+
+    for (const glyph of additions) {
+      if (wrapPending || x + glyph.cells > position.columns) {
+        if (y + 1 >= position.rows) return undefined;
+        x = 0;
+        y += 1;
+        wrapPending = false;
+      }
+      if (glyph.cells < 1 || x + glyph.cells > position.columns) return undefined;
+      const cursorXAfter = x + glyph.cells === position.columns ? position.columns - 1 : x + glyph.cells;
+      const wrapPendingAfter = x + glyph.cells === position.columns;
+      glyphs.push({ text: glyph.text, x, y, cells: glyph.cells });
+      const placed: PredictionGlyph = {
+        ...glyph,
+        x,
+        y,
+        cursorXAfter,
+        cursorYAfter: y,
+        wrapPendingAfter,
+      };
+      // Keep the chosen cell geometry on each pending glyph so a partial echo
+      // at the right margin does not lose Ghostty's wrap-pending state.
+      pendingGlyphs.push(placed);
+      x = cursorXAfter;
+      wrapPending = wrapPendingAfter;
+    }
+
+    for (let index = 0; index < backspaces; index += 1) {
+      if (wrapPending) wrapPending = false;
+      if (x === 0) return undefined;
+      x -= 1;
+    }
+    return { glyphs, pendingGlyphs, cursor: { x, y } };
+  }
+
   private offerEchoProof(bytes: Uint8Array): void {
     if (this.proof) return;
     this.proof = bytes.slice();
@@ -283,11 +408,12 @@ export class PredictiveEcho {
     window.clearTimeout(this.timeout);
     this.timeout = 0;
     const first = this.pending[0];
-    if (!first || this.roundTripMs === undefined) return;
-    const deadline = first.enteredAt + this.roundTripMs + CONFIRMATION_FRAME_BUDGET_MS + PROFILE_JITTER_GUARD_MS;
+    const enteredAt = first?.enteredAt ?? (this.pendingBackspaces > 0 ? this.backspaceEnteredAt : 0);
+    if (!enteredAt || this.roundTripMs === undefined) return;
+    const deadline = enteredAt + this.roundTripMs + CONFIRMATION_FRAME_BUDGET_MS + PROFILE_JITTER_GUARD_MS;
     this.timeout = window.setTimeout(() => {
       this.timeout = 0;
-    if (this.pending.length === 0) return;
+      if (this.pending.length === 0 && this.pendingBackspaces === 0) return;
       this.muted = true;
       this.lastReason = "echo-timeout";
       this.clearPending("echo-timeout");
@@ -315,6 +441,9 @@ export class PredictiveEcho {
     this.timeout = 0;
     this.pending.length = 0;
     this.matchedPrefixLength = 0;
+    this.pendingBackspaces = 0;
+    this.backspaceEnteredAt = 0;
+    this.backspaceEchoState = 0;
     this.lastReason = reason;
     this.hideOverlay();
   }
@@ -324,6 +453,7 @@ export class PredictiveEcho {
     this.renderFrame = 0;
     this.cancelVisibilityFrame();
     this.overlay?.hide();
+    this.options.setHostCursorHidden?.(false);
   }
 
   private scheduleRender(): void {
@@ -338,22 +468,23 @@ export class PredictiveEcho {
     const overlay = this.overlay;
     if (!overlay) return;
     const position = this.options.getPosition();
-    if (!position || position.alternate || position.viewportY !== 0 || !position.visible || this.pending.length === 0 || !this.isEnabled()) {
+    if (!position || position.alternate || position.viewportY !== 0 || !position.visible
+      || (this.pending.length === 0 && this.pendingBackspaces === 0) || !this.isEnabled()) {
       this.hideOverlay();
       return;
     }
 
-    const cells = this.pending.reduce((total, glyph) => total + glyph.cells, 0);
-    if (position.x + cells >= position.columns || position.y < 0 || position.y >= position.rows) {
+    const layout = this.layout(position, this.pending, [], this.pendingBackspaces);
+    if (!layout) {
       this.clearPending("line-boundary");
       return;
     }
 
-    const content = this.pending.map((glyph) => glyph.text).join("");
-    if (!overlay.show(content, position)) {
+    if (!overlay.show(layout.glyphs, layout.cursor, position)) {
       this.cancelVisibilityFrame();
       return;
     }
+    this.options.setHostCursorHidden?.(true);
     if (!reportAtFrame) {
       this.scheduleVisibilityReport();
       return;
@@ -386,10 +517,16 @@ export class PredictiveEcho {
     this.render(at, false);
   }
 
-  private visibleBytes(bytes: Uint8Array): Uint8Array {
+  private visibleBytes(bytes: Uint8Array): VisibleOutput {
     const visible = new Uint8Array(Math.min(bytes.byteLength, MAX_VISIBLE_ECHO_BYTES));
     let length = 0;
     let scanned = 0;
+    let backspaces = 0;
+    const emit = (byte: number): void => {
+      if (byte < 0x20 || byte === 0x7f || length === visible.byteLength) return;
+      visible[length] = byte;
+      length += 1;
+    };
     for (const byte of bytes) {
       scanned += 1;
       if (scanned > MAX_VISIBLE_ECHO_BYTES) break;
@@ -406,13 +543,28 @@ export class PredictiveEcho {
         this.parserState = byte === 0x5c ? "text" : "string";
       } else if (byte === 0x1b) {
         this.parserState = "escape";
-      } else if (byte >= 0x20 && byte !== 0x7f) {
-        if (length === visible.byteLength) break;
-        visible[length] = byte;
-        length += 1;
+      } else if (this.backspaceEchoState === 0 && byte === 0x08) {
+        this.backspaceEchoState = 1;
+      } else if (this.backspaceEchoState === 1) {
+        if (byte === 0x20) this.backspaceEchoState = 2;
+        else {
+          this.backspaceEchoState = 0;
+          emit(byte);
+        }
+      } else if (this.backspaceEchoState === 2) {
+        if (byte === 0x08) {
+          this.backspaceEchoState = 0;
+          backspaces += 1;
+        } else {
+          this.backspaceEchoState = 0;
+          emit(0x20);
+          emit(byte);
+        }
+      } else {
+        emit(byte);
       }
     }
-    return visible.subarray(0, length);
+    return { bytes: visible.subarray(0, length), backspaces };
   }
 }
 
