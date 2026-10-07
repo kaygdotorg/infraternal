@@ -29,29 +29,43 @@ TLS verification bypass. Generate the Ed25519 host key locally as already
 specified by bootstrap §2 step 6. Validate the CSR signature and algorithm;
 construct identity, usages and validity on the server instead of copying
 CSR extensions. The private host key never leaves the host.
+Admission accepts one canonical PKCS10 DER request of at most 4096 bytes,
+with at most 16 constructed nesting levels, mandatory attributes and absent
+Ed25519 algorithm parameters. Accepted universal values are BOOLEAN, INTEGER,
+BIT STRING, OCTET STRING, NULL, OID, ENUMERATED, UTF8String, NumericString,
+PrintableString, IA5String, UniversalString, BMPString, SEQUENCE and SET.
+Validate each accepted value encoding and SET ordering. Refuse high tags,
+unsupported value types and context tags except the request's implicit
+attributes SET; ignored attributes do not justify accepting unchecked DER.
 
 ## CA, certificate lifetime and rotation
 
-The CA primitive is proposed separately with measurements on #78. The
-conservative proposal is Ed25519, matching the existing host-key contract;
-it is not an amendment to an owner decision. Reuse the existing crypto
-implementation before introducing a foundational library.
+The internal CA uses Ed25519, selected by the owner in D168 after the
+measurements on #78. Reuse the existing crypto implementation before
+introducing a foundational library.
 
 Server CA material belongs in `$XDG_DATA_HOME/infraternal/ca/`, defaulting to
 `~/.local/share/infraternal/ca/`, outside SQLite. Directories are 0700;
 encrypted key envelopes and certificates are 0600. Private material is
 encrypted with authenticated encryption and published by fsync/atomic rename.
-The unlock source remains an owner question on #78: a memory credential/FD
-or an owner unlock after restart. A plaintext adjacent unlock-key file does
-not provide independent protection. Missing or wrong unlock material fails
-closed, never regenerating a CA or admitting remote hosts.
+After a cold start the signing key stays locked until any administrator
+unlocks it with their passkey [168]. Keep one wrapped copy per administrator;
+granting or revoking the role rewraps it. A crash, host reboot, power loss,
+manual stop/start, restore or migration is a cold start. An automatic update
+or rollback hands unlocked material to the next process only in memory;
+failed handoff is a cold start. Never lock on a timer. A plaintext adjacent
+unlock-key file is prohibited. Missing or wrong unlock material fails closed
+without regenerating the CA. Locked state blocks enrollment and renewal only:
+the public issuers still verify existing connections and reconnects. Notify
+administrators while locked and again before certificates approach expiry.
 
 Certificates live seven days [133]. Store certificate fingerprints, host id,
 issuer generation, validity and revocation state in SQLite; never CA or host
 private keys. Renew over the authenticated live control stream, binding the
 CSR to the same host and existing public key. Publish the new identity on
-disk atomically without replacing terminal connections. Renew well before
-expiry using a single scheduled deadline, not a polling loop. CA rotation
+disk atomically without replacing terminal connections. Renew at half of the
+seven-day lifetime [168], using a single scheduled deadline, not a polling
+loop. A locked signer must not invalidate existing host authority. CA rotation
 retains the previous trusted generation until all of its valid certificates
 have expired or been replaced. Distribute new trust over the existing
 authenticated channel before changing issuer; never remove a still-needed
@@ -64,6 +78,15 @@ Managed hosts dial out only [64]. QUIC/quinn/BBR uses the server UDP port
 Both require certificate verification and current host authority. QUIC uses
 native streams and unwrapped wire frames; TCP uses the existing mux envelope.
 Control is stream zero. Preserve all v1 wire, shim and upgrade layouts.
+Remote peers advertise leg-B Hello caps bit 1 (`REMOTE_WRITER_BINDING`)
+before native terminal streams can be used. Leg-A `RESUME_NEXT` bit 0 is
+unchanged. Every server-opened native terminal stream begins with a raw
+`Call(call_id=0, action_id="transport.bind", input_json={"writer_id":N})`;
+N is the durable nonzero even server writer id, never the native stream id.
+The first binding frame is limited to 128 bytes and a five-second deadline;
+unknown JSON fields, reserved ids and wrong actions fail closed. Do not
+consume any following frame while validating the binding. Control Hello
+stays on native stream zero and precedes terminal admission.
 Use bounded admission/handshake/frame deadlines and TCP_NODELAY. Interactive
 commands must remain dispatchable during bulk output [130].
 
