@@ -11,3 +11,5 @@ bun install --cwd scripts/browser-auth --frozen-lockfile
 mkdir -p "${CARGO_TARGET_DIR}/auth-rework"
 bun build scripts/browser-auth/entropy.mjs --target browser --outfile "${CARGO_TARGET_DIR}/auth-rework/entropy.js"
 bun run scripts/browser-auth/check.mjs
+bun build scripts/browser-auth/recovery-entry.mjs --target browser --outfile "${CARGO_TARGET_DIR}/auth-rework/recovery.js"
+bun run scripts/browser-auth/recovery-check.mjs

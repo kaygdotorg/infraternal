@@ -331,3 +331,114 @@ async fn incomplete_rfc_message_still_loses_authority_on_revocation() {
     );
     server.abort();
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep full-capacity and cross-account events in one real fixture.
+async fn recovery_subscription_updates_every_signed_in_socket() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let now = crate::websocket::now_seconds().unwrap();
+    let other_user = uuid::Uuid::new_v4().to_string();
+    let other_session = random();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,'other',0,'unused','other','Other')")
+        .bind(&other_user).execute(&f.auth.pool).await.unwrap();
+    let mut tx = f.auth.pool.begin().await.unwrap();
+    insert_session(&mut tx, &other_session, &other_user, "other", now, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut devices = Vec::new();
+    // Exercise the full 16-device account cap plus an independently signed-in account.
+    for index in 0..17 {
+        let session = if index == 16 {
+            &other_session
+        } else {
+            &f.session
+        };
+        let cookie = format!("__Host-infraternal={session}");
+        let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+            .await
+            .unwrap();
+        assert_server_hello(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "recovery-notice",
+            },
+        )
+        .await;
+        read_welcome(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Subscribe {
+                sub_id: 45,
+                filter_json: br#"{"topic":"auth.recovery"}"#,
+            },
+        )
+        .await;
+        let bytes = read_client_frame(&mut socket).await;
+        let decoded = decode_muxed_frame(&bytes).unwrap();
+        let Frame::Event {
+            sub_id: 45,
+            event_json,
+        } = decoded.frame
+        else {
+            panic!("missing recovery snapshot")
+        };
+        assert!(serde_json::from_slice::<Value>(event_json).unwrap()["pending"].is_null());
+        devices.push(socket);
+    }
+    let mut other = devices.pop().unwrap();
+    let (_, ready) = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), now)
+        .await
+        .unwrap();
+    assert!(ready >= now + DAY);
+    for socket in &mut devices {
+        let bytes = read_client_frame(socket).await;
+        let Frame::Event {
+            sub_id: 45,
+            event_json,
+        } = decode_muxed_frame(&bytes).unwrap().frame
+        else {
+            panic!("missing start event")
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(event_json).unwrap()["pending"]["ready_at"],
+            ready
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), other.next())
+            .await
+            .is_err(),
+        "another account received recovery start state"
+    );
+    f.auth.recovery_cancel(&f.session, now).await.unwrap();
+    for socket in &mut devices {
+        let bytes = read_client_frame(socket).await;
+        let Frame::Event {
+            sub_id: 45,
+            event_json,
+        } = decode_muxed_frame(&bytes).unwrap().frame
+        else {
+            panic!("missing cancel event")
+        };
+        assert!(serde_json::from_slice::<Value>(event_json).unwrap()["pending"].is_null());
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), other.next())
+            .await
+            .is_err(),
+        "another account received recovery cancel state"
+    );
+    println!(
+        "Recovery events: 16/16 signed-in devices received start and cancel; other account received 0 events."
+    );
+    server.abort();
+}

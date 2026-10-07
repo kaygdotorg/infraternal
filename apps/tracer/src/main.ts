@@ -1,9 +1,10 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
-import { AuthError, checkStatus, checkSession } from "./auth";
+import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { mountOnboarding } from "./onboarding";
+import { recoveryUiEnabled } from "./recovery-ui";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
@@ -104,7 +105,7 @@ async function showAuthState(setupRequired: boolean): Promise<void> {
   const session = setupRequired ? undefined : await checkSession();
   if (session) {
     activeUserId = session.user_id;
-    await showTerminal(sessionHostname(session));
+    await showTerminal(session);
   } else {
     renderAuth(setupRequired);
   }
@@ -220,8 +221,11 @@ function stopBackdrop(instant = false): void {
   }, 260);
 }
 
-async function showTerminal(serverHostname?: string, instant = false): Promise<void> {
-  const hostName = serverHostname ?? sessionHostname(await checkSession());
+async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSession>>, instant = false): Promise<void> {
+  // Startup already authenticated this snapshot. Reuse it rather than adding
+  // another network round trip; the socket still checks authority on connection.
+  const identity = knownSession ?? await checkSession();
+  const hostName = sessionHostname(identity);
   if (!hostName) {
     renderUnavailable("The authenticated session did not include the server hostname.");
     return;
@@ -248,7 +252,12 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
     await document.fonts.load(uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"');
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
-    screen = mountCoreScreen(app, { hostName, mockMode, probeMode });
+    screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
+      ...(recoveryUiEnabled() ? {
+        onRecovery: () => { void showRecovery(); },
+        onCancelRecovery: async () => { await recoveryAuth.post("recovery-cancel", {}); await checkForegroundSession(); },
+      } : {}),
+    });
   } catch (error: unknown) {
     renderUnavailable(safeMessage(error));
     return;
@@ -258,6 +267,7 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   const probeHooks = performanceProbe?.hooks();
   // Session continuity across reloads (integration, #34): the tab remembers its
   // public session id so a reload reattaches to the same terminal.
+  screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
   const sessionKey = activeUserId ? `tracer.session.${activeUserId}` : undefined;
   const initialSessionId = query.get("session") ?? (sessionKey ? loadTabSession(sessionKey) : undefined);
   const hooks = {
@@ -292,6 +302,7 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
       onConnectionChange: (connected) => screen?.setConnection(connected),
       onScroll: (scrolled) => screen?.setScrolled(scrolled),
       onInputActivity: () => screen?.onInputActivity(),
+      onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen?.setRecoveryPending(readyAt); },
       traceMockServer: probeMode && mockMode,
       ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
       ...(initialSessionId ? { initialSessionId } : {}),
@@ -334,6 +345,23 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   }
 }
 
+/** Opens same-device recovery without revoking the live cookie that authorizes D113. */
+async function showRecovery(): Promise<void> {
+  if (!recoveryUiEnabled()) return;
+  const { mountRecovery } = await import("./recovery");
+  currentTerminal?.dispose(); currentTerminal = undefined;
+  coreScreen?.dispose(); coreScreen = undefined;
+  performanceProbe?.dispose(); performanceProbe = undefined;
+  delete window.__tracerTestDouble;
+  document.documentElement.removeAttribute("data-ui-font");
+  mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
+    activeUserId = userId;
+    saveBrowserId("tracer.user-id", userId);
+    showWelcome(displayName ?? "", instant);
+  });
+  scheduleBackdrop();
+}
+
 /** URL choices win and are remembered when storage is available; private mode still works. */
 function uiFontPreference(): UiFont {
   const requested = new URLSearchParams(location.search).get("ui");
@@ -360,11 +388,16 @@ function probeCount(value: string | null): number {
   return Number.isInteger(count) && count >= 1 && count <= 5_000 ? count : 500;
 }
 
+let recoveryNoticeGeneration = 0;
+
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
   checkingResume = true;
+  const noticeGeneration = recoveryNoticeGeneration;
   try {
     const session = await checkSession();
+    // A delayed HTTP snapshot must not overwrite a newer WebSocket state event.
+    if (session && noticeGeneration === recoveryNoticeGeneration) coreScreen?.setRecoveryPending(session.recovery_pending?.ready_at);
     if (!session) {
       currentTerminal?.dispose();
       currentTerminal = undefined;

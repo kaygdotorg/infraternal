@@ -26,7 +26,7 @@ impl Auth {
     /// Return only authenticated user's envelopes. No PRF output or DEK is accepted.
     pub async fn wraps(&self, token: &str, now: i64) -> Result<Value> {
         let session = self.unlock_session(token, now).await?;
-        let rows = sqlx::query("SELECT wraps.kind,wraps.key_id,wraps.blob,passkeys.prf_input FROM wraps LEFT JOIN passkeys ON passkeys.id=wraps.key_id AND passkeys.user_id=wraps.user_id WHERE wraps.user_id=?")
+        let rows = sqlx::query("SELECT wraps.kind,wraps.key_id,wraps.blob,passkeys.prf_input,users.recovery_wrap_version FROM wraps JOIN users ON users.id=wraps.user_id LEFT JOIN passkeys ON passkeys.id=wraps.key_id AND passkeys.user_id=wraps.user_id WHERE wraps.user_id=?")
             .bind(session.user_id)
             .fetch_all(&self.pool)
             .await?;
@@ -45,7 +45,7 @@ impl Auth {
                     None
                 };
                 Ok(json!({"kind":kind,"key_id":row.get::<String,_>("key_id"),
-                "wrap":serde_json::from_str::<Value>(row.get("blob"))?,"prf_input":input}))
+                "wrap":serde_json::from_str::<Value>(row.get("blob"))?,"prf_input":input,"recovery_wrap_version":row.get::<i64,_>("recovery_wrap_version")}))
             })
             .collect::<Result<_>>()?;
         Ok(json!(wraps))

@@ -58,6 +58,7 @@ struct Register {
     proof: Value,
     passkey_wrap: Wrap,
     recovery_wrap: Option<Wrap>,
+    recovery_verifier: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,8 +70,15 @@ struct Login {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Recovery {
-    user_id: String,
-    words: String,
+    user_id: Option<String>,
+    username: Option<String>,
+    verifier: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryRotation {
+    recovery_wrap: Wrap,
+    recovery_verifier: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -194,6 +202,17 @@ async fn dispatch(
     response
 }
 
+// Recovery authority needs a new sample after expensive verification and writer-lock waits.
+fn current_time() -> super::Result<i64> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Error::Invalid)?
+            .as_secs(),
+    )
+    .map_err(|_| Error::Invalid)
+}
+
 // Keep typed action dispatch together so capability and response rules can be reviewed in one place.
 #[allow(clippy::too_many_lines)]
 async fn execute(
@@ -202,13 +221,7 @@ async fn execute(
     headers: &HeaderMap,
     value: Value,
 ) -> super::Result<Response> {
-    let now = i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| Error::Invalid)?
-            .as_secs(),
-    )
-    .map_err(|_| Error::Invalid)?;
+    let now = current_time()?;
     ingress(auth, action, headers, now).await?;
     if action == "setup-check" {
         let b: Token = body(value)?;
@@ -223,7 +236,14 @@ async fn execute(
             auth.require_ceremony_binding(&b.ceremony, headers).await?;
             return session_response(
                 &auth
-                    .registration_finish(&b.ceremony, b.proof, b.passkey_wrap, b.recovery_wrap, now)
+                    .registration_finish_clock(
+                        &b.ceremony,
+                        b.proof,
+                        b.passkey_wrap,
+                        b.recovery_wrap,
+                        b.recovery_verifier,
+                        current_time,
+                    )
                     .await?,
             );
         }
@@ -263,9 +283,47 @@ async fn execute(
             ))
             .into_response());
         }
-        "recovery-start" => {
+        "recovery-start" | "recovery-resume" => {
             let b: Recovery = body(value)?;
-            json!({"token":auth.recovery_start(&b.user_id, b.words, now).await?,"delay_seconds":86400})
+            super::crypto::valid_secret(&b.verifier)?;
+            let credential = super::recovery::RecoveryCredential::Verifier(b.verifier);
+            let user = match (b.user_id, b.username) {
+                (Some(user), None) => user,
+                (None, Some(username)) => {
+                    sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username=?")
+                        .bind(username)
+                        .fetch_optional(&auth.pool)
+                        .await?
+                        .unwrap_or_default()
+                }
+                _ => return Err(Error::Invalid),
+            };
+            let (token, ready, delay) = auth
+                .recovery_start_clock(
+                    &user,
+                    credential,
+                    cookie(headers).ok(),
+                    current_time,
+                    action != "recovery-start",
+                )
+                .await?;
+            json!({"token":token,"delay_seconds":delay,"ready_at":ready})
+        }
+        "recovery-rotate" => {
+            let b: RecoveryRotation = body(value)?;
+            let user = headers
+                .get("x-infraternal-user")
+                .and_then(|value| value.to_str().ok())
+                .ok_or(Error::Denied)?;
+            auth.recovery_rotate_clock(
+                cookie(headers)?,
+                user,
+                b.recovery_wrap,
+                b.recovery_verifier,
+                current_time,
+            )
+            .await?;
+            json!({"ok":true})
         }
         "recovery-ready" => {
             let b: Token = body(value)?;
