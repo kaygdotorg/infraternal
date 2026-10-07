@@ -615,3 +615,26 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        until the modifier is tapped again to release it.
      - The armed and locked states are visually distinct and subtle, with an
        accessible state and a warm tooltip ("Control, locked").
+130. **Make typing and output feel instant on any link (L1–L3):**
+     - Predictive local echo switches on automatically when the measured
+       round trip is above about 60 ms, with safety rules: off in
+       full-screen apps and when echo is off, and backing off after a
+       misprediction.
+     - An optional **compose mode** (edit locally, send on Enter) is a
+       per-window toggle, also in ⌘K. On high-latency links the app
+       measures, offers to switch it on, and may switch it on automatically
+       where it clearly helps.
+     - Everything the client already holds (scrollback, search, selection,
+       copy, window switching, resize) never waits on the network.
+     - Interactive bytes get priority over bulk output; no Nagle-style
+       batching; paint on the next frame.
+     - **Tests run with high latency by default** (e.g. a 300 ms round trip
+       or more), so protocol and app slowness shows up in every run, and
+       input-to-photon regressions block merges.
+131. **Relays are one command:** the single infraternal binary is agent,
+     server and relay. `infraternal relay --udp-port <n>` (TCP/TLS fallback
+     port optional) runs a relay with no container image and no config
+     file, in the Tailscale spirit and unlike NetBird's container setups.
+     Trust with the server is established with a one-line join shown in the
+     UI (a one-time token); nothing else to configure. The CLI is designed
+     to be human-friendly throughout.
