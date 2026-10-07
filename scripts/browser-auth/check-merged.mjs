@@ -175,6 +175,7 @@ async function backendConnections() {
 // A controlled in-flight loss proves that resume replays input above the last Ack.
 const lostInputSeq = process.env.MERGED_DROP_INPUT_SEQ === undefined ? undefined : BigInt(process.env.MERGED_DROP_INPUT_SEQ);
 let lostInput = false;
+let lossArmed = false;
 var frontWs = new WebSocketServer({ noServer: true });
 tls.on("upgrade", (request, socket, head) => {
   frontWs.handleUpgrade(request, socket, head, (browserSocket) => {
@@ -203,7 +204,7 @@ tls.on("upgrade", (request, socket, head) => {
           entry.session = Buffer.from(f.sessionId).toString("hex");
         if (f.type === "Input") {
           entry.input.push({ seq: f.inSeq, bytes: f.bytes.slice() });
-          if (!lostInput && f.inSeq === lostInputSeq && f.bytes.length === 1) {
+          if (lossArmed && !lostInput && f.inSeq === lostInputSeq && f.bytes.length === 1) {
             lostInput = true;
             dropInput = true;
             console.log(`Injected one in-flight Input loss at sequence=${String(lostInputSeq)}; resume must replay it`);
@@ -545,6 +546,8 @@ try {
   // complete two-device acceptance; server throughput at 32 viewers is separate.
   await page.bringToFront();
   await reserveAuthReads(6);
+  // The probe has a fresh writer; isolate Input loss from the twenty viewer/reload references.
+  lossArmed = true;
   await page.goto(origin + "/?probe=1&n=500");
   await page.locator("#probe-run").waitFor();
   await wait(() => page.locator("#probe-run").isEnabled(), "probe not ready");
