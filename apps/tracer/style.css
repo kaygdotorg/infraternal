@@ -199,10 +199,6 @@ button { color: inherit; }
   .access { padding-right: 20px; padding-left: 20px; }
 }
 
-/* The first view fades in once it mounts, instead of a loading placeholder. */
-#app > * { animation: app-in 180ms cubic-bezier(0.23, 1, 0.32, 1) both; }
-@keyframes app-in { from { opacity: 0; transform: translateY(4px); } }
-@media (prefers-reduced-motion: reduce) { #app > * { animation: none; } }
 .boot-error { margin: 30vh auto 0; max-width: 28rem; padding: 0 20px; text-align: center; color: #9a9aa2; font: 450 15px/1.5 "Geist Mono", ui-monospace, monospace; }
 
 /* Core terminal shell: one padded pane card keeps the renderer ready for later splits. */
@@ -223,6 +219,7 @@ button { color: inherit; }
   isolation: isolate;
 }
 .backdrop { position: fixed; z-index: 0; inset: 0; pointer-events: none; opacity: 0; transition: opacity 240ms ease-out; }
+.terminal-screen[data-no-motion] .backdrop { transition: none; }
 .terminal-screen[data-bg="mesh"] .backdrop { opacity: 1; background: var(--mesh-image, none) center / cover no-repeat, var(--bg); }
 .terminal-screen[data-bg="mesh"] .backdrop::before {
   content: ""; position: absolute; inset: 0; pointer-events: none;
@@ -324,7 +321,7 @@ button { color: inherit; }
 .bm-list { --bm-x: 12px; list-style: none; margin: 0 0 4px; padding: 0 0 0 calc(var(--bm-x) + 8px + 12px + 6px); }
 .bm-branches { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; fill: none; stroke-linecap: round; }
 .bm-dim path { stroke: var(--bm-line); stroke-width: 1.5; }
-.bm-lit { stroke: var(--fg); stroke-width: 1.5; stroke-dasharray: 1; }
+.bm-lit { stroke: var(--fg); stroke-width: 1.5; stroke-dasharray: 1; stroke-dashoffset: 0; opacity: 0; }
 .bm-leaf { height: 34px; color: var(--fg-2); }
 .bm-leaf:disabled { opacity: 0.56; cursor: default; }
 .glyph { width: 18px; flex: none; color: var(--fg-3); font: 500 11px/1 var(--font-mono); }
@@ -415,10 +412,13 @@ button { color: inherit; }
 }
 @media (prefers-reduced-motion: reduce) {
   .sidebar { transition: opacity 180ms ease; }
+  .bm-fold { transition: none; }
   .sidebar[hidden] { transform: none; }
   .sidebar.instant, .palette[data-open-kind="keyboard"] { transition: none; }
   .keybar.is-away { transform: none; }
   .backdrop { transition: opacity 240ms ease; }
+  .icon-btn:active, .capsule:active, .tab:active:not(:disabled), .keybar button:active,
+  .bm-head:active:not(:disabled), .bm-leaf:active:not(:disabled) { transform: none; transition: none; }
 }
 :root[data-kb="open"] .keybar { bottom: 8px; }
 :root[data-kb="open"] .panes { bottom: 64px; }

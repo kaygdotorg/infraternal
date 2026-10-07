@@ -118,21 +118,25 @@ function renderUnavailable(message: string): void {
 }
 
 function renderAuth(setupRequired: boolean, message = ""): void {
-  mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName) => {
+  mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
     saveBrowserId("tracer.user-id", userId);
     activeUserId = userId;
-    if (firstSetup) showWelcome(welcomeName ?? "");
-    else void showTerminal();
+    if (firstSetup) showWelcome(welcomeName ?? "", instant);
+    else void showTerminal(undefined, instant);
   });
   scheduleBackdrop();
 }
 
-function showWelcome(displayName: string): void {
+function showWelcome(displayName: string, instant = false): void {
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
   app.innerHTML = `<section class="auth-screen auth-welcome" aria-live="polite"><div class="welcome-copy"><h1 id="welcome-title"></h1><p></p></div></section>`;
+  const screen = mustGet<HTMLElement>(".auth-welcome");
+  screen.toggleAttribute("data-no-motion", instant);
   mustGet<HTMLElement>(".welcome-copy p").textContent = `signed in as ${displayName}`;
-  welcomeEffect = glitchText(mustGet<HTMLElement>("#welcome-title"), "Welcome to infraternal", { speed: 0.5, settleAfter: 1600 });
+  const title = mustGet<HTMLElement>("#welcome-title");
+  if (instant) title.textContent = "Welcome to infraternal";
+  else welcomeEffect = glitchText(title, "Welcome to infraternal", { speed: 0.5, settleAfter: 1600 });
   welcomeTimer = window.setTimeout(() => {
     welcomeEffect?.destroy();
     welcomeEffect = undefined;
@@ -152,7 +156,6 @@ function startBackdrop(): void {
   canvas.style.transition = "none";
   backdrop?.destroy();
   backdrop = mountFaultyTerminal(canvas);
-  canvas.dataset.ready = "true";
 }
 
 function scheduleBackdrop(): void {
@@ -165,22 +168,30 @@ function scheduleBackdrop(): void {
   }, 600);
 }
 
-function stopBackdrop(): void {
+function stopBackdrop(instant = false): void {
   window.clearTimeout(backdropTimer);
   backdropTimer = 0;
   const canvas = document.querySelector<HTMLCanvasElement>("#faulty-field");
   if (!canvas) return;
-  canvas.style.transition = "opacity 400ms ease";
+  if (instant) {
+    canvas.style.transition = "none";
+    canvas.style.opacity = "0";
+    backdrop?.destroy();
+    backdrop = undefined;
+    canvas.remove();
+    return;
+  }
+  canvas.style.transition = "opacity 240ms ease-out";
   canvas.style.opacity = "0";
   const stopped = backdrop;
   backdrop = undefined;
   window.setTimeout(() => {
     stopped?.destroy();
     if (canvas === document.querySelector("#faulty-field")) canvas.remove();
-  }, 450);
+  }, 260);
 }
 
-async function showTerminal(serverHostname?: string): Promise<void> {
+async function showTerminal(serverHostname?: string, instant = false): Promise<void> {
   const hostName = serverHostname ?? sessionHostname(await checkSession());
   if (!hostName) {
     renderUnavailable("The authenticated session did not include the server hostname.");
@@ -189,7 +200,7 @@ async function showTerminal(serverHostname?: string): Promise<void> {
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
   welcomeEffect = undefined;
-  stopBackdrop();
+  stopBackdrop(instant);
   currentTerminal?.dispose();
   coreScreen?.dispose();
   performanceProbe?.dispose();

@@ -1,16 +1,15 @@
 /**
- * Copy feedback (DECISIONS 103): the copy button's own icon turns into a tick, holds,
- * and turns back. Nothing else on the page moves — the owner asked for minimal after a
- * region blur read as maximal. One shared primitive for every such action, so copy
- * and download confirm the same way (owner: download had no feedback).
+ * Copy feedback (DECISIONS 103): the icon turns into a tick, holds, and turns back;
+ * the morph uses opacity, scale, and a subtle blur, while the tick draws on behind it.
+ * One shared primitive for every such action, so copy and download confirm the same way
+ * (owner: download had no feedback).
  *
  * Motion lives in the shared styles.css (`.swap`): this file only toggles
  * `data-done`. Transitions, not keyframes, so a second tap mid-way retargets from the
- * current state instead of restarting. The swap is Emil Kowalski's icon pattern: both
- * glyphs share one cell; the outgoing one fades, shrinks and blurs slightly while the
- * incoming one does the reverse, so the eye reads one morph, not two icons. The tick
- * also draws on (stroke-dashoffset), using the same path as the tick primitive
- * (DECISIONS 99). Going back is quicker than coming in (asymmetric timing).
+ * current state instead of restarting. Both glyphs share one cell; the outgoing one
+ * fades, shrinks, and blurs while the incoming tick fades and grows, so the eye reads
+ * one morph. The tick uses the same path as the tick primitive (DECISIONS 99) and
+ * starts drawing 50 ms after the icon transition. Going back is quicker than coming in.
  */
 import { TICK_PATH } from "./tick";
 import { refreshTip } from "./tooltip";
@@ -32,26 +31,28 @@ export const swapIcon = (paths: string) => `<span class="swap"><svg class="is-id
 
 const timers = new WeakMap<HTMLElement, number>();
 
-/** Plays the icon → tick → icon swap on `button`; its label reads `doneLabel` meanwhile. */
-export function confirmAction(button: HTMLElement, doneLabel: string): void {
+/** Plays the icon → tick → icon swap; keyboard activations expose the result instantly. */
+export function confirmAction(button: HTMLElement, doneLabel: string, instant = false): void {
   const idle = button.dataset.idleLabel ??= button.getAttribute("aria-label") ?? "";
   clearTimeout(timers.get(button));
+  button.toggleAttribute("data-instant", instant);
   button.dataset.done = "";
   button.setAttribute("aria-label", doneLabel);
   refreshTip(button);
   timers.set(button, window.setTimeout(() => {
     delete button.dataset.done;
+    button.removeAttribute("data-instant");
     button.setAttribute("aria-label", idle);
     refreshTip(button);
   }, HOLD));
 }
 
-/** Copies `text` and confirms on `button` only after the clipboard accepts it. */
-export async function copyFeedback(button: HTMLElement, text: string): Promise<boolean> {
+/** Copies `text` and confirms after acceptance; keyboard activation is immediate. */
+export async function copyFeedback(button: HTMLElement, text: string, instant = false): Promise<boolean> {
   try {
     if (!navigator.clipboard) return false;
     await navigator.clipboard.writeText(text);
-    confirmAction(button, "Copied");
+    confirmAction(button, "Copied", instant);
     return true;
   } catch {
     return false;

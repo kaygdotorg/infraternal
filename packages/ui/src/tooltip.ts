@@ -4,8 +4,8 @@
  * of the sveltebits warm-tooltip; its code is MIT + Commons Clause and is not copied.
  *
  * Behaviour (one group per page, one floating surface):
- * - Cold: the first tooltip waits 400 ms, then pops from its trigger (opacity, scale
- *   0.94 → 1, blur 4px → 0, 160 ms strong ease-out, origin on the trigger's side).
+ * - Cold: the first tooltip waits 400 ms, then pops from its trigger (opacity and scale
+ *   0.94 → 1, 160 ms strong ease-out, origin on the trigger's side).
  * - Warm: while a tooltip is open, or within 300 ms of one closing, the next trigger
  *   shows its tooltip at once with no pop (Emil: skip delay and animation after the
  *   first). If the surface is still up, it travels to the new trigger and the label
@@ -104,7 +104,6 @@ function place(el: HTMLElement, animateMove: boolean): number {
   const prev = new DOMMatrix(getComputedStyle(pos).transform).m41;
   pos.style.transition = animateMove && !reduced() ? `transform ${TRAVEL}ms ${EASE}` : "none";
   pos.style.transform = `translate(${x}px, ${y}px)`;
-  surface.style.transition = animateMove && !reduced() ? `width ${TRAVEL}ms ${EASE}` : "none";
   surface.style.width = `${w}px`;
   arrow.style.transition = pos.style.transition;
   arrow.style.top = side === "top" ? `${h - 4}px` : "-4px";
@@ -138,8 +137,8 @@ function show(el: HTMLElement, how: "pop" | "instant") {
   pos.getAnimations().forEach((a) => a.cancel());
   pos.style.visibility = "visible";
   if (!shown && how === "pop") {
-    const from = reduced() ? { opacity: 0 } : { opacity: 0, transform: "scale(0.94)", filter: "blur(4px)" };
-    const to = reduced() ? { opacity: 1 } : { opacity: 1, transform: "scale(1)", filter: "blur(0px)" };
+    const from = reduced() ? { opacity: 0 } : { opacity: 0, transform: "scale(0.94)" };
+    const to = reduced() ? { opacity: 1 } : { opacity: 1, transform: "scale(1)" };
     surface.animate([from, to], { duration: POP, easing: EASE });
     arrow.animate([{ opacity: 0 }, { opacity: 1 }], { duration: POP, easing: EASE });
   }

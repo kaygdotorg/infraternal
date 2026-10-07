@@ -4,9 +4,9 @@
  * occasional horizontal glitch band. Black and white. Written from scratch after
  * the sveltebits.xyz effect, whose code cannot be copied (MIT + Commons Clause).
  *
- * Budget (DECISIONS 81): renders at half resolution, at most 30 fps, pauses when
- * the tab is hidden or the canvas leaves the screen, stops for good on `destroy()`
- * (after sign-in), and draws one still frame under prefers-reduced-motion.
+ * Budget (DECISION 96): renders continuously at half resolution and at most 30 fps
+ * while visible. It pauses when the tab is hidden or the canvas is offscreen, stops
+ * on `destroy()` after sign-in, and draws one still frame under prefers-reduced-motion.
  * Glyphs come from a small atlas drawn once with the terminal font, so the shader
  * samples a texture instead of building characters procedurally.
  */
@@ -62,11 +62,26 @@ void main() {
 }`;
 
 const GLYPHS = "01<>/\\|=+-_:;{}[]()#$%&*!?~^".split("");
+const FRAME_INTERVAL_MS = 1000 / 30;
 
 export interface FaultyTerminal { destroy(): void }
 
 export function mountFaultyTerminal(canvas: HTMLCanvasElement, font = '"Geist Mono", monospace'): FaultyTerminal | undefined {
-  const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, powerPreference: "low-power" });
+  return mountOffscreen(canvas, font) ?? mountOnMainThread(canvas, font);
+}
+
+export interface FaultyTerminalRenderer {
+  resize(width: number, height: number, dpr: number): void;
+  draw(now: number, reduced: boolean, mouse: PointerPosition, glow: PointerPosition): void;
+  destroy(): void;
+}
+
+interface PointerPosition { x: number; y: number }
+type ShaderCanvas = HTMLCanvasElement | OffscreenCanvas;
+
+/** Owns WebGL resources while the caller owns the frame schedule and input source. */
+function createRenderer(canvas: ShaderCanvas, font: string): FaultyTerminalRenderer | undefined {
+  const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, powerPreference: "low-power" }) as WebGL2RenderingContext | null;
   if (!gl) return undefined;
   const sh = (type: number, src: string) => { const s = gl.createShader(type)!; gl.shaderSource(s, src); gl.compileShader(s); return s; };
   const prog = gl.createProgram()!;
@@ -82,9 +97,12 @@ export function mountFaultyTerminal(canvas: HTMLCanvasElement, font = '"Geist Mo
 
   // Glyph atlas: one row, drawn once with the terminal font.
   const G = 48;
-  const atlas = document.createElement("canvas");
+  const atlas = typeof document === "undefined"
+    ? new OffscreenCanvas(G * GLYPHS.length, G)
+    : document.createElement("canvas");
   atlas.width = G * GLYPHS.length; atlas.height = G;
-  const ax = atlas.getContext("2d")!;
+  const ax = atlas.getContext("2d") as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+  if (!ax) return undefined;
   ax.fillStyle = "#000"; ax.fillRect(0, 0, atlas.width, atlas.height);
   ax.fillStyle = "#fff"; ax.font = `500 ${G * 0.78}px ${font}`; ax.textAlign = "center"; ax.textBaseline = "middle";
   GLYPHS.forEach((ch, i) => ax.fillText(ch, i * G + G / 2, G / 2 + 2));
@@ -97,32 +115,16 @@ export function mountFaultyTerminal(canvas: HTMLCanvasElement, font = '"Geist Mo
 
   const u = (n: string) => gl.getUniformLocation(prog, n);
   gl.uniform1f(u("glyphs"), GLYPHS.length);
-  // The glow follows a smoothed pointer, not the raw one: tying a decorative effect
-  // directly to the mouse feels artificial (review finding). Eased toward the target
-  // each drawn frame; snaps on enter/leave.
-  const mouse = { x: -1, y: -1 };
-  const glow = { x: -1, y: -1 };
-  const onMove = (e: PointerEvent) => { const r = canvas.getBoundingClientRect(); mouse.x = (e.clientX - r.left) / r.width; mouse.y = 1 - (e.clientY - r.top) / r.height; };
-  const onLeave = () => { mouse.x = mouse.y = -1; };
-  window.addEventListener("pointermove", onMove, { passive: true });
-  window.addEventListener("pointerleave", onLeave);
-
   const SCALE = 0.5; // half resolution: the effect is soft by nature
-  const resize = () => {
-    const w = Math.max(1, Math.round(canvas.clientWidth * devicePixelRatio * SCALE));
-    const h = Math.max(1, Math.round(canvas.clientHeight * devicePixelRatio * SCALE));
+  const start = performance.now();
+  const resize = (width: number, height: number, dpr: number): void => {
+    const w = Math.max(1, Math.round(width * dpr * SCALE));
+    const h = Math.max(1, Math.round(height * dpr * SCALE));
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); }
     gl.uniform2f(u("res"), w, h);
-    gl.uniform1f(u("cell"), Math.max(6, 14 * devicePixelRatio * SCALE));
+    gl.uniform1f(u("cell"), Math.max(6, 14 * dpr * SCALE));
   };
-  const ro = new ResizeObserver(resize);
-  ro.observe(canvas);
-  resize();
-
-  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const start = performance.now();
-  let raf = 0, last = 0, visible = true, alive = true;
-  const draw = (now: number) => {
+  const draw = (now: number, reduced: boolean, mouse: PointerPosition, glow: PointerPosition): void => {
     const s = (now - start) / 1000;
     gl.uniform1f(u("t"), reduced ? 7.0 : s);
     gl.uniform1f(u("intro"), reduced ? 1 : Math.min(1, s / 1.2));
@@ -132,24 +134,193 @@ export function mountFaultyTerminal(canvas: HTMLCanvasElement, font = '"Geist Mo
     gl.uniform2f(u("mouse"), glow.x, glow.y);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   };
-  const loop = (now: number) => {
-    if (!alive || !visible || document.hidden) { raf = 0; return; }
-    if (now - last >= 1000 / 30) { last = now; draw(now); } // cap at 30 fps
-    raf = requestAnimationFrame(loop);
+  return {
+    resize,
+    draw,
+    destroy() { gl.getExtension("WEBGL_lose_context")?.loseContext(); },
   };
-  const wake = () => { if (alive && visible && !document.hidden && !reduced && !raf) raf = requestAnimationFrame(loop); };
-  const io = new IntersectionObserver(([e]) => { visible = !!e?.isIntersecting; wake(); });
+}
+
+/** Creates the worker-safe shader renderer without attaching browser input or frame loops. */
+export function createFaultyTerminalRenderer(canvas: OffscreenCanvas, font: string): FaultyTerminalRenderer | undefined {
+  return createRenderer(canvas, font);
+}
+
+/** Keeps fallback WebGL work at the approved cadence when canvas workers are unavailable. */
+function mountOnMainThread(canvas: HTMLCanvasElement, font: string): FaultyTerminal | undefined {
+  const candidate = createRenderer(canvas, font);
+  if (!candidate) return undefined;
+  // Scheduled callbacks use one validated renderer for their entire lifetime.
+  const renderer: FaultyTerminalRenderer = candidate;
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const mouse = { x: -1, y: -1 }, glow = { x: -1, y: -1 };
+  const onMove = (event: PointerEvent) => {
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = (event.clientX - rect.left) / rect.width;
+    mouse.y = 1 - (event.clientY - rect.top) / rect.height;
+    wake();
+  };
+  const onLeave = () => { mouse.x = mouse.y = -1; wake(); };
+  const onPointerDown = () => wake();
+  window.addEventListener("pointermove", onMove, { passive: true });
+  window.addEventListener("pointerleave", onLeave);
+  window.addEventListener("pointerdown", onPointerDown, { passive: true });
+
+  let ready = false, frameTimer: number | undefined, width = -1, height = -1, dpr = -1;
+  let stillDirty = true, visible = true, alive = true;
+  const resize = (): void => {
+    const nextWidth = canvas.clientWidth, nextHeight = canvas.clientHeight, nextDpr = devicePixelRatio;
+    if (width === nextWidth && height === nextHeight && dpr === nextDpr) return;
+    width = nextWidth; height = nextHeight; dpr = nextDpr;
+    renderer.resize(width, height, dpr);
+    stillDirty = true;
+    if (ready) { if (reduced) drawStill(); else wake(); }
+  };
+  const ro = new ResizeObserver(resize);
+  ro.observe(canvas);
+  resize();
+
+  function pause(): void {
+    if (frameTimer !== undefined) window.clearTimeout(frameTimer);
+    frameTimer = undefined;
+  }
+  function drawStill(): void {
+    if (!alive || !visible || document.hidden || !reduced || !stillDirty) return;
+    renderer.draw(performance.now(), true, mouse, glow);
+    stillDirty = false;
+  }
+  function drawFrame(): void {
+    frameTimer = undefined;
+    if (!alive || !visible || document.hidden || reduced) return;
+    renderer.draw(performance.now(), false, mouse, glow);
+    // Schedule after drawing so slow frames can only lower, never exceed, the 30 fps cap.
+    frameTimer = window.setTimeout(drawFrame, FRAME_INTERVAL_MS);
+  }
+  function wake(): void {
+    if (!alive || !visible || document.hidden) return;
+    if (reduced) drawStill();
+    else if (frameTimer === undefined) drawFrame();
+  }
+  const onVisibilityChange = (): void => { if (document.hidden) pause(); else { drawStill(); wake(); } };
+  const io = new IntersectionObserver(([entry]) => {
+    visible = !!entry?.isIntersecting;
+    if (visible) { drawStill(); wake(); } else pause();
+  });
   io.observe(canvas);
-  document.addEventListener("visibilitychange", wake);
-  if (reduced) draw(performance.now()); else wake();
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  ready = true;
+  canvas.dataset.ready = "true";
+  wake();
 
   return {
     destroy() {
-      alive = false; cancelAnimationFrame(raf);
+      alive = false; pause();
       ro.disconnect(); io.disconnect();
       window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerleave", onLeave);
-      document.removeEventListener("visibilitychange", wake);
-      gl.getExtension("WEBGL_lose_context")?.loseContext(); // free the GPU context
+      window.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      renderer.destroy();
+    },
+  };
+}
+
+/** Compiles and draws the auth field in a worker, leaving first paint responsive. */
+function mountOffscreen(canvas: HTMLCanvasElement, font: string): FaultyTerminal | undefined {
+  if (typeof Worker === "undefined" || typeof OffscreenCanvas === "undefined" || !canvas.transferControlToOffscreen) return undefined;
+  let worker: Worker;
+  let offscreen: OffscreenCanvas;
+  try {
+    worker = new Worker(new URL("./faulty-terminal.worker.js", document.baseURI), { type: "module" });
+  } catch {
+    return undefined;
+  }
+  try {
+    offscreen = canvas.transferControlToOffscreen();
+  } catch {
+    worker.terminate();
+    return undefined;
+  }
+
+  canvas.dataset.ready = "false";
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let intersecting = true, pageVisible = !document.hidden, alive = true, failedOver = false;
+  let fallback: FaultyTerminal | undefined;
+  const post = (message: object): void => {
+    if (!alive || failedOver) return;
+    try { worker.postMessage(message); }
+    catch { onWorkerError(); }
+  };
+  const size = (): void => post({
+    type: "resize",
+    width: canvas.clientWidth,
+    height: canvas.clientHeight,
+    dpr: devicePixelRatio,
+  });
+  const setVisibility = (): void => post({ type: "visibility", visible: intersecting && pageVisible });
+  const onMove = (event: PointerEvent): void => {
+    const rect = canvas.getBoundingClientRect();
+    post({ type: "pointer", x: (event.clientX - rect.left) / rect.width, y: 1 - (event.clientY - rect.top) / rect.height });
+  };
+  const onLeave = (): void => post({ type: "pointer", x: -1, y: -1 });
+  const onPointerDown = (): void => post({ type: "wake" });
+  const onVisibilityChange = (): void => { pageVisible = !document.hidden; setVisibility(); };
+  const resizeObserver = new ResizeObserver(size);
+  const intersectionObserver = new IntersectionObserver(([entry]) => {
+    intersecting = !!entry?.isIntersecting;
+    setVisibility();
+  });
+  const detach = (): void => {
+    resizeObserver.disconnect(); intersectionObserver.disconnect();
+    window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerleave", onLeave);
+    window.removeEventListener("pointerdown", onPointerDown);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    worker.removeEventListener("error", onWorkerError);
+  };
+  const onWorkerError = (): void => {
+    if (!alive || failedOver) return;
+    failedOver = true;
+    detach();
+    worker.terminate();
+    const replacement = canvas.cloneNode(false) as HTMLCanvasElement;
+    replacement.dataset.ready = "false";
+    canvas.replaceWith(replacement);
+    fallback = mountOnMainThread(replacement, font);
+  };
+  worker.addEventListener("message", (event: MessageEvent<{ type: string; ok?: boolean }>) => {
+    if (event.data.type === "ready" && event.data.ok) canvas.dataset.ready = "true";
+    else if (event.data.type === "ready") onWorkerError();
+  });
+  worker.addEventListener("error", onWorkerError, { once: true });
+  resizeObserver.observe(canvas);
+  intersectionObserver.observe(canvas);
+  window.addEventListener("pointermove", onMove, { passive: true });
+  window.addEventListener("pointerleave", onLeave);
+  window.addEventListener("pointerdown", onPointerDown, { passive: true });
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  try {
+    worker.postMessage({
+      type: "start",
+      canvas: offscreen,
+      font,
+      width: canvas.clientWidth,
+      height: canvas.clientHeight,
+      dpr: devicePixelRatio,
+      reduced,
+      visible: intersecting && pageVisible,
+    }, [offscreen]);
+  } catch {
+    onWorkerError();
+  }
+
+  return {
+    destroy() {
+      if (!alive) return;
+      alive = false; detach();
+      if (!failedOver) {
+        try { worker.postMessage({ type: "destroy" }); } catch { /* The worker may have exited. */ }
+        worker.terminate();
+      }
+      fallback?.destroy();
     },
   };
 }

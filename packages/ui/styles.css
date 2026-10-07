@@ -2,7 +2,7 @@
 .countup { font-variant-numeric: tabular-nums; }
 .busy-count { font: 500 13px/1 "Geist Mono", ui-monospace, monospace; color: rgb(0 0 0 / 0.6); }
 
-/* One spring drives the fill, tick draw and label treatment. */
+/* One spring drives the fill, tick draw-on and label treatment. */
 .tick { position: relative; display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px;
   border-radius: 6px; box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.35); color: #000; will-change: transform; }
 .tick-fill { position: absolute; inset: 0; border-radius: inherit; background: var(--fg); transform: scale(0); will-change: transform; }
@@ -37,7 +37,9 @@
 [data-done] .is-idle { opacity: 0; transform: scale(0.6); filter: blur(2px); }
 [data-done] .is-done { opacity: 1; transform: none; filter: none; }
 [data-done] .is-done path { stroke-dashoffset: 0; transition: stroke-dashoffset 260ms var(--ease) 50ms; }
+[data-instant] .swap svg, [data-instant] .is-done path { transition: none; }
 @media (prefers-reduced-motion: reduce) {
+  .check[data-pressed] { transform: none; transition: none; }
   .swap svg, [data-done] .is-idle, .swap .is-done, [data-done] .is-done { transform: none; filter: none; }
   .swap .is-done path { stroke-dashoffset: 0; transition: none; }
 }

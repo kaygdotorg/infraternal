@@ -85,10 +85,12 @@ test("a wrapped-ring Snapshot paints echoes and keeps resize, scrollback, and th
   expect(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.scrollbackRows ?? 0)).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain(SNAPSHOT_MARKER);
 
+  const beforeThemePixels = await canvasFingerprint(page);
   await page.keyboard.press("Control+k");
   await page.locator("#palette-input").fill("dracula");
   await page.keyboard.press("Enter");
   await expect(page.locator("#terminal-screen")).toHaveAttribute("data-theme", "dracula");
+  await expect.poll(() => canvasFingerprint(page)).not.toBe(beforeThemePixels);
   expect(await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain(SNAPSHOT_MARKER);
   await page.locator("#terminal-host").click();
   await page.mouse.wheel(0, 10_000);
