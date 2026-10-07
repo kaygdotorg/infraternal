@@ -14,5 +14,10 @@ uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+openssl.workspace = true
+tokio-openssl.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+
 [lints]
 workspace = true
