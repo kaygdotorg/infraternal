@@ -19,6 +19,7 @@ interface AuthSession {
   display_name: string;
   device: string;
   fresh: number;
+  passkey_provider?: string | null;
 }
 
 interface Wrap {

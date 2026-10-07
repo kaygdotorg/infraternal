@@ -160,20 +160,14 @@ impl Auth {
                     .await?;
             }
         }
-        let key_id = store_passkey(&mut tx, &registration.user, &key, aaguid.as_deref()).await?;
-        put_wrap(
-            &mut tx,
-            &registration.user,
-            "passkey",
-            &key_id,
-            &passkey_wrap,
-        )
-        .await?;
+        let user = &registration.user;
+        let key_id = store_passkey(&mut tx, user, &key, aaguid.as_deref()).await?;
+        put_wrap(&mut tx, user, "passkey", &key_id, &passkey_wrap).await?;
         if let Some(w) = recovery_wrap {
-            put_wrap(&mut tx, &registration.user, "recovery", "recovery", &w).await?;
+            put_wrap(&mut tx, user, "recovery", "recovery", &w).await?;
         }
         let token = random();
-        insert_session(&mut tx, &token, &registration.user, "enrollment", now).await?;
+        insert_session(&mut tx, &token, user, "enrollment", now, Some(&key_id)).await?;
         tx.commit().await?;
         if matches!(registration.authority, Authority::Recovery(_)) {
             self.revocations.send_replace(());
@@ -402,7 +396,15 @@ impl Auth {
             .execute(&mut *tx)
             .await?;
         let token = random();
-        insert_session(&mut tx, &token, &user, device, now).await?;
+        insert_session(
+            &mut tx,
+            &token,
+            &user,
+            device,
+            now,
+            Some(&row.get::<String, _>("id")),
+        )
+        .await?;
         if pending_unlock {
             sqlx::query("UPDATE sessions SET unlocked=0,expires=? WHERE token_hash=?")
                 .bind(now + CEREMONY)

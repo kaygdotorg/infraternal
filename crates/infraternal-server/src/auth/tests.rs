@@ -891,7 +891,7 @@ async fn recovery_expiry_revocation_and_cross_user_isolation() {
         .unwrap();
     let mut tx = f.auth.pool.begin().await.unwrap();
     let other_token = random();
-    insert_session(&mut tx, &other_token, &other, "other device", NOW)
+    insert_session(&mut tx, &other_token, &other, "other device", NOW, None)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -2476,7 +2476,6 @@ mod socket_tests;
 mod review3_tests;
 
 #[tokio::test]
-#[ignore = "regression specified before the additive provider implementation"]
 async fn registration_aaguid_survives_none_attestation_and_binds_session_provider() {
     let _guard = SERIAL.lock().await;
     let (auth, token) = empty().await;
@@ -2555,7 +2554,6 @@ async fn registration_aaguid_survives_none_attestation_and_binds_session_provide
 }
 
 #[tokio::test]
-#[ignore = "regression specified before the additive provider implementation"]
 async fn redacted_unknown_and_failed_registrations_do_not_claim_a_provider() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
@@ -2659,7 +2657,8 @@ async fn provider_session_latency_at_50_devices() {
     }
     samples.sort_unstable();
     println!(
-        "PROVIDER_SESSION_50_DEVICES samples={} p50_ns={} p99_ns={}",
+        "PROVIDER_SESSION_50_DEVICES session_bytes={} samples={} p50_ns={} p99_ns={}",
+        std::mem::size_of::<Session>(),
         samples.len(),
         samples[500],
         samples[990]
@@ -2697,4 +2696,28 @@ fn aaguid_projection_rejects_malformed_cbor_corpus() {
         .into();
         assert!(webauthn::registration_aaguid(&proof).is_err());
     }
+}
+
+#[test]
+fn provider_labels_cover_the_cited_registry_without_guessing() {
+    for (id, name) in [
+        ("bada5566-a7aa-401f-bd96-45619a55120d", "1Password"),
+        ("dd4ec289-e01d-41c9-bb89-70fa845d4bf2", "iCloud Keychain"),
+        (
+            "ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4",
+            "Google Password Manager",
+        ),
+        ("d548826e-79b4-db40-a3d8-11116f7e8349", "Bitwarden"),
+        ("08987058-cadc-4b81-b6e1-30de50dcbe96", "Windows Hello"),
+        ("9ddd1817-af5a-4672-a2b9-3e3dd95000a9", "Windows Hello"),
+        ("6028b017-b1d4-4c02-b4b3-afcdafc96bb2", "Windows Hello"),
+    ] {
+        assert_eq!(sessions::provider_name(Some(id)), Some(name));
+    }
+    assert_eq!(sessions::provider_name(None), None);
+    assert_eq!(
+        sessions::provider_name(Some("00000000-0000-0000-0000-000000000000")),
+        None
+    );
+    assert_eq!(sessions::provider_name(Some("unknown")), None);
 }

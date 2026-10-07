@@ -1,4 +1,4 @@
-//! Sliding sessions, fresh-tap policy and transaction authority rechecks [28].
+//! Sliding sessions, fresh-tap policy, provider diagnostics and transaction authority rechecks [28].
 use super::{Auth, Error, FRESH, Result, Row, SESSION, Serialize, hash};
 
 /// Authenticated browser device, including the last successful passkey verification.
@@ -9,6 +9,7 @@ pub struct Session {
     pub display_name: String,
     pub device: String,
     pub fresh: i64,
+    pub passkey_provider: Option<&'static str>,
 }
 impl Session {
     pub(super) fn require_fresh(&self, now: i64) -> Result<()> {
@@ -33,7 +34,9 @@ impl Auth {
     }
 
     async fn read_session(&self, token: &str, now: i64, pending: bool) -> Result<Session> {
-        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name")
+        // Keep the diagnostic lookup in the existing write/returning query. The
+        // indexed credential ID and user binding identify this session's passkey.
+        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name,(SELECT aaguid FROM passkeys WHERE id=sessions.passkey_id AND user_id=sessions.user_id) AS aaguid")
             .bind(now + SESSION).bind(hash(token)).bind(now).bind(pending).fetch_optional(&self.pool).await?;
         let Some(row) = row else {
             // Successful sessions keep the original single write; cleanup runs only on denial.
@@ -50,6 +53,7 @@ impl Auth {
             display_name: row.get("display_name"),
             device: row.get("device"),
             fresh: row.get("fresh"),
+            passkey_provider: provider_name(row.get::<Option<&str>, _>("aaguid")),
         })
     }
 
@@ -142,13 +146,15 @@ pub(super) async fn insert_session(
     user: &str,
     device: &str,
     now: i64,
+    passkey_id: Option<&str>,
 ) -> Result<()> {
-    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh) VALUES (?,?,?,?,?)")
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,passkey_id) VALUES (?,?,?,?,?,?)")
         .bind(hash(token))
         .bind(user)
         .bind(device)
         .bind(now + SESSION)
         .bind(now)
+        .bind(passkey_id)
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -167,4 +173,20 @@ fn require_pending_transaction(token: &str, transaction: &str) -> Result<()> {
         return Err(Error::Denied);
     }
     Ok(())
+}
+
+/// Best-effort names, not attested provider claims, from the community-maintained list:
+/// <https://github.com/passkeydeveloper/passkey-authenticator-aaguids/blob/main/aaguid.json>
+/// Retrieved 2026-10-07. Unlisted/redacted values stay unlabeled; never guess from the browser.
+pub(super) fn provider_name(aaguid: Option<&str>) -> Option<&'static str> {
+    match aaguid? {
+        "bada5566-a7aa-401f-bd96-45619a55120d" => Some("1Password"),
+        "dd4ec289-e01d-41c9-bb89-70fa845d4bf2" => Some("iCloud Keychain"),
+        "ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4" => Some("Google Password Manager"),
+        "d548826e-79b4-db40-a3d8-11116f7e8349" => Some("Bitwarden"),
+        "08987058-cadc-4b81-b6e1-30de50dcbe96"
+        | "9ddd1817-af5a-4672-a2b9-3e3dd95000a9"
+        | "6028b017-b1d4-4c02-b4b3-afcdafc96bb2" => Some("Windows Hello"),
+        _ => None,
+    }
 }
