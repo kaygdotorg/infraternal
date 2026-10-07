@@ -243,6 +243,28 @@ $manager enable --now infraternal-agent.service
         Ok(())
     }
 
+    /// Ask policy to persist this user's manager without sudo or an interactive prompt.
+    /// A denied request is a warning; only a policy-confirmed change is owned by rollback.
+    /// # Errors
+    /// Reports a failed SSH operation or an invalid bounded policy receipt.
+    pub async fn enable_linger(&self) -> Result<bool, Failure> {
+        if self.mode == InstallMode::Root {
+            return Ok(true);
+        }
+        let output = self.session.run(&self.script(r#"
+stage="$base/.bootstrap-lock"
+[ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+if ! command -v loginctl >/dev/null 2>&1; then printf 'no\n'; exit 0; fi
+uid=$(id -u)
+if [ "$(loginctl show-user "$uid" -p Linger --value 2>/dev/null || :)" = yes ]; then printf 'yes\n'; exit 0; fi
+# Intent precedes mutation so interrupted policy calls remain reversible.
+: > "$stage/linger-requested"
+loginctl --no-ask-password enable-linger "$uid" >/dev/null 2>&1 || :
+if [ "$(loginctl show-user "$uid" -p Linger --value 2>/dev/null || :)" = yes ]; then printf 'yes\n'; else printf 'no\n'; fi
+"#), Input::Empty).await?;
+        parse_linger(&output.stdout)
+    }
+
     /// Only authenticated connection/facts/terminal proof permits deletion of previous artifacts.
     /// # Errors
     /// Reports failed cleanup without claiming that installation is complete.
@@ -264,6 +286,13 @@ stage="$base/.bootstrap-lock"
 if [ ! -e "$stage" ] && [ ! -L "$stage" ]; then exit 0; fi
 [ -d "$stage" ] && [ ! -L "$stage" ] || exit 71
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+if [ -f "$stage/linger-requested" ]; then
+    uid=$(id -u)
+    if [ "$(loginctl show-user "$uid" -p Linger --value 2>/dev/null || :)" = yes ]; then
+        loginctl --no-ask-password disable-linger "$uid" >/dev/null 2>&1
+    fi
+    rm -f "$stage/linger-requested"
+fi
 if [ -f "$stage/activating" ]; then
     $manager stop infraternal-agent.service >/dev/null 2>&1 || :
     $manager disable infraternal-agent.service >/dev/null 2>&1 || :
@@ -320,4 +349,15 @@ async fn binary_digest(path: &Path) -> Result<String, Failure> {
         digest.update(&bytes[..count]);
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+/// Decode only the fixed public policy receipt; remote diagnostics never become logs.
+/// # Errors
+/// Refuses any additional fields, malformed bytes or oversized output.
+pub fn parse_linger(bytes: &[u8]) -> Result<bool, Failure> {
+    match bytes {
+        b"yes\n" => Ok(true),
+        b"no\n" => Ok(false),
+        _ => Err(Failure::install("The linger policy response was invalid.")),
+    }
 }
