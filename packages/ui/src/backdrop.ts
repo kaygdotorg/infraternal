@@ -84,6 +84,49 @@ export function meshColors(theme: Theme): string[] {
 
 let newestRender = 0;
 let currentUrl = "";
+let nextWorkerRequest = 0;
+let renderWorker: Worker | undefined;
+const workerRequests = new Map<number, { resolve: (blob: Blob | null) => void; reject: (error: Error) => void }>();
+
+interface WorkerResponse { id: number; blob: Blob | null }
+
+/** Creates the optional WebGL worker lazily so auth and idle views load no renderer. */
+function getRenderWorker(): Worker | undefined {
+  if (typeof Worker === "undefined") return undefined;
+  if (renderWorker) return renderWorker;
+  const worker = new Worker(new URL("./backdrop.worker.js", document.baseURI), { type: "module" });
+  renderWorker = worker;
+  worker.addEventListener("message", (event: MessageEvent<WorkerResponse>) => {
+    const pending = workerRequests.get(event.data.id);
+    if (!pending) return;
+    workerRequests.delete(event.data.id);
+    pending.resolve(event.data.blob);
+  });
+  const fail = (): void => {
+    worker.terminate();
+    if (renderWorker === worker) renderWorker = undefined;
+    for (const pending of workerRequests.values()) pending.reject(new Error("backdrop worker failed"));
+    workerRequests.clear();
+  };
+  worker.addEventListener("error", fail, { once: true });
+  worker.addEventListener("messageerror", fail, { once: true });
+  return worker;
+}
+
+/** Sends one bounded render request to the worker, if workers are available. */
+function renderInWorker(theme: Theme, width: number, height: number): Promise<Blob | null> | undefined {
+  const worker = getRenderWorker();
+  if (!worker) return undefined;
+  const id = ++nextWorkerRequest;
+  return new Promise((resolve, reject) => {
+    workerRequests.set(id, { resolve, reject });
+    try { worker.postMessage({ id, theme, width, height }); }
+    catch (error) {
+      workerRequests.delete(id);
+      reject(error instanceof Error ? error : new Error("backdrop request could not be sent"));
+    }
+  });
+}
 
 /** Cancels an in-flight result and releases the current still when mesh mode is left. */
 export function releaseBackdrop(): void {
@@ -92,14 +135,38 @@ export function releaseBackdrop(): void {
   currentUrl = "";
 }
 
-/** Draws one half-resolution frame and returns a replaceable blob URL for CSS. */
+/** Draws one half-resolution still off-thread and returns its replaceable URL for CSS. */
 export async function renderBackdrop(theme: Theme, width: number, height: number): Promise<string> {
   const renderId = ++newestRender;
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(width / 2));
-  canvas.height = Math.max(1, Math.round(height / 2));
-  const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true, antialias: false });
-  if (!gl) return "";
+  let blob: Blob | null = null;
+  try { blob = (await renderInWorker(theme, width, height)) ?? null; }
+  catch { /* Older engines can still render through the bounded main-thread fallback. */ }
+  if (!blob) blob = await renderBackdropBlob(theme, width, height);
+  if (renderId !== newestRender) return "";
+  if (currentUrl) URL.revokeObjectURL(currentUrl);
+  currentUrl = blob ? URL.createObjectURL(blob) : "";
+  return currentUrl;
+}
+
+/** Draws and snapshots the mesh using OffscreenCanvas when this context supports it. */
+export async function renderBackdropBlob(theme: Theme, width: number, height: number): Promise<Blob | null> {
+  const canvasWidth = Math.max(1, Math.round(width / 2));
+  const canvasHeight = Math.max(1, Math.round(height / 2));
+  let canvas: OffscreenCanvas | HTMLCanvasElement | undefined;
+  let gl: WebGL2RenderingContext | null = null;
+  if (typeof OffscreenCanvas !== "undefined") {
+    const offscreen = new OffscreenCanvas(canvasWidth, canvasHeight);
+    gl = offscreen.getContext("webgl2", { preserveDrawingBuffer: true, antialias: false });
+    if (gl) canvas = offscreen;
+  }
+  if (!gl && typeof document !== "undefined") {
+    const fallback = document.createElement("canvas");
+    fallback.width = canvasWidth;
+    fallback.height = canvasHeight;
+    gl = fallback.getContext("webgl2", { preserveDrawingBuffer: true, antialias: false });
+    if (gl) canvas = fallback;
+  }
+  if (!gl || !canvas) return null;
 
   const loseContext = () => gl.getExtension("WEBGL_lose_context")?.loseContext();
   const compile = (kind: number, source: string): WebGLShader | undefined => {
@@ -121,19 +188,22 @@ export async function renderBackdrop(theme: Theme, width: number, height: number
     if (fragment) gl.deleteShader(fragment);
     if (program) gl.deleteProgram(program);
     loseContext();
-    return "";
+    return null;
   }
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
   gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  const linked = gl.getProgramParameter(program, gl.LINK_STATUS);
+  if (!linked) {
     gl.deleteShader(vertex);
     gl.deleteShader(fragment);
     gl.deleteProgram(program);
     loseContext();
-    return "";
+    return null;
   }
 
+  const colors = meshColors(theme);
+  const strength = meshStrength(theme);
   gl.useProgram(program);
   const buffer = gl.createBuffer();
   if (!buffer) {
@@ -141,7 +211,7 @@ export async function renderBackdrop(theme: Theme, width: number, height: number
     gl.deleteShader(fragment);
     gl.deleteProgram(program);
     loseContext();
-    return "";
+    return null;
   }
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
@@ -151,10 +221,10 @@ export async function renderBackdrop(theme: Theme, width: number, height: number
   const uniform = (name: string) => gl.getUniformLocation(program, name);
   const blobs = layout(theme.name);
   gl.uniform3fv(uniform("bg"), rgb(theme.bg));
-  gl.uniform3fv(uniform("c"), meshColors(theme).flatMap(rgb));
+  gl.uniform3fv(uniform("c"), colors.flatMap(rgb));
   gl.uniform2fv(uniform("at"), blobs.flatMap((blob) => [blob.x, blob.y]));
   gl.uniform1fv(uniform("radius"), blobs.map((blob) => blob.radius));
-  gl.uniform1f(uniform("strength"), meshStrength(theme));
+  gl.uniform1f(uniform("strength"), strength);
   gl.uniform1f(uniform("aspect"), width / Math.max(1, height));
   gl.uniform1f(uniform("seed"), blobs[0]!.x * 10);
   gl.viewport(0, 0, canvas.width, canvas.height);
@@ -163,16 +233,13 @@ export async function renderBackdrop(theme: Theme, width: number, height: number
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
   gl.deleteProgram(program);
-  // toBlob snapshots the presented pixels when requested; start it before releasing
-  // the drawing buffer so the GPU can go idle while the immutable PNG is encoded.
-  const snapshot = new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  // Snapshot before losing the context; workers keep any encoder and readback wait
+  // off the UI thread while the immutable PNG is produced.
+  const snapshot = "convertToBlob" in canvas
+    ? canvas.convertToBlob({ type: "image/png" }).catch(() => null)
+    : new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
   loseContext();
-
-  const blob = await snapshot;
-  if (renderId !== newestRender) return "";
-  if (currentUrl) URL.revokeObjectURL(currentUrl);
-  currentUrl = blob ? URL.createObjectURL(blob) : "";
-  return currentUrl;
+  return snapshot;
 }
 
 let grain = "";

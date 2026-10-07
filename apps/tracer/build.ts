@@ -1,11 +1,12 @@
-/** Bundles the static tracer app and copies its licensed terminal font into dist/. */
+/** Bundles the tracer app and mesh worker and copies the licensed terminal font. */
 import { cp, mkdir, rm } from "node:fs/promises";
 
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist/fonts", { recursive: true });
 const build = await Bun.build({
-  entrypoints: ["src/main.ts"],
+  entrypoints: ["src/main.ts", "../../packages/ui/src/backdrop.worker.ts"],
   outdir: "dist",
+  naming: { entry: "[name].js" },
   minify: true,
   target: "browser",
   splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
