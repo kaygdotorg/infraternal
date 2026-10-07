@@ -237,34 +237,6 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   await waitForPendingText("");
   await context.request.post("/__mock/echo-mode", { data: { mode: "normal" } });
 
-  // Production screenshots show the plain terminal glyph and the one opacity variant for both themes and sizes.
-  const screenshotCases = [
-    { name: "mobile", width: 393, height: 852, theme: "ink" },
-    { name: "mobile", width: 393, height: 852, theme: "paper" },
-    { name: "desktop", width: 1440, height: 900, theme: "ink" },
-    { name: "desktop", width: 1440, height: 900, theme: "paper" },
-  ] as const;
-  for (const capture of screenshotCases) {
-    await page.setViewportSize({ width: capture.width, height: capture.height });
-    await page.evaluate(() => sessionStorage.clear());
-    await page.goto(`/?mock=1&predict=1&theme=${capture.theme}`);
-    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
-    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.enabled ?? false)).toBe(true);
-    await resetScreen();
-    await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
-    await inject("x");
-    await waitForPendingText("x");
-    const predictedPath = testInfo.outputPath(`predictive-${capture.name}-${capture.theme}-pending.png`);
-    await page.screenshot({ path: predictedPath });
-    await testInfo.attach(`predictive-${capture.name}-${capture.theme}-pending`, { path: predictedPath, contentType: "image/png" });
-    expect(await page.locator(".terminal-text-overlay").evaluate((node) => getComputedStyle(node).opacity)).toBe("0.68");
-    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("x");
-    await waitForPendingText("");
-    const confirmedPath = testInfo.outputPath(`predictive-${capture.name}-${capture.theme}-confirmed.png`);
-    await page.screenshot({ path: confirmedPath });
-    await testInfo.attach(`predictive-${capture.name}-${capture.theme}-confirmed`, { path: confirmedPath, contentType: "image/png" });
-  }
-
   // Seeded key and echo-delay schedules compare the live Ghostty screen to a second Ghostty replay.
   await resetScreen();
   await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());

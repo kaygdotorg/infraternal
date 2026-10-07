@@ -5,6 +5,7 @@ test("predictive echo draws only when Ghostty reports a visible normal-screen cu
   const context = page.context();
   await context.request.post("/__mock/reset");
   await context.request.post("/__mock/open-terminal");
+  await context.addInitScript(() => sessionStorage.clear());
   await page.goto("/?mock=1&predict=1");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0))
@@ -141,4 +142,61 @@ test("predictive echo draws only when Ghostty reports a visible normal-screen cu
     .toBe("x");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? ""))
     .toContain("x");
+});
+
+test("predictive echo captures pending and confirmed glyphs across production viewports and themes", async ({ context }, testInfo) => {
+  const captures = [
+    { name: "mobile", width: 393, height: 852, theme: "ink" },
+    { name: "mobile", width: 393, height: 852, theme: "paper" },
+    { name: "desktop", width: 1440, height: 900, theme: "ink" },
+    { name: "desktop", width: 1440, height: 900, theme: "paper" },
+  ] as const;
+
+  for (const capture of captures) {
+    await context.request.post("/__mock/reset");
+    await context.request.post("/__mock/open-terminal");
+    const capturePage = await context.newPage();
+    try {
+      await capturePage.setViewportSize({ width: capture.width, height: capture.height });
+      await capturePage.goto(`/?mock=1&predict=1&theme=${capture.theme}`);
+      await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+      await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0))
+        .toBeGreaterThan(60);
+      await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.enabled ?? false))
+        .toBe(true);
+
+      await capturePage.evaluate(() => window.__tracerTestDouble?.seedPrompt());
+      await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.screenText() ?? ""))
+        .toContain("$");
+      await capturePage.keyboard.press("x");
+      await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
+        .toBe("x");
+
+      const pendingPath = testInfo.outputPath(`predictive-${capture.name}-${capture.theme}-pending.png`);
+      await capturePage.screenshot({ path: pendingPath });
+      await testInfo.attach(`predictive-${capture.name}-${capture.theme}-pending`, {
+        path: pendingPath,
+        contentType: "image/png",
+      });
+      expect(await capturePage.locator(".terminal-text-overlay").evaluate((node) => getComputedStyle(node).opacity))
+        .toBe("0.68");
+
+      await expect.poll(async () => {
+        const state = await (await context.request.get("/__mock/state")).json() as { echoed_text: string };
+        return state.echoed_text;
+      }).toBe("x");
+      await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.screenText() ?? ""))
+        .toContain("x");
+      await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
+        .toBe("");
+      const confirmedPath = testInfo.outputPath(`predictive-${capture.name}-${capture.theme}-confirmed.png`);
+      await capturePage.screenshot({ path: confirmedPath });
+      await testInfo.attach(`predictive-${capture.name}-${capture.theme}-confirmed`, {
+        path: confirmedPath,
+        contentType: "image/png",
+      });
+    } finally {
+      await capturePage.close();
+    }
+  }
 });
