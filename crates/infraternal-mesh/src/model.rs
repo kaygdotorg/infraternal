@@ -131,6 +131,8 @@ pub enum MeshError {
     InvalidAllocation,
     #[error("rule version counter exhausted")]
     VersionExhausted,
+    #[error("rotation overlap deadline exceeds the deployment clock")]
+    ClockExhausted,
     #[error("invalid coordinator checkpoint")]
     InvalidCheckpoint,
     #[error("address range exhausted")]

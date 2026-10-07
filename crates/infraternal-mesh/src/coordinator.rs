@@ -505,7 +505,7 @@ impl Coordinator {
     /// Caller has installed its new private key locally BEFORE presenting the new public key.
     /// `now_secs` is a monotonic deployment clock. Retirement requires elapsed overlap and delivery.
     /// # Errors
-    /// Rejects unknown nodes, duplicate keys, and overlapping rotation requests.
+    /// Rejects unknown nodes, duplicate keys, overlapping rotations, and unrepresentable deadlines.
     pub fn rotate_key(
         &mut self,
         id: NodeId,
@@ -520,11 +520,15 @@ impl Coordinator {
         if self.keys.contains_key(&key) {
             return Err(MeshError::DuplicateKey);
         }
+        // Reject overflow before any mutation: saturation would shorten the mandatory overlap.
+        let retire_after = now_secs
+            .checked_add(KEY_OVERLAP_SECS)
+            .ok_or(MeshError::ClockExhausted)?;
         if let Some(member) = self.members.get_mut(&id) {
             member.keys.previous = Some(member.keys.current);
             member.keys.current = key;
             member.node.public_key = key;
-            member.retire_after = Some(now_secs.saturating_add(KEY_OVERLAP_SECS));
+            member.retire_after = Some(retire_after);
         }
         self.keys.insert(key, id);
         let dirty = self
