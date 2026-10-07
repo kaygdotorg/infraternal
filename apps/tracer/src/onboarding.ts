@@ -60,6 +60,17 @@ function mountSetup(
   const initialMessage = host.querySelector<HTMLElement>("#auth-error")!;
   initialMessage.textContent = message;
 
+  const markMotion = (instant: boolean): void => {
+    host.querySelector<HTMLElement>("#setup-card")!.toggleAttribute("data-no-motion", instant);
+  };
+  host.addEventListener("pointerdown", () => markMotion(false), { capture: true });
+  host.addEventListener("focusin", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLElement && target.matches("input, button")) {
+      markMotion(target.matches(":focus-visible"));
+    }
+  });
+
   function ready(): boolean {
     if (index === 0) return state.token.trim().length >= 8;
     if (index === 1) return validUsername(state.username) && [...state.displayName].length <= 64;
@@ -67,7 +78,7 @@ function mountSetup(
     return state.saved;
   }
 
-  function renderSteps(): void {
+  function renderSteps(instant = false): void {
     const steps = host.querySelector<HTMLOListElement>("#setup-steps")!;
     steps.innerHTML = SETUP_STEPS.map((_, i) => {
       const done = i < index;
@@ -79,11 +90,14 @@ function mountSetup(
     steps.querySelectorAll<HTMLElement>(".tick-host").forEach((element) => {
       const step = Number(element.dataset.completed);
       const check = tick(element, step !== completedStep);
-      if (step === completedStep) requestAnimationFrame(() => check.set(true));
+      if (step === completedStep) {
+        if (instant) check.set(true, true);
+        else requestAnimationFrame(() => check.set(true));
+      }
     });
     completedStep = -1;
     steps.querySelectorAll<HTMLButtonElement>("[data-goto]").forEach((button) => {
-      button.addEventListener("click", () => moveTo(Number(button.dataset.goto)));
+      button.addEventListener("click", (event) => moveTo(Number(button.dataset.goto), event.detail === 0));
     });
   }
 
@@ -115,11 +129,13 @@ function mountSetup(
     const busyLabel = state.busy && index === 2 ? "Creating passkey" : nextText;
     footer.innerHTML = `<button class="auth-back" id="setup-back" ${index === 0 || state.busy ? "hidden" : ""}>← back</button>
       <button class="auth-primary" id="setup-next" ${ready() && !state.busy ? "" : "disabled"}>${index === 2 ? KEY_MARK : ""}<span>${busyLabel}</span>${state.busy ? '<span class="busy-count" hidden aria-live="off"></span>' : ""}</button>`;
-    footer.querySelector<HTMLButtonElement>("#setup-back")!.addEventListener("click", () => moveTo(index - 1));
-    footer.querySelector<HTMLButtonElement>("#setup-next")!.addEventListener("click", () => {
+    footer.querySelector<HTMLButtonElement>("#setup-back")!.addEventListener("click", (event) => moveTo(index - 1, event.detail === 0));
+    footer.querySelector<HTMLButtonElement>("#setup-next")!.addEventListener("click", (event) => {
+      const instant = event.detail === 0;
+      markMotion(instant);
       if (state.busy || !ready()) return;
-      if (index === 0) void validateSetupToken();
-      else if (index === 1) moveTo(2);
+      if (index === 0) void validateSetupToken(instant);
+      else if (index === 1) moveTo(2, instant);
       else if (index === 2) void createPasskey();
       else void finishSetup();
     });
@@ -130,15 +146,16 @@ function mountSetup(
     if (next) next.disabled = state.busy || !ready();
   }
 
-  function moveTo(next: number): void {
+  function moveTo(next: number, instant = false): void {
     if (next < 0 || next >= SETUP_STEPS.length || next === index || next > index + 1) return;
+    markMotion(instant);
     completedStep = index;
     const direction = next < index ? "back" : "forward";
     index = next;
     state.error = "";
     host.querySelector<HTMLElement>("#auth-error")!.textContent = "";
-    renderSteps();
-    renderPane(direction);
+    renderSteps(instant);
+    renderPane(instant ? "none" : direction);
     renderFooter();
   }
 
@@ -151,6 +168,7 @@ function mountSetup(
     const tokenError = body.querySelector<HTMLElement>("#setup-token-error")!;
     token.value = state.token;
     token.addEventListener("input", () => {
+      markMotion(token.matches(":focus-visible"));
       state.token = token.value;
       tokenError.hidden = true;
       token.removeAttribute("aria-invalid");
@@ -162,13 +180,14 @@ function mountSetup(
     token.focus({ preventScroll: true });
   }
 
-  async function validateSetupToken(): Promise<void> {
+  async function validateSetupToken(instant: boolean): Promise<void> {
     const token = host.querySelector<HTMLInputElement>("#setup-token")!;
     const tokenError = host.querySelector<HTMLElement>("#setup-token-error")!;
     tokenError.hidden = true;
     tokenError.replaceChildren();
     token.removeAttribute("aria-invalid");
     token.removeAttribute("aria-describedby");
+    markMotion(true);
     state.busy = true;
     host.querySelector<HTMLElement>("#auth-error")!.textContent = "";
     renderFooter();
@@ -178,7 +197,7 @@ function mountSetup(
       await checkSetupToken(state.token.trim());
       waiting.done();
       state.busy = false;
-      moveTo(1);
+      moveTo(1, instant);
     } catch (error: unknown) {
       waiting.done();
       state.busy = false;
@@ -207,6 +226,7 @@ function mountSetup(
     username.value = state.username;
     displayName.value = state.displayName;
     const refreshHint = () => {
+      markMotion(username.matches(":focus-visible") || displayName.matches(":focus-visible"));
       hint.textContent = state.username && !validUsername(state.username)
         ? "Use 2–32 lowercase letters, digits, _ or -."
         : state.displayName && [...state.displayName].length > 64
@@ -278,10 +298,15 @@ function mountSetup(
     const checkbox = body.querySelector<HTMLInputElement>("#recovery-saved")!;
     checkbox.checked = state.saved;
     springCheckbox(checkbox);
-    checkbox.addEventListener("change", () => { state.saved = checkbox.checked; updateReady(); });
+    checkbox.addEventListener("change", () => {
+      markMotion(checkbox.matches(":focus-visible"));
+      state.saved = checkbox.checked;
+      updateReady();
+    });
   }
 
   async function createPasskey(): Promise<void> {
+    markMotion(true);
     state.busy = true;
     state.error = "";
     renderPane("none");
@@ -298,8 +323,9 @@ function mountSetup(
         completedStep = 2;
         index = 3;
         state.finishRegistration = finishRegistration;
-        renderSteps();
-        renderPane("forward");
+        markMotion(true);
+        renderSteps(true);
+        renderPane("none");
         renderFooter();
         await new Promise<void>((resolve) => { state.completeRecovery = resolve; });
       });
@@ -316,6 +342,7 @@ function mountSetup(
 
   async function finishSetup(): Promise<void> {
     if (!state.saved || state.busy || !state.finishRegistration) return;
+    markMotion(true);
     state.busy = true;
     renderFooter();
     const button = host.querySelector<HTMLButtonElement>("#setup-next")!;
@@ -345,6 +372,10 @@ function mountSetup(
     const next = host.querySelector<HTMLButtonElement>("#setup-next");
     if (next && !next.disabled) { event.preventDefault(); next.click(); }
   }
+
+  // A focused keyboard action can change readiness, move the pane, and schedule a
+  // completed-step spring in one turn. Keep those changes immediate until a pointer
+  // action takes over; pointer-driven setup keeps the approved glide.
 
   let paneObserver: ResizeObserver | undefined;
   renderSteps();

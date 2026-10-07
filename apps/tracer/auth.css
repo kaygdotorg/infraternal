@@ -116,6 +116,13 @@
 .auth-pane[data-direction="forward"] { animation: auth-pane-forward 240ms var(--ease) both; }
 .auth-pane[data-direction="back"] { animation: auth-pane-back 240ms var(--ease) both; }
 .auth-pane[data-direction="none"] { animation: none; }
+.auth-card[data-no-motion] .auth-input,
+.auth-card[data-no-motion] .auth-dot,
+.auth-card[data-no-motion] .auth-step-bar::after,
+.auth-card[data-no-motion] .auth-pane,
+.auth-card[data-no-motion] .auth-primary { transition: none; }
+.auth-card[data-no-motion] .auth-pane { animation: none; }
+.auth-card[data-no-motion] .auth-primary:active { transform: none; }
 @keyframes auth-pane-forward { from { opacity: 0; transform: translateX(24px); filter: blur(2px); } }
 @keyframes auth-pane-back { from { opacity: 0; transform: translateX(-24px); filter: blur(2px); } }
 .auth-footer { display: flex; min-height: 42px; justify-content: space-between; align-items: center; gap: 12px; margin-top: 26px; }

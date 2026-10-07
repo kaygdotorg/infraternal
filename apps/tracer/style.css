@@ -199,10 +199,6 @@ button { color: inherit; }
   .access { padding-right: 20px; padding-left: 20px; }
 }
 
-/* The first view fades in once it mounts, instead of a loading placeholder. */
-#app > * { animation: app-in 180ms cubic-bezier(0.23, 1, 0.32, 1) both; }
-@keyframes app-in { from { opacity: 0; transform: translateY(4px); } }
-@media (prefers-reduced-motion: reduce) { #app > * { animation: none; } }
 .boot-error { margin: 30vh auto 0; max-width: 28rem; padding: 0 20px; text-align: center; color: #9a9aa2; font: 450 15px/1.5 "Geist Mono", ui-monospace, monospace; }
 
 /* Core terminal shell: one padded pane card keeps the renderer ready for later splits. */
