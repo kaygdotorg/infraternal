@@ -539,8 +539,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       stage.dataset.connected = String(connected);
     },
     setScrolled(scrolled) {
-      keybar.classList.toggle("is-away", scrolled && !keyboardOpen);
-      keyblur.classList.toggle("is-away", scrolled && !keyboardOpen);
+      // Scrollback belongs to the card; mobile input controls stay in place [#44].
+      stage.dataset.scrolled = String(scrolled);
     },
     onInputActivity() {
       let changed = false;
