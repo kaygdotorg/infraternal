@@ -231,13 +231,13 @@ async fn execute(
             auth.require_ceremony_binding(&b.ceremony, headers).await?;
             return session_response(
                 &auth
-                    .registration_finish_with_verifier(
+                    .registration_finish_clock(
                         &b.ceremony,
                         b.proof,
                         b.passkey_wrap,
                         b.recovery_wrap,
                         b.recovery_verifier,
-                        now,
+                        current_time,
                     )
                     .await?,
             );

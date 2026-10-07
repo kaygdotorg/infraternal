@@ -3095,3 +3095,6 @@ async fn recovery_unknown_identity_pays_the_same_database_and_verifier_work() {
         "known and unknown recovery identities take different database paths"
     );
 }
+
+#[path = "reviewer_tests.rs"]
+mod reviewer_tests;

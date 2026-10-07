@@ -91,6 +91,23 @@ impl Auth {
         verifier: Option<String>,
         now: i64,
     ) -> Result<String> {
+        self.registration_finish_clock(id, proof, passkey_wrap, recovery_wrap, verifier, || Ok(now))
+            .await
+    }
+
+    // HTTP supplies live authority time; library callers keep deterministic clocks.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)] // Keep all registration authority consumption in one writer transaction.
+    pub(super) async fn registration_finish_clock(
+        &self,
+        id: &str,
+        proof: Value,
+        passkey_wrap: Wrap,
+        recovery_wrap: Option<Wrap>,
+        verifier: Option<String>,
+        clock: impl Fn() -> Result<i64>,
+    ) -> Result<String> {
+        let now = clock()?;
         let mut registration = self
             .pending
             .lock()
@@ -113,10 +130,21 @@ impl Auth {
         sqlx::query("UPDATE setup SET expires=expires WHERE singleton=1")
             .execute(&mut *tx)
             .await?;
+        // Hashing and writer contention can outlive any admission timestamp. Sample
+        // again under the writer lock; SQLite also checks the consuming statement.
+        let now: i64 = sqlx::query_scalar("SELECT MAX(?,unixepoch())")
+            .bind(clock()?)
+            .fetch_one(&mut *tx)
+            .await?;
+        if registration.expires <= now {
+            return Err(Error::Denied);
+        }
         match &registration.authority {
             Authority::Setup(token) => {
-                if sqlx::query("DELETE FROM setup WHERE token_hash=? AND expires>?")
+                if sqlx::query("DELETE FROM setup WHERE token_hash=? AND expires>MAX(?,unixepoch()) AND ?>MAX(?,unixepoch())")
                     .bind(token)
+                    .bind(now)
+                    .bind(registration.expires)
                     .bind(now)
                     .execute(&mut *tx)
                     .await?
@@ -162,6 +190,7 @@ impl Auth {
                     registration.recovery_hash.as_ref().ok_or(Error::Invalid)?,
                     version,
                     now,
+                    registration.expires,
                 )
                 .await?;
             }

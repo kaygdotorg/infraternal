@@ -226,7 +226,8 @@ pub(super) async fn record(
     Ok(())
 }
 
-// Consume recovery authority and replace all capabilities in one writer transaction.
+// Consume recovery and ceremony authority at statement time inside the writer
+// transaction. MAX preserves explicit future clocks in deterministic library tests.
 pub(super) async fn complete(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user: &str,
@@ -234,13 +235,16 @@ pub(super) async fn complete(
     verifier_hash: &str,
     version: i64,
     now: i64,
+    ceremony_expires: i64,
 ) -> Result<()> {
     if sqlx::query(
-        "DELETE FROM recovery WHERE user_id=? AND token_hash=? AND ready<=? AND expires>?",
+        "DELETE FROM recovery WHERE user_id=? AND token_hash=? AND ready<=MAX(?,unixepoch()) AND expires>MAX(?,unixepoch()) AND ?>MAX(?,unixepoch())",
     )
     .bind(user)
     .bind(token)
     .bind(now)
+    .bind(now)
+    .bind(ceremony_expires)
     .bind(now)
     .execute(&mut **tx)
     .await?

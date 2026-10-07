@@ -141,8 +141,8 @@ pub(super) async fn require_session_tx(
     user: &str,
     now: i64,
 ) -> Result<()> {
-    if sqlx::query("SELECT user_id FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>? AND fresh>? AND fresh<=?")
-        .bind(token_hash).bind(user).bind(now).bind(now - FRESH).bind(now).fetch_optional(&mut **tx).await?.is_none() { return Err(Error::Denied); }
+    if sqlx::query("SELECT user_id FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>MAX(?,unixepoch()) AND fresh>MAX(?,unixepoch())-? AND fresh<=MAX(?,unixepoch())")
+        .bind(token_hash).bind(user).bind(now).bind(now).bind(FRESH).bind(now).fetch_optional(&mut **tx).await?.is_none() { return Err(Error::Denied); }
     Ok(())
 }
 pub(super) async fn insert_session(
