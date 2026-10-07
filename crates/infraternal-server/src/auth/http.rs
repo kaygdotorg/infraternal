@@ -72,7 +72,8 @@ struct Login {
 struct Recovery {
     user_id: Option<String>,
     username: Option<String>,
-    words: String,
+    words: Option<String>,
+    verifier: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -277,42 +278,40 @@ async fn execute(
             ))
             .into_response());
         }
-        "recovery-start" | "recovery-resume" => {
+        "recovery-start" | "recovery-resume" | "recovery-upgrade" => {
             let b: Recovery = body(value)?;
+            let credential = match (action, b.words, b.verifier) {
+                ("recovery-upgrade", Some(words), Some(verifier)) => {
+                    super::crypto::valid_secret(&verifier)?;
+                    super::recovery::RecoveryCredential::Upgrade { words, verifier }
+                }
+                ("recovery-start" | "recovery-resume", None, Some(secret)) => {
+                    super::crypto::valid_secret(&secret)?;
+                    super::recovery::RecoveryCredential::Verifier(secret)
+                }
+                // Preserve bounded denial for legacy clients without admitting their
+                // phrases repeatedly. Only explicit one-time upgrade can use words.
+                ("recovery-start" | "recovery-resume", Some(_), None) => return Err(Error::Denied),
+                _ => return Err(Error::Invalid),
+            };
             let user = match (b.user_id, b.username) {
                 (Some(user), None) => user,
                 (None, Some(username)) => {
-                    let user =
-                        sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username=?")
-                            .bind(username)
-                            .fetch_optional(&auth.pool)
-                            .await?;
-                    if let Some(user) = user {
-                        user
-                    } else {
-                        // Valid phrases for an unknown name still pay the same bounded
-                        // Argon2 work as wrong words for an existing name. No directory
-                        // or fast username-enumeration path is added by recovery lookup.
-                        if let Some(stored) = sqlx::query_scalar::<_, String>(
-                            "SELECT recovery_hash FROM users WHERE owner=1",
-                        )
+                    sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username=?")
+                        .bind(username)
                         .fetch_optional(&auth.pool)
                         .await?
-                        {
-                            let _ = super::verify_recovery(b.words, stored).await;
-                        }
-                        return Err(Error::Denied);
-                    }
+                        .unwrap_or_default()
                 }
                 _ => return Err(Error::Invalid),
             };
             let (token, ready, delay) = auth
                 .recovery_start_clock(
                     &user,
-                    b.words,
+                    credential,
                     cookie(headers).ok(),
                     current_time,
-                    action == "recovery-resume",
+                    action != "recovery-start",
                 )
                 .await?;
             json!({"token":token,"delay_seconds":delay,"ready_at":ready})

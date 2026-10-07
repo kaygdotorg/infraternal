@@ -55,7 +55,6 @@ pub(super) async fn verify_recovery(words: String, stored: String) -> Result<()>
 }
 
 /// Verify the domain-separated browser authentication secret, never a mnemonic or wrap key.
-#[allow(dead_code)] // Consumer is introduced by the recovery protocol slice.
 pub(super) async fn verify_secret(secret: String, stored: String) -> Result<()> {
     valid_secret(&secret)?;
     let permit = ARGON_SLOTS.try_acquire().map_err(|_| Error::Denied)?;
@@ -70,7 +69,6 @@ pub(super) async fn verify_secret(secret: String, stored: String) -> Result<()> 
     .map_err(|_| Error::Denied)?
 }
 
-#[allow(dead_code)] // Consumers are introduced by enrollment/recovery slices.
 pub(super) fn valid_secret(secret: &str) -> Result<()> {
     let bytes = B64.decode(secret).map_err(|_| Error::Denied)?;
     if bytes.len() != 32 || B64.encode(bytes) != secret {

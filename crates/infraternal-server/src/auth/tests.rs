@@ -548,13 +548,13 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
 #[tokio::test]
 async fn recovery_http_live_same_account_is_immediate() {
     let _guard = SERIAL.lock().await;
-    let f = fixture().await;
+    let f = fixture_v2().await;
     let app = router(f.auth.clone());
     let cookie = format!("__Host-infraternal={}", f.session);
     let (status, _, body) = http_post_json_with_cookie(
         &app,
         "recovery-start",
-        json!({"user_id":f.user,"words":f.words}),
+        json!({"user_id":f.user,"verifier":recovery_verifier(&f.words)}),
         &cookie,
     )
     .await;
@@ -569,7 +569,7 @@ async fn recovery_http_live_same_account_is_immediate() {
 async fn recovery_http_other_expired_pending_and_missing_sessions_wait() {
     let _guard = SERIAL.lock().await;
     for mode in ["other", "expired", "pending", "missing"] {
-        let f = fixture().await;
+        let f = fixture_v2().await;
         if mode == "other" {
             sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('other','other',0,'unused','other','Other')")
                 .execute(&f.auth.pool).await.unwrap();
@@ -593,7 +593,7 @@ async fn recovery_http_other_expired_pending_and_missing_sessions_wait() {
         let (status, _, body) = http_post_json_with_optional_cookie(
             &app,
             "recovery-start",
-            json!({"user_id":f.user,"words":f.words}),
+            json!({"user_id":f.user,"verifier":recovery_verifier(&f.words)}),
             if mode == "missing" {
                 None
             } else {
@@ -653,11 +653,11 @@ async fn recovery_live_session_cannot_accelerate_an_active_delayed_request() {
 #[tokio::test]
 async fn recovery_username_identity_is_additive_and_ambiguous_forms_fail() {
     let _guard = SERIAL.lock().await;
-    let f = fixture().await;
+    let f = fixture_v2().await;
     let app = router(f.auth.clone());
     for value in [
-        json!({"words":f.words}),
-        json!({"user_id":f.user,"username":"owner","words":f.words}),
+        json!({"verifier":recovery_verifier(&f.words)}),
+        json!({"user_id":f.user,"username":"owner","verifier":recovery_verifier(&f.words)}),
     ] {
         assert_eq!(
             http_post_json(&app, "recovery-start", value).await.0,
@@ -667,13 +667,13 @@ async fn recovery_username_identity_is_additive_and_ambiguous_forms_fail() {
     let missing = http_post_json(
         &app,
         "recovery-start",
-        json!({"username":"missing","words":f.words}),
+        json!({"username":"missing","verifier":recovery_verifier(&f.words)}),
     )
     .await;
     let wrong = http_post_json(
         &app,
         "recovery-start",
-        json!({"username":"owner","words":"invalid"}),
+        json!({"username":"owner","verifier":"invalid"}),
     )
     .await;
     assert_eq!(missing.0, axum::http::StatusCode::UNAUTHORIZED);
@@ -682,7 +682,7 @@ async fn recovery_username_identity_is_additive_and_ambiguous_forms_fail() {
     let (_, _, body) = http_post_json(
         &app,
         "recovery-start",
-        json!({"username":"owner","words":f.words}),
+        json!({"username":"owner","verifier":recovery_verifier(&f.words)}),
     )
     .await;
     assert_eq!(body["delay_seconds"], DAY);
@@ -2673,7 +2673,7 @@ mod review3_tests;
 #[tokio::test]
 async fn audit_recovery_session_expiring_during_verification_keeps_delay() {
     let _guard = SERIAL.lock().await;
-    let f = fixture().await;
+    let f = fixture_v2().await;
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2690,7 +2690,7 @@ async fn audit_recovery_session_expiring_during_verification_keeps_delay() {
     *f.auth.recovery_pause.lock().await = Some(pause.clone());
     let app = router(f.auth.clone());
     let cookie = format!("__Host-infraternal={}", f.session);
-    let body = json!({"username":"owner","words":f.words});
+    let body = json!({"username":"owner","verifier":recovery_verifier(&f.words)});
     let request = tokio::spawn(async move {
         http_post_json_with_cookie(&app, "recovery-start", body, &cookie).await
     });
@@ -2834,4 +2834,140 @@ fn recovery_material(words: &str, kind: &str) -> [u8; 32] {
 }
 fn recovery_verifier(words: &str) -> String {
     B64.encode(recovery_material(words, "auth"))
+}
+async fn fixture_v2() -> Fixture {
+    let f = fixture().await;
+    sqlx::query("UPDATE users SET recovery_hash=?,recovery_version=2 WHERE id=?")
+        .bind(recovery_hash(recovery_verifier(&f.words)).await.unwrap())
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    f
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the legacy-to-v2 rotation authority checks in one fixture.
+async fn recovery_upgrade_is_one_time_preserves_deadline_and_old_envelope() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let first = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    let verifier = recovery_verifier(&f.words);
+    let (token, ready, _) = f
+        .auth
+        .recovery_start_clock(
+            &f.user,
+            super::recovery::RecoveryCredential::Upgrade {
+                words: f.words.clone(),
+                verifier: verifier.clone(),
+            },
+            None,
+            || Ok(NOW + 1),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ready, NOW + DAY);
+    assert!(f.auth.recovery_ready(&first, NOW + DAY).await.is_err());
+    let metadata: (i64, i64) =
+        sqlx::query_as("SELECT recovery_version,recovery_wrap_version FROM users")
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(metadata, (2, 1));
+    assert!(
+        f.auth
+            .recovery_start_clock(
+                &f.user,
+                super::recovery::RecoveryCredential::Upgrade {
+                    words: f.words.clone(),
+                    verifier: verifier.clone()
+                },
+                None,
+                || Ok(NOW + 2),
+                true
+            )
+            .await
+            .is_err()
+    );
+    let start = f.auth.recovery_ready(&token, NOW + DAY).await.unwrap();
+    assert!(start["recovery_words"].is_null());
+    assert_eq!(start["old_recovery_wrap_version"], 1);
+    let old: Wrap = serde_json::from_value(start["old_recovery_wrap"].clone()).unwrap();
+    assert_eq!(
+        unwrap_browser(&recovery_ikm(&f.words), &old, &f.user, "recovery").unwrap(),
+        f.dek
+    );
+    assert!(
+        unwrap_browser(
+            &recovery_material(&f.words, "auth"),
+            &old,
+            &f.user,
+            "recovery"
+        )
+        .is_err()
+    );
+    // Independent new output wraps the original DEK; the server gets only its sibling.
+    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let new_wrap = browser_wrap(
+        &recovery_material(&words, "wrap"),
+        &f.dek,
+        &f.user,
+        "recovery",
+    );
+    assert!(
+        unwrap_browser(
+            &recovery_material(&words, "auth"),
+            &new_wrap,
+            &f.user,
+            "recovery"
+        )
+        .is_err()
+    );
+    let software = Software::new();
+    f.auth
+        .registration_finish_with_verifier(
+            str_field(&start, "ceremony"),
+            software.registration(&start, ORIGIN, true),
+            browser_wrap(&software.prf(&start), &f.dek, &f.user, "passkey"),
+            Some(new_wrap),
+            Some(recovery_verifier(&words)),
+            NOW + DAY,
+        )
+        .await
+        .unwrap();
+    let metadata: (i64, i64) =
+        sqlx::query_as("SELECT recovery_version,recovery_wrap_version FROM users")
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(metadata, (2, 2));
+    assert!(
+        f.auth
+            .recovery_start_clock(
+                &f.user,
+                super::recovery::RecoveryCredential::Verifier(verifier),
+                None,
+                || Ok(NOW + DAY),
+                true
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        f.auth
+            .recovery_start_clock(
+                &f.user,
+                super::recovery::RecoveryCredential::Verifier(recovery_verifier(&words)),
+                None,
+                || Ok(NOW + DAY),
+                true
+            )
+            .await
+            .is_ok()
+    );
 }
