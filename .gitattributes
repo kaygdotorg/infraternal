@@ -3,3 +3,7 @@ crates/infraternal-shim/tests/fixtures/*.vt binary
 fuzz/corpus/shim_frame_decode/* binary
 apps/tracer/test/fixtures/reproducers/*.bin binary
 apps/tracer/test/fixtures/*.gz binary
+# Keep the generated declaration's CRLF as a valid line ending in diffs.
+apps/tracer/vendor/ghostty-web/dist/index.d.ts whitespace=cr-at-eol
+# Patch context lines deliberately begin with a space, including blank lines.
+apps/tracer/vendor/ghostty-web/*.patch whitespace=-blank-at-eol,-blank-at-eof

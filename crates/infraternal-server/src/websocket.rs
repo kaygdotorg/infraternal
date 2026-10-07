@@ -63,6 +63,12 @@ pub(crate) struct WebSocketState {
     auth: Auth,
     pool: SqlitePool,
     agent: EmbeddedAgent,
+    #[cfg(test)]
+    handshake_timeout: Duration,
+    #[cfg(test)]
+    authority_read_timeout: Duration,
+    #[cfg(test)]
+    terminal_connect_timeout: Duration,
     connections: Arc<Semaphore>,
     users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
 }
@@ -74,9 +80,36 @@ impl WebSocketState {
             auth,
             pool,
             agent,
+            #[cfg(test)]
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+            #[cfg(test)]
+            authority_read_timeout: AUTHORITY_READ_TIMEOUT,
+            #[cfg(test)]
+            terminal_connect_timeout: TERMINAL_CONNECT_TIMEOUT,
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             users: Arc::default(),
         }
+    }
+
+    /// Keep production's terminal deadline fixed while allowing deadline tests to run quickly.
+    #[cfg(test)]
+    pub(crate) fn with_terminal_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.terminal_connect_timeout = timeout;
+        self
+    }
+
+    /// Keep production's handshake deadline fixed while tolerating a loaded test host.
+    #[cfg(test)]
+    pub(crate) fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
+        self
+    }
+
+    /// Keep production's authority-read deadline fixed while tests run on loaded hosts.
+    #[cfg(test)]
+    pub(crate) fn with_authority_read_timeout(mut self, timeout: Duration) -> Self {
+        self.authority_read_timeout = timeout;
+        self
     }
 
     /// Reserve per-user capacity before Hello. Weak entries disappear when the last socket drops.
@@ -165,7 +198,11 @@ async fn run_socket(
 ) {
     // One absolute budget covers server Hello, authority reads, client Hello and Resume.
     // Starting a fresh five seconds after a slow initial write would retain admission too long.
-    let handshake_deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+    #[cfg(test)]
+    let handshake_timeout = state.handshake_timeout;
+    #[cfg(not(test))]
+    let handshake_timeout = HANDSHAKE_TIMEOUT;
+    let handshake_deadline = tokio::time::Instant::now() + handshake_timeout;
     let mut revocations = state.auth.revocation_events();
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
@@ -1026,7 +1063,11 @@ async fn authority_deadline(
     renew: bool,
 ) -> Result<tokio::time::Instant, ()> {
     let now = unix_seconds()?;
-    let expiry = tokio::time::timeout(AUTHORITY_READ_TIMEOUT, async {
+    #[cfg(test)]
+    let read_timeout = state.authority_read_timeout;
+    #[cfg(not(test))]
+    let read_timeout = AUTHORITY_READ_TIMEOUT;
+    let expiry = tokio::time::timeout(read_timeout, async {
         if renew {
             state.auth.socket_activity(token, user_id, now).await
         } else {
@@ -1044,9 +1085,13 @@ async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> 
     let Ok(now) = unix_seconds() else {
         return false;
     };
+    #[cfg(test)]
+    let read_timeout = state.authority_read_timeout;
+    #[cfg(not(test))]
+    let read_timeout = AUTHORITY_READ_TIMEOUT;
     matches!(
         tokio::time::timeout(
-            AUTHORITY_READ_TIMEOUT,
+            read_timeout,
             state.auth.socket_activity(token, user_id, now)
         )
         .await,
@@ -1096,8 +1141,12 @@ async fn open_terminal(
     session_token: &str,
     size: TerminalOpen,
 ) -> Result<[u8; 16], ()> {
+    #[cfg(test)]
+    let connect_timeout = state.terminal_connect_timeout;
+    #[cfg(not(test))]
+    let connect_timeout = TERMINAL_CONNECT_TIMEOUT;
     let session_id = tokio::time::timeout(
-        TERMINAL_CONNECT_TIMEOUT,
+        connect_timeout,
         state.agent.open(TerminalSize {
             cols: size.cols,
             rows: size.rows,

@@ -18,7 +18,16 @@ const INPUT_FRAME_LIMIT = 16 * 1024;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
-const THEME_ROWS_PER_FRAME = 4;
+const THEME_HISTORY_PROBE_ROWS = 10_000;
+const THEME_HISTORY_INDEXED_COLUMN = "theme-history-00000 | ".length;
+const THEME_HISTORY_TRUECOLOR_COLUMN = THEME_HISTORY_INDEXED_COLUMN + 4;
+const ANSI_THEME_KEYS = [
+  "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+  "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
+] as const;
+const THEME_COLOR_KEYS: readonly (keyof ITheme)[] = [
+  "background", "foreground", "cursor", "cursorAccent", "selectionBackground", "selectionForeground", ...ANSI_THEME_KEYS,
+];
 const encoder = new TextEncoder();
 
 /** Private hooks on the pinned Ghostty build, kept at the renderer boundary for idle parking. */
@@ -27,11 +36,12 @@ interface GhosttyActivityControls {
   cancelRenderLoop(): void;
   scrollbarOpacity: number;
   renderer?: {
+    remeasureFont(): void;
+    resize(cols: number, rows: number): void;
+    getMetrics(): { width: number; height: number; baseline: number };
     setCursorBlink(enabled: boolean): void;
     setTheme(theme: ITheme): void;
     render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown, scrollbarOpacity?: number): void;
-    renderLine?(line: unknown, row: number, cols: number): void;
-    renderCursor?(x: number, y: number): void;
   };
 }
 
@@ -214,8 +224,9 @@ export class TerminalClient {
   private connectionIsResume = false;
   private lastPingAt = -Infinity;
   private renderIdleTimer = 0;
-  private themePaintFrame = 0;
   private rendererCursorBlinking = false;
+  private lastThemeColorsMs = 0;
+  private lastThemeRenderMs = 0;
   private nextPingNonce = 0n;
   private readonly pendingPings = new Map<bigint, number>();
   private inputModifiers: InputModifiers = { ctrl: "off", alt: "off" };
@@ -252,7 +263,6 @@ export class TerminalClient {
     window.visualViewport?.addEventListener("resize", this.onViewportChange);
     window.visualViewport?.addEventListener("scroll", this.onViewportChange);
     this.terminal.onResize(({ cols, rows }) => {
-      this.cancelThemePaint();
       this.prediction?.layoutChanged();
       this.wakeTerminal();
       const rect = config.host.getBoundingClientRect();
@@ -280,9 +290,9 @@ export class TerminalClient {
 
   /** Loads Geist and the WASM terminal once, then opens the one-session client. */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
-    await document.fonts.load('400 14px "Geist Mono"');
+    await document.fonts.load('14px "Geist Mono"');
     await init();
-    return new TerminalClient(config, new Terminal({
+    const terminal = new Terminal({
       fontFamily: '"Geist Mono", ui-monospace, monospace',
       fontSize: matchMedia("(pointer: coarse)").matches ? 13 : 14,
       cursorBlink: false,
@@ -295,7 +305,10 @@ export class TerminalClient {
         cursorAccent: "#101113",
         selectionBackground: "#44485c",
       },
-    }));
+    });
+    const client = new TerminalClient(config, terminal);
+    client.remeasureFont();
+    return client;
   }
 
   get isConnected(): boolean { return this.attached; }
@@ -325,19 +338,28 @@ export class TerminalClient {
     rows: number;
     cellWidth: number;
     cellHeight: number;
+    naturalCellWidth: number;
     configuredScrollback: number;
+    cursorX: number;
+    cursorY: number;
+    renderCursorX: number;
+    renderCursorY: number;
+    renderCursorVisible: boolean;
+    themeColorsMs: number;
+    themeRenderMs: number;
+    terminalColors?: { background: { r: number; g: number; b: number }; foreground: { r: number; g: number; b: number } };
     receivedSequence: string;
     outputSequence: string;
     scrollbackRows: number;
     viewportY: number;
-    cursorX: number;
-    cursorY: number;
     cursorVisible: boolean;
     fontSize: number;
     wasmMemoryBytes: number;
   } {
     const wasmTerm = this.terminal.wasmTerm;
     const memory = (wasmTerm as unknown as { memory?: WebAssembly.Memory } | undefined)?.memory;
+    const renderer = this.ghostty.renderer as unknown as { naturalCellWidth?: number } | undefined;
+    const colors = wasmTerm?.getColors();
     const cell = this.cellMetrics();
     const cursor = wasmTerm?.getCursor();
     return {
@@ -345,13 +367,20 @@ export class TerminalClient {
       rows: this.terminal.rows,
       cellWidth: cell.width,
       cellHeight: cell.height,
+      naturalCellWidth: renderer?.naturalCellWidth ?? cell.width,
       configuredScrollback: this.terminal.options.scrollback ?? 10_000,
+      cursorX: cursor?.x ?? 0,
+      cursorY: cursor?.y ?? 0,
+      renderCursorX: cursor?.x ?? 0,
+      renderCursorY: cursor?.y ?? 0,
+      renderCursorVisible: Boolean(cursor?.visible),
+      themeColorsMs: this.lastThemeColorsMs,
+      themeRenderMs: this.lastThemeRenderMs,
+      ...(colors ? { terminalColors: { background: colors.background, foreground: colors.foreground } } : {}),
       receivedSequence: this.receivedOutSeq.toString(),
       outputSequence: this.lastOutSeq.toString(),
       scrollbackRows: wasmTerm?.getScrollbackLength() ?? 0,
       viewportY: this.terminal.viewportY,
-      cursorX: cursor?.x ?? 0,
-      cursorY: cursor?.y ?? 0,
       cursorVisible: Boolean(cursor?.visible),
       fontSize: this.terminal.options.fontSize,
       wasmMemoryBytes: memory?.buffer.byteLength ?? 0,
@@ -360,7 +389,8 @@ export class TerminalClient {
 
   /** Returns bounded renderer text for the explicitly marked test-double page. */
   readScreenText(): string {
-    return terminalBufferText(this.terminal);
+    const maxRows = Math.max(10_000, this.terminal.options.scrollback ?? 10_000);
+    return terminalBufferText(this.terminal, maxRows);
   }
 
   /** Replays test-double output in a second Ghostty instance for differential checks. */
@@ -390,11 +420,30 @@ export class TerminalClient {
       baseline.open(holder);
       baseline.resize(this.terminal.cols, this.terminal.rows);
       await new Promise<void>((resolve) => baseline.write(bytes, resolve));
-      return terminalBufferText(baseline);
+      return terminalBufferText(baseline, Math.max(10_000, baseline.options.scrollback ?? 10_000));
     } finally {
       baseline.dispose();
       holder.remove();
     }
+  }
+
+  /** Reads indexed and literal RGB probe cells on the browser fixture's history rows. */
+  readThemeHistoryColors(): { rows: number; indexed: number[]; truecolor: number[] } {
+    const buffer = this.terminal.buffer.active;
+    const scrollbackRows = this.terminal.getScrollbackLength();
+    const indexed: number[] = [];
+    const truecolor: number[] = [];
+    const historyPrefix = "theme-history-";
+    for (let row = 0; row < scrollbackRows && indexed.length < THEME_HISTORY_PROBE_ROWS; row += 1) {
+      const line = buffer.getLine(row);
+      if (!line || line.translateToString(false, 0, historyPrefix.length) !== historyPrefix) continue;
+      const indexedCell = line.getCell(THEME_HISTORY_INDEXED_COLUMN);
+      const truecolorCell = line.getCell(THEME_HISTORY_TRUECOLOR_COLUMN);
+      if (!indexedCell || !truecolorCell) continue;
+      indexed.push(indexedCell.getFgColor());
+      truecolor.push(truecolorCell.getFgColor());
+    }
+    return { rows: indexed.length, indexed, truecolor };
   }
 
   /** Reads renderer graphemes from the test-only tail, including ZWJ and modifier codepoints. */
@@ -460,11 +509,26 @@ export class TerminalClient {
 
   /** Updates both Ghostty's option record and renderer palette without rebuilding the session. */
   setTheme(theme: ITheme): void {
+    if (sameTheme(this.config.theme, theme)) return;
+    const optionsTheme = this.terminal.options.theme;
+    const themeColors = localThemeColorValues(theme, optionsTheme);
     this.config.theme = theme;
-    this.terminal.options.theme = theme;
+    // The options root is proxied; mutate its nested theme to avoid the pinned
+    // runtime warning while keeping terminal resets aligned with the active look.
+    Object.assign(optionsTheme, theme);
     const renderer = this.ghostty.renderer;
     renderer?.setTheme(theme);
-    this.repaintTheme();
+    const buffer = this.terminal.wasmTerm;
+    if (!buffer) return;
+
+    // Palette-backed cells stay indexed in libghostty-vt. Updating its palette
+    // locally recolors retained rows; literal RGB cells remain untouched.
+    let startedAt = performance.now();
+    for (const [index, color] of themeColors.entries()) buffer.setThemeColor(index, color);
+    this.lastThemeColorsMs = performance.now() - startedAt;
+    startedAt = performance.now();
+    renderer?.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+    this.lastThemeRenderMs = performance.now() - startedAt;
     this.prediction?.refresh();
   }
 
@@ -484,7 +548,6 @@ export class TerminalClient {
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
     this.config.onConnectionChange?.(false);
     window.clearTimeout(this.retryTimer);
-    this.cancelThemePaint();
     this.stopPings();
     this.prediction?.dispose();
     this.resizeObserver.disconnect();
@@ -948,16 +1011,102 @@ export class TerminalClient {
     });
   }
 
-  private cellMetrics(): { width: number; height: number } {
-    const renderer = (this.terminal as unknown as { renderer?: { metrics?: { width: number; height: number } } }).renderer?.metrics;
-    if (renderer && renderer.width > 0 && renderer.height > 0) return renderer;
-    const context = document.createElement("canvas").getContext("2d");
-    if (!context) return { width: 8, height: 18 };
-    context.font = `400 ${this.terminal.options.fontSize}px ${this.terminal.options.fontFamily}`;
-    const measured = context.measureText("W");
+  private cellMetrics(): { width: number; height: number; baseline: number } {
+    const metrics = this.ghostty.renderer?.getMetrics();
+    if (!metrics || metrics.width <= 0 || metrics.height <= 0) {
+      throw new Error("terminal renderer cell metrics are unavailable");
+    }
+    return { width: metrics.width, height: metrics.height, baseline: metrics.baseline };
+  }
+
+  /** Rebuilds backing dimensions from the loaded web font before the first frame. */
+  private remeasureFont(): void {
+    const renderer = this.ghostty.renderer;
+    if (!renderer) throw new Error("terminal renderer is unavailable after font load");
+    renderer.remeasureFont();
+    renderer.resize(this.terminal.cols, this.terminal.rows);
+    this.scheduleFit();
+  }
+
+  /** Times synchronous full-screen redraws for the test-double performance probe. */
+  benchmarkFullRedraw(iterations: number): number[] {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer) throw new Error("terminal renderer is unavailable for redraw benchmark");
+    if (!Number.isInteger(iterations) || iterations < 1 || iterations > 100) {
+      throw new RangeError("redraw benchmark iterations must be from 1 to 100");
+    }
+    const samples: number[] = [];
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      const startedAt = performance.now();
+      renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+      samples.push(performance.now() - startedAt);
+    }
+    return samples;
+  }
+
+  /** Stops cursor blinking and paints one stable frame for canvas pixel tests. */
+  freezeCursorForTest(): void {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer) throw new Error("terminal renderer is unavailable for cursor pixel test");
+    renderer.setCursorBlink(false);
+    renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+  }
+
+  /** Feeds a paced 10 MB/s text stream through Ghostty and waits for its last paint. */
+  async benchmarkOutputAt10MBps(): Promise<{
+    bytes: number;
+    elapsedMs: number;
+    writeCpuMs: number;
+    p95FrameMs: number;
+    maxFrameMs: number;
+    wasmMemoryBytes: number;
+  }> {
+    const bytesPerChunk = 100_000;
+    const chunkCount = 100;
+    const totalBytes = bytesPerChunk * chunkCount;
+    const chunk = new Uint8Array(bytesPerChunk).fill(0x78);
+    await new Promise<void>((resolve) => {
+      this.terminal.write(new TextEncoder().encode("\x1b[?1049h\x1b[2J\x1b[H"), resolve);
+    });
+    const startedAt = performance.now();
+    const frameIntervals: number[] = [];
+    let previousFrameAt = startedAt;
+    let writingDone = false;
+    const sampleFrame = (at: number): void => {
+      frameIntervals.push(at - previousFrameAt);
+      previousFrameAt = at;
+      if (!writingDone || frameIntervals.length < 2) requestAnimationFrame(sampleFrame);
+    };
+    requestAnimationFrame(sampleFrame);
+
+    let writeCpuMs = 0;
+    let lastPaint: Promise<void> | undefined;
+    for (let index = 0; index < chunkCount; index += 1) {
+      const dueAt = startedAt + index * 10;
+      const delay = dueAt - performance.now();
+      if (delay > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+      const writeStartedAt = performance.now();
+      if (index + 1 === chunkCount) {
+        lastPaint = new Promise<void>((resolve) => this.terminal.write(chunk, resolve));
+      } else {
+        this.terminal.write(chunk);
+      }
+      writeCpuMs += performance.now() - writeStartedAt;
+    }
+    writingDone = true;
+    await lastPaint;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const elapsedMs = performance.now() - startedAt;
+    const sortedFrames = frameIntervals.slice().sort((left, right) => left - right);
     return {
-      width: measured.width || 8,
-      height: (measured.fontBoundingBoxAscent ?? this.terminal.options.fontSize) + (measured.fontBoundingBoxDescent ?? 3),
+      bytes: totalBytes,
+      elapsedMs,
+      writeCpuMs,
+      p95FrameMs: sortedFrames[Math.floor((sortedFrames.length - 1) * 0.95)] ?? 0,
+      maxFrameMs: sortedFrames[sortedFrames.length - 1] ?? 0,
+      wasmMemoryBytes: this.rendererMetrics.wasmMemoryBytes,
     };
   }
 
@@ -966,7 +1115,7 @@ export class TerminalClient {
     const renderer = this.terminal.renderer;
     if (!buffer || !renderer) return undefined;
     const cursor = buffer.getCursor();
-    const metrics = renderer.getMetrics();
+    const metrics = this.cellMetrics();
     return {
       canvas: renderer.getCanvas(),
       x: cursor.x,
@@ -1103,54 +1252,6 @@ export class TerminalClient {
     this.ghostty.renderer?.setCursorBlink(false);
   }
 
-  /** Repaints a theme in bounded row batches because Ghostty exposes no theme invalidation. */
-  private repaintTheme(): void {
-    const renderer = this.ghostty.renderer;
-    const buffer = this.terminal.wasmTerm;
-    if (!renderer || !buffer) return;
-    this.cancelThemePaint();
-
-    // The pinned renderer's full redraw walks every cell synchronously. Its row painter
-    // already handles selection and graphemes, so repaint a few visible rows per frame.
-    if (!renderer.renderLine) {
-      renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
-      return;
-    }
-    const { cols, rows } = buffer.getDimensions();
-    const viewportY = this.terminal.viewportY;
-    const scrollbackRows = this.terminal.getScrollbackLength();
-    let row = 0;
-    const paint = (): void => {
-      this.themePaintFrame = 0;
-      const end = Math.min(rows, row + THEME_ROWS_PER_FRAME);
-      for (; row < end; row += 1) {
-        const line = viewportY > 0 && row < viewportY
-          ? this.terminal.getScrollbackLine(scrollbackRows - Math.floor(viewportY) + row)
-          : buffer.getLine(row - Math.floor(viewportY));
-        if (line) renderer.renderLine?.(line, row, cols);
-      }
-      if (row < rows) {
-        this.themePaintFrame = requestAnimationFrame(paint);
-        return;
-      }
-
-      // Refresh small overlays after the rows. The normal renderer skips its cursor
-      // while scrolled back and its idle cursor blink is parked.
-      renderer.render(buffer, false, viewportY, this.terminal, this.ghostty.scrollbarOpacity);
-      if (viewportY === 0 && !this.rendererCursorBlinking) {
-        const cursor = buffer.getCursor();
-        if (cursor.visible) renderer.renderCursor?.(cursor.x, cursor.y);
-      }
-    };
-    this.themePaintFrame = requestAnimationFrame(paint);
-  }
-
-  private cancelThemePaint(): void {
-    if (!this.themePaintFrame) return;
-    cancelAnimationFrame(this.themePaintFrame);
-    this.themePaintFrame = 0;
-  }
-
   private acceptPong(nonce: bigint): void {
     const startedAt = this.pendingPings.get(nonce);
     if (startedAt === undefined) return;
@@ -1165,15 +1266,37 @@ function toU16(value: number): number {
   return clamp(Math.round(value), 0, 0xffff);
 }
 
-function terminalBufferText(terminal: Terminal): string {
+function terminalBufferText(terminal: Terminal, maxRows: number): string {
   const buffer = terminal.buffer.active;
-  const first = Math.max(0, buffer.length - terminal.rows - 10_000);
+  const first = Math.max(0, buffer.length - terminal.rows - maxRows);
   const lines: string[] = [];
   for (let row = first; row < buffer.length; row += 1) {
     const line = buffer.getLine(row);
     if (line) lines.push(line.translateToString(true));
   }
   return lines.join("\n");
+}
+
+/** Packs palette and default colors for the terminal's local theme API. */
+function localThemeColorValues(theme: ITheme, fallback: ITheme): number[] {
+  const palette = ANSI_THEME_KEYS.map((key) => themeHex(theme[key] ?? fallback[key], key, fallback[key]));
+  const foreground = themeHex(theme.foreground ?? fallback.foreground, "foreground", fallback.foreground);
+  const background = themeHex(theme.background ?? fallback.background, "background", fallback.background);
+  const cursor = themeHex(theme.cursor ?? fallback.cursor, "cursor", fallback.cursor);
+  return [...palette, foreground, background, cursor].map((color) => Number.parseInt(color.slice(1), 16));
+}
+
+/** Normalizes transparent mesh backgrounds to zero RGB and rejects OSC injection. */
+function themeHex(value: string | undefined, name: keyof ITheme, fallback: string | undefined): string {
+  const color = value ?? fallback;
+  if (name === "background" && color === "rgba(0,0,0,0)") return "#000000";
+  if (!color || !/^#[0-9a-f]{6}$/i.test(color)) throw new Error(`invalid terminal theme color for ${name}`);
+  return color.toLowerCase();
+}
+
+/** Avoids sending duplicate local OSC writes when UI and terminal state already agree. */
+function sameTheme(left: ITheme | undefined, right: ITheme): boolean {
+  return left !== undefined && THEME_COLOR_KEYS.every((key) => left[key] === right[key]);
 }
 
 function clamp(value: number, min: number, max: number): number {

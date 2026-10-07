@@ -1,3 +1,4 @@
+<!-- Build, review and verification workflow for infraternal contributors. -->
 # How infraternal is built
 
 Adopted by the owner on 2026-10-06 (P1). This file is the standing process.
@@ -108,6 +109,7 @@ Reviews and fixes run at the same time as the next lane's build.
   would corrupt a reliable TCP/WebSocket stream, and the available CDP
   `packetLoss` setting is documented for WebRTC rather than HTTP/WebSocket
   traffic ([Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/tot/Network/)).
+
   The gate therefore reports `loss=unsupported`; packet loss needs a separate
   transport-level mechanism that preserves TCP semantics.
 - The input-to-photon report uses fixed `METRIC` records. Keystroke-to-glyph
@@ -118,3 +120,30 @@ Reviews and fixes run at the same time as the next lane's build.
   Reconnect-to-resumed is bounded by RTT × 2 + 300 ms; at the default 300 ms
   RTT this is 900 ms, while D41's under-300 ms reconnect budget remains the
   zero-network-overhead reference.
+
+## 7. Rust build speed and static binary size
+
+- `scripts/verify fast` checks the stripped, static release binaries against
+  these measured baselines plus a 256 KiB allowance per target:
+
+  | Target | Baseline | Maximum |
+  | --- | ---: | ---: |
+  | `x86_64-unknown-linux-musl` | 16,142,672 bytes | 16,404,816 bytes |
+  | `aarch64-unknown-linux-musl` | 13,555,672 bytes | 13,817,816 bytes |
+
+  The baseline is the #57 measurement on the Debian 13, 8-vCPU build guest.
+  An intentional size increase needs target-specific measurements and a
+  rationale on its issue before the baseline is changed.
+- The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
+  enabled for repeated builds. Put Rust build output in a job-specific
+  `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.
+- Native x86_64 GNU development and test links use mold when installed, with
+  `cc` as the fallback. Static musl release links continue to use the pinned
+  Rust toolchain's LLD. The checksum-pinned Zig toolchain is used for vendored
+  C dependencies; `scripts/auth-toolchain` stages it for the static build.
+- The release profile uses `opt-level = 3`, LTO, one codegen unit and stripping.
+  It keeps `panic = "unwind"` so tokio can isolate a panic to its task rather
+  than ending every session. Change release settings only with measured runtime
+  results from the pinned performance VM, as specified in section 1.
+- For size investigations, use `cargo bloat --release --crates` for native
+  builds or pass the x86_64 musl target to inspect the static release profile.

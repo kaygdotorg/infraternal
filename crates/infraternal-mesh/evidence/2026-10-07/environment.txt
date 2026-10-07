@@ -1,0 +1,14 @@
+# Compiler/profile provenance for the raw mesh benchmark dataset.
+Production source commit: 15e4e32345f1ee2d15db2bc04c9956c1a6d445da
+Workspace release profile: opt-level=3, lto=true, codegen-units=1, strip=true.
+Scope: systemd-run --user --scope -p CPUWeight=10000.
+Timing: process CPU + monotonic wall; JSON encoding outside mutation timing.
+Topology: 1/5/20 one-way all-service node arrows per node around a ring, plus server reachability.
+Samples: five full compiles per shape; twenty samples per incremental operation.
+rustc 1.99.0 (b940084d7 2026-09-28)
+binary: rustc
+commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+commit-date: 2026-09-28
+host: x86_64-unknown-linux-gnu
+release: 1.99.0
+LLVM version: 23.1.1
