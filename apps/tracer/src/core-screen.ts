@@ -1,11 +1,13 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
 import { branchedMenu } from "../../../packages/ui/src/branched";
 import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
-import type { TerminalClient } from "./terminal";
+import { refreshTip } from "../../../packages/ui/src/tooltip";
+import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
 
 const ROOT = document.documentElement;
 const THEME_COLOR = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+const MODIFIER_KEYS = ["ctrl", "alt"] as const;
 
 export interface CoreScreenOptions {
   hostName: string;
@@ -77,21 +79,21 @@ const SCREEN = `
     </section>
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
-      <div class="keytray">
-        <button type="button" data-key="esc" aria-label="Escape" class="key-word">esc</button>
-        <button type="button" data-key="tab" aria-label="Tab">${SVG.tab}</button>
-        <button type="button" data-mod="ctrl" aria-label="Control">${SVG.ctrl}</button>
-        <button type="button" data-mod="alt" aria-label="Option">${SVG.alt}</button>
-        <button type="button" data-key="up" aria-label="Up">${SVG.up}</button>
-        <button type="button" data-key="down" aria-label="Down">${SVG.down}</button>
-        <button type="button" data-key="left" aria-label="Left">${SVG.left}</button>
-        <button type="button" data-key="right" aria-label="Right">${SVG.right}</button>
-        <button type="button" data-text="|" aria-label="Pipe">${SVG.pipe}</button>
-        <button type="button" data-text="~" aria-label="Tilde">${SVG.tilde}</button>
-        <button type="button" data-text="/" aria-label="Slash">${SVG.slash}</button>
-        <button type="button" data-text="-" aria-label="Dash">${SVG.dash}</button>
-        <button type="button" data-paste aria-label="Paste">${SVG.paste}</button>
-        <button type="button" class="dpad" data-tip-off aria-label="Arrow keys: drag to move" hidden></button>
+      <div id="keytray" class="keytray" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
+        <button id="key-escape" type="button" tabindex="-1" data-key="esc" aria-label="Escape" class="key-word">esc</button>
+        <button id="key-tab" type="button" tabindex="-1" data-key="tab" aria-label="Tab">${SVG.tab}</button>
+        <button id="key-control" type="button" tabindex="-1" data-mod="ctrl" data-mod-state="off" aria-pressed="false" aria-label="Control">${SVG.ctrl}</button>
+        <button id="key-option" type="button" tabindex="-1" data-mod="alt" data-mod-state="off" aria-pressed="false" aria-label="Option">${SVG.alt}</button>
+        <button id="key-up" type="button" tabindex="-1" data-key="up" aria-label="Up">${SVG.up}</button>
+        <button id="key-down" type="button" tabindex="-1" data-key="down" aria-label="Down">${SVG.down}</button>
+        <button id="key-left" type="button" tabindex="-1" data-key="left" aria-label="Left">${SVG.left}</button>
+        <button id="key-right" type="button" tabindex="-1" data-key="right" aria-label="Right">${SVG.right}</button>
+        <button id="key-pipe" type="button" tabindex="-1" data-text="|" aria-label="Pipe">${SVG.pipe}</button>
+        <button id="key-tilde" type="button" tabindex="-1" data-text="~" aria-label="Tilde">${SVG.tilde}</button>
+        <button id="key-slash" type="button" tabindex="-1" data-text="/" aria-label="Slash">${SVG.slash}</button>
+        <button id="key-dash" type="button" tabindex="-1" data-text="-" aria-label="Dash">${SVG.dash}</button>
+        <button id="key-paste" type="button" tabindex="-1" data-paste aria-label="Paste">${SVG.paste}</button>
+        <button id="key-dpad" type="button" tabindex="-1" class="dpad" data-tip-off aria-label="Arrow keys: drag to move" hidden></button>
       </div>
     </aside>
     <p id="connection-status" class="connection-status" role="status">Starting terminal…</p>
@@ -146,6 +148,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const paletteInput = get<HTMLInputElement>("#palette-input");
   const paletteResults = get<HTMLElement>("#palette-results");
   const keybar = get<HTMLElement>("#keybar");
+  const keytray = get<HTMLElement>(".keytray");
   const keyblur = get<HTMLElement>(".keyblur");
   const rtt = get<HTMLElement>("#rtt");
   const dot = get<HTMLElement>("#connection-dot");
@@ -169,7 +172,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ? params.get("bg")!
     : (readLocal("tracer.background") === "mesh" ? "mesh" : "none");
   let client: TerminalClient | undefined;
-  let modifier: "ctrl" | "alt" | null = null;
+  let modifiers: InputModifiers = { ctrl: "off", alt: "off" };
+  const modifierTapAt: Record<keyof InputModifiers, number> = { ctrl: -Infinity, alt: -Infinity };
+  const modifierPointerTimes: Record<keyof InputModifiers, number[]> = { ctrl: [], alt: [] };
+  let terminalFocusTarget: HTMLElement | null = null;
   let resizeTimer = 0;
   let keyboardOpen = false;
   let meshKey = "";
@@ -295,6 +301,17 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const scrimClick = (): void => setPalette(false, "pointer");
 
   const keydown = (event: KeyboardEvent): void => {
+    if (event.key === "F6") {
+      if (event.shiftKey || keytray.contains(event.target as Node)) {
+        if (client) client.focus();
+        else terminalHost.focus({ preventScroll: true });
+      } else {
+        keytray.focus({ preventScroll: true });
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       event.stopPropagation();
@@ -366,7 +383,100 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const keyInput: Record<string, string> = {
     esc: "\x1b", tab: "\t", up: "\x1b[A", down: "\x1b[B", left: "\x1b[D", right: "\x1b[C",
   };
-  const keybarPointerDown = (event: PointerEvent): void => { event.preventDefault(); };
+  const markInstant = (button: HTMLButtonElement): void => {
+    button.dataset.instant = "";
+    requestAnimationFrame(() => requestAnimationFrame(() => { delete button.dataset.instant; }));
+  };
+  const renderModifiers = (instant = false): void => {
+    const names: Record<keyof InputModifiers, string> = { ctrl: "Control", alt: "Option" };
+    for (const button of keybar.querySelectorAll<HTMLButtonElement>("[data-mod]")) {
+      const name = button.dataset.mod as keyof InputModifiers;
+      const state: InputModifierState = modifiers[name];
+      button.dataset.modState = state;
+      button.setAttribute("aria-pressed", state === "locked" ? "mixed" : String(state === "armed"));
+      button.setAttribute("aria-label", state === "off" ? names[name] : `${names[name]}, ${state}`);
+      if (instant) markInstant(button);
+      refreshTip(button);
+    }
+    for (const name of MODIFIER_KEYS) client?.setInputModifier(name, modifiers[name]);
+  };
+  const isTerminalFocus = (element: Element | null): element is HTMLElement =>
+    element instanceof HTMLElement && (element === terminalHost || terminalHost.contains(element));
+  const restoreTerminalFocus = (): void => {
+    if (isTerminalFocus(document.activeElement)) {
+      terminalFocusTarget = null;
+      return;
+    }
+    if (terminalFocusTarget?.isConnected) terminalFocusTarget.focus({ preventScroll: true });
+    else if (client) client.focus();
+    else terminalHost.focus({ preventScroll: true });
+    terminalFocusTarget = null;
+  };
+  const rememberTerminalFocus = (): void => {
+    const active = document.activeElement;
+    terminalFocusTarget = isTerminalFocus(active) ? active : null;
+  };
+  const keybarPointerDown = (event: PointerEvent): void => {
+    event.preventDefault();
+    rememberTerminalFocus();
+    if (!(event.target instanceof Element)) return;
+    const modifierButton = event.target.closest<HTMLButtonElement>("button[data-mod]");
+    if (modifierButton?.dataset.mod) {
+      const name = modifierButton.dataset.mod as keyof InputModifiers;
+      const now = performance.now();
+      const pointerTimes = modifierPointerTimes[name];
+      // iOS may delay the synthetic click; preserve pointerdown order for a real fast double tap.
+      while (pointerTimes[0] !== undefined && pointerTimes[0] < now - 300) pointerTimes.shift();
+      pointerTimes.push(now);
+    }
+  };
+  const keybarPointerCancel = (): void => {
+    modifierPointerTimes.ctrl.length = 0;
+    modifierPointerTimes.alt.length = 0;
+  };
+  const keybarKeydown = (event: KeyboardEvent): void => {
+    const buttons = [...keytray.querySelectorAll<HTMLButtonElement>("button:not([hidden]):not(:disabled):not(.dpad)")];
+    if (!buttons.length) return;
+    const currentId = keytray.getAttribute("aria-activedescendant");
+    const currentIndex = Math.max(0, buttons.findIndex((button) => button.id === currentId));
+    let nextIndex: number | undefined;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1) % buttons.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (currentIndex + buttons.length - 1) % buttons.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = buttons.length - 1;
+    else if (event.key === "Enter" || event.key === " ") {
+      buttons[currentIndex]!.click();
+      event.preventDefault();
+      return;
+    }
+    if (nextIndex !== undefined) {
+      const nextButton = buttons[nextIndex]!;
+      keytray.setAttribute("aria-activedescendant", nextButton.id);
+      nextButton.scrollIntoView({ block: "nearest", inline: "nearest" });
+      event.preventDefault();
+    }
+  };
+  const modifierClick = (button: HTMLButtonElement, event: MouseEvent): void => {
+    const name = button.dataset.mod as keyof InputModifiers;
+    const state = modifiers[name];
+    const now = event.detail === 0 ? performance.now() : modifierPointerTimes[name].shift() ?? performance.now();
+    if (event.detail === 0) modifierPointerTimes[name].length = 0;
+    if (state === "locked") {
+      modifiers[name] = "off";
+      modifierTapAt[name] = -Infinity;
+    } else if (state === "armed") {
+      const age = now - modifierTapAt[name];
+      modifiers[name] = age >= 0 && age <= 300 ? "locked" : "off";
+      modifierTapAt[name] = -Infinity;
+    } else {
+      modifiers[name] = "armed";
+      modifierTapAt[name] = now;
+    }
+    renderModifiers(event.detail === 0);
+  };
+  const injectKey = (data: string): void => {
+    try { client?.injectInput(data); } catch { /* connection state is announced in the status line */ }
+  };
   const keybarClick = (event: MouseEvent): void => {
     const target = event.target;
     if (!(target instanceof Element)) return;
@@ -375,25 +485,23 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const key = button.dataset.key;
     const text = button.dataset.text;
     if (button.dataset.mod) {
-      const next = modifier === button.dataset.mod ? null : button.dataset.mod as "ctrl" | "alt";
-      modifier = next;
-      for (const modButton of keybar.querySelectorAll<HTMLButtonElement>("[data-mod]")) {
-        modButton.dataset.armed = String(modifier === modButton.dataset.mod);
-      }
-      client?.setInputModifier(modifier);
+      modifierClick(button, event);
     } else if (key && keyInput[key]) {
-      try { client?.injectInput(keyInput[key]!); } catch { /* connection state is announced in the status line */ }
+      injectKey(keyInput[key]!);
     } else if (text) {
-      try { client?.injectInput(text); } catch { /* connection state is announced in the status line */ }
+      injectKey(text);
     } else if ("paste" in button.dataset) {
       void navigator.clipboard?.readText().then((value) => {
         if (!value) return;
-        try { client?.injectInput(value); } catch { /* connection state is announced in the status line */ }
+        injectKey(value);
       }).catch(() => undefined);
     }
+    restoreTerminalFocus();
   };
   keybar.addEventListener("pointerdown", keybarPointerDown);
+  keybar.addEventListener("pointercancel", keybarPointerCancel);
   keybar.addEventListener("click", keybarClick);
+  keytray.addEventListener("keydown", keybarKeydown);
 
   function runAction(action: string, source: "keyboard" | "pointer"): void {
     const [kind, value] = action.split(":");
@@ -419,7 +527,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     bindTerminal(value) {
       client = value;
       client.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
-      client.setInputModifier(modifier);
+      for (const name of MODIFIER_KEYS) client.setInputModifier(name, modifiers[name]);
     },
     setRoundTrip(milliseconds) {
       rtt.textContent = milliseconds === undefined ? "··" : `${Math.round(milliseconds)} ms`;
@@ -435,8 +543,15 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       keyblur.classList.toggle("is-away", scrolled && !keyboardOpen);
     },
     onInputActivity() {
-      modifier = null;
-      for (const modButton of keybar.querySelectorAll<HTMLButtonElement>("[data-mod]")) modButton.dataset.armed = "false";
+      let changed = false;
+      for (const name of MODIFIER_KEYS) {
+        if (modifiers[name] === "armed") {
+          modifiers[name] = "off";
+          modifierTapAt[name] = -Infinity;
+          changed = true;
+        }
+      }
+      if (changed) renderModifiers(true);
       keybar.classList.remove("is-away");
       keyblur.classList.remove("is-away");
     },
@@ -451,7 +566,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       window.visualViewport?.removeEventListener("resize", viewportChange);
       window.visualViewport?.removeEventListener("scroll", viewportChange);
       keybar.removeEventListener("pointerdown", keybarPointerDown);
+      keybar.removeEventListener("pointercancel", keybarPointerCancel);
       keybar.removeEventListener("click", keybarClick);
+      keytray.removeEventListener("keydown", keybarKeydown);
       window.clearTimeout(resizeTimer);
       releaseMesh();
       delete ROOT.dataset.kb;
