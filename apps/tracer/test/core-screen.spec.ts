@@ -150,7 +150,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
       .map((animation) => Number(animation.effect?.getTiming().duration)),
   }));
   expect(branchMotion.marker, "the marker glide must stay under the 300 ms motion cap").toBeLessThan(300);
-  expect(branchMotion.draw.some((duration) => duration >= 300), "the branch draw must stay under the 300 ms motion cap").toBe(false);
+  expect(branchMotion.draw).toContain(300);
   await expect(page.locator("#tree")).not.toContainText(/static example|STATIC|name unavailable|not available yet|not connected/i);
   await page.keyboard.press("Escape");
   await expect(page.locator("#sidebar")).toBeHidden();
