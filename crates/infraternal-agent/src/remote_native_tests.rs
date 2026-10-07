@@ -9,8 +9,8 @@ use crate::{
 use infraternal_protocol::{Frame, decode_frame, encode_frame_into};
 
 struct Pair {
-    _server: quinn::Endpoint,
-    _client: quinn::Endpoint,
+    server_endpoint: quinn::Endpoint,
+    client_endpoint: quinn::Endpoint,
     server: quinn::Connection,
     client: quinn::Connection,
 }
@@ -34,8 +34,8 @@ impl Pair {
             async { server.accept().await.unwrap().await }
         );
         Self {
-            _server: server,
-            _client: client,
+            server_endpoint: server,
+            client_endpoint: client,
             server: remote.unwrap(),
             client: local.unwrap(),
         }
@@ -158,3 +158,6 @@ async fn control_must_be_host_initiated_stream_zero_and_terminal_halves_cannot_i
     assert!(NativeChannel::control(server.send, server.receive).is_err());
     drop(host.unwrap());
 }
+
+#[path = "native_terminal_tests.rs"]
+mod terminal;
