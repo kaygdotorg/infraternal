@@ -1063,3 +1063,38 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      the expected peer count, idle cost, join time, rule-propagation time
      and rotation impact. A round that regresses a number needs a
      benchmark that justifies it (priority 1).
+168. **Internal CA: Ed25519, locked until an administrator unlocks it**
+     (#78):
+     - The CA signing key is **Ed25519** (measured equal to P-256 in speed
+       and memory; it matches the existing host keys and gives smaller
+       certificates).
+     - The CA private key is stored encrypted. After a cold start it stays
+       **locked** until **any user with the administrator role** unlocks it
+       with their passkey. The CA key is wrapped once per administrator
+       (as with device keys, D151), and granting or revoking the role
+       rewraps it.
+     - **While locked**, existing connections and infraternal agent
+       reconnects keep working (verifying needs only the public CA
+       certificate). Only enrolling new hosts and renewing certificates
+       wait.
+     - The server **locks only on a cold start**: a crash, a host reboot or
+       power loss, a manual stop/start, or a restore or migration to another
+       host. It never locks on a timer. An **auto-update or rollback hands
+       the unlocked key to the new process in memory**, so updates do not
+       lock it (unless the handoff itself fails, which then counts as a
+       cold start).
+     - Infraternal agents renew at half of the 7-day lifetime, so any
+       restart leaves every certificate at least 3.5 days. While locked,
+       administrators are notified, and again before any certificate gets
+       close to expiry.
+169. **WireGuard engines (#81, research/mesh-engines):**
+     - Linux kernel WireGuard is driven by **our own small typed netlink
+       client** (on MIT/Apache crates, chunked peer updates; measured 66 ms
+       for 1,000 peers and 10 µs for a one-peer change).
+     - The userspace engine for macOS nodes is **GotaTun** (Rust, MPL-2.0,
+       independently audited), with our own macOS tunnel adapter in place
+       of its bundled one (whose licence we cannot use). wireguard-go was
+       rejected: it adds a second language runtime (+3.5 MB) and
+       cross-language integration risk.
+     - The Windows tunnel driver is **deferred** until Windows nodes, with a
+       licence review then.
