@@ -1,7 +1,6 @@
 /**
  * Warm tooltips: the one tooltip for every icon-only control (owner rule: wherever an
- * icon stands without a label, it gets this tooltip). Reimplemented from the behaviour
- * of the sveltebits warm-tooltip; its code is MIT + Commons Clause and is not copied.
+ * icon stands without a label, it gets this tooltip).
  *
  * Behaviour (one group per page, one floating surface):
  * - Cold: the first tooltip waits 400 ms, then pops from its trigger (opacity and scale
@@ -45,20 +44,30 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1000; pointer-events: none; will-change: transform; }
 .tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; white-space: nowrap; overflow: hidden;
-  font: 500 12.5px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+  font: 500 13px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .tip-label { display: block; }
 .tip-label.is-leaving { position: absolute; left: 10px; top: 6px; }
 .tip-arrow { position: absolute; left: 0; width: 8px; height: 8px; margin-left: -4px; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
 .tip-measure { position: fixed; visibility: hidden; white-space: nowrap; pointer-events: none;
-  font: 500 12.5px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
+  font: 500 13px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
+.ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(320px, calc(100vw - 24px)); gap: 10px; padding: 12px;
+  border-radius: 13px; opacity: 0; transform: translateY(5px) scale(.97); pointer-events: none;
+  transition: opacity 160ms ease-out, transform 180ms cubic-bezier(.23, 1, .32, 1); }
+.ui-confirm-tip[hidden] { display: none !important; }
+.ui-confirm-tip[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
+.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 15px/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
+.ui-confirm-tip-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.ui-confirm-tip button { min-width: 58px; min-height: 44px; padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 8px;
+  background: transparent; color: var(--fg); font: 550 14px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); cursor: pointer; }
+.ui-confirm-tip button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ui-confirm-tip .ui-confirm-yes { border-color: var(--accent); background: var(--accent); color: var(--bg); }
+@media (prefers-reduced-motion: reduce) { .ui-confirm-tip { transition: opacity 120ms ease; transform: none; } }
 `;
 
 function build() {
-  const style = document.createElement("style");
-  style.textContent = STYLE;
-  document.head.appendChild(style);
+  buildStyleOnly();
   pos = document.createElement("div");
   pos.className = "tip-pos";
   pos.setAttribute("aria-hidden", "true"); // the trigger's aria-label already names it
@@ -70,6 +79,127 @@ function build() {
   measure = document.createElement("span");
   measure.className = "tip-measure";
   document.body.append(pos, measure);
+}
+
+export interface ConfirmTipOptions {
+  /** Accessible name for the small, trigger-anchored confirmation group. */
+  label: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  onConfirm(): void;
+  onCancel?(): void;
+}
+
+export interface ConfirmTipController { close(restoreFocus?: boolean): void }
+
+let activeConfirmTip: ConfirmTipController | undefined;
+let confirmTipSerial = 0;
+
+/** Mounts a single reusable, trigger-anchored confirmation for a reversible choice. */
+export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions): ConfirmTipController {
+  activeConfirmTip?.close(false);
+  buildStyleOnly();
+
+  const tip = document.createElement("div");
+  tip.className = "ui-confirm-tip ui-overlay-surface";
+  tip.id = `ui-confirm-tip-${++confirmTipSerial}`;
+  tip.hidden = true;
+  tip.setAttribute("role", "dialog");
+  tip.setAttribute("aria-label", options.label);
+  tip.dataset.open = "false";
+
+  const message = document.createElement("p");
+  message.className = "ui-confirm-tip-message";
+  message.textContent = options.message;
+
+  const actions = document.createElement("div");
+  actions.className = "ui-confirm-tip-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = options.cancelLabel;
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "ui-confirm-yes";
+  confirm.textContent = options.confirmLabel;
+  actions.append(cancel, confirm);
+  tip.append(message, actions);
+  document.body.append(tip);
+
+  anchor.setAttribute("aria-expanded", "true");
+  anchor.setAttribute("aria-controls", tip.id);
+  tip.hidden = false;
+
+  let closing = false;
+  let controller: ConfirmTipController | undefined;
+  const place = (): void => {
+    if (tip.hidden) return;
+    const anchorRect = anchor.getBoundingClientRect();
+    const width = tip.getBoundingClientRect().width;
+    const height = tip.getBoundingClientRect().height;
+    const left = Math.max(12, Math.min(innerWidth - width - 12, anchorRect.left + anchorRect.width / 2 - width / 2));
+    const below = innerHeight - anchorRect.bottom;
+    const side = below >= height + 18 || below >= anchorRect.top ? "bottom" : "top";
+    const top = side === "bottom" ? anchorRect.bottom + 8 : Math.max(12, anchorRect.top - height - 8);
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+    tip.style.transformOrigin = `${Math.max(12, Math.min(width - 12, anchorRect.left + anchorRect.width / 2 - left))}px ${side === "bottom" ? "0%" : "100%"}`;
+    tip.dataset.side = side;
+  };
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    controller?.close(true);
+    options.onCancel?.();
+  };
+  const onOutside = (event: PointerEvent): void => {
+    if (event.target instanceof Node && (tip.contains(event.target) || anchor.contains(event.target))) return;
+    controller?.close(false);
+    options.onCancel?.();
+  };
+  const cleanup = (): void => {
+    document.removeEventListener("keydown", onKeyDown, true);
+    document.removeEventListener("pointerdown", onOutside, true);
+    window.removeEventListener("resize", place);
+    window.removeEventListener("scroll", place, true);
+  };
+  const instance: ConfirmTipController = {
+    close(restoreFocus = true) {
+      if (closing) return;
+      closing = true;
+      cleanup();
+      anchor.setAttribute("aria-expanded", "false");
+      anchor.removeAttribute("aria-controls");
+      tip.dataset.open = "false";
+      if (restoreFocus && anchor.isConnected) anchor.focus({ preventScroll: true });
+      if (activeConfirmTip === controller) activeConfirmTip = undefined;
+      window.setTimeout(() => { tip.remove(); }, 190);
+    },
+  };
+  controller = instance;
+  activeConfirmTip = instance;
+
+  cancel.addEventListener("click", () => { instance.close(true); options.onCancel?.(); });
+  confirm.addEventListener("click", () => { instance.close(false); options.onConfirm(); });
+  document.addEventListener("keydown", onKeyDown, true);
+  document.addEventListener("pointerdown", onOutside, true);
+  window.addEventListener("resize", place);
+  window.addEventListener("scroll", place, true);
+  place();
+  requestAnimationFrame(() => {
+    if (closing || !tip.isConnected) return;
+    tip.dataset.open = "true";
+    cancel.focus({ preventScroll: true });
+  });
+  return instance;
+}
+
+function buildStyleOnly(): void {
+  if (document.getElementById("ui-tooltip-style")) return;
+  const style = document.createElement("style");
+  style.id = "ui-tooltip-style";
+  style.textContent = STYLE;
+  document.head.appendChild(style);
 }
 
 function labelOf(el: HTMLElement): string {
