@@ -1,0 +1,57 @@
+/** Replaces lost passkeys by unwrapping the original DEK with BIP-39 entropy [23,25,D113]. */
+import { mnemonicToEntropy } from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english.js";
+import { AuthError, recoveryAuth as auth, type AuthStart, type Wrap } from "./auth";
+
+export interface RecoveryRequest { token: string; delay_seconds: number; ready_at: number }
+
+/** Starts recovery with an optional HttpOnly session; the server alone chooses the delay. */
+export async function startRecovery(username: string, words: string): Promise<RecoveryRequest> {
+  const result = await auth.post<RecoveryRequest>("recovery-start", { username, words });
+  auth.requiredString(result.token, "recovery token");
+  if (![0, 86400].includes(result.delay_seconds) || !Number.isSafeInteger(result.ready_at) || result.ready_at <= 0) {
+    throw new AuthError("The server returned an invalid recovery time.");
+  }
+  return result;
+}
+
+/** Creates a replacement passkey, then pauses before committing until rotated words are saved. */
+export async function replacePasskey(token: string, words: string,
+  showWords: (words: string, finish: () => Promise<void>) => Promise<void>,
+): Promise<{ userId: string; displayName: string }> {
+  const start = await auth.post<AuthStart & { old_recovery_wrap: Wrap }>("recovery-ready", { token });
+  const userId = auth.canonicalUuid(start.user_id, "recovery user id");
+  const oldEntropy = mnemonicToEntropy(words, wordlist);
+  let nextEntropy: Uint8Array | undefined, dek: Uint8Array | undefined, prf: Uint8Array | undefined, input: Uint8Array | undefined;
+  try {
+    const nextWords = auth.requiredString(start.recovery_words, "new recovery words");
+    if (oldEntropy.byteLength !== 32) throw new AuthError("Enter all 24 recovery words.");
+    // Authenticate the old envelope before creating anything: replacement must retain the DEK.
+    dek = await auth.unwrapDek(oldEntropy, start.old_recovery_wrap, userId, "recovery");
+    if (dek.byteLength !== 32) throw new AuthError("The account key is invalid.");
+    const options = auth.creationOptions(start.options.publicKey);
+    input = auth.prfInputFrom(options);
+    const created = await navigator.credentials.create({ publicKey: options });
+    if (!(created instanceof PublicKeyCredential)) throw new AuthError("Passkey registration was cancelled.");
+    if (auth.credentialOutputs(created).prf?.enabled !== true) {
+      throw new AuthError("This passkey cannot protect your account key. Choose another passkey.");
+    }
+    prf = auth.prfFrom(created) ?? await auth.credentialPrf(created, options.rp.id, input);
+    nextEntropy = mnemonicToEntropy(nextWords, wordlist);
+    if (nextEntropy.byteLength !== 32) throw new AuthError("The new recovery key is invalid.");
+    const passkeyWrap = await auth.wrapDek(prf, dek, userId, "passkey");
+    const recoveryWrap = await auth.wrapDek(nextEntropy, dek, userId, "recovery");
+    let finishing: Promise<void> | undefined;
+    await showWords(nextWords, () => {
+      // Finish is one-shot. A failed ceremony must restart instead of resubmitting consumed proofs.
+      finishing ??= auth.post<void>("registration-finish", {
+        ceremony: start.ceremony, proof: auth.credentialProof(created),
+        passkey_wrap: passkeyWrap, recovery_wrap: recoveryWrap,
+      });
+      return finishing;
+    });
+    return { userId, displayName: options.user.displayName };
+  } finally {
+    oldEntropy.fill(0); nextEntropy?.fill(0); dek?.fill(0); prf?.fill(0); input?.fill(0);
+  }
+}
