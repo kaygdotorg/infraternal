@@ -672,3 +672,31 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      (NetBird/Tailscale restarts, agent restarts, network loss, a 300 ms+
      RTT, renewal under load, update and swap failures) and reports before
      the owner tests the add-host flow.
+138. **Add-host flow, round H:**
+     - **Entry points (H1):** the sidebar's "Add hosts", ⌘K and a calm
+       empty state all open the same flow.
+     - **Discovery (H2):** one smart field (`user@host`, an IP or a name)
+       plus live lists. The server auto-detects what it can already
+       reach: the mesh it is a peer of (from the local NetBird or
+       Tailscale daemon), `~/.ssh/known_hosts`, `~/.ssh/config` and the
+       like. Smart, simple, stupid.
+     - **Mesh API tokens (H3):** optional, encrypted with the passkey and
+       read-only. Never required to add hosts when the server host is
+       already a mesh peer.
+     - **Installs (H4):** parallel and async; one failure never blocks
+       another.
+     - **Credentials (H5):** asked only when needed, inline per host,
+       with "use for all selected".
+139. **Root needs explicit consent (H6), which supersedes the automatic
+     parts of D18 and D120-W7:** passwordless sudo is never taken as
+     permission. Installing a root infraternal agent, and promoting an
+     existing user agent to root later, always asks first ("trust is one
+     thing we can't get back once lost"). After consent, the W7 spinner
+     and warm tooltip show progress.
+140. **The add-host flow is a window (H7–H9):**
+     - It lives on the canvas, with springy, bouncy, responsive motion in
+       the spirit of the sign-in wizard (a rare action, so delight is
+       allowed).
+     - Finished hosts open their terminal windows automatically.
+     - Failures are plain, human, simplified technical English, with a
+       caret that expands to browse the logs.
