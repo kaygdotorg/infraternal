@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool};
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
@@ -107,6 +107,7 @@ pub struct Auth {
     pending: Arc<Mutex<Pending>>,
     ingress: Arc<Mutex<http::Ingress>>,
     revocations: Arc<tokio::sync::watch::Sender<()>>,
+    setup_consumed: Arc<watch::Sender<()>>,
     #[cfg(test)]
     recovery_pause: Arc<Mutex<Option<Arc<RecoveryPause>>>>,
 }
@@ -119,6 +120,11 @@ impl Auth {
     #[must_use]
     pub fn origin(&self) -> &str {
         &self.origin
+    }
+
+    /// Subscribe to the successful owner-enrollment event used to retire its CLI socket.
+    pub(crate) fn subscribe_setup_consumed(&self) -> watch::Receiver<()> {
+        self.setup_consumed.subscribe()
     }
 
     /// Migrate storage and pin `WebAuthn` to an HTTPS RP origin without wildcard ports/subdomains.
@@ -139,6 +145,7 @@ impl Auth {
             .build()
             .map_err(|_| Error::Invalid)?;
         sqlx::migrate!("./migrations").run(&pool).await?;
+        let (setup_consumed, _) = watch::channel(());
         Ok(Self {
             pool,
             webauthn: Arc::new(webauthn),
@@ -146,6 +153,7 @@ impl Auth {
             pending: Arc::default(),
             ingress: Arc::default(),
             revocations: Arc::new(tokio::sync::watch::channel(()).0),
+            setup_consumed: Arc::new(setup_consumed),
             #[cfg(test)]
             recovery_pause: Arc::default(),
         })

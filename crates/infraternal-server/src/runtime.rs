@@ -23,7 +23,7 @@ use sqlx::{
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -183,7 +183,7 @@ pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
     init_logging();
     let (app, setup_token) = build_router(config.clone(), None).await?;
     if let Some(token) = setup_token {
-        start_setup_token_socket(config.data_dir.join("setup-token.sock"), token)?;
+        start_setup_token_socket(&config.data_dir, token)?;
     }
     tracing::info!(
         listen = %config.listen,
@@ -260,6 +260,18 @@ async fn build_router(
     .await
     .map_err(ServerError::Auth)?;
 
+    if setup_token.is_some() {
+        let mut setup_consumed = auth.subscribe_setup_consumed();
+        let data_dir = config.data_dir.clone();
+        tokio::spawn(async move {
+            if setup_consumed.changed().await.is_ok() {
+                remove_setup_token_socket_or_warn(&data_dir, "owner enrollment");
+            }
+        });
+    } else {
+        remove_setup_token_socket_or_warn(&config.data_dir, "owner already exists at startup");
+    }
+
     let agent = if let Some(agent) = supplied_agent {
         agent
     } else {
@@ -290,11 +302,15 @@ async fn build_router(
 
 // Keep the one-time capability in memory. Only a same-user CLI request over this
 // private socket may retrieve it; systemd output and application logs never contain it.
-fn start_setup_token_socket(path: PathBuf, token: String) -> Result<(), ServerError> {
-    let _ = std::fs::remove_file(&path);
+fn start_setup_token_socket(data_dir: &Path, token: String) -> Result<(), ServerError> {
+    unlink_setup_token_socket(data_dir).map_err(|error| {
+        tracing::warn!("could not safely replace setup-token socket");
+        ServerError::SetupTokenSocket(error)
+    })?;
+    let path = data_dir.join("setup-token.sock");
     let listener = UnixListener::bind(&path).map_err(ServerError::SetupTokenSocket)?;
     if let Err(error) = set_private_file(&path) {
-        let _ = std::fs::remove_file(path);
+        remove_setup_token_socket_or_warn(data_dir, "socket permission setup");
         return Err(ServerError::SetupTokenSocket(error));
     }
     let clients = Arc::new(Semaphore::new(4));
@@ -326,6 +342,36 @@ fn start_setup_token_socket(path: PathBuf, token: String) -> Result<(), ServerEr
         }
     });
     Ok(())
+}
+
+/// Unlink only the fixed setup-token socket name when lstat identifies a socket.
+fn unlink_setup_token_socket(data_dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let path = data_dir.join("setup-token.sock");
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "setup-token path is not a socket",
+        ));
+    }
+    // remove_file unlinks the pathname and never follows a replacement symlink.
+    std::fs::remove_file(path)
+}
+
+/// Report cleanup failures without exposing filesystem errors or setup credentials.
+fn remove_setup_token_socket_or_warn(data_dir: &Path, operation: &'static str) {
+    if unlink_setup_token_socket(data_dir).is_err() {
+        tracing::warn!(
+            operation = operation,
+            "could not safely remove setup-token socket"
+        );
+    }
 }
 
 async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerError> {
@@ -531,7 +577,7 @@ fn set_private_file(_path: &std::path::Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    //! Verifies startup storage and trusted-proxy validation without binding a listener.
+    //! Verifies startup storage, setup-token socket lifecycle, and proxy validation with local fixtures.
 
     use super::{
         ProxyNetwork, ServerConfig, TlsFiles, router_with_agent, set_private_directory,
@@ -633,7 +679,7 @@ mod tests {
         .await
         .expect("initial startup");
         let path = data_dir.join("setup-token.sock");
-        start_setup_token_socket(path.clone(), first.expect("initial setup capability"))
+        start_setup_token_socket(&data_dir, first.expect("initial setup capability"))
             .expect("initial private control socket");
         let mut client = UnixStream::connect(&path)
             .await
@@ -657,7 +703,7 @@ mod tests {
         )
         .await
         .expect("restart against existing database");
-        start_setup_token_socket(path.clone(), next.expect("rotated setup capability"))
+        start_setup_token_socket(&data_dir, next.expect("rotated setup capability"))
             .expect("replace stale private socket");
         let mut client = UnixStream::connect(&path)
             .await
@@ -688,6 +734,17 @@ mod tests {
         let now = super::unix_seconds().expect("current time");
         assert!(auth.setup_start(old.trim(), "owner", now).await.is_err());
         crate::auth::tests::register_over_http(&app, token.trim()).await;
+        let socket_removed = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(
+            socket_removed,
+            "successful owner enrollment must unlink its CLI socket"
+        );
         assert!(auth.setup_start(token.trim(), "owner", now).await.is_err());
         let owners: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE owner=1")
             .fetch_one(&pool)
@@ -707,6 +764,95 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn startup_with_owner_unlinks_stale_setup_token_socket() {
+        use std::os::unix::net::UnixListener as StdUnixListener;
+        use tokio::net::UnixStream;
+
+        let data_dir =
+            PathBuf::from("target").join(format!("owner-startup-{}", uuid::Uuid::new_v4()));
+        let mut configuration = config(data_dir.clone());
+        configuration.public_origin = "https://auth.example.test".to_owned();
+        let (socket, _peer) = UnixStream::pair().expect("initial infraternal agent socketpair");
+        let (app, _) = super::build_router(
+            configuration.clone(),
+            Some(EmbeddedAgent::from_test_socket(socket)),
+        )
+        .await
+        .expect("initial server startup");
+        drop(app);
+
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("open migrated owner fixture");
+        sqlx::query(
+            "INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('test-owner','owner',1,'fixture-hash','owner','owner')",
+        )
+        .execute(&pool)
+        .await
+        .expect("persist existing owner fixture");
+        pool.close().await;
+
+        let path = data_dir.join("setup-token.sock");
+        drop(StdUnixListener::bind(&path).expect("create crash-left socket fixture"));
+        assert!(path.exists());
+        let (socket, _peer) = UnixStream::pair().expect("restart infraternal agent socketpair");
+        let (app, setup_token) =
+            super::build_router(configuration, Some(EmbeddedAgent::from_test_socket(socket)))
+                .await
+                .expect("startup with existing owner");
+        let removed = !path.exists();
+        let no_token = setup_token.is_none();
+        drop(app);
+        std::fs::remove_dir_all(&data_dir).expect("remove owner startup fixture");
+
+        assert!(
+            no_token,
+            "an existing owner must not receive a setup capability"
+        );
+        assert!(
+            removed,
+            "startup with an owner must unlink its stale CLI socket"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_socket_cleanup_preserves_symlinks_and_regular_files() {
+        use std::os::unix::fs::symlink;
+
+        let data_dir =
+            PathBuf::from("target").join(format!("setup-socket-safe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).expect("create socket cleanup fixture");
+        let path = data_dir.join("setup-token.sock");
+        let target = data_dir.join("target-file");
+        std::fs::write(&target, "untouched").expect("create symlink target");
+        symlink(&target, &path).expect("create socket-path symlink");
+
+        assert!(super::unlink_setup_token_socket(&data_dir).is_err());
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("symlink target"),
+            "untouched"
+        );
+
+        std::fs::remove_file(&path).expect("remove test symlink");
+        std::fs::write(&path, "preserved").expect("create regular-file fixture");
+        assert!(super::unlink_setup_token_socket(&data_dir).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("regular socket-path file"),
+            "preserved"
+        );
+
+        std::fs::remove_dir_all(data_dir).expect("remove socket cleanup fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn setup_token_socket_is_private_and_requires_explicit_request() {
         use std::os::unix::fs::PermissionsExt;
         use tokio::{
@@ -718,7 +864,7 @@ mod tests {
         std::fs::create_dir_all(&data_dir).expect("create private data directory");
         set_private_directory(&data_dir).expect("protect data directory");
         let path = data_dir.join("setup-token.sock");
-        start_setup_token_socket(path.clone(), "test-capability".to_owned())
+        start_setup_token_socket(&data_dir, "test-capability".to_owned())
             .expect("start token control socket");
         let mode = std::fs::metadata(&path)
             .expect("control socket metadata")

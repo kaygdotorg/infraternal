@@ -90,6 +90,7 @@ impl Auth {
             .registrations
             .remove(id)
             .ok_or(Error::Denied)?;
+        let setup_consumed = matches!(&registration.authority, Authority::Setup(_));
         if registration.expires <= now {
             return Err(Error::Denied);
         }
@@ -169,6 +170,9 @@ impl Auth {
         let token = random();
         insert_session(&mut tx, &token, user, "enrollment", now, Some(&key_id)).await?;
         tx.commit().await?;
+        if setup_consumed {
+            self.setup_consumed.send_replace(());
+        }
         if matches!(registration.authority, Authority::Recovery(_)) {
             self.revocations.send_replace(());
         }
