@@ -1,0 +1,32 @@
+# Isolated fuzz package for mesh validation and generated lifecycle messages.
+[package]
+name = "infraternal-mesh-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+infraternal-mesh = { version = "0.1.0", path = ".." }
+
+[[bin]]
+name = "mesh"
+path = "fuzz_targets/mesh.rs"
+test = false
+doc = false
+bench = false
+
+[lints.rust]
+unsafe_code = "forbid"
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
