@@ -961,3 +961,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Desktop:** the trackpad or wheel scrolls the terminal under the
        pointer; Shift is horizontal; Space+drag or middle-drag pans the
        canvas; a click activates a window.
+160. **One reusable, per-instance-extensible component per UI concept:**
+     every UI concept (overlay/popover/sheet material, pill, capsule tabs,
+     rows, tooltip, tick and copy swap, toast, buttons, spring) exists
+     **once** in `packages/ui`, is extensible per instance (props, CSS
+     custom properties, slots), and is used everywhere. One-off copies are
+     not allowed: the orchestrator rejects job diffs that hand-roll
+     duplicates. An optimisation to a component therefore lands everywhere.
+     Performance is the highest concern in every shared component. The
+     **overlay material** (D72: translucent glass with a light blur,
+     hairline and soft shadow) is one token set used by every popover, the
+     info popover and session manager included. It is never opaque and
+     never so blurred that it reads as opaque, and it is checked in every
+     theme.
