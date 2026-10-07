@@ -511,3 +511,152 @@ async fn recovery_notices_preserve_order_credit_and_session_isolation() {
     assert!(!routes.contains_key(&4));
     assert!(routes.contains_key(&2));
 }
+
+/// One credited bulk window must survive a forwarder briefly awaiting authenticated I/O.
+#[tokio::test]
+#[ignore = "tests-first credited-burst regression; enabled with queue sizing fix"]
+async fn credited_bulk_output_survives_forwarder_io_pause() {
+    let (mut link, _peer) = connection();
+    let (tx, mut rx) = mpsc::channel(OUTPUT_CAPACITY);
+    let mut state = attachment(tx);
+    state.credit = 1024 * 1024;
+    let mut attachments = HashMap::from([(1, state)]);
+    let mut routes = HashMap::from([(2, 1)]);
+    for chunk in 0..256 {
+        assert!(
+            process_incoming(
+                Incoming::Output {
+                    stream_id: 2,
+                    out_seq: chunk * 4096,
+                    bytes: Bytes::from(vec![120; 4096]),
+                },
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut HashMap::new()
+            )
+            .await
+        );
+    }
+    assert_eq!(
+        rx.len(),
+        256,
+        "credited bulk window retired a healthy I/O-paused viewer"
+    );
+    assert!(routes.contains_key(&2));
+    assert_eq!(attachments[&1].credit, 0);
+    for chunk in 0..256 {
+        assert!(
+            matches!(rx.try_recv(),Ok(TerminalOutput::Output {out_seq,bytes})
+            if out_seq == chunk*4096 && bytes.len()==4096)
+        );
+    }
+}
+
+/// Credit is a byte bound even when the downstream frame queue has spare slots.
+#[tokio::test]
+#[ignore = "tests-first granted-byte boundary; enabled with queue sizing fix"]
+async fn uncredited_output_or_repaint_is_rejected_before_queueing() {
+    for incoming in [
+        Incoming::Output {
+            stream_id: 2,
+            out_seq: 0,
+            bytes: Bytes::from_static(b"x"),
+        },
+        Incoming::Snapshot {
+            stream_id: 2,
+            out_seq: 17,
+            bytes: Bytes::from_static(b"x"),
+        },
+    ] {
+        let (mut link, _peer) = connection();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut attachments = HashMap::from([(1, attachment(tx))]);
+        let mut routes = HashMap::from([(2, 1)]);
+        assert!(
+            !process_incoming(
+                incoming,
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut HashMap::new()
+            )
+            .await,
+            "embedded peer exceeded granted output bytes"
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(attachments[&1].credit, 0);
+        assert_eq!(attachments[&1].last_out_seq, 0);
+    }
+}
+
+/// Quantify the default credited output burst at the deployed 128-stream ceiling.
+#[tokio::test]
+#[ignore = "debug actor memory/scheduling measurement; run without concurrent builds"]
+async fn credited_output_queue_at_stream_capacity() {
+    fn resident_kib() -> usize {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("VmRSS:"))
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+    let baseline = resident_kib();
+    let (mut link, _peer) = connection();
+    let mut attachments = HashMap::new();
+    let mut routes = HashMap::new();
+    let mut receivers = Vec::new();
+    for id in 1..=128_u64 {
+        let (tx, rx) = mpsc::channel(OUTPUT_CAPACITY);
+        let stream_id = u32::try_from(id).unwrap() * 2;
+        attachments.insert(
+            id,
+            AttachmentState {
+                stream_id,
+                credit: 1024 * 1024,
+                ..attachment(tx)
+            },
+        );
+        routes.insert(stream_id, id);
+        receivers.push(rx);
+    }
+    let idle = resident_kib();
+    let mut samples = Vec::with_capacity(32768);
+    // Unique buffers make the measured payload cost real rather than shared test storage.
+    for chunk in 0..256 {
+        for id in 1..=128_u64 {
+            let started = std::time::Instant::now();
+            assert!(
+                process_incoming(
+                    Incoming::Output {
+                        stream_id: u32::try_from(id).unwrap() * 2,
+                        out_seq: chunk * 4096,
+                        bytes: Bytes::from(vec![120; 4096])
+                    },
+                    &mut link,
+                    &mut attachments,
+                    &mut routes,
+                    &mut HashMap::new()
+                )
+                .await
+            );
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    assert_eq!(routes.len(), 128);
+    assert!(receivers.iter().all(|rx| rx.len() == 256));
+    assert!(attachments.values().all(|state| state.credit == 0));
+    let full = resident_kib();
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "debug actor scale: streams=128 frames=32768 payload_bytes=134217728 baseline_RSS_KiB={baseline} idle_queues_RSS_KiB={idle} full_queues_RSS_KiB={full} dispatch_p99_ms={:.6} CPUs={} load={}",
+        samples[samples.len() * 99 / 100],
+        std::thread::available_parallelism().unwrap().get(),
+        std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+    );
+}
