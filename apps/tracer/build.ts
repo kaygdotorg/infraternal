@@ -5,6 +5,10 @@ import { browserFileLoader } from "./browser-build";
 
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist/fonts", { recursive: true });
+const recoveryUiMode = process.env.INFRATERNAL_RECOVERY_UI ?? "off";
+if (!["off", "preview", "1"].includes(recoveryUiMode)) {
+  throw new Error("INFRATERNAL_RECOVERY_UI must be off, preview, or 1");
+}
 const build = await Bun.build({
   entrypoints: ["src/main.ts", "../../packages/ui/src/backdrop.worker.ts", "../../packages/ui/src/faulty-terminal.worker.ts"],
   outdir: "dist",
@@ -12,6 +16,7 @@ const build = await Bun.build({
   minify: true,
   target: "browser",
   splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
+  define: { __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode) },
   plugins: [browserFileLoader],
 });
 if (!build.success) {

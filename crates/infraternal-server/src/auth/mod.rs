@@ -9,13 +9,14 @@ mod crypto;
 mod devices;
 mod http;
 mod recovery;
+mod recovery_rotation;
 mod sessions;
 mod setup;
 mod webauthn;
 mod wraps;
 
 pub(crate) use crypto::hash;
-use crypto::{constant_prf_input, prf_salt, random, recovery_hash, verify_recovery};
+use crypto::{constant_prf_input, prf_salt, random, recovery_hash};
 pub use sessions::Session;
 use sessions::{insert_session, require_session_tx};
 pub use wraps::Wrap;
@@ -27,6 +28,8 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool};
+#[cfg(test)]
+use std::sync::atomic::AtomicI64;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
@@ -75,6 +78,7 @@ struct Registration {
     display_name: String,
     authority: Authority,
     recovery_hash: Option<String>,
+    rotate_recovery: bool,
     expires: i64,
     binding: Option<String>,
 }
@@ -106,10 +110,14 @@ pub struct Auth {
     origin: String,
     pending: Arc<Mutex<Pending>>,
     ingress: Arc<Mutex<http::Ingress>>,
+    recovery_changes: Arc<tokio::sync::watch::Sender<()>>,
     revocations: Arc<tokio::sync::watch::Sender<()>>,
     setup_consumed: Arc<watch::Sender<()>>,
     #[cfg(test)]
     recovery_pause: Arc<Mutex<Option<Arc<RecoveryPause>>>>,
+    // i64::MIN leaves HTTP on wall time; tests opt into a shared, advanceable clock.
+    #[cfg(test)]
+    test_http_time: Arc<AtomicI64>,
 }
 
 // Public entry points share one error contract, documented here instead of repeating it:
@@ -152,11 +160,30 @@ impl Auth {
             origin: url.origin().ascii_serialization(),
             pending: Arc::default(),
             ingress: Arc::default(),
+            recovery_changes: Arc::new(tokio::sync::watch::channel(()).0),
             revocations: Arc::new(tokio::sync::watch::channel(()).0),
             setup_consumed: Arc::new(setup_consumed),
             #[cfg(test)]
             recovery_pause: Arc::default(),
+            #[cfg(test)]
+            test_http_time: Arc::new(AtomicI64::new(i64::MIN)),
         })
+    }
+
+    /// Set the HTTP time shared by cloned test routers.
+    #[cfg(test)]
+    pub(crate) fn set_test_http_time(&self, now: i64) {
+        self.test_http_time
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Return the opted-in test time, if a test has installed one.
+    #[cfg(test)]
+    pub(super) fn test_http_time(&self) -> Option<i64> {
+        let now = self
+            .test_http_time
+            .load(std::sync::atomic::Ordering::Relaxed);
+        (now != i64::MIN).then_some(now)
     }
 }
 

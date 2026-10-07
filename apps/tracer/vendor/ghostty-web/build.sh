@@ -44,7 +44,7 @@ if [[ "$actual_bun" != "$required_bun" || "$actual_zig" != "$required_zig" ]]; t
     exit 1
 fi
 
-scratch_root="${GHOSTTY_BUILD_SCRATCH_ROOT:-${HOME}/.cache/codex-scratch/infraternal/ghostty-builds}"
+scratch_root="${GHOSTTY_BUILD_SCRATCH_ROOT:-${HOME}/.cache/codex-scratch/fix-cell-metrics/ghostty-builds}"
 mkdir -p "$scratch_root"
 build_dir="$(mktemp -d "${scratch_root}/source.XXXXXX")"
 trap 'rm -rf "$build_dir"' EXIT
@@ -61,6 +61,8 @@ fi
 
 # This local bridge patch sets theme colors directly in the existing terminal state.
 git -C "$source_dir" apply "$vendor_dir/local-theme-api.patch"
+# Apply font geometry after the theme renderer changes so both fixes build together.
+git -C "$source_dir" apply "$vendor_dir/cell-metrics.patch"
 
 git -C "$source_dir" submodule update --quiet --init --recursive --depth=1
 if [[ "$(git -C "$source_dir/ghostty" rev-parse HEAD)" != "$ghostty_commit" ]]; then

@@ -81,11 +81,12 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     const material = await page.evaluate(() => {
       const root = getComputedStyle(document.documentElement);
       const stage = document.querySelector<HTMLElement>("#terminal-screen")!;
-      const layers = [".icon-btn", ".capsule"];
+      const layers = ["#sidebar-toggle", ".capsule"];
       if (getComputedStyle(document.querySelector<HTMLElement>(".tabs")!).display !== "none") layers.push(".tab-add");
       if (getComputedStyle(document.querySelector<HTMLElement>(".keybar")!).display !== "none") layers.push(".keytray");
       return {
         root: root.getPropertyValue("--overlay").trim(),
+        rootPanel: root.getPropertyValue("--overlay-panel").trim(),
         rootLine: root.getPropertyValue("--overlay-line").trim(),
         rootShadow: root.getPropertyValue("--shadow").trim(),
         stage: getComputedStyle(stage).getPropertyValue("--overlay").trim(),
@@ -120,7 +121,8 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
       const style = getComputedStyle(element);
       return { background: style.backgroundColor, line: style.borderTopColor, shadow: style.boxShadow };
     });
-    expect(cssChannels(sidebarMaterial.background)).toEqual(cssChannels(material.root));
+    // The sidebar is a large floating surface: the thinner shared panel material, not the pill one.
+    expect(cssChannels(sidebarMaterial.background)).toEqual(cssChannels(material.rootPanel));
     expect(cssChannels(sidebarMaterial.line)).toEqual(cssChannels(material.rootLine));
     expect(sidebarMaterial.shadow).toBe(material.layers[0]!.shadow);
     paths.push(await saveScreenshot(page, testInfo, `${prefix}-sidebar-open`));
@@ -163,7 +165,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   await expect(page.locator(".tabs .tab-add")).toBeVisible();
   await expect(page.locator("#tree")).not.toContainText(/static example|name unavailable|not available yet|not connected/i);
   await expect(page.locator(".tabs")).toBeVisible();
-  expect(await page.locator(".pane-card").evaluate((element) => getComputedStyle(element).backdropFilter)).toBe("none");
+  expect(await page.locator("#terminal-host").locator("xpath=..").evaluate((element) => getComputedStyle(element).backdropFilter)).toBe("none");
   await expect(page.locator(".terminal-screen")).not.toContainText(/static example|STATIC|name unavailable|not available yet|not connected/i);
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"))).toContain("blob:");
   await expect.poll(() => backdropWorkers.length).toBe(1);

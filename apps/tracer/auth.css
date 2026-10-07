@@ -64,7 +64,7 @@
   font: 450 16px/1 "Geist Mono", ui-monospace, monospace;
 }
 .auth-input:focus { border-color: rgb(255 255 255 / 0.28); background: var(--field-focus); }
-.auth-mono { font-size: 15px; letter-spacing: 0.01em; }
+.auth-mono { font-size: 16px; letter-spacing: 0.01em; }
 .auth-command {
   display: flex;
   min-height: 44px;
@@ -80,6 +80,13 @@
 }
 .auth-command code { flex: 1; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
 .auth-hint { min-height: 1em; margin: 6px 0 14px; color: var(--fg-3); font-size: 12px; }
+.recovery-word-label { margin-top: 18px; }
+.auth-word-inputs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; list-style: none; margin: 0; padding: 0; }
+.auth-word-inputs li { display: flex; align-items: center; min-width: 0; border: 1px solid var(--line); border-radius: 9px; background: var(--field); }
+.auth-word-inputs li > span { flex: none; width: 22px; text-align: center; color: var(--fg-3); font-size: 10px; }
+.auth-word-inputs input { min-width: 0; width: 100%; height: 44px; padding: 0 4px 0 0; border: 0; border-radius: 9px; outline: none; color: var(--fg); background: transparent; font: 450 16px/1 "Geist Mono", monospace; }
+.auth-word-inputs li:focus-within { border-color: var(--fg-2); background: var(--field-focus); }
+.auth-word-inputs li:has([aria-invalid="true"]) { border-color: var(--fg); }
 .auth-error-line { margin: 0; padding: 10px 12px; border-radius: 10px; background: rgb(255 255 255 / 0.06); color: var(--fg); font-size: 13.5px; }
 .auth-message { min-height: 1.4em; margin: 12px 0 0; color: var(--fg-2); font-size: 12px; line-height: 1.5; }
 
@@ -157,13 +164,14 @@
 .auth-back { padding: 10px 8px; margin-left: -8px; }
 .auth-back[hidden] { display: inline; visibility: hidden; }
 .auth-back:hover { color: var(--fg); }
+#use-recovery, #recovery-card .auth-primary, #recovery-card .auth-back, #recovery-card .icon-action { min-width: 44px; min-height: 44px; }
 .auth-signin { padding: 40px 32px 36px; }
 .auth-signin .auth-lede { margin-bottom: 28px; }
 .auth-login { width: 100%; height: 48px; border-radius: 12px; font-size: 15px; }
 .auth-loading { min-height: 1em; margin: 14px 0 0; text-align: center; }
 .auth-check { position: relative; display: flex; min-height: 44px; align-items: center; gap: 10px; margin-top: 18px; color: var(--fg-2); font-size: 14px; cursor: pointer; }
 .auth-check input { width: 18px; height: 18px; accent-color: #fff; }
-.auth-check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
+[data-focus-ring="on"] .auth-check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
 .auth-check[data-pressed] { transform: scale(0.98); }
 .auth-check .tick { width: 20px; height: 20px; }
 .auth-words { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 4px 0 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: rgb(255 255 255 / 0.03); counter-reset: recovery; list-style: none; }
@@ -181,7 +189,7 @@
 @keyframes auth-welcome-caption { from { opacity: 0; transform: translateX(10px); } }
 
 .auth-screen button:focus { outline: none; }
-.auth-screen button:focus-visible { outline: 2px solid rgb(255 255 255 / 0.55); outline-offset: 2px; }
+[data-focus-ring="on"] .auth-screen button:focus-visible { outline: 2px solid rgb(255 255 255 / 0.55); outline-offset: 2px; }
 @media (max-width: 480px) {
   .auth-card { padding: 28px 22px 22px; border-radius: 20px; }
   .auth-signin { padding: 30px 22px 28px; }
