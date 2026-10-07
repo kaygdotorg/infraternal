@@ -311,7 +311,7 @@ button { color: inherit; }
 
 /* Floating host tree: it can open without taking a permanent column from the terminal. */
 .sidebar {
-  position: absolute; z-index: 5; top: calc(58px + env(safe-area-inset-top)); left: var(--gutter); bottom: 16px; width: 292px;
+  position: absolute; z-index: 5; top: calc(env(safe-area-inset-top) + 10px + var(--pill-h) + 12px); left: var(--gutter); bottom: 16px; width: 292px;
   display: flex; flex-direction: column; padding: 14px 8px 8px; overflow: auto;
   border: 1px solid var(--overlay-line); border-radius: var(--r-lg); background: var(--overlay); box-shadow: var(--shadow);
   -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
@@ -319,6 +319,10 @@ button { color: inherit; }
 }
 .sidebar[hidden] { display: flex !important; visibility: hidden; opacity: 0; transform: translateX(-8px) scale(0.98); }
 .sidebar.instant { transition: none; }
+/* Desktop: the open sidebar takes a column beside the windows (see dockPanes in core-screen.ts). */
+@media (hover: hover) and (pointer: fine) and (min-width: 1024px) {
+  .terminal-screen[data-sidebar="docked"] .panes { left: calc(var(--gutter) + 292px + 12px); }
+}
 .sidebar-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 0 10px 10px; }
 .sidebar-title { font-weight: 600; letter-spacing: -0.01em; }
 .bm { --bm-line: color-mix(in oklab, var(--fg) 16%, transparent); position: relative; margin-left: 4px; padding-left: 14px; }

@@ -156,6 +156,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const scrim = get<HTMLElement>("#scrim");
   const paletteInput = get<HTMLInputElement>("#palette-input");
   const paletteResults = get<HTMLElement>("#palette-results");
+  const panes = get<HTMLElement>("#panes");
   const keybar = get<HTMLElement>("#keybar");
   const keytray = get<HTMLElement>(".keytray");
   const keyblur = get<HTMLElement>(".keyblur");
@@ -351,7 +352,26 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     }
   };
 
+  // Desktop docks the sidebar beside the windows instead of over them, so nothing under it
+  // becomes unreachable. The panes' left edge moves once (one terminal fit, no per-frame resize)
+  // and a FLIP translate on the compositor makes that single layout change read as a slide.
+  const dockedLayout = matchMedia("(hover: hover) and (pointer: fine) and (min-width: 1024px)");
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const dockPanes = (open: boolean, instant: boolean): void => {
+    const docked = open && dockedLayout.matches;
+    if ((stage.dataset.sidebar === "docked") === docked) return;
+    const before = panes.getBoundingClientRect().left;
+    stage.dataset.sidebar = docked ? "docked" : "";
+    if (instant || reducedMotion.matches) return;
+    const shift = before - panes.getBoundingClientRect().left;
+    panes.animate(
+      [{ transform: `translateX(${shift}px)` }, { transform: "translateX(0)" }],
+      { duration: 240, easing: "cubic-bezier(0.32, 0.72, 0, 1)" },
+    );
+  };
+
   const setSidebar = (open: boolean, instant = false): void => {
+    dockPanes(open, instant);
     sidebar.hidden = !open;
     sidebarToggle.setAttribute("aria-expanded", String(open));
     sidebarToggle.setAttribute("aria-label", open ? "Hide hosts" : "Show hosts");
@@ -465,6 +485,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   window.addEventListener("keydown", keydown, true);
   window.addEventListener("resize", resize);
   systemDark.addEventListener("change", systemThemeChange);
+  const dockedLayoutChange = (): void => dockPanes(!sidebar.hidden, true);
+  dockedLayout.addEventListener("change", dockedLayoutChange);
   window.visualViewport?.addEventListener("resize", viewportChange);
   window.visualViewport?.addEventListener("scroll", viewportChange);
   viewportChange();
@@ -687,6 +709,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       window.removeEventListener("keydown", keydown, true);
       window.removeEventListener("resize", resize);
       systemDark.removeEventListener("change", systemThemeChange);
+      dockedLayout.removeEventListener("change", dockedLayoutChange);
       window.visualViewport?.removeEventListener("resize", viewportChange);
       window.visualViewport?.removeEventListener("scroll", viewportChange);
       keybar.removeEventListener("pointerdown", keybarPointerDown);
