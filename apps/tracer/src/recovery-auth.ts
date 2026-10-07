@@ -7,9 +7,9 @@ export interface RecoveryRequest { token: string; delay_seconds: number; ready_a
 
 /** Starts recovery with an optional HttpOnly session; the server alone chooses the delay. */
 export async function startRecovery(username: string, words: string): Promise<RecoveryRequest> {
-  const result = await auth.post<RecoveryRequest>("recovery-start", { username, words });
+  const result = await auth.post<RecoveryRequest>("recovery-resume", { username, words });
   auth.requiredString(result.token, "recovery token");
-  if (![0, 86400].includes(result.delay_seconds) || !Number.isSafeInteger(result.ready_at) || result.ready_at <= 0) {
+  if ((!Number.isSafeInteger(result.delay_seconds) || result.delay_seconds < 0 || result.delay_seconds > 86400) || !Number.isSafeInteger(result.ready_at) || result.ready_at <= 0) {
     throw new AuthError("The server returned an invalid recovery time.");
   }
   return result;

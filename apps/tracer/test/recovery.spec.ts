@@ -51,11 +51,11 @@ test("sign-in exposes recovery key entry with per-word errors", async ({ page })
   await page.getByRole("textbox", { name: "Word 1", exact: true }).fill("notaword");
   await expect(page.locator("#recovery-word-error")).toHaveText("Word 1 is not in the recovery word list.");
   await expect(page.getByRole("button", { name: "Start recovery" })).toBeDisabled();
-  await page.route("**/auth/recovery-start", route => route.fulfill({ status: 401, json: {} }));
+  await page.route("**/auth/recovery-resume", route => route.fulfill({ status: 401, json: {} }));
   await page.locator("#recovery-username").fill("fixture_owner");
   await paste(page, phrase);
   await page.getByRole("button", { name: "Start recovery" }).click();
-  await expect(page.locator("#auth-error")).toContainText("recovery page already open");
+  await expect(page.locator("#auth-error")).toContainText("username and recovery key");
 });
 
 for (const delay of [0, 86400]) {
@@ -70,7 +70,7 @@ for (const delay of [0, 86400]) {
     await page.route("**/auth/session", (route) => finished
       ? route.fulfill({ json: { user_id: userId, username: "fixture_owner", display_name: "Fixture owner", hostname: "fixture-host" } })
       : route.fulfill({ status: 401, json: {} }));
-    await page.route("**/auth/recovery-start", async route => {
+    await page.route("**/auth/recovery-resume", async route => {
       starts++;
       const body = route.request().postDataJSON() as { username: string; words: string };
       // Keep failures boolean so no phrase can appear in assertion output.
@@ -190,7 +190,7 @@ test("a signed-in device can open recovery without revoking its session", async 
 test("pointer recovery step changes glide the fitted pane", async ({ page }) => {
   await page.route("**/auth/status", route => route.fulfill({ json: { setup_required: false } }));
   await page.route("**/auth/session", route => route.fulfill({ status: 401, json: {} }));
-  await page.route("**/auth/recovery-start", route => route.fulfill({ json: {
+  await page.route("**/auth/recovery-resume", route => route.fulfill({ json: {
     token: "public-motion-fixture", delay_seconds: 0, ready_at: Math.floor(Date.now() / 1000),
   } }));
   await page.goto("/");
@@ -216,4 +216,28 @@ test("pointer recovery step changes glide the fitted pane", async ({ page }) => 
   await page.waitForTimeout(350);
   const heights = await page.evaluate(() => (window as Window & { __recoveryHeights?: number[] }).__recoveryHeights ?? []);
   expect(Math.max(...heights) - Math.min(...heights)).toBeGreaterThan(8);
+});
+
+test("discarded waiting page resumes the original deadline", async ({ page }) => {
+  const readyAt = Math.floor(Date.now() / 1000) + 3600;
+  let attempts = 0;
+  await page.route("**/auth/status", route => route.fulfill({ json: { setup_required: false } }));
+  await page.route("**/auth/session", route => route.fulfill({ status: 401, json: {} }));
+  await page.route("**/auth/recovery-resume", route => {
+    attempts++;
+    return route.fulfill({ json: { token: "public-resume-fixture", ready_at: readyAt, delay_seconds: 3600 } });
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await page.goto("/");
+    await page.getByRole("button", { name: "use recovery key", exact: true }).click();
+    await page.locator("#recovery-username").fill("fixture_owner");
+    await paste(page, phrase);
+    await page.getByRole("button", { name: "Start recovery" }).click();
+    await expect(page.locator("#recovery-ready-time")).toContainText("60 minutes remaining");
+    await expect(page.getByRole("button", { name: "Continue recovery" })).toBeDisabled();
+    await expect(page.locator(".auth-lede")).toContainText("original deadline stays the same");
+    // Reload drops every in-memory capability and word reference.
+    await page.reload();
+  }
+  expect(attempts).toBe(2);
 });

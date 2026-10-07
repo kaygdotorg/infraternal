@@ -69,14 +69,14 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     pane.querySelector<HTMLElement>("h1")!.textContent = titles[step]!;
     pane.querySelector<HTMLElement>(".auth-lede")!.textContent = [
       "Enter your username and the 24 words you saved. You can paste the whole key into any word field.",
-      request?.delay_seconds === 0 ? "This browser has a live session for your account. You can recover immediately." : "Recovery waits 24 hours. A signed-in device can cancel it. Keep this page open; your key stays only in memory.",
+      request?.delay_seconds === 0 ? "This browser has a live session for your account. You can recover immediately." : "Recovery waits 24 hours. A signed-in device can cancel it. You can close this page and resume with your words in any browser. The original deadline stays the same.",
       "Your new passkey will protect the same account key. Your saved SSH keys stay accessible.",
       "Your old recovery key will stop working. Store these new words somewhere safe and offline.",
     ][step]!;
     if (step === 0) renderEntry();
     else if (step === 1) {
       body.innerHTML = '<p id="recovery-ready-time" role="status"></p>';
-      body.querySelector<HTMLElement>("p")!.textContent = request?.delay_seconds === 0 ? "Ready now" : `Available ${new Date(request!.ready_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
+      body.querySelector<HTMLElement>("p")!.textContent = request?.delay_seconds === 0 ? "Ready now" : `Available ${new Date(request!.ready_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · ${Math.ceil(Math.max(0, request!.ready_at * 1000 - Date.now()) / 60_000)} minutes remaining`;
     } else if (step === 2) body.replaceChildren();
     else recoveryWords(body, nextWords, saved, (value) => { saved = value; update(); }, markMotion);
     button.querySelector<HTMLElement>("span")!.textContent = ["Start recovery", "Continue recovery", "Create passkey", "Open infraternal"][step]!;
@@ -93,6 +93,8 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     if (step === 1 && !ready()) {
       const checkReady = (): void => {
         if (!card.isConnected || step !== 1) return;
+        const remaining = body.querySelector<HTMLElement>("#recovery-ready-time");
+        if (remaining) remaining.textContent = ready() ? "Ready now" : `${Math.ceil(Math.max(0, request!.ready_at * 1000 - Date.now()) / 60_000)} minutes remaining · Available ${new Date(request!.ready_at * 1000).toLocaleString()}`;
         update();
         if (!ready()) readyTimer = window.setTimeout(checkReady, Math.min(60_000, Math.max(1, request!.ready_at * 1000 - Date.now())));
       };
@@ -170,7 +172,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
       }
     } catch (failure: unknown) {
       error.textContent = failure instanceof AuthError && failure.status === 401
-        ? step === 0 ? "Recovery could not start. Check the username and key, or use the recovery page already open." : "Recovery is not ready, expired or was cancelled. Check the available time or start again."
+        ? step === 0 ? "Recovery could not start. Check the username and recovery key." : "Recovery is not ready, expired or was cancelled. Check the available time or start again."
         : failure instanceof DOMException && failure.name === "InvalidStateError" ? "This device already has a passkey for this account. Choose another passkey provider or remove the old passkey from your device."
         : failure instanceof DOMException && failure.name === "NotAllowedError" ? "The passkey prompt was cancelled. Try again when you are ready."
         : failure instanceof AuthError ? failure.message : "Recovery could not be completed. Try again.";
