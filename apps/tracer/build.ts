@@ -1,5 +1,6 @@
-/** Bundles the tracer app and mesh worker and copies the licensed terminal font. */
+/** Bundles the tracer and workers, copies licensed fonts, and writes static compressed encodings. */
 import { cp, mkdir, rm } from "node:fs/promises";
+import { precompress } from "./precompress";
 
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist/fonts", { recursive: true });
@@ -22,4 +23,5 @@ await Promise.all([
   cp("node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2", "dist/fonts/GeistMono-Variable.woff2"),
   cp("node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", "dist/fonts/Geist-Variable.woff2"),
 ]);
+await precompress("dist");
 console.log(`built ${build.outputs.map((output) => output.path.split("/").at(-1)).join(", ")}`);
