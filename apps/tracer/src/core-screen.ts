@@ -20,6 +20,14 @@ export interface CoreScreenTab {
   session: string;
 }
 
+export interface CorePaletteEntry {
+  group: string;
+  glyph: string;
+  label: string;
+  hint: string;
+  action: string;
+}
+
 export interface CoreScreen {
   stage: HTMLElement;
   terminalHost: HTMLElement;
@@ -30,6 +38,7 @@ export interface CoreScreen {
   setIdentity(host: string, session: string, connected: boolean): void;
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): void;
   setTabs(tabs: CoreScreenTab[], activeId: string, onSelect: (id: string) => void): void;
+  setPrototypePalette(entries: CorePaletteEntry[]): void;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
   setScrolled(scrolled: boolean): void;
@@ -429,8 +438,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       applyLook(source === "keyboard");
     } else if (kind === "session" || kind === "host") {
       terminalHost.focus({ preventScroll: true });
-    } else if (kind === "proto" && value === "promotion" && options.windowsPrototype) {
-      window.dispatchEvent(new Event("tracer:proto-promotion"));
+    } else if (kind === "proto" && options.windowsPrototype) {
+      window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: action }));
     }
   }
 
@@ -484,6 +493,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       add.setAttribute("aria-label", "New session");
       add.innerHTML = SVG.plus;
       tabNav.append(add);
+    },
+    setPrototypePalette(items) {
+      if (!options.windowsPrototype) return;
+      const baseEntries = entries.filter((entry) => !entry.action?.startsWith("proto:"));
+      entries.splice(0, entries.length, ...baseEntries, ...items);
+      if (!palette.hidden) renderPalette(paletteInput.value);
     },
     setRoundTrip(milliseconds) {
       rtt.textContent = milliseconds === undefined ? "··" : `${Math.round(milliseconds)} ms`;
