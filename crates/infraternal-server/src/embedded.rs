@@ -4,7 +4,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -66,6 +66,8 @@ pub(crate) enum TerminalOutput {
     Output { out_seq: u64, bytes: Bytes },
     /// Repaint bytes valid at the given absolute offset.
     Snapshot { out_seq: u64, bytes: Bytes },
+    /// Ordered, session-bound recovery or lifecycle notice.
+    Event { event_json: Bytes },
     /// Highest input sequence written to the PTY.
     Ack { in_seq_acked: u64 },
     /// The agent retired one terminal stream.
@@ -265,6 +267,10 @@ enum Incoming {
         stream_id: u32,
         out_seq: u64,
         bytes: Bytes,
+    },
+    Event {
+        stream_id: u32,
+        event_json: Bytes,
     },
     Ack {
         stream_id: u32,
@@ -729,6 +735,54 @@ async fn reattach_all(
     true
 }
 
+/// Content-free notices are bounded and bound to the attached session before forwarding.
+#[derive(Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum TerminalNotice {
+    #[serde(rename = "terminal.snapshot")]
+    Snapshot {
+        session_id: String,
+        seq: u64,
+        approximate: bool,
+    },
+    #[serde(rename = "terminal.snapshot_unavailable")]
+    Unavailable { session_id: String, seq: u64 },
+    #[serde(rename = "terminal.exited")]
+    Exited {
+        session_id: String,
+        status: i32,
+        final_seq: u64,
+    },
+}
+
+impl TerminalNotice {
+    fn session_id(&self) -> &str {
+        // Cursor/status fields validate JSON shape; wire Snapshot/Ack remain authoritative.
+        match self {
+            Self::Snapshot {
+                session_id,
+                seq,
+                approximate,
+            } => {
+                let _ = (seq, approximate);
+                session_id
+            }
+            Self::Unavailable { session_id, seq } => {
+                let _ = seq;
+                session_id
+            }
+            Self::Exited {
+                session_id,
+                status,
+                final_seq,
+            } => {
+                let _ = (status, final_seq);
+                session_id
+            }
+        }
+    }
+}
+
 // Incoming wire cases share actor-owned sequence accounting and bounded output senders.
 #[allow(clippy::too_many_lines)]
 async fn process_incoming(
@@ -835,6 +889,39 @@ async fn process_incoming(
             attachment.last_out_seq = out_seq;
             true
         }
+        Incoming::Event {
+            stream_id,
+            event_json,
+        } => {
+            let Some(attachment_id) = routes.get(&stream_id).copied() else {
+                return true;
+            };
+            let Some(attachment) = attachments.get(&attachment_id) else {
+                return false;
+            };
+            let Ok(notice) = serde_json::from_slice::<TerminalNotice>(&event_json) else {
+                return false;
+            };
+            if decode_session_id(notice.session_id()) != Some(attachment.session_id) {
+                return false;
+            }
+            // The same queue preserves notice/repaint ordering and retires a slow viewer only.
+            if attachment
+                .output
+                .try_send(TerminalOutput::Event { event_json })
+                .is_err()
+            {
+                return retire_slow_stream(
+                    connection,
+                    attachments,
+                    routes,
+                    attachment_id,
+                    stream_id,
+                )
+                .await;
+            }
+            true
+        }
         Incoming::Ack {
             stream_id,
             in_seq_acked,
@@ -938,6 +1025,13 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                         out_seq,
                         bytes: share_payload(&wire, bytes)?,
                     },
+                    Frame::Event {
+                        sub_id: 0,
+                        event_json,
+                    } if event_json.len() <= 1024 => Incoming::Event {
+                        stream_id,
+                        event_json: share_payload(&wire, event_json)?,
+                    },
                     Frame::Ack { in_seq_acked } => Incoming::Ack {
                         stream_id,
                         in_seq_acked,
@@ -956,6 +1050,7 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                     &frame,
                     Incoming::Output { .. }
                         | Incoming::Snapshot { .. }
+                        | Incoming::Event { .. }
                         | Incoming::Ack { .. }
                         | Incoming::Close { .. }
                 ) && (stream_id == CONTROL_STREAM || stream_id % 2 != 0)

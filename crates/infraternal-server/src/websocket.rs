@@ -447,6 +447,17 @@ where
             .await
             .is_ok()
         }
+        TerminalOutput::Event { event_json } => send_frame(
+            sink,
+            stream_id,
+            &Frame::Event {
+                sub_id: 0,
+                event_json: &event_json,
+            },
+            encode,
+        )
+        .await
+        .is_ok(),
         TerminalOutput::Ack { in_seq_acked } => {
             if in_seq_acked < attachment.last_in_acked
                 || (!attachment.awaiting_ack && in_seq_acked > attachment.input_sent_end)

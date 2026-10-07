@@ -334,7 +334,6 @@ async fn real_agent_canonical_uuid_result_is_accepted() {
 
 /// Recovery notices are ordered terminal traffic, so they cannot retire leg B.
 #[tokio::test]
-#[ignore = "tests-first recovery-event regression; enabled after adapter fix"]
 async fn recovery_event_then_snapshot_keeps_embedded_connection_live() {
     use tokio::io::AsyncWriteExt;
     let (mut link, mut peer) = connection();
@@ -416,4 +415,99 @@ async fn healthy_receiver_survives_ready_native_output_burst() {
         128,
         "healthy native viewer was retired during an immediately-ready burst"
     );
+}
+
+#[tokio::test]
+async fn recovery_notices_preserve_order_credit_and_session_isolation() {
+    let (mut link, _peer) = connection();
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(1, attachment(tx))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let json = |session: [u8; 16]| {
+        Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type":"terminal.snapshot", "session_id":uuid::Uuid::from_bytes(session),
+                "seq":17, "approximate":true
+            }))
+            .unwrap(),
+        )
+    };
+    assert!(
+        !process_incoming(
+            Incoming::Event {
+                stream_id: 2,
+                event_json: json([2; 16])
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new()
+        )
+        .await
+    );
+    assert!(rx.try_recv().is_err());
+    assert!(
+        process_incoming(
+            Incoming::Event {
+                stream_id: 2,
+                event_json: json([1; 16])
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new()
+        )
+        .await
+    );
+    assert_eq!(attachments[&1].last_out_seq, 0);
+    assert_eq!(attachments[&1].credit, 0);
+    assert!(
+        process_incoming(
+            Incoming::Snapshot {
+                stream_id: 2,
+                out_seq: 17,
+                bytes: Bytes::from_static(b"repaint")
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new()
+        )
+        .await
+    );
+    assert!(matches!(
+        rx.recv().await,
+        Some(TerminalOutput::Event { .. })
+    ));
+    assert!(matches!(
+        rx.recv().await,
+        Some(TerminalOutput::Snapshot { out_seq: 17, .. })
+    ));
+    assert_eq!(attachments[&1].last_out_seq, 17);
+    let (tx, _held) = mpsc::channel(1);
+    tx.try_send(TerminalOutput::Ack { in_seq_acked: 0 })
+        .unwrap();
+    attachments.insert(
+        3,
+        AttachmentState {
+            stream_id: 4,
+            ..attachment(tx)
+        },
+    );
+    routes.insert(4, 3);
+    assert!(
+        process_incoming(
+            Incoming::Event {
+                stream_id: 4,
+                event_json: json([1; 16])
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new()
+        )
+        .await
+    );
+    assert!(!routes.contains_key(&4));
+    assert!(routes.contains_key(&2));
 }
