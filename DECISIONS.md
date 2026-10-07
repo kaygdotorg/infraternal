@@ -908,3 +908,25 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        no host-key bypass, no login attempts, no workload dumps, no SMART
        self-tests, no SSH to shell-less appliances. We iterate slowly and
        stay stable.
+157. **Extended information and compose mode (rounds E and C):**
+     - **"Gather extended information" (E1–E4):** a global default, off,
+       overridable per host group and per host; the most specific setting
+       wins, and each place shows where a value is inherited from. It is
+       switched from the Machine tab's "more", the host-group settings, the
+       global settings and the add-host window. Switching it on shows one
+       plain line saying what it adds and that it is read-only, with no
+       dialog. Switching it off deletes the collected extended facts at
+       once, and the audit log records it. **Expensive commands are
+       identified and measured, and collection is conservative with them**
+       (sampled rarely, cancelled on hang, never on a timer while the host
+       is busy).
+     - **Compose mode (C1–C4):**
+       - an inline local line editor in the terminal's own font and theme
+         colours, with a subtle header marker; Enter sends; local history
+         is merged with the shell's history where readable;
+       - it turns off automatically for full-screen apps, password prompts,
+         when no prompt is detected (OSC 133 first, a heuristic otherwise)
+         and on Ctrl-C;
+       - completion: instant local suggestions, and Tab asks the shell;
+       - it is offered once by toast when the RTT stays above 150 ms on a
+         phone or 250 ms on desktop, and remembered once accepted.
