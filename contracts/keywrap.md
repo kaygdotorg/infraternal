@@ -300,3 +300,21 @@ backend protocol; this fix does not invent one.
 Before owner enrollment, each restart rotates the token and replaces a stale
 private setup-token.sock. The token remains only in process memory and the
 private CLI socket; runtime logs do not disclose it. Enrollment consumes it once.
+
+## Recovery resumption (#45, D25/D113)
+
+Additive `recovery-resume` accepts the same identity and authentication fields
+as recovery-start. It verifies the key on every call and takes the writer lock
+before inspecting pending state. Without a pending row it creates recovery with
+the D113 delay. With a row it reissues a capability and retains **exactly** its
+stored ready time, even after the previous capability expires. Reissuing extends
+only the capability lifetime (48 hours from this verification), never the wait.
+The previous capability and any replacement ceremony bound to it become invalid.
+Cancellation and successful replacement delete the row. Recovery-start retains
+its legacy active-request rejection policy.
+
+The result is `{token,ready_at,delay_seconds}` with delay_seconds equal to the
+nonnegative remaining time measured by the server. A browser may discard all
+secret state and resume by supplying the key again, from any device. Its UI
+shows the real remaining time and never promises that its local clock grants
+server authority. No key or capability is persisted by the browser.
