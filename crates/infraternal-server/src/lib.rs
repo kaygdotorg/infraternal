@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod auth;
+pub mod ca;
 pub mod csr;
 mod embedded;
 pub mod enrollment;
