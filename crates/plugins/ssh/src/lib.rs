@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod credentials;
+pub mod install;
 pub mod model;
 pub mod openssh;
 pub mod probe;
