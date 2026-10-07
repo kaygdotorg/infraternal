@@ -1,5 +1,5 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
-import { branchedMenu } from "../../../packages/ui/src/branched";
+import { branchedMenu, type BranchSection } from "../../../packages/ui/src/branched";
 import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import type { TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
@@ -11,6 +11,13 @@ export interface CoreScreenOptions {
   hostName: string;
   mockMode: boolean;
   probeMode: boolean;
+  windowsPrototype?: boolean;
+}
+
+export interface CoreScreenTab {
+  id: string;
+  host: string;
+  session: string;
 }
 
 export interface CoreScreen {
@@ -20,6 +27,9 @@ export interface CoreScreen {
   probePanel: HTMLElement;
   theme(): ITheme;
   bindTerminal(client: TerminalClient): void;
+  setIdentity(host: string, session: string, connected: boolean): void;
+  setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): void;
+  setTabs(tabs: CoreScreenTab[], activeId: string, onSelect: (id: string) => void): void;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
   setScrolled(scrolled: boolean): void;
@@ -149,18 +159,21 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const keyblur = get<HTMLElement>(".keyblur");
   const rtt = get<HTMLElement>("#rtt");
   const dot = get<HTMLElement>("#connection-dot");
+  const capsuleSession = get<HTMLElement>(".capsule-session");
+  const tabNav = get<HTMLElement>(".tabs");
   const hostName = options.hostName.trim();
   get<HTMLElement>("#capsule-host").textContent = hostName;
   get<HTMLElement>("#test-double-badge").hidden = !options.mockMode;
   probePanel.hidden = !options.probeMode;
 
-  const branch = branchedMenu(get<HTMLElement>("#tree"), [
+  let branch = branchedMenu(get<HTMLElement>("#tree"), [
     { id: "current-host", label: hostName, meta: "current", live: true, open: true, leaves: [
       { id: "current-shell", label: "SSH shell", meta: "current" },
     ] },
   ], { active: "current-shell" });
   const liveHost = get<HTMLElement>("#tree .bm-sec");
   liveHost.setAttribute("aria-label", hostName);
+  let onTabSelect: (id: string) => void = () => undefined;
 
   const params = new URLSearchParams(location.search);
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
@@ -221,6 +234,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     })),
     { group: "Background", glyph: "▦", label: "Mesh from the theme", hint: "one still · no idle work", action: "bg:mesh" },
     { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
+    ...(options.windowsPrototype ? [
+      { group: "Actions", glyph: "↟", label: "Simulate root promotion", hint: "mock mode only", action: "proto:promotion" },
+    ] : []),
   ];
   let visibleEntries: PaletteEntry[] = [];
   let selected = 0;
@@ -305,6 +321,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); }
       else if (!sidebar.hidden) { setSidebar(false, true); event.preventDefault(); }
     }
+  };
+  const tabSelect = (event: MouseEvent): void => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const tab = target.closest<HTMLButtonElement>(".tab[data-tab-id]");
+    if (tab?.dataset.tabId) onTabSelect(tab.dataset.tabId);
   };
   const resize = (): void => {
     window.clearTimeout(resizeTimer);
@@ -407,8 +429,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       applyLook(source === "keyboard");
     } else if (kind === "session" || kind === "host") {
       terminalHost.focus({ preventScroll: true });
+    } else if (kind === "proto" && value === "promotion" && options.windowsPrototype) {
+      window.dispatchEvent(new Event("tracer:proto-promotion"));
     }
   }
+
+  tabNav.addEventListener("click", tabSelect);
 
   return {
     stage,
@@ -420,6 +446,44 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       client = value;
       client.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
       client.setInputModifier(modifier);
+    },
+    setIdentity(host, session, connected) {
+      get<HTMLElement>("#capsule-host").textContent = host;
+      capsuleSession.textContent = session;
+      dot.classList.toggle("live", connected);
+      dot.classList.toggle("connecting", !connected);
+      dot.setAttribute("aria-label", connected ? "Connected" : "Reconnecting");
+    },
+    setHostTree(sections, activeLeaf, onSelect) {
+      branch.dispose();
+      branch = branchedMenu(get<HTMLElement>("#tree"), sections, { active: activeLeaf, onSelect });
+    },
+    setTabs(items, activeId, onSelect) {
+      onTabSelect = onSelect;
+      tabNav.replaceChildren();
+      for (const item of items) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "tab";
+        button.dataset.tabId = item.id;
+        button.setAttribute("aria-current", String(item.id === activeId));
+        button.setAttribute("aria-label", `${item.host}, ${item.session}`);
+        const host = document.createElement("span");
+        host.className = "tab-host";
+        host.textContent = item.host;
+        const name = document.createElement("span");
+        name.className = "tab-name";
+        name.textContent = item.session;
+        button.append(host, name);
+        tabNav.append(button);
+      }
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "tab tab-add";
+      add.disabled = true;
+      add.setAttribute("aria-label", "New session");
+      add.innerHTML = SVG.plus;
+      tabNav.append(add);
     },
     setRoundTrip(milliseconds) {
       rtt.textContent = milliseconds === undefined ? "··" : `${Math.round(milliseconds)} ms`;
@@ -442,6 +506,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     dispose() {
       branch.dispose();
+      tabNav.removeEventListener("click", tabSelect);
       sidebarToggle.removeEventListener("click", sidebarClick);
       capsule.removeEventListener("click", capsuleClick);
       scrim.removeEventListener("click", scrimClick);
