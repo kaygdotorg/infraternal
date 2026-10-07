@@ -1098,3 +1098,20 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        cross-language integration risk.
      - The Windows tunnel driver is **deferred** until Windows nodes, with a
        licence review then.
+170. **Scale, order, test hosts, self-measurement, deploys (round B):**
+     - **Design point per server:** 1,000 nodes, 200 concurrent terminal
+       sessions and 50 users; tests run at 10,000 nodes for headroom. Every
+       "per unit × expected count" budget uses these numbers.
+     - **Backend order after remote infraternal agents phase 1:** relay mode
+       (D131), then auto-update with rollback, then wiring the mesh to the
+       server and infraternal agents, then backups (D147).
+     - **Test hosts:** monitor01 runs the server **as root** (fresh deploy
+       2026-10-07, system unit, data in `/var/lib/infraternal`), so the
+       owner can test the user → root infraternal agent upgrade. o1 and o2
+       take rootless test agents that are removed after each test.
+     - **Self-measurement:** the deployed server records its own latency
+       (RTT, echo p99, reconnect, sign-in) on the real path, stored locally
+       and visible to administrators, never sent anywhere.
+     - **Deploys:** lean and fast: every change that passes its gate and a
+       hands-on check is deployed to monitor01 with a short note, for many
+       quick test rounds. Mockups never deploy before owner approval.
