@@ -506,3 +506,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      sized for an enterprise deployment. Phones get a scaled picture and
      desktops native resolution; H.264 with a persistent encoder shared by
      subscribers at the same size (P5).
+118. **Scroll routing in split views (S1 = c):** nested by default, as in iOS
+     scroll views: a scroll moves the content under the finger or pointer;
+     only when a card is at its edge does a *new* gesture move the canvas.
+     There are also explicit canvas gestures: two-finger drag on touch,
+     Space+drag or middle-drag on desktop. Shift+wheel scrolls
+     horizontally. A keyboard shortcut cycles the active card; arrow keys
+     pan the canvas when no card has focus. **The active card shows an
+     accent-colour border highlight** (#46).
