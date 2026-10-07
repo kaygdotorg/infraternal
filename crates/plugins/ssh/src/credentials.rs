@@ -149,7 +149,7 @@ impl CredentialSession {
             .map_err(|_| Failure::install("The SSH prompt helper could not be created."))?;
         writeln!(
             helper,
-            "#!/bin/sh\nexec {} __ssh-askpass",
+            "#!/bin/sh\n# Private credential reply; never approve a trust or permission prompt.\ncase \"${{1-}}\" in\n\"Enter passphrase for \"*\": \"|*\"'s password: \") ;;\n*) exit 1;;\nesac\nexec {} __ssh-askpass",
             shell_quote(binary)
         )
         .map_err(|_| Failure::install("The SSH prompt helper could not be written."))?;
