@@ -1,0 +1,235 @@
+<!-- Standalone behavior demo for the reflective share-card research spike. -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Reflective share card behavior demo</title>
+  <style>
+    :root { color-scheme: dark; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; --ink: #edf4f4; --muted: #a4b2b2; --line: #ffffff24; --accent: #9ee1d5; }
+    * { box-sizing: border-box; }
+    body { min-width: 320px; min-height: 100vh; margin: 0; color: var(--ink); background: radial-gradient(ellipse at 72% 8%, #274e4e47, transparent 36rem), #0d1217; }
+    button { font: inherit; }
+    .page { width: min(100% - 32px, 980px); margin: auto; padding: 36px 0 48px; }
+    .eyebrow { margin: 0 0 10px; color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { max-width: 620px; margin: 0; font-size: clamp(28px, 4vw, 42px); font-weight: 600; letter-spacing: -.045em; line-height: 1.06; }
+    .intro { max-width: 580px; margin: 12px 0 0; color: var(--muted); line-height: 1.6; }
+    .stage { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); align-items: center; gap: clamp(28px, 7vw, 80px); margin-top: 36px; }
+    .card-wrap { width: min(100%, 430px); justify-self: center; }
+    .card { position: relative; isolation: isolate; width: 100%; aspect-ratio: 1; overflow: hidden; border: 1px solid #ffffff40; border-radius: 28px; color: #f5fbfa; background: radial-gradient(ellipse at 16% 4%, #89d5cf94, transparent 43%), radial-gradient(ellipse at 91% 92%, #859bc166, transparent 48%), linear-gradient(144deg, #29474b, #293640 48%, #262e3b); box-shadow: 0 28px 80px #0006, 0 1px #ffffff2b inset; touch-action: none; }
+    .card[hidden] { display: none; }
+    .card[data-theme="paper"] { color: #162528; border-color: #1e2f3033; background: radial-gradient(ellipse at 11% 5%, #ffffffdf, transparent 44%), radial-gradient(ellipse at 96% 92%, #b5d6d1c2, transparent 50%), linear-gradient(145deg, #e7e8df, #cdd9d4 54%, #b9c9cb); box-shadow: 0 28px 80px #0004, 0 1px #ffffffcc inset; }
+    .sheen { position: absolute; z-index: -1; inset: -10%; pointer-events: none; opacity: .76; mix-blend-mode: screen; background: radial-gradient(ellipse 44% 33% at 35% 29%, #ffffffd1, #d8fffb4a 42%, transparent 76%), radial-gradient(ellipse 38% 47% at 74% 64%, #a7eee64a, transparent 75%), conic-gradient(from 216deg at 45% 42%, transparent 0 20%, #ffffff2b 22% 23%, transparent 28% 54%, #c0ebf521 57% 59%, transparent 65%); transform: translate3d(0, 0, 0); }
+    .card[data-theme="paper"] .sheen { opacity: .55; mix-blend-mode: multiply; }
+    .card[data-moving="true"] .sheen { will-change: transform; }
+    .content { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; padding: clamp(20px, 6vw, 34px); color: inherit; text-shadow: 0 1px 7px #0007; background: linear-gradient(#08100f7a, #08100f2b 48%, #08100fa6); }
+    .card[data-theme="paper"] .content { text-shadow: 0 1px 5px #fff9; background: linear-gradient(#eff7f276, #eff7f212 48%, #dde8e18a); }
+    .top, .bottom, .metrics { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .top { padding-bottom: 15px; border-bottom: 1px solid #ffffff47; }
+    .card[data-theme="paper"] .top, .card[data-theme="paper"] .bottom { border-color: #1625283d; }
+    .mark { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid currentColor; border-radius: 10px; font-size: 15px; font-weight: 750; letter-spacing: -.08em; }
+    .kind { margin-left: auto; font-size: 10px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+    .tilt { min-height: 38px; padding: 0 12px; border: 1px solid #ffffff59; border-radius: 999px; color: inherit; background: #ffffff1a; cursor: pointer; font-size: 11px; font-weight: 650; }
+    .card[data-theme="paper"] .tilt { border-color: #1625284d; background: #ffffff61; }
+    .main { margin: auto 0; padding: 20px 0; }
+    h2 { margin: 0; font-size: clamp(30px, 7vw, 43px); font-weight: 600; letter-spacing: -.055em; line-height: 1.05; }
+    .os { margin: 10px 0 0; font-size: 13px; letter-spacing: .03em; }
+    .metrics { justify-content: flex-start; flex-wrap: wrap; margin-top: 25px; gap: 8px; }
+    .metric { min-width: 84px; padding: 9px 10px; border: 1px solid #ffffff3b; border-radius: 12px; background: #07111630; }
+    .card[data-theme="paper"] .metric { border-color: #16252830; background: #ffffff47; }
+    .metric span { display: block; font-size: 9px; font-weight: 700; letter-spacing: .12em; opacity: .78; text-transform: uppercase; }
+    .metric strong { display: block; margin-top: 4px; font: 600 12px ui-monospace, monospace; }
+    .bottom { padding-top: 14px; border-top: 1px solid #ffffff47; font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+    .brand { display: flex; align-items: center; gap: 8px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .private { font-size: 9px; letter-spacing: .06em; opacity: .8; }
+    .panel { display: flex; flex-direction: column; justify-content: center; gap: 16px; }
+    .panel h2 { font-size: 16px; letter-spacing: 0; }
+    .panel p { margin: 0; color: var(--muted); font-size: 13px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+    .control { min-height: 42px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: #ffffff0a; cursor: pointer; font-size: 12px; font-weight: 650; }
+    .status { min-height: 42px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; color: #cbd6d5; background: #ffffff08; font-size: 11px; }
+    .note { color: #879695 !important; font-size: 11px !important; }
+    button:focus-visible { outline: 3px solid #a7f3e6; outline-offset: 3px; }
+    button:active { transform: scale(.98); }
+    @media (max-width: 700px) { .stage { grid-template-columns: 1fr; gap: 26px; margin-top: 28px; } .panel { width: min(100%, 430px); justify-self: center; } }
+    @media (max-width: 390px) { .content { padding: 20px; } .metric { min-width: 76px; padding: 8px; } .metric strong { font-size: 11px; } }
+    @media (prefers-reduced-motion: reduce) { .card[data-moving="true"] .sheen { will-change: auto; } button:active { transform: none; } }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <p class="eyebrow">Behavior demo · no build step</p>
+      <h1>A quiet reflection that follows your hand.</h1>
+      <p class="intro">Move a desktop pointer over the card, or drag on touch. On iPhone, tap “Enable tilt” to ask for motion access; touch drag remains available if you decline.</p>
+    </header>
+    <section class="stage" aria-label="Reflective share card demo">
+      <div class="card-wrap">
+        <article id="card" class="card" aria-label="Machine share card" data-theme="ink" data-moving="false">
+          <div id="sheen" class="sheen" aria-hidden="true"></div>
+          <div class="content">
+            <div class="top"><span class="mark" aria-hidden="true">in</span><span class="kind">Machine profile</span><button id="tilt" class="tilt" type="button" aria-pressed="false">Enable tilt</button></div>
+            <div class="main"><h2>atlas edge</h2><p class="os">Debian 13 · x86_64</p><div class="metrics" aria-label="Example machine details"><div class="metric"><span>CPU</span><strong>16 cores</strong></div><div class="metric"><span>Memory</span><strong>64 GiB</strong></div><div class="metric"><span>Uptime</span><strong>18 days</strong></div></div></div>
+            <div class="bottom"><span class="brand"><span class="dot" aria-hidden="true"></span>infraternal</span><span class="private">private details hidden</span></div>
+          </div>
+        </article>
+      </div>
+      <aside class="panel" aria-labelledby="tryIt">
+        <h2 id="tryIt">Try the surface</h2>
+        <p>Static CSS gradients make the sheen. A damped spring moves one overlay with transforms and sleeps when it settles.</p>
+        <div class="controls"><button id="theme" class="control" type="button" aria-pressed="false">Switch to paper theme</button><button id="open" class="control" type="button" aria-pressed="false">Close card</button></div>
+        <div id="status" class="status" role="status" aria-live="polite">Move or drag the card. No animation loop runs while it is still.</div>
+        <p class="note">Illustrative values only. No webcam, video stream, network dependency, or product UI code.</p>
+      </aside>
+    </section>
+  </main>
+  <script>
+    (() => {
+      const card = document.querySelector("#card");
+      const sheen = document.querySelector("#sheen");
+      const status = document.querySelector("#status");
+      const tiltButton = document.querySelector("#tilt");
+      const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+      const metrics = { frameCallbacks: 0, lastFrameAt: 0 };
+      window.__reflectiveDemoMetrics = metrics;
+
+      let open = true, tiltOn = false, listening = false, dragging = false, pointerId = null;
+      let frame = 0, lastTime = 0, targetX = 0, targetY = 0, x = 0, y = 0, vx = 0, vy = 0;
+      let baseBeta = null, baseGamma = null, bounds = card.getBoundingClientRect();
+
+      function tick(time) {
+        frame = 0;
+        if (!open || reducedMotion.matches || document.hidden) return;
+        metrics.frameCallbacks += 1;
+        metrics.lastFrameAt = time;
+        const dt = lastTime ? Math.min((time - lastTime) / 1000, .04) : 1 / 60;
+        lastTime = time;
+        // Near-critical damping keeps reversals smooth without visible bounce.
+        const ax = 150 * (targetX - x) - 25 * vx, ay = 150 * (targetY - y) - 25 * vy;
+        vx += ax * dt; vy += ay * dt; x += vx * dt; y += vy * dt;
+        if (Math.abs(targetX - x) < .001 && Math.abs(targetY - y) < .001 && Math.abs(vx) < .002 && Math.abs(vy) < .002) {
+          x = targetX; y = targetY; vx = 0; vy = 0; lastTime = 0; card.dataset.moving = "false";
+        } else {
+          sheen.style.transform = `translate3d(${x * 24}px, ${y * 24}px, 0)`;
+          frame = requestAnimationFrame(tick);
+        }
+      }
+
+      function wake() {
+        if (open && !reducedMotion.matches && !document.hidden && !frame) {
+          card.dataset.moving = "true";
+          frame = requestAnimationFrame(tick);
+        }
+      }
+
+      function aim(nx, ny) {
+        if (!open || reducedMotion.matches || document.hidden) return;
+        targetX = Math.max(-1, Math.min(1, nx)); targetY = Math.max(-1, Math.min(1, ny));
+        if (Math.abs(targetX - x) + Math.abs(targetY - y) > .002) wake();
+      }
+
+      function point(clientX, clientY) {
+        aim(((clientX - bounds.left) / bounds.width - .5) * 2, ((clientY - bounds.top) / bounds.height - .5) * 2);
+      }
+
+      function stop() {
+        if (frame) cancelAnimationFrame(frame);
+        frame = 0; lastTime = 0; card.dataset.moving = "false";
+      }
+
+      function onOrientation(event) {
+        if (!open || !tiltOn || document.hidden || event.beta == null || event.gamma == null) return;
+        if (baseBeta === null || baseGamma === null) { baseBeta = event.beta; baseGamma = event.gamma; return; }
+        // Sensor axes stay tied to the device; rotate their delta into screen axes.
+        const angle = (window.screen?.orientation?.angle ?? window.orientation ?? 0) * Math.PI / 180;
+        const beta = event.beta - baseBeta, gamma = event.gamma - baseGamma;
+        aim((gamma * Math.cos(angle) + beta * Math.sin(angle)) / 28,
+          (-gamma * Math.sin(angle) + beta * Math.cos(angle)) / 28);
+      }
+
+      function onScreenOrientationChange() {
+        baseBeta = null; baseGamma = null;
+        aim(0, 0);
+      }
+
+      function listen() {
+        if (!listening && open && !document.hidden) {
+          window.addEventListener("deviceorientation", onOrientation, { passive: true });
+          if (window.screen?.orientation?.addEventListener) window.screen.orientation.addEventListener("change", onScreenOrientationChange);
+          else window.addEventListener("orientationchange", onScreenOrientationChange);
+          listening = true;
+        }
+      }
+
+      function stopListening() {
+        if (listening) window.removeEventListener("deviceorientation", onOrientation);
+        if (window.screen?.orientation?.removeEventListener) window.screen.orientation.removeEventListener("change", onScreenOrientationChange);
+        else window.removeEventListener("orientationchange", onScreenOrientationChange);
+        listening = false;
+      }
+
+      card.addEventListener("pointerdown", event => {
+        if (event.target.closest("button")) return;
+        if (event.pointerType === "touch" || event.pointerType === "pen") {
+          dragging = true; pointerId = event.pointerId; card.setPointerCapture(pointerId); point(event.clientX, event.clientY);
+        }
+      });
+      card.addEventListener("pointermove", event => {
+        if (event.pointerType === "mouse" || (dragging && event.pointerId === pointerId)) point(event.clientX, event.clientY);
+      }, { passive: true });
+      for (const type of ["pointerup", "pointercancel"]) card.addEventListener(type, event => {
+        if (event.pointerId === pointerId) { dragging = false; pointerId = null; }
+      });
+      card.addEventListener("pointerleave", event => {
+        if (event.pointerType === "mouse") aim(0, 0);
+      });
+
+      tiltButton.addEventListener("click", async () => {
+        if (reducedMotion.matches) { status.textContent = "Reduced motion is on, so the highlight stays still."; return; }
+        try {
+          const Orientation = window.DeviceOrientationEvent;
+          if (!Orientation) { status.textContent = "No orientation sensor here. Drag or move the pointer instead."; return; }
+          if (typeof Orientation.requestPermission === "function") {
+            // Invoke synchronously from this tap so iOS transient activation is preserved.
+            if (await Orientation.requestPermission() !== "granted") { status.textContent = "Motion access was declined. Drag the card instead."; return; }
+          }
+          tiltOn = true; baseBeta = null; baseGamma = null;
+          tiltButton.setAttribute("aria-pressed", "true"); tiltButton.textContent = "Tilt enabled";
+          listen(); status.textContent = "Tilt enabled. Drag the card if no sensor data arrives.";
+        } catch {
+          status.textContent = "Motion access could not start. Drag the card instead.";
+        }
+      });
+
+      document.querySelector("#theme").addEventListener("click", event => {
+        const button = event.currentTarget, paper = card.dataset.theme !== "paper";
+        card.dataset.theme = paper ? "paper" : "ink"; button.setAttribute("aria-pressed", String(paper));
+        button.textContent = paper ? "Switch to ink theme" : "Switch to paper theme";
+      });
+
+      document.querySelector("#open").addEventListener("click", event => {
+        open = !open; card.hidden = !open;
+        event.currentTarget.setAttribute("aria-pressed", String(!open)); event.currentTarget.textContent = open ? "Close card" : "Open card";
+        if (open) { bounds = card.getBoundingClientRect(); if (tiltOn) listen(); status.textContent = "Card reopened. The spring wakes on input."; }
+        else { stopListening(); stop(); status.textContent = "Card closed. Sensor listening and animation work stopped."; }
+      });
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) { stopListening(); stop(); baseBeta = null; baseGamma = null; }
+        else if (tiltOn && open) { bounds = card.getBoundingClientRect(); baseBeta = null; baseGamma = null; listen(); }
+      });
+      window.addEventListener("resize", () => { if (open) bounds = card.getBoundingClientRect(); }, { passive: true });
+      reducedMotion.addEventListener("change", event => {
+        if (event.matches) {
+          stopListening(); stop(); tiltOn = false; x = y = targetX = targetY = vx = vy = 0;
+          sheen.style.transform = "translate3d(0, 0, 0)";
+          tiltButton.setAttribute("aria-pressed", "false"); tiltButton.textContent = "Enable tilt";
+          status.textContent = "Reduced motion is on. The highlight is static and sensor listening is off.";
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
