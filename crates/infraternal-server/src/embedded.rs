@@ -26,7 +26,10 @@ const CONTROL_STREAM: u32 = 0;
 // Callers await bounded command capacity; output never waits on a browser receiver.
 const COMMAND_CAPACITY: usize = 64;
 // A full output queue retires only that attachment; reconnect replays from its last offset.
-const OUTPUT_CAPACITY: usize = 4;
+// A default 1MiB grant can arrive in 256 bulk PTY frames while forwarding awaits I/O.
+// Credits bound payload bytes; frame slots separately bound small outputs and notices.
+const OUTPUT_CAPACITY: usize = 256;
+const MAX_OUTPUT_CREDIT: u64 = 8 * 1024 * 1024;
 // Full input queues stop the WebSocket reader and propagate backpressure to the peer.
 const INPUT_CAPACITY: usize = 4;
 const READ_CHUNK: usize = 16 * 1024;
@@ -639,7 +642,7 @@ async fn process_command(
                     let Some(credit) = attachment.credit.checked_add(u64::from(bytes)) else {
                         return false;
                     };
-                    if credit > 8 * 1024 * 1024 {
+                    if credit > MAX_OUTPUT_CREDIT {
                         return false;
                     }
                     attachment.credit = credit;
@@ -836,6 +839,9 @@ async fn process_incoming(
                 )
                 .await;
             }
+            if end - out_seq > attachment.credit {
+                return false;
+            }
             if attachment
                 .output
                 .try_send(TerminalOutput::Output { out_seq, bytes })
@@ -850,7 +856,7 @@ async fn process_incoming(
                 )
                 .await;
             }
-            attachment.credit = attachment.credit.saturating_sub(end - out_seq);
+            attachment.credit -= end - out_seq;
             attachment.last_out_seq = end;
             // Ready socket bursts otherwise retire a healthy four-frame receiver before it runs.
             tokio::task::yield_now().await;
@@ -871,6 +877,9 @@ async fn process_incoming(
                 return false;
             }
             let length = bytes.len() as u64;
+            if length > attachment.credit {
+                return false;
+            }
             if attachment
                 .output
                 .try_send(TerminalOutput::Snapshot { out_seq, bytes })
@@ -885,7 +894,7 @@ async fn process_incoming(
                 )
                 .await;
             }
-            attachment.credit = attachment.credit.saturating_sub(length);
+            attachment.credit -= length;
             attachment.last_out_seq = out_seq;
             true
         }

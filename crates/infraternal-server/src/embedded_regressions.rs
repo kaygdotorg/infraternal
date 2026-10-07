@@ -31,6 +31,14 @@ fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
     }
 }
 
+/// Output fixtures include the native credit grant; control-only fixtures remain unfunded.
+fn funded_attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
+    AttachmentState {
+        credit: 1024 * 1024,
+        ..attachment(output)
+    }
+}
+
 #[tokio::test]
 async fn full_output_queue_must_not_block_shared_actor() {
     let (mut link, _peer) = connection();
@@ -38,7 +46,7 @@ async fn full_output_queue_must_not_block_shared_actor() {
     tx.send(TerminalOutput::Ack { in_seq_acked: 0 })
         .await
         .unwrap();
-    let mut attachments = HashMap::from([(1, attachment(tx))]);
+    let mut attachments = HashMap::from([(1, funded_attachment(tx))]);
     let mut routes = HashMap::from([(2, 1)]);
     let result = tokio::time::timeout(
         Duration::from_millis(100),
@@ -66,7 +74,7 @@ async fn full_output_queue_must_not_block_shared_actor() {
         3,
         AttachmentState {
             stream_id: 4,
-            ..attachment(tx)
+            ..funded_attachment(tx)
         },
     );
     routes.insert(4, 3);
@@ -97,7 +105,7 @@ async fn healthy_streams_progress_at_user_attachment_capacity() {
         slow.try_send(TerminalOutput::Ack { in_seq_acked: 0 })
             .unwrap();
     }
-    let mut attachments = HashMap::from([(1, attachment(slow))]);
+    let mut attachments = HashMap::from([(1, funded_attachment(slow))]);
     let mut routes = HashMap::from([(2, 1)]);
     assert!(
         process_incoming(
@@ -120,7 +128,7 @@ async fn healthy_streams_progress_at_user_attachment_capacity() {
             u64::from(stream),
             AttachmentState {
                 stream_id: stream,
-                ..attachment(tx)
+                ..funded_attachment(tx)
             },
         );
         routes.insert(stream, u64::from(stream));
@@ -382,7 +390,7 @@ async fn recovery_event_then_snapshot_keeps_embedded_connection_live() {
 async fn healthy_receiver_survives_ready_native_output_burst() {
     let (mut link, _peer) = connection();
     let (tx, mut rx) = mpsc::channel(4);
-    let mut attachments = HashMap::from([(1, attachment(tx))]);
+    let mut attachments = HashMap::from([(1, funded_attachment(tx))]);
     let mut routes = HashMap::from([(2, 1)]);
     let received = tokio::spawn(async move {
         let mut count = 0;
@@ -461,6 +469,7 @@ async fn recovery_notices_preserve_order_credit_and_session_isolation() {
     );
     assert_eq!(attachments[&1].last_out_seq, 0);
     assert_eq!(attachments[&1].credit, 0);
+    attachments.get_mut(&1).unwrap().credit = 7;
     assert!(
         process_incoming(
             Incoming::Snapshot {
@@ -514,7 +523,6 @@ async fn recovery_notices_preserve_order_credit_and_session_isolation() {
 
 /// One credited bulk window must survive a forwarder briefly awaiting authenticated I/O.
 #[tokio::test]
-#[ignore = "tests-first credited-burst regression; enabled with queue sizing fix"]
 async fn credited_bulk_output_survives_forwarder_io_pause() {
     let (mut link, _peer) = connection();
     let (tx, mut rx) = mpsc::channel(OUTPUT_CAPACITY);
@@ -555,7 +563,6 @@ async fn credited_bulk_output_survives_forwarder_io_pause() {
 
 /// Credit is a byte bound even when the downstream frame queue has spare slots.
 #[tokio::test]
-#[ignore = "tests-first granted-byte boundary; enabled with queue sizing fix"]
 async fn uncredited_output_or_repaint_is_rejected_before_queueing() {
     for incoming in [
         Incoming::Output {
