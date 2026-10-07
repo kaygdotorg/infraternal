@@ -1,4 +1,4 @@
-# Bun checks for dependency-free TypeScript packages.
+# Bun checks for the protocol and production tracer, including its compressed transfer budget.
 
 ts_verify_fast() {
     local protocol_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../packages/protocol" && pwd)"
@@ -14,6 +14,9 @@ ts_verify_fast() {
 
     printf '\n==> TypeScript protocol compiler\n'
     (cd -- "$protocol_dir" && bun x --package typescript@5.9.3 tsc --project tsconfig.json) || return $?
+
+    printf '\n==> Tracer compiler, precompression and bundle transfer budget\n'
+    (cd -- "$repo_dir/apps/tracer" && bun install --frozen-lockfile && bun run check && bun test precompress.test.ts && bun run build && bun run transfer-budget.ts) || return $?
 
     # The Rust/TS differential test runs the Rust stream oracle. Build it first, so
     # the test measures decoding and never times out on a cold compile.
