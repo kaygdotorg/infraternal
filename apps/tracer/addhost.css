@@ -1,139 +1,126 @@
 /**
- * The add-host window (mock only). It borrows the product's existing vocabulary
- * exactly: the pane-card surface, the sign-in card's pill primary button and
- * 12 px-radius field, the palette's 8 px-radius rows and uppercase group label,
- * and the mono UI face with hierarchy by weight. Everything sits on a 4 px grid
- * and shares one left edge (title, field, rows, footer). Rings appear only for
- * Tab navigation (packages/ui focus-ring.ts); pointer and shortcut focus stay
- * quiet. Desktop uses the macOS-sized scale; touch uses the iOS scale.
+ * The add-host wizard (mock only). It lives inside an ordinary window card, the
+ * same card and header a terminal uses, with its content centred both ways.
+ * Vocabulary is borrowed exactly: the sign-in card's pill primary and text
+ * secondary buttons, 12 px field and weights (body 450, names 500, titles 600,
+ * secondary 400 in --fg-2); the palette's 8 px rows. Type follows one scale per
+ * platform (docs/design/TASTE.md): desktop 13 / 12 / 11 px, touch 16 / 15 / 13 px.
+ * Icons are 16 px on desktop and 18 px on touch with a 1.5 stroke. Rings appear
+ * only during Tab navigation (packages/ui focus-ring.ts). Nothing here keeps a
+ * transform or will-change at rest, so text renders like the sign-in card's.
  */
 
-/* ── Canvas placement ─────────────────────────────────────────────────────── */
+/* ── Canvas ───────────────────────────────────────────────────────────────── */
 .terminal-screen.has-addhost-prototype .panes[data-window-canvas] {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  align-items: stretch;
   justify-content: safe center;
+  gap: 12px;
   overflow: auto hidden;
   scroll-snap-type: x proximity;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
 }
+/* Only what the sidebar would cover moves, and only by as much as it would cover.
+   An offset (not a transform) keeps settled text off fractional transforms. */
+.terminal-screen.has-addhost-prototype .panes[data-window-canvas] > .window-group {
+  position: relative;
+  left: var(--ah-shift, 0px);
+  transition: left 240ms var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1));
+}
 .terminal-screen.has-addhost-prototype .panes[data-window-canvas]::-webkit-scrollbar { display: none; }
 .terminal-screen.has-addhost-prototype .panes > .pane-card[aria-hidden="true"] { display: none; }
-.ah-group {
-  display: flex;
-  flex: 0 0 auto;
-  max-height: 100%;
-  scroll-snap-align: center;
-}
-.ah-result-group { display: flex; flex: 0 0 min(720px, 100%); height: 100%; scroll-snap-align: start; }
 
-/* On desktop the open sidebar makes room instead of covering the canvas. */
-@media (min-width: 900px) and (pointer: fine) {
-  .terminal-screen.has-addhost-prototype:has(.sidebar:not([hidden])) .panes { left: calc(var(--gutter) + 292px + 12px); }
-}
-
-/* ── Scale (one token set; desktop is the macOS scale, touch the iOS scale) ── */
-.ah, .ah-result {
+/* ── Scale ────────────────────────────────────────────────────────────────── */
+.terminal-screen.has-addhost-prototype {
   --ah-title: 20px;
   --ah-body: 13px;
   --ah-small: 12px;
+  --ah-caption: 11px;
   --ah-control: 32px;
+  --ah-icon: 16px;
   --ah-row-pad: 8px;
-  --ah-pad: 28px;
   --ah-check: 18px;
   --ah-field: color-mix(in oklab, var(--fg) 5%, transparent);
   --ah-ring: color-mix(in oklab, var(--fg) 55%, transparent);
-  --ui-tick-border-color: color-mix(in oklab, var(--fg) 34%, transparent);
-  --ui-tick-border-width: 1.5px;
-  font-family: var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  letter-spacing: -0.02em;
 }
 @media (pointer: coarse) {
-  .ah, .ah-result {
+  .terminal-screen.has-addhost-prototype {
     --ah-title: 22px;
     --ah-body: 16px;
-    --ah-small: 14px;
+    --ah-small: 15px;
+    --ah-caption: 13px;
     --ah-control: 44px;
+    --ah-icon: 18px;
     --ah-row-pad: 10px;
-    --ah-pad: 20px;
     --ah-check: 22px;
   }
+}
+.ah-icon, .ah-status-icon, .ah-field-icon, .ah-pill-icon, .ah-root-icon, .ah-os-mark.is-line {
+  width: var(--ah-icon);
+  height: var(--ah-icon);
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* ── Window ───────────────────────────────────────────────────────────────── */
 .ah {
-  position: relative;
-  display: flex;
-  width: min(600px, calc(100vw - 2 * var(--gutter)));
-  max-height: 100%;
-  flex-direction: column;
+  /* The card's own surface, opaque, for the pinned action bar's backing. */
+  --ah-surface: var(--bg);
+  --ui-tick-border-color: color-mix(in oklab, var(--fg) 34%, transparent);
+  --ui-tick-border-width: 1.5px;
   color: var(--fg);
-  font-size: var(--ah-body);
-  line-height: 1.5;
-  transform-origin: 50% 0;
-  will-change: transform, opacity;
+  font: 450 var(--ah-body)/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  letter-spacing: -0.01em;
 }
-.ah-close {
-  position: absolute;
-  z-index: 2;
-  top: 16px;
-  right: 16px;
-  display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: var(--r-sm, 8px);
-  background: transparent;
-  color: var(--fg-3);
-  cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease, transform 120ms var(--ease-out);
-}
-.ah-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
-.ah-close::before { content: ""; position: absolute; inset: -6px; }
-@media (hover: hover) and (pointer: fine) { .ah-close:hover { background: var(--hover); color: var(--fg); } }
-.ah-close:active { transform: scale(0.94); }
-@media (pointer: coarse) { .ah-close { top: 12px; right: 12px; width: 40px; height: 40px; } }
+.ah-pill .ah-pill-icon { color: var(--fg-2); }
+.ah-actions .window-header-action svg { fill: none; stroke: currentColor; stroke-linecap: round; }
+.ah .window-header-actions { opacity: 1; }
+.ah .window-header-action { --ui-icon-button-size: 28px; --ui-icon-button-hit-inset: -8px; --ui-icon-size: 16px; --ui-icon-stroke: 1.5; margin-top: 4px; color: var(--fg-3); }
+@media (pointer: coarse) { .ah .window-header-action { --ui-icon-button-size: 44px; --ui-icon-button-hit-inset: 0px; --ui-icon-size: 18px; margin-top: 0; } }
+@media (hover: hover) and (pointer: fine) { .ah .window-header-action:hover { color: var(--fg); background: var(--hover); } }
 
-.ah-scroll {
+.ah-body {
+  display: grid;
   min-height: 0;
   flex: 1 1 auto;
   overflow: auto;
   overscroll-behavior: contain;
+  padding: 64px 24px 32px;
   scrollbar-width: thin;
 }
-/* Scroll edge: content fades under the top once scrolled, and the close button gets a backing. */
-.ah.is-scrolled .ah-scroll { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28px); mask-image: linear-gradient(to bottom, transparent 0, #000 28px); }
-.ah.is-scrolled .ah-close { background: color-mix(in oklab, var(--bg) 92%, transparent); }
-.ah-pages { position: relative; display: grid; padding: var(--ah-pad) var(--ah-pad) 20px; }
+/* margin: auto centres both ways and falls back to the top when content overflows. */
+.ah-panel { width: min(520px, 100%); margin: auto; }
+.ah-pages { position: relative; display: grid; }
 .ah-page { min-width: 0; grid-area: 1 / 1; }
 
 /* ── Type ─────────────────────────────────────────────────────────────────── */
-.ah-title {
-  margin: 0 40px 8px 0;
-  font-size: var(--ah-title);
-  font-weight: 600;
-  line-height: 1.25;
-  letter-spacing: -0.03em;
-  text-wrap: balance;
+.ah-hero {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  margin-bottom: 16px;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--fg) 6%, transparent);
+  color: var(--fg-2);
 }
+.ah-hero .ah-icon { width: 18px; height: 18px; }
+.ah-hero[data-tone="danger"] { background: color-mix(in oklab, var(--danger) 13%, transparent); color: var(--danger); }
+.ah-title { margin: 0 0 8px; font-size: var(--ah-title); font-weight: 600; line-height: 1.25; letter-spacing: -0.03em; text-wrap: balance; }
 .ah-lede { margin: 0 0 20px; color: var(--fg-2); text-wrap: pretty; }
-.ah-body { margin: -8px 0 16px; color: var(--fg-2); text-wrap: pretty; }
-.ah-quote { margin: 0 0 16px; color: var(--fg); font-weight: 500; }
-.ah-note { margin: 12px 0 0; color: var(--fg-2); font-size: var(--ah-small); }
-.ah-label {
-  margin: 20px 0 4px;
-  color: var(--fg-3);
-  font: 600 10px/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-}
-@media (pointer: coarse) { .ah-label { font-size: 11px; } }
+.ah-text { margin: -8px 0 16px; padding: 0; color: var(--fg-2); font-weight: 400; text-wrap: pretty; }
+.ah-quote { margin: 0 0 16px; font-weight: 500; }
+.ah-note { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; color: var(--fg-2); font-size: var(--ah-small); font-weight: 400; }
+.ah-note .ah-icon { color: color-mix(in oklab, var(--danger) 70%, var(--fg-2)); }
 
-/* ── Field (the sign-in field, sized per platform) ────────────────────────── */
+/* ── Field ────────────────────────────────────────────────────────────────── */
+.ah-field { position: relative; }
+.ah-field-icon { position: absolute; top: 50%; left: 12px; margin-top: calc(var(--ah-icon) / -2); color: var(--fg-3); pointer-events: none; }
 .ah-input, .ah-secret {
   display: block;
   width: 100%;
@@ -147,16 +134,16 @@
   letter-spacing: -0.01em;
   transition: border-color 120ms ease, background-color 120ms ease;
 }
-.ah-input { height: calc(var(--ah-control) + 8px); padding: 0 12px; }
+.ah-input { height: calc(var(--ah-control) + 8px); padding: 0 12px 0 calc(12px + var(--ah-icon) + 8px); }
 .ah-secret { min-height: 88px; margin-top: 12px; padding: 10px 12px; resize: vertical; }
 .ah-input::placeholder, .ah-secret::placeholder { color: var(--fg-3); opacity: 1; }
 .ah-input:focus, .ah-secret:focus { border-color: color-mix(in oklab, var(--fg) 22%, transparent); background: color-mix(in oklab, var(--fg) 7%, transparent); }
 
-/* ── List: plain rows, selection lives only in the checkbox ───────────────── */
-.ah-list { display: grid; margin: 0 -10px; container-type: inline-size; }
+/* ── List: plain rows, selection only in the checkbox ─────────────────────── */
+.ah-list { display: grid; margin: 12px -10px 0; container-type: inline-size; }
 .ah-row {
   display: grid;
-  grid-template-columns: var(--ah-check) minmax(0, 1fr) auto;
+  grid-template-columns: var(--ah-check) var(--ah-icon) minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 12px;
   padding: var(--ah-row-pad) 10px;
@@ -166,43 +153,33 @@
 }
 @media (hover: hover) and (pointer: fine) { .ah-row:not(.is-added):hover { background: color-mix(in oklab, var(--fg) 4%, transparent); } }
 .ah-row.is-added { cursor: default; }
-.ah-row.is-added .ah-name, .ah-row.is-added .ah-meta { color: var(--fg-3); }
+.ah-row.is-added :is(.ah-name, .ah-meta, .ah-os-mark) { color: var(--fg-3); }
 .ah-check { display: grid; width: var(--ah-check); height: var(--ah-check); place-items: center; }
 .ah-check .tick, .ah-consent .tick { width: var(--ah-check); height: var(--ah-check); border-radius: 5px; color: var(--bg); }
 .ah-row.is-added .tick { opacity: 0.4; }
+.ah-os-mark { width: var(--ah-icon); height: var(--ah-icon); flex: none; fill: currentColor; color: var(--fg-2); }
 .ah-main { display: grid; min-width: 0; gap: 2px; }
-.ah-name { overflow: hidden; color: var(--fg); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.ah-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0 12px; color: var(--fg-2); font-size: var(--ah-small); line-height: 1.5; }
-.ah-os { color: var(--fg-2); font-size: var(--ah-small); white-space: nowrap; }
-.ah-src { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.ah-src .ui-source-icon { width: 12px; height: 12px; flex: none; color: var(--fg-3); }
-.ah-side { display: grid; justify-items: end; gap: 2px; font-size: var(--ah-small); white-space: nowrap; }
-.ah-status { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-2); }
-.ah-status::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--fg-3); }
-.ah-status[data-tone="ok"]::before { background: var(--ok); }
-.ah-status[data-tone="warn"]::before { background: color-mix(in oklab, var(--danger) 55%, var(--ok)); }
-.ah-status[data-tone="off"]::before { background: var(--danger); }
-.ah-status[data-tone="none"] { color: var(--fg-3); }
-.ah-status[data-tone="none"]::before { display: none; }
-.ah-ip {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--fg-3);
-  font: inherit;
-  letter-spacing: inherit;
-  cursor: pointer;
-}
-@media (hover: hover) and (pointer: fine) { .ah-ip:hover { color: var(--fg); } }
-/* Narrow windows: status and Show IP move under the text, never over it. */
-@container (max-width: 470px) {
-  .ah-row { grid-template-columns: var(--ah-check) minmax(0, 1fr); align-items: start; }
-  .ah-check { margin-top: 2px; }
-  .ah-side { grid-column: 2; display: flex; justify-content: space-between; margin-top: 4px; }
-}
-.ah-manual-target { font-weight: 600; }
+.ah-name { overflow: hidden; color: var(--fg); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .ah-candidate .ah-name { font-weight: 450; }
-.ah-none { margin: 12px 10px 0; color: var(--fg-2); }
+.ah-manual-target { font-weight: 500; }
+.ah-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0 12px; color: var(--fg-2); font-size: var(--ah-small); font-weight: 400; line-height: 1.5; }
+.ah-src { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.ah-src .ui-source-icon { width: 12px; height: 12px; flex: none; color: var(--fg-3); stroke-width: 1.5; }
+.ah-side { display: grid; justify-items: end; gap: 2px; font-size: var(--ah-small); font-weight: 400; white-space: nowrap; }
+.ah-status { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-2); }
+.ah-status-icon { width: 14px; height: 14px; color: var(--fg-3); }
+.ah-status[data-tone="ok"] .ah-status-icon { color: var(--ok); }
+.ah-status[data-tone="warn"] .ah-status-icon { color: color-mix(in oklab, var(--danger) 55%, var(--ok)); }
+.ah-status[data-tone="off"] .ah-status-icon { color: var(--danger); }
+.ah-status[data-tone="none"] { color: var(--fg-3); }
+.ah-ip { padding: 0; border: 0; background: none; color: var(--fg-3); font: inherit; letter-spacing: inherit; cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .ah-ip:hover { color: var(--fg); } }
+@container (max-width: 470px) {
+  .ah-row { grid-template-columns: var(--ah-check) var(--ah-icon) minmax(0, 1fr); align-items: start; }
+  .ah-check, .ah-row > .ah-os-mark { margin-top: 2px; }
+  .ah-side { grid-column: 3; display: flex; justify-content: space-between; margin-top: 4px; }
+}
+.ah-none { margin: 12px 10px 0; color: var(--fg-2); font-weight: 400; }
 
 /* ── Choices ──────────────────────────────────────────────────────────────── */
 .ah-options { display: grid; gap: 4px; margin: 0 -10px; }
@@ -211,45 +188,60 @@
 .ah-option input { position: absolute; opacity: 0; pointer-events: none; }
 .ah-radio { width: var(--ah-check); height: var(--ah-check); margin-top: 1px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--ui-tick-border-color); transition: box-shadow 160ms var(--ease-out); }
 .ah-option input:checked + .ah-radio { box-shadow: inset 0 0 0 5px var(--fg); }
-.ah-option-text { display: grid; gap: 2px; }
-.ah-option-hint { color: var(--fg-2); font-size: var(--ah-small); }
-.ah-consent { display: flex; align-items: center; gap: 12px; min-height: var(--ah-control); margin-top: 8px; color: var(--fg); cursor: pointer; }
+.ah-option-text { display: grid; gap: 2px; font-weight: 500; }
+.ah-option-hint { color: var(--fg-2); font-size: var(--ah-small); font-weight: 400; }
+.ah-consent { display: flex; align-items: center; gap: 12px; min-height: var(--ah-control); margin-top: 8px; cursor: pointer; }
 
 /* ── Progress ─────────────────────────────────────────────────────────────── */
 .ah-host + .ah-host { margin-top: 20px; }
-.ah-host-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 12px; margin-bottom: 8px; }
+.ah-host-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-bottom: 8px; }
+.ah-host-os { color: var(--fg-2); font-size: var(--ah-small); font-weight: 400; }
 .ah-steps { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
 .ah-steps li { display: flex; align-items: center; gap: 12px; min-height: 28px; color: var(--fg-3); transition: color 160ms ease; }
 .ah-steps li[data-state="running"] { color: var(--fg); }
 .ah-steps li[data-state="done"] { color: var(--fg-2); }
-.ah-mark { --ui-step-status-size: var(--ah-check); --ui-spinner-size: 14px; }
-.ah-done { margin-bottom: 16px; }
-.ah-done .ui-step-status { --ui-step-status-size: 28px; }
-.ah-done .ui-step-status-tick, .ah-done .tick { width: 28px; height: 28px; }
+.ah-mark { --ui-step-status-size: var(--ah-icon); --ui-spinner-size: 14px; }
 
-/* ── Details disclosure ───────────────────────────────────────────────────── */
+/* ── Details ──────────────────────────────────────────────────────────────── */
 .ah-details { margin-top: 4px; }
 .ah-details summary { display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; color: var(--fg-2); cursor: pointer; list-style: none; }
 .ah-details summary::-webkit-details-marker { display: none; }
-.ah-details summary svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; transition: transform 180ms var(--ease-out); }
-.ah-details[open] summary svg { transform: rotate(90deg); }
-.ah-details pre { margin: 8px 0 0; padding: 12px; border-radius: var(--r-sm, 8px); background: var(--ah-field); color: var(--fg-2); font: 450 var(--ah-small)/1.6 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ah-details summary .ah-icon { width: 14px; height: 14px; transition: transform 180ms var(--ease-out); }
+.ah-details[open] summary .ah-icon { transform: rotate(90deg); }
+.ah-details pre { margin: 8px 0 0; padding: 12px; border-radius: var(--r-sm, 8px); background: var(--ah-field); color: var(--fg-2); font: 400 var(--ah-small)/1.6 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* ── Footer and buttons (the sign-in card's pill and text buttons) ────────── */
+/* ── Actions (the sign-in card's pill and text buttons) ───────────────────── */
+/* The actions stay reachable when the step is taller than the window: they stick to its bottom. */
 .ah-foot {
+  position: sticky;
+  z-index: 1;
+  bottom: -32px;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 16px var(--ah-pad) var(--ah-pad);
-  border-top: 1px solid var(--line);
+  margin: 12px -24px -32px;
+  padding: 12px 24px 32px;
 }
-.ah-count { color: var(--fg-3); font-size: var(--ah-small); }
+/* Only when the step overflows does the bar get a backing, so short steps show no seam. */
+.ah-body.is-overflowing .ah-foot { background: var(--ah-surface); }
+.ah-body.is-overflowing .ah-foot::before {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  left: 0;
+  height: 32px;
+  background: linear-gradient(to bottom, transparent, var(--ah-surface));
+  pointer-events: none;
+}
+.ah-count { color: var(--fg-2); font-size: var(--ah-small); font-weight: 400; }
 .ah-primary {
   display: inline-flex;
   min-width: 120px;
   height: var(--ah-control);
   align-items: center;
   justify-content: center;
+  gap: 8px;
   margin-left: auto;
   padding: 0 16px;
   border: 0;
@@ -261,8 +253,10 @@
   cursor: pointer;
   transition: transform 140ms var(--ease-out), opacity 160ms ease;
 }
+.ah-primary .ah-icon { width: 15px; height: 15px; }
 .ah-primary:active:not(:disabled) { transform: scale(0.97); }
-.ah-primary:disabled { opacity: 0.35; cursor: default; }
+/* Solid, not translucent: a disabled button over scrolled content must not show it through. */
+.ah-primary:disabled { background: color-mix(in oklab, var(--fg) 30%, var(--bg)); color: color-mix(in oklab, var(--bg) 85%, var(--fg)); cursor: default; }
 .ah-secondary {
   height: var(--ah-control);
   margin-left: -8px;
@@ -278,22 +272,20 @@
 }
 @media (hover: hover) and (pointer: fine) { .ah-secondary:hover { color: var(--fg); } }
 .ah-secondary:active { transform: scale(0.97); }
-/* Narrow windows stack the actions full width, primary on top. */
-@container ah-foot (max-width: 400px) {
+@media (max-width: 480px) {
   .ah-foot:has(.ah-secondary) { flex-direction: column-reverse; align-items: stretch; }
-  .ah-foot:has(.ah-secondary) .ah-primary, .ah-foot:has(.ah-secondary) .ah-secondary { width: 100%; margin: 0; }
+  .ah-foot:has(.ah-secondary) :is(.ah-primary, .ah-secondary) { width: 100%; margin: 0; }
 }
-.ah { container-type: inline-size; container-name: ah-foot; }
 
 /* ── Focus: rings only during Tab navigation ──────────────────────────────── */
-.ah :focus, .ah-sidebar-add:focus, .ah-result :focus { outline: none; }
+.ah :focus, .ah-sidebar-add:focus, .ah-root-pill:focus { outline: none; }
 .ah .check input:focus-visible + .tick { outline: none; }
 :root[data-focus-ring="on"] .ah :is(button, summary, .ah-input, .ah-secret):focus-visible,
-:root[data-focus-ring="on"] .ah-sidebar-add:focus-visible { outline: 2px solid var(--ah-ring); outline-offset: 2px; }
+:root[data-focus-ring="on"] :is(.ah-sidebar-add, .ah-root-pill):focus-visible { outline: 2px solid var(--ah-ring); outline-offset: 2px; }
 :root[data-focus-ring="on"] .ah .check input:focus-visible + .tick,
 :root[data-focus-ring="on"] .ah-option input:focus-visible + .ah-radio { outline: 2px solid var(--ah-ring); outline-offset: 2px; }
 
-/* ── Sidebar entry ────────────────────────────────────────────────────────── */
+/* ── Sidebar entry, result header ─────────────────────────────────────────── */
 .ah-sidebar-add {
   display: flex;
   align-items: center;
@@ -311,32 +303,27 @@
   cursor: pointer;
   transition: transform 140ms var(--ease-out);
 }
-.ah-sidebar-add svg { width: 18px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.ah-sidebar-add .ah-icon { width: 16px; height: 16px; }
 @media (hover: hover) and (pointer: fine) { .ah-sidebar-add:hover { background: var(--hover); color: var(--fg); } }
 .ah-sidebar-add:active { transform: scale(0.98); }
-
-/* ── Result windows ───────────────────────────────────────────────────────── */
-.ah-result { display: flex; width: 100%; flex-direction: column; }
-.ah-result-head { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 8px 16px; border-bottom: 1px solid var(--line); font-size: var(--ah-body); }
-.ah-result-host { font-weight: 600; }
-.ah-result-head .dot { margin-left: auto; }
 .ah-root-pill {
-  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
   padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: none;
+  background: var(--bg);
   color: var(--fg-2);
   font: 500 var(--ah-small)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   cursor: pointer;
+  pointer-events: auto;
 }
+.ah-root-pill .ah-root-icon { width: 14px; height: 14px; }
+.ah-root-pill .ui-spinner { --ui-spinner-size: 12px; }
 .ah-root-pill:disabled { cursor: default; }
-.ah-root-pill .ui-spinner { --ui-spinner-size: 11px; margin-right: 6px; vertical-align: -1px; }
-.ah-result-term { flex: 1; margin: 0; padding: 16px; color: var(--fg); font: 450 13px/1.5 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; }
 
-@media (max-width: 600px) {
-  .ah-result-group { flex-basis: 100%; }
-}
 @media (prefers-reduced-motion: reduce) {
-  .ah, .ah * { transition-duration: 0ms !important; }
+  .ah *, .terminal-screen.has-addhost-prototype .panes[data-window-canvas] > .window-group { transition-duration: 0ms !important; }
 }
