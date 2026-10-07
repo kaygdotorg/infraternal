@@ -30,7 +30,7 @@ impl<S: CaKeySource> RemoteEnrollment<S> {
         CertificateAuthority::from_source(self.source.as_ref()).map_err(|_| RemoteEnrollmentError)
     }
 
-    /// Validate/sign before atomic capability consumption; send DER only after commit.
+    /// Preflight public authority before CSR/signing; send DER only after atomic commit.
     /// The caller must authenticate the enrollment server before supplying a capability.
     /// # Errors
     /// Refuses malformed CSR, invalid host/mode/invitation, unavailable CA or failed storage.
@@ -42,6 +42,10 @@ impl<S: CaKeySource> RemoteEnrollment<S> {
         csr_der: &[u8],
         now: i64,
     ) -> Result<SignedCertificate, RemoteEnrollmentError> {
+        self.store
+            .preflight(token, host, mode, now)
+            .await
+            .map_err(|_| RemoteEnrollmentError)?;
         let csr = ValidatedCsr::parse(csr_der).map_err(|_| RemoteEnrollmentError)?;
         let certificate = self
             .signer()?
@@ -102,6 +106,51 @@ mod tests {
             .unwrap();
         builder.sign(&key, MessageDigest::null()).unwrap();
         builder.build().to_der().unwrap()
+    }
+
+    #[tokio::test]
+    async fn invalid_invitations_never_load_the_private_signer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counted(AtomicUsize);
+        impl CaKeySource for Counted {
+            fn load(&self) -> Result<crate::ca::CaMaterial, crate::ca::CaError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Err(crate::ca::CaError)
+            }
+        }
+        let (store, _, host) = crate::enrollment::authority::tests::enrolled().await;
+        let source = Arc::new(Counted(AtomicUsize::new(0)));
+        let service = RemoteEnrollment::new(source.clone(), store.clone());
+        let now = 1_800_000_000;
+        let token = store
+            .issue("owner", host, Mode::Rootless, now)
+            .await
+            .unwrap();
+        let request = csr();
+        let unknown = "A".repeat(43);
+        for (identity, mode, secret, instant) in [
+            (host, Mode::Rootless, "bad", now),
+            (host, Mode::Rootless, unknown.as_str(), now),
+            (Uuid::new_v4(), Mode::Rootless, token.secret(), now),
+            (host, Mode::Rootful, token.secret(), now),
+            (host, Mode::Rootless, token.secret(), now - 1),
+            (host, Mode::Rootless, token.secret(), now + 900),
+        ] {
+            assert!(
+                service
+                    .join(identity, mode, secret, &request, instant)
+                    .await
+                    .is_err()
+            );
+        }
+        store.revoke("owner", host, now).await.unwrap();
+        assert!(
+            service
+                .join(host, Mode::Rootless, token.secret(), &request, now)
+                .await
+                .is_err()
+        );
+        assert_eq!(source.0.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

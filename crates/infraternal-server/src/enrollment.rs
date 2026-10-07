@@ -81,6 +81,39 @@ impl EnrollmentStore {
         Self(pool)
     }
 
+    /// Cheap public-authority preflight before CSR verification or private signing.
+    /// Redemption repeats these checks atomically; this read grants no authority.
+    /// # Errors
+    /// Refuses noncanonical, stale, consumed, wrong-mode or revoked invitations.
+    pub async fn preflight(
+        &self,
+        secret: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+    ) -> Result<(), EnrollmentError> {
+        if secret.len() != 43 || now < 0 {
+            return Err(EnrollmentError::Denied);
+        }
+        let decoded = URL_SAFE_NO_PAD
+            .decode(secret)
+            .map_err(|_| EnrollmentError::Denied)?;
+        if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&decoded) != secret {
+            return Err(EnrollmentError::Denied);
+        }
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM remote_join_tokens t JOIN remote_hosts h ON h.id=t.host_id \
+             WHERE t.host_id=? AND t.mode=? AND h.mode=t.mode AND t.digest=? \
+             AND t.consumed_at IS NULL AND t.issued_at<=? AND t.expires_at>? AND h.revoked_at IS NULL)",
+        ).bind(host.as_bytes().as_slice()).bind(mode.as_str())
+            .bind(Sha256::digest(secret.as_bytes()).as_slice()).bind(now).bind(now)
+            .fetch_one(&self.0).await?;
+        if !valid {
+            return Err(EnrollmentError::Denied);
+        }
+        Ok(())
+    }
+
     /// Replace a host's invitation only for its authorized owner and fixed mode.
     ///
     /// # Errors
