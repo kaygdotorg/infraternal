@@ -46,7 +46,15 @@ try {
       if (!path.startsWith(dist + sep)) throw new Error('asset path escaped dist');
       const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
         '.woff2': 'font/woff2', '.wasm': 'application/wasm' };
-      await route.fulfill({ contentType: types[extname(path)] ?? 'application/octet-stream', body: await readFile(path) });
+      let body;
+      try { body = await readFile(path); }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        // Mirror the static server: missing assets are HTTP 404, not fatal IPC-fixture errors.
+        await route.fulfill({ status: 404, body: 'Not found' });
+        return;
+      }
+      await route.fulfill({ contentType: types[extname(path)] ?? 'application/octet-stream', body });
       return;
     }
     const path = new URL(request.url()).pathname;

@@ -4,6 +4,7 @@ import { wordlist } from "@scure/bip39/wordlists/english.js";
 
 const KEY_CONTEXT = "infraternal/keywrap/v1";
 const encoder = new TextEncoder();
+const bufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
 
 interface AuthStart {
   ceremony: string;
@@ -18,6 +19,7 @@ interface AuthSession {
   display_name: string;
   device: string;
   fresh: number;
+  passkey_provider?: string | null;
 }
 
 interface Wrap {
@@ -35,7 +37,7 @@ interface StoredWrap {
 
 interface PrfOutputs extends Record<string, unknown> {
   enabled?: boolean;
-  results?: { first?: ArrayBuffer | ArrayBufferView };
+  results?: { first?: unknown; second?: unknown };
 }
 
 interface CredentialOutputs extends Record<string, unknown> {
@@ -158,7 +160,7 @@ export async function loginWithPasskey(device: string): Promise<string> {
       const session = await post<AuthSession>("unlock-session", {});
       userId = canonicalUuid(session?.user_id, "session user id");
       const stored = await post<StoredWrap[]>("wraps", {});
-      const keyId = base64url(new Uint8Array(assertion.rawId));
+      const keyId = base64url(copyBytes(assertion.rawId, "rawId"));
       const entry = stored.find((entry) => entry.kind === "passkey" && entry.key_id === keyId);
       const envelope = entry?.wrap;
       if (!envelope) throw new AuthError("Your account key is unavailable on the server. Try again.");
@@ -274,14 +276,17 @@ async function credentialPrf(
     publicKey: {
       challenge: toArrayBuffer(crypto.getRandomValues(new Uint8Array(32))),
       ...(rpId ? { rpId } : {}),
-      allowCredentials: [{ type: "public-key", id: credential.rawId }],
+      allowCredentials: [{ type: "public-key", id: toArrayBuffer(copyBytes(credential.rawId, "rawId")) }],
       userVerification: "required",
       extensions: { prf: { eval: { first: toArrayBuffer(first) } } } as AuthenticationExtensionsClientInputs,
     },
   });
   if (!(result instanceof PublicKeyCredential)) throw new AuthError("The passkey key proof was cancelled.");
   const prf = prfFrom(result);
-  if (!prf) throw new AuthError("This passkey could not unlock your account key. Try again or choose another passkey.");
+  if (!prf) {
+    binaryDiagnostic(undefined, "prf.first");
+    throw new AuthError("This passkey could not unlock your account key. Try again or choose another passkey.");
+  }
   return prf;
 }
 
@@ -290,25 +295,43 @@ function credentialOutputs(credential: PublicKeyCredential): CredentialOutputs {
 }
 
 function prfFrom(credential: PublicKeyCredential): Uint8Array | undefined {
-  const first = credentialOutputs(credential).prf?.results?.first;
-  if (!first) return undefined;
-  const result = copyBytes(first);
-  if (result.byteLength !== 32) throw new AuthError("Your passkey could not unlock your account key. Try again.");
-  return result;
+  const outputs = credentialOutputs(credential).prf?.results;
+  const first = outputs?.first;
+  let result: Uint8Array | undefined;
+  try {
+    const second = outputs?.second;
+    if (second !== undefined) {
+      const bytes = copyBytes(second, "prf.second");
+      const length = bytes.byteLength;
+      bytes.fill(0);
+      if (length !== 32) {
+        binaryDiagnostic(second, "prf.second");
+        throw new AuthError("Your passkey could not unlock your account key. Try again.");
+      }
+    }
+    if (first === undefined) return undefined;
+    result = copyBytes(first, "prf.first");
+    if (result.byteLength !== 32) throw new Error("invalid PRF length");
+    return result;
+  } catch (error: unknown) {
+    result?.fill(0);
+    if (!(error instanceof AuthError)) binaryDiagnostic(first, "prf.first");
+    throw new AuthError("Your passkey could not unlock your account key. Try again.");
+  }
 }
 
 function credentialProof(credential: PublicKeyCredential): Record<string, unknown> {
   const response = credential.response;
   const fields: Record<string, string | string[] | null> = {
-    clientDataJSON: base64url(new Uint8Array(response.clientDataJSON)),
+    clientDataJSON: base64url(copyBytes(response.clientDataJSON, "clientDataJSON")),
   };
   if (response instanceof AuthenticatorAttestationResponse) {
-    fields.attestationObject = base64url(new Uint8Array(response.attestationObject));
+    fields.attestationObject = base64url(copyBytes(response.attestationObject, "attestationObject"));
     fields.transports = response.getTransports();
   } else if (response instanceof AuthenticatorAssertionResponse) {
-    fields.authenticatorData = base64url(new Uint8Array(response.authenticatorData));
-    fields.signature = base64url(new Uint8Array(response.signature));
-    fields.userHandle = response.userHandle ? base64url(new Uint8Array(response.userHandle)) : null;
+    fields.authenticatorData = base64url(copyBytes(response.authenticatorData, "authenticatorData"));
+    fields.signature = base64url(copyBytes(response.signature, "signature"));
+    fields.userHandle = response.userHandle === null ? null : base64url(copyBytes(response.userHandle, "userHandle"));
   } else {
     throw new AuthError("This browser could not use your passkey. Try another browser.");
   }
@@ -318,7 +341,7 @@ function credentialProof(credential: PublicKeyCredential): Record<string, unknow
   delete extensions.prf;
   return {
     id: credential.id,
-    rawId: base64url(new Uint8Array(credential.rawId)),
+    rawId: base64url(copyBytes(credential.rawId, "rawId")),
     type: credential.type,
     response: fields,
     extensions,
@@ -371,13 +394,49 @@ async function deriveWrappingKey(ikm: Uint8Array, salt: Uint8Array, info: Uint8A
   );
 }
 
-function copyBytes(input: ArrayBuffer | ArrayBufferView): Uint8Array {
-  const result = new Uint8Array(input.byteLength);
-  const source = input instanceof ArrayBuffer
-    ? new Uint8Array(input)
-    : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-  result.set(source);
-  return result;
+/** Copy at the WebAuthn boundary so views preserve offsets and extension arrays cannot coerce bytes. */
+function copyBytes(input: unknown, field: string): Uint8Array {
+  try {
+    if (ArrayBuffer.isView(input)) {
+      return new Uint8Array(new Uint8Array(input.buffer, input.byteOffset, input.byteLength));
+    }
+    if (input instanceof ArrayBuffer) return new Uint8Array(new Uint8Array(input));
+    if (Object.prototype.toString.call(input) === "[object ArrayBuffer]") {
+      // The intrinsic getter also rejects objects spoofing Symbol.toStringTag.
+      const length = bufferByteLength?.call(input) as number;
+      const source = new Uint8Array(input as ArrayBuffer);
+      if (source.byteLength !== length) throw new Error("invalid buffer");
+      return new Uint8Array(source);
+    }
+    if (Array.isArray(input)) {
+      // Visit every index: Array.every skips holes, which must be rejected.
+      for (let index = 0; index < input.length; index += 1) {
+        const value: unknown = input[index];
+        if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 255) throw new Error("invalid byte");
+      }
+      return Uint8Array.from(input as number[]);
+    }
+  } catch {
+    binaryDiagnostic(input, field);
+    throw new AuthError(`This browser returned invalid passkey binary data (${field}). Try another browser.`);
+  }
+  binaryDiagnostic(input, field);
+  throw new AuthError(`This browser returned invalid passkey binary data (${field}). Try another browser.`);
+}
+
+/** Log only fixed shape codes and sizes; never values, credential IDs or arbitrary object tags. */
+function binaryDiagnostic(input: unknown, field: string): void {
+  let shape = "unsupported";
+  let length: number | null = null;
+  try {
+    if (Array.isArray(input)) { shape = "array"; length = input.length; }
+    else if (ArrayBuffer.isView(input)) { shape = "view"; length = input.byteLength; }
+    else if (Object.prototype.toString.call(input) === "[object ArrayBuffer]") {
+      shape = "array-buffer";
+      length = bufferByteLength?.call(input) as number;
+    }
+  } catch { /* A malformed object's getters must not escape into error messages or logs. */ }
+  console.warn("AUTH_BINARY_INVALID", { field, shape, length });
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {

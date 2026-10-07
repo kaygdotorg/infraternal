@@ -68,7 +68,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         let headers = serde_json::to_value(headers)?;
         let body = to_bytes(response.into_body(), 64 * 1024).await?;
-        let mut body: Value = serde_json::from_slice(&body)?;
+        // The IPC envelope is JSON even when HTTP deliberately has no response body.
+        // Keep 204 intact so the production browser exercises its normal empty-success path.
+        let mut body: Value = if status == 204 && body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&body)?
+        };
         if status == 200
             && let Some(version) = legacy.as_deref()
         {
