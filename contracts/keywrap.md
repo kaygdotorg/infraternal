@@ -376,6 +376,10 @@ Recovery-start/resume add `{username|user_id,verifier}` as an alternative to leg
 words. Exactly one authentication form is accepted. Generic denial, the existing
 Origin/body/admission partitions and two concurrent Argon2 slots remain; unknown
 accounts take the same bounded verifier work, with no version/account oracle.
+Exhausted Argon2 capacity uses the existing generic 429 and Retry-After: 60,
+independent of account/version. It must not return a credential-denial 401 that
+could trigger an explicitly selected legacy fallback. The browser never attempts
+phrase migration after 429 or service failure.
 Words are not accepted for accounts already upgraded to version 2. Both v2 start and resume reissue pending authorization without changing an existing deadline.
 
 ### Existing phrase-hash migration: explicit one-time exception
