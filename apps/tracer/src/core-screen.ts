@@ -382,7 +382,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer"): void => {
     palette.hidden = !open;
     scrim.hidden = !open;
-    palette.dataset.openKind = open ? source : "";
+    // The source of the last open or close decides its motion: keyboard is instant, pointer animates.
+    palette.dataset.openKind = source;
     if (open) {
       selected = 0;
       paletteInput.value = "";
