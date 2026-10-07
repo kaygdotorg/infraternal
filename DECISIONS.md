@@ -754,3 +754,15 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      add-host view (D141): SSH-ready hosts are marked, and SSH-blocked ones
      are explained (#58). It runs in the background with no prompts,
      refreshes on mesh changes, and stays cheap and idle-free otherwise.
+145. **Fact collection is an infraternal agent feature, not a shell script:**
+     the agent binary gathers host facts natively. It reads `/proc`, `/sys`
+     and the OS APIs directly where possible, and runs external commands as
+     parallel tasks, each with its own timeout. It **detects hangs** (for
+     example a stuck `df` on a dead NFS mount), abandons them without
+     blocking anything else, records which source hung, and draws
+     conclusions from it ("NFS mount /mnt/x is unresponsive"). Everything is
+     read-only and breaks nothing. Before install, SSH runs only a tiny
+     OS/arch sniff (POSIX sh or PowerShell) to pick the right binary; the
+     same binary then runs once in a one-shot probe mode over that session,
+     returns the structured report and exits, without being installed.
+     After install, the agent refreshes facts itself per D126.
