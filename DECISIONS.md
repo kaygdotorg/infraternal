@@ -549,3 +549,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 124. **Enterprise scale test target:** 500 concurrent terminal sessions and
      50 remote desktop sessions per server, up to 5 viewers per session
      (N5, D117).
+125. **Window header, popover and mobile canvas (M2–M8):**
+     - The info popover opens from the pill on every device: on desktop and
+       phone alike it sits right at the pill, with a bubble tail pointing to
+       it (not a bottom sheet).
+     - The header is one floating row with no band: pill on the left,
+       multiplexer icons on the right, over a progressive blur. It is always
+       visible, dimmed until hovered.
+     - On phones, scrolling inside a window scrolls the window; canvas
+       navigation gets explicit controls in the bottom toolbar if
+       differentiating inside versus outside scrolling proves too complex.
+     - Tooltips on touch appear on long-press, as everywhere.
+     - The Machine tab (M3) and the session manager (M7) each get their own
+       interactive design and mockup round.
