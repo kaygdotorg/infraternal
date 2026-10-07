@@ -87,32 +87,40 @@ test("mouse and shortcut focus draw no rings; Tab navigation does", async ({ bro
   }
 });
 
-test("the desktop sidebar makes room instead of covering the window", async ({ browser }) => {
-  const { context, page } = await open(browser, DESKTOP);
-  try {
-    await page.locator("[aria-label='Show hosts']").first().click();
-    await page.waitForTimeout(350);
-    const reachable = await page.evaluate(() => {
-      const close = document.querySelector(".ah-close")!.getBoundingClientRect();
-      return !!document.elementFromPoint(close.x + close.width / 2, close.y + close.height / 2)?.closest(".ah-close");
-    });
-    expect(reachable).toBe(true);
-  } finally {
-    await context.close();
+test("the sidebar moves the window only by what it would cover", async ({ browser }) => {
+  for (const [width, expected] of [[1440, 324], [1920, null]] as const) {
+    const { context, page } = await open(browser, { width, height: 900 });
+    try {
+      const left = () => page.evaluate(() => Math.round(document.querySelector(".ah-group")!.getBoundingClientRect().left));
+      const before = await left();
+      await page.locator("[aria-label='Show hosts']").first().click();
+      await page.waitForTimeout(450);
+      // Wide screens leave the window where it is; narrower ones shift it just past the sidebar.
+      expect(await left()).toBe(expected ?? before);
+      const close = await page.evaluate(() => {
+        const rect = document.querySelector("[data-ah='close']")!.getBoundingClientRect();
+        return !!document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.closest("[data-ah='close']");
+      });
+      expect(close).toBe(true);
+      await page.locator("[aria-label='Hide hosts']").first().click();
+      await page.waitForTimeout(450);
+      expect(await left()).toBe(before);
+    } finally {
+      await context.close();
+    }
   }
 });
 
 test("steps slide in the direction of travel and Back reverses it", async ({ browser }) => {
   const { context, page } = await open(browser, DESKTOP);
   try {
-    await page.locator(".ah-row[data-host='edge-arm']").click();
+    await page.locator(".ah-row[data-host='pve01']").click();
     await page.locator("[data-ah='continue']").click();
     await page.waitForTimeout(30);
     const forward = await page.evaluate(() => new DOMMatrix(getComputedStyle(document.querySelector(".ah-page:not([data-leaving])")!).transform).m41);
     expect(forward).toBeGreaterThan(0);
-    await page.locator("[data-ah='as-user']").click();
-    await expect(page.locator(".ah-page[data-page='success']")).toBeVisible({ timeout: 10_000 });
-    await page.locator("[data-ah='again']").click();
+    await page.waitForTimeout(400);
+    await page.locator("[data-ah='back']").click();
     await page.waitForTimeout(30);
     const back = await page.evaluate(() => new DOMMatrix(getComputedStyle(document.querySelector(".ah-page:not([data-leaving])")!).transform).m41);
     expect(back).toBeLessThan(0);
@@ -121,9 +129,10 @@ test("steps slide in the direction of travel and Back reverses it", async ({ bro
   }
 });
 
-test("root needs explicit consent and a finished host opens its window beside the flow", async ({ browser }) => {
+test("the wizard window becomes the host's terminal, with crisp text at rest", async ({ browser }) => {
   const { context, page } = await open(browser, DESKTOP);
   try {
+    const windowsBefore = await page.locator(".window-group").count();
     await page.locator(".ah-row[data-host='edge-arm']").click();
     await page.locator("[data-ah='continue']").click();
     const root = page.locator("[data-ah='as-root']");
@@ -131,10 +140,23 @@ test("root needs explicit consent and a finished host opens its window beside th
     await page.locator(".ah-consent").click();
     await expect(root).toBeEnabled();
     await root.click();
-    await expect(page.locator(".ah-page[data-page='success']")).toBeVisible({ timeout: 10_000 });
-    const result = await page.locator(".ah-result").boundingBox();
-    expect(result && result.x + result.width <= 1440).toBe(true);
-    await expect(page.locator(".ui-toast")).toBeVisible();
+    await expect(page.locator(".window-card[data-host-id='edge-arm'] .window-pill-host")).toHaveText("ops@edge-arm", { timeout: 10_000 });
+    await expect(page.locator(".window-card[data-host-id='edge-arm'] .window-fake-output")).toBeVisible();
+    expect(await page.locator(".window-group").count()).toBe(windowsBefore);
+    await page.waitForTimeout(500);
+    const settled = await page.evaluate(() => {
+      const hits: string[] = [];
+      for (let el: Element | null = document.querySelector(".window-card[data-host-id='edge-arm'] .window-fake-output"); el; el = el.parentElement) {
+        const style = getComputedStyle(el);
+        if (style.transform !== "none" || style.willChange !== "auto") hits.push(el.className.toString());
+      }
+      return hits;
+    });
+    expect(settled).toEqual([]);
+    await expect(page.locator(".ui-toast-message")).toHaveCSS("font-size", "13px");
+    await page.locator(".ui-toast-action").click();
+    await expect(page.locator(".ah .ah-page[data-page='discovery']")).toBeVisible();
+    await expect(page.locator(".ah .ah-row[data-host='edge-arm']")).toHaveClass(/is-added/);
   } finally {
     await context.close();
   }
@@ -162,7 +184,10 @@ for (const width of [320, 375, 393]) {
       const overlaps = await page.evaluate(() => {
         const hits: string[] = [];
         for (const row of document.querySelectorAll<HTMLElement>(".ah-row[data-host]")) {
-          const parts = [".ah-name", ".ah-meta", ".ah-status", ".ah-ip"].map((selector) => row.querySelector<HTMLElement>(selector)!.getBoundingClientRect());
+          const parts = [".ah-name", ".ah-meta", ".ah-status", ".ah-ip"].flatMap((selector) => {
+            const part = row.querySelector<HTMLElement>(selector);
+            return part ? [part.getBoundingClientRect()] : [];
+          });
           for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
             const a = parts[i]!, b = parts[j]!;
             if (a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5) hits.push(`${row.dataset.host}:${i}-${j}`);
