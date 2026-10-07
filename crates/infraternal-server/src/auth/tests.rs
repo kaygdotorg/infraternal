@@ -2594,7 +2594,6 @@ async fn redacted_unknown_and_failed_registrations_do_not_claim_a_provider() {
 }
 
 #[tokio::test]
-#[ignore = "regression specified before the additive provider implementation"]
 async fn aaguid_migration_preserves_legacy_credentials_and_sessions() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
