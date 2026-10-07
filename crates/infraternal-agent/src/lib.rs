@@ -19,3 +19,6 @@ pub fn run_embedded(fd: i32, state: Option<std::path::PathBuf>) -> std::io::Resu
         .build()?;
     runtime.block_on(daemon::run(fd, state))
 }
+
+#[cfg(test)]
+mod transport_diagnostics;
