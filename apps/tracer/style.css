@@ -227,6 +227,9 @@ button { color: inherit; }
   --t-panel: 240ms;
   --gutter: max(20px, env(safe-area-inset-left));
   --pill-h: 38px;
+  --keybar-height: 48px;
+  --keybar-gap: 16px;
+  --keybar-inset: 8px;
   z-index: 1;
   isolation: isolate;
 }
@@ -387,14 +390,13 @@ button { color: inherit; }
 .keybar { display: none; position: absolute; z-index: 7; left: 0; right: 0; bottom: calc(8px + env(safe-area-inset-bottom)); padding: 0 12px; transition: transform 240ms var(--ease-drawer), opacity 180ms ease-out; }
 .keytray {
   display: flex; width: max-content; max-width: 100%; gap: 2px; margin: 0 auto; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity;
-  padding: 3px 7px; border: 1px solid var(--overlay-line); border-radius: var(--r-pill); background: var(--overlay); box-shadow: var(--shadow);
-  -webkit-backdrop-filter: blur(28px) saturate(1.9); backdrop-filter: blur(28px) saturate(1.9);
+  --ui-pill-height: var(--keybar-height); height: var(--keybar-height); padding: 1px 7px; border-radius: var(--r-pill);
   scrollbar-width: none;
   -webkit-mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 22px), transparent);
   mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 22px), transparent);
 }
 .keytray::-webkit-scrollbar { display: none; }
-.keybar button { flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
+.keybar button { flex: none; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
 .keybar button svg { width: 24px; height: 24px; stroke-width: 1.75; }
 .keybar .key-word { font: 600 15px/1 var(--font-ui); letter-spacing: 0.01em; }
 .keybar button[data-armed="true"] { background: var(--accent-soft); color: var(--accent); }
@@ -418,7 +420,7 @@ button { color: inherit; }
   .capsule, .tab { height: 44px; }
   .bm-head, .bm-leaf, .add-row, .result { min-height: 44px; }
   .keyblur, .keybar { display: block; }
-  .panes { bottom: calc(66px + env(safe-area-inset-bottom)); }
+  .panes { bottom: calc(var(--keybar-inset) + var(--keybar-height) + var(--keybar-gap) + env(safe-area-inset-bottom)); }
 }
 @media (max-width: 720px) {
   .terminal-screen { --gutter: max(12px, env(safe-area-inset-left)); }
@@ -444,8 +446,8 @@ button { color: inherit; }
   .icon-btn:active, .capsule:active, .tab:active:not(:disabled), .keybar button:active,
   .bm-head:active:not(:disabled), .bm-leaf:active:not(:disabled) { transform: none; transition: none; }
 }
-:root[data-kb="open"] .keybar { bottom: 8px; }
-:root[data-kb="open"] .panes { bottom: 64px; }
+:root[data-kb="open"] .keybar { bottom: calc(var(--keybar-inset) + env(safe-area-inset-bottom)); }
+:root[data-kb="open"] .panes { bottom: calc(var(--keybar-inset) + var(--keybar-height) + var(--keybar-gap) + env(safe-area-inset-bottom)); }
 :root[data-kb="open"] .keyblur { height: 80px; }
 
 /* The gated windows prototype extends the deployed terminal shell without replacing its chrome. */

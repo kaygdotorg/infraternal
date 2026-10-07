@@ -96,7 +96,7 @@ const SCREEN = `
     </section>
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
-      <div class="keytray">
+      <div class="keytray ui-overlay-surface ui-pill">
         <button type="button" data-key="esc" aria-label="Escape" class="key-word">esc</button>
         <button type="button" data-key="tab" aria-label="Tab">${SVG.tab}</button>
         <button type="button" data-mod="ctrl" aria-label="Control">${SVG.ctrl}</button>
