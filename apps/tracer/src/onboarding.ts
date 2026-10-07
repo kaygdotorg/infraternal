@@ -1,8 +1,9 @@
 /** Renders the real setup wizard and discoverable passkey sign-in for the tracer. */
+import { recoveryWords } from "./recovery-words";
 import { AuthError, checkSetupToken, loginWithPasskey, registerOwner } from "./auth";
-import { copyFeedback, confirmAction, swapIcon, CLIPBOARD, DOWNLOAD } from "../../../packages/ui/src/copy-feedback";
+import { copyFeedback, swapIcon, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { loading, type Loading } from "../../../packages/ui/src/countup";
-import { springCheckbox, tick } from "../../../packages/ui/src/tick";
+import { tick } from "../../../packages/ui/src/tick";
 
 const BRAND_MARK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v7M12 10 5 17M12 10l7 7"/><circle cx="12" cy="3" r="1.2" fill="currentColor"/><circle cx="5" cy="18" r="1.2" fill="currentColor"/><circle cx="19" cy="18" r="1.2" fill="currentColor"/></svg>`;
 const KEY_MARK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H21M17 12v3M20 12v2"/></svg>`;
@@ -266,52 +267,10 @@ function mountSetup(
   }
 
   function renderRecoveryStep(body: HTMLElement): void {
-    body.innerHTML = `<ol class="auth-words" id="recovery-words"></ol>
-      <div class="auth-actions"><button class="icon-action" id="copy-recovery" type="button" aria-label="Copy recovery key">${swapIcon(CLIPBOARD)}</button>
-        <button class="icon-action" id="download-recovery" type="button" aria-label="Download recovery key">${swapIcon(DOWNLOAD)}</button></div>
-      <p class="auth-recovery-message" id="recovery-message" role="status"></p>
-      <label class="auth-check"><input id="recovery-saved" type="checkbox" /><span>I stored them somewhere safe</span></label>`;
-    const list = body.querySelector<HTMLOListElement>("#recovery-words")!;
-    state.recoveryWords.forEach((word, i) => {
-      const item = document.createElement("li");
-      const number = document.createElement("span");
-      number.className = "auth-word-number";
-      number.textContent = String(i + 1);
-      const value = document.createElement("span");
-      value.textContent = word;
-      item.append(number, value);
-      list.append(item);
-    });
-    const serializedWords = state.recoveryWords.join(" ");
-    body.querySelector<HTMLButtonElement>("#copy-recovery")!.addEventListener("click", async (event) => {
-      const button = event.currentTarget as HTMLButtonElement;
-      markMotion(true); // the copy status can change pane height; only the icon feedback should animate
-      const copied = await copyFeedback(button, serializedWords, event.detail === 0);
-      body.querySelector<HTMLElement>("#recovery-message")!.textContent = copied
-        ? "Copied. Store the words somewhere private."
-        : "Copy is unavailable here. Select and copy the words.";
-      button.blur();
-    });
-    body.querySelector<HTMLButtonElement>("#download-recovery")!.addEventListener("click", (event) => {
-      const button = event.currentTarget as HTMLButtonElement;
-      confirmAction(button, "Downloaded", event.detail === 0);
-      const contents = state.recoveryWords.map((word, i) => `${i + 1}. ${word}`).join("\n") + "\n";
-      const url = URL.createObjectURL(new Blob([contents], { type: "text/plain;charset=utf-8" }));
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = "infraternal-recovery-key.txt";
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
-      button.blur();
-    });
-    const checkbox = body.querySelector<HTMLInputElement>("#recovery-saved")!;
-    checkbox.checked = state.saved;
-    springCheckbox(checkbox);
-    checkbox.addEventListener("change", () => {
-      markMotion(checkbox.matches(":focus-visible"));
-      state.saved = checkbox.checked;
+    recoveryWords(body, state.recoveryWords, state.saved, (saved) => {
+      state.saved = saved;
       updateReady();
-    });
+    }, markMotion);
   }
 
   async function createPasskey(): Promise<void> {
