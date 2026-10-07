@@ -15,6 +15,11 @@ declare global {
       dropConnection: () => void;
       screenText: () => string;
       graphemeText: () => string;
+      injectInput: (data: string) => void;
+      seedPrompt: () => Promise<void>;
+      setPredictiveEcho: (enabled: boolean) => void;
+      baselineScreenText: (bytes: number[]) => Promise<string>;
+      predictiveEcho: () => import("./predictive-echo").PredictiveEchoState | undefined;
       rendererMetrics: () => {
         cols: number;
         rows: number;
@@ -25,6 +30,9 @@ declare global {
         outputSequence: string;
         scrollbackRows: number;
         viewportY: number;
+        cursorX: number;
+        cursorY: number;
+        cursorVisible: boolean;
         fontSize: number;
         wasmMemoryBytes: number;
       } | undefined;
@@ -219,6 +227,7 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   const query = new URLSearchParams(location.search);
   const mockMode = query.get("mock") === "1";
   const probeMode = query.get("probe") === "1";
+  const predictiveEcho = query.get("predict") === "1";
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
   try {
@@ -268,6 +277,7 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
       status: screen.status,
       theme: screen.theme(),
       hooks,
+      predictiveEcho,
       onRoundTrip: (milliseconds) => screen?.setRoundTrip(milliseconds),
       onConnectionChange: (connected) => screen?.setConnection(connected),
       onScroll: (scrolled) => screen?.setScrolled(scrolled),
@@ -285,6 +295,11 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
         dropConnection: () => currentTerminal?.forceDrop(),
         screenText: () => currentTerminal?.readScreenText() ?? "",
         graphemeText: () => currentTerminal?.readGraphemeText() ?? "",
+        injectInput: (data) => currentTerminal?.injectInput(data),
+        seedPrompt: () => currentTerminal?.seedPromptForTest() ?? Promise.resolve(),
+        setPredictiveEcho: (enabled) => currentTerminal?.setPredictiveEchoForTest(enabled),
+        baselineScreenText: (bytes) => currentTerminal?.baselineScreenText(Uint8Array.from(bytes)) ?? Promise.resolve(""),
+        predictiveEcho: () => currentTerminal?.predictiveEchoState,
         rendererMetrics: () => currentTerminal?.rendererMetrics,
         trace: () => performanceProbe?.traceSamples() ?? [],
       };
