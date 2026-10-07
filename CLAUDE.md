@@ -29,6 +29,12 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
 - Code explains itself. Use module docs and comments for choices and
   invariants that are not obvious.
 - No secrets in the repo, in logs or in argv. No prices in the repo.
+- No other products' names in code or code comments. Never write that something
+  is "like", "inspired by", "re-implemented from" or "the same as" another product.
+  We implement features our own way. Documentation (docs/, research/, DECISIONS)
+  may name products as examples. Code may name something only where it directly
+  integrates with or depends on it (for example calling a CLI we support, or a
+  library we ship), and then only factually.
 - Do not push or deploy unless the task tells you to.
 
 ## History and tracking (owner rule)
