@@ -196,3 +196,7 @@ impl EnrollmentStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "remote_migration_tests.rs"]
+mod migration_tests;
