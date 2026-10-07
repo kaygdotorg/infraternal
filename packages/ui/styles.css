@@ -390,6 +390,9 @@
   font: 450 16px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: 0.01em;
 }
+/* With chips present the input needs room for a few characters only; it grows on its own row
+   when it has to wrap, so no blank line is left under the chips. */
+.ui-chip-flow:has(.ui-chip) .ui-chip-text { min-width: 4ch; flex-basis: 4ch; }
 .ui-chip-text::placeholder { color: var(--fg-3); opacity: 1; }
 .ui-chip {
   display: inline-flex;
