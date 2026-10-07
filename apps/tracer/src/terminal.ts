@@ -43,6 +43,32 @@ export interface TerminalHooks {
   onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint) => void;
 }
 
+export type InputModifierState = "off" | "armed" | "locked";
+
+/** Modifier states shared by the key tray and Ghostty's input encoder. */
+export interface InputModifiers {
+  ctrl: InputModifierState;
+  alt: InputModifierState;
+}
+
+function applyInputModifiers(data: string, ctrl: boolean, alt: boolean): string {
+  if (!ctrl && !alt) return data;
+
+  // Ghostty emits CSI or SS3 arrows before the key tray modifier is applied.
+  // CSI's parameter follows xterm's bit values: Alt=2, Ctrl=4, plus the base 1.
+  const arrow = /^\x1b(?:\[|O)(?:1;)?([ABCD])$/.exec(data);
+  if (arrow) {
+    const parameter = 1 + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+    return `\x1b[1;${parameter}${arrow[1]!}`;
+  }
+
+  if (ctrl && data.length === 1) {
+    const code = data.toUpperCase().charCodeAt(0);
+    if (code >= 64 && code <= 95) data = String.fromCharCode(code - 64);
+  }
+  return alt ? `\x1b${data}` : data;
+}
+
 export type TerminalTraceHop =
   | "encode"
   | "wsSend"
@@ -187,7 +213,7 @@ export class TerminalClient {
   private rendererCursorBlinking = false;
   private nextPingNonce = 0n;
   private readonly pendingPings = new Map<bigint, number>();
-  private inputModifier: "ctrl" | "alt" | undefined;
+  private inputModifiers: InputModifiers = { ctrl: "off", alt: "off" };
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
   private readonly onViewportChange = (): void => this.syncVisualViewport();
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
@@ -333,9 +359,23 @@ export class TerminalClient {
     this.terminal.input(data, true);
   }
 
-  /** Applies one sticky mobile modifier to the next terminal input event. */
-  setInputModifier(modifier: "ctrl" | "alt" | null): void {
-    this.inputModifier = modifier ?? undefined;
+  /** Focuses Ghostty's actual input host so the mobile keyboard can stay open. */
+  focus(): void {
+    this.terminal.focus();
+  }
+
+  /** Sets one modifier; the one-argument form keeps the earlier keybar API compatible. */
+  setInputModifier(modifier: "ctrl" | "alt" | null): void;
+  setInputModifier(modifier: "ctrl" | "alt", state: InputModifierState): void;
+  setInputModifier(modifier: "ctrl" | "alt" | null, state?: InputModifierState): void {
+    if (modifier && state) {
+      this.inputModifiers[modifier] = state;
+      return;
+    }
+    this.inputModifiers = {
+      ctrl: modifier === "ctrl" ? "armed" : "off",
+      alt: modifier === "alt" ? "armed" : "off",
+    };
   }
 
   /** Updates both Ghostty's option record and renderer palette without rebuilding the session. */
@@ -624,16 +664,13 @@ export class TerminalClient {
 
   private handleInput(data: string): void {
     if (this.closed || !data) return;
+    const ctrl = this.inputModifiers.ctrl !== "off";
+    const alt = this.inputModifiers.alt !== "off";
+    if (this.inputModifiers.ctrl === "armed") this.inputModifiers.ctrl = "off";
+    if (this.inputModifiers.alt === "armed") this.inputModifiers.alt = "off";
     this.config.onInputActivity?.();
     this.sampleRoundTrip();
-    const modifier = this.inputModifier;
-    this.inputModifier = undefined;
-    if (modifier === "ctrl" && data.length === 1) {
-      const code = data.toUpperCase().charCodeAt(0);
-      if (code >= 64 && code <= 95) data = String.fromCharCode(code - 64);
-    } else if (modifier === "alt") {
-      data = `\x1b${data}`;
-    }
+    data = applyInputModifiers(data, ctrl, alt);
     const at = performance.now();
     const traceInput = this.config.hooks?.onInput?.(data, at, this.nextInSeq) === true;
     let encoded = this.encoderIntoScratch(data);
