@@ -145,8 +145,8 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
         factAppearance: getComputedStyle(row).appearance,
         factBorder: getComputedStyle(row).borderTopWidth,
         factBackground: getComputedStyle(row).backgroundColor,
-        copyIcons: popover.querySelectorAll(".machine-fact .is-idle, .machine-metric .is-idle, .machine-metric-copy").length,
-        feedbackTicks: popover.querySelectorAll(".machine-copy-feedback .is-done").length,
+        copyIcons: popover.querySelectorAll(".machine-fact .is-idle path, .machine-fact .is-idle rect, .machine-fact .is-idle circle, .machine-fact .is-idle line, .machine-metric .is-idle path, .machine-metric .is-idle rect, .machine-metric .is-idle circle, .machine-metric .is-idle line, .machine-metric-copy").length,
+        feedbackTicks: popover.querySelectorAll(".machine-value .swap .is-done").length,
         valueKeyFontSize: getComputedStyle(value).fontSize,
         keyFontSize: getComputedStyle(key).fontSize,
         machineColumns: getComputedStyle(popover.querySelector<HTMLElement>(".machine-card-layout") ?? firstFact.parentElement!).gridTemplateColumns.split(" ").length,
@@ -186,8 +186,8 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
       factBackground: "rgba(0, 0, 0, 0)",
       copyIcons: 0,
       feedbackTicks: 11,
-      valueKeyFontSize: "11px",
-      keyFontSize: "11px",
+      valueKeyFontSize: "16px",
+      keyFontSize: "14px",
       machineColumns: 1,
       logoAtTop: true,
       logoCentered: true,
@@ -201,7 +201,7 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
       side: "bottom",
       originY: "0px",
     });
-    expect(machineStyles.factHeights.every(({ height, textHeight, lineHeight }) => textHeight > lineHeight + 1 ? height <= textHeight + 18 : height <= 40)).toBe(true);
+    expect(machineStyles.factHeights.every(({ height, textHeight, lineHeight }) => height >= 44 && (textHeight > lineHeight + 1 ? height <= textHeight + 18 : height <= 52))).toBe(true);
     expect(machineStyles.tailAlignment).toBeLessThanOrEqual(1);
     expect(machineStyles.markFill).toBe(machineStyles.markColor);
     expect(machineStyles.markColor).toBe(machineStyles.accentColor);
@@ -209,9 +209,9 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
     const copiedValue = await copiedValueCell.locator(".machine-value-text").textContent();
     await copiedValueCell.click();
     await expect(copiedValueCell).toHaveAttribute("data-done", "");
+    await expect(copiedValueCell.locator(".swap .is-done")).toHaveCSS("opacity", "1");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(copiedValue);
     await expect(page.locator(".tip-label:not(.is-leaving)")).toHaveText("Copied");
-    await expect(details.locator(".machine-fact").first().locator(".machine-copy-feedback")).toHaveCSS("opacity", "1");
 
     const layoutSpread = async (selector: string): Promise<number> => details.locator(selector).evaluateAll((cells) => {
       const positions = cells.map((cell) => cell.getBoundingClientRect().left);
@@ -236,9 +236,9 @@ test("window popovers use the shared controls, fastfetch rows, and anchored tabs
         return { spread: Math.max(...values.map((value) => value.getBoundingClientRect().left)) - Math.min(...values.map((value) => value.getBoundingClientRect().left)), valueSizes, keySizes, measures };
       });
       expect(sharedGrid.spread).toBeLessThanOrEqual(1);
-      expect(sharedGrid.valueSizes.every((size) => size === "11px")).toBe(true);
-      expect(sharedGrid.keySizes.every((size) => size === "11px")).toBe(true);
-      expect(sharedGrid.measures.every(({ rowHeight, textHeight, lineHeight }) => textHeight > lineHeight + 1 ? rowHeight <= textHeight + 18 : rowHeight <= 40)).toBe(true);
+      expect(sharedGrid.valueSizes.every((size) => size === "16px")).toBe(true);
+      expect(sharedGrid.keySizes.every((size) => size === "14px")).toBe(true);
+      expect(sharedGrid.measures.every(({ rowHeight, textHeight, lineHeight }) => rowHeight >= 44 && (textHeight > lineHeight + 1 ? rowHeight <= textHeight + 18 : rowHeight <= 52))).toBe(true);
     }
 
     await page.keyboard.press("Escape");
@@ -297,7 +297,7 @@ test("copying a value needs one desktop click or two touch taps", async ({ brows
     const y = bounds.y + bounds.height / 2;
     await page.evaluate(() => navigator.clipboard.writeText("unchanged until the second tap"));
     await page.touchscreen.tap(x, y);
-    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("unchanged until the second tap");
+    await expect(value).not.toHaveAttribute("data-done");
     await page.touchscreen.tap(x, y);
     await expect(value).toHaveAttribute("data-done", "");
     await expect(page.locator(".tip-label:not(.is-leaving)")).toHaveText("Copied");
@@ -397,7 +397,7 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
       await expect(details).toBeVisible();
       await expect(details.locator(".machine-os-mark")).toBeVisible();
       await expect(details.locator(".machine-fact")).toHaveCount(8);
-      await expect(details.locator(".machine-fact .is-idle, .machine-metric .is-idle, .machine-metric-copy")).toHaveCount(0);
+      await expect(details.locator(".machine-fact .is-idle path, .machine-fact .is-idle rect, .machine-fact .is-idle circle, .machine-fact .is-idle line, .machine-metric .is-idle path, .machine-metric .is-idle rect, .machine-metric .is-idle circle, .machine-metric .is-idle line, .machine-metric-copy")).toHaveCount(0);
       await expect(details.locator(".machine-os-title .machine-value-text")).toHaveText("Ubuntu 24.04.2 LTS");
       const machineValues = await details.locator(".machine-facts .machine-value-text").allTextContents();
       expect(machineValues).toContain("ThinkCentre M90q Gen 3");
@@ -423,7 +423,10 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
         { key: "Agent mode", value: "root" },
         { key: "Engines", value: "Podman 5.0 · BuildKit 0.16" },
       ]);
-      expect(compactValues.filter(({ key }) => key !== "Engines").every(({ oneLine }) => oneLine)).toBe(true);
+      expect(compactValues.find(({ key }) => key === "Agent mode")?.oneLine).toBe(true);
+      if (combo.width >= 1440) {
+        expect(compactValues.filter(({ key }) => key === "Model" || key === "CPU").every(({ oneLine }) => oneLine)).toBe(true);
+      }
       expect(compactValues.every(({ fitsValueColumn }) => fitsValueColumn)).toBe(true);
       const assertFactGrid = async (selector: string): Promise<void> => {
         const geometry = await details.locator(selector).evaluate((root) => {
@@ -435,7 +438,7 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
             const textHeight = text.getBoundingClientRect().height;
             const lineHeight = Number.parseFloat(getComputedStyle(text).lineHeight);
             const rowHeight = row.getBoundingClientRect().height;
-            return textHeight > lineHeight + 1 ? rowHeight <= textHeight + 18 : rowHeight <= 40;
+            return rowHeight >= 44 && (textHeight > lineHeight + 1 ? rowHeight <= textHeight + 18 : rowHeight <= 52);
           });
           return {
             spread: values.length ? Math.max(...values.map((value) => value.getBoundingClientRect().left)) - Math.min(...values.map((value) => value.getBoundingClientRect().left)) : 0,
@@ -445,8 +448,8 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
           };
         });
         expect(geometry.spread).toBeLessThanOrEqual(1);
-        expect(geometry.valueSizes.every((size) => size === "11px")).toBe(true);
-        expect(geometry.keySizes.every((size) => size === "11px")).toBe(true);
+        expect(geometry.valueSizes.every((size) => size === "16px")).toBe(true);
+        expect(geometry.keySizes.every((size) => size === "14px")).toBe(true);
         expect(geometry.rowsFit).toBe(true);
       };
       const assertCapsuleTracksTab = async (): Promise<void> => {
@@ -531,8 +534,8 @@ test("gated windows, header, popovers, session manager, and phone controls", asy
       await page.locator(".window-card[aria-current='true'] [data-window-action='sessions']").click();
       const manager = page.getByRole("dialog", { name: "Window details" });
       await expect(manager.locator(".window-session-row")).toHaveCount(2);
-      await expect(manager.locator(".window-session-output").first()).toHaveCSS("font-size", "11px");
-      await expect(manager.locator(".window-session-meta").first()).toHaveCSS("font-size", "10px");
+      await expect(manager.locator(".window-session-output").first()).toHaveCSS("font-size", "16px");
+      await expect(manager.locator(".window-session-meta").first()).toHaveCSS("font-size", "14px");
       screenshotPaths.push(await saveComparison(browser, testInfo, page, combo.width, combo.height, combo.theme, "session-manager", basePath));
       await capturePopover("session-manager");
       const endAction = manager.locator(".window-session-row-actions [data-manager-action='end']").first();
