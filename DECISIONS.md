@@ -742,3 +742,15 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      high RTT, bundle bytes (raw and gzip), lazy-chunk splitting for the
      terminal, the latency probe and idle work. Both are prototyped on the
      same screens and the numbers decide; no default favourite.
+144. **Quiet automatic discovery, including SSH reachability:** the server
+     (through its embedded infraternal agent) quietly and automatically runs
+     read-only commands such as `netbird status --detail` (JSON where
+     available) and `tailscale status --json` to infer every host on the
+     meshes, **and especially which hosts accept SSH**. Use mesh metadata
+     where it exists (for example Tailscale SSH host keys or the NetBird
+     peer SSH state); otherwise a single, rate-limited, unauthenticated
+     reachability check (a TCP connect or SSH banner read on 22 and the
+     NetBird SSH port), never a login attempt. Results feed the one-list
+     add-host view (D141): SSH-ready hosts are marked, and SSH-blocked ones
+     are explained (#58). It runs in the background with no prompts,
+     refreshes on mesh changes, and stays cheap and idle-free otherwise.
