@@ -69,7 +69,8 @@ struct Login {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Recovery {
-    user_id: String,
+    user_id: Option<String>,
+    username: Option<String>,
     words: String,
 }
 #[derive(Deserialize)]
@@ -265,7 +266,37 @@ async fn execute(
         }
         "recovery-start" => {
             let b: Recovery = body(value)?;
-            json!({"token":auth.recovery_start(&b.user_id, b.words, now).await?,"delay_seconds":86400})
+            let user = match (b.user_id, b.username) {
+                (Some(user), None) => user,
+                (None, Some(username)) => {
+                    let user =
+                        sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username=?")
+                            .bind(username)
+                            .fetch_optional(&auth.pool)
+                            .await?;
+                    if let Some(user) = user {
+                        user
+                    } else {
+                        // Valid phrases for an unknown name still pay the same bounded
+                        // Argon2 work as wrong words for an existing name. No directory
+                        // or fast username-enumeration path is added by recovery lookup.
+                        if let Some(stored) = sqlx::query_scalar::<_, String>(
+                            "SELECT recovery_hash FROM users WHERE owner=1",
+                        )
+                        .fetch_optional(&auth.pool)
+                        .await?
+                        {
+                            let _ = super::verify_recovery(b.words, stored).await;
+                        }
+                        return Err(Error::Denied);
+                    }
+                }
+                _ => return Err(Error::Invalid),
+            };
+            let (token, ready) = auth
+                .recovery_start_with_session(&user, b.words, cookie(headers).ok(), now)
+                .await?;
+            json!({"token":token,"delay_seconds":ready-now,"ready_at":ready})
         }
         "recovery-ready" => {
             let b: Token = body(value)?;
