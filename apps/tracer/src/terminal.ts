@@ -164,7 +164,7 @@ export class TerminalClient {
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
-  private pingTimer = 0;
+  private lastPingAt = -Infinity;
   private nextPingNonce = 0n;
   private readonly pendingPings = new Map<bigint, number>();
   private inputModifier: "ctrl" | "alt" | undefined;
@@ -532,6 +532,7 @@ export class TerminalClient {
   private handleInput(data: string): void {
     if (this.closed || !data) return;
     this.config.onInputActivity?.();
+    this.sampleRoundTrip();
     const modifier = this.inputModifier;
     this.inputModifier = undefined;
     if (modifier === "ctrl" && data.length === 1) {
@@ -794,29 +795,28 @@ export class TerminalClient {
     this.config.status.hidden = message.length === 0;
   }
 
-  /** Starts one immediate RTT sample and then a single bounded sample every two seconds. */
+  /** Samples RTT on attachment and typing; an idle terminal schedules no wakeups [81]. */
   private startPings(): void {
     this.stopPings();
-    if (!this.attached || this.closed) return;
-    const ping = () => {
-      if (!this.attached || this.closed) return;
-      this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
-      const nonce = this.nextPingNonce;
-      if (this.pendingPings.size >= 8) {
-        const oldest = this.pendingPings.keys().next().value as bigint | undefined;
-        if (oldest !== undefined) this.pendingPings.delete(oldest);
-      }
-      const startedAt = performance.now();
-      this.pendingPings.set(nonce, startedAt);
-      this.sendFrame(TERMINAL_STREAM, { type: "Ping", nonce, sentUs: BigInt(Math.round(startedAt * 1000)) });
-    };
-    ping();
-    this.pingTimer = window.setInterval(ping, 2000);
+    this.sampleRoundTrip();
+  }
+
+  private sampleRoundTrip(): void {
+    const startedAt = performance.now();
+    if (!this.attached || this.closed || startedAt - this.lastPingAt < 2000) return;
+    this.lastPingAt = startedAt;
+    this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
+    const nonce = this.nextPingNonce;
+    if (this.pendingPings.size >= 8) {
+      const oldest = this.pendingPings.keys().next().value as bigint | undefined;
+      if (oldest !== undefined) this.pendingPings.delete(oldest);
+    }
+    this.pendingPings.set(nonce, startedAt);
+    this.sendFrame(CONTROL_STREAM, { type: "Ping", nonce, sentUs: BigInt(Math.round(startedAt * 1000)) });
   }
 
   private stopPings(): void {
-    window.clearInterval(this.pingTimer);
-    this.pingTimer = 0;
+    this.lastPingAt = -Infinity;
     this.pendingPings.clear();
     this.config.onRoundTrip?.(undefined);
   }
