@@ -1,6 +1,7 @@
 # infraternal agent contract
 
-Before you start any work, read `DECISIONS.md` and `docs/ARCHITECTURE.md`.
+Before you start any work, read `DECISIONS.md`, `docs/ARCHITECTURE.md` and
+`docs/PROCESS.md` (how work is built, reviewed and merged).
 Decisions are referenced by their number. Only the owner (kayg) can change one.
 
 ## Priorities
@@ -46,6 +47,15 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
   (with evidence), when you are blocked, and when you finish (head SHA and the
   gate output, verbatim). Jobs never close issues. Memory tools such as Honcho
   are a convenience, not the record.
+
+## Foundational choices (owner rule)
+
+- A library or engine that the foundation depends on (terminal state,
+  crypto, database, transport, renderer, and so on) is never chosen inside a
+  job. The orchestrator brings it to the owner as a grill question with
+  measured trade-offs: speed, memory per session multiplied by the expected
+  number of sessions, correctness, and consistency with the rest of the
+  stack. A job may measure candidates. It does not decide.
 
 ## Gates
 

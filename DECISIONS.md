@@ -349,3 +349,139 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     toolchain. Idle RAM stays near 5 MB. A pure-Rust verifier (webauthn-rp)
     is reviewed again when it passes the advisory gate and has its own
     security review.
+87. **Curated terminal fonts.** Nine OFL-1.1 monospace fonts, chosen in the
+    palette with a live preview: Geist Mono (default), JetBrains Mono, Commit
+    Mono, Maple Mono, Monaspace Neon, IBM Plex Mono, Cascadia Code, Fira Code
+    and Source Code Pro. They are self-hosted and loaded on first use.
+88. **Codec on both sides, one byte format.** The browser (TypeScript) and
+    the server and agent (Rust) each have a native codec for the wire format.
+    Shared golden vectors and differential tests keep them identical. No
+    WASM bridge: copying through the JS↔WASM boundary would cost more than
+    the about 230 ns that the JS decode itself takes. Performance is
+    measured from the UI, end to end (keystroke → paint), as the main S1
+    gate.
+89. **Search across sessions** (S1–S4 of #18). Scrollback search fans out to
+    the agents: each shim scans its own in-memory scrollback, results stream
+    back, and there is no central copy of the output. Command history (from
+    shell integration) has a small central index that also works when hosts
+    are offline. Budget: results from 50 sessions in < 100 ms, bounded by
+    the slowest host's round trip. The fastest default is always chosen, and
+    the engine stays fast with very large scrollback.
+90. **Binary output** is detected in the shim (thresholds calibrated by the
+    #18 stress test, so that emoji, CJK and combining text never count as
+    binary). It is shown live, kept out of search, and collapsed to a marker
+    in scrollback that can be expanded on request.
+91. **How far back search reaches:** live scrollback always. Closed sessions
+    are kept read-only for 7 days. Command history is kept for 90 days,
+    opt-in for each host. Hits open the session at the line, with the match
+    highlighted.
+92. **Order after S1: VNC next.** When SSH is complete, the next slice is
+    VNC and RDP, ahead of metrics and Docker (this changes the order in
+    decision 34).
+93. **Terminal images: kitty graphics in S1.5.** We implement them
+    ourselves: the kitty graphics protocol is intercepted before ghostty-web,
+    images are drawn on a layer locked to the character cells, and the shim
+    stores them per session so that they survive resume. Sixel and iTerm
+    come only on request. ghostty-web 0.4 and alacritty_terminal have no
+    image support.
+94. **The shim's terminal-state engine is libghostty-vt** (owner decision,
+    2026-10-06). It replaces alacritty_terminal, which a job chose without a
+    grill. It is the same engine as the browser's ghostty-web (14), so the
+    screen the shim saves and the screen the browser draws come from the
+    same code. It measured 2.4× the parse speed (138 MB/s) and 60% less
+    memory (about 20 MB per 10,000 lines). We write our own screen
+    serializer for snapshots (its built-in formatter failed our repaint
+    fixtures). Zig is pinned for the build.
+95. **Onboarding is a guided wizard.** The app detects whether a server
+    owner exists. If none exists, it goes straight into a stepped setup
+    wizard (setup token → name → passkey → recovery key), with numbered steps
+    that turn into ticks. After the passkey is registered, the owner is
+    signed in automatically. Sign-in is one "Continue with passkey" button
+    with no username.
+96. **The sign-in and onboarding backdrop is our own "faulty terminal"
+    shader,** in black and white, written from scratch after the
+    sveltebits.xyz effect. Its code cannot be copied (MIT + Commons Clause).
+    Budget: half resolution, at most 30 fps, paused when hidden or after
+    sign-in, one still frame with reduced motion.
+97. **Account identity.** Each account has an internal random user ID (the
+    primary key and the WebAuthn user handle), a **username** (unique,
+    lowercase, `[a-z0-9._-]`, 1–32 characters, can be changed later because
+    everything refers to the ID), a free-text **display name**, and an
+    **optional email** (notifications only; no email server is required).
+    The passkey is created with name = username and displayName = display
+    name. The wizard step "name" becomes username + display name (the
+    display name is pre-filled from the username).
+98. **Sign-in:** one usernameless "Continue with passkey" button, plus a quiet
+    secondary "use a different passkey…" that opens the browser's QR or
+    security-key flow. Typing a username is never required.
+99. **One tick, everywhere.** Each checkmark (checkboxes, stepper steps,
+    completed bootstrap steps, "copied") uses one shared spring-tick
+    primitive, reimplemented from the sveltebits spring-check behaviour: one
+    spring (0.2 s, bounce 0.2) drives the fill, the overshoot swell and the
+    draw-on. Pointer toggles animate. Keyboard toggles are instant. The same
+    rule applies to every repeated interaction: one primitive, reused.
+100. **No font swap, ever.** Each page preloads the fonts that its first
+     view uses. Font faces use `font-display: block`, and a view renders once
+     its font is ready (with a short cap). The first frame is the final frame.
+     This applies to the app, the website and the docs.
+101. **Everything has motion; first sign-in has a moment.** After the
+     onboarding wizard, "Welcome to infraternal" appears as glitch text
+     (reimplemented, monochrome, settles after 1.6 s), then the app opens.
+     The rest of onboarding is designed as we go.
+102. **Waits use the count-up.** Nothing appears for waits under 400 ms. Above
+     that, a count-up shows real progress when known, otherwise elapsed
+     seconds. Never fake progress, and no spinners. One shared loading()
+     primitive.
+103. **Copy feedback:** minimal. The copy button's own icon turns into a
+     tick (the D99 path, drawn on) and back: 200 ms in, a 0.9 s hold, 150 ms
+     out, with strong ease-out CSS transitions, so a re-tap retargets. Nothing
+     else on the page moves. A region blur and a pixel mosaic were tried and
+     rejected as maximal. Reduced motion is opacity only. One shared
+     copyFeedback() primitive for every copy action.
+
+104. **Remote desktop sessions are held by the server side, like SSH:** the
+     server or its infraternal agent opens and keeps the VNC (later RDP)
+     connection to the target. Browsers and later Apple clients only
+     subscribe to it. Closing a tab or losing a phone connection never
+     ends the session. The holder keeps the current framebuffer, so a
+     client that joins or rejoins gets a full image at once (the
+     equivalent of the terminal Snapshot). A browser-held RFB connection
+     (noVNC talking to the target) is rejected for that reason. Decoding
+     in the browser is fine (owner, #23).
+105. **First remote desktop targets:** macOS Screen Sharing first, then
+     Proxmox/QEMU (#23).
+106. **Minimum client:** iOS/Safari 17, so WebCodecs video decode is always
+     available (#23).
+107. **Remote desktop quality and input follow measurement:** the encoding
+     from holder to subscriber (dirty rectangles, lossless or JPEG,
+     H.264/HEVC low-delay video, or a mix) is chosen by benchmark for the
+     lowest input-to-photon latency and the best performance on phones.
+     Text sharpness, trackpad mode and clipboard follow from that
+     benchmark. They are not fixed promises. Benchmark and optimise
+     aggressively (#23).
+108. **One passkey prompt at sign-in (A3):** discoverable sign-in and the
+     PRF key unwrap use a single ceremony, with a server-wide constant PRF
+     input, provided the independent auth review confirms that this loses
+     no protection compared with the per-user input. Existing envelopes
+     keep their stored input (#19).
+109. **Browser terminal pinned to a source build (T1):** ghostty-web is built
+     from source at an upstream commit that contains the crash fix
+     (bec9e162, #180, or later on the 0.5.0-rc line), pinned by SHA with a
+     checksum, until an official release contains it. We then switch to the
+     release. No upstream release request is sent: we build it ourselves
+     and move to the official release when it ships (owner) (#31).
+110. **Lossless terminal state (T2):** ship with the bounded painter
+     (approximate restores are flagged and counted, and a reconnect never
+     closes a session). In parallel, build an engine-level state
+     export/import for libghostty-vt in our own fork and test it with our
+     differential suite. Propose it upstream as a PR only after it is
+     proven here (#26).
+111. **Auth backdrop keeps animating until sign-in completes:** the
+     faulty-terminal field (D96) runs continuously on the setup and sign-in
+     screens (at most 30 fps, half resolution, paused when hidden or
+     off-screen, one still frame under reduced motion) and stops for good
+     once sign-in completes. It is not frozen after its intro (#40).
+112. **Steady cursor when idle:** the terminal stops rendering, cursor blink
+     included, after 700 ms of inactivity and wakes on input, output,
+     resize, scroll or pointer, so idle CPU stays at zero (D81). A steady
+     cursor at idle is accepted (#40).
