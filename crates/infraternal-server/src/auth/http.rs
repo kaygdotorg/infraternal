@@ -269,7 +269,7 @@ async fn execute(
             ))
             .into_response());
         }
-        "recovery-start" => {
+        "recovery-start" | "recovery-resume" => {
             let b: Recovery = body(value)?;
             let user = match (b.user_id, b.username) {
                 (Some(user), None) => user,
@@ -299,7 +299,13 @@ async fn execute(
                 _ => return Err(Error::Invalid),
             };
             let (token, ready, delay) = auth
-                .recovery_start_clock(&user, b.words, cookie(headers).ok(), current_time)
+                .recovery_start_clock(
+                    &user,
+                    b.words,
+                    cookie(headers).ok(),
+                    current_time,
+                    action == "recovery-resume",
+                )
                 .await?;
             json!({"token":token,"delay_seconds":delay,"ready_at":ready})
         }

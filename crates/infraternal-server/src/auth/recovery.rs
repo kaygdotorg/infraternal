@@ -21,7 +21,20 @@ impl Auth {
         now: i64,
     ) -> Result<(String, i64)> {
         let (token, ready, _) = self
-            .recovery_start_clock(user, words, session, || Ok(now))
+            .recovery_start_clock(user, words, session, || Ok(now), false)
+            .await?;
+        Ok((token, ready))
+    }
+
+    /// Reauthenticate after page loss; a pending request always retains its original deadline.
+    pub async fn recovery_resume(
+        &self,
+        user: &str,
+        words: String,
+        now: i64,
+    ) -> Result<(String, i64)> {
+        let (token, ready, _) = self
+            .recovery_start_clock(user, words, None, || Ok(now), true)
             .await?;
         Ok((token, ready))
     }
@@ -34,6 +47,7 @@ impl Auth {
         words: String,
         session: Option<&str>,
         clock: impl Fn() -> Result<i64>,
+        resume: bool,
     ) -> Result<(String, i64, i64)> {
         let stored: String = sqlx::query_scalar("SELECT recovery_hash FROM users WHERE id=?")
             .bind(user)
@@ -66,15 +80,23 @@ impl Auth {
         } else {
             false
         };
-        let ready = if live { now } else { now + DAY };
+        let now_ready = if live { now } else { now + DAY };
         let token = random();
-        let n = sqlx::query("INSERT INTO recovery(user_id,token_hash,ready,expires) VALUES (?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,ready=excluded.ready,expires=excluded.expires WHERE recovery.expires<=?")
-            .bind(user).bind(hash(&token)).bind(ready).bind(now + 2 * DAY).bind(now).execute(&mut *tx).await?.rows_affected();
-        if n != 1 {
-            return Err(Error::Denied);
-        }
+        let ready: Option<i64> = if resume {
+            // Reissue only the bearer capability. Even an expired capability's row
+            // retains the original deadline until explicit cancellation or completion.
+            // Rotation also invalidates replacement ceremonies in a discarded browser.
+            sqlx::query_scalar("INSERT INTO recovery(user_id,token_hash,ready,expires) VALUES (?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,expires=excluded.expires RETURNING ready")
+                .bind(user).bind(hash(&token)).bind(now_ready).bind(now + 2 * DAY)
+                .fetch_optional(&mut *tx).await?
+        } else {
+            sqlx::query_scalar("INSERT INTO recovery(user_id,token_hash,ready,expires) VALUES (?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,ready=excluded.ready,expires=excluded.expires WHERE recovery.expires<=? RETURNING ready")
+                .bind(user).bind(hash(&token)).bind(now_ready).bind(now + 2 * DAY).bind(now)
+                .fetch_optional(&mut *tx).await?
+        };
+        let ready = ready.ok_or(Error::Denied)?;
         tx.commit().await?;
-        Ok((token, ready, ready - now))
+        Ok((token, ready, (ready - now).max(0)))
     }
 
     /// Any signed-in device may cancel recovery without a fresh tap [25].

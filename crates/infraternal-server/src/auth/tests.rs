@@ -2692,3 +2692,35 @@ async fn audit_recovery_session_expiring_during_verification_keeps_delay() {
         "session expired before recovery transaction but received immediate recovery"
     );
 }
+
+#[tokio::test]
+async fn audit_recovery_after_page_discard_can_resume_at_original_deadline() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let original = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    // Model page discard by dropping the only clear capability. The unchanged words survive offline.
+    drop(original);
+    let resumed = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), NOW + DAY)
+        .await;
+    let denied_at_day = resumed.is_err();
+    let (_, ready) = f
+        .auth
+        .recovery_resume(&f.user, f.words.clone(), NOW + 2 * DAY)
+        .await
+        .unwrap();
+    println!(
+        "AUDIT discarded page: retry_at_24h_denied={denied_at_day}; retry_at_48h_ready_offset_hours={}",
+        (ready - NOW) / 3600
+    );
+    assert_eq!(ready, NOW + DAY);
+    assert!(
+        !denied_at_day,
+        "re-entering correct words after 24h cannot recover the pending capability; denied until 48h then another 24h wait"
+    );
+}
