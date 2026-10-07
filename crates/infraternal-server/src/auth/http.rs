@@ -195,6 +195,17 @@ async fn dispatch(
     response
 }
 
+// Recovery authority needs a new sample after expensive verification and writer-lock waits.
+fn current_time() -> super::Result<i64> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Error::Invalid)?
+            .as_secs(),
+    )
+    .map_err(|_| Error::Invalid)
+}
+
 // Keep typed action dispatch together so capability and response rules can be reviewed in one place.
 #[allow(clippy::too_many_lines)]
 async fn execute(
@@ -203,13 +214,7 @@ async fn execute(
     headers: &HeaderMap,
     value: Value,
 ) -> super::Result<Response> {
-    let now = i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| Error::Invalid)?
-            .as_secs(),
-    )
-    .map_err(|_| Error::Invalid)?;
+    let now = current_time()?;
     ingress(auth, action, headers, now).await?;
     if action == "setup-check" {
         let b: Token = body(value)?;
@@ -293,10 +298,10 @@ async fn execute(
                 }
                 _ => return Err(Error::Invalid),
             };
-            let (token, ready) = auth
-                .recovery_start_with_session(&user, b.words, cookie(headers).ok(), now)
+            let (token, ready, delay) = auth
+                .recovery_start_clock(&user, b.words, cookie(headers).ok(), current_time)
                 .await?;
-            json!({"token":token,"delay_seconds":ready-now,"ready_at":ready})
+            json!({"token":token,"delay_seconds":delay,"ready_at":ready})
         }
         "recovery-ready" => {
             let b: Token = body(value)?;

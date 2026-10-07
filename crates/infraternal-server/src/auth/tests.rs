@@ -2656,3 +2656,39 @@ mod socket_tests;
 
 #[path = "review3_tests.rs"]
 mod review3_tests;
+
+// Defensive recovery probes; fixture secrets remain in memory and diagnostics contain only outcomes.
+#[tokio::test]
+async fn audit_recovery_session_expiring_during_verification_keeps_delay() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    sqlx::query("UPDATE sessions SET expires=?")
+        .bind(now + 1)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let pause = Arc::new(RecoveryPause::default());
+    *f.auth.recovery_pause.lock().await = Some(pause.clone());
+    let app = router(f.auth.clone());
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let body = json!({"username":"owner","words":f.words});
+    let request = tokio::spawn(async move {
+        http_post_json_with_cookie(&app, "recovery-start", body, &cookie).await
+    });
+    pause.verified.notified().await;
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    pause.resume.notify_one();
+    let (status, _, body) = request.await.unwrap();
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(
+        body["delay_seconds"], DAY,
+        "session expired before recovery transaction but received immediate recovery"
+    );
+}

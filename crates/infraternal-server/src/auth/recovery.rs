@@ -20,6 +20,21 @@ impl Auth {
         session: Option<&str>,
         now: i64,
     ) -> Result<(String, i64)> {
+        let (token, ready, _) = self
+            .recovery_start_clock(user, words, session, || Ok(now))
+            .await?;
+        Ok((token, ready))
+    }
+
+    // HTTP supplies a live clock; deterministic library callers supply their own time.
+    // Sample it only after the writer lock so every verification/database await is covered.
+    pub(super) async fn recovery_start_clock(
+        &self,
+        user: &str,
+        words: String,
+        session: Option<&str>,
+        clock: impl Fn() -> Result<i64>,
+    ) -> Result<(String, i64, i64)> {
         let stored: String = sqlx::query_scalar("SELECT recovery_hash FROM users WHERE id=?")
             .bind(user)
             .fetch_optional(&self.pool)
@@ -44,6 +59,7 @@ impl Auth {
         }
         // Do not slide or check the cookie before Argon2: revocation/expiry can occur
         // during verification. This recheck shares the writer lock with request creation.
+        let now = clock()?;
         let live: bool = if let Some(token) = session {
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?)")
                 .bind(hash(token)).bind(user).bind(now).fetch_one(&mut *tx).await?
@@ -58,7 +74,7 @@ impl Auth {
             return Err(Error::Denied);
         }
         tx.commit().await?;
-        Ok((token, ready))
+        Ok((token, ready, ready - now))
     }
 
     /// Any signed-in device may cancel recovery without a fresh tap [25].
