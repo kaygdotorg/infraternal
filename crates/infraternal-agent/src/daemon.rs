@@ -1,4 +1,4 @@
-//! Inherited leg-B dispatcher and bounded session registry for the tracer bullet [9][13][41].
+//! Shared inherited and authenticated remote leg-B dispatcher and bounded session registry for the tracer bullet [9][13][41].
 //!
 //! Each terminal owns one pending output frame. Commands have eight slots;
 //! a full queue retires only that stream, cancelling its shim link. Unacknowledged
@@ -8,6 +8,7 @@
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
 //! A closed shim or failed terminal task closes only its mux stream.
 use crate::{
+    channel::Channel,
     relay,
     sessions::{self, Manager, Reader, Session},
     transport::{Receive, Socket, Transmit},
@@ -63,7 +64,7 @@ struct Open {
     rows: u16,
 }
 
-async fn writer(socket: &Socket, mut messages: mpsc::Receiver<Message>) -> io::Result<()> {
+async fn writer(socket: &impl Channel, mut messages: mpsc::Receiver<Message>) -> io::Result<()> {
     let mut tx = Transmit::default();
     tx.send(
         socket,
@@ -147,8 +148,46 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     if fd != 3 {
         return Err(sessions::invalid("embedded leg B requires fd 3"));
     }
-    let state = sessions::state(state)?;
     let socket = Socket::inherited(fd)?;
+    run_channel(&socket, state, None).await
+}
+
+/// Dispatch an admitted remote server connection through the same session and shim path.
+/// The dialer must authenticate the server and supply the locally enrolled uid;
+/// neither browser JSON nor an untrusted peer can select that identity. Returning
+/// drops every attachment and launch task, but never terminates surviving shims.
+/// # Errors
+/// Refuses invalid greeting, unsafe state, wrong uid and malformed terminal frames.
+pub async fn run_authenticated(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    execution_uid: u32,
+) -> io::Result<()> {
+    if execution_uid != nix::unistd::Uid::effective().as_raw() {
+        return Err(sessions::invalid(
+            "enrolled uid differs from infraternal agent uid",
+        ));
+    }
+    // Cancellation retires the authenticated channel as well as its task set;
+    // a caller cannot reuse it with detached readers or unfinished wire writes.
+    let _retire = RetireChannel(channel);
+    run_channel(channel, state, Some(execution_uid)).await
+}
+
+struct RetireChannel<'a, C: Channel>(&'a C);
+impl<C: Channel> Drop for RetireChannel<'_, C> {
+    fn drop(&mut self) {
+        self.0.retire();
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_channel(
+    socket: &impl Channel,
+    state: Option<PathBuf>,
+    execution_uid: Option<u32>,
+) -> io::Result<()> {
+    let state = sessions::state(state)?;
     let manager = Manager::detect().await;
     let exe = std::env::current_exe()?;
     let mut registry = HashMap::new();
@@ -160,6 +199,19 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     let (tx, rx) = mpsc::channel(8);
     let dispatch = async {
         let mut receive = Receive::default();
+        if execution_uid.is_some() {
+            // The whole greeting has one deadline, including an entirely silent
+            // authenticated peer. Established idle channels have no timer.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let hello = receive.next(socket).await?;
+                if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
+                    return Err(sessions::invalid("remote control Hello required"));
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        }
         let mut streams: HashMap<u32, Stream> = HashMap::new();
         let mut jobs: JoinSet<(u32, io::Result<()>)> = JoinSet::new();
         let mut opens: JoinSet<(u32, u32, io::Result<Session>)> = JoinSet::new();
@@ -187,15 +239,18 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                         Err(_) => emit(&tx, Message::Result(stream, call_id, false, b"{\"error\":\"terminal open refused\"}".to_vec())).await?,
                     }
                 }
-                decoded = receive.next(&socket) => {
+                decoded = receive.next(socket) => {
                     let decoded = decoded?;
                     let stream = decoded.stream_id;
+                    if execution_uid.is_some() && (stream % 2 != 0 || matches!(decoded.frame, Frame::Hello { .. })) {
+                        return Err(sessions::invalid("invalid remote stream or duplicate Hello"));
+                    }
                     match decoded.frame {
                         Frame::Hello {version: 1, ..} if stream == 0 => {}
                         Frame::Ping {nonce, sent_us} if stream == 0 => emit(&tx, Message::Pong(nonce, sent_us)).await?,
-                        Frame::Call {call_id, action_id: "terminal.open", input_json} => {
+                        Frame::Call {call_id, action_id: "terminal.open", input_json} if execution_uid.is_none() || stream == 0 => {
                             let input = serde_json::from_slice::<Open>(input_json);
-                            if let Ok(input) = input && registry.len() + opens.len() < sessions::MAX_SESSIONS {
+                            if let Ok(input) = input && execution_uid.is_none_or(|uid| input.uid == uid) && registry.len() + opens.len() < sessions::MAX_SESSIONS {
                                 let exe = exe.clone(); let state = state.clone();
                                 opens.spawn(async move { (stream, call_id, sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await) });
                             } else {
@@ -247,7 +302,7 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
             }
         }
     };
-    tokio::select! { result = dispatch => result, result = writer(&socket, rx) => result }
+    tokio::select! { result = dispatch => result, result = writer(socket, rx) => result }
 }
 
 /// One shim connection reuses transmit and cancellation-safe receive storage.
