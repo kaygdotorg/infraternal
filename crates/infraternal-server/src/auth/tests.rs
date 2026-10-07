@@ -546,6 +546,190 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
 }
 
 #[tokio::test]
+async fn recovery_http_live_same_account_is_immediate() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = router(f.auth.clone());
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (status, _, body) = http_post_json_with_cookie(
+        &app,
+        "recovery-start",
+        json!({"user_id":f.user,"words":f.words}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body["delay_seconds"], 0);
+    let (status, _, _) =
+        http_post_json(&app, "recovery-ready", json!({"token":body["token"]})).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn recovery_http_other_expired_pending_and_missing_sessions_wait() {
+    let _guard = SERIAL.lock().await;
+    for mode in ["other", "expired", "pending", "missing"] {
+        let f = fixture().await;
+        if mode == "other" {
+            sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('other','other',0,'unused','other','Other')")
+                .execute(&f.auth.pool).await.unwrap();
+            sqlx::query("UPDATE sessions SET user_id='other'")
+                .execute(&f.auth.pool)
+                .await
+                .unwrap();
+        } else if mode == "expired" {
+            sqlx::query("UPDATE sessions SET expires=0")
+                .execute(&f.auth.pool)
+                .await
+                .unwrap();
+        } else if mode == "pending" {
+            sqlx::query("UPDATE sessions SET unlocked=0")
+                .execute(&f.auth.pool)
+                .await
+                .unwrap();
+        }
+        let app = router(f.auth.clone());
+        let cookie = format!("__Host-infraternal={}", f.session);
+        let (status, _, body) = http_post_json_with_optional_cookie(
+            &app,
+            "recovery-start",
+            json!({"user_id":f.user,"words":f.words}),
+            if mode == "missing" {
+                None
+            } else {
+                Some(&cookie)
+            },
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["delay_seconds"], DAY);
+        let (status, _, _) =
+            http_post_json(&app, "recovery-ready", json!({"token":body["token"]})).await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[tokio::test]
+async fn recovery_live_session_revoked_during_verification_cannot_waive_delay() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let pause = Arc::new(RecoveryPause::default());
+    *f.auth.recovery_pause.lock().await = Some(pause.clone());
+    let auth = f.auth.clone();
+    let user = f.user.clone();
+    let words = f.words.clone();
+    let session = f.session.clone();
+    let request = tokio::spawn(async move {
+        auth.recovery_start_with_session(&user, words, Some(&session), NOW)
+            .await
+    });
+    pause.verified.notified().await;
+    f.auth.logout(&f.session).await.unwrap();
+    pause.resume.notify_one();
+    let (token, ready) = request.await.unwrap().unwrap();
+    assert_eq!(ready, NOW + DAY);
+    assert!(f.auth.recovery_ready(&token, NOW).await.is_err());
+}
+
+#[tokio::test]
+async fn recovery_live_session_cannot_accelerate_an_active_delayed_request() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let token = f
+        .auth
+        .recovery_start(&f.user, f.words.clone(), NOW)
+        .await
+        .unwrap();
+    assert!(
+        f.auth
+            .recovery_start_with_session(&f.user, f.words.clone(), Some(&f.session), NOW + 1)
+            .await
+            .is_err()
+    );
+    assert!(f.auth.recovery_ready(&token, NOW + DAY - 1).await.is_err());
+    assert!(f.auth.recovery_ready(&token, NOW + DAY).await.is_ok());
+}
+
+#[tokio::test]
+async fn recovery_username_identity_is_additive_and_ambiguous_forms_fail() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = router(f.auth.clone());
+    for value in [
+        json!({"words":f.words}),
+        json!({"user_id":f.user,"username":"owner","words":f.words}),
+    ] {
+        assert_eq!(
+            http_post_json(&app, "recovery-start", value).await.0,
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
+    let missing = http_post_json(
+        &app,
+        "recovery-start",
+        json!({"username":"missing","words":f.words}),
+    )
+    .await;
+    let wrong = http_post_json(
+        &app,
+        "recovery-start",
+        json!({"username":"owner","words":"invalid"}),
+    )
+    .await;
+    assert_eq!(missing.0, axum::http::StatusCode::UNAUTHORIZED);
+    assert_eq!(missing.0, wrong.0);
+    assert_eq!(missing.2, wrong.2);
+    let (_, _, body) = http_post_json(
+        &app,
+        "recovery-start",
+        json!({"username":"owner","words":f.words}),
+    )
+    .await;
+    assert_eq!(body["delay_seconds"], DAY);
+    assert!(body["ready_at"].as_i64().is_some());
+}
+
+#[tokio::test]
+#[ignore = "release-only recovery measurement at 50 live sessions; run without concurrent compilation"]
+async fn recovery_session_delay_latency_at_capacity() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    sqlx::query("UPDATE sessions SET expires=?")
+        .bind(NOW + 200 * DAY)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    for _ in 1..50 {
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh) VALUES (?,?,'scale',?,?)")
+            .bind(hash(&random())).bind(&f.user).bind(NOW + 200 * DAY).bind(NOW).execute(&f.auth.pool).await.unwrap();
+    }
+    for live in [false, true] {
+        let mut samples = Vec::new();
+        for index in 0..30 {
+            let now = NOW + (index + if live { 30 } else { 0 }) * 2 * DAY;
+            let begin = std::time::Instant::now();
+            let (_, ready) = f
+                .auth
+                .recovery_start_with_session(
+                    &f.user,
+                    f.words.clone(),
+                    live.then_some(f.session.as_str()),
+                    now,
+                )
+                .await
+                .unwrap();
+            samples.push(begin.elapsed().as_micros());
+            assert_eq!(ready, now + if live { 0 } else { DAY });
+        }
+        samples.sort_unstable();
+        println!(
+            "Recovery start (SQLite memory, 50 live session rows, n=30, live={live}): p50 {} us, p99 {} us",
+            samples[14], samples[29]
+        );
+    }
+}
+
+#[tokio::test]
 async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
