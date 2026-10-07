@@ -277,7 +277,7 @@ function mountSetup(
     const serializedWords = state.recoveryWords.join(" ");
     body.querySelector<HTMLButtonElement>("#copy-recovery")!.addEventListener("click", async (event) => {
       const button = event.currentTarget as HTMLButtonElement;
-      const copied = await copyFeedback(button, serializedWords);
+      const copied = await copyFeedback(button, serializedWords, event.detail === 0);
       body.querySelector<HTMLElement>("#recovery-message")!.textContent = copied
         ? "Copied. Store the words somewhere private."
         : "Copy is unavailable here. Select and copy the words.";
@@ -285,7 +285,7 @@ function mountSetup(
     });
     body.querySelector<HTMLButtonElement>("#download-recovery")!.addEventListener("click", (event) => {
       const button = event.currentTarget as HTMLButtonElement;
-      confirmAction(button, "Downloaded");
+      confirmAction(button, "Downloaded", event.detail === 0);
       const contents = state.recoveryWords.map((word, i) => `${i + 1}. ${word}`).join("\n") + "\n";
       const url = URL.createObjectURL(new Blob([contents], { type: "text/plain;charset=utf-8" }));
       const anchor = document.createElement("a");
@@ -360,8 +360,8 @@ function mountSetup(
   }
 
   function wireCopy(button: HTMLButtonElement, text: string): void {
-    button.addEventListener("click", async () => {
-      const copied = await copyFeedback(button, text);
+    button.addEventListener("click", async (event) => {
+      const copied = await copyFeedback(button, text, event.detail === 0);
       if (!copied) host.querySelector<HTMLElement>("#auth-error")!.textContent = "Copy is unavailable here.";
       button.blur();
     });

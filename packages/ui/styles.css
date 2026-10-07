@@ -37,6 +37,7 @@
 [data-done] .is-idle { opacity: 0; transform: scale(0.6); filter: blur(2px); }
 [data-done] .is-done { opacity: 1; transform: none; filter: none; }
 [data-done] .is-done path { stroke-dashoffset: 0; transition: stroke-dashoffset 260ms var(--ease) 50ms; }
+[data-instant] .swap svg, [data-instant] .is-done path { transition: none; }
 @media (prefers-reduced-motion: reduce) {
   .swap svg, [data-done] .is-idle, .swap .is-done, [data-done] .is-done { transform: none; filter: none; }
   .swap .is-done path { stroke-dashoffset: 0; transition: none; }

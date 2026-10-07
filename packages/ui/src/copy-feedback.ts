@@ -32,26 +32,28 @@ export const swapIcon = (paths: string) => `<span class="swap"><svg class="is-id
 
 const timers = new WeakMap<HTMLElement, number>();
 
-/** Plays the icon → tick → icon swap on `button`; its label reads `doneLabel` meanwhile. */
-export function confirmAction(button: HTMLElement, doneLabel: string): void {
+/** Plays the icon → tick → icon swap; keyboard activations expose the result instantly. */
+export function confirmAction(button: HTMLElement, doneLabel: string, instant = false): void {
   const idle = button.dataset.idleLabel ??= button.getAttribute("aria-label") ?? "";
   clearTimeout(timers.get(button));
+  button.toggleAttribute("data-instant", instant);
   button.dataset.done = "";
   button.setAttribute("aria-label", doneLabel);
   refreshTip(button);
   timers.set(button, window.setTimeout(() => {
     delete button.dataset.done;
+    button.removeAttribute("data-instant");
     button.setAttribute("aria-label", idle);
     refreshTip(button);
   }, HOLD));
 }
 
-/** Copies `text` and confirms on `button` only after the clipboard accepts it. */
-export async function copyFeedback(button: HTMLElement, text: string): Promise<boolean> {
+/** Copies `text` and confirms after acceptance; keyboard activation is immediate. */
+export async function copyFeedback(button: HTMLElement, text: string, instant = false): Promise<boolean> {
   try {
     if (!navigator.clipboard) return false;
     await navigator.clipboard.writeText(text);
-    confirmAction(button, "Copied");
+    confirmAction(button, "Copied", instant);
     return true;
   } catch {
     return false;
