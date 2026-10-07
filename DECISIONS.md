@@ -939,3 +939,6 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - The pills (window pill, tab tray) are vertically shorter.
      - Mobile typography is tightened: one type scale, aligned key and
        value columns, values that fit without awkward wrapping.
+     - The bottom toolbar (key tray) never touches a window card: a
+       consistent gap separates them, and the toolbar pill is vertically
+       shorter (touch targets kept by padding).
