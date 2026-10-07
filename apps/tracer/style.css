@@ -184,6 +184,15 @@ button { color: inherit; }
 .probe-panel pre { margin: 12px 0 5px; white-space: pre-wrap; font-size: 12px; line-height: 1.7; }
 .probe-panel p { margin: 0; color: #b6b8bd; font-size: 11px; line-height: 1.5; }
 
+/* The pinned ghostty-web (0.5 line, D109) marks the terminal host itself
+   contenteditable="true", not only its hidden textarea. iOS then draws its native
+   caret at the full height of that editable box: a tall blue bar down the left of the
+   terminal (owner report). The terminal draws its own cursor on the canvas, so the
+   native caret must never show on the host or anything inside it. */
+.terminal-host, .terminal-host [contenteditable], .terminal-host [contenteditable] * {
+  caret-color: transparent !important;
+  outline: none !important;
+}
 /* Keep Ghostty's hidden input present without iOS zoom or its large native caret. */
 .terminal-host textarea, .terminal-host input {
   opacity: 0 !important;
