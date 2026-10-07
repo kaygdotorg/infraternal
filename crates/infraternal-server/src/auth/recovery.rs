@@ -275,21 +275,12 @@ async fn verify_credential(
     user: &str,
     credential: RecoveryCredential,
 ) -> Result<(String, i64, Option<String>)> {
-    let found: Option<(String, i64)> =
-        sqlx::query_as("SELECT recovery_hash,recovery_version FROM users WHERE id=?")
-            .bind(user)
-            .fetch_optional(&auth.pool)
-            .await?;
-    // Unknown identities do the same verifier work, using the existing owner
-    // PHC as a dummy. Nothing publishes an account's version or hash.
-    let known = found.is_some();
-    let (stored, version) = match found {
-        Some(row) => row,
-        None => sqlx::query_as("SELECT recovery_hash,recovery_version FROM users WHERE owner=1")
-            .fetch_optional(&auth.pool)
-            .await?
-            .ok_or(Error::Denied)?,
-    };
+    // Both identities use one indexed owner/candidate lookup and the same Argon2
+    // work. A conditional second query would expose a different denial path,
+    // especially when global KDF admission is exhausted. No metadata is published.
+    let (known, stored, version): (bool, String, i64) = sqlx::query_as(
+        "SELECT candidate.id IS NOT NULL,COALESCE(candidate.recovery_hash,owner.recovery_hash),COALESCE(candidate.recovery_version,owner.recovery_version) FROM users AS owner LEFT JOIN users AS candidate ON candidate.id=? WHERE owner.owner=1",
+    ).bind(user).fetch_optional(&auth.pool).await?.ok_or(Error::Denied)?;
     let upgrade = match credential {
         RecoveryCredential::Legacy(words) => {
             verify_recovery(words, stored.clone()).await?;

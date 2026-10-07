@@ -3047,3 +3047,51 @@ async fn recovery_verifier_latency_at_capacity() {
         println!("Recovery verifier process at 50 session rows: {row}");
     }
 }
+
+#[tokio::test]
+async fn recovery_unknown_identity_pays_the_same_database_and_verifier_work() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _guard = SERIAL.lock().await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counter = reads.clone();
+    let pool = SqlitePoolOptions::new()
+        .test_before_acquire(false)
+        .max_connections(1)
+        .before_acquire(move |_, _| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                Ok(true)
+            })
+        })
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let auth = Auth::new(pool, "auth.example.test", ORIGIN).await.unwrap();
+    let user = uuid::Uuid::new_v4().to_string();
+    let stored = recovery_hash(random()).await.unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name,recovery_version) VALUES (?,'owner',1,?,'owner','Owner',2)")
+        .bind(&user).bind(stored).execute(&auth.pool).await.unwrap();
+    let wrong_secret = random();
+    let mut attempts = Vec::new();
+    for identity in [&user, "missing"] {
+        reads.store(0, Ordering::Relaxed);
+        assert!(matches!(
+            auth.recovery_start_clock(
+                identity,
+                super::recovery::RecoveryCredential::Verifier(wrong_secret.clone()),
+                None,
+                || Ok(NOW),
+                true
+            )
+            .await,
+            Err(Error::Denied)
+        ));
+        attempts.push(reads.load(Ordering::Relaxed));
+    }
+    // Real SQLite acquisition hooks count actual reads; Argon2 is not mocked.
+    assert_eq!(
+        attempts[0], attempts[1],
+        "known and unknown recovery identities take different database paths"
+    );
+}
