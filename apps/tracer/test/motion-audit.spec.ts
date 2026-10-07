@@ -388,7 +388,11 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   });
   expect(copyFilter?.duration).toBe("0.2s");
   expect(copyDraw).toMatchObject({ duration: "0.26s", delay: "0.05s" });
-  expect(copyMorph.idleFilter).toBe("blur(2px)");
+  // Both blur endpoints may be sampled just before their last compositor frame.
+  // Apply the existing 0.01px settling epsilon to the 2px endpoint as well.
+  const idleBlur = /^blur\(([\d.e+-]+)px\)$/.exec(copyMorph.idleFilter)?.[1];
+  expect(idleBlur).toBeDefined();
+  expect(Math.abs(Number(idleBlur) - 2)).toBeLessThan(0.01);
   expect(copyMorph.idleScale).toBeCloseTo(0.6);
   // The 2px -> 0 blur transition can be read in its final frame (observed 1.2e-13px);
   // anything under 0.01px is not visible, so treat it as settled.
