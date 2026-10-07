@@ -660,9 +660,15 @@ async function waitForBackend(port) {
 
 async function stopServerProcess() {
   if (!server || server.exitCode !== null) return;
+  const exited = once(server, "exit");
   try { process.kill(-server.pid, "SIGTERM"); }
   catch { server.kill("SIGTERM"); }
-  await Promise.race([once(server, "exit"), pause(5_000)]);
+  await Promise.race([exited, pause(5_000)]);
+  if (server.exitCode === null) {
+    try { process.kill(-server.pid, "SIGKILL"); }
+    catch { server.kill("SIGKILL"); }
+    await exited;
+  }
 }
 
 try {
@@ -875,6 +881,14 @@ try {
   if (frontSockets) await new Promise((resolveClose) => frontSockets.close(resolveClose)).catch(() => undefined);
   if (tlsServer) await new Promise((resolveClose) => tlsServer.close(resolveClose)).catch(() => undefined);
   await stopServerProcess();
+  // Shims deliberately detach from the server's process group to survive
+  // restarts. Reuse socket-authenticated fixture cleanup before unlinking
+  // their rendezvous directory; process-group termination cannot reach them.
+  await runCommand("python3", ["-c",
+    "import sys;sys.dont_write_bytecode=True;sys.path.insert(0,'scripts');from agent_fixture import cleanup;from pathlib import Path;cleanup(Path(sys.argv[1]))",
+    // Keep the same short socket spelling as the server (Linux SUN_LEN).
+    "target/../r/infraternal",
+  ]);
   await rm(state, { recursive: true, force: true });
   await rm(runtimeDir, { recursive: true, force: true });
 }
