@@ -721,3 +721,15 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        Kowalski's standards.
      - **When hosts finish (H16):** the canvas does not move; a toast says
        the host is ready, with an action to go to its window.
+142. **The web UI moves to Svelte 5 now (F1), and looks identical:** the tracer
+     and `packages/ui` are migrated from hand-managed DOM to Svelte 5
+     components before the windows, session-manager and add-host UI is
+     built. **Before and after must look the same:** a pixel-diff
+     screenshot gate covers every existing screen and state (onboarding,
+     sign-in, the core screen, palette, sidebar, key tray, popovers,
+     themes, mono and sans, phone and desktop), and the motion audit,
+     latency probe, bundle size, first paint and idle-work checks must
+     match or improve. Toasts use Svelte Sonner as the queue and lifecycle
+     owner, with our inner renderer per `docs/design/toast.md`. The build
+     tooling (Vite or Bun plugin, and SvelteKit or plain Svelte) is settled
+     before the migration starts.
