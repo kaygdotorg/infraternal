@@ -1340,7 +1340,9 @@ dependencies = [
 name = "infraternal-fuzz"
 version = "0.1.0"
 dependencies = [
+ "infraternal-agent",
  "infraternal-protocol",
+ "infraternal-server",
  "infraternal-shim",
  "libfuzzer-sys",
 ]

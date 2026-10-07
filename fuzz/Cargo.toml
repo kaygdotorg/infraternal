@@ -1,5 +1,4 @@
-# Decoder fuzzing harness for both parsers of untrusted bytes [12][40]:
-# the frozen shim framing (contracts/shim.md) and the wire codec (contracts/wire.md).
+# Fuzzes frozen shim/wire framing plus remote CSR and writer binding admission [12][40].
 [package]
 name = "infraternal-fuzz"
 version.workspace = true
@@ -14,6 +13,8 @@ cargo-fuzz = true
 libfuzzer-sys.workspace = true
 infraternal-shim.workspace = true
 infraternal-protocol.workspace = true
+infraternal-agent = { version = "0.1.0", path = "../crates/infraternal-agent" }
+infraternal-server = { version = "0.1.0", path = "../crates/infraternal-server" }
 
 [[bin]]
 name = "shim_frame_decode"
@@ -32,6 +33,20 @@ bench = false
 [[bin]]
 name = "wire_stream_decode"
 path = "fuzz_targets/wire_stream_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "remote_csr_decode"
+path = "fuzz_targets/remote_csr_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "remote_binding_decode"
+path = "fuzz_targets/remote_binding_decode.rs"
 test = false
 doc = false
 bench = false
