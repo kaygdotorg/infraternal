@@ -857,3 +857,24 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Audit (G9):** grant changes, sign-ins, device approvals, host
        changes, session open and end, and shared-credential use are logged
        and visible in the UI (90 days default, D147).
+155. **Releases and upgrades (round U):**
+     - **Versioning (U1):** one version for the single binary, starting at
+       **0.0.1 = the first stable release**. Only stable builds ship
+       publicly; there is no public edge channel. Pre-release builds go
+       only to the owner's own deploys (monitor01).
+     - **Auto-update on by default (U2):** the server checks, verifies the
+       signature, takes the pre-upgrade backup (D147), swaps A/B slots,
+       restarts with sessions kept alive (shims survive), and the infraternal
+       agents follow in lockstep (D135).
+     - **Auto-rollback gets a ridiculous amount of effort:** health checks
+       (HTTP, WebSocket attach, agent reconnect, DB migration success,
+       session resume) gate every update, and any failure rolls back the
+       binary and restores the pre-upgrade backup automatically. Every
+       failure mode is tested deliberately, as in D135.
+     - **Distribution (U3):** signed release files on Forgejo, mirrored to
+       GitHub, verified against a key built into the binary. No central
+       update server.
+     - **Migrations (U4):** forward-only; a downgrade restores the
+       pre-upgrade backup; tested against real old databases.
+     - **Browsers (U5):** a toast says infraternal updated, and the page
+       reloads when idle with no unsent input; sessions resume.
