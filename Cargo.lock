@@ -1364,6 +1364,16 @@ version = "0.1.0"
 [[package]]
 name = "infraternal-plugin-ssh"
 version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "url",
+ "uuid",
+ "zeroize",
+]
 
 [[package]]
 name = "infraternal-protocol"
