@@ -43,3 +43,52 @@
   .swap svg, [data-done] .is-idle, .swap .is-done, [data-done] .is-done { transform: none; filter: none; }
   .swap .is-done path { stroke-dashoffset: 0; transition: none; }
 }
+
+/* DECISION 120: one centred, shared capsule follows the selected icon-only tab. */
+.bm-icon { display: grid; place-items: center; width: 16px; height: 16px; flex: none; color: var(--fg-2); }
+.bm-icon svg { display: block; width: 15px; height: 15px; fill: currentColor; stroke: none; }
+.segmented-tabs {
+  position: relative;
+  display: flex;
+  width: max-content;
+  max-width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 5px;
+  border: 1px solid var(--overlay-line);
+  border-radius: var(--r-pill, 999px);
+  background: var(--overlay);
+  box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  backdrop-filter: blur(18px) saturate(1.4);
+  isolation: isolate;
+}
+.segmented-capsule {
+  position: absolute;
+  z-index: -1;
+  top: 5px;
+  left: 0;
+  height: 44px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--fg) 7%, var(--overlay-solid));
+  pointer-events: none;
+  will-change: transform, width;
+}
+.segmented-tab {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border-radius: 50%;
+  color: var(--fg-2);
+  transition: color 250ms ease-out;
+}
+.segmented-tab[aria-selected="true"] { color: var(--fg); }
+.segmented-tab svg { width: 18px; height: 18px; }
+.segmented-tab:focus-visible { z-index: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) {
+  .segmented-tab { transition: none; }
+}

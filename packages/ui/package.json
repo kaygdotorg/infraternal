@@ -17,6 +17,8 @@
     "./themes": "./src/themes.ts",
     "./backdrop": "./src/backdrop.ts",
     "./branched": "./src/branched.ts",
+    "./host-icons": "./src/host-icons.ts",
+    "./segmented": "./src/segmented.ts",
     "./styles.css": "./styles.css"
   }
 }

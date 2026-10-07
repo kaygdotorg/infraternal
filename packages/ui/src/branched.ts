@@ -11,6 +11,8 @@ export interface BranchLeaf {
 export interface BranchSection {
   id: string;
   label: string;
+  /** Optional single-colour detected-platform mark (for example, a Simple Icons path). */
+  icon?: { path: string; viewBox?: string };
   meta?: string;
   live?: boolean;
   open?: boolean;
@@ -50,6 +52,17 @@ function makeSection(section: BranchSection): HTMLElement {
     const dot = el("span", "dot live");
     dot.setAttribute("aria-hidden", "true");
     head.append(dot);
+  }
+  if (section.icon) {
+    const icon = el("span", "bm-icon");
+    icon.setAttribute("aria-hidden", "true");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", section.icon.viewBox ?? "0 0 24 24");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", section.icon.path);
+    svg.append(path);
+    icon.append(svg);
+    head.append(icon);
   }
   const name = el("span", "bm-name");
   name.textContent = section.label;
