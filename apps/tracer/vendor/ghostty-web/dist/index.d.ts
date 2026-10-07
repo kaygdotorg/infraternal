@@ -6,6 +6,7 @@ export declare class CanvasRenderer {
     private cursorStyle;
     private cursorBlink;
     private theme;
+    private themeBackgroundRgb;
     private devicePixelRatio;
     private metrics;
     private palette;
@@ -27,6 +28,8 @@ export declare class CanvasRenderer {
      */
     remeasureFont(): void;
     private rgbToCSS;
+    /** Parses only opaque hex colors so skipping a fill cannot change alpha compositing. */
+    private parseOpaqueHexColor;
     /**
      * Resize canvas to fit terminal dimensions
      */
@@ -47,6 +50,12 @@ export declare class CanvasRenderer {
      * cover any left-extending portions of graphemes from cell N-1.
      */
     private renderLine;
+    /**
+     * Batch contiguous plain ASCII cells but keep complex or styled cells on the
+     * original path. Flushing around those cells preserves left-to-right drawing
+     * order for graphemes that can extend into a neighboring cell.
+     */
+    private renderAsciiRunsAndComplexCells;
     /**
      * Render a cell's background only (Pass 1 of two-pass rendering)
      * Selection highlighting is integrated here to avoid z-order issues with
@@ -287,6 +296,8 @@ export declare class GhosttyTerminal {
     get cols(): number;
     get rows(): number;
     write(data: string | Uint8Array): void;
+    /** Updates indexed or default colors locally, without feeding bytes into the VT stream. */
+    setThemeColor(index: number, rgb: number): void;
     resize(cols: number, rows: number): void;
     free(): void;
     /**
@@ -475,6 +486,7 @@ declare interface GhosttyWasmExports extends WebAssembly.Exports {
     ghostty_terminal_free(terminal: TerminalHandle): void;
     ghostty_terminal_resize(terminal: TerminalHandle, cols: number, rows: number): void;
     ghostty_terminal_write(terminal: TerminalHandle, dataPtr: number, dataLen: number): void;
+    ghostty_terminal_set_theme_color(terminal: TerminalHandle, index: number, rgb: number): void;
     ghostty_render_state_update(terminal: TerminalHandle): number;
     ghostty_render_state_get_cols(terminal: TerminalHandle): number;
     ghostty_render_state_get_rows(terminal: TerminalHandle): number;
@@ -909,6 +921,8 @@ export declare class InputHandler {
 
 export declare interface IRenderable {
     getLine(y: number): GhosttyCell[] | null;
+    /** Gets all visible cells in one snapshot when the backing renderer supports it. */
+    getViewport?(): GhosttyCell[];
     getCursor(): {
         x: number;
         y: number;
