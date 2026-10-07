@@ -104,7 +104,7 @@ button { color: inherit; }
   letter-spacing: -0.006em;
   touch-action: pan-x pan-y;
 }
-:where(.terminal-screen) button { border: 0; background: none; color: inherit; cursor: pointer; font: inherit; -webkit-tap-highlight-color: transparent; }
+:where(.terminal-screen) button { border: 0; background: none; color: inherit; cursor: pointer; font: inherit; letter-spacing: inherit; -webkit-tap-highlight-color: transparent; }
 .terminal-screen svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 .terminal-host {
   position: absolute;
@@ -243,12 +243,14 @@ button { color: inherit; }
 /* Mono's wider glyphs use tighter tracking and smaller labels while touch heights stay unchanged. */
 :root[data-ui-font="mono"] .terminal-screen {
   line-height: 1.45;
-  letter-spacing: -0.025em;
+  /* Same tracking as the sign-in card: monospace at 11-16 px wants near-zero tracking;
+     -0.025em put glyphs on fractional advances and made mono text look uneven. */
+  letter-spacing: -0.01em;
 }
-:root[data-ui-font="mono"] .capsule { font-weight: 450; letter-spacing: -0.025em; }
-:root[data-ui-font="mono"] .tab { font-size: var(--text-secondary); font-weight: 450; letter-spacing: -0.025em; }
-:root[data-ui-font="mono"] .palette-input input { letter-spacing: -0.02em; }
-:root[data-ui-font="mono"] .palette-input input::placeholder { letter-spacing: -0.025em; }
+:root[data-ui-font="mono"] .capsule { font-weight: 450; letter-spacing: inherit; }
+:root[data-ui-font="mono"] .tab { font-size: var(--text-secondary); font-weight: 450; }
+:root[data-ui-font="mono"] .palette-input input { letter-spacing: inherit; }
+:root[data-ui-font="mono"] .palette-input input::placeholder { letter-spacing: inherit; }
 .backdrop { position: fixed; z-index: 0; inset: 0; pointer-events: none; opacity: 0; transition: opacity 240ms ease-out; }
 .terminal-screen[data-no-motion] .backdrop { transition: none; }
 .terminal-screen[data-bg="mesh"] .backdrop { opacity: 1; background: var(--mesh-image, none) center / cover no-repeat, var(--bg); }
