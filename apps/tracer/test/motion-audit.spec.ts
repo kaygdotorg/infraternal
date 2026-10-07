@@ -27,7 +27,12 @@ interface MotionProbe {
 }
 
 declare global {
-  interface Window { __motionAudit: MotionProbe; __faultyReadyMarks: number[] }
+  interface Window {
+    __motionAudit: MotionProbe;
+    __faultyReadyMarks: number[];
+    __faultyWorkerFrames: number[];
+    __setMotionAuditHidden(hidden: boolean): void;
+  }
 }
 
 test("measure deployed motion at 4x CPU and capture production screens", async ({ browser, page }, testInfo) => {
@@ -39,6 +44,24 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
     const pathname = new URL(request.url()).pathname;
     if (pathname.endsWith("/backdrop.worker.js")) requestedWorkers.push(request.url());
     if (pathname.endsWith("/faulty-terminal.worker.js")) requestedFaultyWorkers.push(request.url());
+  });
+  await page.route("**/faulty-terminal.worker.js", async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    // Count actual WebGL shader draws in the real worker, without changing app code.
+    const probe = `const __nativeGetContext = OffscreenCanvas.prototype.getContext;
+OffscreenCanvas.prototype.getContext = function(type, ...args) {
+  const context = __nativeGetContext.call(this, type, ...args);
+  if (type === "webgl2" && context) {
+    const draw = context.drawArrays.bind(context);
+    context.drawArrays = (...drawArgs) => {
+      postMessage({ type: "__motion-audit-frame", time: performance.now() });
+      return draw(...drawArgs);
+    };
+  }
+  return context;
+};`;
+    await route.fulfill({ response, body: `${probe}\n${source}` });
   });
   await context.request.post("/__mock/reset");
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
@@ -63,6 +86,21 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
     };
     const stack = (): string => new Error().stack?.split("\n").slice(2, 5).join(" | ") ?? "";
     const faultyReadyMarks: number[] = [];
+    const faultyWorkerFrames: number[] = [];
+    let motionAuditHidden = false;
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => motionAuditHidden });
+    const NativeWorker = window.Worker;
+    window.Worker = new Proxy(NativeWorker, {
+      construct(target, args) {
+        const worker = Reflect.construct(target, args) as Worker;
+        if (String(args[0]).includes("faulty-terminal.worker.js")) {
+          worker.addEventListener("message", (event: MessageEvent<{ type?: string; time?: number }>) => {
+            if (event.data.type === "__motion-audit-frame" && typeof event.data.time === "number") faultyWorkerFrames.push(event.data.time);
+          });
+        }
+        return worker;
+      },
+    }) as typeof Worker;
     new MutationObserver((records) => {
       for (const record of records) {
         if (record.target instanceof HTMLElement && record.target.id === "faulty-field") faultyReadyMarks.push(performance.now());
@@ -199,6 +237,14 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
     });
     Object.defineProperty(window, "__motionAudit", { value: probe, configurable: false });
     Object.defineProperty(window, "__faultyReadyMarks", { value: faultyReadyMarks, configurable: false });
+    Object.defineProperty(window, "__faultyWorkerFrames", { value: faultyWorkerFrames, configurable: false });
+    Object.defineProperty(window, "__setMotionAuditHidden", {
+      value: (hidden: boolean) => {
+        motionAuditHidden = hidden;
+        document.dispatchEvent(new Event("visibilitychange"));
+      },
+      configurable: false,
+    });
   });
 
   const cdp = await context.newCDPSession(page);
@@ -220,20 +266,51 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
   await page.screenshot({ path: setupPath, fullPage: true, mask: [page.locator("#setup-token")] });
   await testInfo.attach("production setup", { path: setupPath, contentType: "image/png" });
   await page.waitForTimeout(1_300); // let the 1.2 s first-run reveal finish before measuring idle
-  const authIdleStartFrame = await page.evaluate(() => window.__motionAudit.frameTimes.length);
+  const authIdleStartFrame = await page.evaluate(() => ({ raf: window.__motionAudit.frameTimes.length, shader: window.__faultyWorkerFrames.length }));
   await page.waitForTimeout(1_100);
-  const authIdle = await page.evaluate((startFrame) => ({
-    rafCallbacks: [...window.__motionAudit.rAFs.values()],
-    pending: [
-      ...[...window.__motionAudit.timeouts.values()],
-      ...[...window.__motionAudit.intervals.values()],
-    ],
-    idleRafFrames: window.__motionAudit.frameTimes.length - startFrame,
-  }), authIdleStartFrame);
+  const authIdle = await page.evaluate((startFrame) => {
+    const shaderFrames = window.__faultyWorkerFrames.slice(startFrame.shader);
+    return {
+      rafCallbacks: [...window.__motionAudit.rAFs.values()],
+      pending: [
+        ...[...window.__motionAudit.timeouts.values()],
+        ...[...window.__motionAudit.intervals.values()],
+      ],
+      idleRafFrames: window.__motionAudit.frameTimes.length - startFrame.raf,
+      shaderFrames: shaderFrames.length,
+      shaderGaps: shaderFrames.slice(1).map((time, index) => time - shaderFrames[index]!),
+    };
+  }, authIdleStartFrame);
   expect(authIdle.rafCallbacks).toEqual([]);
   expect(authIdle.pending).toEqual([]);
   expect(authIdle.idleRafFrames).toBe(0);
-  console.log(`MOTION_AUDIT auth-idle ${JSON.stringify(authIdle)}`);
+  expect(authIdle.shaderFrames).toBeGreaterThanOrEqual(20);
+  expect(authIdle.shaderFrames).toBeLessThanOrEqual(35);
+  expect(authIdle.shaderGaps.every((gap) => gap >= 30)).toBe(true);
+  const hiddenPause = await page.evaluate(async () => {
+    window.__setMotionAuditHidden(true);
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+    const frames = window.__faultyWorkerFrames.length;
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+    const paused = window.__faultyWorkerFrames.length === frames;
+    window.__setMotionAuditHidden(false);
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+    return { paused, resumed: window.__faultyWorkerFrames.length > frames };
+  });
+  expect(hiddenPause).toEqual({ paused: true, resumed: true });
+  const offscreenPause = await page.evaluate(async () => {
+    const field = document.querySelector<HTMLElement>("#faulty-field")!;
+    field.style.transform = "translateX(200vw)";
+    await new Promise((resolve) => window.setTimeout(resolve, 220));
+    const frames = window.__faultyWorkerFrames.length;
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+    const paused = window.__faultyWorkerFrames.length === frames;
+    field.style.transform = "";
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+    return { paused, resumed: window.__faultyWorkerFrames.length > frames };
+  });
+  expect(offscreenPause).toEqual({ paused: true, resumed: true });
+  console.log(`MOTION_AUDIT auth-visible-loop ${JSON.stringify({ ...authIdle, hiddenPause, offscreenPause })}`);
   const authStart = await styles(page, ["#setup-card", ".auth-pane", "#setup-viewport", ".auth-step-bar", "#setup-token", ".auth-dot", "#setup-next"]);
   expect(authStart.find((style) => style.selector === "#setup-card")?.animationDuration).toBe("0.24s");
   expect(authStart.find((style) => style.selector === "#setup-token")?.transitionDuration).toBe("0s");
@@ -452,9 +529,12 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
   await page.screenshot({ path: corePath, animations: "disabled" });
   await testInfo.attach("production core", { path: corePath, contentType: "image/png" });
   await page.waitForTimeout(800); // allow the 700 ms terminal activity window and backdrop teardown to finish
+  const shaderFramesAfterSignIn = await page.evaluate(() => window.__faultyWorkerFrames.length);
+  await page.waitForTimeout(350);
+  expect(await page.evaluate(() => window.__faultyWorkerFrames.length)).toBe(shaderFramesAfterSignIn);
   const idleStartFrame = await page.evaluate(() => window.__motionAudit.frameTimes.length);
   await page.waitForTimeout(1_100);
-  const idle = await page.evaluate((startFrame) => ({
+  const idle = await page.evaluate(({ startFrame, shaderFramesAtSignIn }) => ({
     rafCallbacks: [...window.__motionAudit.rAFs.values()],
     pending: [
       ...[...window.__motionAudit.timeouts.values()],
@@ -462,7 +542,8 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
     ],
     totalObservedRafFrames: window.__motionAudit.frameTimes.length,
     idleRafFrames: window.__motionAudit.frameTimes.length - startFrame,
-  }), idleStartFrame);
+    shaderFramesAfterSignIn: window.__faultyWorkerFrames.length - shaderFramesAtSignIn,
+  }), { startFrame: idleStartFrame, shaderFramesAtSignIn: shaderFramesAfterSignIn });
   expect(idle.rafCallbacks).toEqual([]);
   expect(idle.pending).toEqual([]);
   expect(idle.idleRafFrames).toBe(0);
@@ -745,6 +826,8 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
   await expect(page.locator("#setup-card")).toBeVisible();
   await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true");
   await page.waitForTimeout(320);
+  const reducedShaderFrames = await page.evaluate(() => window.__faultyWorkerFrames.length);
+  expect(reducedShaderFrames).toBe(1);
   const reducedAuth = await sampleAndEvents(page, "reduced-auth");
   const reducedAuthStyle = await styles(page, ["#setup-card", "#faulty-field"]);
   expect(reducedAuth.events).toEqual([]);
@@ -756,10 +839,12 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
     rafCallbacks: [...window.__motionAudit.rAFs.values()],
     pending: [...window.__motionAudit.timeouts.values(), ...window.__motionAudit.intervals.values()],
     idleRafFrames: window.__motionAudit.frameTimes.length - startFrame,
+    shaderFrames: window.__faultyWorkerFrames.length,
   }), reducedAuthIdleStart);
   expect(reducedAuthIdle.rafCallbacks).toEqual([]);
   expect(reducedAuthIdle.pending).toEqual([]);
   expect(reducedAuthIdle.idleRafFrames).toBe(0);
+  expect(reducedAuthIdle.shaderFrames).toBe(reducedShaderFrames);
   console.log(`MOTION_AUDIT reduced-auth ${JSON.stringify({ reducedAuth, reducedAuthStyle, reducedAuthIdle })}`);
 
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
