@@ -2971,3 +2971,79 @@ async fn recovery_upgrade_is_one_time_preserves_deadline_and_old_envelope() {
             .is_ok()
     );
 }
+
+#[tokio::test]
+#[ignore = "release-only v2 diagnostic at 50 live session rows; record host load separately"]
+async fn recovery_verifier_latency_at_capacity() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    let verifier = recovery_verifier(&f.words);
+    sqlx::query("UPDATE sessions SET expires=?")
+        .bind(NOW + 200 * DAY)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    for _ in 1..50 {
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh) VALUES (?,?,'scale',?,?)")
+            .bind(hash(&random())).bind(&f.user).bind(NOW + 200 * DAY).bind(NOW).execute(&f.auth.pool).await.unwrap();
+    }
+    for mode in ["delayed-start", "live-start", "resume"] {
+        let mut samples = Vec::new();
+        let resume = mode == "resume";
+        if resume {
+            sqlx::query("DELETE FROM recovery WHERE user_id=?")
+                .bind(&f.user)
+                .execute(&f.auth.pool)
+                .await
+                .unwrap();
+            f.auth
+                .recovery_start_clock(
+                    &f.user,
+                    super::recovery::RecoveryCredential::Verifier(verifier.clone()),
+                    None,
+                    || Ok(NOW),
+                    true,
+                )
+                .await
+                .unwrap();
+        }
+        for _ in 0..30 {
+            if !resume {
+                // Reset outside the timed request; each start must measure insertion,
+                // not the already-pending deadline-preservation path.
+                sqlx::query("DELETE FROM recovery WHERE user_id=?")
+                    .bind(&f.user)
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            let begin = Instant::now();
+            let (_, ready, delay) = f
+                .auth
+                .recovery_start_clock(
+                    &f.user,
+                    super::recovery::RecoveryCredential::Verifier(verifier.clone()),
+                    (mode == "live-start").then_some(f.session.as_str()),
+                    || Ok(if resume { NOW + DAY } else { NOW }),
+                    true,
+                )
+                .await
+                .unwrap();
+            samples.push(begin.elapsed().as_micros());
+            assert_eq!(ready, NOW + if mode == "live-start" { 0 } else { DAY });
+            assert_eq!(delay, if mode == "delayed-start" { DAY } else { 0 });
+        }
+        samples.sort_unstable();
+        println!(
+            "Recovery verifier (SQLite memory, 50 live session rows, n=30, mode={mode}): p50 {} us, p99 {} us",
+            samples[14], samples[29]
+        );
+    }
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    for row in status
+        .lines()
+        .filter(|row| row.starts_with("VmRSS:") || row.starts_with("VmHWM:"))
+    {
+        println!("Recovery verifier process at 50 session rows: {row}");
+    }
+}
