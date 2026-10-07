@@ -11,7 +11,7 @@ const viewports = [
   { width: 1440, height: 900 },
 ] as const;
 const themes = ["ink", "paper"] as const;
-const manifest: string[] = ["capture\tstep\ttheme\tviewport"];
+const manifest: string[] = ["capture\tstep\ttheme\tviewport\tscale"];
 
 async function openFlow(context: BrowserContext, page: Page, theme: string, query = ""): Promise<void> {
   await context.request.post(`${origin}/__mock/open-terminal`);
@@ -33,7 +33,30 @@ async function capture(page: Page, step: string, theme: string, width: number, h
   await settle(page);
   const filename = `${step}-${theme}-${width}x${height}.png`;
   await page.screenshot({ path: resolve(outputDir, filename), animations: "disabled" });
-  manifest.push(`${filename}\t${step}\t${theme}\t${width}x${height}`);
+  manifest.push(`${filename}\t${step}\t${theme}\t${width}x${height}\t1x`);
+}
+
+async function captureRowCrop(theme: string, width: number, height: number): Promise<void> {
+  const browser = await chromium.launch({ headless: true, args: ["--disable-renderer-backgrounding"] });
+  const context = await browser.newContext({
+    viewport: { width, height },
+    deviceScaleFactor: 2,
+    isMobile: width === 393,
+    hasTouch: width === 393,
+  });
+  const page = await context.newPage();
+  const filename = `discovery-row-2x-${theme}-${width}x${height}.png`;
+  try {
+    await openFlow(context, page, theme);
+    const row = page.locator("[data-host-row][data-host-id='build-01']");
+    await row.scrollIntoViewIfNeeded();
+    await settle(page);
+    await row.screenshot({ path: resolve(outputDir, filename), animations: "disabled", scale: "device" });
+    manifest.push(`${filename}\tdiscovery-row-2x\t${theme}\t${width}x${height}\t2x`);
+  } finally {
+    await context.close().catch(() => undefined);
+    await browser.close();
+  }
 }
 
 async function captureVariant(theme: string, width: number, height: number): Promise<void> {
@@ -91,7 +114,7 @@ async function captureVariant(theme: string, width: number, height: number): Pro
     await capture(page, "root-consent", theme, width, height);
     await page.locator(".addhost-consent-label").first().click();
     await page.getByRole("button", { name: "Install as root" }).click();
-    await page.locator("[data-bootstrap-step='sniff'][data-state='active']").waitFor({ state: "visible" });
+    await page.locator("[data-bootstrap-step='sniff'][data-state='running']").waitFor({ state: "visible" });
     await capture(page, "bootstrap-progress", theme, width, height);
     await page.getByRole("heading", { name: "edge-arm is ready" }).waitFor({ state: "visible", timeout: 8_000 });
     await capture(page, "success-root", theme, width, height);
@@ -134,5 +157,6 @@ await mkdir(outputDir, { recursive: true });
 for (const viewport of viewports) {
   for (const theme of themes) await captureVariant(theme, viewport.width, viewport.height);
 }
+for (const viewport of viewports) await captureRowCrop("ink", viewport.width, viewport.height);
 await writeFile(resolve(outputDir, "manifest.txt"), `${manifest.join("\n")}\n`);
-console.log(`Captured ${manifest.length - 1} states in ${outputDir}`);
+console.log(`Captured ${manifest.length - 3} states and 2 row crops in ${outputDir}`);
