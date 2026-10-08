@@ -3,7 +3,7 @@
  * the tracer, real PTYs. Opening, closing, splitting and re-tiling windows, the one WebSocket, persistence, and
  * the memory budget on a phone. No test double anywhere.
  */
-import { expect, test, type Browser, type CDPSession, type Page } from "playwright/test";
+import { devices, expect, test, type Browser, type CDPSession, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { WebSocket } from "ws";
@@ -268,14 +268,20 @@ test("memory on a phone: windows off screen hold no canvas, and the layer memory
   await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
 });
 
-test("captures: ink and paper at desktop and phone size", async () => {
-  for (const [name, width, height] of [["desktop", 1440, 900], ["phone", 393, 852]] as const) {
-    await page.setViewportSize({ width, height });
+test("captures: ink and paper at desktop and phone size", async ({ browser }) => {
+  // The phone is a real phone context (touch, coarse pointer, device scale 3) carrying the same session cookie, so
+  // the toolbar and the chrome are the phone's.
+  const cookies = await page.context().cookies();
+  for (const [name, device] of [["desktop", { viewport: { width: 1440, height: 900 } }], ["phone", devices["iPhone 15"]]] as const) {
+    const context = await browser.newContext({ ...device, ignoreHTTPSErrors: true });
+    await context.addCookies(cookies);
+    const shot = await context.newPage();
     for (const theme of ["ink", "paper"]) {
-      await page.goto(`${server.origin}/?theme=${theme}&bg=none`);
-      await page.locator(".cl-viewport").waitFor();
-      await page.waitForTimeout(1500);
-      await page.screenshot({ path: `${captures}/${name}-${theme}.png` });
+      await shot.goto(`${server.origin}/?theme=${theme}&bg=none`);
+      await shot.locator(".cl-viewport").waitFor();
+      await shot.waitForTimeout(1500);
+      await shot.screenshot({ path: `${captures}/${name}-${theme}.png` });
     }
+    await context.close();
   }
 });
