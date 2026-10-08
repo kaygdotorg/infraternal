@@ -1191,3 +1191,36 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        opens the same editor in place (wiggle, drag, hide, add). A
        horizontal swipe on the top pill steps between views with motion,
        and the canvas lock re-engages on landing.
+178. **Sessions, the per-account canvas and the sidebar (owner, 2026-10-08, #89):**
+     - **The canvas belongs to the account:** open windows and their
+       arrangement are the same on every device; each device keeps only
+       its own camera (current view and position). A ⌘K "Jump to where you
+       were on <device>" action hands off between devices.
+     - **Session states:** open (has a window on the account's canvas),
+       detached (running, no window), exited (final screen and exit code
+       kept with "Run again" until dismissed or 7 days). Viewing by other
+       accounts ("shared") is designed with multi-user (enterprise).
+     - **Splits and windows:** a split always opens a new shell, no prompt;
+       splits are windows in the one structure, no nesting, with the
+       droplet animation. Closing a window never ends its session.
+       Detached sessions are never ended automatically by default; an
+       optional per-host idle limit exists.
+     - **Terminal size:** when a session is visible on several devices,
+       the device last typed on decides the size, automatically; others
+       show it scaled to fit.
+     - **Names:** automatic from the running command or folder (later
+       inferred from what the user is doing), renameable; the session
+       name is the window's name.
+     - **Activity:** detached sessions show a quiet dot for new output and
+       ✓/✗ when a command finishes; push notifications later.
+     - **Session manager:** an icon at the top right of each window
+       (desktop), an action in the mobile canvas row, and every session
+       on every host in ⌘K.
+     - **Sidebar = inventory, canvas = workspace:** the sidebar has one
+       section per view the account's grants allow (Console, then
+       Containers, VMs and so on as they arrive), each listing hosts and
+       their items with open/detached/exited markers, ordered by frecency;
+       tapping a view flies the canvas there, tapping an item opens or
+       flies to it. Section expansion belongs to the account.
+     - **Settings → Devices:** lists every device signed in to the account,
+       with where each is looking, for handoff.
