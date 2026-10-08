@@ -3,17 +3,27 @@ use crate::{
     auth::Auth,
     mesh_api::{MeshApiError, MeshFilter, MeshService, parse_action},
 };
+use futures_util::future::join_all;
+use infraternal_protocol::{Frame, encode_muxed_frame_into};
 use serde_json::{Value, json};
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 use uuid::Uuid;
 
 const OWNER: &str = "mesh-owner";
 const MEMBER: &str = "mesh-member";
 const NOW: i64 = 1_800_000_000;
+const SCALE_NODE_COUNT: i64 = 1_000;
+const SCALE_TAG_COUNT: i64 = 100;
+const SCALE_GRANT_COUNT: i64 = 3_000;
+const SCALE_MEMBERSHIPS_PER_NODE: i64 = 10;
+const SCALE_VIEWER_COUNT: usize = 50;
 
 struct Fixture {
     pool: SqlitePool,
@@ -593,4 +603,272 @@ fn shared_mesh_vectors_cover_each_production_action_and_wire_shape() {
             _ => unreachable!(),
         }
     }
+}
+
+/// Measure Mesh list, mutation and 50-viewer invalidation work at the D170 inventory point.
+/// Run on infraternal-dev with `systemd-run --user --scope -p CPUWeight=10000`.
+#[tokio::test]
+#[ignore = "scale measurement; run on infraternal-dev under the weighted user scope"]
+async fn mesh_api_scale_benchmark() {
+    let fixture = Fixture::new().await;
+    let pool = &fixture.pool;
+    let rss_base_kib = proc_status_kib("VmRSS:");
+    let viewers = seed_scale_inventory(&fixture).await;
+    let filter = MeshFilter::default();
+    let (list_samples, list_payload_bytes) =
+        measure_scale_lists(&fixture.service, &viewers, &filter).await;
+    let op_samples = measure_scale_operations(&fixture.service, &viewers).await;
+    let (fanout_samples, outbound_event_bytes) =
+        measure_scale_fanout(&fixture.service, &viewers, &filter).await;
+
+    let page_count: i64 = sqlx::query_scalar("PRAGMA page_count")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let page_size: i64 = sqlx::query_scalar("PRAGMA page_size")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let load: Vec<_> = std::fs::read_to_string("/proc/loadavg")
+        .unwrap()
+        .split_whitespace()
+        .take(3)
+        .map(str::to_owned)
+        .collect();
+    let host = std::process::Command::new("hostname")
+        .output()
+        .unwrap()
+        .stdout;
+    println!(
+        "METRIC name=mesh_api_scale host={} cpus={} loadavg_1m={} loadavg_5m={} loadavg_15m={} nodes={SCALE_NODE_COUNT} tags={SCALE_TAG_COUNT} grants={SCALE_GRANT_COUNT} memberships={} viewers={SCALE_VIEWER_COUNT} list_samples={} list_p50_ms={:.3} list_p99_ms={:.3} list_payload_bytes={list_payload_bytes} op=mesh.node.observe op_samples={} op_p50_ms={:.3} op_p99_ms={:.3} fanout_samples={} fanout_viewers={SCALE_VIEWER_COUNT} fanout_p50_ms={:.3} fanout_p99_ms={:.3} fanout_outbound_event_bytes_total={outbound_event_bytes} rss_base_kib={rss_base_kib} rss_final_kib={} rss_hwm_kib={} sqlite_page_count={page_count} sqlite_page_size={page_size}",
+        String::from_utf8_lossy(&host).trim(),
+        std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
+        load.first().map_or("unknown", String::as_str),
+        load.get(1).map_or("unknown", String::as_str),
+        load.get(2).map_or("unknown", String::as_str),
+        SCALE_NODE_COUNT * SCALE_MEMBERSHIPS_PER_NODE,
+        list_samples.len(),
+        percentile_ms(&list_samples, 50),
+        percentile_ms(&list_samples, 99),
+        op_samples.len(),
+        percentile_ms(&op_samples, 50),
+        percentile_ms(&op_samples, 99),
+        fanout_samples.len(),
+        percentile_ms(&fanout_samples, 50),
+        percentile_ms(&fanout_samples, 99),
+        proc_status_kib("VmRSS:"),
+        proc_status_kib("VmHWM:"),
+    );
+    fixture.cleanup().await;
+}
+
+async fn seed_scale_inventory(fixture: &Fixture) -> Vec<String> {
+    let mut tx = fixture.pool.begin().await.unwrap();
+    for tag in 0..SCALE_TAG_COUNT {
+        sqlx::query("INSERT INTO mesh_tags(name,created_at) VALUES (?,?)")
+            .bind(format!("tag-{tag:03}"))
+            .bind(NOW)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    for node in 1..=SCALE_NODE_COUNT {
+        let mut public_key = [0_u8; 32];
+        public_key[..8].copy_from_slice(&node.to_le_bytes());
+        sqlx::query(
+            "INSERT INTO mesh_nodes(id,name,public_key,last_seen,last_rtt_us) VALUES (?,?,?,?,?)",
+        )
+        .bind(node)
+        .bind(format!("node-{node:04}"))
+        .bind(public_key.as_slice())
+        .bind(NOW)
+        .bind(1_000_i64 + node)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        for offset in 0..SCALE_MEMBERSHIPS_PER_NODE {
+            let tag = (node * 7 + offset * 13) % SCALE_TAG_COUNT;
+            sqlx::query("INSERT INTO mesh_tag_members(tag_name,node_id) VALUES (?,?)")
+                .bind(format!("tag-{tag:03}"))
+                .bind(node)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+    }
+    for grant in 0..SCALE_GRANT_COUNT {
+        let tag = grant % SCALE_TAG_COUNT;
+        let node = grant % SCALE_NODE_COUNT + 1;
+        sqlx::query(
+            "INSERT INTO mesh_grants(name,from_kind,from_value,to_kind,to_value,both_ways,ports_json) VALUES (?,?,?,?,?,?,?)",
+        )
+        .bind(format!("grant-{grant:04}"))
+        .bind("tag")
+        .bind(format!("tag-{tag:03}"))
+        .bind("node")
+        .bind(node.to_string())
+        .bind(grant % 2 == 0)
+        .bind("\"All\"")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    sqlx::query("INSERT INTO mesh_roles(name,created_at) VALUES ('mesh-scale-viewer',?)")
+        .bind(NOW)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for action in ["mesh.manage_nodes", "mesh.manage_grants"] {
+        sqlx::query("INSERT INTO mesh_role_actions(role_name,action,scope_tag) VALUES ('mesh-scale-viewer',?,NULL)")
+            .bind(action)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    let viewers: Vec<String> = (0..SCALE_VIEWER_COUNT)
+        .map(|viewer| format!("mesh-bench-{viewer:03}"))
+        .collect();
+    for (index, viewer) in viewers.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?, ?, 0, 'benchmark-fixture', ?, ?)",
+        )
+        .bind(viewer)
+        .bind(viewer)
+        .bind(viewer)
+        .bind(format!("Mesh benchmark viewer {index}"))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mesh_user_roles(user_id,role_name) VALUES (?,'mesh-scale-viewer')",
+        )
+        .bind(viewer)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    viewers
+}
+
+async fn measure_scale_lists(
+    service: &MeshService,
+    viewers: &[String],
+    filter: &MeshFilter,
+) -> (Vec<Duration>, usize) {
+    const WARMUP: usize = 10;
+    const SAMPLES: usize = 200;
+    let mut samples = Vec::with_capacity(SAMPLES);
+    let mut payload_bytes = 0;
+    for sample in 0..(WARMUP + SAMPLES) {
+        let actor = &viewers[sample % SCALE_VIEWER_COUNT];
+        let started = Instant::now();
+        let snapshot = service.list(actor, filter.clone(), NOW).await.unwrap();
+        let elapsed = started.elapsed();
+        let payload = serde_json::to_vec(&snapshot).unwrap();
+        if sample == WARMUP {
+            payload_bytes = payload.len();
+        }
+        if sample >= WARMUP {
+            samples.push(elapsed);
+        }
+    }
+    (samples, payload_bytes)
+}
+
+async fn measure_scale_operations(service: &MeshService, viewers: &[String]) -> Vec<Duration> {
+    const SAMPLES: usize = 200;
+    let input = serde_json::to_vec(&json!({"node_id":1,"last_rtt_us":1234})).unwrap();
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES {
+        let actor = &viewers[sample % SCALE_VIEWER_COUNT];
+        let now = NOW + i64::try_from(sample).unwrap();
+        let started = Instant::now();
+        service
+            .execute(actor, "mesh.node.observe", &input, now)
+            .await
+            .unwrap();
+        samples.push(started.elapsed());
+    }
+    samples
+}
+
+/// Measure the per-viewer server path through authorization and encoded Event bytes.
+async fn measure_scale_fanout(
+    service: &MeshService,
+    viewers: &[String],
+    filter: &MeshFilter,
+) -> (Vec<Duration>, usize) {
+    const SAMPLES: usize = 100;
+    let input = serde_json::to_vec(&json!({"node_id":1,"last_rtt_us":1234})).unwrap();
+    let mut receivers: Vec<_> = (0..SCALE_VIEWER_COUNT)
+        .map(|_| service.subscribe())
+        .collect();
+    let mut samples = Vec::with_capacity(SAMPLES);
+    let mut outbound_bytes = 0_usize;
+    for sample in 0..SAMPLES {
+        let actor = &viewers[sample % SCALE_VIEWER_COUNT];
+        let now = NOW + 1_000 + i64::try_from(sample).unwrap();
+        service
+            .execute(actor, "mesh.node.observe", &input, now)
+            .await
+            .unwrap();
+        let started = Instant::now();
+        let updates = join_all(
+            receivers
+                .iter_mut()
+                .map(tokio::sync::broadcast::Receiver::recv),
+        )
+        .await;
+        let change = updates[0].as_ref().unwrap();
+        let revision = change.revision;
+        assert!(updates.iter().all(|update| {
+            update
+                .as_ref()
+                .is_ok_and(|change| change.revision == revision)
+        }));
+        let checks = join_all(
+            viewers
+                .iter()
+                .map(|viewer| service.can_view_change(viewer, filter, change)),
+        )
+        .await;
+        assert!(checks.iter().all(|check| matches!(check, Ok(true))));
+        let event = json!({"type":"changed","revision":revision});
+        for sub_id in 0..SCALE_VIEWER_COUNT {
+            let event_json = serde_json::to_vec(&event).unwrap();
+            let mut encoded = Vec::with_capacity(event_json.len() + 12);
+            encode_muxed_frame_into(
+                0,
+                &Frame::Event {
+                    sub_id: u32::try_from(sub_id + 1).unwrap(),
+                    event_json: &event_json,
+                },
+                &mut encoded,
+            )
+            .unwrap();
+            outbound_bytes += encoded.len();
+        }
+        samples.push(started.elapsed());
+    }
+    (samples, outbound_bytes)
+}
+
+fn percentile_ms(samples: &[Duration], percentile: usize) -> f64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let index = (sorted.len() * percentile).div_ceil(100).saturating_sub(1);
+    sorted[index].as_secs_f64() * 1_000.0
+}
+
+fn proc_status_kib(field: &str) -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(field)
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+        })
+        .unwrap()
 }
