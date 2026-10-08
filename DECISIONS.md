@@ -1124,3 +1124,18 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      no glossy bevels on in-page controls (glass only for floating overlays,
      D160); desktop-sized controls on desktop; every state change animated;
      one input rather than mode tabs; no settings sections inside flows.
+172. **Discovery sources live only in Settings (owner, 2026-10-08; supersedes the
+     in-flow switches of D141-H11):** add host never shows source toggles or
+     an "extended information" switch. Discovery uses every source
+     automatically; per-source switches exist only in Settings.
+173. **QUIC's binary cost is accepted (owner, 2026-10-08, #78):** the quinn QUIC
+     transport (D41) needs rustls with the ring provider next to OpenSSL; it
+     adds about 2.8 MB (x86) and 2.4 MB (ARM) to the static binary. Pointing
+     rustls at OpenSSL saved only 0.4 MB and nearly doubled per-connection CPU,
+     so it was rejected. The size baseline is raised for this growth only,
+     with the per-crate breakdown recorded; the allowance for future growth
+     stays 256 KiB.
+174. **Type scale: one text size, bigger touch targets (owner, 2026-10-08):**
+     text sizes follow the sign-in card on every platform (no larger phone
+     text scale); touch devices get 44 px targets through padding and row
+     height only. Supersedes the separate touch text scale in TASTE.md.
