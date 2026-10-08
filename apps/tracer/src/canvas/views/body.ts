@@ -38,6 +38,11 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     });
     return;
   }
+  if (m.kind === "flow") {
+    // A flow fills its own body (the add-host wizard); the window only gives it a frame and a place on the canvas.
+    body.classList.add("cl-flow");
+    return;
+  }
   if (m.kind === "logs") {
     const pre = el("pre", "canvas-preview cl-preview cl-logs");
     pre.innerHTML = (m.lines ?? []).map((l) => {
