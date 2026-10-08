@@ -1,12 +1,47 @@
-/** Dark monochrome onboarding and sign-in layout for the tracer. */
-.auth-screen {
+/** Monochrome onboarding and sign-in layout for the tracer, in a dark and a light scheme.
+ *
+ * The sign-in pages stay black and white on purpose (the app's own themes are coloured). The scheme
+ * is dark unless auth-scheme.ts sets data-auth-scheme="light" on the root: the system is light, or the
+ * saved theme is a light one. Every colour below is a token; nothing else in this file may use a
+ * literal black or white, so the light scheme cannot miss a spot. */
+.auth-screen:not(.flow-layer) {
   --fg: #f4f4f5;
   --fg-2: #a1a1aa;
   --fg-3: #63636b;
+  --on-fg: #000;
   --line: rgb(255 255 255 / 0.09);
+  --edge: rgb(255 255 255 / 0.28);
+  --strong: rgb(255 255 255 / 0.4);
+  --ring: rgb(255 255 255 / 0.55);
   --card: rgb(10 10 11 / 0.68);
   --field: rgb(255 255 255 / 0.05);
   --field-focus: rgb(255 255 255 / 0.09);
+  --hover: rgb(255 255 255 / 0.06);
+  --wash: rgb(255 255 255 / 0.03);
+  --shade: rgb(0 0 0 / 0.9);
+  --ui-on-fg: var(--on-fg);
+}
+:root[data-auth-scheme="light"] .auth-screen:not(.flow-layer) {
+  --fg: #18181b;
+  --fg-2: #52525b;
+  --fg-3: #6b6b74;
+  --on-fg: #fff;
+  --line: rgb(0 0 0 / 0.1);
+  --edge: rgb(0 0 0 / 0.32);
+  --strong: rgb(0 0 0 / 0.4);
+  --ring: rgb(0 0 0 / 0.55);
+  --card: rgb(255 255 255 / 0.74);
+  --field: rgb(0 0 0 / 0.04);
+  --field-focus: rgb(0 0 0 / 0.07);
+  --hover: rgb(0 0 0 / 0.05);
+  --wash: rgb(0 0 0 / 0.03);
+  --shade: rgb(0 0 0 / 0.28);
+}
+:root[data-auth-scheme="light"] { color-scheme: light; background: #f6f6f4; color: #18181b; }
+/* The shared tick and counter assume a dark card: ink on the fill, a white hairline. */
+.auth-screen:not(.flow-layer) .tick { color: var(--on-fg); box-shadow: inset 0 0 0 1.5px var(--edge); }
+.auth-screen:not(.flow-layer) .busy-count { color: var(--on-fg); opacity: 0.6; }
+.auth-screen {
   --ease: cubic-bezier(0.23, 1, 0.32, 1);
   position: fixed;
   z-index: 1;
@@ -38,7 +73,7 @@
   border: 1px solid var(--line);
   border-radius: 22px;
   background: var(--card);
-  box-shadow: 0 30px 80px -30px rgb(0 0 0 / 0.9), inset 0 1px 0 rgb(255 255 255 / 0.06);
+  box-shadow: 0 30px 80px -30px var(--shade, rgb(0 0 0 / 0.9)), inset 0 1px 0 rgb(255 255 255 / 0.06);
   -webkit-backdrop-filter: blur(14px) saturate(1.2);
   backdrop-filter: blur(14px) saturate(1.2);
   animation: auth-card-in 240ms var(--ease) both;
@@ -63,7 +98,7 @@
   color: var(--fg);
   font: 450 16px/1 var(--font-maple);
 }
-.auth-input:focus { border-color: rgb(255 255 255 / 0.28); background: var(--field-focus); }
+.auth-input:focus { border-color: var(--edge); background: var(--field-focus); }
 .auth-mono { font-size: 16px; letter-spacing: 0.01em; }
 .auth-command {
   display: flex;
@@ -74,7 +109,7 @@
   padding: 4px 5px 4px 12px;
   border: 1px dashed var(--line);
   border-radius: 10px;
-  background: rgb(255 255 255 / 0.03);
+  background: var(--wash);
   color: var(--fg-2);
   font-size: 12.5px;
 }
@@ -87,7 +122,7 @@
 .auth-word-inputs input { min-width: 0; width: 100%; height: 44px; padding: 0 4px 0 0; border: 0; border-radius: 9px; outline: none; color: var(--fg); background: transparent; font: 450 16px/1 "Geist Mono", monospace; }
 .auth-word-inputs li:focus-within { border-color: var(--fg-2); background: var(--field-focus); }
 .auth-word-inputs li:has([aria-invalid="true"]) { border-color: var(--fg); }
-.auth-error-line { margin: 0; padding: 10px 12px; border-radius: 10px; background: rgb(255 255 255 / 0.06); color: var(--fg); font-size: 13.5px; }
+.auth-error-line { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--hover); color: var(--fg); font-size: 13.5px; }
 .auth-message { min-height: 1.4em; margin: 12px 0 0; color: var(--fg-2); font-size: 12px; line-height: 1.5; }
 
 .auth-steps { display: flex; align-items: center; gap: 0; margin: 0 0 30px; padding: 0; list-style: none; }
@@ -108,10 +143,10 @@
   cursor: pointer;
 }
 .auth-dot:disabled { cursor: default; }
-.auth-steps .is-current .auth-dot { border-color: var(--fg); background: var(--fg); color: #000; }
-.auth-steps .is-done .auth-dot { border-color: rgb(255 255 255 / 0.35); color: var(--fg); }
+.auth-steps .is-current .auth-dot { border-color: var(--fg); background: var(--fg); color: var(--on-fg); }
+.auth-steps .is-done .auth-dot { border-color: var(--edge); color: var(--fg); }
 .auth-step-bar { position: relative; height: 1px; flex: 1; overflow: hidden; margin: 0 8px; background: var(--line); }
-.auth-step-bar::after { position: absolute; inset: 0; transform: scaleX(0); transform-origin: left; background: rgb(255 255 255 / 0.4); content: ""; transition: transform 240ms var(--ease); }
+.auth-step-bar::after { position: absolute; inset: 0; transform: scaleX(0); transform-origin: left; background: var(--strong); content: ""; transition: transform 240ms var(--ease); }
 .auth-steps .is-done .auth-step-bar::after { transform: scaleX(1); }
 .auth-steps .tick { width: 24px; height: 24px; border-radius: 50%; box-shadow: none; }
 .auth-steps .tick-fill { background: var(--fg); }
@@ -144,7 +179,7 @@
   border: 0;
   border-radius: 999px;
   background: var(--fg);
-  color: #000;
+  color: var(--on-fg);
   font: 600 13.5px/1 var(--font-maple);
   letter-spacing: -0.01em;
   cursor: pointer;
@@ -181,16 +216,16 @@
 .auth-note:has(.auth-message:not(:empty), .busy-count:not([hidden])) { grid-template-rows: 1fr; }
 @media (prefers-reduced-motion: reduce) { .auth-note { transition: none; } }
 .auth-check { position: relative; display: flex; min-height: 44px; align-items: center; gap: 10px; margin-top: 18px; color: var(--fg-2); font-size: 14px; cursor: pointer; }
-.auth-check input { width: 18px; height: 18px; accent-color: #fff; }
-[data-focus-ring="on"] .auth-check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
+.auth-check input { width: 18px; height: 18px; accent-color: var(--fg); }
+[data-focus-ring="on"] .auth-check input:focus-visible + .tick { outline: 2px solid var(--ring); outline-offset: 2px; }
 .auth-check[data-pressed] { transform: scale(0.98); }
 .auth-check .tick { width: 20px; height: 20px; }
-.auth-words { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 4px 0 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: rgb(255 255 255 / 0.03); counter-reset: recovery; list-style: none; }
+.auth-words { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 4px 0 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--wash); counter-reset: recovery; list-style: none; }
 .auth-words li { display: flex; min-width: 0; align-items: baseline; gap: 5px; color: var(--fg); font: 450 13px/1.9 var(--font-maple); }
 .auth-word-number { width: 19px; flex: none; color: var(--fg-3); font-size: 10.5px; text-align: right; }
 .auth-actions { display: flex; justify-content: flex-end; gap: 4px; margin: 10px -8px -4px 0; }
 .icon-action { display: inline-grid; width: 40px; height: 40px; place-items: center; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--fg-2); cursor: pointer; }
-.icon-action:hover { background: rgb(255 255 255 / 0.06); color: var(--fg); }
+.icon-action:hover { background: var(--hover); color: var(--fg); }
 .auth-recovery-message { min-height: 1em; margin: 2px 0 0; color: var(--fg-3); font-size: 11px; }
 .auth-welcome { text-align: center; }
 .welcome-copy { max-width: 100%; text-align: center; }
@@ -200,7 +235,7 @@
 @keyframes auth-welcome-caption { from { opacity: 0; transform: translateX(10px); } }
 
 .auth-screen button:focus { outline: none; }
-[data-focus-ring="on"] .auth-screen button:focus-visible { outline: 2px solid rgb(255 255 255 / 0.55); outline-offset: 2px; }
+[data-focus-ring="on"] .auth-screen button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 @media (max-width: 480px) {
   .auth-card { padding: 28px 22px 22px; border-radius: 20px; }
   .auth-signin { --auth-pad: 28px; padding-inline: 22px; }

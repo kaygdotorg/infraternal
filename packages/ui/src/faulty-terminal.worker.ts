@@ -9,12 +9,14 @@ interface StartMessage {
   height: number;
   dpr: number;
   reduced: boolean;
+  light: boolean;
   visible: boolean;
 }
+interface SchemeMessage { type: "scheme"; light: boolean }
 interface ResizeMessage { type: "resize"; width: number; height: number; dpr: number }
 interface PointerMessage { type: "pointer"; x: number; y: number }
 interface VisibilityMessage { type: "visibility"; visible: boolean }
-type WorkerMessage = StartMessage | ResizeMessage | PointerMessage | VisibilityMessage | { type: "wake" | "destroy" };
+type WorkerMessage = StartMessage | ResizeMessage | SchemeMessage | PointerMessage | VisibilityMessage | { type: "wake" | "destroy" };
 
 interface WorkerScope {
   addEventListener(type: "message", listener: (event: MessageEvent<WorkerMessage>) => void): void;
@@ -63,7 +65,7 @@ function resize(nextWidth: number, nextHeight: number, nextDpr: number): void {
 }
 
 function start(message: StartMessage): void {
-  renderer = createFaultyTerminalRenderer(message.canvas, message.font);
+  renderer = createFaultyTerminalRenderer(message.canvas, message.font, message.light);
   if (!renderer) { scope.postMessage({ type: "ready", ok: false }); return; }
   reduced = message.reduced;
   visible = message.visible;
@@ -78,6 +80,10 @@ scope.addEventListener("message", (event) => {
   if (!renderer || !alive) return;
   if (message.type === "resize") {
     resize(message.width, message.height, message.dpr);
+    wake();
+  } else if (message.type === "scheme") {
+    renderer.setLight(message.light);
+    stillDirty = true;
     wake();
   } else if (message.type === "pointer") {
     mouse.x = message.x; mouse.y = message.y;
