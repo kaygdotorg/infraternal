@@ -1175,7 +1175,7 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        neighbours peeking; one finger scrolls the terminal, two fingers or
        ← → move windows; when turned off it stays off until the next view
        switch. Desktop: icon buttons right of the top pill; ⌘1–9 views;
-       the canvas lock shortcut is still to be chosen (not ⌘\).
+       the canvas lock is ⌘⇧G (Ctrl+Shift+G elsewhere).
      - **Top pill:** the view's icon and name, a quiet session count, the
        connection status icon and the ⌘K hint; tap for the view switcher;
        it is the morph source for `?` and the floating terminal; it does
@@ -1184,3 +1184,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        window, swipes don't move windows, the key row stays; locking with
        the canvas lock off snaps to the window first and unlocking
        restores the previous state.
+     - **Follow-ups (same day):** every shortcut is configurable in
+       Settings → Shortcuts (one registry feeds `?`, ⌘K, tooltips and the
+       toolbar; conflicts warn with swap or cancel). The toolbar layout is
+       per account with a per-device override. Long-pressing the toolbar
+       opens the same editor in place (wiggle, drag, hide, add). A
+       horizontal swipe on the top pill steps between views with motion,
+       and the canvas lock re-engages on landing.
