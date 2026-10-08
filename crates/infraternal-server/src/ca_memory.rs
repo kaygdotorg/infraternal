@@ -91,6 +91,9 @@ impl MemoryCaSource {
 }
 
 impl CaKeySource for MemoryCaSource {
+    fn subscribe_locked(&self) -> Option<watch::Receiver<bool>> {
+        Some(MemoryCaSource::subscribe_locked(self))
+    }
     fn load(&self) -> Result<CaMaterial, CaError> {
         self.material
             .read()

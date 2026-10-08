@@ -72,6 +72,11 @@ pub trait CaKeySource: Send + Sync {
     /// # Errors
     /// Missing/wrong unlock credentials fail closed without regeneration.
     fn load(&self) -> Result<CaMaterial, CaError>;
+    /// Optional lock events wake deferred renewal immediately after an administrator unlock.
+    /// Sources without events retain bounded retry deadlines.
+    fn subscribe_locked(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        None
+    }
 }
 
 /// One immutable unlocked issuer generation; rotation retains previous public issuers.
