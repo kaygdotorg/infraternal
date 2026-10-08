@@ -13,7 +13,7 @@
   --edge: rgb(255 255 255 / 0.28);
   --strong: rgb(255 255 255 / 0.4);
   --ring: rgb(255 255 255 / 0.55);
-  --card: rgb(10 10 11 / 0.68);
+  --card: rgb(0 0 0 / 0.5);
   --field: rgb(255 255 255 / 0.05);
   --field-focus: rgb(255 255 255 / 0.09);
   --hover: rgb(255 255 255 / 0.06);
@@ -30,7 +30,7 @@
   --edge: rgb(0 0 0 / 0.32);
   --strong: rgb(0 0 0 / 0.4);
   --ring: rgb(0 0 0 / 0.55);
-  --card: rgb(255 255 255 / 0.74);
+  --card: rgb(255 255 255 / 0.58);
   --field: rgb(0 0 0 / 0.04);
   --field-focus: rgb(0 0 0 / 0.07);
   --hover: rgb(0 0 0 / 0.05);
@@ -70,14 +70,22 @@
 .auth-card {
   width: min(440px, 100%);
   padding: 36px 32px 28px;
-  border: 1px solid var(--line);
   border-radius: 22px;
-  background: var(--card);
-  box-shadow: 0 30px 80px -30px var(--shade, rgb(0 0 0 / 0.9)), inset 0 1px 0 rgb(255 255 255 / 0.06);
-  -webkit-backdrop-filter: blur(14px) saturate(1.2);
-  backdrop-filter: blur(14px) saturate(1.2);
   animation: auth-card-in 240ms var(--ease) both;
 }
+/* The card is the shared translucent overlay material (.ui-overlay-surface, packages/ui), tuned for
+   this page through its instance properties: a black tint on dark, a white tint on light (--card),
+   and only a small blur, so the drifting backdrop glyphs show softly through. No top-edge highlight. */
+.auth-card.ui-overlay-surface {
+  --ui-overlay-background: var(--card);
+  --ui-overlay-border: var(--line);
+  --ui-overlay-color: var(--fg);
+  --ui-overlay-shadow: 0 30px 80px -30px var(--shade);
+  --ui-overlay-blur: 5px;
+  --ui-overlay-saturation: 100%;
+}
+/* Cards that are not glass (the replace-words flow over the signed-in window) stay solid. */
+.auth-card:not(.ui-overlay-surface) { border: 1px solid var(--line); background: var(--card); box-shadow: 0 30px 80px -30px rgb(0 0 0 / 0.9); }
 @keyframes auth-card-in { from { opacity: 0; transform: translateY(8px) scale(0.99); } }
 .auth-mark { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; font-weight: 600; line-height: 1; }
 .auth-mark svg { width: 22px; height: 22px; flex: none; }

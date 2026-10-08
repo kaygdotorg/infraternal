@@ -14,6 +14,21 @@
 .busy-count { font: 500 13px/1 var(--font-maple, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
 .terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
 
+/* One theme-aware glass material for every floating surface (D72, D160): popovers, sheets,
+   palette, sidebar and tooltips, never in-page controls. No top-edge highlight (TASTE §1).
+   Instances can tune the blur, saturation, border or shadow through custom properties. */
+.ui-overlay-surface, .ui-panel {
+  --ui-overlay-blur: 14px;
+  --ui-overlay-saturation: 160%;
+  background: var(--ui-overlay-background, var(--overlay));
+  border: 1px solid var(--ui-overlay-border, var(--overlay-line));
+  box-shadow: var(--ui-overlay-shadow, var(--shadow));
+  color: var(--ui-overlay-color, var(--fg));
+  -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
+  backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
+}
+.ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
+
 /* One spring drives the fill, tick draw-on and label treatment. */
 .tick { position: relative; display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px;
   border-radius: 6px; box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.35); color: #000; will-change: transform; }

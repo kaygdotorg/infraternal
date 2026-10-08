@@ -149,7 +149,7 @@ const authLight = (): boolean => useAuthScheme((light) => backdrop?.setLight(lig
 function renderUnavailable(message: string): void {
   authLight();
   document.documentElement.removeAttribute("data-ui-font");
-  app.innerHTML = `<section class="auth-screen"><section class="auth-card auth-signin">
+  app.innerHTML = `<section class="auth-screen"><section class="auth-card auth-signin ui-overlay-surface">
     <div class="auth-mark">infraternal</div><h1>Could not reach the server</h1>
     <p id="status-error" class="auth-message" role="alert"></p>
     <button id="retry-status" class="auth-primary" type="button">Try again</button></section></section>`;

@@ -54,7 +54,7 @@ function mountSetup(
   let completedStep = -1;
   const events = new AbortController();
   host.innerHTML = `<section class="auth-screen" aria-label="Set up infraternal">
-    <section class="auth-card" id="setup-card" aria-labelledby="setup-title">
+    <section class="auth-card ui-overlay-surface" id="setup-card" aria-labelledby="setup-title">
       <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
       <ol class="auth-steps" id="setup-steps" aria-label="Setup progress"></ol>
       <div class="auth-viewport" id="setup-viewport"></div>
@@ -380,7 +380,7 @@ function mountSignIn(
   onAuthenticated: (userId: string, firstSetup: boolean, welcomeName?: string, instant?: boolean) => void,
 ): void {
   host.innerHTML = `<section class="auth-screen" aria-label="Sign in">
-    <section class="auth-card auth-signin" aria-labelledby="signin-title">
+    <section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="signin-title">
       <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
       <h1 id="signin-title">Welcome back</h1>
       <p class="auth-lede">Your passkey is all you need.</p>
