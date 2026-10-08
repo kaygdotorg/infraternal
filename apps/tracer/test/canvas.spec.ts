@@ -536,6 +536,26 @@ test("lock (touch): there is no frame lock on a phone; the palette locks", async
   await context.close();
 });
 
+test("lock: one click on an unfocused window's lock focuses that window and locks it", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  const second = page.locator(".ui-window").nth(1);
+  expect(await activeWindow(page)).toMatch(/^live:/);
+  const box = (await second.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 20);
+  await expect(second).toHaveAttribute("data-lock-near", "");
+  await second.locator(".ui-window-lock").click();
+  await expect(second).toHaveAttribute("data-locked", "");
+  expect(await activeWindow(page)).toMatch(/^build-01:/);
+  await expect(page.locator(".ui-window[data-locked]")).toHaveCount(1);
+  // Locking another window moves the lock.
+  const first = page.locator(".ui-window").first();
+  const firstBox = (await first.boundingBox())!;
+  await page.mouse.move(firstBox.x + firstBox.width / 2, firstBox.y + 20);
+  await first.locator(".ui-window-lock").click();
+  await expect(first).toHaveAttribute("data-locked", "");
+  await expect(second).not.toHaveAttribute("data-locked", "");
+});
 
 // ---- the `?` shortcuts view ---------------------------------------------------------------
 const blurTerminal = (page: Page): Promise<void> => page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());

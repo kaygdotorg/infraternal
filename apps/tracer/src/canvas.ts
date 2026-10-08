@@ -657,6 +657,9 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     }
     const target = windowOf(event.target);
     if (!target) return;
+    // The lock acts for itself, on any window: one click focuses that window and locks it (moving a
+    // lock from another window), so it must not be swallowed as the "first touch activates" press.
+    if ((event.target as Element).closest(".ui-window-lock")) return;
     // A locked window keeps the input: presses elsewhere are ignored, with a pulse on the lock.
     if (lockedAgainst(target) && !(event.target as Element).closest(".ui-window-head")) { event.preventDefault(); event.stopPropagation(); return; }
     if (target === active) return;
