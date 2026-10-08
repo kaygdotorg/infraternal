@@ -430,11 +430,13 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
                 Frame::Close { .. } => return Ok(()),
                 _ => return Err(sessions::invalid("unexpected native terminal request")),
             };
-            // Bound admission, including while the shim handshake is pending.
-            // A full queue retires this stream only; authoritative shim cursors
-            // permit replay when the server reattaches this same writer.
+            // This dispatcher belongs to one native stream. Awaiting its bounded
+            // queue propagates QUIC flow control without parking control or any
+            // sibling stream. Ordinary coalesced Credit bursts must not retire
+            // an authenticated attachment while its shim handshake is pending.
             commands
-                .try_send(command)
+                .send(command)
+                .await
                 .map_err(|_| sessions::invalid("native terminal command queue unavailable"))?;
         }
     };
