@@ -662,16 +662,16 @@
 .ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
 .keyedit-list::before { white-space: nowrap; }
 
-/* Canvas backdrop (canvas-backdrop.ts): the fill is fixed to the screen; the covers carry the holes (the dots) with the camera. */
+/* Canvas backdrop (canvas-backdrop.ts): the gradient is fixed to the screen and visible everywhere; the dots are light marks on it and move with the camera. */
 .ui-canvas-backdrop {
-  --ui-dot-size: 1.4px; --ui-dot-gap: 22px; --ui-dot-opacity: var(--dot-opacity, 0.2);
+  --ui-dot-size: 1.4px; --ui-dot-gap: 22px; --ui-dot-opacity: var(--dot-opacity, 0.35); --ui-gradient-opacity: var(--gradient-opacity, 0.5);
+  --ui-dot-color: var(--dot-color, color-mix(in oklab, var(--mesh-3) 40%, white));
   position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
 }
-.ui-canvas-backdrop-fill { position: absolute; inset: 0; opacity: var(--ui-dot-opacity); background: var(--ui-dot-fill, linear-gradient(115deg, var(--mesh-1), var(--mesh-2) 35%, var(--mesh-3) 70%, var(--mesh-4))); }
+.ui-canvas-backdrop-fill { position: absolute; inset: 0; opacity: var(--ui-gradient-opacity); background: var(--ui-dot-fill, linear-gradient(115deg, var(--mesh-1), var(--mesh-2) 35%, var(--mesh-3) 70%, var(--mesh-4))); }
 .ui-canvas-backdrop-layer {
-  position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform, opacity; background: var(--bg);
-  -webkit-mask-image: radial-gradient(circle at 50% 50%, transparent calc(var(--ui-dot-size) / 2), #000 calc(var(--ui-dot-size) / 2 + 0.7px));
-  mask-image: radial-gradient(circle at 50% 50%, transparent calc(var(--ui-dot-size) / 2), #000 calc(var(--ui-dot-size) / 2 + 0.7px));
+  position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform, opacity;
+  background-image: radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--ui-dot-color) calc(var(--ui-dot-opacity) * 100%), transparent) calc(var(--ui-dot-size) / 2), transparent calc(var(--ui-dot-size) / 2 + 0.7px));
 }
 
 /* Settings windows (settings-panels.ts): choice rows with a tick, device rows, headings; every colour, size and radius is a token. */

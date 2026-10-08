@@ -147,7 +147,14 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   viewport.setAttribute("aria-label", "Canvas of views");
   const world = el("div", "cl-world");
   const dotsOn = new URLSearchParams(location.search).get("dots") !== "0";
-  const backdrop = dotsOn ? createCanvasBackdrop(viewport) : undefined;
+  // The backdrop fills the whole screen behind the chrome, not just the canvas area; its dots follow the camera,
+  // so it needs the canvas area's offset inside the stage (measured on mount and on every resize, never per frame).
+  const backdrop = dotsOn ? createCanvasBackdrop(stage) : undefined;
+  const bd = { x: 0, y: 0, w: 0, h: 0 };
+  const measureBackdrop = (): void => {
+    const s = stage.getBoundingClientRect(), v = viewport.getBoundingClientRect();
+    bd.x = v.left - s.left; bd.y = v.top - s.top; bd.w = s.width; bd.h = s.height;
+  };
   const overlay = document.createElementNS(SVG_NS, "svg");
   overlay.setAttribute("class", "cl-overlay");
   overlay.setAttribute("aria-hidden", "true");
@@ -159,6 +166,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   summary.hidden = true;
   viewport.append(world, edges);
   core.panes.append(viewport);
+  measureBackdrop();
   document.body.append(summary);
   const events = new AbortController();
   const signal = events.signal;
@@ -193,6 +201,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   const dpr = (): number => devicePixelRatio || 1;
   const snapPx = (v: number): number => Math.round(v * dpr()) / dpr();
   let camMoving = false;
+  let lastInv = "1";
   const applyCam = (atRest = false): void => {
     vw = viewport.clientWidth; vh = viewport.clientHeight;
     tx = vw / 2 - cam.cx * cam.z;
@@ -200,9 +209,11 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     // At rest the translation lands on whole device pixels, so text is as crisp as it can be.
     if (atRest) { tx = snapPx(tx); ty = snapPx(ty); }
     world.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${cam.z})`;
-    backdrop?.update(tx, ty, cam.z, vw, vh);
-    world.style.setProperty("--z", String(cam.z));
-    world.style.setProperty("--inv", String(clamp(1 / cam.z, 1, 3.2)));
+    backdrop?.update(tx + bd.x, ty + bd.y, cam.z, bd.w || vw, bd.h || vh);
+    // The labels keep a readable size at any zoom. Written on the labels themselves, not on the world: a custom
+    // property that changes on a root restyles every element below it, on every frame of every zoom.
+    const inv = String(clamp(1 / cam.z, 1, 3.2));
+    if (inv !== lastInv) { lastInv = inv; for (const c of clusters.values()) c.label.style.setProperty("--inv", inv); }
     const nextLod = lod === "live" ? (cam.z < 0.58 ? "thumb" : "live") : (cam.z > 0.62 ? "live" : "thumb");
     if (nextLod !== lod) { lod = nextLod; world.dataset.lod = lod; paintCapsule(); }
     const nextBand = zoomBand === "in" ? (cam.z < 0.76 ? "out" : "in") : (cam.z > 0.82 ? "in" : "out");
@@ -699,6 +710,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const region = el("div", "cl-region");
     const label = el("button", "cl-label ui-pill");
     label.type = "button";
+    label.style.setProperty("--inv", lastInv);
     label.innerHTML = `<span class="cl-label-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(view.id)}</svg></span><span class="cl-label-name"></span><span class="cl-label-meta"></span>${view.team ? '<span class="ui-ts-tag cl-team">team</span>' : ""}<span class="cl-label-menu" role="button" tabindex="0" aria-label="View menu" data-tip="Share layout…"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg></span>`;
     (label.querySelector(".cl-label-name") as HTMLElement).textContent = view.name;
     label.querySelector(".cl-label-menu")!.addEventListener("pointerdown", (e) => e.stopPropagation());
@@ -2352,6 +2364,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     if (w === lastW && h === lastH) return;
     lastW = w; lastH = h;
     vw = w; vh = h;
+    measureBackdrop();
     // Views are as tall as the viewport: a resize (the keyboard, the URL bar, a rotation) refits them.
     metrics = metricsFor(w, h, coarse.matches);
     world.style.setProperty("--clh", `${metrics.clh}px`);

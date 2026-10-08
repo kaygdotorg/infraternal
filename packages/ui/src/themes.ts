@@ -140,7 +140,11 @@ export function applyTheme(active: Theme, root: HTMLElement, glassLevel = DEFAUL
   style.setProperty("--accent-soft", `rgb(${rgb(active.accent)} / 0.16)`);
   style.setProperty("--accent-fg", active.dark ? active.bg : "#ffffff");
   style.setProperty("--ok", active.ok);
-  style.setProperty("--dot-opacity", active.dark ? "0.32" : "0.34"); // the canvas backdrop's dots: quiet on both
+  // The canvas backdrop: the gradient shows everywhere at this strength, and the dots are light marks (a brighter
+  // tint of the gradient on dark themes, a deeper one on light themes) at a low opacity.
+  style.setProperty("--gradient-opacity", active.dark ? "0.46" : "0.32");
+  style.setProperty("--dot-opacity", active.dark ? "0.4" : "0.34");
+  style.setProperty("--dot-color", active.dark ? "color-mix(in oklab, var(--mesh-3) 40%, white)" : "color-mix(in oklab, var(--mesh-3) 55%, black)");
   style.setProperty("--warn", active.ansi[3]); // the theme's amber: slow links, approximate screens
   style.setProperty("--danger", active.ansi[1]);
   style.setProperty("--overlay", overlay.overlay);

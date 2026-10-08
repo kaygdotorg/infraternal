@@ -177,6 +177,29 @@ test("canvas lock off frees pan and zoom in place; the overview is its own actio
   await expect.poll(async () => (await probe(page, (p) => p.camera())).z, { timeout: 4000 }).toBeLessThan(0.5);
 });
 
+test("the dots sit on the gradient: the gradient shows everywhere, the dot layers are plain tiles with no cover or mask", async ({ page }) => {
+  await open(page, 3);
+  const info = await page.evaluate(() => {
+    const fill = document.querySelector<HTMLElement>(".ui-canvas-backdrop-fill")!;
+    const layers = [...document.querySelectorAll<HTMLElement>(".ui-canvas-backdrop-layer")];
+    const shown = layers.find((l) => l.dataset.on === "1")!;
+    const cs = getComputedStyle(shown);
+    const stage = document.querySelector<HTMLElement>("#terminal-screen")!.getBoundingClientRect();
+    const root = document.querySelector<HTMLElement>(".ui-canvas-backdrop")!.getBoundingClientRect();
+    return {
+      fillOpacity: Number(getComputedStyle(fill).opacity), fillImage: getComputedStyle(fill).backgroundImage.startsWith("linear-gradient"),
+      layerImage: cs.backgroundImage.startsWith("radial-gradient"), layerMask: cs.maskImage, layerBg: cs.backgroundColor,
+      coversScreen: Math.abs(root.width - stage.width) < 1 && Math.abs(root.height - stage.height) < 1,
+    };
+  });
+  expect(info.fillOpacity).toBeGreaterThan(0.2);
+  expect(info.fillImage).toBe(true);
+  expect(info.layerImage).toBe(true);
+  expect(info.layerMask).toBe("none");
+  expect(info.layerBg).toBe("rgba(0, 0, 0, 0)"); // no opaque cover over the gradient
+  expect(info.coversScreen).toBe(true); // behind the chrome too, not only the canvas area
+});
+
 test("container shell: the camera stays, the pill morphs into a floating terminal that resizes with its aspect locked and expands into Console", async ({ page }) => {
   await open(page, 4);
   const cam0 = await probe(page, (p) => p.camera());
