@@ -943,7 +943,25 @@ test("pills=large: desktop pills take the larger sizes through tokens, nothing o
   const large = await sizes("&pills=large", { width: 1440, height: 900 });
   expect(standard).toMatchObject({ tabs: 30, capsule: 38, font: "13.5px", clipped: 0 });
   // A 46 px pill with a 4 px inset, a 38 px selected segment, 16 px labels.
-  expect(large).toMatchObject({ tabs: 46, tab: 38, capsule: 46, font: "16px", clipped: 0 });
+  expect(large).toMatchObject({ tabs: 46, tab: 38, capsule: 46, font: "17px", clipped: 0 }); // the popover tabs have room for 17 px
+  // The selected segment is solid and light in the theme, with a dark label (readable at 4.5:1 or better).
+  for (const theme of ["ink", "paper"]) {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    await page.goto(`/?mock=1&proto=windows&bg=none&fixture=none&pills=large&theme=${theme}`);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __tracerCanvas?: { windows(): string[] } }).__tracerCanvas?.windows().length ?? 0), { timeout: 30_000 }).toBeGreaterThan(2);
+    await page.locator(".ui-window-pill").nth(1).click();
+    await page.waitForTimeout(400);
+    const ratio = await page.evaluate(() => {
+      const px = (css: string): number[] => { const c = document.createElement("canvas"); c.width = c.height = 1; const k = c.getContext("2d", { willReadFrequently: true })!; k.fillStyle = css; k.fillRect(0, 0, 1, 1); return [...k.getImageData(0, 0, 1, 1).data]; };
+      const lum = (c: number[]): number => { const f = (v: number): number => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c[0]!) + 0.7152 * f(c[1]!) + 0.0722 * f(c[2]!); };
+      const bg = lum(px(getComputedStyle(document.querySelector(".ui-tabs-capsule")!).backgroundColor));
+      const fg = lum(px(getComputedStyle(document.querySelector(".ui-tab[aria-selected='true']")!).color));
+      return (Math.max(bg, fg) + 0.05) / (Math.min(bg, fg) + 0.05) + (bg > 0.8 ? 0 : -100);
+    });
+    expect(ratio, `${theme}: a light segment with a dark label`).toBeGreaterThanOrEqual(4.5);
+    await context.close();
+  }
   // Phones keep their sizes whatever the parameter says.
   const phone = await sizes("&pills=large", { width: 393, height: 852 }, true);
   const phoneStandard = await sizes("", { width: 393, height: 852 }, true);

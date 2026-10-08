@@ -584,8 +584,16 @@
     --ui-pill-pad-x: 18px;
     --ui-pill-pad-compact: 14px;
     --ui-tabs-hairline: inset 0 0 0 1px var(--overlay-line);
-    --ui-tab-selected-shadow: 0 1px 3px rgb(0 0 0 / 0.16), 0 0 0 1px var(--overlay-line);
   }
+  /* The selected segment is solid and light in every theme (near-white on paper, a soft lavender-white on ink)
+     with the dark of the theme as its label: that contrast is what makes the control read as selected. */
+  :root[data-pills="large"] .ui-tabs-capsule {
+    background: light-dark(color-mix(in oklab, white 96%, var(--fg)), color-mix(in oklab, white 90%, var(--accent)));
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.18), 0 6px 14px -6px rgb(0 0 0 / 0.3);
+  }
+  :root[data-pills="large"] .ui-tab[aria-selected="true"] { color: light-dark(var(--fg), var(--bg)); text-shadow: none; }
+  /* The popover's tabs have room for one size more. */
+  :root[data-pills="large"] .canvas-popover .ui-tabs { --ui-pill-font-size: 17px; }
   :root[data-pills="large"] .ui-tab { font-weight: var(--fw-label); }
   :root[data-pills="large"] .ui-tab:not([aria-selected="true"]) { color: color-mix(in oklab, var(--fg) 70%, var(--bg)); }
 }
