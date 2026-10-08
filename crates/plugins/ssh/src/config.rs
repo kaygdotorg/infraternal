@@ -159,3 +159,7 @@ fn original_host_token(value: &str, host: &str) -> String {
 fn quoted(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod tests;

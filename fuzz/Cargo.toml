@@ -69,3 +69,10 @@ path = "fuzz_targets/ssh_check_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ssh_public_config_decode"
+path = "fuzz_targets/ssh_public_config_decode.rs"
+test = false
+doc = false
+bench = false
