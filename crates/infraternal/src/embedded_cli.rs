@@ -60,3 +60,7 @@ pub(crate) fn run_if_requested() -> Option<ExitCode> {
         }
     })
 }
+
+#[cfg(test)]
+#[path = "embedded_cli_tests.rs"]
+mod tests;
