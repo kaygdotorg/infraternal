@@ -409,7 +409,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const paletteGroupIds = new Map<string, string>();
   // The fixed rows are built, indexed and given their DOM rows once; only the rows a provider computes from
   // state (Lock or Unlock) are new at each open, so opening the palette re-attaches rows instead of rebuilding them.
-  const staticEntries = baseEntries();
+  let staticEntries = baseEntries();
   const indexEntry = (entry: PaletteEntry, index: number): void => {
     paletteSearchText.set(entry, `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase());
     // Normalize IDs once so typing never sanitizes every matching result.
@@ -417,6 +417,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (!paletteGroupIds.has(entry.group)) paletteGroupIds.set(entry.group, `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`);
   };
   staticEntries.forEach(indexEntry);
+  /** The fixed rows that depend on state (the toolbar's row appears once a canvas row is registered) are rebuilt when it changes. */
+  const rebuildStaticEntries = (): void => {
+    for (const entry of staticEntries) { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); }
+    staticEntries = baseEntries();
+    staticEntries.forEach(indexEntry);
+  };
   let contextual: PaletteEntry[] = [];
   const refreshEntries = (): void => {
     for (const entry of contextual) { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); }
@@ -1333,6 +1339,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       defaults.canvas = items.map((i) => i.id);
       applyPrefs(false);
       if (items.length && !options.settingsView && !settingsSections.includes(toolbarSettings)) settingsSections.unshift(toolbarSettings);
+      rebuildStaticEntries();
       canvasRowEl.hidden = items.length === 0;
       keytray.dataset.rows = items.length ? "2" : "1";
       autoRow();
@@ -1340,7 +1347,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       else if (!isTerminalFocus(document.activeElement)) settleRow(0, true);
       return {
         update(id, patch) { const cur = canvasItems.get(id); if (!cur) return; Object.assign(cur, patch); paint(id); },
-        dispose() { const at = settingsSections.indexOf(toolbarSettings); if (at >= 0) settingsSections.splice(at, 1); canvasItems.clear(); canvasRowEl.replaceChildren(); canvasRowEl.hidden = true; keytray.dataset.rows = "1"; settleRow(1, true); },
+        dispose() { const at = settingsSections.indexOf(toolbarSettings); if (at >= 0) settingsSections.splice(at, 1); canvasItems.clear(); rebuildStaticEntries(); canvasRowEl.replaceChildren(); canvasRowEl.hidden = true; keytray.dataset.rows = "1"; settleRow(1, true); },
       };
     },
     setHostTree(sections, activeLeaf, onSelect) {
