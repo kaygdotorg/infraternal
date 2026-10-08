@@ -24,9 +24,13 @@ import {
 
 export const CONTROL_STREAM = 0;
 
-/** The server answered an action with a refusal: it does not exist here, or the person may not run it. */
+/**
+ * The server answered an action with a refusal: it does not exist here, the person may not run it, or it could not
+ * be done. `reason` is the server's short, generic word for it (`forbidden`, `conflict`, `not found`, ...) when it
+ * sent one; it never carries input or internal detail.
+ */
 export class ActionRefused extends Error {
-  constructor(message = "the server refused the action") { super(message); this.name = "ActionRefused"; }
+  constructor(message = "the server refused the action", readonly reason?: string) { super(message); this.name = "ActionRefused"; }
 }
 /**
  * The server keeps a writer row for every stream that ever attached on a connection and allows 32. A closed window
@@ -89,6 +93,7 @@ export class MuxConnection {
   private readonly rttListeners = new Set<(ms: number | undefined) => void>();
   private readonly pendingPings = new Map<bigint, number>();
   private readonly subscriptions = new Map<number, Subscription>();
+  private readonly welcomeListeners = new Set<() => void>();
   private nextSubscription = FIRST_FEATURE_SUBSCRIPTION;
   private readonly sendScratch = new Uint8Array(SEND_BUFFER_SIZE);
   private nextStream = 1;
@@ -169,6 +174,17 @@ export class MuxConnection {
     this.subscriptions.set(subId, { filter, onEvent, onOpen });
     if (this.isWelcomed) this.openSubscription(subId);
     return () => { this.subscriptions.delete(subId); };
+  }
+
+  /**
+   * Runs `listener` now if the socket is welcomed, and after every later welcome (a reconnect). A feature that must
+   * not subscribe before it knows the server serves it (an unknown subscription closes the socket) starts here
+   * with a plain call, and subscribes only once the call is answered.
+   */
+  onWelcome(listener: () => void): () => void {
+    this.welcomeListeners.add(listener);
+    if (this.isWelcomed) listener();
+    return () => { this.welcomeListeners.delete(listener); };
   }
 
   /** Sends one subscription's filter (first connect and each reconnect) and lets its owner resync. */
@@ -335,6 +351,7 @@ export class MuxConnection {
         this.welcomed = true;
         this.retryAttempt = 0;
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
+        for (const l of [...this.welcomeListeners]) l();
         if (!this.resumeSent) this.writersUsed.clear();
         for (const s of [...this.streams.values()]) s.onWelcome(this.resumeSent);
         return;
@@ -342,7 +359,7 @@ export class MuxConnection {
         const pending = this.calls.get(frame.callId);
         if (!pending) { this.fail("server returned an unexpected action result"); return; }
         this.calls.delete(frame.callId);
-        if (!frame.ok) { pending.reject(new ActionRefused()); return; }
+        if (!frame.ok) { pending.reject(new ActionRefused(undefined, refusalReason(frame.json))); return; }
         try {
           pending.resolve(asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.json)) as unknown));
         } catch { pending.reject(new Error("the server returned an unreadable result")); }
@@ -392,6 +409,15 @@ export class MuxConnection {
     this.pendingPings.clear();
     for (const l of this.rttListeners) l(undefined);
   }
+}
+
+/** The `error` word of a refusal body (`{"error":"forbidden"}`), if the body is one. */
+function refusalReason(body: Uint8Array): string | undefined {
+  try {
+    const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as unknown;
+    const reason = typeof parsed === "object" && parsed !== null ? (parsed as { error?: unknown }).error : undefined;
+    return typeof reason === "string" && reason.length <= 64 ? reason : undefined;
+  } catch { return undefined; }
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
