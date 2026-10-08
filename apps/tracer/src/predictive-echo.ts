@@ -113,6 +113,8 @@ export class PredictiveEcho {
   private predictedLastInput = false;
   private readonly inputCosts: number[] = [];
   private warmHandle = 0;
+  /** The overlay geometry or glyph cache is cold: set at start and by every layout change. */
+  private warmNeeded = true;
   /**
    * Echoes of keys that were sent without a prediction, or whose prediction was dropped, cannot arrive before
    * this time (send time + round trip - jitter). Until then no output proves that the host cursor has caught up
@@ -170,7 +172,7 @@ export class PredictiveEcho {
    * the host-cursor guard, and first-call compilation of the placement and drawing code.
    */
   private scheduleWarm(): void {
-    if (!this.overlay || this.warmHandle) return;
+    if (!this.overlay || this.warmHandle || !this.warmNeeded) return;
     const idle = (window as { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
     const run = (): void => {
       this.warmHandle = 0;
@@ -179,15 +181,24 @@ export class PredictiveEcho {
     this.warmHandle = idle ? idle.call(window, run, { timeout: 200 }) : window.setTimeout(run, 50);
   }
 
-  /** A dry run of common glyphs and one erase through placement and drawing; nothing is sent or left on screen. */
+  /**
+   * Warms the overlay. With nothing queued this is a dry run of common glyphs and one erase through placement
+   * and drawing. While keys are in flight (a resize in the middle of typing) only the overlay geometry is
+   * synchronised, so the next key does not resize the canvas; the dry run follows at the next idle moment.
+   */
   private warm(): void {
     // Intl.Segmenter and the Unicode property classes compile on first use; that is the largest one-off cost.
     printableGraphemes("a");
     encoder.encode("a").slice();
-    if (!this.overlay || this.pending.length > 0 || this.awaitingPaint.length > 0 || !this.isEnabled()) return;
+    if (!this.overlay) return;
     const position = this.options.getPosition();
     if (!position || position.alternate || position.viewportY !== 0 || !position.visible) return;
     this.cellWidth("M", position);
+    if (this.pending.length > 0 || this.awaitingPaint.length > 0 || !this.isEnabled()) {
+      this.overlay.warm(position);
+      return;
+    }
+    this.warmNeeded = false;
     const enteredAt = performance.now();
     // Common ASCII glyphs, so the canvas rasterises them (and fills its glyph cache) now rather than on a key.
     const inputs: PredictionOpInput[] = Array.from(WARM_TEXT, (text) => ({
@@ -422,6 +433,7 @@ export class PredictiveEcho {
   /** Drops stale overlay geometry while retaining waits caused by unconfirmed input. */
   layoutChanged(): void {
     this.overlay?.invalidate();
+    this.warmNeeded = true;
     if (this.isAboveThreshold()) this.scheduleWarm();
     if (this.pending.length > 0 || this.awaitingPaint.length > 0) {
       this.waitingForOutput = true;

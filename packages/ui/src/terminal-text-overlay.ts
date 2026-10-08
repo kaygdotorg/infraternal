@@ -186,6 +186,16 @@ export class TerminalTextOverlay {
     return true;
   }
 
+  /**
+   * Synchronises the canvas with the renderer's current size (the costly part of a first draw after a resize)
+   * without drawing or showing anything. A no-op while something is on screen.
+   */
+  warm(position: TerminalTextOverlayPosition): void {
+    const source = position.canvas;
+    if (!this.context || this.shown || source.width <= 0 || source.height <= 0) return;
+    this.syncGeometry(source, position.devicePixelRatio ?? window.devicePixelRatio ?? 1);
+  }
+
   /** Removes speculative pixels immediately when their input is confirmed or invalidated. */
   hide(): void {
     if (this.context && this.drawnRows) {
