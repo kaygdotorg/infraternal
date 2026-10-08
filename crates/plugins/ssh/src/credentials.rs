@@ -2,12 +2,13 @@
 
 use crate::{
     model::{Failure, FailureKind},
-    process::execute,
+    process::{Group, execute},
     transport::{Credentials, Input, Secret, shell_quote},
 };
 use std::{
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::process::CommandExt,
     path::PathBuf,
     process::Stdio,
     time::Duration,
@@ -30,9 +31,10 @@ pub struct CredentialConfig {
 /// Scope owns every helper and its 0700 directory, including during failed preparation.
 pub struct CredentialSession {
     directory: Option<PathBuf>,
-    agent: Option<Child>,
+    agent: Option<KeyHelper>,
     askpass: Option<JoinHandle<()>>,
     password: bool,
+    network: bool,
     prompt_helper: bool,
 }
 
@@ -49,15 +51,13 @@ impl CredentialSession {
             agent: None,
             askpass: None,
             password: false,
+            network: matches!(credentials, Credentials::Network),
             prompt_helper: false,
         };
         if matches!(credentials, Credentials::Automatic(_)) {
             return Err(Failure::install(
                 "Automatic SSH authentication requires its ordered adapter.",
             ));
-        }
-        if matches!(credentials, Credentials::Network) {
-            return Ok(session);
         }
         match std::fs::DirBuilder::new()
             .mode(0o700)
@@ -88,7 +88,9 @@ impl CredentialSession {
                 "ssh-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..24]
             ));
-        if directory.join("askpass.sock").as_os_str().len() >= 108 {
+        // OpenSSH binds a temporary control name with a 17-byte suffix.
+        // The private root must fit that name before any credential helper starts.
+        if directory.join("c").as_os_str().len() + 17 >= 108 {
             return Err(Failure::install(
                 "The SSH helper socket directory is too long.",
             ));
@@ -101,6 +103,9 @@ impl CredentialSession {
                 Failure::install("The private SSH helper directory could not be created.")
             })?;
         session.directory = Some(directory.clone());
+        if session.network {
+            return Ok(session);
+        }
         let (key, prompt_secret) = match credentials {
             Credentials::Network | Credentials::Automatic(_) => unreachable!(),
             Credentials::PrivateKey { key, passphrase } => (Some(key), passphrase),
@@ -118,6 +123,7 @@ impl CredentialSession {
             // longer needed by SSH and must not remain in the prompt task.
             if let Some(task) = session.askpass.take() {
                 task.abort();
+                let _ = task.await;
             }
         }
         Ok(session)
@@ -185,7 +191,9 @@ impl CredentialSession {
             ));
         }
         let agent_socket = directory.join("agent.sock");
-        let agent = Command::new(&adapter.ssh_agent)
+        let mut agent_command = Command::new(&adapter.ssh_agent);
+        agent_command.as_std_mut().process_group(0);
+        let agent = agent_command
             .args(["-D", "-a"])
             .arg(&agent_socket)
             .stdin(Stdio::null())
@@ -194,7 +202,10 @@ impl CredentialSession {
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| Failure::install("The temporary SSH key helper could not start."))?;
-        self.agent = Some(agent);
+        self.agent = Some(KeyHelper {
+            group: Group::owned(&agent)?,
+            child: agent,
+        });
         // Only active startup uses a short retry; healthy helpers have no polling task.
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -220,6 +231,31 @@ impl CredentialSession {
                 FailureKind::Auth,
                 "The SSH private key or passphrase was refused.",
             ));
+        }
+        Ok(())
+    }
+
+    /// This path belongs to the owned private directory, never request input.
+    pub(crate) fn control_socket(&self) -> Result<PathBuf, Failure> {
+        self.directory
+            .as_ref()
+            .map(|directory| directory.join("c"))
+            .ok_or_else(|| Failure::install("The private SSH control scope is unavailable."))
+    }
+
+    /// Erase prompt/signing helpers before any post-authentication command.
+    pub(crate) async fn authenticated(&mut self) -> Result<(), Failure> {
+        if let Some(task) = self.askpass.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(helper) = self.agent.take() {
+            helper.retire().await?;
+        }
+        if let Some(directory) = &self.directory {
+            for name in ["agent.sock", "askpass.sock", "askpass"] {
+                let _ = std::fs::remove_file(directory.join(name));
+            }
         }
         Ok(())
     }
@@ -268,7 +304,7 @@ impl CredentialSession {
             "-o",
             "GSSAPIDelegateCredentials=no",
         ]);
-        if self.directory.is_none() {
+        if self.network {
             command
                 .env_remove("SSH_AUTH_SOCK")
                 .env_remove("SSH_ASKPASS")
@@ -331,6 +367,27 @@ impl CredentialSession {
     }
 }
 
+/// Retain the signer leader until its owned group has been retired.
+struct KeyHelper {
+    group: Group,
+    child: Child,
+}
+impl KeyHelper {
+    async fn retire(mut self) -> Result<(), Failure> {
+        self.group.retire();
+        tokio::time::timeout(Duration::from_secs(3), self.child.wait())
+            .await
+            .map_err(|_| Failure::install("The temporary SSH key helper did not retire."))?
+            .map_err(|_| Failure::install("The temporary SSH key helper could not retire."))?;
+        Ok(())
+    }
+}
+impl Drop for KeyHelper {
+    fn drop(&mut self) {
+        self.group.retire();
+    }
+}
+
 async fn serve_prompt(listener: UnixListener, secret: Secret) {
     // The enclosing 0700 directory is the authority boundary. Limit helper requests
     // as a second bound; each accepted helper gets one reply and its socket closes.
@@ -351,9 +408,8 @@ impl Drop for CredentialSession {
         if let Some(task) = self.askpass.take() {
             task.abort();
         }
-        if let Some(agent) = &mut self.agent {
-            let _ = agent.start_kill();
-        }
+        // The helper guard retires its group before Tokio may reap the leader.
+        drop(self.agent.take());
         if let Some(directory) = &self.directory {
             let _ = std::fs::remove_dir_all(directory);
         }

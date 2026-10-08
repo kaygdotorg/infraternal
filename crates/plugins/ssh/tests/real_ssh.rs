@@ -45,20 +45,17 @@ async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
         command_timeout: Duration::from_secs(30),
     };
     // D183 network auth must not inherit the fixture's authorized SSH agent.
-    let network = adapter
+    let network_result = adapter
         .open(
             Destination::parse(&format!("{user}@127.0.0.1:{port}")).unwrap(),
             Credentials::Network,
             MeshEvidence::default(),
         )
-        .await
-        .unwrap();
-    let network_result = network.run(CHECK_SCRIPT, Input::Empty).await;
+        .await;
     assert!(
         matches!(network_result, Err(ref error) if error.kind == FailureKind::Auth),
         "network-only authentication must not use ambient local SSH identities"
     );
-    drop(network);
     let private = Secret::new(private);
     let opened = Instant::now();
     let session = adapter
@@ -154,15 +151,15 @@ async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
         &configuration.stdout,
     );
     assert_eq!(effective.unwrap().port(), Some(port));
-    let session = adapter
+    let error = adapter
         .open(
             Destination::parse(&format!("{user}@127.0.0.1")).unwrap(),
             Credentials::Network,
             MeshEvidence::default(),
         )
         .await
+        .err()
         .unwrap();
-    let error = session.run("exit 0", Input::Empty).await.err().unwrap();
     assert_eq!(error.kind, FailureKind::HostKey);
     assert_ne!(error.fingerprints.len(), 0);
 }

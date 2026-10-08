@@ -11,14 +11,24 @@ use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 #[tokio::test]
 async fn configured_identity_paths_are_not_inherited_by_the_command_child() {
-    let root = common::scratch().join(format!("cfg-{}", uuid::Uuid::new_v4().simple()));
+    let root = common::scratch().join(format!(
+        "cfg-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
     std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let wrapper = root.join("ssh");
+    let master = common::master_fixture(&root);
     std::fs::write(&wrapper, r#"#!/bin/sh
 # Only synthetic public configuration is returned; no credential path is accessed.
 case "$1" in
 -G) printf '%s\n' 'hostname fixture.invalid' 'port 2222' 'proxyjump none' 'proxycommand none' 'userknownhostsfile /nonexistent/infraternal-public-trust' 'identityfile /nonexistent/infraternal-identity' 'certificatefile /nonexistent/infraternal-certificate'; exit 0;;
 esac
+case " $* " in
+  *" -M "*) master=yes;;
+  *) master=no;;
+esac
+validate_policy() {
 empty_config=no
 public_trust=no
 while [ "$#" -gt 0 ]; do
@@ -29,9 +39,13 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-[ "$empty_config" = yes ] && [ "$public_trust" = yes ] || exit 77
+[ "$empty_config" = yes ] || exit 77
+[ "$master" = no ] || [ "$public_trust" = yes ] || exit 77
+}
+validate_policy "$@"
+[ "$master" = no ] || exec /usr/bin/python3 MASTER_FIXTURE "$@"
 printf '%s\n' 'isolated-public-policy'
-"#).unwrap();
+"#.replace("MASTER_FIXTURE", &format!("'{}'", master.display()))).unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
     let adapter = OpenSsh {
         ssh: wrapper,

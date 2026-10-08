@@ -4,6 +4,7 @@ use crate::process::{execute, execute_bounded};
 use crate::{
     config::PublicSshConfiguration,
     credentials::{CredentialConfig, CredentialSession},
+    master::Master,
     model::{Destination, Failure, FailureKind, MeshEvidence},
     transport::{
         CommandOutput, Credentials, Input, Operation, SshSession, SshTransport, shell_quote,
@@ -51,7 +52,7 @@ impl SshTransport for OpenSsh {
                 credentials,
             )
             .await?;
-            Ok(Arc::new(Session {
+            let mut session = Session {
                 ssh: self.ssh.clone(),
                 keyscan: self.ssh_keyscan.clone(),
                 keygen: self.ssh_keygen.clone(),
@@ -59,7 +60,27 @@ impl SshTransport for OpenSsh {
                 credentials,
                 mesh,
                 timeout: self.command_timeout,
-            }) as Arc<dyn SshSession>)
+                master: None,
+            };
+            let socket = session.credentials.control_socket()?;
+            match Master::start(
+                session.command(&socket),
+                socket,
+                session.timeout,
+                session.mesh,
+            )
+            .await
+            {
+                Ok(master) => session.master = Some(master),
+                Err(mut failure) => {
+                    if failure.kind == FailureKind::HostKey {
+                        failure.fingerprints = session.observed_fingerprints().await;
+                    }
+                    return Err(failure);
+                }
+            }
+            session.credentials.authenticated().await?;
+            Ok(Arc::new(session) as Arc<dyn SshSession>)
         })
     }
 }
@@ -72,6 +93,7 @@ struct Session {
     credentials: CredentialSession,
     mesh: MeshEvidence,
     timeout: Duration,
+    master: Option<Master>,
 }
 
 impl Session {
@@ -113,10 +135,10 @@ impl Session {
             .map(str::to_owned)
             .collect()
     }
-    fn command(&self) -> Command {
+    fn command(&self, socket: &std::path::Path) -> Command {
         let mut command = Command::new(&self.ssh);
-        // OpenSSH uses the first scalar option: credential policy must precede
-        // retained public authentication preferences and transport configuration.
+        // Method-specific authentication precedes retained public preferences;
+        // OpenSSH singleton command-line options keep their first value.
         self.credentials.configure(&mut command);
         self.configuration.configure(&mut command);
         // Command-line precedence forces these over config: host keys cannot be accepted or rewritten;
@@ -144,10 +166,6 @@ impl Session {
             "-o",
             "ForwardX11=no",
             "-o",
-            "ControlMaster=no",
-            "-o",
-            "ControlPath=none",
-            "-o",
             "ControlPersist=no",
             "-o",
             "ForkAfterAuthentication=no",
@@ -161,6 +179,7 @@ impl Session {
             "LogLevel=ERROR",
         ]);
         let destination = &self.configuration.destination;
+        command.args(["-M", "-N", "-S"]).arg(socket);
         command.arg("-l").arg(destination.user());
         if let Some(port) = destination.port() {
             command.arg("-p").arg(port.to_string());
@@ -242,7 +261,62 @@ pub fn scan_destination(original: &Destination, bytes: &[u8]) -> Option<Destinat
 impl SshSession for Session {
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
-            let mut command = self.command();
+            let master = self.master.as_ref().ok_or_else(|| {
+                Failure::new(FailureKind::Unreachable, "The SSH connection has closed.")
+            })?;
+            if !master.alive()? {
+                return Err(Failure::new(
+                    FailureKind::Unreachable,
+                    "The SSH connection has closed.",
+                ));
+            }
+            let mut command = Command::new(&self.ssh);
+            command
+                .env_remove("SSH_AUTH_SOCK")
+                .env_remove("SSH_ASKPASS")
+                .env("SSH_ASKPASS_REQUIRE", "never")
+                .env("LC_ALL", "C");
+            // A missing/stale master must fail locally, never create another
+            // connection or reuse the browser's now-erased credential.
+            command
+                .args(["-F", "/dev/null", "-T", "-S"])
+                .arg(master.socket())
+                .args([
+                    "-o",
+                    "ControlMaster=no",
+                    "-o",
+                    "ControlPersist=no",
+                    "-o",
+                    "ProxyJump=none",
+                    "-o",
+                    "ProxyCommand=/bin/sh -c 'exit 1'",
+                    "-o",
+                    "ForkAfterAuthentication=no",
+                    "-o",
+                    "IdentityFile=none",
+                    "-o",
+                    "CertificateFile=none",
+                    "-o",
+                    "IdentityAgent=none",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "PubkeyAuthentication=no",
+                    "-o",
+                    "PasswordAuthentication=no",
+                    "-o",
+                    "KbdInteractiveAuthentication=no",
+                    "-o",
+                    "GSSAPIAuthentication=no",
+                ]);
+            let destination = &self.configuration.destination;
+            command
+                .arg("-l")
+                .arg(destination.user())
+                .arg("-p")
+                .arg(destination.port().unwrap_or(22).to_string())
+                .arg("--")
+                .arg(destination.host());
             command.arg(format!("sh -c {}", shell_quote(script)));
             let result = execute(&mut command, input, self.timeout).await?;
             if result.success {
@@ -250,12 +324,17 @@ impl SshSession for Session {
                     stdout: result.stdout,
                 });
             }
-            let mut failure = classify(&result.stderr, result.ssh_failure, self.mesh);
-            if failure.kind == FailureKind::HostKey {
-                failure.fingerprints = self.observed_fingerprints().await;
-            }
-            Err(failure)
+            // Authentication already succeeded. Never treat remote stderr or
+            // a command's exit 255 as permission to try a different credential.
+            Err(Failure::install("The authenticated SSH command failed."))
         })
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Retire the unreaped master group before removing its private scope.
+        drop(self.master.take());
     }
 }
 
