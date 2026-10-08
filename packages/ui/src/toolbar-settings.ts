@@ -21,6 +21,10 @@ export interface ToolbarSettingsRow {
 }
 export interface ToolbarSettingsModel {
   rows(): ToolbarSettingsRow[];
+  /** Where the layout in force comes from: the account (every device) or an override on this device. */
+  source(): "account" | "device";
+  customise(): void;
+  useAccount(): void;
   /** Persist and apply a row's new order and hidden set. */
   change(rowId: string, order: string[], hidden: string[]): void;
   reset(): void;
@@ -42,6 +46,16 @@ export function toolbarSection(model: ToolbarSettingsModel): SettingsSection {
 
       const paint = (): void => {
         root.replaceChildren();
+        const head = document.createElement("div");
+        head.className = "ui-ts-source";
+        const onDevice = model.source() === "device";
+        head.innerHTML = `<span class="ui-ts-tag"></span><button type="button" class="ui-ts-reset"></button>`;
+        (head.querySelector(".ui-ts-tag") as HTMLElement).textContent = onDevice ? "This device" : "Account layout";
+        (head.querySelector(".ui-ts-tag") as HTMLElement).dataset.device = String(onDevice);
+        const toggle = head.querySelector<HTMLButtonElement>("button")!;
+        toggle.textContent = onDevice ? "Use account layout" : "Customise for this device";
+        toggle.addEventListener("click", () => { if (onDevice) model.useAccount(); else model.customise(); paint(); });
+        root.append(head);
         for (const row of model.rows()) {
           const section = document.createElement("section");
           section.className = "ui-ts-row";
