@@ -133,12 +133,24 @@ pub async fn execute_bounded(
     }
 }
 
-struct Group {
+pub(crate) struct Group {
     id: Pid,
     armed: bool,
 }
 impl Group {
-    fn retire(&mut self) {
+    /// Guard a child spawned with `process_group(0)`. The caller retains its
+    /// unreaped leader until retirement so the group id cannot be reused.
+    pub(crate) fn owned(child: &tokio::process::Child) -> Result<Self, Failure> {
+        let id = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|pid| *pid > 0)
+            .map(Pid::from_raw)
+            .ok_or_else(|| Failure::install("The SSH helper identity is unavailable."))?;
+        Ok(Self { id, armed: true })
+    }
+
+    pub(crate) fn retire(&mut self) {
         if self.armed {
             let _ = killpg(self.id, Signal::SIGKILL);
             self.armed = false;
