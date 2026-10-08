@@ -37,7 +37,9 @@ export function createInputLock(cx: Ctx): InputLock {
       lock = { win, before };
       win.card.setLocked(true);
       cx.core.lockToolbarRow("keys");
-      win.binding?.focus();
+      // A touch screen's keyboard opens when an input is focused, and a lock button must not open it: the person
+      // taps the terminal for that. With a hardware keyboard the lock takes the focus so keys flow at once.
+      if (!matchMedia("(pointer: coarse)").matches) win.binding?.focus();
       cx.toolbar.update();
     },
     reset() { if (lock) { lock = undefined; cx.core.lockToolbarRow(undefined); } },

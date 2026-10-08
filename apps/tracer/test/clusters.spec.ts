@@ -21,7 +21,7 @@ const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
 
 async function open(page: Page, scene: number, query = ""): Promise<void> {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=none${query}`);
+  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await expect.poll(() => probe(page, (p) => p.views().length)).toBeGreaterThan(0);
   // Let the camera come to rest before measuring.
@@ -352,7 +352,7 @@ test("structure: a window dragged by its pill lands in another column", async ({
 async function touchPage(browser: Browser, scene: number): Promise<{ page: Page; touch: (type: "touchStart" | "touchMove" | "touchEnd", pts: Array<{ x: number; y: number }>) => Promise<unknown>; close(): Promise<void> }> {
   const context = await browser.newContext({ baseURL: `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}`, viewport: { width: 393, height: 852 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
   const page = await context.newPage();
-  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=none`);
+  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(900);
   const cdp = await context.newCDPSession(page);
@@ -432,7 +432,7 @@ test("canvas lock on a phone: tapping a neighbour that peeks in moves there; two
 
 test("snap on desktop: wheel and trackpad move between windows and columns, ctrl-wheel does not zoom", async ({ page }) => {
   await page.setViewportSize({ width: 1000, height: 800 });
-  await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none");
+  await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft");
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(900);
   expect(await probe(page, (p) => p.canvasLock())).toMatchObject({ on: true, index: 0 });
@@ -463,18 +463,17 @@ test("toolbar: the keyboard row follows terminal focus, the canvas row follows a
   try {
     const { page } = t;
     const row = (): Promise<string | null> => page.evaluate(() => document.querySelector("#terminal-screen")!.getAttribute("data-row"));
-    // The live terminal has focus: keyboard row.
+    // The live terminal has focus: keyboard row, and the canvas row is one snap swipe away.
     await page.touchscreen.tap(200, 500);
     await expect.poll(row).toBe("keys");
     await expect(page.locator("#keytray")).toHaveAttribute("data-rows", "2");
-    // Tap empty canvas: the canvas row.
-    await page.touchscreen.tap(359, 400);
-    await expect.poll(row).toBe("canvas");
     let tray = (await page.locator("#keytray").boundingBox())!;
     expect(tray.height).toBeGreaterThanOrEqual(44);
-    // A swipe up reveals the row below (the key row), a swipe down the row above (the canvas row).
     await page.waitForTimeout(700);
-    tray = (await page.locator("#keytray").boundingBox())!;
+    // A swipe down reveals the row above (the canvas row), a swipe up the row below (the key row) again.
+    await swipe(t, { x: tray.x + 100, y: tray.y + 12 }, { x: tray.x + 100, y: tray.y + 44 }, 6);
+    await expect.poll(row).toBe("canvas");
+    await page.waitForTimeout(500);
     await t.touch("touchStart", [{ x: tray.x + 100, y: tray.y + 32 }]);
     for (let i = 1; i <= 7; i++) { await t.touch("touchMove", [{ x: tray.x + 100, y: tray.y + 32 - i * 6 }]); await page.waitForTimeout(40); }
     await t.touch("touchEnd", []);
@@ -482,6 +481,9 @@ test("toolbar: the keyboard row follows terminal focus, the canvas row follows a
     await page.waitForTimeout(500);
     await swipe(t, { x: tray.x + 100, y: tray.y + 12 }, { x: tray.x + 100, y: tray.y + 44 }, 6);
     await expect.poll(row).toBe("canvas");
+    // Tap empty canvas: the key row goes away altogether.
+    await page.touchscreen.tap(359, 400);
+    await expect(page.locator("#keytray")).toHaveAttribute("data-rows", "1");
     await page.waitForTimeout(500);
     // Horizontal swipe scrolls the overflowing canvas row.
     await swipe(t, { x: tray.x + 300, y: tray.y + 22 }, { x: tray.x + 100, y: tray.y + 22 }, 8);
@@ -682,23 +684,24 @@ test("canvas backdrop: the dots stay on world multiples, a layer is about one sc
   expect(far.map((l) => l.k).sort()).toEqual([1]); // only the sparser one: the denser has faded away and holds nothing
 });
 
-test("toolbar: the row stack follows the finger one to one (swipe up moves it up and reveals the key row)", async ({ browser }) => {
+test("toolbar: the row stack follows the finger one to one (a swipe down moves it down and reveals the canvas row)", async ({ browser }) => {
   const t = await touchPage(browser, 3);
   try {
     const { page } = t;
-    await page.touchscreen.tap(359, 400);
-    await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "canvas");
+    await page.touchscreen.tap(200, 500); // a terminal has focus: the key row shows, the canvas row is above it
+    await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "keys");
     await page.waitForTimeout(900);
     const tray = (await page.locator("#keytray").boundingBox())!;
     const offset = (): Promise<number> => page.evaluate(() => Number(/-?[\d.]+/.exec(document.querySelector<HTMLElement>("#keyrows")!.style.transform || "0")?.[0] ?? 0));
-    await t.touch("touchStart", [{ x: tray.x + 100, y: tray.y + 32 }]);
+    const rowH = await page.evaluate(() => document.querySelector<HTMLElement>("#keyrow-keys")!.offsetHeight);
+    await t.touch("touchStart", [{ x: tray.x + 100, y: tray.y + 12 }]);
     const seen: number[] = [];
-    for (let i = 1; i <= 7; i++) { await t.touch("touchMove", [{ x: tray.x + 100, y: tray.y + 32 - i * 6 }]); await page.waitForTimeout(40); seen.push(await offset()); }
-    // After the direction locks, the stack is above where it started and keeps moving up with the finger.
-    expect(seen[6]!).toBeLessThan(-25);
-    expect(seen[6]!).toBeLessThan(seen[3]!);
+    for (let i = 1; i <= 7; i++) { await t.touch("touchMove", [{ x: tray.x + 100, y: tray.y + 12 + i * 6 }]); await page.waitForTimeout(40); seen.push(await offset()); }
+    // After the direction locks, the stack is below where it started (nearer the canvas row) and keeps moving with the finger.
+    expect(seen[6]!).toBeGreaterThan(-rowH + 25);
+    expect(seen[6]!).toBeGreaterThan(seen[3]!);
     await t.touch("touchEnd", []);
-    await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "keys");
+    await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "canvas");
   } finally { await t.close(); }
 });
 
@@ -953,4 +956,134 @@ test("the window lock sits at the exact centre of its window and the title pill 
   await page.keyboard.press("Control+Shift+G");
   await page.waitForTimeout(400);
   await ok("after the canvas lock changes");
+});
+
+test("toolbar rows snap: a short drag springs back, a longer one commits, and the stack never rests between rows", async ({ browser }) => {
+  const t = await touchPage(browser, 3);
+  try {
+    const { page } = t;
+    await page.touchscreen.tap(200, 500); // a terminal has focus: both rows exist, the key row shows
+    await expect(page.locator("#keytray")).toHaveAttribute("data-rows", "2");
+    await page.waitForTimeout(900);
+    const offset = (): Promise<number> => page.evaluate(() => Number(/-?[\d.]+/.exec(document.querySelector<HTMLElement>("#keyrows")!.style.transform || "0")?.[0] ?? 0));
+    const rowH = await page.evaluate(() => document.querySelector<HTMLElement>("#keyrow-keys")!.offsetHeight);
+    const tray = (await page.locator("#keytray").boundingBox())!;
+    const drag = async (dy: number): Promise<void> => {
+      await t.touch("touchStart", [{ x: tray.x + 100, y: tray.y + 32 }]);
+      for (let i = 1; i <= 6; i++) { await t.touch("touchMove", [{ x: tray.x + 100, y: tray.y + 32 + (dy * i) / 6 }]); await page.waitForTimeout(60); }
+      await page.waitForTimeout(250); // the finger rests: no flick
+      await t.touch("touchEnd", []);
+      await page.waitForTimeout(900);
+    };
+    const atKeys = async (): Promise<boolean> => Math.abs((await offset()) + rowH) < 1;
+    const atCanvas = async (): Promise<boolean> => Math.abs(await offset()) < 1;
+    expect(await atKeys()).toBe(true);
+    await drag(rowH * 0.25); // a short pull down springs back to the key row
+    expect(await atKeys()).toBe(true);
+    await drag(rowH * 0.8); // most of a row commits to the canvas row, and it rests exactly there
+    expect(await atCanvas()).toBe(true);
+    await drag(-rowH * 0.25);
+    expect(await atCanvas()).toBe(true);
+    await drag(-rowH * 0.8);
+    expect(await atKeys()).toBe(true);
+    // Never between rows: a mid-drag release always ends on one of the two.
+    for (const dy of [0.4, 0.6, -0.45, -0.55]) { await drag(rowH * dy); expect((await atKeys()) || (await atCanvas()), `rest after a ${dy} row drag`).toBe(true); }
+  } finally { await t.close(); }
+});
+
+test("window header actions are one pill: as tall as the title pill, on its line, with touch targets of 44 px", async ({ browser, page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft");
+  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  await page.waitForTimeout(1500);
+  const geometry = (pg: Page, id: string) => pg.evaluate((windowId) => {
+    const w = document.querySelector(`.ui-window[data-window-id="${windowId}"]`)!;
+    const a = w.querySelector(".ui-window-actions")!.getBoundingClientRect(), t = w.querySelector(".ui-window-pill")!.getBoundingClientRect();
+    const buttons = [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => b.dataset.action);
+    const gaps = [...w.querySelectorAll(".ui-window-action")].map((b) => b.getBoundingClientRect()).map((r, i, all) => (i ? r.left - all[i - 1]!.right : 0)).slice(1);
+    return { aTop: a.top, aH: a.height, tTop: t.top, tH: t.height, buttons, gaps, tip: [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => b.dataset.tip) };
+  }, id);
+  const d = await geometry(page, "w-nix-cache");
+  expect(d.buttons).toEqual(["split-right", "split-down", "close"]);
+  expect(d.tip).toEqual(["Split right", "Split down", "Close"]);
+  expect(Math.abs(d.aH - d.tH)).toBeLessThan(0.5);
+  expect(Math.abs(d.aTop - d.tTop)).toBeLessThan(0.5);
+  expect(Math.max(...d.gaps) - Math.min(...d.gaps)).toBeLessThan(0.5); // equal spacing
+  // On a phone the same pill, with 44 px hit areas around each button (the title truncates before the pill shrinks).
+  const t = await touchPage(browser, 3);
+  try {
+    const p = t.page;
+    const pd = await geometry(p, "w-build-01");
+    expect(pd.buttons).toEqual(["split-right", "split-down", "close"]);
+    expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(0.5);
+    expect(Math.abs(pd.aTop - pd.tTop)).toBeLessThan(0.5);
+    const hits = await p.evaluate(() => {
+      const w = document.querySelector('.ui-window[data-window-id="w-build-01"]')!;
+      return [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => {
+        const r = b.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        const at = (x: number, y: number): boolean => (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(".ui-window-action") === b;
+        // The point 21 px left, right, above and below the centre still lands on this button: a 44 px target.
+        return at(cx - 21, cy) && at(cx + 21, cy) && at(cx, cy - 21) && at(cx, cy + 21);
+      });
+    });
+    expect(hits).toEqual([true, true, true]);
+  } finally { await t.close(); }
+});
+
+test("toolbar and keyboard: no terminal focused means one row and no dots, a toolbar tap never focuses an input, a focused terminal gets the key row and keeps its focus", async ({ browser }) => {
+  const t = await touchPage(browser, 3);
+  try {
+    const { page } = t;
+    // Count every focus that lands on something editable, from the start.
+    await page.evaluate(() => {
+      (window as unknown as { __focusIn: string[] }).__focusIn = [];
+      document.addEventListener("focusin", (e) => { const n = e.target as HTMLElement; if (n.matches("input, textarea, [contenteditable]")) (window as unknown as { __focusIn: string[] }).__focusIn.push(n.className || n.tagName); }, true);
+    });
+    const state = () => page.evaluate(() => ({
+      rows: document.querySelector("#keytray")!.getAttribute("data-rows"),
+      keysHidden: (document.querySelector("#keyrow-keys") as HTMLElement).hidden,
+      dots: getComputedStyle(document.querySelector(".keydots")!).display,
+      editable: !!document.activeElement?.matches("input, textarea, [contenteditable]"),
+      focusIn: (window as unknown as { __focusIn: string[] }).__focusIn.length,
+    }));
+    await page.touchscreen.tap(359, 400); // the canvas, not a terminal
+    await page.waitForTimeout(900);
+    let s = await state();
+    expect(s).toMatchObject({ rows: "1", keysHidden: true, dots: "none", editable: false });
+    // Every canvas-row control: no input takes focus, no keyboard.
+    const ids = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#keyrow-canvas > button")].map((b) => b.dataset.cv!));
+    expect(ids.length).toBeGreaterThan(5);
+    for (const id of ids) {
+      if (id === "search") continue; // opens the palette, whose field is a real text input
+      const box = await page.evaluate((cv) => { const r = document.querySelector(`#keyrow-canvas > [data-cv="${cv}"]`)!.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width }; }, id);
+      if (box.w === 0) continue;
+      await page.touchscreen.tap(box.x, box.y);
+      await page.waitForTimeout(250);
+      s = await state();
+      expect(s.editable, `canvas row "${id}" focused an input`).toBe(false);
+      expect(s.focusIn, `canvas row "${id}" fired a focus event on an input`).toBe(0);
+      if (id === "input-lock") { await page.evaluate(() => document.querySelector<HTMLElement>('[data-cv="input-lock"]')!.click()); await page.waitForTimeout(500); } // the lock holds the key row; unlock it
+      await page.keyboard.press("Escape").catch(() => undefined);
+    }
+    await page.waitForTimeout(600);
+    expect(await state()).toMatchObject({ rows: "1", keysHidden: true });
+    // A terminal takes focus: the key row appears, two rows, dots. (The controls above left the canvas free and zoomed out.)
+    await page.evaluate(() => { const p = (window as unknown as { __tracerClusters: { setCanvasLock(on: boolean): void } }).__tracerClusters; p.setCanvasLock(true); });
+    await page.evaluate(() => document.querySelector<HTMLElement>('[data-cv="views"]')!.click());
+    await page.keyboard.press("Control+1");
+    await page.waitForTimeout(1200);
+    await page.touchscreen.tap(200, 500);
+    await expect.poll(async () => (await state()).rows).toBe("2");
+    expect(await state()).toMatchObject({ keysHidden: false, dots: "flex" });
+    // Key-row taps keep the terminal focused (D129).
+    const focusedInTerminal = (): Promise<boolean> => page.evaluate(() => !!document.activeElement?.closest(".terminal-host"));
+    expect(await focusedInTerminal()).toBe(true);
+    await page.waitForTimeout(900); // the key row has slid into place
+    const keys = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#keyrow-keys > button:not([hidden])")].slice(0, 6).map((b) => { const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; }));
+    for (const [i, k] of keys.entries()) { await page.touchscreen.tap(k.x, k.y); await page.waitForTimeout(150); expect(await focusedInTerminal(), `key ${i}`).toBe(true); }
+    // Focus leaves: back to one row.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await expect.poll(async () => (await state()).rows, { timeout: 4000 }).toBe("1");
+    expect(await state()).toMatchObject({ keysHidden: true, dots: "none" });
+  } finally { await t.close(); }
 });

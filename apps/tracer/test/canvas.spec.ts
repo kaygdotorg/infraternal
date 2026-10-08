@@ -7,11 +7,11 @@ import { chromium, expect, test, type BrowserContext, type Page } from "playwrig
 
 type CanvasOffset = { x: number; y: number; minX: number; moving: boolean; transform: string };
 
-async function openCanvas(page: Page): Promise<void> {
+async function openCanvas(page: Page, query = ""): Promise<void> {
   // The reset closes the previous test's sockets; a pooled keep-alive connection through the
   // latency proxy can be among them, so one retry absorbs that hang-up.
   await page.context().request.post("/__mock/reset").catch(() => page.context().request.post("/__mock/reset"));
-  await page.goto("/?mock=1&proto=windows&bg=none&fixture=none");
+  await page.goto(`/?mock=1&proto=windows&bg=none&fixture=none${query}`);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
   await expect.poll(() => page.evaluate(() => (window as unknown as { __tracerCanvas?: { windows(): string[] } }).__tracerCanvas?.windows().length ?? 0)).toBeGreaterThan(2);
 }
@@ -184,7 +184,7 @@ test("every floating card uses the one overlay material", async ({ page }) => {
     return { popover, shared };
   });
   expect(material.popover).toEqual(material.shared);
-  expect(material.shared.filter).toContain("blur(16px)");
+  expect(material.shared.filter).toContain("blur(8px)"); // the default card level, Tinted
 });
 
 // ---- the connection line is never a second toast ---------------------------------------
@@ -601,7 +601,7 @@ test("shortcuts: ? morphs the capsule into the list, current area first, one sho
   const palette = await panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd").allTextContents();
   expect(palette).toEqual(["Ctrl", "K"]);
   const material = await panel.evaluate((node) => { const s = getComputedStyle(node); return { filter: s.backdropFilter, bg: s.backgroundColor }; });
-  expect(material.filter).toContain("blur(16px)");
+  expect(material.filter).toContain("blur(8px)"); // the default card level, Tinted
   // At rest nothing is left animating: no transform, no opacity on the content.
   expect(await panel.evaluate((node) => [getComputedStyle(node).transform, getComputedStyle(node.querySelector(".ui-shortcuts-body")!).opacity])).toEqual(["none", "1"]);
   await page.keyboard.press("Escape");
@@ -922,9 +922,9 @@ test("palette: Ctrl+K then typing within 20 ms lands every character; arrow sele
 });
 
 // ---- text behind glass is never legible through it --------------------------------------------
-test("glass surfaces blur what is behind them by about a line of text, so letters never read through", async ({ page }) => {
+test("clear and frosted cards blur what is behind them by more than a line of text, so letters never read through", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await openCanvas(page);
+  await openCanvas(page, "&card=3");
   await page.locator("#sidebar-toggle").click();
   await page.keyboard.press("Control+k");
   await page.waitForTimeout(400);
@@ -933,5 +933,5 @@ test("glass surfaces blur what is behind them by about a line of text, so letter
   await page.locator(".ui-window-pill").nth(1).click();
   const popover = await page.evaluate(() => parseFloat(/blur\(([\d.]+)px\)/.exec(getComputedStyle(document.querySelector(".canvas-popover")!).backdropFilter)?.[1] ?? "0"));
   // A terminal line is about 18 px tall: the blur radius is at least that, measured from captures over dense text.
-  for (const value of [...Object.values(blurs), popover]) expect(value).toBeGreaterThanOrEqual(16);
+  for (const value of [...Object.values(blurs), popover]) expect(value).toBeGreaterThanOrEqual(24);
 });

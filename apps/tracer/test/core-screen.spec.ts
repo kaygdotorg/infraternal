@@ -197,7 +197,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   const paletteActions = await palette.locator(".result").evaluateAll((results) =>
     results.map((result) => (result as HTMLButtonElement).dataset.action ?? ""));
   expect(paletteActions.sort()).toEqual([
-    "session:current", "host:current", "bg:mesh", "bg:none", ...Object.keys(THEMES).map((id) => `theme:${id}`), ...FONTS.map((font) => `font:${font.id}`),
+    "session:current", "host:current", "bg:mesh", "bg:soft", "bg:none", ...[1, 2, 3, 4].flatMap((n) => [`card:${n}`, `windows:${n}`]), ...Object.keys(THEMES).map((id) => `theme:${id}`), ...FONTS.map((font) => `font:${font.id}`),
   ].sort());
   // Superseded (TASTE: animation never gets in the way): a key-triggered open is a short 180 ms fade, never blocking input.
   expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0.18s");
@@ -210,7 +210,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   expect(backdropWorkers).toHaveLength(1);
 
   await page.keyboard.press("Control+k");
-  await page.locator("#palette-input").fill("background none");
+  await page.locator("#palette-input").fill("background: plain");
   await page.keyboard.press("Enter");
   await expect(page.locator("#terminal-screen")).toHaveAttribute("data-bg", "none");
   await expect.poll(() => page.locator("#rtt").textContent()).toMatch(/^\d+ ms$/);
