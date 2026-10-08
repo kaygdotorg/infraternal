@@ -291,7 +291,7 @@
   border: 1px solid var(--overlay-line); border-radius: 999px; background: transparent; color: var(--fg);
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: pointer;
   /* The lock owns the exact centre of the frame line: the pill never reaches past half the header minus the lock's hit area. */
-  max-width: calc(50% - 26px);
+  max-width: calc(50% - 26px); line-height: 1.4; /* room for descenders: the title clips its overflow */
   transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
 .ui-window-pill:active { transform: scale(var(--ui-press-scale)); }

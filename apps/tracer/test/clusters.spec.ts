@@ -725,6 +725,48 @@ test("a restarted mock never strands an open preview tab: an unknown session coo
   expect(status).toBe(200);
 });
 
+/**
+ * Descenders: the font's full content area (ascent + descent, from the canvas text metrics of the element's own
+ * computed font, so it holds for any face) must fit inside every box that clips the text, up to and including
+ * the pill itself. A line box shorter than the content area clips the descender of g, j, p, q and y.
+ * Covers the window pill, a Mesh node pill, the view label and the top pill.
+ */
+const GLYPHS = "gjpqy";
+async function glyphFit(page: Page, selector: string): Promise<{ selector: string; slack: number; ancestor: string }> {
+  return page.evaluate(({ selector: sel, text }) => {
+    const target = document.querySelector<HTMLElement>(sel);
+    if (!target) throw new Error(`no ${sel}`);
+    target.textContent = text;
+    const style = getComputedStyle(target);
+    const ctx = document.createElement("canvas").getContext("2d")!;
+    ctx.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    const m = ctx.measureText(text);
+    const need = m.fontBoundingBoxAscent + m.fontBoundingBoxDescent;
+    let worst = Infinity, who = "";
+    for (let n: HTMLElement | null = target; n; n = n.parentElement) {
+      const s = getComputedStyle(n);
+      const pill = n.classList.contains("ui-window-pill") || n.classList.contains("cl-label") || n.id === "capsule";
+      if (pill || s.overflowY !== "visible") {
+        const have = n.clientHeight - (pill ? parseFloat(s.paddingTop) + parseFloat(s.paddingBottom) : 0);
+        if (have - need < worst) { worst = have - need; who = n.className.toString() || n.tagName; }
+      }
+      if (pill) break;
+    }
+    return { selector: sel, slack: worst, ancestor: who };
+  }, { selector, text: GLYPHS });
+}
+
+test("descenders: g j p q y fit inside the window pill, a Mesh node pill, the view label and the top pill", async ({ page }) => {
+  await open(page, 1);
+  for (const sel of [".cl-label-name", "#capsule-host", ".ui-window-host"]) {
+    const r = await glyphFit(page, sel);
+    expect(r.slack, `${sel} clipped by ${r.ancestor}`).toBeGreaterThanOrEqual(0);
+  }
+  await open(page, 6);
+  const node = await glyphFit(page, '.ui-window[aria-label$="node"] .ui-window-host');
+  expect(node.slack, `node pill clipped by ${node.ancestor}`).toBeGreaterThanOrEqual(0);
+});
+
 test("the window lock sits at the exact centre of its window and the title pill yields", async ({ page }) => {
   await open(page, 1);
   const centreOff = (): Promise<number[]> => page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".ui-window")].map((w) => {
