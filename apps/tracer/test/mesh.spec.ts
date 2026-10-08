@@ -558,7 +558,7 @@ test.describe("states", () => {
   });
 
   test("every glass surface of the Mesh view blurs what is behind it by about a line of text", async ({ page }) => {
-    await open(page);
+    await open(page, "&card=3"); // Clear: the default card level (Tinted) blurs 8 px and is not the level this rule is about
     await intoMesh(page);
     // The hover card of a view (zoomed out), a confirmation tip and the note over the cards.
     await dragEnd(page, "g3", "head", "edge-arm");
