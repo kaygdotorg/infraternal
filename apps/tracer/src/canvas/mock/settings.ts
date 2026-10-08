@@ -1,6 +1,6 @@
 /** Mockup Settings panels: devices, account, users, grants and discovery, with test-double data. */
 import { renderDevices, renderFacts } from "../../../../../packages/ui/src/settings-panels";
-import type { SettingsSource } from "../views/settings-body";
+import type { SettingsSource } from "../views/settings-body.on-demand";
 import type { ViewId } from "../model/types";
 import type { MockWorld } from "./world";
 

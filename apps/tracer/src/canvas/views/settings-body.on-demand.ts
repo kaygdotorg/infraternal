@@ -1,4 +1,7 @@
 /**
+ * On demand (the `.on-demand.ts` name is what the transfer gate reads): loaded the first time a Settings window is
+ * drawn, through `onDemand` in body.ts, never on the first screen.
+ *
  * The bodies of the Settings view's windows (D179): one panel per section, rendered into its window.
  *
  * The sections that belong to the app itself (appearance, toolbar, shortcuts, about) are rendered here from the
@@ -18,9 +21,6 @@ export interface SettingsSource {
   sections: readonly string[];
   render(section: string, pane: HTMLElement, cx: Ctx): (() => void) | void;
 }
-
-/** Sections the app renders itself. */
-export const BUILTIN_SECTIONS = ["appearance", "toolbar", "shortcuts", "about"] as const;
 
 export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement): () => void {
   const { core } = cx;

@@ -1,5 +1,5 @@
 /**
- * One Console window stays centred, and the docked sidebar moves the framing only when it would cover it.
+ * One Console window stays centred. (The sidebar is a layer over the canvas and moves nothing: see sidebar.spec.ts, #114.)
  * Production server binary, real sessions (D177). "Centred" is measured against the canvas area (the pane under
  * the top bar and above the key tray), within 1 px, after each event that can move the framing.
  */
@@ -117,7 +117,7 @@ test("desktop 1440x900: one window stays centred after every event", async () =>
   const page = await desktop.newPage();
   await scenarios(page, "desktop");
 
-  // sidebar toggles (docked at this size): a centred narrow window does not move at all
+  // the sidebar is a layer over the canvas: a centred window does not move at all
   await page.goto(server.origin + "/?theme=ink&bg=none");
   await page.locator(".cl-viewport").waitFor();
   await onlyWindow(page);
@@ -126,7 +126,7 @@ test("desktop 1440x900: one window stays centred after every event", async () =>
   const sizeBefore = await page.locator(".terminal-host").first().evaluate((n) => `${n.clientWidth}x${n.clientHeight}`);
   await page.evaluate(() => { (window as unknown as { __moves: number }).__moves = 0; const w = document.querySelector('.cl[data-view="console"] .ui-window')!; let last = ""; const tick = (): void => { const r = w.getBoundingClientRect(); const k = `${r.left.toFixed(2)}`; if (last && k !== last) (window as unknown as { __moves: number }).__moves++; last = k; requestAnimationFrame(tick); }; tick(); });
   await page.locator("#sidebar-toggle").click();
-  await expect(page.locator("#terminal-screen")).toHaveAttribute("data-sidebar", "docked");
+  await expect(page.locator("#sidebar")).toBeVisible();
   await page.waitForTimeout(1200);
   const after = await windows(page).first().boundingBox();
   expect(Math.abs(after!.x - before!.x)).toBeLessThanOrEqual(0.5);
@@ -135,32 +135,6 @@ test("desktop 1440x900: one window stays centred after every event", async () =>
   await page.locator("#sidebar-toggle").click();
   await page.waitForTimeout(800);
   await centred(page, "after the sidebar closes");
-  await page.close();
-});
-
-test("a wide layout moves only by the overlap when the sidebar docks, and back when it closes", async () => {
-  const page = await desktop.newPage();
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(server.origin + "/?theme=ink&bg=none");
-  await page.locator(".cl-viewport").waitFor();
-  await onlyWindow(page);
-  for (let i = 0; i < 2; i++) { await page.locator(".tab-add").click(); await page.waitForTimeout(700); }
-  await expect(windows(page)).toHaveCount(3);
-  await page.keyboard.press("Control+Shift+G"); await page.keyboard.press("Control+Shift+G"); // lock off then on: snaps to the nearest stop
-  await page.waitForTimeout(1200);
-  const left = async (): Promise<number> => (await windows(page).first().boundingBox())!.x;
-  const sidebarEdge = async (): Promise<number> => page.evaluate(() => { const s = document.querySelector<HTMLElement>("#sidebar")!; return s.offsetLeft + s.offsetWidth + 12; });
-  const x0 = await left();
-  await page.locator("#sidebar-toggle").click();
-  await page.waitForTimeout(1500);
-  const edge = await sidebarEdge();
-  const x1 = await left();
-  // Moved right by exactly what the sidebar covered, and the window's left edge now starts at the sidebar's edge.
-  expect(x0).toBeLessThan(edge);
-  expect(Math.abs(x1 - edge)).toBeLessThanOrEqual(2.5); // the window card sits a hair inside its column
-  await page.locator("#sidebar-toggle").click();
-  await page.waitForTimeout(1500);
-  expect(Math.abs((await left()) - x0)).toBeLessThanOrEqual(1);
   await page.close();
 });
 

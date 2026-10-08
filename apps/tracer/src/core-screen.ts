@@ -581,12 +581,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
 
   // Desktop docks the sidebar beside the windows instead of over them, so nothing under it
-  // becomes unreachable. The panes' left edge moves once (one terminal fit, no per-frame resize)
+  // becomes unreachable. The canvas never docks it (#114): the sidebar is another layer over the canvas, so opening
+  // it changes no layout, resizes no terminal and moves no window; only the sidebar itself slides. The panes' left edge moves once (one terminal fit, no per-frame resize)
   // and a FLIP translate on the compositor makes that single layout change read as a slide.
   const dockedLayout = matchMedia("(hover: hover) and (pointer: fine) and (min-width: 1024px)");
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const dockPanes = (open: boolean, instant: boolean): void => {
-    const docked = open && dockedLayout.matches;
+    const docked = open && dockedLayout.matches && stage.dataset.clusters === undefined;
     if ((stage.dataset.sidebar === "docked") === docked) return;
     const before = panes.getBoundingClientRect().left;
     stage.dataset.sidebar = docked ? "docked" : "";

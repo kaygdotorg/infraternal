@@ -171,7 +171,6 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       ro.disconnect();
       removePalette();
       removeShortcuts();
-      cx.nav.dispose();
       cx.store.dispose();
       cx.toolbar.dispose();
       cx.tree.dispose();

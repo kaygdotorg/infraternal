@@ -29,7 +29,16 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   }
   if (m.kind !== "node" && m.kind !== "settings" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });
   const title = { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
-  const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" && !m.noAccess ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: () => cx.toolbar.update() });
+  const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" && !m.noAccess ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: (locked) => {
+    // The lock icon on the window is the input lock (the padlock): one lock at a time, on this window.
+    const held = cx.inputLock.state;
+    if (locked) {
+      setActive(cx, rec);
+      if (held && held.win !== rec) cx.inputLock.toggle();
+      if (!cx.inputLock.state) cx.inputLock.toggle();
+    } else if (held?.win === rec) cx.inputLock.toggle();
+    cx.toolbar.update();
+  } });
   Object.assign(rec, { model: m, card, owner: c });
   card.root.dataset.kind = m.kind;
   if (m.h) { card.root.style.height = m.h <= 1 ? `calc(var(--clh) * ${m.h})` : `${m.h}px`; card.root.style.flex = "none"; }

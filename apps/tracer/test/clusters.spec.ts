@@ -845,6 +845,8 @@ test("settings is a view: a gear after a divider, one window per section, admin 
   await page.keyboard.type("settings → devices");
   await page.keyboard.press("Enter");
   await expect(page.locator('.ui-window[data-window-id="s-devices"][data-active]')).toHaveCount(1, { timeout: 4000 });
+  // The sidebar is a layer over the canvas (it no longer docks), so it is closed before reaching under it.
+  await page.locator("#sidebar-toggle").click();
   // Appearance applies live: choosing a theme repaints at once.
   await page.evaluate(() => (window as unknown as { __tracerClusters: { openSettings(s: string): void } }).__tracerClusters.openSettings("appearance"));
   await page.locator('.ui-window[data-window-id="s-appearance"] .ui-sp-row[data-id="ink"]').click();
