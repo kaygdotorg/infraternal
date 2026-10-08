@@ -156,6 +156,27 @@ test("split right opens a new column beside the window, split down stacks below 
   await expect.poll(count).toBe(n0 + 4);
 });
 
+test("canvas lock off frees pan and zoom in place; the overview is its own action", async ({ page }) => {
+  await open(page, 3);
+  const cam0 = await probe(page, (p) => p.camera());
+  await page.keyboard.press("Control+Shift+G");
+  await page.waitForTimeout(900);
+  const cam1 = await probe(page, (p) => p.camera());
+  expect(cam1.z).toBeCloseTo(cam0.z, 3);
+  expect(cam1.cx).toBeCloseTo(cam0.cx, 1);
+  expect(cam1.cy).toBeCloseTo(cam0.cy, 1);
+  expect((await probe(page, (p) => p.canvasLock())).on).toBe(false);
+  // Free: a ctrl+wheel zooms, a plain wheel pans.
+  await page.mouse.move(720, 450);
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, 240);
+  await page.keyboard.up("Control");
+  await page.waitForTimeout(300);
+  expect((await probe(page, (p) => p.camera())).z).toBeLessThan(cam0.z);
+  await page.keyboard.press("Escape");
+  await expect.poll(async () => (await probe(page, (p) => p.camera())).z, { timeout: 4000 }).toBeLessThan(0.5);
+});
+
 test("container shell: the camera stays, the pill morphs into a floating terminal that resizes with its aspect locked and expands into Console", async ({ page }) => {
   await open(page, 4);
   const cam0 = await probe(page, (p) => p.camera());
@@ -299,9 +320,13 @@ test("canvas lock on a phone: two fingers move one column at a time, pinch does 
     await t.touch("touchEnd", []);
     await page.waitForTimeout(500);
     expect((await probe(page, (p) => p.camera())).z).toBe(z0);
-    // The canvas lock toggle frees the canvas (zoomed out), then locks it again.
+    // The canvas lock toggle frees the canvas where it is (no zoom change), then locks it again.
     await page.evaluate(() => document.querySelector<HTMLElement>('[data-cv="canvas-lock"]')!.click());
     await expect.poll(async () => (await probe(page, (p) => p.canvasLock())).on).toBe(false);
+    await page.waitForTimeout(700);
+    expect((await probe(page, (p) => p.camera())).z).toBe(z0);
+    // The overview is its own control and does zoom out.
+    await page.evaluate(() => document.querySelector<HTMLElement>('[data-cv="overview"]')!.click());
     await expect.poll(async () => (await probe(page, (p) => p.camera())).z, { timeout: 4000 }).toBeLessThan(0.7);
     await page.evaluate(() => document.querySelector<HTMLElement>('[data-cv="canvas-lock"]')!.click());
     await expect.poll(async () => (await probe(page, (p) => p.camera())).z, { timeout: 4000 }).toBe(1);
@@ -390,6 +415,7 @@ test("toolbar: Ctrl latches (tap arms, double tap holds), snap and lock work fro
     const { page } = t;
     await page.touchscreen.tap(200, 500);
     await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "keys");
+    await page.waitForTimeout(600); // the rows slide for about 240 ms; measure the key once it has stopped
     const ctrl = page.locator('[data-mod="ctrl"]');
     const state = (): Promise<string | null> => ctrl.getAttribute("data-mod-state");
     expect(await state()).toBe("off");

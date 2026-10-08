@@ -342,8 +342,11 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   const setCanvasLock = (on: boolean, instant = false): void => {
     applyCanvasLock(on);
     const c = clusters.get(currentView);
-    if (on && c) goStop(c, nearestStop(c, cam.cx), instant); else if (!on) flyTo(overviewCam, instant);
+    // Off frees pan and zoom where the camera is; it never moves it. The overview is its own action (showOverview).
+    if (on && c) goStop(c, nearestStop(c, cam.cx), instant);
   };
+  /** All views at once: frees the canvas and flies out to fit everything. */
+  const showOverview = (instant = false): void => { applyCanvasLock(false); flyTo(overviewCam, instant); };
   /** Springs a column's scroll to a window's start (the column scrolls by itself; snapping is ours to animate). */
   const scrollColumn = (colEl: HTMLElement, top: number, instant = false): void => {
     const target = clamp(top, 0, colEl.scrollHeight - colEl.clientHeight);
@@ -1915,7 +1918,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.next, label: "Share layout…", hint: "send views to a person or a group", action: "proto:share" });
     if (clusters.get(currentView)?.view.team) out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.unlock, label: "Unlink team layout to edit", hint: "keep your own copy", action: "proto:unlink" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.snap, label: "Canvas lock on", hint: `${canvasLock ? "on now · " : ""}${bindingText("canvas-lock")}`, action: "proto:canvaslock:on" });
-    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free canvas · all views · Esc", action: "proto:canvaslock:off" });
+    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free pan and zoom, in place", action: "proto:canvaslock:off" });
+    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "All views", hint: "fit every view · Esc", action: "proto:overview" });
     if (activeWin?.model.kind === "terminal") {
       out.push({ group: "Canvas", glyph: "▥", icon: ICONS.splitRight, label: "Split right", hint: `new window beside · ${bindingText("split-right")}`, action: "proto:split:right" });
       out.push({ group: "Canvas", glyph: "▤", icon: ICONS.splitDown, label: "Split down", hint: `new window below · ${bindingText("split-down")}`, action: "proto:split:down" });
@@ -1939,7 +1943,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const [, kind, value] = action.split(":");
     const source = (event as CustomEvent<{ source?: string }>).detail?.source;
     if (kind === "view" && value) { if (source === "keyboard") keyFlight(() => flyView(value as ViewId)); else flyView(value as ViewId); }
-    else if (kind === "overview") setCanvasLock(false);
+    else if (kind === "overview") showOverview();
     else if (kind === "settings") openSettings(value ?? "appearance");
     else if (kind === "devicechip") showContinueChip();
     else if (kind === "share") void openShare();
@@ -1965,7 +1969,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     { id: "split-down", label: "Split down", keys: "", combo: isMacPlatform() ? { code: "KeyD", mod: true, shift: true } : { code: "KeyD", mod: true, shift: true, alt: true } },
     { id: "next-window", label: "Next window", keys: "", combo: { code: "ArrowRight", mod: true, shift: true } },
     { id: "previous-window", label: "Previous window", keys: "", combo: { code: "ArrowLeft", mod: true, shift: true } },
-    { id: "overview", label: "Canvas lock off (all views)", keys: "Esc" },
+    { id: "overview", label: "All views (overview)", keys: "Esc" },
     { id: "pan", label: "Next window or column", keys: "Scroll" },
     { id: "views", label: "Go to view 1 to 3", keys: { mac: "⌘1–3", other: "Ctrl+1–3" } },
   ] });
@@ -1983,7 +1987,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     if (e.key !== "Escape" || e.defaultPrevented || stage.querySelector(".palette:not([hidden])") || document.querySelector(".ui-confirm-tip[data-open='true']")) return;
     if (isTypingTarget(e.target)) return;
     if (float && !float.expanding) { closeFloat(); return; }
-    setCanvasLock(false);
+    showOverview();
   }, { signal });
   // Every jump is the same camera spring: Command or Ctrl with 1 to 9.
   window.addEventListener("keydown", (e) => {
@@ -2038,7 +2042,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     { id: "previous", label: "Previous window", icon: ICONS.previous, onSelect: () => { if (!inputLock) stepOrder(-1); } },
     { id: "next", label: "Next window", icon: ICONS.next, onSelect: () => { if (!inputLock) stepOrder(1); } },
     { id: "canvas-lock", label: "Canvas lock", icon: ICONS.snap, pressed: true, onSelect: () => { if (!inputLock) setCanvasLock(!canvasLock); } },
-    { id: "overview", label: "All views", icon: ICONS.overview, onSelect: () => { if (!inputLock) setCanvasLock(false); } },
+    { id: "overview", label: "All views", icon: ICONS.overview, onSelect: () => { if (!inputLock) showOverview(); } },
     { id: "input-lock", label: "Input lock", icon: ICONS.lock, onSelect: toggleInputLock },
     { id: "split-right", label: "Split right", icon: ICONS.splitRight, onSelect: () => { if (activeWin?.model.kind === "terminal") void splitWindow(activeWin, "right"); } },
     { id: "split-down", label: "Split down", icon: ICONS.splitDown, onSelect: () => { if (activeWin?.model.kind === "terminal") void splitWindow(activeWin, "down"); } },
@@ -2370,7 +2374,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     views: () => [...clusters.values()].map((c) => ({ id: c.view.id, name: c.view.name, team: Boolean(c.view.team), x: c.x, y: c.y, w: boxOf(c.view, metrics).w, h: boxOf(c.view, metrics).h, windows: [...c.wins.keys()] })),
     grants: () => grants.map((g) => ({ ...g })),
     flyView: (id: ViewId) => flyView(id),
-    overview: () => setCanvasLock(false),
+    overview: () => showOverview(),
     openSession,
     openSettings,
     showContinueChip,
