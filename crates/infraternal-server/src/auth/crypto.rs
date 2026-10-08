@@ -21,9 +21,11 @@ pub(super) fn prf_salt(user: Option<&str>) -> String {
 pub(super) fn constant_prf_input() -> String {
     B64.encode(Sha256::digest(b"infraternal/keywrap/prf/v3"))
 }
+// Capacity is account/version independent and retryable. Exhaustion is never
+// reported as a credential denial. Only independent verifier material is admitted.
 static ARGON_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 pub(super) async fn recovery_hash(words: String) -> Result<String> {
-    let permit = ARGON_SLOTS.try_acquire().map_err(|_| Error::Denied)?;
+    let permit = ARGON_SLOTS.try_acquire().map_err(|_| Error::Throttled)?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let salt =
@@ -36,8 +38,9 @@ pub(super) async fn recovery_hash(words: String) -> Result<String> {
     .await
     .map_err(|_| Error::Invalid)?
 }
+#[cfg(test)]
 pub(super) async fn verify_recovery(words: String, stored: String) -> Result<()> {
-    let permit = ARGON_SLOTS.try_acquire().map_err(|_| Error::Denied)?;
+    let permit = ARGON_SLOTS.try_acquire().map_err(|_| Error::Throttled)?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mnemonic = bip39::Mnemonic::parse_in(bip39::Language::English, &words)
@@ -52,4 +55,60 @@ pub(super) async fn verify_recovery(words: String, stored: String) -> Result<()>
     })
     .await
     .map_err(|_| Error::Denied)?
+}
+
+/// Verify the domain-separated browser authentication secret, never a mnemonic or wrap key.
+pub(super) async fn verify_secret(secret: String, stored: String) -> Result<()> {
+    valid_secret(&secret)?;
+    let permit = ARGON_SLOTS.try_acquire().map_err(|_| Error::Throttled)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let hash = PasswordHash::new(&stored).map_err(|_| Error::Denied)?;
+        Argon2::default()
+            .verify_password(secret.as_bytes(), &hash)
+            .map_err(|_| Error::Denied)
+    })
+    .await
+    .map_err(|_| Error::Denied)?
+}
+
+pub(super) fn valid_secret(secret: &str) -> Result<()> {
+    let bytes = B64.decode(secret).map_err(|_| Error::Denied)?;
+    if bytes.len() != 32 || B64.encode(bytes) != secret {
+        return Err(Error::Denied);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod verifier_tests {
+    use super::*;
+    #[tokio::test]
+    async fn recovery_capacity_denial_is_not_a_legacy_credential_signal() {
+        let _guard = super::super::tests::SERIAL.lock().await;
+        let secret = B64.encode(rand::random::<[u8; 32]>());
+        let stored = recovery_hash(secret.clone()).await.unwrap();
+        let _slots = ARGON_SLOTS.acquire_many(2).await.unwrap();
+        // A 401 makes an explicitly selected older-key browser try phrase migration.
+        // Global capacity is independent of account/version and must be retryable 429.
+        assert!(matches!(
+            verify_secret(secret.clone(), stored).await,
+            Err(Error::Throttled)
+        ));
+        assert!(matches!(recovery_hash(secret).await, Err(Error::Throttled)));
+    }
+
+    #[tokio::test]
+    async fn browser_secret_hashing_is_canonical_and_bounded() {
+        let _guard = super::super::tests::SERIAL.lock().await;
+        let secret = B64.encode(rand::random::<[u8; 32]>());
+        let stored = recovery_hash(secret.clone()).await.unwrap();
+        assert!(verify_secret(secret, stored.clone()).await.is_ok());
+        assert!(
+            verify_secret(B64.encode(rand::random::<[u8; 32]>()), stored.clone())
+                .await
+                .is_err()
+        );
+        assert!(verify_secret("not-a-secret".into(), stored).await.is_err());
+    }
 }

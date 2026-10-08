@@ -973,3 +973,74 @@ mod tests {
         assert!(validate_config(&config).is_err());
     }
 }
+
+#[cfg(test)]
+mod reviewer_admission {
+    //! Independent production middleware checks for recovery source policy.
+    use super::*;
+    use tower::ServiceExt;
+    async fn request(app: &Router, action: &str, forwarded: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/auth/{action}"))
+                    .header("x-forwarded-for", forwarded)
+                    .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 5000))))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+    #[tokio::test]
+    async fn reviewer_recovery_source_limit_covers_all_routes_without_forwarding_bypass() {
+        let policy = SourceAdmission {
+            behind_proxy: false,
+            trusted_proxies: Vec::new(),
+            buckets: Arc::default(),
+        };
+        let app = Router::new()
+            .route(
+                "/auth/{action}",
+                axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(from_fn_with_state(policy, source_admission));
+        for _ in 0..30 {
+            assert_eq!(
+                request(&app, "recovery-resume", "198.51.100.1").await,
+                StatusCode::NO_CONTENT
+            );
+        }
+        for action in [
+            "recovery-start",
+            "recovery-resume",
+            "recovery-rotate",
+            "recovery-ready",
+            "recovery-cancel",
+        ] {
+            assert_eq!(
+                request(&app, action, "198.51.100.2").await,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+        }
+        for _ in 0..10 {
+            assert_eq!(
+                request(&app, "device-redeem", "198.51.100.2").await,
+                StatusCode::NO_CONTENT
+            );
+        }
+        assert_eq!(
+            request(&app, "device-start", "198.51.100.3").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            request(&app, "logout", "198.51.100.3").await,
+            StatusCode::NO_CONTENT
+        );
+        println!(
+            "REVIEW production source admission: 30 browser / 10 device, five recovery actions covered, untrusted XFF cannot reset budget, logout exempt"
+        );
+    }
+}

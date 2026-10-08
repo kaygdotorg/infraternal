@@ -8,6 +8,8 @@ export declare class CanvasRenderer {
     private theme;
     private themeBackgroundRgb;
     private devicePixelRatio;
+    private lineHeightFactor;
+    private naturalCellWidth;
     private metrics;
     private palette;
     private cursorVisible;
@@ -27,6 +29,8 @@ export declare class CanvasRenderer {
      * Remeasure font metrics (call after font loads or changes)
      */
     remeasureFont(): void;
+    /** Set the line-height multiple of the font's ascent and descent. */
+    setLineHeightFactor(factor: number): void;
     private rgbToCSS;
     /** Parses only opaque hex colors so skipping a fill cannot change alpha compositing. */
     private parseOpaqueHexColor;
@@ -1025,6 +1029,7 @@ export declare interface ITerminalOptions {
     scrollback?: number;
     fontSize?: number;
     fontFamily?: string;
+    lineHeightFactor?: number;
     allowTransparency?: boolean;
     convertEol?: boolean;
     disableStdin?: boolean;
@@ -1424,6 +1429,7 @@ export declare class OSC8LinkProvider implements ILinkProvider {
 export declare interface RendererOptions {
     fontSize?: number;
     fontFamily?: string;
+    lineHeightFactor?: number;
     cursorStyle?: 'block' | 'underline' | 'bar';
     cursorBlink?: boolean;
     theme?: ITheme;

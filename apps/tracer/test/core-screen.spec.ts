@@ -39,7 +39,7 @@ async function saveFontComparison(
     img{display:block;width:${width}px;height:${height}px}
   </style></head><body><main>
     <figure><figcaption>Geist Sans · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${sans.toString("base64")}"></figure>
-    <figure><figcaption>Geist Mono · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${mono.toString("base64")}"></figure>
+    <figure><figcaption>Maple Mono NF · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${mono.toString("base64")}"></figure>
   </main></body></html>`);
   await page.locator("img").evaluateAll((images) => Promise.all(images.map((image) => (image as HTMLImageElement).decode())));
   const path = resolve(process.cwd(), "test-results", "core-screen", `${name}-comparison.png`);
@@ -81,11 +81,12 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     const material = await page.evaluate(() => {
       const root = getComputedStyle(document.documentElement);
       const stage = document.querySelector<HTMLElement>("#terminal-screen")!;
-      const layers = [".icon-btn", ".capsule"];
+      const layers = ["#sidebar-toggle", ".capsule"];
       if (getComputedStyle(document.querySelector<HTMLElement>(".tabs")!).display !== "none") layers.push(".tab-add");
       if (getComputedStyle(document.querySelector<HTMLElement>(".keybar")!).display !== "none") layers.push(".keytray");
       return {
         root: root.getPropertyValue("--overlay").trim(),
+        rootPanel: root.getPropertyValue("--overlay-panel").trim(),
         rootLine: root.getPropertyValue("--overlay-line").trim(),
         rootShadow: root.getPropertyValue("--shadow").trim(),
         stage: getComputedStyle(stage).getPropertyValue("--overlay").trim(),
@@ -120,7 +121,8 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
       const style = getComputedStyle(element);
       return { background: style.backgroundColor, line: style.borderTopColor, shadow: style.boxShadow };
     });
-    expect(cssChannels(sidebarMaterial.background)).toEqual(cssChannels(material.root));
+    // The sidebar is a large floating surface: the thinner shared panel material, not the pill one.
+    expect(cssChannels(sidebarMaterial.background)).toEqual(cssChannels(material.rootPanel));
     expect(cssChannels(sidebarMaterial.line)).toEqual(cssChannels(material.rootLine));
     expect(sidebarMaterial.shadow).toBe(material.layers[0]!.shadow);
     paths.push(await saveScreenshot(page, testInfo, `${prefix}-sidebar-open`));
@@ -163,7 +165,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   await expect(page.locator(".tabs .tab-add")).toBeVisible();
   await expect(page.locator("#tree")).not.toContainText(/static example|name unavailable|not available yet|not connected/i);
   await expect(page.locator(".tabs")).toBeVisible();
-  expect(await page.locator(".pane-card").evaluate((element) => getComputedStyle(element).backdropFilter)).toBe("none");
+  expect(await page.locator("#terminal-host").locator("xpath=..").evaluate((element) => getComputedStyle(element).backdropFilter)).toBe("none");
   await expect(page.locator(".terminal-screen")).not.toContainText(/static example|STATIC|name unavailable|not available yet|not connected/i);
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"))).toContain("blob:");
   await expect.poll(() => backdropWorkers.length).toBe(1);
@@ -259,11 +261,11 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
       const stage = document.querySelector<HTMLElement>("#terminal-screen")!;
       return {
         family: getComputedStyle(stage).fontFamily,
-        selectedFaceLoaded: document.fonts.check(document.documentElement.dataset.uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"'),
+        selectedFaceLoaded: document.fonts.check(document.documentElement.dataset.uiFont === "mono" ? '450 13px "Maple Mono NF"' : '450 14px "Geist Sans"'),
         stored: localStorage.getItem("tracer.ui-font"),
       };
     });
-    expect(typography.family).toContain(font === "mono" ? "Geist Mono" : "Geist Sans");
+    expect(typography.family).toContain(font === "mono" ? "Maple Mono NF" : "Geist Sans");
     expect(typography.selectedFaceLoaded).toBe(true);
     expect(typography.stored).toBe(font);
 
@@ -362,7 +364,7 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
     await waitForAttached(storedPreferencePage);
     await expect(storedPreferencePage.locator("html")).toHaveAttribute("data-ui-font", "mono");
     const storedFamily = await storedPreferencePage.locator("#terminal-screen").evaluate((stage) => getComputedStyle(stage).fontFamily);
-    expect(storedFamily).toContain("Geist Mono");
+    expect(storedFamily).toContain("Maple Mono NF");
   } finally {
     await storedPreferenceContext.close();
   }
@@ -382,7 +384,7 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
     await waitForAttached(blockedStoragePage);
     await expect(blockedStoragePage.locator("html")).toHaveAttribute("data-ui-font", "mono");
     const blockedFamily = await blockedStoragePage.locator("#terminal-screen").evaluate((stage) => getComputedStyle(stage).fontFamily);
-    expect(blockedFamily).toContain("Geist Mono");
+    expect(blockedFamily).toContain("Maple Mono NF");
   } finally {
     await blockedStorageContext.close();
   }

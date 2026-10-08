@@ -4,6 +4,7 @@ import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
+import { recoveryUiEnabled } from "./recovery-ui";
 
 const ROOT = document.documentElement;
 const THEME_COLOR = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
@@ -13,6 +14,8 @@ export interface CoreScreenOptions {
   hostName: string;
   mockMode: boolean;
   probeMode: boolean;
+  onRecovery?: () => void;
+  onCancelRecovery?: () => Promise<void>;
 }
 
 export interface CoreScreen {
@@ -24,6 +27,7 @@ export interface CoreScreen {
   bindTerminal(client: TerminalClient): void;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
+  setRecoveryPending(readyAt: number | undefined): void;
   setScrolled(scrolled: boolean): void;
   onInputActivity(): void;
   dispose(): void;
@@ -51,32 +55,40 @@ const SCREEN = `
   <section class="terminal-screen" id="terminal-screen" aria-label="Terminal">
     <div class="backdrop" aria-hidden="true"></div>
     <div class="panes" id="panes">
-      <section class="pane-card" aria-label="Current terminal pane">
-        <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal" tabindex="0"></div>
+      <section class="ui-window pane-card" aria-label="Current terminal pane">
+        <div class="terminal-host" id="terminal-host" role="application" aria-label="Remote terminal" tabindex="0" data-captures-keys></div>
       </section>
     </div>
+    <!-- The one sidebar toggle. It lives outside the top bar so it can travel into the sidebar's
+         header when the sidebar opens (see .sidebar-toggle in style.css); a spacer keeps its slot. -->
+    <button class="ui-pill ui-pill-icon sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false" aria-controls="sidebar">${SVG.menu}</button>
     <header class="top" aria-label="Terminal controls">
-      <button class="icon-btn" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false">${SVG.menu}</button>
-      <button class="capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
+      <span class="top-spacer" aria-hidden="true"></span>
+      <button class="ui-pill capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
         <span class="capsule-session">SSH shell</span><span class="capsule-rtt" id="rtt" aria-label="Round trip">··</span>
         <kbd class="capsule-kbd">⌘K</kbd>
       </button>
       <nav class="tabs" aria-label="Other sessions">
-        <button class="tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
+        <button class="ui-pill ui-pill-icon tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
       </nav>
     </header>
-    <aside class="sidebar" id="sidebar" aria-label="Hosts" hidden>
+    <aside class="ui-panel sidebar" id="sidebar" aria-label="Hosts" hidden>
       <div class="sidebar-head"><span class="sidebar-title">Hosts</span></div>
       <div id="tree"></div>
     </aside>
     <div class="palette-scrim" id="scrim" hidden></div>
     <section class="palette" id="palette" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
-      <div class="palette-input">${SVG.search}<input id="palette-input" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
+      <div class="palette-input">${SVG.search}<input id="palette-input" role="searchbox" aria-controls="palette-results" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
     </section>
+    ${recoveryUiEnabled() ? `<section class="ui-window recovery-notice" id="recovery-notice" aria-label="Pending account recovery" hidden>
+      <p id="recovery-notice-time"></p><button class="ui-pill" id="recovery-cancel" type="button">Cancel recovery</button>
+      <p id="recovery-cancel-error" role="alert"></p>
+    </section>
+    <p class="ui-window recovery-toast" id="recovery-toast" role="status" hidden></p>` : ""}
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
       <div id="keytray" class="keytray" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
@@ -147,6 +159,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const scrim = get<HTMLElement>("#scrim");
   const paletteInput = get<HTMLInputElement>("#palette-input");
   const paletteResults = get<HTMLElement>("#palette-results");
+  const panes = get<HTMLElement>("#panes");
   const keybar = get<HTMLElement>("#keybar");
   const keytray = get<HTMLElement>(".keytray");
   const keyblur = get<HTMLElement>(".keyblur");
@@ -167,7 +180,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
 
   const params = new URLSearchParams(location.search);
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
-  let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "ink" : "paper");
+  let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "mocha" : "latte");
   let background = params.get("bg") === "mesh" || params.get("bg") === "none"
     ? params.get("bg")!
     : (readLocal("tracer.background") === "mesh" ? "mesh" : "none");
@@ -204,7 +217,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     void backdropModule?.then((renderer) => renderer.releaseBackdrop());
   };
 
-  const applyLook = (instant = false): void => {
+  const applyLook = (instant = false): Promise<void> => {
     const active = THEMES[currentThemeId]!;
     stage.toggleAttribute("data-no-motion", instant);
     ROOT.dataset.theme = currentThemeId;
@@ -214,10 +227,22 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     applyTheme(active, ROOT);
     THEME_COLOR?.setAttribute("content", active.bg);
     client?.setTheme(terminalTheme(active, background === "mesh"));
-    if (background === "mesh") void paintMesh();
-    else releaseMesh();
+    if (background === "mesh") return paintMesh();
+    releaseMesh();
+    return Promise.resolve();
   };
-  applyLook();
+  void applyLook();
+
+  // Theme and background picks swap every token in one step, with no animation. Measured
+  // at 1440x900 DPR 2: a view-transition crossfade froze rendering for 80-220 ms while it
+  // captured two full-screen snapshots, and the old per-element fades repainted every
+  // blurred surface per frame; the instant swap costs one repaint (p95 16.7-33 ms headless).
+  // The palette closes in the same step so it never fades over a repainting page.
+  const swapLook = (): void => {
+    setPalette(false, "keyboard");
+    void applyLook(true);
+  };
+
 
   const entries: PaletteEntry[] = [
     { group: "Sessions", glyph: "›_", label: "SSH shell", hint: hostName, action: "session:current" },
@@ -227,26 +252,82 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     })),
     { group: "Background", glyph: "▦", label: "Mesh from the theme", hint: "one still · no idle work", action: "bg:mesh" },
     { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
+    ...(recoveryUiEnabled() && options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
   ];
+  const paletteSearchText = new Map(entries.map((entry) => [
+    entry,
+    `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase(),
+  ]));
+  // Normalize IDs once so typing never sanitizes every matching result.
+  const paletteOptionIds = new Map(entries.map((entry, index) => [
+    entry,
+    `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`,
+  ]));
+  const paletteGroupIds = new Map([...new Set(entries.map((entry) => entry.group))].map((group) => [
+    group,
+    `palette-group-${group.toLocaleLowerCase().replaceAll(" ", "-")}`,
+  ]));
   let visibleEntries: PaletteEntry[] = [];
+  let visibleOptions: HTMLButtonElement[] = [];
   let selected = 0;
+  const headingByGroup = new Map<string, HTMLDivElement>();
+
+  const keepPaletteOptionVisible = (option: HTMLButtonElement, index: number): void => {
+    option.scrollIntoView({ block: "nearest", behavior: "instant" });
+    const entry = visibleEntries[index];
+    if (entry && visibleEntries[index - 1]?.group !== entry.group) {
+      headingByGroup.get(entry.group)?.scrollIntoView({ block: "nearest", behavior: "instant" });
+    }
+  };
+
+  const selectPaletteOption = (nextIndex: number): void => {
+    if (!visibleOptions.length) return;
+    const boundedIndex = Math.max(0, Math.min(visibleOptions.length - 1, nextIndex));
+    const previousOption = visibleOptions[selected];
+    const nextOption = visibleOptions[boundedIndex];
+    if (!nextOption) return;
+    if (previousOption !== nextOption) {
+      previousOption?.setAttribute("aria-selected", "false");
+      nextOption.setAttribute("aria-selected", "true");
+      selected = boundedIndex;
+    }
+    if (paletteInput.getAttribute("aria-activedescendant") !== nextOption.id) {
+      paletteInput.setAttribute("aria-activedescendant", nextOption.id);
+    }
+    keepPaletteOptionVisible(nextOption, boundedIndex);
+  };
+
+  const visiblePalettePageSize = (): number => {
+    const port = paletteResults.getBoundingClientRect();
+    const top = port.top + paletteResults.clientTop;
+    const bottom = top + paletteResults.clientHeight;
+    const visibleCount = visibleOptions.reduce((count, option) => {
+      const rect = option.getBoundingClientRect();
+      return rect.top >= top && rect.bottom <= bottom ? count + 1 : count;
+    }, 0);
+    return Math.max(1, visibleCount);
+  };
 
   const renderPalette = (query = ""): void => {
     const needle = query.trim().toLocaleLowerCase();
-    const filtered = entries.filter((entry) => `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase().includes(needle));
-    visibleEntries = filtered;
+    visibleEntries = entries.filter((entry) => paletteSearchText.get(entry)?.includes(needle) ?? false);
     selected = Math.min(selected, Math.max(0, visibleEntries.length - 1));
+    visibleOptions = [];
+    // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
     paletteResults.replaceChildren();
     let previousGroup = "";
-    filtered.forEach((entry, index) => {
+    visibleEntries.forEach((entry, index) => {
       if (entry.group !== previousGroup) {
         const heading = document.createElement("div");
+        heading.id = paletteGroupIds.get(entry.group)!;
         heading.className = "group-label";
         heading.textContent = entry.group;
+        headingByGroup.set(entry.group, heading);
         paletteResults.append(heading);
         previousGroup = entry.group;
       }
       const result = document.createElement("button");
+      result.id = paletteOptionIds.get(entry)!;
       result.type = "button";
       result.className = "result";
       result.setAttribute("role", "option");
@@ -267,9 +348,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       hint.className = "result-hint";
       hint.textContent = entry.hint;
       result.append(icon, label, hint);
+      visibleOptions.push(result);
       paletteResults.append(result);
     });
-    if (!filtered.length) {
+    const selectedOption = visibleOptions[selected];
+    if (selectedOption) {
+      if (paletteInput.getAttribute("aria-activedescendant") !== selectedOption.id) {
+        paletteInput.setAttribute("aria-activedescendant", selectedOption.id);
+      }
+    } else {
+      paletteInput.removeAttribute("aria-activedescendant");
+    }
+    if (!visibleEntries.length) {
       const empty = document.createElement("p");
       empty.className = "palette-empty";
       empty.textContent = "No matching hosts, sessions or actions.";
@@ -277,7 +367,31 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     }
   };
 
+  // Desktop docks the sidebar beside the windows instead of over them, so nothing under it
+  // becomes unreachable. The panes' left edge moves once (one terminal fit, no per-frame resize)
+  // and a FLIP translate on the compositor makes that single layout change read as a slide.
+  const dockedLayout = matchMedia("(hover: hover) and (pointer: fine) and (min-width: 1024px)");
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const dockPanes = (open: boolean, instant: boolean): void => {
+    const docked = open && dockedLayout.matches;
+    if ((stage.dataset.sidebar === "docked") === docked) return;
+    const before = panes.getBoundingClientRect().left;
+    stage.dataset.sidebar = docked ? "docked" : "";
+    if (instant || reducedMotion.matches) return;
+    const shift = before - panes.getBoundingClientRect().left;
+    panes.animate(
+      [{ transform: `translateX(${shift}px)` }, { transform: "translateX(0)" }],
+      { duration: 240, easing: "cubic-bezier(0.32, 0.72, 0, 1)" },
+    );
+  };
+
   const setSidebar = (open: boolean, instant = false): void => {
+    dockPanes(open, instant);
+    // The toggle travels between the top bar and the sidebar header on a transform transition.
+    sidebarToggle.classList.toggle("instant", instant);
+    stage.toggleAttribute("data-sidebar-open", open);
+    if (instant) window.setTimeout(() => sidebarToggle.classList.remove("instant"), 0);
+    else if (reducedMotion.matches) sidebarToggle.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
     sidebar.hidden = !open;
     sidebarToggle.setAttribute("aria-expanded", String(open));
     sidebarToggle.setAttribute("aria-label", open ? "Hide hosts" : "Show hosts");
@@ -288,12 +402,16 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer"): void => {
     palette.hidden = !open;
     scrim.hidden = !open;
-    palette.dataset.openKind = open ? source : "";
+    // The source of the last open or close decides its motion: keyboard is instant, pointer animates.
+    palette.dataset.openKind = source;
     if (open) {
       selected = 0;
       paletteInput.value = "";
+      paletteResults.scrollTop = 0;
       renderPalette();
       paletteInput.focus({ preventScroll: true });
+    } else {
+      paletteInput.removeAttribute("aria-activedescendant");
     }
   };
   const sidebarClick = (event: MouseEvent): void => setSidebar(sidebar.hidden, event.detail === 0);
@@ -334,8 +452,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   const systemThemeChange = (): void => {
     if (!themeId(params.get("theme")) && !themeId(readLocal("tracer.theme"))) {
-      currentThemeId = systemDark.matches ? "ink" : "paper";
-      applyLook();
+      currentThemeId = systemDark.matches ? "mocha" : "latte";
+      void applyLook();
     }
   };
   const viewportChange = (): void => {
@@ -351,12 +469,24 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   sidebarToggle.addEventListener("click", sidebarClick);
   capsule.addEventListener("click", capsuleClick);
   scrim.addEventListener("click", scrimClick);
-  paletteInput.addEventListener("input", () => { selected = 0; renderPalette(paletteInput.value); });
+  paletteInput.addEventListener("input", () => {
+    selected = 0;
+    renderPalette(paletteInput.value);
+  });
   paletteInput.addEventListener("keydown", (event) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       const delta = event.key === "ArrowDown" ? 1 : -1;
-      selected = Math.max(0, Math.min(visibleEntries.length - 1, selected + delta));
-      renderPalette(paletteInput.value);
+      selectPaletteOption(selected + delta);
+      event.preventDefault();
+    } else if (event.key === "Home") {
+      selectPaletteOption(0);
+      event.preventDefault();
+    } else if (event.key === "End") {
+      selectPaletteOption(visibleOptions.length - 1);
+      event.preventDefault();
+    } else if (event.key === "PageDown" || event.key === "PageUp") {
+      const delta = visiblePalettePageSize() * (event.key === "PageDown" ? 1 : -1);
+      selectPaletteOption(selected + delta);
       event.preventDefault();
     } else if (event.key === "Enter") {
       const entry = visibleEntries[selected];
@@ -370,12 +500,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (!(target instanceof Element)) return;
     const result = target.closest<HTMLButtonElement>(".result");
     if (!result) return;
-    runAction(result.dataset.action ?? "", "pointer");
-    setPalette(false, "pointer");
+    if (!runAction(result.dataset.action ?? "", "pointer")) setPalette(false, "pointer");
   });
   window.addEventListener("keydown", keydown, true);
   window.addEventListener("resize", resize);
   systemDark.addEventListener("change", systemThemeChange);
+  const dockedLayoutChange = (): void => dockPanes(!sidebar.hidden, true);
+  dockedLayout.addEventListener("change", dockedLayoutChange);
   window.visualViewport?.addEventListener("resize", viewportChange);
   window.visualViewport?.addEventListener("scroll", viewportChange);
   viewportChange();
@@ -503,21 +634,41 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   keybar.addEventListener("click", keybarClick);
   keytray.addEventListener("keydown", keybarKeydown);
 
-  function runAction(action: string, source: "keyboard" | "pointer"): void {
+  /** Runs a palette action; returns true when the action closed the palette itself. */
+  function runAction(action: string, source: "keyboard" | "pointer"): boolean {
     const [kind, value] = action.split(":");
-    if (kind === "theme" && themeId(value ?? null)) {
+    if (kind === "account" && value === "recovery") {
+      setPalette(false, source);
+      options.onRecovery?.();
+    } else if (kind === "theme" && themeId(value ?? null)) {
       currentThemeId = value!;
       writeLocal("tracer.theme", currentThemeId);
-      applyLook(source === "keyboard");
+      swapLook();
+      return true;
     } else if (kind === "bg" && (value === "mesh" || value === "none")) {
       background = value;
       writeLocal("tracer.background", value);
-      applyLook(source === "keyboard");
+      swapLook();
+      return true;
     } else if (kind === "session" || kind === "host") {
       terminalHost.focus({ preventScroll: true });
     }
+    return false;
   }
 
+  const recoveryNotice = stage.querySelector<HTMLElement>("#recovery-notice")!;
+  const recoveryToast = stage.querySelector<HTMLElement>("#recovery-toast")!;
+  const cancelRecovery = stage.querySelector<HTMLButtonElement>("#recovery-cancel")!;
+  let recoveryReady: number | undefined, recoveryToastTimer = 0;
+  const cancelClick = (): void => {
+    cancelRecovery.disabled = true;
+    const error = stage.querySelector<HTMLElement>("#recovery-cancel-error")!;
+    error.textContent = "";
+    void options.onCancelRecovery?.().catch(() => {
+      error.textContent = "Recovery could not be cancelled. Try again.";
+    }).finally(() => { cancelRecovery.disabled = false; });
+  };
+  cancelRecovery?.addEventListener("click", cancelClick);
   return {
     stage,
     terminalHost,
@@ -538,6 +689,23 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       dot.classList.toggle("connecting", !connected);
       stage.dataset.connected = String(connected);
     },
+    setRecoveryPending(readyAt) {
+      // Keep consuming session/socket state while unapproved presentation stays absent.
+      if (!recoveryUiEnabled()) return;
+      recoveryNotice.hidden = readyAt === undefined;
+      if (readyAt !== undefined) {
+        stage.querySelector<HTMLElement>("#recovery-notice-time")!.textContent = `Account recovery requested · Available ${new Date(readyAt * 1000).toLocaleString()}`;
+        if (recoveryReady !== readyAt) {
+          recoveryToast.textContent = "Recovery requested. You can cancel it from this device.";
+          recoveryToast.hidden = false;
+          window.clearTimeout(recoveryToastTimer);
+          recoveryToastTimer = window.setTimeout(() => { recoveryToast.hidden = true; }, 5000);
+        }
+      } else {
+        window.clearTimeout(recoveryToastTimer); recoveryToast.hidden = true;
+      }
+      recoveryReady = readyAt;
+    },
     setScrolled(scrolled) {
       // Scrollback belongs to the card; mobile input controls stay in place [#44].
       stage.dataset.scrolled = String(scrolled);
@@ -556,6 +724,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       keyblur.classList.remove("is-away");
     },
     dispose() {
+      window.clearTimeout(recoveryToastTimer);
+      cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
       sidebarToggle.removeEventListener("click", sidebarClick);
       capsule.removeEventListener("click", capsuleClick);
@@ -563,6 +733,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       window.removeEventListener("keydown", keydown, true);
       window.removeEventListener("resize", resize);
       systemDark.removeEventListener("change", systemThemeChange);
+      dockedLayout.removeEventListener("change", dockedLayoutChange);
       window.visualViewport?.removeEventListener("resize", viewportChange);
       window.visualViewport?.removeEventListener("scroll", viewportChange);
       keybar.removeEventListener("pointerdown", keybarPointerDown);

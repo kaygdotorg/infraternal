@@ -1,6 +1,7 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { terminalTouch } from "./terminal-touch";
+import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
@@ -17,6 +18,11 @@ const INPUT_FRAME_LIMIT = 16 * 1024;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
+/** The family declared in style.css; the fallback is metric-matched so a late face moves nothing. */
+const TERMINAL_FONT_NAME = "Maple Mono NF";
+const TERMINAL_FONT_FAMILY = `"${TERMINAL_FONT_NAME}", "Maple Mono NF Fallback", ui-monospace, monospace`;
+const TERMINAL_FONT_SIZE_DESKTOP = 14;
+const TERMINAL_FONT_SIZE_TOUCH = 13;
 const THEME_HISTORY_PROBE_ROWS = 10_000;
 const THEME_HISTORY_INDEXED_COLUMN = "theme-history-00000 | ".length;
 const THEME_HISTORY_TRUECOLOR_COLUMN = THEME_HISTORY_INDEXED_COLUMN + 4;
@@ -35,8 +41,17 @@ interface GhosttyActivityControls {
   cancelRenderLoop(): void;
   scrollbarOpacity: number;
   renderer?: {
+    remeasureFont(): void;
+    resize(cols: number, rows: number): void;
+    getMetrics(): { width: number; height: number; baseline: number };
     setCursorBlink(enabled: boolean): void;
     setTheme(theme: ITheme): void;
+    renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
+    renderCursor(x: number, y: number, line: unknown[] | null): void;
+    naturalCellWidth?: number;
+    ctx?: CanvasRenderingContext2D;
+    devicePixelRatio?: number;
+    theme?: { background?: string; foreground?: string; cursor?: string };
     render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown, scrollbarOpacity?: number): void;
   };
 }
@@ -84,7 +99,8 @@ export type TerminalTraceHop =
   | "decode"
   | "termWrite"
   | "writeCallback"
-  | "paint";
+  | "paint"
+  | "prediction";
 
 export interface TerminalConfig {
   host: HTMLElement;
@@ -98,11 +114,14 @@ export interface TerminalConfig {
   onConnectionChange?: (connected: boolean) => void;
   onScroll?: (scrolled: boolean) => void;
   onInputActivity?: () => void;
+  onRecoveryPending?: (readyAt: number | undefined) => void;
   traceMockServer?: boolean;
   /** Reattach this tab's owned session using a new writer after a page reload. */
   initialSessionId?: string;
   /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
   scrollbackLimit?: number;
+  /** Enables the explicit `?predict=1` opt-in; the production default remains off. */
+  predictiveEcho?: boolean;
 }
 
 interface ResumeCredentials {
@@ -197,6 +216,7 @@ export class TerminalClient {
   private sessionId: Uint8Array | undefined;
   private retryTimer = 0;
   private retryAttempt = 0;
+  private symbolFaceRequested = false;
   private outputWriteInFlight = false;
   private outputWriteLength = 0;
   private snapshotWriteInFlight = false;
@@ -218,11 +238,13 @@ export class TerminalClient {
   private lastPingAt = -Infinity;
   private renderIdleTimer = 0;
   private rendererCursorBlinking = false;
+  private predictionCursorHidden = false;
   private lastThemeColorsMs = 0;
   private lastThemeRenderMs = 0;
   private nextPingNonce = 0n;
   private readonly pendingPings = new Map<bigint, number>();
   private inputModifiers: InputModifiers = { ctrl: "off", alt: "off" };
+  private readonly prediction: PredictiveEcho | undefined;
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
   private readonly onViewportChange = (): void => this.syncVisualViewport();
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
@@ -236,6 +258,15 @@ export class TerminalClient {
     this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal());
     this.pauseTerminal(); // Ghostty opens with one live loop; the client owns its activity window.
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
+    this.prediction = config.predictiveEcho === true
+      ? new PredictiveEcho({
+        host: config.host,
+        optedIn: true,
+        getPosition: () => this.predictionPosition(),
+        onVisible: (sequence, at) => config.hooks?.onTrace?.(sequence, "prediction", at),
+        setHostCursorHidden: (hidden) => this.setPredictionCursorHidden(hidden),
+      })
+      : undefined;
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
     config.host.addEventListener("pointermove", this.onTerminalActivity, { passive: true });
     config.host.addEventListener("wheel", this.onTerminalActivity, { passive: true });
@@ -247,6 +278,7 @@ export class TerminalClient {
     window.visualViewport?.addEventListener("resize", this.onViewportChange);
     window.visualViewport?.addEventListener("scroll", this.onViewportChange);
     this.terminal.onResize(({ cols, rows }) => {
+      this.prediction?.layoutChanged();
       this.wakeTerminal();
       const rect = config.host.getBoundingClientRect();
       this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
@@ -255,6 +287,8 @@ export class TerminalClient {
     this.terminal.onData((data) => { this.wakeTerminal(); this.handleInput(data); });
     this.terminal.onScroll((offset) => {
       this.wakeTerminal();
+      if (offset !== 0) this.prediction?.unsafeScreen();
+      else this.prediction?.returnToLiveViewport();
       config.host.dataset.scrolled = String(offset !== 0);
       config.onScroll?.(offset !== 0);
     });
@@ -269,13 +303,17 @@ export class TerminalClient {
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
   }
 
-  /** Loads Geist and the WASM terminal once, then opens the one-session client. */
+  /**
+   * Loads the regular Maple Mono NF face and the WASM terminal once, then opens the
+   * one-session client. Only the regular face gates the first paint, because the cell
+   * grid is measured from it; italic, bold and Nerd Font faces load afterwards.
+   */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
-    await document.fonts.load('400 14px "Geist Mono"');
+    await document.fonts.load(`${TERMINAL_FONT_SIZE_DESKTOP}px "${TERMINAL_FONT_NAME}"`);
     await init();
-    return new TerminalClient(config, new Terminal({
-      fontFamily: '"Geist Mono", ui-monospace, monospace',
-      fontSize: matchMedia("(pointer: coarse)").matches ? 13 : 14,
+    const terminal = new Terminal({
+      fontFamily: TERMINAL_FONT_FAMILY,
+      fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
       cursorStyle: "bar",
       scrollback: config.scrollbackLimit ?? 10_000,
@@ -286,13 +324,37 @@ export class TerminalClient {
         cursorAccent: "#101113",
         selectionBackground: "#44485c",
       },
-    }));
+    });
+    const client = new TerminalClient(config, terminal);
+    client.remeasureFont();
+    client.keepLigaturesOff();
+    client.loadStyledFaces();
+    return client;
   }
 
   get isConnected(): boolean { return this.attached; }
   get outputSequence(): bigint { return this.lastOutSeq; }
   get inputSequence(): bigint { return this.nextInSeq; }
   get inputAcknowledged(): bigint { return this.ackedInSeq; }
+  get predictiveEchoState(): PredictiveEchoState {
+    return this.prediction?.state ?? {
+      optedIn: false,
+      enabled: false,
+      roundTripMs: undefined,
+      pendingText: "",
+      muted: false,
+      mispredictions: 0,
+      fallbacks: {},
+      inputCostMs: [],
+      overlay: undefined,
+      reason: "flag-off",
+    };
+  }
+
+  /** Available only through the mock-page hook for paired on/off measurements. */
+  setPredictiveEchoForTest(enabled: boolean): void {
+    this.prediction?.setOptedIn(enabled);
+  }
 
   /** Exposes renderer allocation counters only through the explicit test-double hook. */
   get rendererMetrics(): {
@@ -300,9 +362,13 @@ export class TerminalClient {
     rows: number;
     cellWidth: number;
     cellHeight: number;
+    naturalCellWidth: number;
     configuredScrollback: number;
     cursorX: number;
     cursorY: number;
+    renderCursorX: number;
+    renderCursorY: number;
+    renderCursorVisible: boolean;
     themeColorsMs: number;
     themeRenderMs: number;
     terminalColors?: { background: { r: number; g: number; b: number }; foreground: { r: number; g: number; b: number } };
@@ -310,21 +376,28 @@ export class TerminalClient {
     outputSequence: string;
     scrollbackRows: number;
     viewportY: number;
+    cursorVisible: boolean;
     fontSize: number;
     wasmMemoryBytes: number;
   } {
     const wasmTerm = this.terminal.wasmTerm;
     const memory = (wasmTerm as unknown as { memory?: WebAssembly.Memory } | undefined)?.memory;
+    const renderer = this.ghostty.renderer as unknown as { naturalCellWidth?: number } | undefined;
     const colors = wasmTerm?.getColors();
     const cell = this.cellMetrics();
+    const cursor = wasmTerm?.getCursor();
     return {
       cols: this.terminal.cols,
       rows: this.terminal.rows,
       cellWidth: cell.width,
       cellHeight: cell.height,
+      naturalCellWidth: renderer?.naturalCellWidth ?? cell.width,
       configuredScrollback: this.terminal.options.scrollback ?? 10_000,
-      cursorX: this.terminal.buffer.active.cursorX,
-      cursorY: this.terminal.buffer.active.cursorY,
+      cursorX: cursor?.x ?? 0,
+      cursorY: cursor?.y ?? 0,
+      renderCursorX: cursor?.x ?? 0,
+      renderCursorY: cursor?.y ?? 0,
+      renderCursorVisible: Boolean(cursor?.visible),
       themeColorsMs: this.lastThemeColorsMs,
       themeRenderMs: this.lastThemeRenderMs,
       ...(colors ? { terminalColors: { background: colors.background, foreground: colors.foreground } } : {}),
@@ -332,6 +405,7 @@ export class TerminalClient {
       outputSequence: this.lastOutSeq.toString(),
       scrollbackRows: wasmTerm?.getScrollbackLength() ?? 0,
       viewportY: this.terminal.viewportY,
+      cursorVisible: Boolean(cursor?.visible),
       fontSize: this.terminal.options.fontSize,
       wasmMemoryBytes: memory?.buffer.byteLength ?? 0,
     };
@@ -339,14 +413,42 @@ export class TerminalClient {
 
   /** Returns bounded renderer text for the explicitly marked test-double page. */
   readScreenText(): string {
-    const buffer = this.terminal.buffer.active;
-    const first = Math.max(0, buffer.length - this.terminal.rows - Math.max(10_000, this.terminal.options.scrollback));
-    const lines: string[] = [];
-    for (let row = first; row < buffer.length; row += 1) {
-      const line = buffer.getLine(row);
-      if (line) lines.push(line.translateToString(true));
+    const maxRows = Math.max(10_000, this.terminal.options.scrollback ?? 10_000);
+    return terminalBufferText(this.terminal, maxRows);
+  }
+
+  /** Replays test-double output in a second Ghostty instance for differential checks. */
+  async baselineScreenText(bytes: Uint8Array): Promise<string> {
+    if (bytes.byteLength > 64 * 1024) throw new Error("differential replay exceeds its test bound");
+    const rect = this.config.host.getBoundingClientRect();
+    const holder = document.createElement("div");
+    Object.assign(holder.style, {
+      position: "fixed",
+      left: `${-Math.ceil(rect.width) - 100}px`,
+      top: "0",
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+      visibility: "hidden",
+      pointerEvents: "none",
+    });
+    document.body.append(holder);
+    const baseline = new Terminal({
+      fontFamily: this.terminal.options.fontFamily,
+      fontSize: this.terminal.options.fontSize,
+      cursorBlink: false,
+      cursorStyle: this.terminal.options.cursorStyle,
+      scrollback: this.terminal.options.scrollback,
+      theme: this.terminal.options.theme,
+    });
+    try {
+      baseline.open(holder);
+      baseline.resize(this.terminal.cols, this.terminal.rows);
+      await new Promise<void>((resolve) => baseline.write(bytes, resolve));
+      return terminalBufferText(baseline, Math.max(10_000, baseline.options.scrollback ?? 10_000));
+    } finally {
+      baseline.dispose();
+      holder.remove();
     }
-    return lines.join("\n");
   }
 
   /** Reads indexed and literal RGB probe cells on the browser fixture's history rows. */
@@ -403,6 +505,13 @@ export class TerminalClient {
     this.terminal.input(data, true);
   }
 
+  /** Seeds a visible shell prompt in the mock page without advancing wire sequences. */
+  async seedPromptForTest(): Promise<void> {
+    if (this.closed) throw new Error("terminal is closed");
+    await new Promise<void>((resolve) => this.terminal.write("$ ", resolve));
+    this.prediction?.refresh();
+  }
+
   /** Focuses Ghostty's actual input host so the mobile keyboard can stay open. */
   focus(): void {
     this.terminal.focus();
@@ -444,6 +553,8 @@ export class TerminalClient {
     startedAt = performance.now();
     renderer?.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
     this.lastThemeRenderMs = performance.now() - startedAt;
+    this.prediction?.rendererPainted();
+    this.prediction?.refresh();
   }
 
   /** Forces a WebSocket close for the opt-in resume probe. */
@@ -463,6 +574,7 @@ export class TerminalClient {
     this.config.onConnectionChange?.(false);
     window.clearTimeout(this.retryTimer);
     this.stopPings();
+    this.prediction?.dispose();
     this.resizeObserver.disconnect();
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
@@ -556,6 +668,7 @@ export class TerminalClient {
         if (frame.version !== VERSION) this.protocolFailure("server uses an unsupported wire version");
         return;
       case "Welcome":
+        this.sendFrame(CONTROL_STREAM, { type: "Subscribe", subId: 45, filterJson: encoder.encode(JSON.stringify({ topic: "auth.recovery" })) });
         this.resumeCredentials?.connectionId.fill(0);
         this.resumeCredentials?.resumeToken.fill(0);
         this.resumeCredentials = {
@@ -589,6 +702,16 @@ export class TerminalClient {
         } catch {
           this.protocolFailure("terminal.open returned an invalid session id");
         }
+        return;
+      case "Event":
+        if (frame.subId !== 45) return;
+        try {
+          const event = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.eventJson)) as unknown);
+          if (event.topic !== "auth.recovery") throw new Error("unexpected recovery topic");
+          const readyAt = event.pending === null ? undefined : asRecord(event.pending).ready_at;
+          if (event.pending !== null && (typeof readyAt !== "number" || !Number.isSafeInteger(readyAt) || readyAt < 0)) throw new Error("invalid recovery deadline");
+          this.config.onRecoveryPending?.(readyAt as number | undefined);
+        } catch { this.protocolFailure("server returned invalid recovery state"); }
         return;
       case "Ping":
         this.sendFrame(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
@@ -758,6 +881,10 @@ export class TerminalClient {
         offset += length;
       }
     }
+    // Predict after the bytes are on the socket: prediction never delays the send. The overlay is still
+    // drawn in this same task, so no host echo can be processed (and painted) before the prediction is.
+    // `encoded` may alias inputScratch, which the queue has already copied; prediction copies what it keeps.
+    this.prediction?.input(data, firstSequence, encoded, this.predictionSafe());
     if (this.inputQueue.free < INPUT_RESUME_GUARD) {
       this.pauseInput("Input paused: the bounded reconnect buffer is nearly full.");
     }
@@ -834,7 +961,9 @@ export class TerminalClient {
       const snapshot = this.pendingSnapshot;
       this.pendingSnapshot = undefined;
       this.snapshotWriteInFlight = true;
+      this.prediction?.resetForSnapshot();
       this.terminal.reset();
+      this.requestSymbolsIfNeeded(snapshot.bytes);
       this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
       this.terminal.write(snapshot.bytes, () => {
         const callbackAt = performance.now();
@@ -861,6 +990,7 @@ export class TerminalClient {
       }
       this.outputWriteInFlight = true;
       this.outputWriteLength = region.byteLength;
+      this.requestSymbolsIfNeeded(region);
       const writeSequence = this.lastOutSeq;
       this.traceRange(writeSequence, region.byteLength, "termWrite", performance.now());
       this.terminal.write(region, () => {
@@ -871,6 +1001,11 @@ export class TerminalClient {
         const consumed = this.outputWriteLength;
         this.lastOutSeq += BigInt(consumed);
         this.traceRange(writeSequence, consumed, "paint", paintedAt);
+        if (this.predictionScreenUnsafe()) this.prediction?.unsafeScreen();
+        else {
+          this.prediction?.rendererPainted();
+          this.prediction?.paintedOutput();
+        }
         this.config.hooks?.onPaintedOutput?.(region.subarray(0, consumed), paintedAt, writeSequence);
         this.outputQueue.consume(consumed);
         this.outputWriteLength = 0;
@@ -879,6 +1014,10 @@ export class TerminalClient {
         this.drainOutput();
         this.tryAttach();
       });
+      // The terminal state includes these bytes now; only their paint is a frame away. Reconcile the
+      // prediction against them at once, so a key typed in that frame is placed from a consistent cursor.
+      if (this.predictionUnsafe()) this.prediction?.unsafeScreen();
+      else this.prediction?.hostWritten(region.subarray(0, region.byteLength));
       return;
     }
     this.tryAttach();
@@ -919,17 +1058,269 @@ export class TerminalClient {
     });
   }
 
-  private cellMetrics(): { width: number; height: number } {
-    const renderer = (this.terminal as unknown as { renderer?: { metrics?: { width: number; height: number } } }).renderer?.metrics;
-    if (renderer && renderer.width > 0 && renderer.height > 0) return renderer;
-    const context = document.createElement("canvas").getContext("2d");
-    if (!context) return { width: 8, height: 18 };
-    context.font = `400 ${this.terminal.options.fontSize}px ${this.terminal.options.fontFamily}`;
-    const measured = context.measureText("W");
+  private cellMetrics(): { width: number; height: number; naturalWidth: number; baseline: number } {
+    const metrics = this.ghostty.renderer?.getMetrics();
+    if (!metrics || metrics.width <= 0 || metrics.height <= 0) {
+      throw new Error("terminal renderer cell metrics are unavailable");
+    }
     return {
-      width: measured.width || 8,
-      height: (measured.fontBoundingBoxAscent ?? this.terminal.options.fontSize) + (measured.fontBoundingBoxDescent ?? 3),
+      width: metrics.width,
+      height: metrics.height,
+      naturalWidth: this.ghostty.renderer?.naturalCellWidth ?? metrics.width,
+      baseline: metrics.baseline,
     };
+  }
+
+  /**
+   * Terminal ligatures stay off, on purpose (D175, measured in test/font-maple.spec.ts).
+   *
+   * The renderer draws a run of plain ASCII cells with one fillText and a canvas
+   * letterSpacing that stretches the font's natural advance onto the device-pixel cell
+   * (cell = round(advance x dpr) / dpr). Chromium turns Maple Mono's contextual
+   * ligatures off whenever letterSpacing is non-zero, and the spacing is zero only when
+   * the natural advance already equals the cell. So with the default `auto` text
+   * rendering the same text would show ligatures on one display and not on another,
+   * and a colour or style change would split them mid-sequence. Rather than ship that,
+   * choose "optimizeSpeed", which disables ligatures and kerning in every case and
+   * leaves every glyph exactly on its cell.
+   *
+   * A canvas resize resets the context's state, so the mode is applied at the start of
+   * every render instead of once.
+   */
+  private keepLigaturesOff(): void {
+    const renderer = this.ghostty.renderer;
+    const context = renderer?.ctx;
+    if (!renderer || !context) return;
+    const render = renderer.render.bind(renderer);
+    renderer.render = (...args) => {
+      context.textRendering = "optimizeSpeed";
+      render(...args);
+    };
+  }
+
+  /**
+   * Canvas text never waits for a web font: a face that is not loaded yet is drawn with
+   * the fallback and is not repainted by the browser. So every face the renderer can ask
+   * for is loaded here, and the whole screen is repainted once each arrives.
+   * Italic and bold cells are drawn one cell at a time, so they stay on the grid.
+   */
+  private loadStyledFaces(): void {
+    const size = this.terminal.options.fontSize ?? TERMINAL_FONT_SIZE_DESKTOP;
+    const load = (): void => {
+      void Promise.all([
+        document.fonts.load(`italic ${size}px "${TERMINAL_FONT_NAME}"`),
+        document.fonts.load(`600 ${size}px "${TERMINAL_FONT_NAME}"`),
+        document.fonts.load(`italic 600 ${size}px "${TERMINAL_FONT_NAME}"`),
+      ]).then(() => this.repaintAll(), () => undefined);
+    };
+    // Off the critical path: the first prompt must not wait behind these downloads.
+    // Safari has no requestIdleCallback; the lib types claim it always exists, so widen it.
+    const idle = (window as { requestIdleCallback?: Window["requestIdleCallback"] }).requestIdleCallback;
+    if (idle) idle.call(window, load, { timeout: 3000 });
+    else window.setTimeout(load, 1000);
+  }
+
+  /**
+   * Fetches the Nerd Font symbol face the first time output holds a private-use code
+   * point. In UTF-8 the private-use area U+E000..U+F8FF starts with 0xEE or 0xEF, and
+   * Uint8Array.indexOf scans natively, so a screen without prompt icons never pays the
+   * download and the check costs next to nothing per chunk.
+   */
+  private requestSymbolsIfNeeded(bytes: Uint8Array): void {
+    if (this.symbolFaceRequested) return;
+    if (bytes.indexOf(0xee) < 0 && bytes.indexOf(0xef) < 0) return;
+    this.symbolFaceRequested = true;
+    const size = this.terminal.options.fontSize ?? TERMINAL_FONT_SIZE_DESKTOP;
+    void document.fonts.load(`${size}px "${TERMINAL_FONT_NAME}"`, "\ue0b0\uf015\ue718")
+      .then(() => this.repaintAll(), () => undefined);
+  }
+
+  private repaintAll(): void {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer || this.closed) return;
+    renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+  }
+
+  /** Rebuilds backing dimensions from the loaded web font before the first frame. */
+  private remeasureFont(): void {
+    const renderer = this.ghostty.renderer;
+    if (!renderer) throw new Error("terminal renderer is unavailable after font load");
+    renderer.remeasureFont();
+    renderer.resize(this.terminal.cols, this.terminal.rows);
+    this.scheduleFit();
+  }
+
+  /** Times synchronous full-screen redraws for the test-double performance probe. */
+  benchmarkFullRedraw(iterations: number): number[] {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer) throw new Error("terminal renderer is unavailable for redraw benchmark");
+    if (!Number.isInteger(iterations) || iterations < 1 || iterations > 100) {
+      throw new RangeError("redraw benchmark iterations must be from 1 to 100");
+    }
+    const samples: number[] = [];
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      const startedAt = performance.now();
+      renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+      samples.push(performance.now() - startedAt);
+    }
+    return samples;
+  }
+
+  /** Stops cursor blinking and paints one stable frame for canvas pixel tests. */
+  freezeCursorForTest(): void {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer) throw new Error("terminal renderer is unavailable for cursor pixel test");
+    renderer.setCursorBlink(false);
+    renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+  }
+
+  /** Feeds a paced 10 MB/s text stream through Ghostty and waits for its last paint. */
+  async benchmarkOutputAt10MBps(): Promise<{
+    bytes: number;
+    elapsedMs: number;
+    writeCpuMs: number;
+    p95FrameMs: number;
+    maxFrameMs: number;
+    wasmMemoryBytes: number;
+  }> {
+    const bytesPerChunk = 100_000;
+    const chunkCount = 100;
+    const totalBytes = bytesPerChunk * chunkCount;
+    const chunk = new Uint8Array(bytesPerChunk).fill(0x78);
+    await new Promise<void>((resolve) => {
+      this.terminal.write(new TextEncoder().encode("\x1b[?1049h\x1b[2J\x1b[H"), resolve);
+    });
+    const startedAt = performance.now();
+    const frameIntervals: number[] = [];
+    let previousFrameAt = startedAt;
+    let writingDone = false;
+    const sampleFrame = (at: number): void => {
+      frameIntervals.push(at - previousFrameAt);
+      previousFrameAt = at;
+      if (!writingDone || frameIntervals.length < 2) requestAnimationFrame(sampleFrame);
+    };
+    requestAnimationFrame(sampleFrame);
+
+    let writeCpuMs = 0;
+    let lastPaint: Promise<void> | undefined;
+    for (let index = 0; index < chunkCount; index += 1) {
+      const dueAt = startedAt + index * 10;
+      const delay = dueAt - performance.now();
+      if (delay > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+      const writeStartedAt = performance.now();
+      if (index + 1 === chunkCount) {
+        lastPaint = new Promise<void>((resolve) => this.terminal.write(chunk, resolve));
+      } else {
+        this.terminal.write(chunk);
+      }
+      writeCpuMs += performance.now() - writeStartedAt;
+    }
+    writingDone = true;
+    await lastPaint;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const elapsedMs = performance.now() - startedAt;
+    const sortedFrames = frameIntervals.slice().sort((left, right) => left - right);
+    return {
+      bytes: totalBytes,
+      elapsedMs,
+      writeCpuMs,
+      p95FrameMs: sortedFrames[Math.floor((sortedFrames.length - 1) * 0.95)] ?? 0,
+      maxFrameMs: sortedFrames[sortedFrames.length - 1] ?? 0,
+      wasmMemoryBytes: this.rendererMetrics.wasmMemoryBytes,
+    };
+  }
+
+  private predictionPosition(): PredictionPosition | undefined {
+    const buffer = this.terminal.wasmTerm;
+    const renderer = this.terminal.renderer;
+    if (!buffer || !renderer) return undefined;
+    const cursor = buffer.getCursor();
+    const metrics = this.cellMetrics();
+    return {
+      canvas: renderer.getCanvas(),
+      x: cursor.x,
+      y: cursor.y,
+      visible: cursor.visible,
+      alternate: buffer.isAlternateScreen(),
+      viewportY: this.terminal.viewportY,
+      columns: this.terminal.cols,
+      rows: this.terminal.rows,
+      cellWidth: metrics.width,
+      cellHeight: metrics.height,
+      naturalCellWidth: metrics.naturalWidth,
+      baseline: metrics.baseline,
+      fontFamily: this.terminal.options.fontFamily,
+      fontSize: this.terminal.options.fontSize,
+      devicePixelRatio: this.ghostty.renderer?.devicePixelRatio,
+      background: this.ghostty.renderer?.theme?.background ?? (this.terminal.options.theme as ITheme | undefined)?.background,
+      foreground: this.ghostty.renderer?.theme?.foreground ?? (this.terminal.options.theme as ITheme | undefined)?.foreground,
+      cursorStyle: this.terminal.options.cursorStyle,
+      cursorColor: this.ghostty.renderer?.theme?.cursor ?? (this.terminal.options.theme as ITheme | undefined)?.cursor ?? "#c8ceff",
+    };
+  }
+
+  /**
+   * Hides or restores the renderer's own cursor while a prediction is pending.
+   *
+   * There must be exactly one visible cursor: the predicted one. Repainting the
+   * row once is not enough, because Ghostty redraws its cursor on every render
+   * pass, so the renderer's renderCursor is wrapped once (installCursorGuard)
+   * and skips drawing while hidden. Toggling only repaints the single cursor row.
+   */
+  private setPredictionCursorHidden(hidden: boolean): void {
+    if (hidden === this.predictionCursorHidden) return;
+    this.installCursorGuard();
+    this.predictionCursorHidden = hidden;
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer) return;
+    const cursor = buffer.getCursor();
+    const line = this.cursorLine(cursor.y);
+    if (!line) return;
+    renderer.renderLine(line, cursor.y, this.terminal.cols);
+    if (!hidden && cursor.visible && this.terminal.viewportY === 0) renderer.renderCursor(cursor.x, cursor.y, line);
+  }
+
+  private cursorGuardInstalled = false;
+
+  /** Wraps the pinned renderer's cursor draw once so a pending prediction suppresses it on every pass. */
+  private installCursorGuard(): void {
+    const renderer = this.ghostty.renderer;
+    if (this.cursorGuardInstalled || !renderer) return;
+    const draw = renderer.renderCursor.bind(renderer);
+    renderer.renderCursor = (x, y, line) => {
+      if (!this.predictionCursorHidden) draw(x, y, line);
+    };
+    this.cursorGuardInstalled = true;
+  }
+
+  /** Uses the same viewport slice the renderer uses for its cursor row. */
+  private cursorLine(y: number): unknown[] | null {
+    const buffer = this.terminal.wasmTerm;
+    if (!buffer) return null;
+    const viewport = buffer.getViewport?.();
+    return viewport
+      ? viewport.slice(y * this.terminal.cols, (y + 1) * this.terminal.cols)
+      : buffer.getLine(y);
+  }
+
+  private predictionUnsafe(): boolean {
+    const buffer = this.terminal.wasmTerm;
+    return !this.attached || this.inputPaused || !buffer || buffer.isAlternateScreen() || this.terminal.viewportY !== 0;
+  }
+
+  private predictionScreenUnsafe(): boolean {
+    const buffer = this.terminal.wasmTerm;
+    return !buffer || buffer.isAlternateScreen() || this.terminal.viewportY !== 0;
+  }
+
+  private predictionSafe(): boolean {
+    if (this.predictionUnsafe()) return false;
+    const position = this.predictionPosition();
+    return position !== undefined && position.visible && !position.alternate && position.viewportY === 0;
   }
 
   private syncVisualViewport(): void {
@@ -1012,6 +1403,7 @@ export class TerminalClient {
   private stopPings(): void {
     this.lastPingAt = -Infinity;
     this.pendingPings.clear();
+    this.prediction?.setRoundTrip(undefined);
     this.config.onRoundTrip?.(undefined);
   }
 
@@ -1038,12 +1430,25 @@ export class TerminalClient {
     const startedAt = this.pendingPings.get(nonce);
     if (startedAt === undefined) return;
     this.pendingPings.delete(nonce);
-    this.config.onRoundTrip?.(Math.max(1, performance.now() - startedAt));
+    const milliseconds = Math.max(1, performance.now() - startedAt);
+    this.prediction?.setRoundTrip(milliseconds);
+    this.config.onRoundTrip?.(milliseconds);
   }
 }
 
 function toU16(value: number): number {
   return clamp(Math.round(value), 0, 0xffff);
+}
+
+function terminalBufferText(terminal: Terminal, maxRows: number): string {
+  const buffer = terminal.buffer.active;
+  const first = Math.max(0, buffer.length - terminal.rows - maxRows);
+  const lines: string[] = [];
+  for (let row = first; row < buffer.length; row += 1) {
+    const line = buffer.getLine(row);
+    if (line) lines.push(line.translateToString(true));
+  }
+  return lines.join("\n");
 }
 
 /** Packs palette and default colors for the terminal's local theme API. */

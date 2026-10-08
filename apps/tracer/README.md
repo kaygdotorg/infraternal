@@ -58,9 +58,11 @@ resident-credential and PRF flow described above.
 
 `packages/ui` is the shared AGPL-3.0-only package for spring, tick, glitch,
 count-up, copy feedback, warm tooltips and the faulty-terminal canvas. Its source
-modules hold the motion timings and lifecycle rules. The tracer preloads Geist
-Mono, waits for `document.fonts.load()` (with the mockup's 800 ms fallback), and
-uses `font-display: block` so auth text does not swap from a fallback face.
+modules hold the motion timings and lifecycle rules. The tracer preloads the
+regular Maple Mono NF subset (`fonts/`, rebuilt by `fonts/subset.sh`, D175), waits
+for `document.fonts.load()` (with the mockup's 800 ms fallback), and uses
+`font-display: swap` with a metric-matched local fallback so a late font moves
+no line.
 
 The production-browser `onboarding.spec.ts` saves dark screenshots for token,
 identity, passkey, recovery, welcome and returning sign-in at 393 × 852 and
@@ -103,6 +105,22 @@ painted echo count, p50/p95/p99 keydown-to-paint latency, and browser-side hop
 timings. **Drop socket** forces a disconnect and records the time until a
 marker echo paints after resume. **Copy results** works on a phone or falls back
 to selectable report text when clipboard access is unavailable.
+
+## Predictive local echo (#50)
+
+Append `?predict=1` to opt in; production sessions keep it off by default. The
+client draws bounded printable input only when measured RTT is above 60 ms and
+Ghostty reports a visible cursor on the live normal screen. Host output confirms
+or clears the overlay. Large paste and editing keys wait for host output; a
+missing echo or three consecutive mismatches mutes prediction until host output
+proves echo is safe again. The shared text overlay uses plain terminal glyphs
+with one opacity setting, `--terminal-prediction-opacity`.
+
+The production test compares seeded input/echo schedules against a second
+Ghostty instance and captures pending and confirmed glyphs in both themes at
+393 × 852 and 1440 × 900. The captures and latency attribution are under
+`test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/`;
+measured results and the 50 MB throughput comparison are recorded on issue #50.
 
 ## Browser test
 

@@ -161,7 +161,7 @@ export function branchedMenu(
     marker.style.opacity = currentHead ? "1" : "0";
     if (currentHead) {
       marker.style.transition = animate && !reduced() ? `transform 280ms ${EASE}` : "none";
-      marker.style.transform = `translateY(${currentHead.offsetTop + currentHead.offsetHeight / 2 - 10}px)`;
+      marker.style.transform = `translateY(${Math.round(currentHead.offsetTop + (currentHead.offsetHeight - marker.offsetHeight) / 2)}px)`;
     }
   }
 

@@ -1,9 +1,14 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
-import { AuthError, checkStatus, checkSession } from "./auth";
+import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
+import { installFocusRing } from "../../../packages/ui/src/focus-ring";
 import { mountOnboarding } from "./onboarding";
+import { BRAND_MARK } from "./auth-marks";
+import { loading } from "../../../packages/ui/src/countup";
+import { releaseAuthScheme, useAuthScheme } from "./auth-scheme";
+import { recoveryUiEnabled } from "./recovery-ui";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
@@ -15,25 +20,45 @@ declare global {
       dropConnection: () => void;
       screenText: () => string;
       graphemeText: () => string;
+      injectInput: (data: string) => void;
+      seedPrompt: () => Promise<void>;
+      setPredictiveEcho: (enabled: boolean) => void;
+      baselineScreenText: (bytes: number[]) => Promise<string>;
+      predictiveEcho: () => import("./predictive-echo").PredictiveEchoState | undefined;
       themeHistoryColors: () => { rows: number; indexed: number[]; truecolor: number[] };
       rendererMetrics: () => {
         cols: number;
         rows: number;
         cellWidth: number;
         cellHeight: number;
+        naturalCellWidth: number;
         configuredScrollback: number;
         cursorX: number;
         cursorY: number;
+        renderCursorX: number;
+        renderCursorY: number;
+        renderCursorVisible: boolean;
         receivedSequence: string;
         outputSequence: string;
         scrollbackRows: number;
         viewportY: number;
+        cursorVisible: boolean;
         fontSize: number;
         wasmMemoryBytes: number;
         themeColorsMs: number;
         themeRenderMs: number;
         terminalColors?: { background: { r: number; g: number; b: number }; foreground: { r: number; g: number; b: number } };
       } | undefined;
+      benchmarkFullRedraw: (iterations: number) => number[] | undefined;
+      freezeCursorForTest: () => void;
+      benchmarkOutputAt10MBps: () => Promise<{
+        bytes: number;
+        elapsedMs: number;
+        writeCpuMs: number;
+        p95FrameMs: number;
+        maxFrameMs: number;
+        wasmMemoryBytes: number;
+      }> | undefined;
       trace: () => ProbeTraceSample[];
     };
   }
@@ -59,9 +84,10 @@ let backdropTimer = 0;
 void start();
 
 async function start(): Promise<void> {
+  installFocusRing();
   installForegroundListener();
   const fontsReady = Promise.race([
-    document.fonts.load('450 14px "Geist Mono"').then(() => undefined),
+    document.fonts.load('450 14px "Maple Mono NF"').then(() => undefined),
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
   ]).catch(() => undefined);
   try {
@@ -90,7 +116,7 @@ async function showAuthState(setupRequired: boolean): Promise<void> {
   const session = setupRequired ? undefined : await checkSession();
   if (session) {
     activeUserId = session.user_id;
-    await showTerminal(sessionHostname(session));
+    await showTerminal(session);
   } else {
     renderAuth(setupRequired);
   }
@@ -119,18 +145,35 @@ function installForegroundListener(): void {
   });
 }
 
+/** Applies the sign-in scheme (light or dark); the backdrop follows later scheme changes live. */
+const authLight = (): boolean => useAuthScheme((light) => backdrop?.setLight(light));
+
+/**
+ * The access card for a server that cannot be reached. It is the sign-in card with different words:
+ * the same mark, title, lede and full-width primary, through the sign-in card's own classes, so the
+ * mark, the lede-to-action gap and the padding cannot drift from it. The explanation is the lede (it is
+ * what the person reads next); pressing "Try again" shows the shared wait counter on the button.
+ */
 function renderUnavailable(message: string): void {
+  authLight();
   document.documentElement.removeAttribute("data-ui-font");
-  app.innerHTML = `<section class="auth-screen"><section class="auth-card auth-signin">
-    <div class="auth-mark">infraternal</div><h1>Could not reach the server</h1>
-    <p id="status-error" class="auth-message" role="alert"></p>
-    <button id="retry-status" class="auth-primary" type="button">Try again</button></section></section>`;
+  app.innerHTML = `<section class="auth-screen" aria-label="Server unavailable"><section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="unavailable-title">
+    <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
+    <h1 id="unavailable-title">Could not reach the server</h1>
+    <p id="status-error" class="auth-lede" role="alert"></p>
+    <button id="retry-status" class="auth-primary auth-login" type="button"><span>Try again</span><span class="busy-count" hidden></span></button></section></section>`;
   mustGet<HTMLElement>("#status-error").textContent = message;
-  mustGet<HTMLButtonElement>("#retry-status").addEventListener("click", () => { void refreshAuth(); }, { once: true });
+  const retry = mustGet<HTMLButtonElement>("#retry-status");
+  retry.addEventListener("click", () => {
+    retry.disabled = true;
+    loading(retry.querySelector<HTMLElement>(".busy-count")!, 400);
+    void refreshAuth();
+  }, { once: true });
   scheduleBackdrop();
 }
 
 function renderAuth(setupRequired: boolean, message = ""): void {
+  authLight();
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
     saveBrowserId("tracer.user-id", userId);
@@ -142,6 +185,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
 }
 
 function showWelcome(displayName: string, instant = false): void {
+  authLight();
   document.documentElement.removeAttribute("data-ui-font");
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
@@ -170,7 +214,7 @@ function startBackdrop(): void {
   canvas.style.opacity = "1";
   canvas.style.transition = "none";
   backdrop?.destroy();
-  backdrop = mountFaultyTerminal(canvas);
+  backdrop = mountFaultyTerminal(canvas, authLight());
 }
 
 function scheduleBackdrop(): void {
@@ -206,8 +250,11 @@ function stopBackdrop(instant = false): void {
   }, 260);
 }
 
-async function showTerminal(serverHostname?: string, instant = false): Promise<void> {
-  const hostName = serverHostname ?? sessionHostname(await checkSession());
+async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSession>>, instant = false): Promise<void> {
+  // Startup already authenticated this snapshot. Reuse it rather than adding
+  // another network round trip; the socket still checks authority on connection.
+  const identity = knownSession ?? await checkSession();
+  const hostName = sessionHostname(identity);
   if (!hostName) {
     renderUnavailable("The authenticated session did not include the server hostname.");
     return;
@@ -216,6 +263,8 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   welcomeEffect?.destroy();
   welcomeEffect = undefined;
   stopBackdrop(instant);
+  // The app paints its own theme; the sign-in scheme lets go once the backdrop has faded out.
+  window.setTimeout(() => { if (!app.querySelector(".auth-screen")) releaseAuthScheme(); }, instant ? 0 : 260);
   currentTerminal?.dispose();
   coreScreen?.dispose();
   performanceProbe?.dispose();
@@ -225,16 +274,22 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   const query = new URLSearchParams(location.search);
   const mockMode = query.get("mock") === "1";
   const probeMode = query.get("probe") === "1";
+  const predictiveEcho = query.get("predict") === "1";
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
   try {
     const { mountCoreScreen } = await import("./core-screen");
     // The screen mounts only after its selected face is ready, preventing a one-frame
     // fallback and keeping the mobile layout stable while the font loads.
-    await document.fonts.load(uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"');
+    await document.fonts.load(uiFont === "mono" ? '450 13px "Maple Mono NF"' : '450 14px "Geist Sans"');
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
-    screen = mountCoreScreen(app, { hostName, mockMode, probeMode });
+    screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
+      ...(recoveryUiEnabled() ? {
+        onRecovery: () => { void showRecovery(); },
+        onCancelRecovery: async () => { await recoveryAuth.post("recovery-cancel", {}); await checkForegroundSession(); },
+      } : {}),
+    });
   } catch (error: unknown) {
     renderUnavailable(safeMessage(error));
     return;
@@ -244,6 +299,7 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
   const probeHooks = performanceProbe?.hooks();
   // Session continuity across reloads (integration, #34): the tab remembers its
   // public session id so a reload reattaches to the same terminal.
+  screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
   const sessionKey = activeUserId ? `tracer.session.${activeUserId}` : undefined;
   const initialSessionId = query.get("session") ?? (sessionKey ? loadTabSession(sessionKey) : undefined);
   const hooks = {
@@ -274,10 +330,12 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
       status: screen.status,
       theme: screen.theme(),
       hooks,
+      predictiveEcho,
       onRoundTrip: (milliseconds) => screen?.setRoundTrip(milliseconds),
       onConnectionChange: (connected) => screen?.setConnection(connected),
       onScroll: (scrolled) => screen?.setScrolled(scrolled),
       onInputActivity: () => screen?.onInputActivity(),
+      onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen?.setRecoveryPending(readyAt); },
       traceMockServer: probeMode && mockMode,
       ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
       ...(initialSessionId ? { initialSessionId } : {}),
@@ -291,8 +349,31 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
         dropConnection: () => currentTerminal?.forceDrop(),
         screenText: () => currentTerminal?.readScreenText() ?? "",
         graphemeText: () => currentTerminal?.readGraphemeText() ?? "",
+        injectInput: (data) => currentTerminal?.injectInput(data),
+        seedPrompt: () => currentTerminal?.seedPromptForTest() ?? Promise.resolve(),
+        setPredictiveEcho: (enabled) => currentTerminal?.setPredictiveEchoForTest(enabled),
+        baselineScreenText: (bytes) => currentTerminal?.baselineScreenText(Uint8Array.from(bytes)) ?? Promise.resolve(""),
+        predictiveEcho: () => currentTerminal?.predictiveEchoState,
         themeHistoryColors: () => currentTerminal?.readThemeHistoryColors() ?? { rows: 0, indexed: [], truecolor: [] },
         rendererMetrics: () => currentTerminal?.rendererMetrics,
+        benchmarkFullRedraw: (iterations) => {
+          if (!currentTerminal) return undefined;
+          return (currentTerminal as unknown as { benchmarkFullRedraw: (count: number) => number[] }).benchmarkFullRedraw(iterations);
+        },
+        freezeCursorForTest: () => currentTerminal?.freezeCursorForTest(),
+        benchmarkOutputAt10MBps: () => {
+          if (!currentTerminal) return undefined;
+          return (currentTerminal as unknown as {
+            benchmarkOutputAt10MBps: () => Promise<{
+              bytes: number;
+              elapsedMs: number;
+              writeCpuMs: number;
+              p95FrameMs: number;
+              maxFrameMs: number;
+              wasmMemoryBytes: number;
+            }>;
+          }).benchmarkOutputAt10MBps();
+        },
         trace: () => performanceProbe?.traceSamples() ?? [],
       };
     }
@@ -300,6 +381,23 @@ async function showTerminal(serverHostname?: string, instant = false): Promise<v
     const status = document.querySelector<HTMLElement>("#connection-status");
     if (status) status.textContent = safeMessage(error);
   }
+}
+
+/** Opens same-device recovery without revoking the live cookie that authorizes D113. */
+async function showRecovery(): Promise<void> {
+  if (!recoveryUiEnabled()) return;
+  const { mountRecovery } = await import("./recovery");
+  currentTerminal?.dispose(); currentTerminal = undefined;
+  coreScreen?.dispose(); coreScreen = undefined;
+  performanceProbe?.dispose(); performanceProbe = undefined;
+  delete window.__tracerTestDouble;
+  document.documentElement.removeAttribute("data-ui-font");
+  mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
+    activeUserId = userId;
+    saveBrowserId("tracer.user-id", userId);
+    showWelcome(displayName ?? "", instant);
+  });
+  scheduleBackdrop();
 }
 
 /** URL choices win and are remembered when storage is available; private mode still works. */
@@ -310,9 +408,10 @@ function uiFontPreference(): UiFont {
     return requested;
   }
   try {
-    return window.localStorage.getItem("tracer.ui-font") === "mono" ? "mono" : "sans";
+    // Monospace is the product face (TASTE.md section 2); sans stays an explicit opt-in.
+    return window.localStorage.getItem("tracer.ui-font") === "sans" ? "sans" : "mono";
   } catch {
-    return "sans";
+    return "mono";
   }
 }
 
@@ -328,11 +427,16 @@ function probeCount(value: string | null): number {
   return Number.isInteger(count) && count >= 1 && count <= 5_000 ? count : 500;
 }
 
+let recoveryNoticeGeneration = 0;
+
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
   checkingResume = true;
+  const noticeGeneration = recoveryNoticeGeneration;
   try {
     const session = await checkSession();
+    // A delayed HTTP snapshot must not overwrite a newer WebSocket state event.
+    if (session && noticeGeneration === recoveryNoticeGeneration) coreScreen?.setRecoveryPending(session.recovery_pending?.ready_at);
     if (!session) {
       currentTerminal?.dispose();
       currentTerminal = undefined;
