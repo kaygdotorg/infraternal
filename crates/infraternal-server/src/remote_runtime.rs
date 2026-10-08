@@ -91,6 +91,8 @@ fn now() -> io::Result<i64> {
 pub(crate) struct RemoteListeners {
     tasks: JoinSet<()>,
     endpoint: quinn::Endpoint,
+    #[cfg(test)]
+    pub(crate) diagnostic_hosts: RemoteHosts,
 }
 impl Drop for RemoteListeners {
     fn drop(&mut self) {
@@ -115,6 +117,8 @@ impl RemoteListeners {
         store: EnrollmentStore,
         hosts: RemoteHosts,
     ) -> io::Result<Self> {
+        #[cfg(test)]
+        let diagnostic_hosts = hosts.clone();
         let endpoint =
             quinn::Endpoint::server(remote_quic::server_config(identity, roots)?, address)?;
         let tcp = TcpListener::bind(endpoint.local_addr()?).await?;
@@ -185,7 +189,12 @@ impl RemoteListeners {
                 });
             }
         });
-        Ok(Self { tasks, endpoint })
+        Ok(Self {
+            tasks,
+            endpoint,
+            #[cfg(test)]
+            diagnostic_hosts,
+        })
     }
 }
 

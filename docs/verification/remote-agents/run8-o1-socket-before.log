@@ -1,0 +1,20 @@
+Running as unit: run-p3856251-i12243996.scope; invocation ID: 42ef424e6c164a358feffe2891861526
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/remote-agents/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.78s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/remote-agents/target/debug/deps/infraternal_server-1a408e36adb2d6d0)
+
+running 1 test
+
+thread 'runtime::remote_demo_tests::real_host::o1_runtime_path_admits_real_unix_socket_address' (3856799) panicked at crates/infraternal-server/src/remote_host_tests.rs:41:5:
+o1 shim rendezvous exceeds the platform Unix-socket address bound
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test runtime::remote_demo_tests::real_host::o1_runtime_path_admits_real_unix_socket_address ... FAILED
+
+failures:
+
+failures:
+    runtime::remote_demo_tests::real_host::o1_runtime_path_admits_real_unix_socket_address
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 148 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`
