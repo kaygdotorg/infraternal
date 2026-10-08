@@ -18,6 +18,8 @@ export interface KeyValueRow {
   key: string;
   value: string;
   meter?: number; // 0..100
+  /** Copied instead of `value` when the value is an abbreviation (a short commit id). */
+  copy?: string;
 }
 
 export interface KeyValueList {
@@ -79,11 +81,11 @@ export function createKeyValueList(label: string): KeyValueList {
   root.addEventListener("click", click);
 
   const tick = `<svg class="ui-kv-tick" viewBox="0 0 24 24" aria-hidden="true"><path d="${TICK_PATH}"/></svg>`;
-  const cell = (kind: "key" | "value", text: string): HTMLButtonElement => {
+  const cell = (kind: "key" | "value", text: string, copyText = text): HTMLButtonElement => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `ui-kv-cell ui-kv-${kind}`;
-    button.dataset.copy = text;
+    button.dataset.copy = copyText;
     button.setAttribute("aria-description", "Copies to the clipboard");
     const span = document.createElement("span");
     span.className = "ui-kv-text";
@@ -100,7 +102,7 @@ export function createKeyValueList(label: string): KeyValueList {
         const item = document.createElement("div");
         item.className = "ui-kv-row";
         item.setAttribute("role", "listitem");
-        item.append(cell("key", row.key), cell("value", row.value));
+        item.append(cell("key", row.key), cell("value", row.value, row.copy ?? row.value));
         if (row.meter !== undefined) {
           const meter = document.createElement("span");
           meter.className = "ui-kv-meter";

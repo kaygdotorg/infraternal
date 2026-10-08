@@ -339,7 +339,7 @@
 }
 .ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
 .ui-kv-value { justify-self: end; justify-content: flex-end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
-.ui-kv-text { min-width: 0; overflow-wrap: break-word; }
+.ui-kv-text { min-width: 0; overflow-wrap: anywhere; }
 .ui-kv-tick { width: 12px; height: 12px; flex: none; align-self: center; fill: none; stroke: var(--ok); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 150ms var(--ease-out, ease-out); }
 .ui-kv-cell[data-copied] .ui-kv-tick { opacity: 1; transform: none; }
 .ui-kv-meter { grid-column: 1 / -1; position: relative; height: 3px; margin: 4px 0 2px; overflow: hidden; border-radius: 2px; background: var(--line); }
@@ -471,25 +471,27 @@
 .ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"]::after { bottom: 6px; left: 6px; border-width: 0 0 3px 3px; border-bottom-left-radius: 14px; }
 @keyframes ui-grip-in { from { opacity: 0; } to { opacity: 1; } }
 
-/* Sidebar footer (sidebar-foot.ts): shared pills laid out in two rows, pinned under the host
-   tree. Desktop pills are 32 px, touch pills 44 px; the pills themselves are plain `.ui-pill`s. */
-.ui-sidebar-foot { --pill-h: 32px; display: grid; flex: none; gap: 8px; margin-top: auto; padding: 9px 0 0; box-shadow: 0 -1px 0 var(--line); }
-@media (pointer: coarse) { .ui-sidebar-foot { --pill-h: 44px; } }
-.ui-sidebar-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
-.ui-sidebar-foot .ui-pill { font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; cursor: pointer; }
-.ui-sidebar-user { min-width: 0; gap: 8px; padding: 0 12px 0 5px; cursor: default !important; pointer-events: none; }
-.ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 500; color: var(--fg); }
-.ui-sidebar-monogram {
-  display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 10px); height: calc(var(--pill-h) - 10px); border-radius: 50%;
-  background: var(--accent-soft); color: var(--accent); font: 600 11px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+/* Sidebar footer (sidebar-foot.ts): the person's pill and the settings pill share one height, so
+   their centres sit on one line. Pills are the shared `.ui-pill`; only layout lives here. */
+.ui-sidebar-foot { --pill-h: 40px; display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding: 9px 0 0; box-shadow: 0 -1px 0 var(--line); }
+.ui-sidebar-foot[data-variant="b"] { --pill-h: 32px; }
+@media (pointer: coarse) { .ui-sidebar-foot, .ui-sidebar-foot[data-variant="b"] { --pill-h: 44px; } }
+.ui-sidebar-foot .ui-pill { cursor: pointer; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, box-shadow 160ms ease; }
+@media (hover: hover) and (pointer: fine) { .ui-sidebar-foot .ui-pill:hover:not(:active) { box-shadow: var(--shadow), 0 2px 8px -2px rgb(0 0 0 / 0.18); } }
+.ui-sidebar-user { flex: 1; min-width: 0; justify-content: flex-start; gap: 10px; padding: 0 14px 0 5px; text-align: left; }
+.ui-sidebar-foot[data-variant="b"] .ui-sidebar-user { padding-right: 12px; }
+.ui-sidebar-avatar {
+  display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 10px); height: calc(var(--pill-h) - 10px); border-radius: 50%; color: #fff;
+  background: linear-gradient(145deg, oklch(from var(--accent) calc(l + 0.06) c calc(h + var(--ui-avatar-hue, 0))), oklch(from var(--accent) calc(l - 0.12) c calc(h + var(--ui-avatar-hue, 0) + 28)));
+  font: 600 12px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
 }
-@media (pointer: coarse) { .ui-sidebar-monogram { font-size: 13px; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
+.ui-sidebar-foot[data-variant="b"] .ui-sidebar-avatar { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--accent) 40%, transparent); }
+@media (pointer: coarse) { .ui-sidebar-avatar { font-size: 14px; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
+.ui-sidebar-names { display: grid; min-width: 0; gap: 3px; }
+.ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: 500; }
+.ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: 11px; }
+@media (pointer: coarse) { .ui-sidebar-secondary { font-size: 12px; } }
 .ui-sidebar-settings svg { stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ui-sidebar-version { min-width: 0; justify-self: start; gap: 8px; padding: 0 14px 0 10px; color: var(--ui-text-secondary); }
-.ui-sidebar-version .swap { width: 15px; height: 15px; color: var(--fg-3); }
-.ui-sidebar-version[data-done] .swap { color: var(--ok); }
-.ui-sidebar-commit { font-variant-numeric: tabular-nums; color: var(--fg); }
-.ui-sidebar-dot { color: var(--fg-3); }
 
 /* Window lock (lock-toggle.ts, window-card.ts): invisible until the pointer is near the window's
    top edge (or the header is tapped), then 35 % strong; locked, it stays at full strength with an
@@ -523,3 +525,22 @@
 .ui-shortcuts-keys { display: inline-flex; flex: none; gap: 4px; }
 .ui-shortcuts kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
 @media (pointer: coarse) { .ui-shortcuts-label { font-size: var(--text-body); } .ui-shortcuts-head { padding-right: 14px; } }
+
+/* Settings overlay (settings-overlay.ts): one centred card in the shared overlay material. */
+.ui-settings { position: absolute; z-index: 8; top: 50%; left: 50%; display: flex; flex-direction: column; width: min(560px, calc(100% - 24px)); max-height: min(520px, calc(100% - 24px)); margin: 0; translate: -50% -50%; border-radius: var(--r-lg, 18px); color: var(--fg); outline: none; }
+.ui-settings-head { display: flex; flex: none; align-items: center; justify-content: space-between; height: 52px; padding: 0 8px 0 18px; }
+.ui-settings-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.ui-settings-close { display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-2); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-settings-close svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.ui-settings-close:active, .ui-settings-nav-row:active { transform: scale(0.97); }
+@media (hover: hover) and (pointer: fine) { .ui-settings-close:hover, .ui-settings-nav-row:hover { background: var(--hover); } }
+.ui-settings-main { display: flex; min-height: 0; flex: 1; border-top: 1px solid var(--line); }
+.ui-settings-nav { display: flex; flex: none; flex-direction: column; gap: 2px; width: 150px; padding: 8px; border-right: 1px solid var(--line); }
+.ui-settings-nav-row { display: flex; align-items: center; gap: 8px; height: var(--ui-row-h, 32px); padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-settings-nav-row[aria-current="true"] { background: var(--hover); color: var(--fg); }
+.ui-settings-nav-row svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-settings-pane { min-width: 0; flex: 1; overflow: auto; padding: 6px 18px 14px; overscroll-behavior: contain; }
+@media (max-width: 520px) {
+  .ui-settings-main { flex-direction: column; }
+  .ui-settings-nav { width: auto; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--line); }
+}

@@ -9,7 +9,7 @@ const recoveryUiMode = process.env.INFRATERNAL_RECOVERY_UI ?? "off";
 if (!["off", "preview", "1"].includes(recoveryUiMode)) {
   throw new Error("INFRATERNAL_RECOVERY_UI must be off, preview, or 1");
 }
-// The commit the bundle was built from, shown (and copied) from the sidebar footer. A tree
+// The commit the bundle was built from, shown (and copied) from Settings, About. A tree
 // without git history reports nothing, and the UI then says "dev".
 const commit = Bun.spawnSync(["git", "rev-parse", "HEAD"], { stderr: "ignore" }).stdout.toString().trim();
 const build = await Bun.build({
@@ -19,7 +19,7 @@ const build = await Bun.build({
   minify: true,
   target: "browser",
   splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
-  define: { __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode), __BUILD_COMMIT__: JSON.stringify(/^[0-9a-f]{40}$/.test(commit) ? commit : "") },
+  define: { __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode), __BUILD_DATE__: JSON.stringify(new Date().toISOString()), __BUILD_COMMIT__: JSON.stringify(/^[0-9a-f]{40}$/.test(commit) ? commit : "") },
   plugins: [browserFileLoader],
 });
 if (!build.success) {

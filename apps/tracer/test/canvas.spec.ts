@@ -340,7 +340,7 @@ test("touch: press and hold on a header reveals corner handles; a handle resizes
 });
 
 // ---- the sidebar footer ------------------------------------------------------------------
-test("sidebar footer: a name pill, a settings pill and a version pill that copies the commit id", async ({ page, context }) => {
+test("sidebar footer: the person and settings pills line up, press, and open Settings with About; no version pill", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.setViewportSize({ width: 1440, height: 900 });
   await openCanvas(page);
@@ -348,26 +348,57 @@ test("sidebar footer: a name pill, a settings pill and a version pill that copie
   await page.waitForTimeout(500); // the open spring settles before sizes are read
   const foot = page.locator(".ui-sidebar-foot");
   await expect(foot).toBeVisible();
+  await expect(foot.locator(".ui-sidebar-version")).toHaveCount(0);
   await expect(foot.locator(".ui-sidebar-name")).not.toBeEmpty();
   await expect(foot.locator(".ui-sidebar-settings")).toHaveAttribute("aria-label", "Settings");
-  // Pinned to the sidebar's bottom with the same side inset as the tree.
+  // Same height, centres on one line, pinned at the sidebar's bottom.
   const geometry = await page.evaluate(() => {
-    const sidebar = document.querySelector("#sidebar")!.getBoundingClientRect();
-    const foot = document.querySelector(".ui-sidebar-foot")!.getBoundingClientRect();
-    return { gap: sidebar.bottom - foot.bottom, pill: document.querySelector(".ui-sidebar-version")!.getBoundingClientRect().height };
+    const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+    const user = box(".ui-sidebar-user"), gear = box(".ui-sidebar-settings"), sidebar = box("#sidebar"), foot = box(".ui-sidebar-foot");
+    return { userH: user.height, gearH: gear.height, centre: Math.abs((user.top + user.height / 2) - (gear.top + gear.height / 2)), gap: sidebar.bottom - foot.bottom };
   });
+  expect(geometry.userH).toBeCloseTo(geometry.gearH, 0);
+  expect(geometry.centre).toBeLessThan(0.5);
   expect(geometry.gap).toBeLessThan(12);
-  expect(geometry.pill).toBe(32);
-  const version = foot.locator(".ui-sidebar-version");
-  await expect(version.locator(".ui-sidebar-commit")).toHaveText(/^[0-9a-f]{7}$|^dev$/);
-  await version.click();
-  await expect(version).toHaveAttribute("data-done", "");
-  const copied = await page.evaluate(() => navigator.clipboard.readText());
-  expect(copied).toMatch(/^[0-9a-f]{40}$/);
-  expect(copied.startsWith((await version.locator(".ui-sidebar-commit").textContent())!)).toBe(true);
-  // The shared "Copied" tooltip flashes; no focus ring after a click.
+  // Both are real buttons: pressing scales them (nothing is inert).
+  const user = foot.locator(".ui-sidebar-user");
+  const ubox = (await user.boundingBox())!;
+  await page.mouse.move(ubox.x + 20, ubox.y + 10);
+  await page.mouse.down();
+  await expect.poll(() => user.evaluate((node) => getComputedStyle(node).transform)).not.toBe("none");
+  await page.mouse.up();
+  await expect(page.locator(".ui-settings")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".ui-settings")).toHaveCount(0);
+  // Settings, About: the gear opens it; a value copies with the shared tick and "Copied".
+  await foot.locator(".ui-sidebar-settings").click();
+  const about = page.locator(".ui-settings");
+  await expect(about.locator(".ui-settings-nav-row[aria-current='true']")).toHaveText("About");
+  const commit = about.locator(".ui-kv-row", { hasText: "Commit" }).locator(".ui-kv-value");
+  await commit.click();
+  await expect(commit).toHaveAttribute("data-copied", "");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/^[0-9a-f]{40}$|^dev$/);
   await expect(page.locator(".tip")).toContainText("Copied");
+  const version = about.locator(".ui-kv-row", { hasText: "Version" }).locator(".ui-kv-value");
+  await version.click();
+  expect((await page.evaluate(() => navigator.clipboard.readText())).length).toBeGreaterThanOrEqual(3);
   expect(await page.evaluate(() => document.documentElement.dataset.focusRing ?? "off")).toBe("off");
+  await page.keyboard.press("Escape");
+});
+
+test("palette: About infraternal opens Settings, About, and is found by version, build and commit", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  for (const alias of ["about", "version", "build", "commit"]) {
+    await page.keyboard.press("Control+k");
+    await page.locator("#palette-input").fill(alias);
+    await expect(page.locator(".result[data-action='settings:about']")).toBeVisible();
+    if (alias === "commit") {
+      await page.keyboard.press("Enter");
+      await expect(page.locator(".ui-settings")).toBeVisible();
+      await page.keyboard.press("Escape");
+    } else await page.keyboard.press("Escape");
+  }
 });
 
 // ---- the window lock ----------------------------------------------------------------------

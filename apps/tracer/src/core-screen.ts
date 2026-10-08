@@ -6,6 +6,7 @@ import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
+import { aboutSection, createSettingsOverlay } from "../../../packages/ui/src/settings-overlay";
 import { buildVersion } from "./build-version";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
@@ -22,6 +23,10 @@ export interface CoreScreenOptions {
   addHostPrototype?: boolean;
   /** The signed-in user's display name, shown in the sidebar footer (canvas preview only). */
   displayName?: string;
+  /** The signed-in username, shown as the footer's quiet second line. */
+  username?: string;
+  /** `?footer=a|b`: which sidebar footer variant to draw. */
+  footerVariant?: "a" | "b";
   onRecovery?: () => void;
   onCancelRecovery?: () => Promise<void>;
 }
@@ -171,8 +176,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const sidebar = get<HTMLElement>("#sidebar");
   const sidebarToggle = get<HTMLButtonElement>("#sidebar-toggle");
   // The footer (who is signed in, settings, the build) is part of the canvas preview.
+  // Settings is a shell; About is the only section so far (the build's name, version, commit, date).
+  const build = buildVersion();
+  const settings = options.addHostPrototype
+    ? createSettingsOverlay({ stage, sections: [aboutSection({ name: "infraternal", version: build.short, commit: build.full, built: build.built })] })
+    : undefined;
   const sidebarFoot = options.addHostPrototype
-    ? createSidebarFoot({ displayName: options.displayName?.trim() || "Signed in", version: buildVersion() })
+    ? createSidebarFoot({
+      displayName: options.displayName?.trim() || "Signed in",
+      ...(options.username ? { secondary: options.username } : {}),
+      ...(options.footerVariant ? { variant: options.footerVariant } : {}),
+      onOpen: (source) => settings?.open("about", source),
+    })
     : undefined;
   if (sidebarFoot) { sidebar.append(sidebarFoot.root); sidebar.dataset.foot = ""; }
   const capsule = get<HTMLButtonElement>("#capsule");
@@ -277,6 +292,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
     { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
+    ...(options.addHostPrototype ? [
+      // The hint carries the aliases, so "version", "build" and "commit" find it.
+      { group: "Help", glyph: "i", label: "About infraternal", hint: "version · build · commit", action: "settings:about" },
+    ] : []),
     ...(recoveryUiEnabled() && options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
   ];
   // Rows can come from providers (the canvas offers Lock or Unlock by state), so the list and its
@@ -441,6 +460,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     palette.dataset.openKind = source;
     if (open) {
       shortcuts.close(true);
+      settings?.close("keyboard");
       refreshEntries();
       selected = 0;
       paletteInput.value = "";
@@ -501,6 +521,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return;
     }
     if (event.key === "Escape") {
+      if (settings?.isOpen || shortcuts.isOpen) return; // the open overlay takes this Escape itself
       if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); }
       else if (!sidebar.hidden) { setSidebar(false, true); event.preventDefault(); }
     }
@@ -714,6 +735,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       writeLocal("tracer.background", value);
       swapLook();
       return true;
+    } else if (kind === "settings") {
+      setPalette(false, source);
+      settings?.open(value ?? "about", source);
+      return true;
     } else if (kind === "shortcuts") {
       // After the palette has gone, so the morph starts from the settled pill.
       setPalette(false, source);
@@ -809,6 +834,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
       shortcuts.dispose();
+      settings?.dispose();
       for (const remove of removeShortcuts) remove();
       sidebarFoot?.dispose();
       sidebarToggle.removeEventListener("click", sidebarClick);

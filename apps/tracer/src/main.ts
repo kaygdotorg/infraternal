@@ -270,6 +270,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
       addHostPrototype: canvasMode,
       ...(identity?.display_name ? { displayName: identity.display_name } : {}),
+      ...(identity?.username ? { username: identity.username } : {}),
+      ...(query.get("footer") === "b" ? { footerVariant: "b" as const } : {}),
       ...(recoveryUiEnabled() ? {
         onRecovery: () => { void showRecovery(); },
         onCancelRecovery: async () => { await recoveryAuth.post("recovery-cancel", {}); await checkForegroundSession(); },

@@ -1,61 +1,75 @@
 /**
- * The sidebar's footer (D160): who is signed in, the settings entry and the build.
+ * The sidebar's footer (D160): who is signed in, and the way into Settings.
  *
- *   row 1   [ monogram  Display name ]                         ( gear )
- *   row 2   [ commit-glyph  infraternal · 9c62448 ]
+ *   [ avatar  Display name        ]  ( gear )
+ *   [         secondary line      ]
  *
- * Every control is the shared `.ui-pill`; this file only lays them out (styles.css,
- * `.ui-sidebar-foot`). The name pill is a status, not a button, so it takes no pointer
- * events. The version pill copies the full commit id on click or tap: its leading glyph
- * swaps to the shared tick (`swapIcon`) and the shared tooltip flashes "Copied", so there is
- * no copy icon (TASTE: copy without buttons). The settings pill opens nothing yet: it
- * answers with a short tooltip so a press is never silent.
+ * Both controls are the shared `.ui-pill` and open the Settings overlay (the person's own
+ * pill is where an account section will live). They share one height, so their centres sit on
+ * one line. The avatar is the name's initial on a soft gradient derived from the theme's accent
+ * (a per-name hue offset, so two people differ without leaving the palette). Every control
+ * answers a press with the shared 0.97 scale; nothing here is inert.
  *
- *   const foot = createSidebarFoot({ displayName, version: { short, full } });
+ * Variants for the owner to compare (`?footer=a|b`, chosen by the caller):
+ *   a (default): two lines (name, then a quiet secondary line), a 40 px pill.
+ *   b: one line, a 32 px pill, a thin gradient ring around the avatar.
+ *
+ * The build's version is not here: it lives in Settings, About (settings-overlay.ts).
+ *
+ *   const foot = createSidebarFoot({ displayName, secondary, onOpen: () => settings.open("about", "pointer") });
  *   sidebar.append(foot.root);
  */
-import { confirmAction, swapIcon } from "./copy-feedback";
-import { flashTip } from "./tooltip";
-
 export interface SidebarFootOptions {
   displayName: string;
-  version: { short: string; full: string };
-  /** Runs when the settings pill is pressed; without it the pill answers "Coming soon". */
-  onSettings?: () => void;
+  /** A quiet second line under the name (the username or role); omitted in variant b. */
+  secondary?: string;
+  variant?: "a" | "b";
+  /** Opens Settings. */
+  onOpen(source: "pointer" | "keyboard"): void;
 }
 
 export interface SidebarFoot {
   readonly root: HTMLElement;
-  readonly version: HTMLButtonElement;
+  readonly user: HTMLButtonElement;
   readonly settings: HTMLButtonElement;
   dispose(): void;
 }
 
 const GEAR = '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>';
-const COMMIT = '<circle cx="12" cy="12" r="3.5"/><path d="M3 12h5.5M15.5 12H21"/>';
-const HOLD_MS = 900;
 
-/** The first letter of the name, upper-cased, for the monogram (never empty). */
-const monogram = (name: string): string => [...name.trim()][0]?.toUpperCase() ?? "?";
+/** The first letter of the name, upper-cased, for the avatar (never empty). */
+const initial = (name: string): string => [...name.trim()][0]?.toUpperCase() ?? "?";
+/** A stable 0..60 degree hue offset per name: neighbours in the palette, never off it. */
+const hueOffset = (name: string): number => { let sum = 0; for (const char of name) sum = (sum * 31 + char.codePointAt(0)!) % 997; return sum % 61; };
 
 export function createSidebarFoot(options: SidebarFootOptions): SidebarFoot {
+  const variant = options.variant ?? "a";
   const root = document.createElement("div");
   root.className = "ui-sidebar-foot";
+  root.dataset.variant = variant;
 
-  const account = document.createElement("div");
-  account.className = "ui-sidebar-row";
-  const user = document.createElement("div");
+  const user = document.createElement("button");
+  user.type = "button";
   user.className = "ui-pill ui-sidebar-user";
-  user.setAttribute("role", "group");
-  user.setAttribute("aria-label", `Signed in as ${options.displayName}`);
-  const letter = document.createElement("span");
-  letter.className = "ui-sidebar-monogram";
-  letter.setAttribute("aria-hidden", "true");
-  letter.textContent = monogram(options.displayName);
+  user.setAttribute("aria-label", `${options.displayName}${options.secondary ? `, ${options.secondary}` : ""}. Open settings`);
+  const avatar = document.createElement("span");
+  avatar.className = "ui-sidebar-avatar";
+  avatar.setAttribute("aria-hidden", "true");
+  avatar.style.setProperty("--ui-avatar-hue", `${hueOffset(options.displayName)}`);
+  avatar.textContent = initial(options.displayName);
+  const names = document.createElement("span");
+  names.className = "ui-sidebar-names";
   const name = document.createElement("span");
   name.className = "ui-sidebar-name";
   name.textContent = options.displayName;
-  user.append(letter, name);
+  names.append(name);
+  if (variant === "a" && options.secondary) {
+    const secondary = document.createElement("span");
+    secondary.className = "ui-sidebar-secondary";
+    secondary.textContent = options.secondary;
+    names.append(secondary);
+  }
+  user.append(avatar, names);
 
   const settings = document.createElement("button");
   settings.type = "button";
@@ -63,48 +77,18 @@ export function createSidebarFoot(options: SidebarFootOptions): SidebarFoot {
   settings.setAttribute("aria-label", "Settings");
   settings.dataset.tip = "Settings";
   settings.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">${GEAR}</svg>`;
-  account.append(user, settings);
 
-  const version = document.createElement("button");
-  version.type = "button";
-  version.className = "ui-pill ui-sidebar-version";
-  version.dataset.tip = "Copy commit id";
-  version.setAttribute("aria-label", `Copy commit id ${options.version.short}`);
-  version.innerHTML = `${swapIcon(COMMIT)}<span class="ui-sidebar-build">infraternal <span class="ui-sidebar-dot" aria-hidden="true">·</span> <span class="ui-sidebar-commit">${options.version.short}</span></span>`;
-  const row2 = document.createElement("div");
-  row2.className = "ui-sidebar-row";
-  row2.append(version);
-  root.append(account, row2);
-
-  let touched = false;
-  const onPointerDown = (event: PointerEvent): void => { touched = event.pointerType === "touch"; };
-  const onVersion = async (event: MouseEvent): Promise<void> => {
-    try {
-      if (!navigator.clipboard) return;
-      await navigator.clipboard.writeText(options.version.full);
-    } catch {
-      return;
-    }
-    // A keyboard activation (detail 0) shows the result at once, without the morph.
-    confirmAction(version, "Copied", event.detail === 0 && !touched);
-    flashTip(version, "Copied", HOLD_MS);
-  };
-  const onSettings = (): void => {
-    if (options.onSettings) options.onSettings();
-    else flashTip(settings, "Coming soon", HOLD_MS);
-  };
-  version.addEventListener("pointerdown", onPointerDown);
-  version.addEventListener("click", onVersion);
-  settings.addEventListener("click", onSettings);
-
+  root.append(user, settings);
+  const open = (event: MouseEvent): void => options.onOpen(event.detail === 0 ? "keyboard" : "pointer");
+  user.addEventListener("click", open);
+  settings.addEventListener("click", open);
   return {
     root,
-    version,
+    user,
     settings,
     dispose() {
-      version.removeEventListener("pointerdown", onPointerDown);
-      version.removeEventListener("click", onVersion);
-      settings.removeEventListener("click", onSettings);
+      user.removeEventListener("click", open);
+      settings.removeEventListener("click", open);
       root.remove();
     },
   };
