@@ -517,3 +517,80 @@ async fn concurrent_tag_edits_serialize_revisions_and_unique_names() {
     assert_eq!(audits, revision);
     fixture.cleanup().await;
 }
+
+#[test]
+fn shared_mesh_vectors_cover_each_production_action_and_wire_shape() {
+    let manifest: Value = serde_json::from_str(include_str!(
+        "../../../contracts/vectors/mesh/manifest.json"
+    ))
+    .unwrap();
+    let expected_actions = [
+        "mesh.list",
+        "mesh.node.enroll",
+        "mesh.node.observe",
+        "mesh.node.rename",
+        "mesh.node.delete",
+        "mesh.tag.create",
+        "mesh.tag.rename",
+        "mesh.tag.delete",
+        "mesh.tag.member.add",
+        "mesh.tag.member.remove",
+        "mesh.grant.create",
+        "mesh.grant.move",
+        "mesh.grant.delete",
+        "mesh.grant.rename",
+        "mesh.role.define",
+        "mesh.role.assign",
+    ];
+    let actions = manifest["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), expected_actions.len());
+    for (vector, expected_action) in actions.iter().zip(expected_actions) {
+        let action = vector["action"].as_str().unwrap();
+        assert_eq!(action, expected_action);
+        let input = serde_json::to_vec(&vector["input"]).unwrap();
+        parse_action(action, &input)
+            .unwrap_or_else(|error| panic!("golden action {action} input must parse: {error:?}"));
+    }
+
+    let results = manifest["results"].as_array().unwrap();
+    assert_eq!(results.len(), 4);
+    for result in results {
+        let value = &result["value"];
+        assert!(value["revision"].as_u64().is_some());
+        match result["action"].as_str().unwrap() {
+            "mesh.list" => {
+                assert!(value["nodes"].is_array());
+                assert!(value["tags"].is_array());
+                assert!(value["grants"].is_array());
+                assert_eq!(
+                    value["nodes"][0]["node"]["public_key"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    32
+                );
+                assert!(value["grants"][0]["arrow"]["id"].as_u64().is_some());
+            }
+            "mesh.node.enroll" => assert!(value["node_id"].as_u64().is_some()),
+            "mesh.grant.create" => assert!(value["grant_id"].as_u64().is_some()),
+            "mesh.tag.member.add" => assert_eq!(value.as_object().unwrap().len(), 1),
+            action => panic!("unexpected golden result action {action}"),
+        }
+    }
+
+    let subscriptions = manifest["subscriptions"].as_array().unwrap();
+    assert_eq!(subscriptions.len(), 4);
+    let expected_events = ["snapshot", "changed", "resync", "error"];
+    for (vector, expected_event) in subscriptions.iter().zip(expected_events) {
+        assert_eq!(vector["filter"]["topic"], "mesh");
+        assert_eq!(vector["event"]["type"], expected_event);
+        match expected_event {
+            "snapshot" | "resync" => {
+                assert!(vector["event"]["snapshot"]["revision"].as_u64().is_some());
+            }
+            "changed" => assert!(vector["event"]["revision"].as_u64().is_some()),
+            "error" => assert!(vector["event"]["error"].as_str().is_some()),
+            _ => unreachable!(),
+        }
+    }
+}
