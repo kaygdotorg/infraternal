@@ -82,7 +82,7 @@
 @media (pointer: coarse) {
   .terminal-screen[data-canvas="on"] .test-double-badge { bottom: calc(84px + env(safe-area-inset-bottom)); }
 }
-.terminal-screen:has(.canvas-popover) .test-double-badge { opacity: 0; }
+
 
 /* The canvas is the overview, so the top bar keeps only the session capsule and "+" even on
    a phone; the other sessions' tab strip stays hidden there. */

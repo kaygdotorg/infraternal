@@ -140,6 +140,8 @@ const DECELERATION = 0.998;
 const MIN_COLUMNS = 40;
 const MIN_ROWS = 10;
 const MIN_WIDTH = 260;
+/** The column the docked sidebar takes from the canvas: its 292 px plus the 12 px gap (style.css). */
+const DOCK_WIDTH = 292 + 12;
 
 const coarse = matchMedia("(pointer: coarse)");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
@@ -358,11 +360,14 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     const rect = inner();
     viewWidth = rect.width;
     viewHeight = rect.height;
+    // Window sizes follow the screen, not the room the docked sidebar leaves: opening the sidebar only
+    // moves the canvas, so no window (and no terminal) is resized, re-measured and redrawn for it.
+    const roomWidth = rect.width + (stage.dataset.sidebar === "docked" ? DOCK_WIDTH : 0);
     // Desktop shows two windows and a peek of the third (the canvas invites a pan);
     // phones show one window and a sliver of the next.
-    const width = coarse.matches || rect.width < 720
+    const width = coarse.matches || roomWidth < 720
       ? Math.max(260, rect.width - 28)
-      : Math.max(420, Math.min(860, (rect.width - GAP * 2) / 2.25));
+      : Math.max(420, Math.min(860, (roomWidth - GAP * 2) / 2.25));
     const height = rect.height;
     baseWidth = Math.round(width);
     layer.style.setProperty("--window-w", `${baseWidth}px`);
@@ -374,10 +379,23 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       entry.size = { width: Math.min(entry.size.width, Math.max(MIN_WIDTH, Math.round(rect.width))), height: fitted, top: Math.max(0, Math.min(entry.size.top, Math.round(height) - fitted)) };
       paintSize(entry);
     }
+    // A canvas scrolled to its far end stays at its far end when the room changes (the docked sidebar takes
+    // a column), so the last window is never pushed out of view; otherwise the offset is only clamped.
+    const atEnd = minX < 0 && (moving ? targetX : x) <= minX + 0.5;
     minX = Math.min(0, rect.width - contentWidth());
     minY = 0;
-    x = clampX(x);
+    if (moving) {
+      // A pan or glide is in flight: keep it going, only aim it at the new bounds (it rests by itself).
+      targetX = atEnd ? minX : clampX(targetX);
+      targetY = clampY(targetY);
+      springX.set(targetX);
+      springY.set(targetY);
+      return;
+    }
+    x = atEnd ? minX : clampX(x);
     y = clampY(y);
+    springX.set(x, true);
+    springY.set(y, true);
     rest();
   };
 

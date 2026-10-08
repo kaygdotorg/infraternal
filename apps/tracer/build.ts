@@ -19,7 +19,7 @@ const build = await Bun.build({
   entrypoints: ["src/main.ts", "../../packages/ui/src/backdrop.worker.ts", "../../packages/ui/src/faulty-terminal.worker.ts"],
   outdir: "dist",
   naming: { entry: "[name].js" },
-  minify: true,
+  minify: process.env.TRACER_NO_MINIFY === undefined,
   target: "browser",
   splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
   define: { __CLUSTERS_PREVIEW__: JSON.stringify(clustersPreview), __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode), __BUILD_DATE__: JSON.stringify(new Date().toISOString()), __BUILD_COMMIT__: JSON.stringify(/^[0-9a-f]{40}$/.test(commit) ? commit : "") },

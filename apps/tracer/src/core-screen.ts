@@ -224,6 +224,17 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const sidebar = get<HTMLElement>("#sidebar");
   const sidebarToggle = get<HTMLButtonElement>("#sidebar-toggle");
   const toast = mountToast(stage);
+  // Whether any floating thing is open (the test-double badge steps aside for it). A flag from script:
+  // `:has()` selectors on the screen or the body would re-evaluate on every change below them.
+  const OVERLAYS = ".sidebar:not([hidden]), .palette:not([hidden]), .ui-toast:not([hidden]), .ah-float, .canvas-popover, .ui-settings, .ui-shortcuts";
+  let overlayQueued = false;
+  const syncOverlay = (): void => {
+    overlayQueued = false;
+    stage.toggleAttribute("data-overlay", stage.querySelector(OVERLAYS) !== null || document.querySelector(".ui-confirm-tip") !== null);
+  };
+  const overlayWatch = new MutationObserver(() => { if (!overlayQueued) { overlayQueued = true; queueMicrotask(syncOverlay); } });
+  overlayWatch.observe(document.body, { childList: true }); // the anchored confirmation lives on the body
+  overlayWatch.observe(stage, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
   // The footer (who is signed in, settings, the build) is part of the canvas preview.
   // Settings is a shell; About is the only section so far (the build's name, version, commit, date).
   const build = buildVersion();
@@ -326,7 +337,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     applyTheme(active, ROOT, glassLevel);
     window.dispatchEvent(new CustomEvent("tracer:appearance"));
     THEME_COLOR?.setAttribute("content", active.bg);
-    client?.setTheme(terminalTheme(active, background === "mesh"));
+    // The terminal's own recolour (every retained row is redrawn) is the heaviest part of a theme
+    // switch. It runs in its own task, right after the tokens above, so the interface answers at once
+    // and no single task is long (work stays under the 50 ms long-task line at 4x CPU).
+    const terminal = terminalTheme(active, background === "mesh");
+    window.setTimeout(() => client?.setTheme(terminal), 0);
     if (background === "mesh") return paintMesh();
     releaseMesh();
     return Promise.resolve();
@@ -357,7 +372,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (request !== fontRequest) return;
       shownFont = font;
       applyFontVars(font, ROOT);
-      client?.setFont(font);
+      // The terminal re-measures its cells and redraws in its own task, after the interface has the new face.
+      window.setTimeout(() => client?.setFont(font), 0);
     }, () => undefined);
   };
 
@@ -391,19 +407,24 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const paletteSearchText = new Map<PaletteEntry, string>();
   const paletteOptionIds = new Map<PaletteEntry, string>();
   const paletteGroupIds = new Map<string, string>();
+  // The fixed rows are built, indexed and given their DOM rows once; only the rows a provider computes from
+  // state (Lock or Unlock) are new at each open, so opening the palette re-attaches rows instead of rebuilding them.
+  const staticEntries = baseEntries();
+  const indexEntry = (entry: PaletteEntry, index: number): void => {
+    paletteSearchText.set(entry, `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase());
+    // Normalize IDs once so typing never sanitizes every matching result.
+    paletteOptionIds.set(entry, `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`);
+    if (!paletteGroupIds.has(entry.group)) paletteGroupIds.set(entry.group, `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`);
+  };
+  staticEntries.forEach(indexEntry);
+  let contextual: PaletteEntry[] = [];
   const refreshEntries = (): void => {
-    entries.length = 0;
+    for (const entry of contextual) { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); }
     // Context first: a provider's rows (actions on the current window) lead the list.
-    entries.push(...[...providers].flatMap((provider) => provider()), ...baseEntries());
-    paletteSearchText.clear();
-    paletteOptionIds.clear();
-    paletteGroupIds.clear();
-    entries.forEach((entry, index) => {
-      paletteSearchText.set(entry, `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase());
-      // Normalize IDs once so typing never sanitizes every matching result.
-      paletteOptionIds.set(entry, `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`);
-      if (!paletteGroupIds.has(entry.group)) paletteGroupIds.set(entry.group, `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`);
-    });
+    contextual = [...providers].flatMap((provider) => provider());
+    contextual.forEach((entry, index) => indexEntry(entry, 1000 + index));
+    entries.length = 0;
+    entries.push(...contextual, ...staticEntries);
   };
   refreshEntries();
   let visibleEntries: PaletteEntry[] = [];
@@ -563,20 +584,23 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
 
   const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer"): void => {
-    palette.hidden = !open;
-    scrim.hidden = !open;
-    // The source of the last open or close decides its motion: keyboard is instant, pointer animates.
+    // The source of the last open or close decides its motion (a key-triggered open is the shorter one).
     palette.dataset.openKind = source;
     if (open) {
       shortcuts.close(true);
       settings?.close("keyboard");
+      // Fill the list while the palette is still display:none (no layout runs for it), then show it and
+      // focus the field: the browser lays the palette out once, for the focus, not once per step.
       refreshEntries();
       selected = 0;
       paletteInput.value = "";
-      paletteResults.scrollTop = 0;
       renderPalette();
+      palette.hidden = false;
+      scrim.hidden = false;
       paletteInput.focus({ preventScroll: true });
     } else {
+      palette.hidden = true;
+      scrim.hidden = true;
       paletteInput.removeAttribute("aria-activedescendant");
       syncFontPreview();
     }
@@ -702,6 +726,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const result = target.closest<HTMLButtonElement>(".result");
     const index = result ? visibleOptions.indexOf(result) : -1;
     if (index >= 0 && index !== selected) selectPaletteOption(index);
+  });
+  // Hover intent: the face of a font row is fetched and decoded as soon as the pointer rests on it
+  // (the long part of a cold font switch is the fetch and decode, not the apply), so choosing it is warm.
+  paletteResults.addEventListener("pointerover", (event) => {
+    const row = (event.target as Element | null)?.closest<HTMLElement>(".result[data-action^='font:']");
+    const font = row ? fontById(row.dataset.action!.slice(5)) : undefined;
+    if (font) void loadFont(font).catch(() => undefined);
   });
   paletteResults.addEventListener("click", (event) => {
     const target = event.target;
@@ -1361,6 +1392,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     dispose() {
       toast.dispose();
+      overlayWatch.disconnect();
       cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
       shortcuts.dispose();

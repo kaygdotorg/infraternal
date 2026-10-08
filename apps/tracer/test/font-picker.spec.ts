@@ -36,14 +36,15 @@ test("arrow previews a font, Escape reverts, nothing is saved", async ({ browser
   expect((await state(page)).loaded).not.toContain("Geist Mono");
   await page.keyboard.press("ArrowDown");
   await expect.poll(async () => (await state(page)).dataFont).toBe("geist-mono");
+  // The terminal follows the interface in its own task (so no single task is long): poll for it.
+  await expect.poll(async () => (await state(page)).terminalId).toBe("geist-mono");
   const preview = await state(page);
-  expect(preview.terminalId).toBe("geist-mono");
   expect(preview.rootFamily).toContain("Geist Mono");
   expect(preview.loaded).toContain("Geist Mono");
   expect(preview.saved).toBeNull();
   await page.keyboard.press("Escape");
   await expect.poll(async () => (await state(page)).dataFont).toBe("maple-mono-nf");
-  expect((await state(page)).terminalId).toBe("maple-mono-nf");
+  await expect.poll(async () => (await state(page)).terminalId).toBe("maple-mono-nf");
   expect((await state(page)).saved).toBeNull();
   await context.close();
 });

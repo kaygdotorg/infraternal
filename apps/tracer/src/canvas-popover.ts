@@ -107,9 +107,12 @@ export function openDetailsPopover(
   const list = createKeyValueList(`${input.hostLabel} details`);
   const scroll = root.querySelector<HTMLElement>(".canvas-popover-scroll")!;
   scroll.append(list.root);
+  let scrolled = false;
+  scroll.addEventListener("scroll", () => { scrolled = true; }, { passive: true });
   const show = (section: Section, animate: boolean): void => {
     list.set(rows(section, host, session));
-    scroll.scrollTop = 0;
+    // Resetting the scroll position forces a layout; only a popover that was scrolled needs it.
+    if (scrolled) { scroll.scrollTop = 0; scrolled = false; }
     if (animate && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
       list.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE });
     }
@@ -121,7 +124,6 @@ export function openDetailsPopover(
   ], "machine", (id, how) => show(id as Section, how === "pointer"), "Details", true);
   root.querySelector(".canvas-popover-tabs")!.append(tabs.root);
   show("machine", false);
-  stage.append(root);
 
   // ---- placement: inside the window, under the pill, one inset on every side ----------
   // The inset equals the window header's padding, so at its maximum height the popover sits
@@ -145,7 +147,10 @@ export function openDetailsPopover(
     root.style.maxHeight = `${Math.max(0, Math.floor(bottom - top))}px`;
     root.style.transformOrigin = `${Math.round(pill.left + pill.width / 2 - left)}px 0`;
   };
+  // Placed before it is attached: every measurement (the pill, the window, the stage, the key tray) is read
+  // while no new content is pending, so the browser lays out once, after the single write below.
   place();
+  stage.append(root);
 
   if (source === "pointer" && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
     root.animate([

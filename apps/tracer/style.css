@@ -213,9 +213,9 @@ button { color: inherit; }
   font-size: 10px;
   letter-spacing: 0.08em;
 }
-/* Translucent overlays would show the badge blurred through them; it steps aside instead. */
-.terminal-screen:has(.sidebar:not([hidden]), .palette:not([hidden]), .ui-toast:not([hidden]), .ah-float) .test-double-badge,
-body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge { opacity: 0; }
+/* Translucent overlays would show the badge blurred through them; it steps aside instead. (A flag set from script,
+   not `:has()` on the screen or the body: those re-evaluate on every DOM change under them.) */
+.terminal-screen[data-overlay] .test-double-badge { opacity: 0; }
 .probe-panel {
   position: absolute;
   z-index: 5;
@@ -459,20 +459,36 @@ body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge 
      material itself (fill, hairline, blur) comes from .ui-overlay-surface. */
   transition: opacity 120ms ease-out, transform 120ms var(--ease-out), display 120ms allow-discrete;
 }
-.palette:not([hidden]) { transition-duration: 180ms; }
+.palette:not([hidden]) { transition-duration: 240ms; }
 @starting-style { .palette:not([hidden]) { opacity: 0; transform: translate(-50%, -6px) scale(0.98); } }
 .palette[hidden] { display: none; opacity: 0; transform: translate(-50%, -4px) scale(0.99); }
-.palette[data-open-kind="keyboard"] { transition: none; }
+/* Animation never gets in the way: a key-triggered open is a short 180 ms fade and scale (a pointer open
+   takes 240 ms), input is never blocked while it plays (the field is focused at once), and filtering,
+   arrowing and height changes are never animated. */
+.palette[data-open-kind="keyboard"]:not([hidden]) { transition-duration: 180ms; }
+/* Desktop: the palette is centred in the viewport and sized by its results. It grows and shrinks
+   symmetrically from the middle (top 50%, translated back by half its own height), is as tall as
+   its content (a single result is compact), and never exceeds 50 % of the height, so it stays at
+   least a quarter of the viewport away from the top and from the bottom. Typing resizes it with
+   no animation (height is never transitioned); phones keep the placement under the top bar. */
+@media (min-width: 721px) {
+  .palette { top: 50%; display: flex; flex-direction: column; height: auto; max-height: 50%; transform: translate(-50%, -50%); transform-origin: 50% 50%; }
+  .palette-input, .palette-foot { flex: none; }
+  .palette-results { flex: 0 1 auto; min-height: 0; max-height: none; }
+  @starting-style { .palette:not([hidden]) { opacity: 0; transform: translate(-50%, -50%) scale(0.98); } }
+  .palette[hidden] { transform: translate(-50%, -50%) scale(0.99); }
+}
 .palette-input { display: flex; align-items: center; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--line); }
 .palette-input svg { flex: none; color: var(--fg-2); }
 .palette-input input { width: 100%; height: 56px; border: 0; outline: 0; background: transparent; color: var(--fg); font: var(--fw-body) var(--text-input)/1.3 var(--font-ui); }
 .palette-input input::placeholder { color: var(--fg-3); }
+.palette-results .result, .palette-results .group-label { content-visibility: auto; contain-intrinsic-size: auto 36px; }
 .palette-results { max-height: min(54vh, 470px); overflow: auto; padding: 8px; overscroll-behavior: contain; }
 .group-label { padding: 10px 8px 4px; color: var(--fg-3); font: var(--fw-title) var(--text-caption)/12px var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; }
 .result { display: flex; align-items: center; width: 100%; min-height: calc(var(--row) + 4px); gap: 8px; padding: 0 8px; border-radius: 6px; text-align: left; position: relative; isolation: isolate; }
 /* The highlight is drawn inset from the row (the row keeps its full hit area): 3 px above and below
    leave an even gap to the rows and section headers around it. */
-.result::before { content: ""; position: absolute; z-index: -1; inset: 3px 0; border-radius: 8px; background: transparent; transition: background-color 120ms ease; }
+.result::before { content: ""; position: absolute; z-index: -1; inset: 3px 0; border-radius: 8px; background: transparent; }
 .result:disabled { color: var(--fg-3); cursor: default; opacity: 0.72; }
 .result[aria-selected="true"]::before { background: var(--accent-soft); }
 .result-icon.has-svg svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -507,6 +523,10 @@ body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge 
 .keydots i[data-on] { background: var(--fg); opacity: 0.9; }
 .keytray[data-rows="2"] .keyrow { padding-right: 16px; }
 .keyrow::-webkit-scrollbar { display: none; }
+/* `safe`: when the keys are wider than the tray, plain centring pushes the first ones out of reach to the
+   left of the scroll origin (esc and tab could not be scrolled to or tapped on a phone). */
+.keytray.ui-pill { justify-content: safe center; }
+.keytray::-webkit-scrollbar { display: none; }
 [data-focus-ring="on"] .keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .keybar button { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
 .keybar button svg { width: 24px; height: 24px; stroke-width: 1.75; }
@@ -557,7 +577,8 @@ body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge 
   .bm-fold { transition: none; }
   .keybar button { transition: none; }
   .sidebar[hidden] { transform: none; }
-  .sidebar.instant, .palette[data-open-kind="keyboard"], .sidebar-toggle { transition: none; }
+  .sidebar.instant, .sidebar-toggle { transition: none; }
+  .palette { transition-duration: 0ms; }
   .keybar.is-away { transform: none; }
   .backdrop { transition: opacity 240ms ease; }
   .keybar button:active,

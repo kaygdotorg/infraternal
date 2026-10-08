@@ -32,6 +32,13 @@ export const swapIcon = (paths: string) => `<span class="swap"><svg class="is-id
 /** An inline tick for text that copies (no idle glyph): it morphs in with the same motion as `swapIcon`. */
 export const inlineTick = (): string => `<span class="swap ui-inline-tick" aria-hidden="true">${TICK_ICON}</span>`;
 
+let tickTemplate: HTMLTemplateElement | undefined;
+/** The same inline tick as a node, cloned from one parsed template (a list of cells would otherwise parse the markup per cell). */
+export const inlineTickNode = (): Node => {
+  if (!tickTemplate) { tickTemplate = document.createElement("template"); tickTemplate.innerHTML = inlineTick(); }
+  return tickTemplate.content.firstChild!.cloneNode(true);
+};
+
 const timers = new WeakMap<HTMLElement, number>();
 
 /** Plays the icon → tick → icon swap; keyboard activations expose the result instantly. */

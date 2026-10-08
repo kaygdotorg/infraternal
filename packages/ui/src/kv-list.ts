@@ -12,7 +12,7 @@
  *
  * Meters (memory, disk) are a thin bar under the value; they span the value column.
  */
-import { copyFeedback, inlineTick } from "./copy-feedback";
+import { copyFeedback, inlineTickNode } from "./copy-feedback";
 
 export interface KeyValueRow {
   key: string;
@@ -80,8 +80,7 @@ export function createKeyValueList(label: string): KeyValueList {
     const span = document.createElement("span");
     span.className = "ui-kv-text";
     const label = document.createTextNode(text);
-    span.innerHTML = inlineTick();
-    if (kind === "key") span.prepend(label); else span.append(label);
+    span.append(kind === "key" ? label : inlineTickNode(), kind === "key" ? inlineTickNode() : label);
     button.append(span);
     return button;
   };

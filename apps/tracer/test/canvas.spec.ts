@@ -847,3 +847,76 @@ test("top pill: the host's operating-system icon replaces the connection dot and
   await page.locator(".ui-window").nth(2).locator(".ui-window-body").click(); // an Arch/Debian-family host, not the first
   await expect.poll(() => pill.locator("#capsule-os").innerHTML()).not.toBe(first);
 });
+
+// ---- the palette: centred and sized by its results ---------------------------------------------
+test("palette (desktop): centred, as tall as its results, never closer than a quarter of the viewport to the top or bottom", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  const palette = page.locator("#palette");
+  const box = async () => (await palette.boundingBox())!;
+  await page.keyboard.press("Control+k");
+  await expect(palette).toBeVisible();
+  await page.waitForTimeout(300);
+  // No query: the default sections up to the cap (50 % of the viewport), centred both ways.
+  let b = await box();
+  expect(Math.abs(b.x + b.width / 2 - 720)).toBeLessThan(1);
+  expect(b.height).toBeLessThanOrEqual(450.5);
+  expect(b.y).toBeGreaterThanOrEqual(224);
+  expect(900 - (b.y + b.height)).toBeGreaterThanOrEqual(224);
+  expect(Math.abs(b.y + b.height / 2 - 450)).toBeLessThan(1);
+  const sizes: number[] = [b.height];
+  for (const [query, expectRows] of [["ink", 1], ["theme", 10], ["zzzz", 0]] as const) {
+    await page.locator("#palette-input").fill(query);
+    await page.waitForTimeout(60);
+    b = await box();
+    sizes.push(b.height);
+    // Symmetric growth: the middle never moves; the height follows the rows and is never animated.
+    expect(Math.abs(b.y + b.height / 2 - 450)).toBeLessThan(1);
+    expect(await page.locator(".palette-results .result").count()).toBeGreaterThanOrEqual(Math.min(expectRows, 1));
+    expect(await palette.evaluate((node) => getComputedStyle(node).transitionProperty)).not.toContain("height");
+  }
+  const [none, one, many, empty] = sizes as [number, number, number, number];
+  expect(one).toBeLessThan(many);
+  expect(many).toBeLessThanOrEqual(none);
+  expect(empty).toBeLessThan(none);
+  expect(one).toBeLessThan(200);
+  // The selected row keeps its inset highlight.
+  await page.locator("#palette-input").fill("theme");
+  const inset = await page.locator(".result[aria-selected='true']").first().evaluate((node) => getComputedStyle(node, "::before").top);
+  expect(inset).toBe("3px");
+  await page.keyboard.press("Escape");
+});
+
+test("palette (phone): keeps its placement under the top bar, inside the safe area", async ({ browser }) => {
+  const context = await browser.newContext({ hasTouch: true, isMobile: true, deviceScaleFactor: 3, viewport: { width: 393, height: 852 } });
+  const page = await touchContext(context);
+  await openCanvas(page);
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#palette")).toBeVisible();
+  await page.waitForTimeout(300);
+  const b = (await page.locator("#palette").boundingBox())!;
+  expect(b.y).toBeLessThan(100);
+  expect(b.y + b.height).toBeLessThanOrEqual(852);
+  await context.close();
+});
+
+// ---- animation never gets in the way ----------------------------------------------------------
+test("palette: Ctrl+K then typing within 20 ms lands every character; arrow selection has no transition", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  // The open animates (a short fade), yet the field is focused at once and takes the first keystrokes.
+  await page.keyboard.press("Control+k");
+  await page.waitForTimeout(20);
+  await page.keyboard.type("thm", { delay: 0 });
+  await expect(page.locator("#palette-input")).toHaveValue("thm");
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).pointerEvents)).not.toBe("none");
+  await page.locator("#palette-input").fill("theme");
+  const before = await page.locator(".result[aria-selected='true']").getAttribute("data-action");
+  await page.keyboard.press("ArrowDown");
+  expect(await page.locator(".result[aria-selected='true']").getAttribute("data-action")).not.toBe(before);
+  const transitions = await page.evaluate(() => [...document.querySelectorAll(".result")].slice(0, 4).map((row) => getComputedStyle(row, "::before").transitionDuration));
+  expect(transitions.every((duration) => duration === "0s")).toBe(true);
+  // The key-triggered open is short (about 180 ms) and the pointer one longer.
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).transitionDuration)).toBe("0.18s");
+});
