@@ -1375,6 +1375,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      views, Mesh, toolbar editing, the droplet, settings windows) has its own
      separate budget, so neither can grow unnoticed. Budgets change only with
      measurements in the commit.
+     **A third class, on demand (owner, 2026-10-08):** code loaded only when
+     the person takes an action (the add-host wizard, the share studio,
+     Settings windows) has its own budget instead of counting as
+     after-first-paint code.
 189. **Card and window transparency (owner, 2026-10-08):** four levels for each,
      "Glass" renamed **Frosted**. Dark/light tint and blur:
      - **Solid:** cards 1.00/1.00, 0 px; windows 1.00/1.00, 0 px.
