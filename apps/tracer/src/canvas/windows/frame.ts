@@ -38,6 +38,7 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   const unwatch = cx.memory.watch(card.root);
   const bodyCleanup = rec.cleanup;
   rec.cleanup = () => { unwatch(); bodyCleanup?.(); };
+  if (rec.binding) cx.visibility.watch(rec);
   return rec;
 }
 

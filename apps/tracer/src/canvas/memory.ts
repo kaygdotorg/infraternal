@@ -29,7 +29,9 @@ export function createMemory(cx: Ctx, backdrop: Backdrop | undefined): Memory {
   const far = new WeakSet<ViewRec>();
   let hidden = false;
 
-  const setVisible = (c: ViewRec, visible: boolean): void => { for (const rec of c.wins.values()) rec.binding?.setVisible(visible); };
+  // How live a window is (near the screen, level of detail) is decided in windows/visibility.ts; this module only
+  // says which views are far and when the page is paused, and that module combines the three.
+  const setVisible = (c: ViewRec, visible: boolean): void => cx.visibility.setViewFar(c, !visible);
 
   const cull = (): void => {
     if (hidden || !camera.vw || !camera.vh) return;
@@ -51,14 +53,14 @@ export function createMemory(cx: Ctx, backdrop: Backdrop | undefined): Memory {
     backdrop?.release();
     world.style.willChange = "";
     world.style.visibility = "hidden"; // every layer under the world goes with it
-    for (const c of views.values()) setVisible(c, false);
+    cx.visibility.setPaused(true);
   };
   const show = (): void => {
     if (document.hidden || !hidden) return;
     hidden = false;
     world.style.visibility = "";
     camera.apply(true);
-    for (const c of views.values()) setVisible(c, !far.has(c));
+    cx.visibility.setPaused(false);
     cull();
   };
   document.addEventListener("visibilitychange", () => { if (document.hidden) hide(); else show(); }, { signal });
