@@ -406,7 +406,8 @@ test("palette: About infraternal opens Settings, About, and is found by version,
     await page.locator("#palette-input").fill(alias);
     await expect(page.locator(".result[data-action='settings:about']")).toBeVisible();
     if (alias === "commit") {
-      await page.keyboard.press("Enter");
+      // "commit" also finds the Commit Mono font row, so pick About by name.
+      await page.locator(".result[data-action='settings:about']").click();
       await expect(page.locator(".ui-settings")).toBeVisible();
       await page.keyboard.press("Escape");
     } else await page.keyboard.press("Escape");
