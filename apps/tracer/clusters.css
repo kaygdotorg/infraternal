@@ -155,8 +155,7 @@
 .cl-empty-add { --pill-h: var(--ui-control-h, 30px); gap: 6px; margin-top: 10px !important; padding: 0 14px 0 10px; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; }
 .cl-empty-add svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 
-/* ---- split: the bridge between two halves ---------------------------------------------------- */
-.cl-neck {
+
   position: absolute; z-index: 0; opacity: 0; pointer-events: none;
   background: color-mix(in oklab, var(--bg) 88%, transparent); border-inline: 1px solid var(--overlay-line);
 }
@@ -220,3 +219,7 @@
 .terminal-screen[data-clusters] .capsule-rtt { display: none; }
 .terminal-screen[data-clusters] .capsule-session { color: var(--fg-3); }
 @media (max-width: 480px) { .cl-noun { display: none; } }
+
+/* During a split the two frames are drawn by the goo layer (clusters-split.ts); the windows keep only their contents. */
+.ui-window[data-goo] { transition: none; background: transparent; border-color: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+.cl-goo { z-index: 0; }

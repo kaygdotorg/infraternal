@@ -540,3 +540,22 @@ test("toolbar: the row stack follows the finger one to one (swipe up moves it up
     await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "keys");
   } finally { await t.close(); }
 });
+
+test("droplet split: a goo layer exists only while it runs, the gap pulls past its rest size and wobbles back, and each frame costs under 4 ms", async ({ page }) => {
+  await open(page, 3);
+  await page.evaluate(() => ((window as unknown as { __splitProbe: unknown }).__splitProbe = { frames: 0, drawMs: 0, maxDrawMs: 0, trace: [] }));
+  expect(await page.locator(".cl-goo").count()).toBe(0);
+  await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split"]').click();
+  await expect(page.locator(".cl-goo")).toHaveCount(1, { timeout: 2000 });
+  await expect(page.locator(".cl-goo")).toHaveCount(0, { timeout: 3000 });
+  const r = await page.evaluate(() => (window as unknown as { __splitProbe: { frames: number; drawMs: number; maxDrawMs: number; trace: Array<[number, number]> } }).__splitProbe);
+  console.log(`SPLIT_COST frames=${r.frames} avgDrawMs=${(r.drawMs / r.frames).toFixed(3)} maxDrawMs=${r.maxDrawMs.toFixed(2)}`);
+  expect(r.maxDrawMs).toBeLessThan(4);
+  const gaps = r.trace.map((t) => t[1]);
+  expect(Math.max(...gaps)).toBeGreaterThan(60); // pulled far past the resting gap
+  const peak = gaps.indexOf(Math.max(...gaps));
+  expect(Math.min(...gaps.slice(peak))).toBeLessThan(12); // squeezed below it on the way back
+  expect(r.trace[r.trace.length - 1]![0]).toBeLessThan(1000);
+  // Both windows are plain frames again, with their content, at rest.
+  await expect(page.locator('.ui-window[data-goo]')).toHaveCount(0);
+});
