@@ -115,6 +115,11 @@ button { color: inherit; }
   touch-action: none;
   overscroll-behavior: none;
   scrollbar-width: none;
+  /* The renderer measures its cells from the host's computed font settings, so UI
+     typography (the mono UI's negative tracking) must never reach it: inherited
+     letter-spacing shrank the measured advance and drew the cursor ahead of the text. */
+  letter-spacing: normal;
+  word-spacing: normal;
 }
 .terminal-host::-webkit-scrollbar { display: none; }
 [data-focus-ring="on"] .terminal-host:focus-visible { outline: 2px solid var(--accent, #7a9cff); outline-offset: -3px; }
@@ -226,6 +231,7 @@ button { color: inherit; }
 
 /* Core terminal shell: one padded pane card keeps the renderer ready for later splits. */
 .terminal-screen {
+  --terminal-prediction-opacity: 0.74;
   --font-mono: "Geist Mono", ui-monospace, monospace;
   --r-sm: 8px;
   --r-md: 12px;

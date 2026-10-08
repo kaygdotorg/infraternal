@@ -104,6 +104,22 @@ timings. **Drop socket** forces a disconnect and records the time until a
 marker echo paints after resume. **Copy results** works on a phone or falls back
 to selectable report text when clipboard access is unavailable.
 
+## Predictive local echo (#50)
+
+Append `?predict=1` to opt in; production sessions keep it off by default. The
+client draws bounded printable input only when measured RTT is above 60 ms and
+Ghostty reports a visible cursor on the live normal screen. Host output confirms
+or clears the overlay. Large paste and editing keys wait for host output; a
+missing echo or three consecutive mismatches mutes prediction until host output
+proves echo is safe again. The shared text overlay uses plain terminal glyphs
+with one opacity setting, `--terminal-prediction-opacity`.
+
+The production test compares seeded input/echo schedules against a second
+Ghostty instance and captures pending and confirmed glyphs in both themes at
+393 × 852 and 1440 × 900. The captures and latency attribution are under
+`test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/`;
+measured results and the 50 MB throughput comparison are recorded on issue #50.
+
 ## Browser test
 
 ```sh
