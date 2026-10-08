@@ -34,29 +34,36 @@ pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Resul
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    let mut endpoint = quinn::Endpoint::client(
-        if identity.endpoint.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        }
-        .parse()
-        .map_err(io::Error::other)?,
-    )?;
-    endpoint.set_default_client_config(remote_quic::client_config(
-        &identity.identity,
-        &identity.roots,
-    )?);
     let tls = remote_tls::client_config(&identity.identity, &identity.roots)?;
     let mut backoff = Duration::from_millis(200);
     loop {
         let started = tokio::time::Instant::now();
+        let quic = dial_runtime::DialRuntime::new();
+        let mut endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            None,
+            std::net::UdpSocket::bind(if identity.endpoint.is_ipv6() {
+                "[::]:0"
+            } else {
+                "0.0.0.0:0"
+            })?,
+            quic.runtime(),
+        )?;
+        endpoint.set_default_client_config(remote_quic::client_config(
+            &identity.identity,
+            &identity.roots,
+        )?);
         let connected = dial_preferred(&endpoint, identity, &tls).await;
         match connected {
             Ok(Connected::Quic(connection)) => {
                 let _ = quic_session(connection, identity, state.clone()).await;
             }
             Ok(Connected::Tcp(connection)) => {
+                // The losing handshake otherwise retains Quinn drain timers after
+                // Connecting is dropped. Cancel only this attempt's UDP drivers;
+                // the authenticated TCP channel and rootless shims are independent.
+                drop(endpoint);
+                drop(quic);
                 let _ = daemon::run_authenticated(
                     &connection.channel,
                     state.clone(),
@@ -218,3 +225,6 @@ async fn quic_session(
 #[cfg(test)]
 #[path = "remote_client_tests.rs"]
 mod tests;
+
+#[path = "remote_dial_runtime.rs"]
+mod dial_runtime;
