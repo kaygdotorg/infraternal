@@ -21,10 +21,11 @@ const limits = {
   // Measured when the canvas product module landed (D188): 46,738 B gzip / 40,526 B brotli. The limit is that size
   // rounded up to a whole KiB plus a 4 KiB margin, so ordinary canvas work fits and a library pulled in by accident does not.
   deferred: { gzip: 50 * KIB, brotli: 44 * KIB },
-  // On demand (D188): the Settings window panels measure 2,136 B gzip / 1,863 B brotli. The limit is that rounded up to
-  // a whole KiB plus an 8 KiB margin, which also leaves room for the add-host wizard (about 15.6 KB identity, roughly
-  // 6 KiB compressed) to mount on demand without a budget change.
-  onDemand: { gzip: 11 * KIB, brotli: 10 * KIB },
+  // On demand (D188): the Settings window panels measure 2,136 B gzip / 1,863 B brotli; with the add-host wizard the
+  // class measures 15,932 B gzip / 14,123 B brotli. The first estimate for the wizard was about 6 KiB compressed;
+  // it is about 13.8 KiB (the chip field, the step mover, the key/value list and the pages themselves). The limit
+  // follows the deferred rule: the size rounded up to a whole KiB plus a 4 KiB margin. PROPOSED, for the owner.
+  onDemand: { gzip: 20 * KIB, brotli: 18 * KIB },
 };
 const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[]; onDemand: string[] };
 const totals = { critical: { identity: 0, gzip: 0, brotli: 0 }, deferred: { identity: 0, gzip: 0, brotli: 0 }, onDemand: { identity: 0, gzip: 0, brotli: 0 } };
