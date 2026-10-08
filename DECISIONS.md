@@ -1155,3 +1155,32 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      accepted in D173. The delayed-path row needs a rerun with matched packet
      loss before its exact gap is quoted; it does not affect this choice.
      Next: measure BBR congestion control at the India–Germany latency.
+177. **Canvas vocabulary, toolbar and locks (owner, 2026-10-08, #89, #91):**
+     - **Names:** the *toolbar* is the bottom bar on touch devices, with
+       two rows: the *key row* (terminal keys the on-screen keyboard
+       lacks) and the *canvas row* (canvas controls). The *canvas lock*
+       (snap) keeps the canvas snapped to windows; the *input lock* (the
+       padlock) keeps all input inside one window. A *view* is a named
+       area of the canvas (Console, Containers, Topology); the *top pill*
+       is the centred pill at the top.
+     - **Rows:** switch automatically by focus; swipe up for the canvas
+       row, down for the key row; horizontal swipe scrolls a row. The
+       toolbar never hides (slim strip while reading scrollback).
+     - **Canvas row:** ⌘K · views · ← → window · canvas lock · overview ·
+       input lock · split · add host · sidebar, customisable in
+       Settings → Toolbar (reorder, show/hide, reset).
+     - **Key row:** current keys, sticky Ctrl/Alt, Paste; custom keys later.
+     - **Canvas lock:** on by default and re-enabled on every view switch
+       or fly-to; one window per swipe (a flick may move two); phones show
+       neighbours peeking; one finger scrolls the terminal, two fingers or
+       ← → move windows; when turned off it stays off until the next view
+       switch. Desktop: icon buttons right of the top pill; ⌘1–9 views;
+       the canvas lock shortcut is still to be chosen (not ⌘\).
+     - **Top pill:** the view's icon and name, a quiet session count, the
+       connection status icon and the ⌘K hint; tap for the view switcher;
+       it is the morph source for `?` and the floating terminal; it does
+       not name the active window.
+     - **Input lock on touch:** in the canvas row; input stays in the
+       window, swipes don't move windows, the key row stays; locking with
+       the canvas lock off snaps to the window first and unlocking
+       restores the previous state.
