@@ -1,3 +1,4 @@
 # Browser output is evidence from the production build, not a source asset.
 test-results/
 playwright-report/
+__pycache__/

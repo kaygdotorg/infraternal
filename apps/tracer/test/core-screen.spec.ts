@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "playwright/test";
 import { contrastRatio } from "../../../packages/ui/src/color";
 import { THEMES, overlayMaterial } from "../../../packages/ui/src/themes";
+import { FONTS } from "../../../packages/ui/src/fonts";
 
 async function waitForAttached(page: Page): Promise<void> {
   await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
@@ -39,7 +40,7 @@ async function saveFontComparison(
     img{display:block;width:${width}px;height:${height}px}
   </style></head><body><main>
     <figure><figcaption>Geist Sans · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${sans.toString("base64")}"></figure>
-    <figure><figcaption>Geist Mono · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${mono.toString("base64")}"></figure>
+    <figure><figcaption>Maple Mono NF · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${mono.toString("base64")}"></figure>
   </main></body></html>`);
   await page.locator("img").evaluateAll((images) => Promise.all(images.map((image) => (image as HTMLImageElement).decode())));
   const path = resolve(process.cwd(), "test-results", "core-screen", `${name}-comparison.png`);
@@ -196,7 +197,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   const paletteActions = await palette.locator(".result").evaluateAll((results) =>
     results.map((result) => (result as HTMLButtonElement).dataset.action ?? ""));
   expect(paletteActions.sort()).toEqual([
-    "session:current", "host:current", "bg:mesh", "bg:none", ...Object.keys(THEMES).map((id) => `theme:${id}`),
+    "session:current", "host:current", "bg:mesh", "bg:none", ...Object.keys(THEMES).map((id) => `theme:${id}`), ...FONTS.map((font) => `font:${font.id}`),
   ].sort());
   expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0s");
   const previousMesh = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"));
@@ -263,11 +264,11 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
       const stage = document.querySelector<HTMLElement>("#terminal-screen")!;
       return {
         family: getComputedStyle(stage).fontFamily,
-        selectedFaceLoaded: document.fonts.check(document.documentElement.dataset.uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"'),
+        selectedFaceLoaded: document.fonts.check(document.documentElement.dataset.uiFont === "mono" ? '450 13px "Maple Mono NF"' : '450 14px "Geist Sans"'),
         stored: localStorage.getItem("tracer.ui-font"),
       };
     });
-    expect(typography.family).toContain(font === "mono" ? "Geist Mono" : "Geist Sans");
+    expect(typography.family).toContain(font === "mono" ? "Maple Mono NF" : "Geist Sans");
     expect(typography.selectedFaceLoaded).toBe(true);
     expect(typography.stored).toBe(font);
 
@@ -366,7 +367,7 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
     await waitForAttached(storedPreferencePage);
     await expect(storedPreferencePage.locator("html")).toHaveAttribute("data-ui-font", "mono");
     const storedFamily = await storedPreferencePage.locator("#terminal-screen").evaluate((stage) => getComputedStyle(stage).fontFamily);
-    expect(storedFamily).toContain("Geist Mono");
+    expect(storedFamily).toContain("Maple Mono NF");
   } finally {
     await storedPreferenceContext.close();
   }
@@ -386,7 +387,7 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
     await waitForAttached(blockedStoragePage);
     await expect(blockedStoragePage.locator("html")).toHaveAttribute("data-ui-font", "mono");
     const blockedFamily = await blockedStoragePage.locator("#terminal-screen").evaluate((stage) => getComputedStyle(stage).fontFamily);
-    expect(blockedFamily).toContain("Geist Mono");
+    expect(blockedFamily).toContain("Maple Mono NF");
   } finally {
     await blockedStorageContext.close();
   }

@@ -4,6 +4,8 @@ import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/s
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { installFocusRing } from "../../../packages/ui/src/focus-ring";
+import { applyFontVars, loadFont } from "../../../packages/ui/src/fonts";
+import { initialFont } from "./font-preference";
 import { mountOnboarding } from "./onboarding";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
@@ -41,6 +43,8 @@ declare global {
         viewportY: number;
         cursorVisible: boolean;
         fontSize: number;
+        fontFamily: string;
+        fontId: string;
         wasmMemoryBytes: number;
         themeColorsMs: number;
         themeRenderMs: number;
@@ -83,8 +87,12 @@ void start();
 async function start(): Promise<void> {
   installFocusRing();
   installForegroundListener();
+  // The chosen font applies to the whole app, sign-in card included, before the first paint.
+  // The default is already declared in CSS and preloaded; another font is fetched here.
+  const font = initialFont();
+  applyFontVars(font, document.documentElement);
   const fontsReady = Promise.race([
-    document.fonts.load('450 14px "Geist Mono"').then(() => undefined),
+    loadFont(font),
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
   ]).catch(() => undefined);
   try {
@@ -264,7 +272,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     const { mountCoreScreen } = await import("./core-screen");
     // The screen mounts only after its selected face is ready, preventing a one-frame
     // fallback and keeping the mobile layout stable while the font loads.
-    await document.fonts.load(uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"');
+    await (uiFont === "mono" ? loadFont(initialFont()) : document.fonts.load('450 14px "Geist Sans"'));
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
@@ -328,6 +336,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
       screen: screen.stage,
       status: screen.status,
       theme: screen.theme(),
+      font: screen.font(),
       hooks,
       predictiveEcho,
       onRoundTrip: (milliseconds) => screen?.setRoundTrip(milliseconds),

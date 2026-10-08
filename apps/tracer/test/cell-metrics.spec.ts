@@ -40,7 +40,7 @@ for (const scenario of [
   { name: "mobile-dpr3", width: 393, height: 852, dpr: 3 },
   { name: "desktop-dpr1", width: 1440, height: 900, dpr: 1 },
 ]) {
-  test(`Geist cell metrics and box joins at DPR ${scenario.dpr}`, async ({ browser }, testInfo) => {
+  test(`Maple Mono NF cell metrics and box joins at DPR ${scenario.dpr}`, async ({ browser }, testInfo) => {
     test.setTimeout(180_000);
     console.log(`RENDER_ENV ${JSON.stringify({
       host: hostname(),
@@ -94,7 +94,7 @@ for (const scenario of [
         if (!measurementContext) throw new Error("font metric measurement canvas is unavailable");
         const fontContext = measurementContext as CanvasRenderingContext2D & { letterSpacing?: string };
         if (typeof fontContext.letterSpacing === "string") fontContext.letterSpacing = "0px";
-        measurementContext.font = `400 ${metrics.fontSize}px "Geist Mono"`;
+        measurementContext.font = `400 ${metrics.fontSize}px "Maple Mono NF"`;
         const font = measurementContext.measureText("M");
         const dpr = window.devicePixelRatio;
         const x = Math.round(metrics.cellWidth * 0.5 * dpr);
@@ -126,7 +126,7 @@ for (const scenario of [
           expectedCanvasWidth: Math.round(metrics.cols * metrics.cellWidth * dpr),
           expectedCanvasHeight: Math.round(metrics.rows * metrics.cellHeight * dpr),
           boxSeamInk: seams,
-          fontLoaded: document.fonts.check(`14px "Geist Mono"`),
+          fontLoaded: document.fonts.check(`14px "Maple Mono NF"`),
         };
       }, boxStartRow);
       console.log(`CELL_METRICS ${JSON.stringify(measured)}`);

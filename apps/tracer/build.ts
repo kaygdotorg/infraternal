@@ -32,7 +32,7 @@ await Promise.all([
   cp("canvas.css", "dist/canvas.css"),
   cp("addhost.css", "dist/addhost.css"),
   cp("../../packages/ui/styles.css", "dist/ui.css"),
-  cp("node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2", "dist/fonts/GeistMono-Variable.woff2"),
+  cp("fonts", "dist/fonts", { recursive: true, filter: (source) => !source.endsWith(".sh") && !source.endsWith(".py") }),
   cp("node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", "dist/fonts/Geist-Variable.woff2"),
 ]);
 await precompress("dist");

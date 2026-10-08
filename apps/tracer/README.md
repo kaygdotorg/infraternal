@@ -58,9 +58,12 @@ resident-credential and PRF flow described above.
 
 `packages/ui` is the shared AGPL-3.0-only package for spring, tick, glitch,
 count-up, copy feedback, warm tooltips and the faulty-terminal canvas. Its source
-modules hold the motion timings and lifecycle rules. The tracer preloads Geist
-Mono, waits for `document.fonts.load()` (with the mockup's 800 ms fallback), and
-uses `font-display: block` so auth text does not swap from a fallback face.
+modules hold the motion timings and lifecycle rules. The tracer preloads the
+upright Maple Mono NF subset (`fonts/maple-mono-nf/`, rebuilt by `fonts/subset.sh`, D175; one variable
+face carries every weight, and `packages/ui/src/fonts.ts` holds each font's text weights), waits
+for `document.fonts.load()` (with the mockup's 800 ms fallback), and uses
+`font-display: swap` with a metric-matched local fallback so a late font moves
+no line.
 
 The production-browser `onboarding.spec.ts` saves dark screenshots for token,
 identity, passkey, recovery, welcome and returning sign-in at 393 × 852 and
