@@ -231,7 +231,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
     await expect(mobilePage.locator("#keybar")).toBeVisible();
     // The product screen is the canvas: on a phone the top bar keeps only the "+" (a new window) beside the pill.
     await expect(mobilePage.locator(".tabs .tab-add")).toBeVisible();
-    await expect(mobilePage.locator(".tabs .cl-snap, .tabs .cl-viewsbtn")).toBeHidden();
+    for (const desktopOnly of [".tabs .cl-snap", ".tabs .cl-viewsbtn"]) await expect(mobilePage.locator(desktopOnly)).toBeHidden();
     const controls = await mobilePage.locator("#sidebar-toggle, #capsule, #keybar button:not([hidden])").evaluateAll((items) => items.map((item) => {
       const rect = item.getBoundingClientRect();
       return { width: rect.width, height: rect.height };
