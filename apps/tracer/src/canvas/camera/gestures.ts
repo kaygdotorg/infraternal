@@ -115,9 +115,11 @@ export function installGestures(cx: Ctx): void {
     if (!state.canvasLock || cx.inputLock.state) return;
     const colEl = (e.target as Element).closest<HTMLElement>(".cl-col");
     if (!colEl || (e.target as Element).closest("button, .ui-window-pill, .cl-port")) return;
-    const vp = viewport.getBoundingClientRect(), r = colEl.getBoundingClientRect();
-    if (r.left > vp.left - 1 && r.right < vp.right + 1) return;
     const first = colEl.querySelector<HTMLElement>(":scope > .ui-window");
+    // The window's own box decides whether it is peeking in: its column also holds the gap, which at the last
+    // stop reaches past the viewport although the window is fully shown (a tap there was swallowed every time).
+    const vp = viewport.getBoundingClientRect(), r = (first ?? colEl).getBoundingClientRect();
+    if (r.left > vp.left - 1 && r.right < vp.right + 1) return;
     const rec = first ? [...views.values()].flatMap((cl) => [...cl.wins.values()]).find((w) => w.card.root === first) : undefined;
     if (rec) { e.stopPropagation(); e.preventDefault(); cx.win.setActive(rec); cx.nav.focusWindow(rec); }
   }, { capture: true, signal });
