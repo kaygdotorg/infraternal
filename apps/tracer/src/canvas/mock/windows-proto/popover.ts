@@ -12,9 +12,9 @@
  *   instant. The animations use the Web Animations API without fill, so nothing is left
  *   transformed at rest and text stays crisp.
  */
-import { createCapsuleTabs } from "../../../packages/ui/src/capsule-tabs";
-import { hostIconMarkup } from "../../../packages/ui/src/host-icons";
-import { createKeyValueList, type KeyValueRow } from "../../../packages/ui/src/kv-list";
+import { createCapsuleTabs } from "../../../../../../packages/ui/src/capsule-tabs";
+import { hostIconMarkup } from "../../../../../../packages/ui/src/host-icons";
+import { createKeyValueList, type KeyValueRow } from "../../../../../../packages/ui/src/kv-list";
 import type { CanvasHost, CanvasSession } from "./canvas";
 
 export interface DetailsPopover {

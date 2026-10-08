@@ -24,7 +24,7 @@
  * the animation only moves the contents with their shapes (translate) and clips the content of a
  * shape that is shorter than its frame. The layer is at most a few thousand pixels, one draw call.
  */
-import { Spring } from "../../../packages/ui/src/spring";
+import { Spring } from "../../../../../packages/ui/src/spring";
 
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
 const smooth = (a: number, b: number, v: number): number => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };

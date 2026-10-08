@@ -43,7 +43,7 @@ import {
   type ToastController,
 } from "../../../packages/ui/src/index";
 import type { AddHostFixture } from "./add-host-contract";
-import type { CanvasController, CanvasFlowWindow, CanvasHost, CanvasWindowHandle } from "./canvas";
+import type { CanvasController, CanvasFlowWindow, CanvasHost, CanvasWindowHandle } from "./canvas/mock/windows-proto/canvas";
 import type { CoreScreen } from "./core-screen";
 import {
   foldEvent,

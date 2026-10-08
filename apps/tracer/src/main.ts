@@ -338,7 +338,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   }
   coreScreen = screen;
   if (clustersMode) {
-    const { mountClusters } = await import("./clusters");
+    const { mountClusters } = await import("./canvas/controller");
     const scene = Number(query.get("scene"));
     const roleParam = query.get("role");
     let clusters: Awaited<ReturnType<typeof mountClusters>>;
@@ -354,7 +354,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   if (canvasMode) {
     // Gated mockup (D162): the window canvas and the add-host flow on it, built against the
     // test double only. The canvas mounts first; the flow hangs its windows on the canvas.
-    const { mountCanvas } = await import("./canvas");
+    const { mountCanvas } = await import("./canvas/mock/windows-proto/canvas");
     const { mountAddHostPrototype } = await import("./add-host-prototype");
     const canvas = mountCanvas(screen, hostName);
     let addHost: { dispose(): void } | undefined;

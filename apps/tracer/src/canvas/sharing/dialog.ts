@@ -8,9 +8,8 @@
  * - Operators can also publish to the team: followers keep a linked, read-only copy that updates.
  * - One quiet line says what the recipient gets. Send is an icon button with the warm tooltip.
  */
-import { mountChipInput, type Chip, type ChipInputController } from "../../../packages/ui/src/chip-input";
-import { enhanceSwitch } from "../../../packages/ui/src/switch";
-import { GROUPS, PEOPLE } from "./clusters-model";
+import { mountChipInput, type Chip, type ChipInputController } from "../../../../../packages/ui/src/chip-input";
+import { enhanceSwitch } from "../../../../../packages/ui/src/switch";
 
 export interface ShareChoice { views: string[]; to: string[]; publish: boolean }
 export interface ShareDialogOptions {
@@ -19,6 +18,8 @@ export interface ShareDialogOptions {
   /** Pre-selected view ids. */
   selected: string[];
   sender: string;
+  /** Who can receive a layout: people and groups on this instance (the adapter supplies them). */
+  directory: { people: readonly string[]; groups: Readonly<Record<string, readonly string[]>> };
   canPublish: boolean;
   onSend(choice: ShareChoice): void;
 }
@@ -81,9 +82,9 @@ export function buildShareDialog(options: ShareDialogOptions): ShareDialog {
   const resolve = (token: string): Chip | undefined => {
     const t = token.trim().replace(/^@/, "").toLowerCase();
     if (!t) return undefined;
-    const user = PEOPLE.find((p) => p === t && p !== options.sender);
+    const user = options.directory.people.find((p) => p === t && p !== options.sender);
     if (user) return { id: `user:${user}`, label: user, icon: USER };
-    if (t in GROUPS) return { id: `group:${t}`, label: t, icon: GROUP };
+    if (t in options.directory.groups) return { id: `group:${t}`, label: t, icon: GROUP };
     return undefined;
   };
   recipients = mountChipInput(panel.querySelector<HTMLElement>(".cl-share-to")!, {

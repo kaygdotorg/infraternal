@@ -20,34 +20,35 @@
  * only (arrow geometry excepted), every spring comes from packages/ui spring.ts, and reduced
  * motion jumps instead.
  */
-import { Spring } from "../../../packages/ui/src/spring";
-import { createWindowCard, type WindowAction, type WindowCard } from "../../../packages/ui/src/window-card";
-import { hostIconMarkup, type HostPlatform } from "../../../packages/ui/src/host-icons";
-import { mountConfirmTip } from "../../../packages/ui/src/tooltip";
-import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
-import { allShortcuts, bindShortcut, bindingOf, comboLabel, keyCaps, onBindingsChange, registerShortcuts } from "../../../packages/ui/src/shortcuts";
-import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
-import { createPillMorph, type PillMorph } from "../../../packages/ui/src/pill-morph";
-import { aspectFrame, aspectRange, attachWindowResize, settleResize, type ResizeFrame, type ResizeStart, type WindowResizeHost } from "../../../packages/ui/src/window-resize";
-import type { BranchSection } from "../../../packages/ui/src/branched";
-import type { CoreScreen } from "./core-screen";
-import { previewLine } from "./canvas";
-import { buildShareDialog, type ShareChoice } from "./clusters-share";
-import {
-  copyForRecipient, incidentView, usernameOf, SETTINGS_SECTIONS, CELL, COLUMN_GAP, CONTAINERS, INITIAL_GRANTS, MARGIN, boxOf, buildViews, contentSize, metricsFor, reach, resolve, shellLines, snapToGrid,
-  type Box, type ColumnModel, type Grant, type Metrics, type NodeModel, type Role, type ViewId, type ViewModel, type WindowModel,
-} from "./clusters-model";
-import { Arrow, DragArrow, anchors, type Pt, type Rect } from "./clusters-arrows";
-import { dropletSplit } from "./clusters-split";
-import { isTypingTarget } from "../../../packages/ui/src/shortcuts-view";
-import { refreshTip } from "../../../packages/ui/src/tooltip";
-import { ICONS, iconSvg } from "../../../packages/ui/src/icons";
-import { createCanvasBackdrop } from "../../../packages/ui/src/canvas-backdrop";
-import { THEMES } from "../../../packages/ui/src/themes";
-import { FONTS } from "../../../packages/ui/src/fonts";
-import { renderAppearance, renderDevices, renderFacts, type AppearanceApi, type DeviceRow } from "../../../packages/ui/src/settings-panels";
-import { createConnectionIndicator } from "../../../packages/ui/src/connection-indicator";
-import type { ToolbarRow } from "./core-screen";
+import { Spring } from "../../../../packages/ui/src/spring";
+import { createWindowCard, type WindowAction, type WindowCard } from "../../../../packages/ui/src/window-card";
+import { hostIconMarkup, type HostPlatform } from "../../../../packages/ui/src/host-icons";
+import { mountConfirmTip } from "../../../../packages/ui/src/tooltip";
+import { mountToast, type ToastController } from "../../../../packages/ui/src/toast";
+import { allShortcuts, bindShortcut, bindingOf, comboLabel, keyCaps, onBindingsChange, registerShortcuts } from "../../../../packages/ui/src/shortcuts";
+import { isMacPlatform, shortcutLabel } from "../../../../packages/ui/src/platform";
+import { createPillMorph, type PillMorph } from "../../../../packages/ui/src/pill-morph";
+import { aspectFrame, aspectRange, attachWindowResize, settleResize, type ResizeFrame, type ResizeStart, type WindowResizeHost } from "../../../../packages/ui/src/window-resize";
+import type { BranchSection } from "../../../../packages/ui/src/branched";
+import type { CoreScreen } from "../core-screen";
+import { previewLine } from "./windows/preview";
+import { buildShareDialog, type ShareChoice } from "./sharing/dialog";
+import { GROUPS, PEOPLE, copyForRecipient, incidentView, usernameOf, CONTAINERS, INITIAL_GRANTS, TAGS, buildViews, shellLines, type Role } from "./mock/data";
+import { SETTINGS_SECTIONS } from "./views/settings";
+import { COLUMN_GAP, MARGIN, boxOf, contentSize, metricsFor, resolve, snapToGrid, type Box, type Metrics } from "./layout/geometry";
+import { reach } from "./mesh/grants";
+import type { ColumnModel, Grant, NodeModel, ViewId, ViewModel, WindowModel } from "./model/types";
+import { Arrow, DragArrow, anchors, type Pt, type Rect } from "./mesh/arrows";
+import { dropletSplit } from "./layout/droplet";
+import { isTypingTarget } from "../../../../packages/ui/src/shortcuts-view";
+import { refreshTip } from "../../../../packages/ui/src/tooltip";
+import { ICONS, iconSvg } from "../../../../packages/ui/src/icons";
+import { createCanvasBackdrop } from "../../../../packages/ui/src/canvas-backdrop";
+import { THEMES } from "../../../../packages/ui/src/themes";
+import { FONTS } from "../../../../packages/ui/src/fonts";
+import { renderAppearance, renderDevices, renderFacts, type AppearanceApi, type DeviceRow } from "../../../../packages/ui/src/settings-panels";
+import { createConnectionIndicator } from "../../../../packages/ui/src/connection-indicator";
+import type { ToolbarRow } from "../core-screen";
 
 const reduced = matchMedia("(prefers-reduced-motion: reduce)");
 const coarse = matchMedia("(pointer: coarse)");
@@ -502,7 +503,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     rec.card.root.dataset.reach = "";
     const items: ReachItem[] = [];
     const topo = clusters.get("mesh");
-    for (const r of reach(rec.model.host, grants)) {
+    for (const r of reach(rec.model.host, grants, TAGS)) {
       const target = clusters.get("console")?.wins.get(`w-${r.host}`)?.card.root;
       if (!target) continue;
       const arrow = new Arrow({ ...(r.via ? { dashed: true } : {}), tone: "quiet" });
@@ -1216,7 +1217,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     overlay.append(arrow.arrow.g);
     drag = { arrow, source: rec };
     rec.card.root.dataset.linking = "";
-    const reachable = new Set(reach(rec.model.host, grants).map((r) => r.host));
+    const reachable = new Set(reach(rec.model.host, grants, TAGS).map((r) => r.host));
     const move = (ev: PointerEvent): void => {
       if (!drag) return;
       const w = toWorld(ev.clientX, ev.clientY);
@@ -1857,7 +1858,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const views = [...clusters.values()].filter((c) => c.view.id !== "settings").map((c) => ({ id: c.view.id, name: c.view.name }));
     if (!views.length) return;
     const selected = (preselect ?? [currentView]).filter((id) => views.some((v) => v.id === id));
-    const dialog = buildShareDialog({ views, selected: selected.length ? selected : [views[0]!.id], sender: me(), canPublish: role === "operator", onSend: (choice) => { void sendShare(choice); closeShare(); } });
+    const dialog = buildShareDialog({ views, selected: selected.length ? selected : [views[0]!.id], sender: me(), directory: { people: PEOPLE, groups: GROUPS }, canPublish: role === "operator", onSend: (choice) => { void sendShare(choice); closeShare(); } });
     shareDialog = dialog;
     shareMorph = createPillMorph({ pill: capsule, stage, panel: dialog.panel, content: dialog.content, width: 400, onClosed: () => { dialog.dispose(); if (shareDialog === dialog) shareDialog = undefined; } });
     shareAbort = new AbortController();
@@ -2037,7 +2038,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   const visibleHosts = (): string[] => [...(consoleView()?.wins.values() ?? [])].filter((w) => w.model.kind === "terminal" && !w.model.id.includes("-s") && !w.model.id.startsWith("w-shell")).map((w) => w.model.host);
   const allowedHosts = (): string[] => (role === "viewer" || role === "asha" ? ["build-01", "nix-cache"] : role === "new" ? [] : ["build-01", "edge-arm", "nix-cache", "studio-mac"]);
   const removeProvider = core.addPaletteProvider(() => {
-    const out: import("./core-screen").PaletteEntry[] = [];
+    const out: import("../core-screen").PaletteEntry[] = [];
     [...clusters.values()].forEach((c, i) => {
       out.push({ group: "Views", glyph: "▦", icon: viewIcon(c.view.id), label: `Go to ${c.view.name}`, hint: `view · ${shortcutLabel(viewKeys(i))}`, action: `proto:view:${c.view.id}` });
     });

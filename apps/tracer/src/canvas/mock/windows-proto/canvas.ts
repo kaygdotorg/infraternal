@@ -28,15 +28,16 @@
  * terminal window (`becomeHost`). New windows are placed by the canvas's own layout (one
  * row, equal widths, fixed gap, so none can overlap) and revealed with its own pan spring.
  */
-import { Spring } from "../../../packages/ui/src/spring";
-import { createWindowCard, type WindowCard } from "../../../packages/ui/src/window-card";
-import { hostIconMarkup, type HostPlatform } from "../../../packages/ui/src/host-icons";
-import type { ToastController } from "../../../packages/ui/src/toast";
-import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
-import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResize, type WindowResizeHost } from "../../../packages/ui/src/window-resize";
-import { openDetailsPopover, type DetailsPopover } from "./canvas-popover";
-import type { BranchSection, BranchedMenu } from "../../../packages/ui/src/branched";
-import type { CoreScreen } from "./core-screen";
+import { Spring } from "../../../../../../packages/ui/src/spring";
+import { createWindowCard, type WindowCard } from "../../../../../../packages/ui/src/window-card";
+import { hostIconMarkup, type HostPlatform } from "../../../../../../packages/ui/src/host-icons";
+import type { ToastController } from "../../../../../../packages/ui/src/toast";
+import { registerShortcuts } from "../../../../../../packages/ui/src/shortcuts";
+import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResize, type WindowResizeHost } from "../../../../../../packages/ui/src/window-resize";
+import { previewLine } from "../../windows/preview";
+import { openDetailsPopover, type DetailsPopover } from "./popover";
+import type { BranchSection, BranchedMenu } from "../../../../../../packages/ui/src/branched";
+import type { CoreScreen } from "../../../core-screen";
 
 export interface CanvasSession {
   id: string;
@@ -145,20 +146,6 @@ const DOCK_WIDTH = 292 + 12;
 
 const coarse = matchMedia("(pointer: coarse)");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-
-const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-})[char]!);
-
-/** Italic (`ESC[3m`) and bold (`ESC[1m`) runs of a fixture line, closed by `ESC[0m`, become <i> and <b>. */
-const sgr = (html: string): string => html.replace(/\u001b\[3m(.*?)\u001b\[0m/g, "<i>$1</i>").replace(/\u001b\[1m(.*?)\u001b\[0m/g, "<b>$1</b>").replace(/\u001b\[[0-9;]*m/g, "");
-
-/** Splits a prompt line into its prompt and command so previews colour them like a shell. */
-export function previewLine(line: string): string {
-  const match = /^(\S+@\S+:[^$#]*[$#])(.*)$/.exec(line);
-  if (!match) return `<span class="canvas-out">${sgr(escapeHtml(line)) || " "}</span>`;
-  return `<span class="canvas-prompt">${escapeHtml(match[1]!)}</span><span class="canvas-cmd">${sgr(escapeHtml(match[2]!))}</span>`;
-}
 
 /** Mounts the canvas into the core screen's pane area and returns its disposer. */
 export function mountCanvas(core: CoreScreen, hostName: string): CanvasController {

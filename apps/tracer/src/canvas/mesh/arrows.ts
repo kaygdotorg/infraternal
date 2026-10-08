@@ -12,7 +12,7 @@
  * end is pulled off the window and rejoins the pointer. The head also gets a small scale pulse
  * on snap. Only the path data and the head transform change; no layout is touched.
  */
-import { Spring } from "../../../packages/ui/src/spring";
+import { Spring } from "../../../../../packages/ui/src/spring";
 
 export interface Pt { x: number; y: number }
 export interface Rect { x: number; y: number; w: number; h: number }

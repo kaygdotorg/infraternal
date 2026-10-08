@@ -28,7 +28,7 @@ const build = await Bun.build({
     // Without the preview flag the mockup resolves to an empty module (its call is unreachable: the define is false).
     name: "leave-out-clusters-preview",
     setup(builder) {
-      builder.onResolve({ filter: /^\.\/clusters$/ }, () => ({ path: "clusters-left-out", namespace: "left-out" }));
+      builder.onResolve({ filter: /^\.\/canvas\/controller$/ }, () => ({ path: "clusters-left-out", namespace: "left-out" }));
       builder.onLoad({ filter: /.*/, namespace: "left-out" }, () => ({ contents: "export const mountClusters = undefined;", loader: "js" }));
     },
   }],

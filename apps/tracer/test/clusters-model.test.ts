@@ -1,6 +1,8 @@
-/** Placement rules of the clusters mockup: grid snapping, pushing and grant reach (src/clusters-model.ts). */
+/** Placement rules of the clusters mockup: grid snapping, pushing and grant reach (src/canvas/layout/geometry.ts). */
 import { expect, test } from "bun:test";
-import { CELL, INITIAL_GRANTS, reach, resolve, snapToGrid, type Box } from "../src/clusters-model";
+import { CELL, resolve, snapToGrid, type Box } from "../src/canvas/layout/geometry";
+import { reach } from "../src/canvas/mesh/grants";
+import { INITIAL_GRANTS, TAGS } from "../src/canvas/mock/data";
 
 const overlaps = (a: Box, b: Box, at: Map<string, { x: number; y: number }>): boolean => {
   const p = at.get(a.id)!, q = at.get(b.id)!;
@@ -40,8 +42,8 @@ test("snapping rounds to whole cells", () => {
 });
 
 test("reach follows grants through tags and keeps the relay", () => {
-  expect(reach("build-01", INITIAL_GRANTS)).toEqual([{ host: "nix-cache" }, { host: "edge-arm", via: "fra-relay" }]);
+  expect(reach("build-01", INITIAL_GRANTS, TAGS)).toEqual([{ host: "nix-cache" }, { host: "edge-arm", via: "fra-relay" }]);
   // studio-mac is a member of tag:ops, which may reach build-01 and nix-cache.
-  expect(reach("studio-mac", INITIAL_GRANTS).map((r) => r.host).sort()).toEqual(["build-01", "nix-cache"]);
-  expect(reach("db-never", INITIAL_GRANTS)).toEqual([]);
+  expect(reach("studio-mac", INITIAL_GRANTS, TAGS).map((r) => r.host).sort()).toEqual(["build-01", "nix-cache"]);
+  expect(reach("db-never", INITIAL_GRANTS, TAGS)).toEqual([]);
 });
