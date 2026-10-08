@@ -306,11 +306,14 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   // One combined preview (D160): `?proto=windows` is the canvas, and the add-host flow opens
   // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
   const proto = query.get("proto");
-  const canvasMode = mockMode && (proto === "windows" || proto === "addhost");
+  const canvasMode = __CLUSTERS_PREVIEW__ && mockMode && (proto === "windows" || proto === "addhost");
   // Concept mockup for views on one canvas (#89): it brings its own windows and no live terminal.
   const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
   const predictiveEcho = query.get("predict") === "1";
+  // The canvas is the product screen. The test double's plain page and the latency probe keep the single
+  // terminal screen: the terminal specs and the probe drive that one terminal.
+  const useCanvas = !mockMode && !probeMode;
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
   try {
