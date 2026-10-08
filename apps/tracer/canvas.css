@@ -26,7 +26,7 @@
 .canvas-preview {
   --preview-font: 14px;
   position: absolute; inset: 0; margin: 0; padding: 14px 16px; overflow: auto;
-  color: var(--fg); font: 400 var(--preview-font)/1.2857 "Geist Mono", ui-monospace, monospace;
+  color: var(--fg); font: var(--fw-body, 450) var(--preview-font)/1.2857 var(--font-mono, "Maple Mono NF"), ui-monospace, monospace;
   letter-spacing: 0; white-space: pre; tab-size: 8;
   overscroll-behavior: contain; scrollbar-width: none; touch-action: pan-x pan-y;
   -webkit-user-select: text; user-select: text;
@@ -34,6 +34,9 @@
 .canvas-preview::-webkit-scrollbar { display: none; }
 @media (pointer: coarse) { .canvas-preview { --preview-font: 13px; } }
 .canvas-prompt { color: var(--accent); }
+/* SGR 3 (italic) and 1 (bold) in a static preview; the font's own italic is used when it has one, the browser slants the upright face when it has none. */
+.canvas-preview i { font-style: italic; }
+.canvas-preview b { font-weight: 700; }
 .canvas-cmd { color: var(--fg); }
 .canvas-out { color: color-mix(in oklab, var(--fg) 82%, var(--bg)); }
 

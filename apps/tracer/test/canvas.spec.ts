@@ -11,7 +11,7 @@ async function openCanvas(page: Page): Promise<void> {
   // The reset closes the previous test's sockets; a pooled keep-alive connection through the
   // latency proxy can be among them, so one retry absorbs that hang-up.
   await page.context().request.post("/__mock/reset").catch(() => page.context().request.post("/__mock/reset"));
-  await page.goto("/?mock=1&proto=windows&bg=none");
+  await page.goto("/?mock=1&proto=windows&bg=none&fixture=none");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
   await expect.poll(() => page.evaluate(() => (window as unknown as { __tracerCanvas?: { windows(): string[] } }).__tracerCanvas?.windows().length ?? 0)).toBeGreaterThan(2);
 }

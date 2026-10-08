@@ -360,7 +360,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let visibleOptions: HTMLButtonElement[] = [];
   let selected = 0;
   const headingByGroup = new Map<string, HTMLDivElement>();
-  const rowCache = new Map<PaletteEntry, HTMLButtonElement>();
+  const rowCache = new WeakMap<PaletteEntry, HTMLButtonElement>();
 
   /**
    * Keeps the screen in step with the selected palette row: a font row previews its font, any

@@ -113,12 +113,12 @@
 .ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
 /* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
 .ui-toast { min-height: 44px; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 14px; }
-.ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: 450; line-height: 1.4; }
+.ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
 .ui-toast-marker { display: grid; width: 22px; height: 22px; flex: none; place-items: center; }
 .ui-toast-marker .tick { width: 20px; height: 20px; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
 .ui-toast-marker .tick svg { width: 14px; height: 14px; stroke: var(--bg); }
-.ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: 500; white-space: nowrap; }
+.ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
 .ui-toast-marker .tick { width: 18px; height: 18px; }
 @media (pointer: coarse) {
   .ui-toast { min-height: 54px; gap: 12px; padding: 7px 9px 7px 12px; border-radius: 15px; }
@@ -291,9 +291,9 @@
 /* Line glyphs (a flow's mark, not a host platform) draw as the 1.5 stroke icons everywhere else. */
 .ui-window-mark svg.is-line { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-window-title { display: inline-flex; min-width: 0; overflow: hidden; }
-.ui-window-user { color: var(--ui-text-secondary); font-weight: 450; }
+.ui-window-user { color: var(--ui-text-secondary); font-weight: var(--fw-secondary); }
 .ui-window-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ui-window-session { color: var(--fg-3); font-weight: 450; }
+.ui-window-session { color: var(--fg-3); font-weight: var(--fw-secondary); }
 .ui-window-session::before { content: "·"; margin-right: 8px; color: var(--fg-3); }
 .ui-window-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--ok); }
 .ui-window[data-status="connecting"] .ui-window-dot { background: var(--fg-3); }
@@ -393,7 +393,7 @@
   outline: none;
   background: transparent;
   color: var(--fg);
-  font: 450 16px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-body) 16px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: 0.01em;
 }
 /* With chips present the input needs room for a few characters only; it grows on its own row
@@ -410,7 +410,7 @@
   border-radius: 999px;
   background: rgb(from var(--fg) r g b / 0.08);
   color: var(--fg);
-  font: 500 13px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-label) 13px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: -0.01em;
   transform-origin: left center;
   transition: background-color 120ms ease;
@@ -500,7 +500,7 @@
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-avatar { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--accent) 40%, transparent); }
 @media (pointer: coarse) { .ui-sidebar-avatar { font-size: 14px; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
 .ui-sidebar-names { display: grid; min-width: 0; gap: 3px; }
-.ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: 500; }
+.ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: var(--fw-label); }
 .ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: 11px; }
 @media (pointer: coarse) { .ui-sidebar-secondary { font-size: 12px; } }
 .ui-sidebar-settings svg { stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }

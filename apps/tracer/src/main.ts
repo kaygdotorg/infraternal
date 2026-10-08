@@ -350,6 +350,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     });
     currentTerminal = client;
     screen.bindTerminal(client);
+    if (canvasMode && mockMode && query.get("fixture") !== "none") void seedItalicFixture(client);
     performanceProbe?.bind(client);
     if (mockMode) {
       window.__tracerTestDouble = {
@@ -495,4 +496,23 @@ function mustGet<ElementType extends HTMLElement = HTMLElement>(selector: string
 
 function missingMount(): never {
   throw new Error("tracer mount point is missing");
+}
+
+/**
+ * Preview only: writes a prompt line and italic, bold and bold-italic output into the fresh mock
+ * terminal, so every font in the picker can be judged on slanted text (a font without a real italic
+ * is slanted by the browser, which is part of what the owner compares). `?fixture=none` skips it.
+ */
+async function seedItalicFixture(client: import("./terminal").TerminalClient): Promise<void> {
+  for (let attempt = 0; attempt < 40 && !client.isConnected; attempt++) await new Promise((resolve) => setTimeout(resolve, 100));
+  const text = [
+    "infraternal-dev:~$ printf '\\e[3mitalic\\e[0m'",
+    "\u001b[3mitalic: the quick brown fox jumps over the lazy dog\u001b[0m",
+    "\u001b[1mbold\u001b[0m regular \u001b[1;3mbold italic\u001b[0m \u001b[3m0123456789 -> => != ===\u001b[0m",
+    "",
+    "infraternal-dev:~$ ",
+  ].join("\r\n");
+  try {
+    await fetch("/__mock/text-output", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+  } catch { /* a resumed session or a closed socket: the fixture is a convenience, never an error */ }
 }

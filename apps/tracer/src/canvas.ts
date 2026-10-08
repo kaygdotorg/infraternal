@@ -148,11 +148,14 @@ const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) =
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[char]!);
 
+/** Italic (`ESC[3m`) and bold (`ESC[1m`) runs of a fixture line, closed by `ESC[0m`, become <i> and <b>. */
+const sgr = (html: string): string => html.replace(/\u001b\[3m(.*?)\u001b\[0m/g, "<i>$1</i>").replace(/\u001b\[1m(.*?)\u001b\[0m/g, "<b>$1</b>").replace(/\u001b\[[0-9;]*m/g, "");
+
 /** Splits a prompt line into its prompt and command so previews colour them like a shell. */
 function previewLine(line: string): string {
   const match = /^(\S+@\S+:[^$#]*[$#])(.*)$/.exec(line);
-  if (!match) return `<span class="canvas-out">${escapeHtml(line) || " "}</span>`;
-  return `<span class="canvas-prompt">${escapeHtml(match[1]!)}</span><span class="canvas-cmd">${escapeHtml(match[2]!)}</span>`;
+  if (!match) return `<span class="canvas-out">${sgr(escapeHtml(line)) || " "}</span>`;
+  return `<span class="canvas-prompt">${escapeHtml(match[1]!)}</span><span class="canvas-cmd">${sgr(escapeHtml(match[2]!))}</span>`;
 }
 
 /** Mounts the canvas into the core screen's pane area and returns its disposer. */
