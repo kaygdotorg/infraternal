@@ -30,6 +30,7 @@ await Promise.all([
   cp("style.css", "dist/style.css"),
   cp("auth.css", "dist/auth.css"),
   cp("canvas.css", "dist/canvas.css"),
+  cp("clusters.css", "dist/clusters.css"),
   cp("addhost.css", "dist/addhost.css"),
   cp("../../packages/ui/styles.css", "dist/ui.css"),
   cp("node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2", "dist/fonts/GeistMono-Variable.woff2"),

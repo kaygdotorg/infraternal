@@ -149,7 +149,7 @@ const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) =
 })[char]!);
 
 /** Splits a prompt line into its prompt and command so previews colour them like a shell. */
-function previewLine(line: string): string {
+export function previewLine(line: string): string {
   const match = /^(\S+@\S+:[^$#]*[$#])(.*)$/.exec(line);
   if (!match) return `<span class="canvas-out">${escapeHtml(line) || " "}</span>`;
   return `<span class="canvas-prompt">${escapeHtml(match[1]!)}</span><span class="canvas-cmd">${escapeHtml(match[2]!)}</span>`;

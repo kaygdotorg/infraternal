@@ -256,6 +256,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
   const proto = query.get("proto");
   const canvasMode = mockMode && (proto === "windows" || proto === "addhost");
+  // Concept mockup for views on one canvas (#89): it brings its own windows and no live terminal.
+  const clustersMode = mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
   const predictiveEcho = query.get("predict") === "1";
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
@@ -268,7 +270,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
-      addHostPrototype: canvasMode,
+      addHostPrototype: canvasMode || clustersMode,
       ...(identity?.display_name ? { displayName: identity.display_name } : {}),
       ...(identity?.username ? { username: identity.username } : {}),
       ...(query.get("footer") === "b" ? { footerVariant: "b" as const } : {}),
@@ -283,6 +285,21 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     return;
   }
   coreScreen = screen;
+  if (clustersMode) {
+    const { mountClusters } = await import("./clusters");
+    const scene = Number(query.get("scene"));
+    const roleParam = query.get("role");
+    let clusters: Awaited<ReturnType<typeof mountClusters>>;
+    try {
+      clusters = await mountClusters(screen, {
+      ...(scene ? { scene } : {}),
+      ...(roleParam === "viewer" || roleParam === "operator" || roleParam === "new" ? { role: roleParam } : {}),
+    });
+    } catch (error: unknown) { console.error("clusters mockup failed", error); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
+    canvasPrototype = clusters;
+    screen.setConnection(true);
+    return;
+  }
   if (canvasMode) {
     // Gated mockup (D162): the window canvas and the add-host flow on it, built against the
     // test double only. The canvas mounts first; the flow hangs its windows on the canvas.
@@ -403,7 +420,7 @@ async function showRecovery(): Promise<void> {
 function uiFontPreference(): UiFont {
   // The canvas mockup is monospace throughout (owner rule, docs/design/TASTE.md §2).
   const proto = new URLSearchParams(location.search).get("proto");
-  if (proto === "windows" || proto === "addhost") return "mono";
+  if (proto === "windows" || proto === "addhost" || proto === "clusters") return "mono";
   const requested = new URLSearchParams(location.search).get("ui");
   if (requested === "sans" || requested === "mono") {
     try { window.localStorage.setItem("tracer.ui-font", requested); } catch { /* The URL remains the preference without storage. */ }

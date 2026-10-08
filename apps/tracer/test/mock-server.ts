@@ -404,7 +404,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method !== "GET" && request.method !== "HEAD") {
     return sendJson(response, 404, { error: "not found" });
   }
-  if ((url.pathname === "/" || url.pathname === "/index.html") && ["windows", "addhost"].includes(url.searchParams.get("proto") ?? "")) {
+  if ((url.pathname === "/" || url.pathname === "/index.html") && ["windows", "addhost", "clusters"].includes(url.searchParams.get("proto") ?? "")) {
     if (!owner) owner = makeMockOwner();
     activeAuthCookie = newToken();
     unlockPending = false;
