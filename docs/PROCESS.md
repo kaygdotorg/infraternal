@@ -79,3 +79,12 @@ Reviews and fixes run at the same time as the next lane's build.
   extra build lanes through Linux VMs (OrbStack).
 - Jobs avoid wording that tooling filters flag. Process-termination tests
   are described neutrally ("abrupt stop", "restart").
+
+## 6. Backend grill first, design grill second (owner, 2026-10-08)
+
+Every feature goes through two grills, in this order:
+
+1. **Backend grill, extensively.** The orchestrator questions the owner until the backend design tree is empty. The decisions are recorded in DECISIONS.md and the feature's issue, and Codex jobs start building at once.
+2. **Design grill, extensively.** Then come the design questions and mockup iterations, as many rounds as it takes to reach "good enough", while the backend builds in parallel.
+
+The aim is that the backend is finished when the design is approved, so approved UI is wired to real behaviour instead of a test double. Every status report says plainly what is shipped, what is built but not wired, and what is mockup only.
