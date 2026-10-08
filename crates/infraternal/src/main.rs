@@ -4,6 +4,7 @@
 mod embedded_cli;
 mod install;
 mod remote;
+mod remote_server;
 
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
@@ -61,6 +62,8 @@ enum AgentAction {
 
 #[derive(Debug, Args)]
 struct ServerArgs {
+    #[command(flatten)]
+    remote: remote_server::Options,
     /// HTTP(S) listener address.
     #[arg(long, default_value = "127.0.0.1:7443", global = true)]
     listen: SocketAddr,
@@ -124,7 +127,7 @@ fn main() -> ExitCode {
         return result;
     }
     match Cli::parse().command {
-        Command::Server(args) => {
+        Command::Server(mut args) => {
             // Preserve the no-argument status used by the fast CLI smoke gate while
             // requiring a configured listener before a real server can start.
             if args.action.is_none() && std::env::args_os().len() == 2 {
@@ -164,6 +167,7 @@ fn main() -> ExitCode {
                     }
                 }
                 None => {
+                    let remote_options = std::mem::take(&mut args.remote);
                     let config = match server_config(args) {
                         Ok(config) => config,
                         Err(error) => {
@@ -171,7 +175,7 @@ fn main() -> ExitCode {
                             return ExitCode::from(2);
                         }
                     };
-                    match runtime.block_on(infraternal_server::serve(config)) {
+                    match runtime.block_on(remote_server::serve(config, remote_options)) {
                         Ok(()) => ExitCode::SUCCESS,
                         Err(error) => {
                             eprintln!("server failed: {error}");
