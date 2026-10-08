@@ -449,3 +449,34 @@ async fn tcp_proxy_flushes_bounded_flood_before_half_close() {
         received.len()
     );
 }
+
+#[tokio::test]
+async fn tcp_winner_cancels_silent_udp_drivers_without_waiting_for_drain() {
+    let ca = root();
+    let identity = leaf(&ca, false);
+    // A real bound UDP socket absorbs Initial packets without answering them.
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let runtime = dial_runtime::DialRuntime::new();
+    let mut endpoint = quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None,
+        std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+        runtime.runtime(),
+    )
+    .unwrap();
+    endpoint.set_default_client_config(
+        remote_quic::client_config(&identity, &[ca.certificate]).unwrap(),
+    );
+    let connecting = endpoint
+        .connect(silent.local_addr().unwrap(), "localhost")
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    drop(runtime);
+    let result = tokio::time::timeout(Duration::from_millis(100), connecting)
+        .await
+        .expect("losing UDP driver survived cancellation until its drain timer");
+    assert!(
+        result.is_err(),
+        "cancelled UDP connection unexpectedly authenticated"
+    );
+}
