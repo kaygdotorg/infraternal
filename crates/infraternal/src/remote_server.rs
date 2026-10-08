@@ -28,3 +28,7 @@ pub(crate) async fn serve(
         infraternal_server::serve(config).await
     }
 }
+
+#[cfg(test)]
+#[path = "remote_server_tests.rs"]
+mod tests;

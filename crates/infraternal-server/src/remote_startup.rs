@@ -176,3 +176,7 @@ fn private_file(path: &Path) -> Result<Vec<u8>, ServerError> {
     }
     Ok(bytes)
 }
+
+#[cfg(test)]
+#[path = "remote_startup_tests.rs"]
+mod tests;

@@ -168,6 +168,7 @@ async fn next(browser: &mut Browser) -> bytes::Bytes {
 }
 
 struct Fixture {
+    identity: infraternal_agent::remote_tls::Identity,
     pool: sqlx::SqlitePool,
     root: X509,
     cookie: String,
@@ -231,7 +232,10 @@ async fn fixture_at(directory: &Directory, address: SocketAddr, endpoint: Socket
                 server_name: "localhost".into(),
             },
         },
-        identity,
+        identity: infraternal_agent::remote_tls::Identity {
+            certificate: identity.certificate.clone(),
+            key: identity.key.clone(),
+        },
         roots: vec![root.clone()],
     };
     let (app, setup, listeners) = build_router_core(
@@ -255,6 +259,7 @@ async fn fixture_at(directory: &Directory, address: SocketAddr, endpoint: Socket
             .serve(app.into_make_service_with_connect_info::<SocketAddr>()),
     );
     Fixture {
+        identity,
         pool,
         root,
         cookie,
@@ -670,3 +675,6 @@ async fn remote_cli_enrollment_and_browser_terminal_two_processes() {
 
 #[path = "remote_host_tests.rs"]
 mod real_host;
+
+#[path = "remote_cold_tests.rs"]
+mod cold_start;
