@@ -198,7 +198,7 @@ export function createViews(cx: Ctx): ViewsModule {
       wins: new Map(), x: view.x, y: view.y,
       sx: undefined as unknown as Spring, sy: undefined as unknown as Spring,
     };
-    const place = (): void => { root.style.transform = `translate(${c.x}px, ${c.y}px)`; cx.invalidate(); };
+    const place = (): void => { root.style.transform = `translate(${c.x}px, ${c.y}px)`; cx.invalidate(); cx.memory?.cull(); };
     const POS = { visualDuration: 0.5, bounce: 0.2 };
     c.sx = new Spring(view.x, (v) => { c.x = v; place(); }, POS);
     c.sy = new Spring(view.y, (v) => { c.y = v; place(); }, POS);

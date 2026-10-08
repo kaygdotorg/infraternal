@@ -1,0 +1,67 @@
+/**
+ * What the canvas holds in memory, and what it gives back (a phone restores a page with a small budget, and iOS
+ * ends a page that keeps too much while the phone is locked).
+ *
+ * - Views far from the screen are not painted: `visibility: hidden` frees their compositor layers and paint work.
+ *   "Far" is more than one screen from the visible area, so a view that is flown to is already painted when it
+ *   arrives. Layout is untouched. Every window of a far view is told `setVisible(false)` (a live renderer then
+ *   releases its canvas), and `setVisible(true)` when the view is near again.
+ * - A hidden page (`visibilitychange`, `pagehide`) ends a split in progress (and with it its GL context),
+ *   releases the dot layers and the compositor hint on the world, hides the world (which drops every layer under
+ *   it) and tells every window it is not visible. `pageshow` and visible draw it all again.
+ * - Nothing here runs per frame except one rectangle test per view while the camera moves.
+ */
+import type { Ctx, ViewRec } from "./context";
+import { boxOf } from "./layout/geometry";
+import { endSplit } from "./layout/droplet";
+import type { Backdrop } from "./backdrop";
+
+export interface Memory {
+  /** Culls views by the camera's visible area; cheap enough for every frame. */
+  cull(): void;
+  dispose(): void;
+}
+
+export function createMemory(cx: Ctx, backdrop: Backdrop | undefined): Memory {
+  const { world, camera, views, signal } = cx;
+  const far = new WeakSet<ViewRec>();
+  let hidden = false;
+
+  const setVisible = (c: ViewRec, visible: boolean): void => { for (const rec of c.wins.values()) rec.binding?.setVisible(visible); };
+
+  const cull = (): void => {
+    if (hidden || !camera.vw || !camera.vh) return;
+    const { tx, ty, vw, vh } = camera, z = camera.cam.z;
+    const x0 = -tx / z - vw / z, x1 = (-tx + 2 * vw) / z, y0 = -ty / z - vh / z, y1 = (-ty + 2 * vh) / z;
+    for (const c of views.values()) {
+      const box = boxOf(c.view, cx.state.metrics);
+      const isFar = c.x + box.w < x0 || c.x > x1 || c.y + box.h < y0 || c.y > y1;
+      if (isFar === far.has(c)) continue;
+      if (isFar) far.add(c); else far.delete(c);
+      c.el.style.visibility = isFar ? "hidden" : "";
+      setVisible(c, !isFar);
+    }
+  };
+
+  const hide = (): void => {
+    hidden = true;
+    endSplit();
+    backdrop?.release();
+    world.style.willChange = "";
+    world.style.visibility = "hidden"; // every layer under the world goes with it
+    for (const c of views.values()) setVisible(c, false);
+  };
+  const show = (): void => {
+    if (document.hidden || !hidden) return;
+    hidden = false;
+    world.style.visibility = "";
+    camera.apply(true);
+    for (const c of views.values()) setVisible(c, !far.has(c));
+    cull();
+  };
+  document.addEventListener("visibilitychange", () => { if (document.hidden) hide(); else show(); }, { signal });
+  window.addEventListener("pagehide", hide, { signal });
+  window.addEventListener("pageshow", show, { signal });
+
+  return { cull, dispose() { /* listeners end with the canvas signal */ } };
+}

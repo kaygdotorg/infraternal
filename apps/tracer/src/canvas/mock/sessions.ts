@@ -33,7 +33,9 @@ export function createMockSessions(core: CoreScreen, world: MockWorld): SessionS
           body.append(pre);
         },
         focus() { if (live) core.terminalHost.focus({ preventScroll: true }); },
-        setActive() {}, setVisible() {}, refit() {},
+        setActive() {}, refit() {},
+        // The live terminal's canvas holds pixels only while its window can be seen.
+        setVisible(visible) { if (live) { if (visible) core.restoreSurface(); else core.releaseSurface(); } },
         dispose() { if (live) holder.append(core.terminalHost); },
       };
     },

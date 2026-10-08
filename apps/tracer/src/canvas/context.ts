@@ -28,6 +28,7 @@ import type { SessionBinding, SessionService } from "./sessions/adapter";
 import type { MeshModule } from "./mesh";
 import type { SharingModule } from "./sharing";
 import type { Nav } from "./camera/lock";
+import type { Memory } from "./memory";
 import type { Flip } from "./layout/flip";
 import type { ViewsModule } from "./views/world";
 import type { WindowsModule } from "./windows/lifecycle";
@@ -137,6 +138,7 @@ export interface Ctx {
   store: DocumentSync;
 
   // Services, filled in by the composition root in dependency order. Call them at event time only.
+  memory: Memory;
   nav: Nav;
   view: ViewsModule;
   win: WindowsModule;

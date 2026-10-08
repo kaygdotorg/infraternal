@@ -62,12 +62,18 @@ function rgba(css: string): [number, number, number, number] {
 
 export interface SplitProbe { frames: number; drawMs: number; maxDrawMs: number; trace?: Array<[number, number]> }
 
+/** The finisher of the animation that is running, if any: there is never more than one GL context alive. */
+let running: (() => void) | undefined;
+/** Ends the running split at once (its layer and GL context are destroyed). A hidden page calls this. */
+export const endSplit = (): void => running?.();
+
 /**
  * Plays the split of `a` and `b`, already in their final places. `down`: b is below a in the same column
  * (the layer lives in that column). `right`: b is in the next column to the right of a (the layer lives in
  * `host`, the element both columns sit in). Both directions are the same drawing, rotated a quarter turn.
  */
 export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" | "right" = "down", host?: HTMLElement, probe?: SplitProbe): Promise<void> {
+  endSplit(); // one context at a time: a split that is still playing settles first
   probe ??= (window as unknown as { __splitProbe?: SplitProbe }).__splitProbe;
   const t00 = performance.now();
   return new Promise((resolve) => {
@@ -177,7 +183,12 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" |
       if (probe) { const dt = performance.now() - t0; probe.frames++; probe.drawMs += dt; probe.maxDrawMs = Math.max(probe.maxDrawMs, dt); }
     };
 
+    let finished = false;
     const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      if (running === finish) running = undefined;
+      spring.set(g, true);
       for (const w of [a, b]) { delete w.dataset.goo; w.style.transform = ""; w.style.clipPath = ""; }
       for (const p of [...partsA, ...partsB]) p.style.opacity = "";
       canvas.remove();
@@ -199,7 +210,8 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" |
     }, { stiffness: 90, damping: 15 });
     spring.restDelta = 0.3; // sub-pixel: the last wobble is not worth another half second of frames
     spring.restVelocity = 3;
+    running = finish;
     draw(0);
-    requestAnimationFrame(() => spring.set(K * 1.3));
+    requestAnimationFrame(() => { if (!finished) spring.set(K * 1.3); });
   });
 }

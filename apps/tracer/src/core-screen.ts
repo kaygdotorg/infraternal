@@ -76,6 +76,9 @@ export interface CoreScreen {
   registerTerminal(client: TerminalClient): () => void;
   /** The terminal the key tray and the paste button talk to; none while no terminal window is active. */
   setActiveTerminal(client: TerminalClient | undefined): void;
+  /** Frees every terminal canvas's pixels (a page that is hidden); `restoreSurface` draws them again from the terminal state. */
+  releaseSurface(): void;
+  restoreSurface(): void;
   /** Replaces the host/session tree (the canvas lists its windows here); returns the new tree. */
   /** The one shared toast of the screen: every transient message (recovery, connection, flows) uses it. */
   readonly toast: ToastController;
@@ -1315,6 +1318,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       value.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
       return () => { clients.delete(value); if (client === value) client = undefined; };
     },
+    releaseSurface() { for (const c of clients) c.releaseSurface(); },
+    restoreSurface() { for (const c of clients) c.restoreSurface(); },
     setActiveTerminal(value) {
       client = value;
       if (value) for (const name of MODIFIER_KEYS) value.setInputModifier(name, modifiers[name]);
