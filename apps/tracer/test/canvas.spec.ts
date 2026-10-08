@@ -780,7 +780,7 @@ test("a normal preview session never writes text bottom left: reload, a failing 
   await page.waitForTimeout(1200);
   await page.unroute("**/auth/session");
   // Routine connection states raise no toast and no text, in any corner.
-  for (const message of ["Connecting…", "Connection lost; resuming…", "Connection interrupted; reconnecting…", "Reconnected with an approximate screen.", "Starting terminal…"]) {
+  for (const message of ["Connecting…", "Connection lost. Reconnecting…", "Connection interrupted. Reconnecting…", "Reconnected. The screen may be slightly out of date.", "Starting terminal…"]) {
     await page.evaluate((text) => { document.querySelector("#connection-status")!.textContent = text; }, message);
     await page.waitForTimeout(150);
     await expect(page.locator(".ui-toast")).toBeHidden();

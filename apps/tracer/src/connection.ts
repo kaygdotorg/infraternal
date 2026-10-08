@@ -191,7 +191,7 @@ export class MuxConnection {
 
   /** Reports a violation of the wire contract and closes the socket (the browser rejects 1002 from script, so 4002). */
   fail(message: string): void {
-    for (const s of this.streams.values()) s.onStatus(`Terminal protocol error: ${message}.`);
+    for (const s of this.streams.values()) s.onStatus("The connection sent something unexpected and was closed. Reconnecting…");
     try { this.socket?.close(4002, "invalid tracer frame"); } catch { this.socket?.close(); }
   }
 
@@ -216,7 +216,7 @@ export class MuxConnection {
   private connect(): void {
     if (this.closed) return;
     const resuming = [...this.streams.values()].some((s) => s.hasSession());
-    this.status(resuming ? "Connection lost; resuming…" : "Connecting…");
+    this.status(resuming ? "Connection lost. Reconnecting…" : "Connecting…");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const traceQuery = this.config.traceMockServer ? "?trace=1" : "";
     const socket = new WebSocket(`${protocol}//${location.host}/v1/ws${traceQuery}`);
@@ -249,7 +249,7 @@ export class MuxConnection {
         this.fail("server sent an invalid wire frame");
       }
     };
-    socket.onerror = () => this.status("Connection interrupted; reconnecting…");
+    socket.onerror = () => this.status("Connection interrupted. Reconnecting…");
     socket.onclose = () => {
       if (this.socket !== socket || this.closed) return;
       this.socket = undefined;
@@ -263,7 +263,7 @@ export class MuxConnection {
       const forced = this.forcedDrop;
       this.forcedDrop = false;
       for (const s of [...this.streams.values()]) s.onDisconnected(forced);
-      this.status("Connection lost; resuming…");
+      this.status("Connection lost. Reconnecting…");
       // With no stream left there is nothing to restore; the next `openStream` connects again.
       if (this.streams.size > 0) this.scheduleReconnect();
     };

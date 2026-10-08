@@ -656,7 +656,7 @@ export class TerminalClient {
         this.attachRequested = false;
         this.openCallSent = false;
         this.config.hooks?.onDisconnected?.(forced);
-        this.setStatus("Connection lost; resuming…");
+        this.setStatus("Connection lost. Reconnecting…");
       },
       hasSession: () => this.sessionId !== undefined,
       onStatus: (message) => this.setStatus(message),
@@ -693,9 +693,9 @@ export class TerminalClient {
           if (!this.sessionId || session.some((byte, index) => byte !== this.sessionId?.[index])) throw new Error("session mismatch");
           // Notices describe recovery; only the subsequent wire Snapshot advances the cursor.
           if (notice.type === "terminal.snapshot" && notice.approximate === true) {
-            this.setStatus("Reconnected with an approximate screen.");
+            this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {
-            this.setStatus("Output paused; waiting for screen recovery.");
+            this.setStatus("Waiting for the screen to catch up.");
           } else if (notice.type !== "terminal.exited") {
             throw new Error("unknown terminal notice");
           }
@@ -711,7 +711,7 @@ export class TerminalClient {
         this.conn.acceptPong(frame.nonce);
         return;
       case "Close":
-        this.setStatus(frame.reason || "The terminal stream closed.");
+        this.setStatus(frame.reason || "The terminal session ended.");
         // On a connection of its own a closed stream restarts it; on a shared one the others keep running.
         if (this.ownsConnection) this.conn.forceClose();
         return;
@@ -724,7 +724,7 @@ export class TerminalClient {
     if (this.openCallSent || this.closed) return;
     const hostId = this.config.hostId ?? new URLSearchParams(location.search).get("host");
     if (hostId && !isCanonicalUuid(hostId)) {
-      this.setStatus("The host query parameter must be a lowercase UUID.");
+      this.setStatus("That host address is not valid.");
       return;
     }
     this.openCallSent = true;
@@ -820,7 +820,7 @@ export class TerminalClient {
       encoded = encoder.encode(data);
     }
     if (encoded.byteLength > this.inputQueue.free) {
-      this.pauseInput("Input is paused until the server acknowledges buffered keystrokes.");
+      this.pauseInput("Typing is paused until the connection catches up.");
       return;
     }
     if (this.nextInSeq > MAX_U64 - BigInt(encoded.byteLength) || !this.inputQueue.push(encoded)) {
@@ -845,7 +845,7 @@ export class TerminalClient {
     // `encoded` may alias inputScratch, which the queue has already copied; prediction copies what it keeps.
     this.prediction?.input(data, firstSequence, encoded, this.predictionSafe());
     if (this.inputQueue.free < INPUT_RESUME_GUARD) {
-      this.pauseInput("Input paused: the bounded reconnect buffer is nearly full.");
+      this.pauseInput("Typing is paused because too much is waiting to be sent. It resumes when the connection is back.");
     }
   }
 
