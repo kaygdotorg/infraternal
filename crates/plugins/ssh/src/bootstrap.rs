@@ -1,6 +1,7 @@
 //! Runs independent host attempts under one global concurrency bound and a bounded replayable event log [138 H4].
 
 use crate::{
+    auth_order::Authentication,
     install::{BinaryPaths, Cleanup, Installation, JoinMaterial},
     model::{Destination, Event, Failure, MeshEvidence, Step, Target, identifier},
     probe::{CHECK_SCRIPT, Check},
@@ -191,6 +192,7 @@ impl Bootstrap {
                 history: Mutex::new(History {
                     sequence: 0,
                     events: VecDeque::new(),
+                    metadata: HashMap::new(),
                 }),
                 changed,
                 cancel,
@@ -220,6 +222,14 @@ impl Bootstrap {
             state.attempt += 1;
             (state.target.clone(), state.attempt)
         };
+        lock(&batch.history).metadata.insert(
+            target.id.clone(),
+            HostMetadata {
+                attempt,
+                authentication: None,
+                host_id: None,
+            },
+        );
         let runner = self.clone();
         tokio::spawn(async move {
             runner.attempt(batch, target, attempt).await;
@@ -341,6 +351,11 @@ impl Bootstrap {
             .open(resolved.destination, resolved.credentials, resolved.mesh)
             .await?;
         let output = session.run(CHECK_SCRIPT, Input::Empty).await?;
+        // Preserve method evidence even if the authenticated host is unsupported.
+        // Public metadata only; no provider or private material enters replay state.
+        if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
+            metadata.authentication = session.authentication();
+        }
         let check = Check::parse(&output.stdout)?;
         check.authorize_mode(target.mode)?;
         restore_previous(batch, target, attempt, started, session.clone()).await?;
@@ -350,6 +365,9 @@ impl Bootstrap {
             .invitation(&batch.authority, target, &check)
             .await?;
         *host = Some(join.host);
+        if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
+            metadata.host_id = Some(join.host);
+        }
         *installation = Some(Installation::new(session, target, &join)?);
         let transaction = installation
             .as_ref()
@@ -453,9 +471,18 @@ struct HostState {
     failed: bool,
     cleanup: Option<Cleanup>,
 }
+/// Shares history's lock: emit must not acquire `HostState` while completion holds
+/// it to order retries. Exactly one current metadata row per bounded target.
+#[derive(Clone, Copy, Default)]
+struct HostMetadata {
+    attempt: u32,
+    authentication: Option<Authentication>,
+    host_id: Option<uuid::Uuid>,
+}
 struct History {
     sequence: u64,
     events: VecDeque<Event>,
+    metadata: HashMap<String, HostMetadata>,
 }
 struct BatchInner {
     authority: Authority,
@@ -524,6 +551,12 @@ fn emit(
         .collect();
     log_tail.reverse();
     log_tail.push(message);
+    let metadata = history
+        .metadata
+        .get(&target.id)
+        .filter(|metadata| metadata.attempt == attempt)
+        .copied()
+        .unwrap_or_default();
     history.events.push_back(Event {
         sequence,
         target: target.id.clone(),
@@ -532,6 +565,8 @@ fn emit(
         message,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         log_tail,
+        authentication: metadata.authentication,
+        host_id: metadata.host_id,
         failure,
     });
     batch.changed.send_replace(sequence);

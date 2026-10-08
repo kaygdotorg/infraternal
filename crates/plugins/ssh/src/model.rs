@@ -1,5 +1,6 @@
 //! Validates bootstrap admission before SSH or privilege changes, and defines content-free progress [139][141].
 
+use crate::auth_order::Authentication;
 use serde::{Deserialize, Serialize};
 use std::net::Ipv6Addr;
 
@@ -257,6 +258,12 @@ pub struct Event {
     pub message: &'static str,
     pub elapsed_ms: u64,
     pub log_tail: Vec<&'static str>,
+    /// Present after the fixed authenticated check; never inferred from banners.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<Authentication>,
+    /// Bound invitation identity; only done proves this host is ready.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
 }
