@@ -285,3 +285,7 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     drop(bytes);
     remote_client::run(&identity, state).await
 }
+
+#[cfg(test)]
+#[path = "remote_tests.rs"]
+mod tests;

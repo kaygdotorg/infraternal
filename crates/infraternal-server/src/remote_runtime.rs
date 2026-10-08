@@ -84,6 +84,11 @@ impl Drop for RemoteListeners {
     }
 }
 impl RemoteListeners {
+    #[cfg(test)]
+    pub(crate) fn refuse_quic(&self) {
+        self.endpoint.close(0u32.into(), b"");
+    }
+
     pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
         self.endpoint.local_addr()
     }
@@ -178,3 +183,7 @@ impl RemoteListeners {
         Ok(Self { tasks, endpoint })
     }
 }
+
+#[cfg(test)]
+#[path = "remote_runtime_tests.rs"]
+pub(crate) mod tests;

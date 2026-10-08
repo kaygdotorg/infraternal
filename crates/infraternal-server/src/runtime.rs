@@ -1067,3 +1067,7 @@ mod reviewer_admission {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "remote_demo_tests.rs"]
+mod remote_demo_tests;

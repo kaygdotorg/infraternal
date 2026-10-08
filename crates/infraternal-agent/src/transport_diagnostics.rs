@@ -274,3 +274,107 @@ async fn quic_300ms_and_1000_connection_pairs() {
     server.close(0u32.into(), b"");
     client.close(0u32.into(), b"");
 }
+
+/// Measure the crypto/transport path with an exact bounded 50 MiB payload.
+/// Connection establishment is excluded; the receiver checks every byte before
+/// returning a completion Ack, so buffering alone cannot count as throughput.
+/// Two workers represent the separately scheduled server/host processes: one
+/// reactor for both peers and the relay introduces artificial UDP burst loss.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "size investigation diagnostic; run alone without build or browser overlap"]
+async fn quic_bulk_50m_exact_bytes() {
+    let ca = root();
+    let server_identity = leaf(&ca, true);
+    let client_identity = leaf(&ca, false);
+    let server = quinn::Endpoint::server(
+        remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+            .unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client.set_default_client_config(
+        remote_quic::client_config(&client_identity, &[ca.certificate]).unwrap(),
+    );
+    let direct = server.local_addr().unwrap();
+    for rtt in [0, 300] {
+        let proxy = if rtt == 300 {
+            Some(udp_proxy(direct).await)
+        } else {
+            None
+        };
+        let address = proxy.as_ref().map_or(direct, |(address, _)| *address);
+        let samples = if rtt == 0 { 3 } else { 1 };
+        for sample in 0..samples {
+            let (a, b) = tokio::join!(client.connect(address, "localhost").unwrap(), async {
+                server.accept().await.unwrap().await
+            });
+            let a = a.unwrap();
+            let b = b.unwrap();
+            let started = Instant::now();
+            let cpu = cpu_ticks();
+            let payload: Vec<u8> = (0..16_384)
+                .map(|n| u8::try_from(n % 251).unwrap())
+                .collect();
+            let bytes = 50 * 1024 * 1024;
+            let transfer = exact_bulk(&a, &b, &payload, bytes);
+            if tokio::time::timeout(Duration::from_secs(90), transfer)
+                .await
+                .is_err()
+            {
+                println!(
+                    "bulk_timeout rtt_ms={rtt} client={:?} server={:?}",
+                    a.stats(),
+                    b.stats()
+                );
+                panic!("exact transfer diagnostic exceeded its bounded deadline");
+            }
+            println!(
+                "bulk_diagnostic transport=quic rtt_ms={rtt} sample={sample} bytes={bytes} elapsed_us={} cpu_ticks={} rss_kib={} application_missing=0 application_duplicates=0 load={}",
+                started.elapsed().as_micros(),
+                cpu_ticks() - cpu,
+                rss(),
+                std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+            );
+            a.close(0u32.into(), b"");
+            b.close(0u32.into(), b"");
+        }
+        if let Some((_, task)) = proxy {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+    server.close(0u32.into(), b"");
+    client.close(0u32.into(), b"");
+}
+
+async fn exact_bulk(a: &quinn::Connection, b: &quinn::Connection, payload: &[u8], bytes: usize) {
+    tokio::join!(
+        async {
+            let (mut send, mut receive) = a.open_bi().await.unwrap();
+            for _ in 0..bytes / payload.len() {
+                send.write_all(payload).await.unwrap();
+            }
+            send.finish().unwrap();
+            let mut ack = [0; 8];
+            receive.read_exact(&mut ack).await.unwrap();
+            assert_eq!(u64::from_le_bytes(ack), u64::try_from(bytes).unwrap());
+        },
+        async {
+            let (mut send, mut receive) = b.accept_bi().await.unwrap();
+            let mut chunk = vec![0; 16_384];
+            let mut count = 0;
+            while let Some(n) = receive.read(&mut chunk).await.unwrap() {
+                for (i, value) in chunk[..n].iter().enumerate() {
+                    assert_eq!(*value, payload[(count + i) % payload.len()]);
+                }
+                count += n;
+            }
+            assert_eq!(count, bytes);
+            send.write_all(&u64::try_from(count).unwrap().to_le_bytes())
+                .await
+                .unwrap();
+            send.finish().unwrap();
+        }
+    );
+}

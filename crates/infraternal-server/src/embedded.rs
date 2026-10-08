@@ -151,6 +151,17 @@ impl EmbeddedAgent {
         }
     }
 
+    /// Fail the unused embedded route in remote-only fixtures; fallback must not create local PTYs.
+    #[cfg(test)]
+    pub(crate) fn unavailable() -> Self {
+        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        drop(receiver);
+        Self {
+            commands,
+            next_attachment_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
     /// Reuse the terminal actor for an enrolled host; only admitted listeners supply links.
     pub(crate) fn remote(uid: u32) -> (Self, mpsc::Sender<RemoteLink>) {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
