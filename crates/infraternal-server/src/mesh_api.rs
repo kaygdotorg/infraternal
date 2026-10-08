@@ -629,13 +629,23 @@ impl MeshService {
     ) -> Result<(u64, u64), MeshApiError> {
         let mut tx = self.begin_change().await?;
         authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
-        let result = sqlx::query("INSERT INTO mesh_nodes(name,public_key,last_seen,last_rtt_us) VALUES (?,?,NULL,NULL) RETURNING id")
+        // Persist allocation history independently of live rows. Explicitly imported
+        // IDs also advance allocation; exhaustion refuses before any identity is issued.
+        let id: i64 = sqlx::query_scalar(
+            "UPDATE mesh_state SET node_id_high_water=MAX(node_id_high_water,COALESCE((SELECT MAX(id) FROM mesh_nodes),0))+1 WHERE singleton=1 AND MAX(node_id_high_water,COALESCE((SELECT MAX(id) FROM mesh_nodes),0))<? RETURNING node_id_high_water",
+        )
+        .bind(i64::MAX)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sql_error)?
+        .ok_or(MeshApiError::Conflict)?;
+        sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,last_seen,last_rtt_us) VALUES (?,?,?,NULL,NULL)")
+            .bind(id)
             .bind(&request.name)
             .bind(request.public_key.as_slice())
-            .fetch_one(&mut *tx)
+            .execute(&mut *tx)
             .await
             .map_err(map_sql_error)?;
-        let id: i64 = result.get("id");
         let revision = self
             .finish_change(
                 tx,

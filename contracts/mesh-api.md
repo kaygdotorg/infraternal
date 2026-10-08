@@ -72,7 +72,9 @@ transaction.
 
 Node, tag, grant and role names are 1–63 lowercase ASCII letters, digits or
 hyphens; a name cannot start or end with a hyphen. A host name is one such
-single label. Tag and grant names are stable references in layout documents.
+single label. Node IDs are monotonically allocated and never reused after
+deletion or restart (D180); the allocation high-water mark is persisted apart
+from live inventory. Tag and grant names are stable references in layout documents.
 
 The only assignable Mesh role actions are `mesh.manage_nodes`,
 `mesh.manage_tags`, `mesh.manage_grants` and `mesh.manage_roles`. A role has a
