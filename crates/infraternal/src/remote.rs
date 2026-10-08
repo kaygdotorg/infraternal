@@ -268,22 +268,76 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     let identity = RemoteIdentity {
         identity: Identity {
             certificate: X509::from_der(
-                &B64.decode(stored.certificate_der).map_err(|_| refused())?,
+                &B64.decode(&stored.certificate_der).map_err(|_| refused())?,
             )
             .map_err(|_| refused())?,
-            key: PKey::private_key_from_pkcs8(&B64.decode(stored.key_der).map_err(|_| refused())?)
+            key: PKey::private_key_from_pkcs8(&B64.decode(&stored.key_der).map_err(|_| refused())?)
                 .map_err(|_| refused())?,
         },
         roots: vec![
-            X509::from_der(&B64.decode(stored.ca_der).map_err(|_| refused())?)
+            X509::from_der(&B64.decode(&stored.ca_der).map_err(|_| refused())?)
                 .map_err(|_| refused())?,
         ],
         endpoint: stored.endpoint,
-        server_name: stored.server_name,
+        server_name: stored.server_name.clone(),
         execution_uid: stored.execution_uid,
     };
     drop(bytes);
-    remote_client::run(&identity, state).await
+    let publisher = std::sync::Arc::new(IdentityPublisher {
+        data: data.to_owned(),
+        stored,
+    });
+    remote_client::run_with_publisher(&identity, state, publisher).await
+}
+
+/// The existing installation is the publication boundary; no new key is generated.
+struct IdentityPublisher {
+    data: PathBuf,
+    stored: StoredIdentity,
+}
+impl infraternal_agent::remote_renewal::CertificatePublisher for IdentityPublisher {
+    fn publish(&self, certificate: &X509) -> io::Result<()> {
+        use std::{
+            io::Write,
+            os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        };
+        let directory = std::fs::symlink_metadata(&self.data)?;
+        let current = std::fs::symlink_metadata(self.data.join("identity.json"))?;
+        let uid = nix::unistd::Uid::effective().as_raw();
+        if !directory.is_dir()
+            || directory.uid() != uid
+            || directory.permissions().mode() & 0o077 != 0
+            || !current.is_file()
+            || current.uid() != uid
+            || current.permissions().mode() & 0o077 != 0
+        {
+            return Err(refused());
+        }
+        let mut stored = serde_json::to_value(&self.stored).map_err(|_| refused())?;
+        stored["certificate_der"] = B64
+            .encode(certificate.to_der().map_err(|_| refused())?)
+            .into();
+        let bytes = serde_json::to_vec(&stored).map_err(|_| refused())?;
+        if bytes.len() > 8192 {
+            return Err(refused());
+        }
+        let pending = self
+            .data
+            .join(format!("identity-{}.pending", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&pending)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&pending, self.data.join("identity.json"))?;
+            std::fs::File::open(&self.data)?.sync_all()
+        })();
+        let _ = std::fs::remove_file(pending);
+        result
+    }
 }
 
 #[cfg(test)]
