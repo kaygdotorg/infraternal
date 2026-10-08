@@ -96,7 +96,7 @@ const SCREEN = `
         <button class="ui-pill ui-pill-icon tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
       </nav>
     </header>
-    <aside class="ui-panel sidebar" id="sidebar" aria-label="Hosts" hidden>
+    <aside class="ui-panel ui-overlay-surface sidebar" id="sidebar" data-overlay-size="large" aria-label="Hosts" hidden>
       <div class="sidebar-head"><span class="sidebar-title">Hosts</span></div>
       <div id="tree"></div>
     </aside>
