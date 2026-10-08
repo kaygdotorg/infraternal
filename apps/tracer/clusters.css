@@ -156,10 +156,6 @@
 .cl-empty-add svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 
 
-  position: absolute; z-index: 0; opacity: 0; pointer-events: none;
-  background: color-mix(in oklab, var(--bg) 88%, transparent); border-inline: 1px solid var(--overlay-line);
-}
-
 /* ---- pill morphs: the floating terminal and the view list ---------------------------------------- */
 .cl-float { position: absolute; z-index: 9; display: block; overflow: hidden; border-radius: var(--r-lg, 18px); color: var(--fg); }
 .cl-float .ui-window { height: 100%; border: 0; border-radius: 0; background: none; box-shadow: none; }
@@ -223,3 +219,14 @@
 /* During a split the two frames are drawn by the goo layer (clusters-split.ts); the windows keep only their contents. */
 .ui-window[data-goo] { transition: none; background: transparent; border-color: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
 .cl-goo { z-index: 0; }
+
+/* Settings view: a section's content fills its window (the shared settings pane, scrolled by itself). */
+.cl-col .ui-window-body > .ui-settings-pane { position: absolute; inset: 0; }
+.bm-sec.cl-divided { margin-top: 8px; padding-top: 8px; box-shadow: 0 -1px 0 var(--line); }
+.cl-viewlist-rows > li.cl-divided { margin-top: 4px; padding-top: 4px; box-shadow: 0 -1px 0 var(--line); }
+
+/* The one-time "Continue from <device>?" chip: the shared pill, centred under the top pill, fades on its own. */
+.cl-continue { position: absolute; z-index: 9; left: 50%; top: calc(env(safe-area-inset-top) + 10px + var(--pill-h, 38px) + 10px); translate: -50% 0; gap: 4px; padding: 0 4px 0 14px; white-space: nowrap; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); opacity: 0; transform: translateY(-6px) scale(0.97); transition: opacity 200ms ease, transform 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.cl-continue[data-open="true"] { opacity: 1; transform: none; }
+.cl-continue-text { padding-right: 6px; }
+@media (prefers-reduced-motion: reduce) { .cl-continue { transform: none; } }

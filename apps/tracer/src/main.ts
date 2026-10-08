@@ -282,6 +282,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
       addHostPrototype: canvasMode || clustersMode,
+      ...(clustersMode ? { settingsView: true } : {}),
       ...(identity?.display_name ? { displayName: identity.display_name } : {}),
       ...(identity?.username ? { username: identity.username } : {}),
       ...(query.get("footer") === "b" ? { footerVariant: "b" as const } : {}),

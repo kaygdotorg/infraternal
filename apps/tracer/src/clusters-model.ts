@@ -3,7 +3,7 @@
  *
  * One infinite canvas holds *views* (internally "clusters"). Each view is a tidy tiled group
  * of windows: columns side by side, each column a vertical stack that scrolls on its own. The
- * Topology view is the exception: it lays small node cards out as a graph. This module is pure
+ * Mesh view is the exception: it lays small node cards out as a graph. This module is pure
  * (no DOM) so the placement rules can be tested on their own:
  *
  * - A view's *box* is its content plus a fixed margin, rounded up to whole grid cells.
@@ -20,8 +20,8 @@ export const CELL = 120;
 export const MARGIN = { l: 48, t: 96, r: 48, b: 48 };
 export const COLUMN_GAP = 12;
 
-export type WindowKind = "terminal" | "containers" | "logs" | "node";
-export type ViewId = "console" | "containers" | "topology";
+export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings";
+export type ViewId = "console" | "containers" | "mesh" | "settings";
 export type Role = "viewer" | "operator" | "new";
 
 export interface WindowModel {
@@ -204,7 +204,8 @@ export function buildViews(role: Role, m: Metrics, screens: Map<string, { os: Ho
     if (c3.length) cols.push(col("c3", c3.map((n) => hostWin(n))));
   }
   const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: 0, y: 0 };
-  if (role !== "operator") return [console_];
+  const settings = buildSettingsView(role, m);
+  if (role !== "operator") { settings.x = box0(console_, m).w + CELL; return [console_, settings]; }
 
   const listW = Math.round(m.colW * 0.9), logsW = Math.round(m.colW * 1.25);
   const containers: ViewModel = {
@@ -217,8 +218,8 @@ export function buildViews(role: Role, m: Metrics, screens: Map<string, { os: Ho
   };
   const nw = m.nodeW, nh = m.nodeH;
   const gx = [30, 340, 650], gy = [40, 250];
-  const topology: ViewModel = {
-    id: "topology", name: "Topology", layout: "graph", cols: [], x: 0, y: 0,
+  const mesh: ViewModel = {
+    id: "mesh", name: "Mesh", layout: "graph", cols: [], x: 0, y: 0,
     graph: { w: gx[2]! + nw + 30, h: gy[1]! + nh + 30 },
     nodes: [
       { id: "tag:ops", kind: "tag", label: "tag:ops", x: gx[0]!, y: gy[0]!, detail: "1 member", sub: "studio-mac" },
@@ -229,13 +230,38 @@ export function buildViews(role: Role, m: Metrics, screens: Map<string, { os: Ho
       { id: "studio-mac", kind: "host", label: "studio-mac", x: gx[2]!, y: gy[1]!, detail: "100.86.4.21", sub: "direct · 58 ms", os: "apple" },
     ],
   };
-  // Desktop: Console top left, Containers under it, Topology to the right. Phone: one stack.
+  // Desktop: Console top left, Containers under it, Mesh to the right. Phone: one stack.
   // Console first; the others are placed by their real sizes (a view is as tall as the viewport).
   const box = (v: ViewModel) => boxOf(v, m);
   containers.y = box(console_).h;
-  if (m.narrow) topology.y = containers.y + box(containers).h;
-  else topology.x = box(console_).w + CELL;
-  const out = [console_, containers, topology];
+  if (m.narrow) mesh.y = containers.y + box(containers).h;
+  else mesh.x = box(console_).w + CELL;
+  if (m.narrow) settings.y = mesh.y + boxOf(mesh, m).h; else { settings.x = mesh.x; settings.y = boxOf(mesh, m).h; }
+  const out = [console_, containers, mesh, settings];
   // Console may grow wider than its default box; keep the order stable and the starts on the grid.
   return out;
+}
+
+const box0 = (v: ViewModel, m: Metrics): Box => boxOf(v, m);
+
+/** The Settings sections a person has windows for. Admin sections exist only for operator grants (D164, D172). */
+export const SETTINGS_SECTIONS: Array<{ id: string; title: string; admin?: boolean }> = [
+  { id: "appearance", title: "Appearance" },
+  { id: "toolbar", title: "Toolbar" },
+  { id: "shortcuts", title: "Shortcuts" },
+  { id: "devices", title: "Devices" },
+  { id: "account", title: "Account" },
+  { id: "about", title: "About" },
+  { id: "users", title: "Users", admin: true },
+  { id: "grants", title: "Grants", admin: true },
+  { id: "discovery", title: "Discovery sources", admin: true },
+];
+
+/** Settings is a view like the others: one window per section, tiled in columns. */
+export function buildSettingsView(role: Role, m: Metrics): ViewModel {
+  const sections = SETTINGS_SECTIONS.filter((s) => !s.admin || role === "operator");
+  return {
+    id: "settings", name: "Settings", layout: "tiled", nodes: [], x: 0, y: 0,
+    cols: sections.map((s) => ({ id: `s-${s.id}`, w: m.colW, wins: [{ id: `s-${s.id}`, kind: "settings" as const, host: s.title }] })),
+  };
 }

@@ -30,6 +30,8 @@ export interface CoreScreenOptions {
   mockMode: boolean;
   probeMode: boolean;
   addHostPrototype?: boolean;
+  /** Settings is a view on the canvas, not an overlay: every way of opening it dispatches `proto:settings:<section>`. */
+  settingsView?: boolean;
   /** The signed-in user's display name, shown in the sidebar footer (canvas preview only). */
   displayName?: string;
   /** The signed-in username, shown as the footer's quiet second line. */
@@ -76,6 +78,11 @@ export interface CoreScreen {
   setCanvasRow(items: ToolbarItem[]): ToolbarRow;
   /** Holds the toolbar on the key row (an input lock), or releases it with `undefined`. */
   lockToolbarRow(row: "keys" | undefined): void;
+  /** Runs a palette action (`theme:ink`, `font:geist-mono`, `glass:2`, `bg:mesh`) as a click on its row would. */
+  act(action: string): void;
+  /** The appearance choices in force, and the sections of Settings that live in core (for the Settings view). */
+  appearance(): { theme: string; font: string; glass: number; background: string };
+  settingsPanels: { toolbar: SettingsSection; shortcuts: SettingsSection; about: SettingsSection };
   /** The row that shows now. */
   toolbarRow(): "canvas" | "keys";
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
@@ -222,14 +229,16 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const build = buildVersion();
   const canvasItems = new Map<string, ToolbarItem>();
   const settingsSections: SettingsSection[] = [aboutSection({ name: "infraternal", version: build.short, commit: build.full, built: build.built })];
-  if (options.addHostPrototype) settingsSections.unshift(shortcutsSection());
-  const settings = options.addHostPrototype ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
+  const shortcutsPanel = shortcutsSection();
+  if (options.addHostPrototype && !options.settingsView) settingsSections.unshift(shortcutsPanel);
+  const aboutPanel = settingsSections[0]!;
+  const settings = options.addHostPrototype && !options.settingsView ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
   const sidebarFoot = options.addHostPrototype
     ? createSidebarFoot({
       displayName: options.displayName?.trim() || "Signed in",
       ...(options.username ? { secondary: options.username } : {}),
       ...(options.footerVariant ? { variant: options.footerVariant } : {}),
-      onOpen: (source) => settings?.open("about", source),
+      onOpen: (source) => { if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action: "proto:settings:appearance", source } })); else settings?.open("about", source); },
     })
     : undefined;
   if (sidebarFoot) { sidebar.append(sidebarFoot.root); sidebar.dataset.foot = ""; }
@@ -260,7 +269,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const params = new URLSearchParams(location.search);
   // `?glass=1..4`: how much shows through the floating cards (1 thickest, 4 thinnest; default 3).
   const glassParam = Number(params.get("glass"));
-  const glassLevel = Number.isInteger(glassParam) && glassParam >= 1 && glassParam <= 4 ? glassParam : DEFAULT_GLASS;
+  const savedGlass = Number(readLocal("tracer.glass"));
+  const validGlass = (n: number): boolean => Number.isInteger(n) && n >= 1 && n <= 4;
+  let glassLevel = validGlass(glassParam) ? glassParam : validGlass(savedGlass) ? savedGlass : DEFAULT_GLASS;
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
   let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "ink" : "paper");
   // The font follows the same order as the theme: URL, then the saved choice, then the default.
@@ -313,6 +324,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     stage.dataset.theme = currentThemeId;
     stage.dataset.bg = background;
     applyTheme(active, ROOT, glassLevel);
+    window.dispatchEvent(new CustomEvent("tracer:appearance"));
     THEME_COLOR?.setAttribute("content", active.bg);
     client?.setTheme(terminalTheme(active, background === "mesh"));
     if (background === "mesh") return paintMesh();
@@ -1196,7 +1208,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       committedFont = fontById(value)!;
       rememberFont(committedFont);
       showFont(committedFont);
+      window.dispatchEvent(new CustomEvent("tracer:appearance"));
       return false;
+    } else if (kind === "glass" && validGlass(Number(value))) {
+      glassLevel = Number(value);
+      writeLocal("tracer.glass", value!);
+      swapLook();
+      return true;
     } else if (kind === "bg" && (value === "mesh" || value === "none")) {
       background = value;
       writeLocal("tracer.background", value);
@@ -1204,7 +1222,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return true;
     } else if (kind === "settings") {
       setPalette(false, source);
-      settings?.open(value ?? "about", source);
+      if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action: `proto:settings:${value ?? "appearance"}`, source } }));
+      else settings?.open(value ?? "about", source);
       return true;
     } else if (kind === "shortcuts") {
       // After the palette has gone, so the morph starts from the settled pill.
@@ -1250,6 +1269,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return () => { providers.delete(provider); };
     },
     toast,
+    act(action) { runAction(action, "pointer"); },
+    appearance: () => ({ theme: currentThemeId, font: committedFont.id, glass: glassLevel, background }),
+    settingsPanels: { get toolbar() { return toolbarSettings; }, shortcuts: shortcutsPanel, about: aboutPanel },
     toolbarRow: () => (rowIndex === 0 ? "canvas" : "keys"),
     lockToolbarRow(row) { rowLock = row; if (row) settleRow(1); else autoRow(); },
     setCanvasRow(items) {
@@ -1279,7 +1301,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       for (const item of items) paint(item.id);
       defaults.canvas = items.map((i) => i.id);
       applyPrefs(false);
-      if (items.length && !settingsSections.includes(toolbarSettings)) settingsSections.unshift(toolbarSettings);
+      if (items.length && !options.settingsView && !settingsSections.includes(toolbarSettings)) settingsSections.unshift(toolbarSettings);
       canvasRowEl.hidden = items.length === 0;
       keytray.dataset.rows = items.length ? "2" : "1";
       autoRow();

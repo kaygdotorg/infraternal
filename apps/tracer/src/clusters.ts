@@ -2,7 +2,7 @@
  * The clusters concept mockup (`?mock=1&proto=clusters`, issue #89, D119, D159, D164).
  *
  * One infinite canvas holds *views*. Each view is a tidy tiled group of windows (columns
- * side by side, every column a vertical stack that scrolls by itself), or, for Topology, a
+ * side by side, every column a vertical stack that scrolls by itself), or, for Mesh, a
  * graph of small node cards joined by mesh access arrows. Views are placed on a coarse grid
  * and push each other aside; they never overlap (clusters-model.ts).
  *
@@ -33,7 +33,7 @@ import type { BranchSection } from "../../../packages/ui/src/branched";
 import type { CoreScreen } from "./core-screen";
 import { previewLine } from "./canvas";
 import {
-  CELL, COLUMN_GAP, CONTAINERS, INITIAL_GRANTS, MARGIN, boxOf, buildViews, contentSize, metricsFor, reach, resolve, shellLines, snapToGrid,
+  SETTINGS_SECTIONS, CELL, COLUMN_GAP, CONTAINERS, INITIAL_GRANTS, MARGIN, boxOf, buildViews, contentSize, metricsFor, reach, resolve, shellLines, snapToGrid,
   type Box, type ColumnModel, type Grant, type Metrics, type NodeModel, type Role, type ViewId, type ViewModel, type WindowModel,
 } from "./clusters-model";
 import { Arrow, DragArrow, anchors, type Pt, type Rect } from "./clusters-arrows";
@@ -42,6 +42,9 @@ import { isTypingTarget } from "../../../packages/ui/src/shortcuts-view";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { ICONS, iconSvg } from "../../../packages/ui/src/icons";
 import { createCanvasBackdrop } from "../../../packages/ui/src/canvas-backdrop";
+import { THEMES } from "../../../packages/ui/src/themes";
+import { FONTS } from "../../../packages/ui/src/fonts";
+import { renderAppearance, renderDevices, renderFacts, type AppearanceApi, type DeviceRow } from "../../../packages/ui/src/settings-panels";
 import { createConnectionIndicator } from "../../../packages/ui/src/connection-indicator";
 import type { ToolbarRow } from "./core-screen";
 
@@ -72,7 +75,18 @@ const ICON = {
   views: ICONS.views,
 } as const;
 const lineIcon = (path: string): string => `<svg viewBox="0 0 24 24" class="is-line" aria-hidden="true">${path}</svg>`;
-const VIEW_ICON: Record<ViewId, string> = { console: ICON.console, containers: ICON.containers, topology: ICON.node };
+const VIEW_ICON: Record<ViewId, string> = { console: ICON.console, containers: ICON.containers, mesh: ICON.node, settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/>' };
+const SECTION_ICON: Record<string, string> = {
+  appearance: '<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/>',
+  toolbar: '<rect x="3" y="14" width="18" height="6" rx="3"/><path d="M7 17h.01M12 17h.01M17 17h.01"/><path d="M8 9h8M10 5h4"/>',
+  shortcuts: '<rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/>',
+  devices: '<rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M11 18h2"/>',
+  account: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20c1-4 4-5.5 7-5.5s6 1.5 7 5.5"/>',
+  about: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+  users: '<circle cx="9" cy="8" r="3"/><path d="M3 19c.8-3.4 3.2-5 6-5s5.2 1.6 6 5M16 5.5a3 3 0 0 1 0 5.5M18 14.5c1.7.6 2.7 2 3 4.5"/>',
+  grants: '<circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H21M18 12v3M15 12v2"/>',
+  discovery: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4M11 8v3l2 1.5"/>',
+};
 
 interface Cam { cx: number; cy: number; z: number }
 
@@ -84,6 +98,7 @@ interface WinRec {
   port?: HTMLButtonElement;
   stopResize?: () => void;
   stream?: HTMLElement;
+  cleanup?: () => void;
 }
 
 interface TopoArrow { grant: Grant; arrow: Arrow; label?: SVGTextElement }
@@ -200,7 +215,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     camMoving = false;
     world.style.willChange = "";
     applyCam(true);
-    redrawTopology();
+    redrawMesh();
     updateCurrentView();
   };
   const stopCam = (): void => {
@@ -466,7 +481,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     reachFor = rec; reachPinned = pinned;
     rec.card.root.dataset.reach = "";
     const items: ReachItem[] = [];
-    const topo = clusters.get("topology");
+    const topo = clusters.get("mesh");
     for (const r of reach(rec.model.host, grants)) {
       const target = clusters.get("console")?.wins.get(`w-${r.host}`)?.card.root;
       if (!target) continue;
@@ -478,9 +493,9 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
       const arrow = new Arrow({ tone: "quiet" });
       const marker = el("button", "cl-edge ui-pill");
       marker.type = "button";
-      marker.innerHTML = `<span class="cl-edge-arrow"><svg viewBox="0 0 24 24" aria-hidden="true">${ICON.chevron}</svg></span><span>Topology</span>`;
-      marker.setAttribute("aria-label", `${rec.model.host} in Topology`);
-      marker.addEventListener("click", () => { hideReach(true); flyView("topology"); });
+      marker.innerHTML = `<span class="cl-edge-arrow"><svg viewBox="0 0 24 24" aria-hidden="true">${ICON.chevron}</svg></span><span>Mesh</span>`;
+      marker.setAttribute("aria-label", `${rec.model.host} in Mesh`);
+      marker.addEventListener("click", () => { hideReach(true); flyView("mesh"); });
       edges.append(marker);
       items.push({ arrow, host: rec.model.host, target: node, marker, node: true });
     }
@@ -524,7 +539,51 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   // ---- building the world ------------------------------------------------------------------------------
   const iconFor = (m: WindowModel): string =>
     m.kind === "terminal" ? (m.os ? hostIconMarkup(m.os, "ui-host-mark") : lineIcon(ICON.terminal))
-      : m.kind === "containers" ? lineIcon(ICON.containers) : m.kind === "logs" ? lineIcon(ICON.logs) : lineIcon(ICON.node);
+      : m.kind === "settings" ? lineIcon(SECTION_ICON[m.id.slice(2)] ?? VIEW_ICON.settings) : m.kind === "containers" ? lineIcon(ICON.containers) : m.kind === "logs" ? lineIcon(ICON.logs) : lineIcon(ICON.node);
+
+  // ---- Settings: a view whose windows are the sections --------------------------------------------------
+  let devices: DeviceRow[] = [
+    { id: "d1", name: "iPhone 15", kind: "phone", type: "iOS · Safari", lastSeen: "now", view: "Console", online: true, current: true },
+    { id: "d2", name: "MacBook Pro", kind: "laptop", type: "macOS · Chrome", lastSeen: "now", view: "Mesh", online: true },
+    { id: "d3", name: "iPad", kind: "tablet", type: "iPadOS · Safari", lastSeen: "2 days ago", view: "Containers", online: false },
+    { id: "d4", name: "Work laptop", kind: "desktop", type: "Linux · Firefox", lastSeen: "3 weeks ago", view: "Console", online: false },
+  ];
+  const appearanceApi: AppearanceApi = {
+    themes: Object.entries(THEMES).map(([id, t]) => ({ id, name: t.name, dark: t.dark, bg: t.bg, accent: t.accent })),
+    fonts: FONTS.map((f) => ({ id: f.id, label: f.label, hint: f.hint })),
+    state: () => core.appearance(),
+    act: (action) => core.act(action),
+    onChange(listener) { window.addEventListener("tracer:appearance", listener); return () => window.removeEventListener("tracer:appearance", listener); },
+  };
+  const renderSettingsBody = (section: string, body: HTMLElement): (() => void) => {
+    const pane = el("div", "ui-settings-pane");
+    pane.setAttribute("role", "region");
+    pane.setAttribute("aria-label", section);
+    body.append(pane);
+    const done = ((): (() => void) | void => {
+      switch (section) {
+        case "appearance": return renderAppearance(pane, appearanceApi);
+        case "toolbar": return core.settingsPanels.toolbar.render(pane);
+        case "shortcuts": return core.settingsPanels.shortcuts.render(pane);
+        case "about": return core.settingsPanels.about.render(pane);
+        case "devices": return renderDevices(pane, {
+          get devices() { return devices; },
+          jump: (view) => { const id = view.toLowerCase() as ViewId; if (clusters.has(id)) flyView(id); },
+          signOut: (d) => { devices = devices.filter((x) => x.id !== d.id); toast.show({ message: `${d.name} signed out` }); },
+          rename: (d, name) => { toast.show({ message: `Renamed to ${name}` }); },
+        });
+        case "account": return renderFacts(pane, "Account", [
+          { title: "Passkeys", rows: [{ key: "iPhone 15", value: "added 2 weeks ago" }, { key: "MacBook Pro", value: "added 3 months ago" }] },
+          { title: "Recovery key", rows: [{ key: "Status", value: "saved" }, { key: "Last checked", value: "6 days ago" }] },
+        ]);
+        case "users": return renderFacts(pane, "Users", [{ title: "People", rows: [{ key: "kayg", value: "owner" }, { key: "mira", value: "operator" }, { key: "ops", value: "viewer" }] }]);
+        case "grants": return renderFacts(pane, "Grants", [{ title: "Mesh", rows: [{ key: "Rules", value: String(grants.length) }, { key: "Via relay", value: String(grants.filter((g) => g.via).length) }] }]);
+        case "discovery": return renderFacts(pane, "Discovery sources", [{ title: "Sources", rows: [{ key: "NetBird", value: "on" }, { key: "Tailscale", value: "on" }, { key: "known_hosts", value: "on" }, { key: "SSH config", value: "on" }] }]);
+        default: return undefined;
+      }
+    })();
+    return () => { done?.(); pane.remove(); };
+  };
 
   // The one live terminal (the real renderer) sits in the build-01 window, as on the product canvas.
   const holder = el("div", "cl-holder");
@@ -536,6 +595,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const body = rec.card.body;
     body.replaceChildren();
     if (m.id === "w-build-01") { body.append(core.terminalHost); return; }
+    if (m.kind === "settings") { rec.cleanup = renderSettingsBody(m.id.slice(2), body); return; }
     if (m.kind === "terminal") {
       const pre = el("pre", "canvas-preview cl-preview");
       const lines = m.lines ?? [];
@@ -579,7 +639,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const rec: WinRec = {} as WinRec;
     // The window's kind decides what it can do: only a terminal has a split control.
     if (m.kind === "terminal") actions.push({ id: "split", label: "Split", icon: ICON.split, onSelect: () => { void splitWindow(rec); } });
-    if (m.kind !== "node") actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => closeWindow(rec) });
+    if (m.kind !== "node" && m.kind !== "settings") actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => closeWindow(rec) });
     const title = { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
     const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: () => updateToolbar() });
     Object.assign(rec, { model: m, card, cluster: c });
@@ -716,7 +776,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     c.empty = box;
   };
 
-  // ---- topology arrows -----------------------------------------------------------------------------------
+  // ---- mesh arrows -----------------------------------------------------------------------------------
   const nodeRect = (c: ClusterRec, id: string): Rect | undefined => {
     const n = c.view.nodes.find((v) => v.id === id);
     return n ? { x: n.x, y: n.y, w: metrics.nodeW, h: metrics.nodeH } : undefined;
@@ -758,8 +818,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     }
   };
   let lastTopoZ = 0;
-  const redrawTopology = (): void => {
-    const c = clusters.get("topology");
+  const redrawMesh = (): void => {
+    const c = clusters.get("mesh");
     if (!c || Math.abs(cam.z - lastTopoZ) / cam.z < 0.04) return;
     lastTopoZ = cam.z;
     for (const e of c.topo) drawTopoArrow(c, e);
@@ -1159,7 +1219,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     mountConfirmTip(tipAnchor, {
       label: `Allow ${from} to reach ${to}`,
       message: `Let ${from} reach ${to}?`,
-      detail: "All ports, direct when possible.",
+      detail: "It can then open connections to it.",
       confirmLabel: "Allow access",
       cancelLabel: "Cancel",
       onConfirm: () => {
@@ -1172,10 +1232,10 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
         const keep = srcRec;
         hideReach(true);
         showReach(keep, true);
-        const topo = clusters.get("topology");
+        const topo = clusters.get("mesh");
         if (topo) { addTopoArrow(topo, g, true); geometry(topo); }
         for (const cl of clusters.values()) geometry(cl);
-        toast.show({ message: `${from} can now reach ${to}`, ...(topo ? { action: { label: "Show in Topology", onSelect: () => flyView("topology") } } : {}) });
+        toast.show({ message: `${from} can now reach ${to}`, ...(topo ? { action: { label: "Show in Mesh", onSelect: () => flyView("mesh") } } : {}) });
       },
       onCancel: () => { cleanup(); retract(d); },
     });
@@ -1283,6 +1343,38 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     delete colEl.dataset.split;
   };
 
+  /**
+   * "Continue from <device>?": shown once when the app opens on a different device than the last one. It
+   * fades on its own; the check jumps to where that device was, the cross dismisses it.
+   */
+  let chip: HTMLElement | undefined;
+  const showContinueChip = (): void => {
+    chip?.remove();
+    const from = devices.find((d) => !d.current && d.online) ?? devices.find((d) => !d.current);
+    if (!from) return;
+    const el0 = el("div", "cl-continue ui-pill");
+    el0.setAttribute("role", "group");
+    el0.setAttribute("aria-label", `Continue from ${from.name}?`);
+    el0.innerHTML = `<span class="cl-continue-text"></span><button type="button" class="ui-window-action" aria-label="Continue" data-tip="Continue in ${from.view}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4 4 9-9"/></svg></button><button type="button" class="ui-window-action" aria-label="Dismiss" data-tip="Dismiss"><svg viewBox="0 0 24 24" aria-hidden="true">${ICON.close}</svg></button>`;
+    (el0.querySelector(".cl-continue-text") as HTMLElement).textContent = `Continue from ${from.name}?`;
+    const [yes, no] = el0.querySelectorAll<HTMLButtonElement>("button");
+    const gone = (): void => { el0.dataset.open = "false"; window.setTimeout(() => el0.remove(), 220); if (chip === el0) chip = undefined; };
+    yes!.addEventListener("click", () => { const id = from.view.toLowerCase() as ViewId; if (clusters.has(id)) flyView(id); gone(); });
+    no!.addEventListener("click", gone);
+    stage.append(el0);
+    chip = el0;
+    el0.dataset.open = "false";
+    requestAnimationFrame(() => { el0.dataset.open = "true"; });
+    window.setTimeout(() => { if (chip === el0) gone(); }, 9000);
+  };
+  /** Flies to a Settings window (canvas-locked, snapped to its column). */
+  const openSettings = (section: string): void => {
+    const c = clusters.get("settings");
+    const rec = c?.wins.get(`s-${section}`) ?? [...(c?.wins.values() ?? [])][0];
+    if (!rec) return;
+    setActive(rec);
+    focusWindow(rec);
+  };
   const consoleView = (): ClusterRec | undefined => clusters.get("console");
 
   const pulse = (rec: WinRec): void => {
@@ -1491,6 +1583,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const list = el("ul", "cl-viewlist-rows");
     [...clusters.values()].forEach((c, i) => {
       const li = el("li");
+      if (c.view.id === "settings") li.classList.add("cl-divided");
       const b = el("button", "cl-viewrow");
       b.type = "button";
       b.dataset.view = c.view.id;
@@ -1578,10 +1671,10 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
       id: `view:${c.view.id}`,
       label: c.view.name,
       meta: graph ? `${c.view.nodes.length} nodes` : `${c.wins.size}`,
-      open: true,
+      open: c.view.id !== "settings",
       leaves: graph
         ? c.view.nodes.map((n) => ({ id: `n-${n.id}`, label: n.label, glyph: n.kind === "tag" ? "#" : "◦" }))
-        : [...c.wins.values()].map((w) => ({ id: w.model.id, label: w.model.kind === "terminal" ? `${w.model.host}${w.model.session ? ` · ${w.model.session}` : ""}` : (w.model.session ?? w.model.kind), glyph: w.model.kind === "terminal" ? "›_" : "▤" })),
+        : [...c.wins.values()].map((w) => ({ id: w.model.id, label: w.model.kind === "terminal" ? `${w.model.host}${w.model.session ? ` · ${w.model.session}` : ""}` : w.model.kind === "settings" ? w.model.host : (w.model.session ?? w.model.kind), glyph: w.model.kind === "terminal" ? "›_" : "▤" })),
     };
   });
   let treeQueued = false;
@@ -1594,7 +1687,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
         const target = [...clusters.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === id);
         if (!target) return;
         setActive(target);
-        if (target.model.kind === "node") flyView("topology"); else focusWindow(target);
+        if (target.model.kind === "node") flyView("mesh"); else focusWindow(target);
         if (coarse.matches) stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click();
       });
     });
@@ -1607,6 +1700,9 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   }, { signal });
   canvasLockBtn.addEventListener("click", () => setCanvasLock(!canvasLock), { signal });
   viewsBtn.addEventListener("click", () => toggleViewList(), { signal });
+  // Settings sits after a divider, like a person's own corner of the app.
+  const markDivider = (): void => { stage.querySelector('#tree .bm-sec[data-id="view:settings"]')?.classList.add("cl-divided"); };
+  if (tree) new MutationObserver(markDivider).observe(tree, { childList: true });
   const sideTitle = stage.querySelector<HTMLElement>(".sidebar-title");
   if (sideTitle) sideTitle.textContent = "Views";
 
@@ -1617,10 +1713,13 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     [...clusters.values()].forEach((c, i) => {
       out.push({ group: "Views", glyph: "▦", icon: VIEW_ICON[c.view.id], label: `Go to ${c.view.name}`, hint: `view · ${shortcutLabel(viewKeys(i))}`, action: `proto:view:${c.view.id}` });
     });
+    out.push({ group: "Settings", glyph: "⚙", icon: VIEW_ICON.settings, label: "Settings", hint: "view · appearance · toolbar · shortcuts · devices", action: "proto:settings:appearance" });
+    for (const sec of SETTINGS_SECTIONS.filter((x) => !x.admin || role === "operator")) out.push({ group: "Settings", glyph: "⚙", icon: SECTION_ICON[sec.id] ?? VIEW_ICON.settings, label: `Settings → ${sec.title}`, hint: "settings", action: `proto:settings:${sec.id}` });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.snap, label: "Canvas lock on", hint: `${canvasLock ? "on now · " : ""}${bindingText("canvas-lock")}`, action: "proto:canvaslock:on" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free canvas · all views · Esc", action: "proto:canvaslock:off" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.lock, label: inputLock ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "proto:inputlock" });
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} ${sc.name}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
+    out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
     for (const r of ["viewer", "operator", "new"] as const) out.push({ group: "Mockup", glyph: "◇", label: `Mockup: sign in as ${r === "new" ? "a new user" : `a ${r}`}`, hint: "grants", action: `proto:role:${r}` });
     // Any session by name. Keywords ride in the hint so "ssh", "terminal", "console", "vnc" and "rdp" find them.
     for (const host of allowedHosts()) {
@@ -1636,10 +1735,12 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const source = (event as CustomEvent<{ source?: string }>).detail?.source;
     if (kind === "view" && value) { if (source === "keyboard") keyFlight(() => flyView(value as ViewId)); else flyView(value as ViewId); }
     else if (kind === "overview") setCanvasLock(false);
+    else if (kind === "settings") openSettings(value ?? "appearance");
+    else if (kind === "devicechip") showContinueChip();
     else if (kind === "canvaslock") setCanvasLock(value === "on");
     else if (kind === "inputlock") toggleInputLock();
     else if (kind === "scene" && value) goScene(Number(value) - 1);
-    else if (kind === "role" && value) { role = value as Role; forcedRole = true; goScene(4); }
+    else if (kind === "role" && value) { role = value as Role; forcedRole = true; goScene(4); window.setTimeout(showContinueChip, 900); }
     else if (kind === "open" && value) openSession(value);
     else if (kind === "ctr" && value) {
       openSession("build-01", value);
@@ -1967,7 +2068,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     hideReach(true);
     hideSummary();
     drag?.arrow.dispose(); drag = undefined;
-    for (const c of clusters.values()) { for (const w of c.wins.values()) { w.stopResize?.(); w.card.dispose(); } c.el.remove(); }
+    for (const c of clusters.values()) { for (const w of c.wins.values()) { w.stopResize?.(); w.cleanup?.(); w.card.dispose(); } c.el.remove(); }
     clusters.clear();
     activeWin = undefined;
   };
@@ -2047,6 +2148,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     flyView: (id: ViewId) => flyView(id),
     overview: () => setCanvasLock(false),
     openSession,
+    openSettings,
+    showContinueChip,
     float: () => (float ? { cols: float.cells.cols, rows: float.cells.rows, width: float.morph.panel.offsetWidth, height: float.morph.panel.offsetHeight } : undefined),
     setRole: (r: Role) => { role = r; forcedRole = true; goScene(4); },
     canvasLock: () => ({ on: canvasLock, index: snapIdx, stops: (() => { const c = clusters.get(currentView); return c ? stopsFor(c).lefts.length : 0; })(), view: currentView }),

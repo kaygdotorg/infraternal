@@ -3,7 +3,7 @@
  * to B; solid = direct, dashed = via a named relay).
  *
  * `Arrow` draws one curve and its head into an SVG group in world coordinates. It knows only
- * rectangles and points, so the same code serves the Topology graph, the on-demand arrows in
+ * rectangles and points, so the same code serves the Mesh graph, the on-demand arrows in
  * the Console view, and the live arrow that follows a pointer.
  *
  * `DragArrow` is the live arrow. Its far end is `lerp(pointer, anchor, s)` where `s` is a

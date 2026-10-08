@@ -51,7 +51,7 @@ test("the six scenes load from the palette and the mockup tag, without a page er
 
 test("overview: three views, thumbnails, a hover summary, and the views listed in the sidebar and the palette", async ({ page }) => {
   await open(page, 1);
-  expect((await probe(page, (p) => p.views())).map((v) => v.id)).toEqual(["console", "containers", "topology"]);
+  expect((await probe(page, (p) => p.views())).map((v) => v.id)).toEqual(["console", "containers", "mesh", "settings"]);
   const camera = await probe(page, (p) => p.camera());
   expect(camera.z).toBeLessThan(0.6);
   expect(camera.lod).toBe("thumb");
@@ -59,15 +59,15 @@ test("overview: three views, thumbnails, a hover summary, and the views listed i
   await expect(page.locator(".cl-summary[data-open='true']")).toContainText("build-01");
   await page.mouse.move(700, 880);
   await page.locator("#sidebar-toggle").click();
-  await expect(page.locator("#tree .bm-sec")).toHaveCount(3);
+  await expect(page.locator("#tree .bm-sec")).toHaveCount(4);
   await page.locator("#sidebar-toggle").click();
   expect((await probe(page, (p) => p.canvasLock())).on).toBe(false);
   await page.keyboard.press("Control+k");
   await page.keyboard.type("go to");
-  await expect(page.locator(".palette-result, [role='option']").filter({ hasText: "Go to Topology" }).first()).toBeVisible();
+  await expect(page.locator(".palette-result, [role='option']").filter({ hasText: "Go to Mesh" }).first()).toBeVisible();
   await page.keyboard.press("Control+a");
   await page.keyboard.type("canvas lock");
-  await expect(page.getByText("Canvas lock on")).toBeVisible();
+  await expect(page.getByText("Canvas lock on").first()).toBeVisible();
   await page.keyboard.press("Escape");
 });
 
@@ -83,7 +83,7 @@ test("fly in: a view click springs the camera in and the windows go live above 6
   await expect.poll(async () => { const c = await probe(page, (p) => p.camera()); const v = (await probe(page, (p) => p.views())).find((x) => x.id === "containers")!; return Math.abs(c.cy - (v.y + v.h / 2)) < 300; }, { timeout: 4000 }).toBe(true);
 });
 
-test("arrows on demand: none by default, hover shows reach, a drag asks and then adds the grant to Topology", async ({ page }) => {
+test("arrows on demand: none by default, hover shows reach, a drag asks and then adds the grant to Mesh", async ({ page }) => {
   await open(page, 3);
   expect(await probe(page, (p) => p.reachCount())).toBe(0);
   const pill = page.locator('.ui-window[data-window-id="w-build-01"] .ui-window-pill');
@@ -100,7 +100,7 @@ test("arrows on demand: none by default, hover shows reach, a drag asks and then
   await expect(page.locator(".ui-confirm-tip")).toContainText("Let build-01 reach studio-mac?");
   await page.locator(".ui-confirm-yes").click();
   await expect.poll(async () => (await probe(page, (p) => p.grants())).length).toBe(before + 1);
-  await expect(page.locator('.cl[data-view="topology"] .cl-arrow')).toHaveCount(before + 1);
+  await expect(page.locator('.cl[data-view="mesh"] .cl-arrow')).toHaveCount(before + 1);
 });
 
 test("a window kind decides its controls, and a terminal splits", async ({ page }) => {
@@ -132,6 +132,7 @@ test("container shell: the camera stays, the pill morphs into a floating termina
   await page.mouse.move(box0.x + box0.width - 2, box0.y + 120);
   await page.mouse.down();
   await page.mouse.move(box0.x + box0.width + 40, box0.y + 120, { steps: 6 });
+  await page.waitForTimeout(150);
   const mid = (await page.locator(".cl-float").boundingBox())!;
   expect(mid.width).toBeGreaterThan(box0.width + 60);
   expect(mid.width / mid.height).toBeCloseTo(aspect0, 1);
@@ -161,20 +162,20 @@ test("the palette opens a shell by name from anywhere: in Console the camera fli
 test("the capsule lists the views with their shortcuts", async ({ page }) => {
   await open(page, 3);
   await page.locator("#capsule").click();
-  await expect(page.locator(".cl-viewlist")).toContainText("Topology");
+  await expect(page.locator(".cl-viewlist")).toContainText("Mesh");
   await expect(page.locator(".cl-viewlist")).toContainText("Ctrl");
-  await page.locator('.cl-viewrow[data-view="topology"]').click();
+  await page.locator('.cl-viewrow[data-view="mesh"]').click();
   await expect.poll(async () => (await probe(page, (p) => p.camera())).cx, { timeout: 4000 }).toBeGreaterThan(1500);
 });
 
 test("access by grants: a viewer sees only Console with two hosts; an operator sees all three views", async ({ page }) => {
   await open(page, 5);
-  expect((await probe(page, (p) => p.views())).map((v) => v.id)).toEqual(["console"]);
-  expect((await probe(page, (p) => p.views()))[0]!.windows).toHaveLength(2);
+  expect((await probe(page, (p) => p.views())).map((v) => v.id)).toEqual(["console", "settings"]);
+  expect((await probe(page, (p) => p.views())).find((v) => v.id === "console")!.windows).toHaveLength(2);
   await page.keyboard.press("Control+k");
   await page.keyboard.type("sign in as");
   await page.getByText("Mockup: sign in as a operator").click();
-  await expect.poll(async () => (await probe(page, (p) => p.views())).length).toBe(3);
+  await expect.poll(async () => (await probe(page, (p) => p.views())).length).toBe(4);
   await page.evaluate(() => (window as unknown as { __tracerClusters: { setRole(r: string): void } }).__tracerClusters.setRole("new"));
   await expect(page.locator(".cl-empty")).toContainText("No hosts yet");
 });
@@ -434,6 +435,7 @@ test("shortcuts: Settings lists the registry, a row rebinds with a conflict warn
   await page.keyboard.type("settings: shortcuts");
   await page.keyboard.press("Enter");
   await expect(page.locator(".ui-ss-row")).not.toHaveCount(0);
+  await page.waitForTimeout(1600);
   await expect(page.locator('.ui-ss-row[data-id="canvas-lock"]')).toContainText("G");
   // A key the terminal needs is refused.
   await page.locator('.ui-ss-row[data-id="canvas-lock"] .ui-ss-main').click();
@@ -589,4 +591,51 @@ test("closing the last window of a column removes the column, its neighbours clo
   // A column with one window has it fill the column.
   const fills = await page.locator('.cl[data-view="console"] .cl-col').evaluateAll((cols) => cols.map((c) => { const wins = [...c.querySelectorAll<HTMLElement>(":scope > .ui-window")]; if (wins.length > 1) return 0; /* a stacked pair scrolls by design */ const used = wins.reduce((s, w) => s + w.getBoundingClientRect().height, 0) + (wins.length - 1) * 12; return Math.abs(used - ((c as HTMLElement).clientHeight - 28)); }));
   for (const f of fills) expect(f).toBeLessThan(2);
+});
+
+test("settings is a view: a gear after a divider, one window per section, admin windows only for operators, nothing modal", async ({ page }) => {
+  await open(page, 1);
+  const sections = async (): Promise<string[]> => (await probe(page, (p) => p.views())).find((v) => v.id === "settings")!.windows;
+  expect(await sections()).toEqual(["s-appearance", "s-toolbar", "s-shortcuts", "s-devices", "s-account", "s-about", "s-users", "s-grants", "s-discovery"]);
+  // The sidebar lists it last, after a divider; the gear in the sidebar footer flies there.
+  await page.locator("#sidebar-toggle").click();
+  await expect(page.locator('#tree .bm-sec[data-id="view:settings"].cl-divided')).toHaveCount(1);
+  await page.locator(".ui-sidebar-foot .ui-sidebar-settings").click();
+  await expect.poll(async () => (await probe(page, (p) => p.canvasLock())).view, { timeout: 4000 }).toBe("settings");
+  expect((await probe(page, (p) => p.canvasLock())).on).toBe(true);
+  await expect(page.locator(".ui-settings")).toHaveCount(0); // the overlay shell is gone
+  // The palette goes straight to a section's window.
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("settings → devices");
+  await page.keyboard.press("Enter");
+  await expect(page.locator('.ui-window[data-window-id="s-devices"][data-active]')).toHaveCount(1, { timeout: 4000 });
+  // Appearance applies live: choosing a theme repaints at once.
+  await page.evaluate(() => (window as unknown as { __tracerClusters: { openSettings(s: string): void } }).__tracerClusters.openSettings("appearance"));
+  await page.locator('.ui-window[data-window-id="s-appearance"] .ui-sp-row[data-id="ink"]').click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "ink");
+  // Viewers get no admin windows.
+  await page.evaluate(() => (window as unknown as { __tracerClusters: { setRole(r: string): void } }).__tracerClusters.setRole("viewer"));
+  await expect.poll(sections, { timeout: 4000 }).toEqual(["s-appearance", "s-toolbar", "s-shortcuts", "s-devices", "s-account", "s-about"]);
+});
+
+test("devices: the name edits in place, a sign-out asks first, and a device switch offers to continue once", async ({ page }) => {
+  await open(page, 1);
+  await page.evaluate(() => (window as unknown as { __tracerClusters: { openSettings(s: string): void } }).__tracerClusters.openSettings("devices"));
+  await page.waitForTimeout(1600);
+  const row = page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device').nth(1);
+  const name = row.locator(".ui-sp-name");
+  await name.fill("Studio MacBook");
+  await name.press("Enter");
+  await expect(page.locator(".ui-toast", { hasText: "Renamed" })).toContainText("Renamed to Studio MacBook");
+  await expect(row.locator(".ui-sp-kind svg")).toHaveCount(1);
+  const before = await page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device').count();
+  await row.locator('[aria-label="Sign out this device"]').click();
+  await expect(page.locator(".ui-confirm-tip")).toContainText("Sign out");
+  await page.locator(".ui-confirm-yes").click();
+  await expect(page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device')).toHaveCount(before - 1);
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("simulate device switch");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".cl-continue[data-open='true']")).toContainText("Continue from");
+  await expect(page.locator(".cl-continue")).toHaveCount(0, { timeout: 12_000 }); // it fades on its own
 });

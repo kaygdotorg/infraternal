@@ -1,27 +1,26 @@
 /**
- * The canvas backdrop (D160): a dot grid in world space that every canvas view sits on. The dots
- * are small holes (a mask) in a layer painted with the theme's mesh colours, over the plain theme
- * base, so the colour shows only through the dots and moving across the canvas feels like moving
- * across something.
+ * The canvas backdrop (D160): a dot grid in world space that every canvas view sits on, with the
+ * colour behind the dots fixed to the screen. Only the dots move with the camera, which gives depth.
  *
- * Cost model, because the camera moves every frame: each level of detail is ONE composited layer
- * (a large element with a repeating dot mask) and the camera only ever writes `transform` and
- * `opacity` on it. There is no background-position animation, no canvas redraw, and nothing runs
+ * How, and why it is cheap. Bottom to top: the theme's plain base, one static fill layer (the mesh
+ * colours, or any image or gradient through `--ui-dot-fill`; it never moves or repaints), and, above
+ * it, "cover" layers: opaque in the base colour with a repeating hole at every dot. The fill shows only
+ * through the holes. Each level of detail is ONE composited layer and the camera only ever writes
+ * `transform` and `opacity` on it: no background-position animation, no canvas redraw, nothing runs
  * while the camera is still (`update` is called by the camera, never by a timer).
  *
- * World space: a layer is placed at a multiple of its own spacing near the visible area, so a dot
- * always sits on a world coordinate that is a multiple of the spacing. Panning moves the dots
- * exactly with the windows; when the view crosses a cell the layer hops by one whole spacing, which
- * is invisible because the pattern repeats.
+ * World space: a cover is placed at a multiple of its own spacing near the visible area, so a hole
+ * always sits on a world coordinate that is a multiple of the spacing. Panning moves the dots exactly
+ * with the windows; when the view crosses a cell the layer hops by one whole spacing, which is
+ * invisible because the pattern repeats.
  *
- * Level of detail: layer k has spacing `gap * 2^k`. Below 50 % zoom the denser grid fades out and
- * the next (every second dot) fades in, crossfading with the zoom, so on screen the spacing stays
- * between half a gap and one gap and never turns into noise.
+ * Level of detail: cover k has spacing `gap * 2^k`. Below 50 % zoom the next, sparser cover fades in
+ * above the denser one: where only the denser grid had a hole the new cover closes it, where both had
+ * one the dot stays, so the grid thins to every second dot with a crossfade and never becomes noise.
  *
  * Tokens (CSS custom properties, per instance or on a parent): `--ui-dot-size` (diameter, default
- * 1.4px), `--ui-dot-gap` (spacing at 100 % zoom, default 22px) and `--ui-dot-opacity` (default
- * 0.2 ink, 0.3 paper through the theme). `--ui-dot-fill` may replace the mesh colours with any
- * image or gradient (later a user's picture).
+ * 1.4px), `--ui-dot-gap` (spacing at 100 % zoom, default 22px), `--ui-dot-opacity` (from the theme)
+ * and `--ui-dot-fill`.
  */
 const LEVELS = 4;
 
@@ -36,6 +35,9 @@ export function createCanvasBackdrop(parent: HTMLElement): CanvasBackdrop {
   const root = document.createElement("div");
   root.className = "ui-canvas-backdrop";
   root.setAttribute("aria-hidden", "true");
+  const fill = document.createElement("div");
+  fill.className = "ui-canvas-backdrop-fill";
+  root.append(fill);
   const layers = Array.from({ length: LEVELS }, (_, k) => {
     const layer = document.createElement("div");
     layer.className = "ui-canvas-backdrop-layer";
@@ -68,7 +70,8 @@ export function createCanvasBackdrop(parent: HTMLElement): CanvasBackdrop {
     const lo = Math.floor(level), hi = Math.min(LEVELS - 1, lo + 1), f = level - lo;
     const wx = -tx / z, wy = -ty / z;
     layers.forEach((layer, k) => {
-      const weight = k === lo ? (lo === hi ? 1 : 1 - f) : k === hi ? f : 0;
+      // The denser cover is always fully opaque (it is what keeps the fill hidden); the sparser one fades in above it.
+      const weight = k === lo ? 1 : k === hi ? f : 0;
       const shown = layer.dataset.on === "1";
       if (weight === 0) { if (shown) { layer.style.opacity = "0"; layer.style.visibility = "hidden"; layer.dataset.on = "0"; } return; }
       if (!shown) { layer.style.visibility = ""; layer.dataset.on = "1"; }
