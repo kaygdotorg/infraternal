@@ -27,6 +27,8 @@ export interface WindowModel {
   h?: number;
   /** Preview text for windows that are not bound to a live session (mockups, thumbnails). */
   lines?: string[];
+  /** Set on a window made by a split: it shares its column with the window it came from and is not resized on its own. */
+  splitOf?: string;
   /** The window's host is not covered by the viewer's grants (a shared layout connects through your own access). */
   noAccess?: boolean;
 }
@@ -56,3 +58,6 @@ export interface ViewModel {
   /** Mine, and published to the team: changes to its arrangement go to the people who follow it. */
   published?: { shareId: string; key: string };
 }
+
+/** One row of the Containers list. */
+export interface ContainerRow { name: string; image: string; state: "running" | "restarting" | "exited"; cpu: string }

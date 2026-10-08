@@ -6,7 +6,9 @@
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { CELL, boxOf, type Metrics } from "../layout/geometry";
 import { buildSettingsView } from "../views/settings";
-import type { ColumnModel, Grant, ViewModel, WindowModel } from "../model/types";
+import { meshView } from "../mesh/view";
+import type { MeshSource } from "../mesh/source";
+import type { ColumnModel, ContainerRow, Grant, ViewModel, WindowModel } from "../model/types";
 
 /** Who is signed in: grants decide the views. "asha" is a second person with a viewer's grants (two hosts). */
 export type Role = "viewer" | "operator" | "new" | "asha";
@@ -32,7 +34,6 @@ export const INITIAL_GRANTS: Grant[] = [
 ];
 
 
-export interface ContainerRow { name: string; image: string; state: "running" | "restarting" | "exited"; cpu: string }
 export const CONTAINERS: ContainerRow[] = [
   { name: "web-api", image: "nginx:1.27", state: "running", cpu: "0.4%" },
   { name: "postgres", image: "postgres:16", state: "running", cpu: "1.2%" },
@@ -67,7 +68,7 @@ export const shellLines = (user: string, host: string, extra: string): string[] 
 
 
 /** Builds the views a person with this role sees. Hosts come from the test double. */
-export function buildViews(roleIn: Role, m: Metrics, screens: Map<string, { os: HostPlatform; user: string; screen: string[] }>, omit: string[] = [], withIncident = false): ViewModel[] {
+export function buildViews(roleIn: Role, m: Metrics, meshSource: MeshSource, screens: Map<string, { os: HostPlatform; user: string; screen: string[] }>, omit: string[] = [], withIncident = false): ViewModel[] {
   const role: Exclude<Role, "asha"> = roleIn === "asha" ? "viewer" : roleIn;
   const hostWin = (name: string, h?: number): WindowModel => {
     const s = screens.get(name);
@@ -100,20 +101,7 @@ export function buildViews(roleIn: Role, m: Metrics, screens: Map<string, { os: 
     ],
     nodes: [],
   };
-  const nw = m.nodeW, nh = m.nodeH;
-  const gx = [30, 340, 650], gy = [40, 250];
-  const mesh: ViewModel = {
-    id: "mesh", name: "Mesh", layout: "graph", cols: [], x: 0, y: 0,
-    graph: { w: gx[2]! + nw + 30, h: gy[1]! + nh + 30 },
-    nodes: [
-      { id: "tag:ops", kind: "tag", label: "tag:ops", x: gx[0]!, y: gy[0]!, detail: "1 member", sub: "studio-mac" },
-      { id: "build-01", kind: "host", label: "build-01", x: gx[1]!, y: gy[0]!, detail: "10.69.69.71", sub: "direct · 42 ms", os: "ubuntu" },
-      { id: "edge-arm", kind: "host", label: "edge-arm", x: gx[2]!, y: gy[0]!, detail: "10.69.69.72", sub: "via fra-relay · 188 ms", os: "debian" },
-      { id: "tag:ci", kind: "tag", label: "tag:ci", x: gx[0]!, y: gy[1]!, detail: "1 member", sub: "build-01" },
-      { id: "nix-cache", kind: "host", label: "nix-cache", x: gx[1]!, y: gy[1]!, detail: "10.69.69.73", sub: "direct · 31 ms", os: "nixos" },
-      { id: "studio-mac", kind: "host", label: "studio-mac", x: gx[2]!, y: gy[1]!, detail: "100.86.4.21", sub: "direct · 58 ms", os: "apple" },
-    ],
-  };
+  const mesh = meshView(meshSource, m);
   // Desktop: Console top left, Containers under it, Mesh to the right. Phone: one stack.
   // Console first; the others are placed by their real sizes (a view is as tall as the viewport).
   const box = (v: ViewModel) => boxOf(v, m);
@@ -145,17 +133,4 @@ export function incidentView(m: Metrics, screens: Map<string, { os: HostPlatform
       { id: "i2", w: m.colW, wins: [term("edge-arm", "i-edge-arm"), { id: "i-logs", kind: "logs", host: "build-01", session: "logs · web-api", lines: LOG_LINES, h: 0.4 }] },
     ],
   };
-}
-
-/** A copy of a view as the recipient gets it: their own, with hosts outside their grants shown as "no access". */
-export function copyForRecipient(snapshot: ViewModel, from: string, allowedHosts: readonly string[], idSuffix: string): ViewModel {
-  const copy: ViewModel = JSON.parse(JSON.stringify(snapshot)) as ViewModel;
-  copy.id = `${snapshot.id}-from-${from}-${idSuffix}`;
-  copy.name = `${snapshot.name} (from ${from})`;
-  copy.from = from;
-  for (const col of copy.cols) for (const w of col.wins) {
-    w.id = `${copy.id}:${w.id}`;
-    if (w.kind === "terminal" && !allowedHosts.includes(w.host)) { w.noAccess = true; w.lines = []; }
-  }
-  return copy;
 }

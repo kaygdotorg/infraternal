@@ -241,7 +241,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       action: isLocked ? "proto:unlock" : "proto:lock",
     }];
   });
-  window.addEventListener("tracer:proto-action", (event) => {
+  window.addEventListener("tracer:canvas-action", (event) => {
     const detail = (event as CustomEvent<{ action?: string; source?: string }>).detail;
     if (detail?.action === "proto:lock" && active && !active.flow) setLock(active, true, detail.source === "keyboard");
     else if (detail?.action === "proto:unlock" && locked) setLock(locked, false, detail.source === "keyboard");

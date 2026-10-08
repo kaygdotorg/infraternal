@@ -321,7 +321,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
-      addHostPrototype: canvasMode || clustersMode,
+      canvas: canvasMode || clustersMode,
+      addHostEntry: canvasMode || clustersMode,
       ...(clustersMode ? { settingsView: true } : {}),
       ...(identity?.display_name ? { displayName: identity.display_name } : {}),
       ...(identity?.username ? { username: identity.username } : {}),
@@ -338,12 +339,12 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   }
   coreScreen = screen;
   if (clustersMode) {
-    const { mountClusters } = await import("./canvas/controller");
+    const { mountMockup } = await import("./canvas/mock");
     const scene = Number(query.get("scene"));
     const roleParam = query.get("role");
-    let clusters: Awaited<ReturnType<typeof mountClusters>>;
+    let clusters: Awaited<ReturnType<typeof mountMockup>>;
     try {
-      clusters = await mountClusters(screen, {
+      clusters = await mountMockup(screen, {
       ...(scene ? { scene } : {}),
       ...(roleParam === "viewer" || roleParam === "operator" || roleParam === "new" || roleParam === "asha" ? { role: roleParam } : {}),
     });

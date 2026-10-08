@@ -866,7 +866,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     const detail = (event as CustomEvent<{ action?: unknown; source?: unknown }>).detail;
     if (detail?.action === "proto:addhost") openWizard(detail.source !== "keyboard");
   };
-  window.addEventListener("tracer:proto-action", onProtoAction);
+  window.addEventListener("tracer:canvas-action", onProtoAction);
 
   if (openAtStart) wizard = new Wizard(startEmpty, true);
 
@@ -875,7 +875,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       wizard?.dispose();
       reviewRun?.close();
       confirmTip?.close(false);
-      window.removeEventListener("tracer:proto-action", onProtoAction);
+      window.removeEventListener("tracer:canvas-action", onProtoAction);
       sidebarButton.removeEventListener("click", openFromSidebar);
       sidebarButton.remove();
       if (plus) {

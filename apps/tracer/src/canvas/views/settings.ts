@@ -18,8 +18,8 @@ export const SETTINGS_SECTIONS: Array<{ id: string; title: string; admin?: boole
 ];
 
 /** Settings is a view like the others: one window per section, tiled in columns. */
-export function buildSettingsView(admin: boolean, m: Metrics): ViewModel {
-  const sections = SETTINGS_SECTIONS.filter((s) => !s.admin || admin);
+export function buildSettingsView(admin: boolean, m: Metrics, available: readonly string[] = SETTINGS_SECTIONS.map((s) => s.id)): ViewModel {
+  const sections = SETTINGS_SECTIONS.filter((s) => (!s.admin || admin) && available.includes(s.id));
   return {
     id: "settings", name: "Settings", layout: "tiled", nodes: [], x: 0, y: 0,
     cols: sections.map((s) => ({ id: `s-${s.id}`, w: m.colW, wins: [{ id: `s-${s.id}`, kind: "settings" as const, host: s.title }] })),

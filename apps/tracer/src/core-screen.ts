@@ -29,7 +29,10 @@ export interface CoreScreenOptions {
   hostName: string;
   mockMode: boolean;
   probeMode: boolean;
-  addHostPrototype?: boolean;
+  /** The canvas chrome: sidebar footer, the shortcuts list, Settings as a view and the actions the canvas handles. */
+  canvas?: boolean;
+  /** Offers "Add hosts" in the palette (the add-host flow exists). */
+  addHostEntry?: boolean;
   /** Settings is a view on the canvas, not an overlay: every way of opening it dispatches `proto:settings:<section>`. */
   settingsView?: boolean;
   /** The signed-in user's display name, shown in the sidebar footer (canvas preview only). */
@@ -67,7 +70,12 @@ export interface CoreScreen {
   theme(): ITheme;
   /** The font the person has chosen (a preview in progress does not count). */
   font(): MonoFont;
+  /** Registers a terminal and makes it the one that takes the keys (the single-terminal screen). */
   bindTerminal(client: TerminalClient): void;
+  /** Registers a terminal on the screen: it follows the theme and font. Returns the remover. */
+  registerTerminal(client: TerminalClient): () => void;
+  /** The terminal the key tray and the paste button talk to; none while no terminal window is active. */
+  setActiveTerminal(client: TerminalClient | undefined): void;
   /** Replaces the host/session tree (the canvas lists its windows here); returns the new tree. */
   /** The one shared toast of the screen: every transient message (recovery, connection, flows) uses it. */
   readonly toast: ToastController;
@@ -217,7 +225,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const stage = get<HTMLElement>("#terminal-screen");
   // The canvas preview never draws the status line, from the first frame (the canvas chunk loads a
   // moment after the screen mounts, and the line's "Starting terminal…" must not flash meanwhile).
-  if (options.addHostPrototype) stage.dataset.preview = "";
+  if (options.canvas) stage.dataset.preview = "";
   const terminalHost = get<HTMLElement>("#terminal-host");
   const status = get<HTMLElement>("#connection-status");
   const probePanel = get<HTMLElement>("#probe-panel");
@@ -241,15 +249,15 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const canvasItems = new Map<string, ToolbarItem>();
   const settingsSections: SettingsSection[] = [aboutSection({ name: "infraternal", version: build.short, commit: build.full, built: build.built })];
   const shortcutsPanel = shortcutsSection();
-  if (options.addHostPrototype && !options.settingsView) settingsSections.unshift(shortcutsPanel);
+  if (options.canvas && !options.settingsView) settingsSections.unshift(shortcutsPanel);
   const aboutPanel = settingsSections[0]!;
-  const settings = options.addHostPrototype && !options.settingsView ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
-  const sidebarFoot = options.addHostPrototype
+  const settings = options.canvas && !options.settingsView ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
+  const sidebarFoot = options.canvas
     ? createSidebarFoot({
       displayName: options.displayName?.trim() || "Signed in",
       ...(options.username ? { secondary: options.username } : {}),
       ...(options.footerVariant ? { variant: options.footerVariant } : {}),
-      onOpen: (source) => { if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action: "proto:settings:appearance", source } })); else settings?.open("about", source); },
+      onOpen: (source) => { if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:appearance", source } })); else settings?.open("about", source); },
     })
     : undefined;
   if (sidebarFoot) { sidebar.append(sidebarFoot.root); sidebar.dataset.foot = ""; }
@@ -294,6 +302,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let background = params.get("bg") === "mesh" || params.get("bg") === "none"
     ? params.get("bg")!
     : (readLocal("tracer.background") === "mesh" ? "mesh" : "none");
+  /** Every terminal on the screen (they share the look), and the one that takes the keys. */
+  const clients = new Set<TerminalClient>();
   let client: TerminalClient | undefined;
   let modifiers: InputModifiers = { ctrl: "off", alt: "off" };
   const modifierTapAt: Record<keyof InputModifiers, number> = { ctrl: -Infinity, alt: -Infinity };
@@ -341,7 +351,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     // switch. It runs in its own task, right after the tokens above, so the interface answers at once
     // and no single task is long (work stays under the 50 ms long-task line at 4x CPU).
     const terminal = terminalTheme(active, background === "mesh");
-    window.setTimeout(() => client?.setTheme(terminal), 0);
+    window.setTimeout(() => { for (const c of clients) c.setTheme(terminal); }, 0);
     if (background === "mesh") return paintMesh();
     releaseMesh();
     return Promise.resolve();
@@ -373,7 +383,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       shownFont = font;
       applyFontVars(font, ROOT);
       // The terminal re-measures its cells and redraws in its own task, after the interface has the new face.
-      window.setTimeout(() => client?.setFont(font), 0);
+      window.setTimeout(() => { for (const c of clients) c.setFont(font); }, 0);
     }, () => undefined);
   };
 
@@ -388,10 +398,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     })),
     { group: "Background", glyph: "▦", label: "Mesh from the theme", hint: "one still · no idle work", action: "bg:mesh" },
     { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
-    ...(options.addHostPrototype ? [
+    ...(options.addHostEntry ? [
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
-    ...(options.addHostPrototype ? [
+    ...(options.canvas ? [
       { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
       // The hint carries the aliases, so "version", "build" and "commit" find it.
       { group: "Help", glyph: "⌨", label: "Settings: Shortcuts", hint: "keys · rebind · reset", action: "settings:shortcuts" },
@@ -654,7 +664,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       setPalette(palette.hidden, "keyboard");
       return;
     }
-    if (options.addHostPrototype && event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isTypingTarget(event.target) && palette.hidden) {
+    if (options.canvas && event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isTypingTarget(event.target) && palette.hidden) {
       event.preventDefault();
       event.stopPropagation();
       shortcuts.toggle();
@@ -777,7 +787,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     for (const name of MODIFIER_KEYS) client?.setInputModifier(name, modifiers[name]);
   };
   const isTerminalFocus = (element: Element | null): element is HTMLElement =>
-    element instanceof HTMLElement && (element === terminalHost || terminalHost.contains(element));
+    element instanceof HTMLElement && element.closest(".terminal-host") !== null;
   const restoreTerminalFocus = (): void => {
     if (isTerminalFocus(document.activeElement)) {
       terminalFocusTarget = null;
@@ -1259,7 +1269,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return true;
     } else if (kind === "settings") {
       setPalette(false, source);
-      if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action: `proto:settings:${value ?? "appearance"}`, source } }));
+      if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${value ?? "appearance"}`, source } }));
       else settings?.open(value ?? "about", source);
       return true;
     } else if (kind === "shortcuts") {
@@ -1268,9 +1278,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       requestAnimationFrame(() => shortcuts.open());
       return true;
     } else if (kind === "session" || kind === "host") {
-      terminalHost.focus({ preventScroll: true });
-    } else if (kind === "proto" && options.addHostPrototype) {
-      window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action, source } }));
+      if (client) client.focus(); else terminalHost.focus({ preventScroll: true });
+    } else if ((kind === "proto" || kind === "canvas") && options.canvas) {
+      window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action, source } }));
     }
     return false;
   }
@@ -1287,7 +1297,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     }).finally(() => { cancelRecovery.disabled = false; });
   };
   cancelRecovery?.addEventListener("click", cancelClick);
-  return {
+  const api: CoreScreen = {
     stage,
     panes,
     terminalHost,
@@ -1296,10 +1306,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     theme: () => terminalTheme(THEMES[currentThemeId]!, background === "mesh"),
     font: () => committedFont,
     bindTerminal(value) {
+      api.registerTerminal(value);
+      api.setActiveTerminal(value);
+    },
+    registerTerminal(value) {
+      clients.add(value);
+      value.setFont(shownFont);
+      value.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
+      return () => { clients.delete(value); if (client === value) client = undefined; };
+    },
+    setActiveTerminal(value) {
       client = value;
-      client.setFont(shownFont);
-      client.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
-      for (const name of MODIFIER_KEYS) client.setInputModifier(name, modifiers[name]);
+      if (value) for (const name of MODIFIER_KEYS) value.setInputModifier(name, modifiers[name]);
     },
     addPaletteProvider(provider) {
       providers.add(provider);
@@ -1424,4 +1442,5 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       delete ROOT.dataset.kb;
     },
   };
+  return api;
 }
