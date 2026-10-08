@@ -33,6 +33,7 @@ pub struct CredentialSession {
     agent: Option<Child>,
     askpass: Option<JoinHandle<()>>,
     password: bool,
+    prompt_helper: bool,
 }
 
 impl CredentialSession {
@@ -48,6 +49,7 @@ impl CredentialSession {
             agent: None,
             askpass: None,
             password: false,
+            prompt_helper: false,
         };
         if matches!(credentials, Credentials::Automatic(_)) {
             return Err(Failure::install(
@@ -107,9 +109,9 @@ impl CredentialSession {
                 (None, Some(password))
             }
         };
-        if let Some(secret) = prompt_secret {
-            session.prepare_prompt(adapter, &directory, secret)?;
-        }
+        // Missing passphrases must refuse through the private route rather than
+        // allowing ssh-add to open the server operator's controlling terminal.
+        session.prepare_prompt(adapter, &directory, prompt_secret)?;
         if let Some(key) = key {
             session.prepare_key(adapter, &directory, key).await?;
             // The key is now inside the scoped ssh-agent. Its passphrase is no
@@ -125,23 +127,29 @@ impl CredentialSession {
         &mut self,
         adapter: &CredentialConfig,
         directory: &std::path::Path,
-        secret: Secret,
+        secret: Option<Secret>,
     ) -> Result<(), Failure> {
-        if secret.expose().is_empty()
-            || secret.expose().len() > 16 * 1024
-            || secret.expose().contains(&0)
-            || secret.expose().contains(&b'\n')
-        {
+        if secret.as_ref().is_some_and(|secret| {
+            secret.expose().is_empty()
+                || secret.expose().len() > 16 * 1024
+                || secret.expose().contains(&0)
+                || secret.expose().contains(&b'\n')
+        }) {
             return Err(Failure::new(
                 FailureKind::Auth,
                 "The SSH password or passphrase is invalid.",
             ));
         }
         let socket_path = directory.join("askpass.sock");
-        let listener = UnixListener::bind(&socket_path)
-            .map_err(|_| Failure::install("The private SSH prompt socket could not start."))?;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| Failure::install("The SSH prompt socket could not be protected."))?;
+        let prompt = if let Some(secret) = secret {
+            let listener = UnixListener::bind(&socket_path)
+                .map_err(|_| Failure::install("The private SSH prompt socket could not start."))?;
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|_| Failure::install("The SSH prompt socket could not be protected."))?;
+            Some((listener, secret))
+        } else {
+            None
+        };
         let binary = adapter
             .askpass_binary
             .to_str()
@@ -158,7 +166,10 @@ impl CredentialSession {
             shell_quote(binary)
         )
         .map_err(|_| Failure::install("The SSH prompt helper could not be written."))?;
-        self.askpass = Some(tokio::spawn(serve_prompt(listener, secret)));
+        self.prompt_helper = true;
+        if let Some((listener, secret)) = prompt {
+            self.askpass = Some(tokio::spawn(serve_prompt(listener, secret)));
+        }
         Ok(())
     }
     async fn prepare_key(
@@ -220,7 +231,7 @@ impl CredentialSession {
             if self.agent.is_some() {
                 command.env("SSH_AUTH_SOCK", directory.join("agent.sock"));
             }
-            if self.askpass.is_some() {
+            if self.prompt_helper {
                 command
                     .env("SSH_ASKPASS", directory.join("askpass"))
                     .env("SSH_ASKPASS_REQUIRE", "force")

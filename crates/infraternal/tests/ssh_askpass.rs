@@ -112,3 +112,50 @@ async fn real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes() {
     assert!(!directory.exists());
     std::fs::remove_dir(root).unwrap();
 }
+
+#[tokio::test]
+#[ignore = "run under the disposable controlling-terminal harness"]
+async fn encrypted_key_without_passphrase_never_prompts_on_a_controlling_terminal() {
+    use tokio::io::AsyncWriteExt;
+    let root = common::scratch().join(format!("n-{}", std::process::id()));
+    let passphrase = Secret::new(b"synthetic-key-unlock\n".to_vec());
+    let mut generating = Command::new("openssl")
+        .args([
+            "genrsa",
+            "-traditional",
+            "-aes256",
+            "-passout",
+            "stdin",
+            "2048",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = generating.stdin.take().unwrap();
+    input.write_all(passphrase.expose()).await.unwrap();
+    drop(input);
+    let generated = generating.wait_with_output().await.unwrap();
+    assert!(generated.status.success());
+    let result = CredentialSession::prepare(
+        &CredentialConfig {
+            scratch: root.clone(),
+            ssh_agent: "/usr/bin/ssh-agent".into(),
+            ssh_add: "/usr/bin/ssh-add".into(),
+            askpass_binary: env!("CARGO_BIN_EXE_infraternal").into(),
+        },
+        Credentials::PrivateKey {
+            key: Secret::new(generated.stdout),
+            passphrase: None,
+        },
+    )
+    .await;
+    let Err(error) = result else {
+        panic!("encrypted key without passphrase must be refused")
+    };
+    assert_eq!(error.kind, infraternal_plugin_ssh::model::FailureKind::Auth);
+    assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    std::fs::remove_dir(root).unwrap();
+}
