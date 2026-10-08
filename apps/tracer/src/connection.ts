@@ -23,6 +23,11 @@ import {
 } from "../../../packages/protocol/src/codec";
 
 export const CONTROL_STREAM = 0;
+
+/** The server answered an action with a refusal: it does not exist here, or the person may not run it. */
+export class ActionRefused extends Error {
+  constructor(message = "the server refused the action") { super(message); this.name = "ActionRefused"; }
+}
 /**
  * The server keeps a writer row for every stream that ever attached on a connection and allows 32. A closed window
  * frees no row, so a page that opens and closes windows for hours would hit the cap. Before that, the connection
@@ -33,6 +38,16 @@ const VERSION = 1;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RECOVERY_SUBSCRIPTION = 45;
+/** Ids for subscriptions that features open through `subscribe` (the recovery notice keeps its own). */
+const FIRST_FEATURE_SUBSCRIPTION = 64;
+
+/** A feature's live subscription: the server pushes `Event` frames for `filter`; resent on every welcome. */
+interface Subscription {
+  filter: { topic: string };
+  onEvent(event: Record<string, unknown>): void;
+  /** The subscription is (re)established: the owner refetches its snapshot, since events may have been missed. */
+  onOpen?: (() => void) | undefined;
+}
 const encoder = new TextEncoder();
 
 /** What a stream gives the connection. All callbacks run on the socket's event task. */
@@ -73,6 +88,8 @@ export class MuxConnection {
   private readonly calls = new Map<number, { resolve(value: Record<string, unknown>): void; reject(error: Error): void }>();
   private readonly rttListeners = new Set<(ms: number | undefined) => void>();
   private readonly pendingPings = new Map<bigint, number>();
+  private readonly subscriptions = new Map<number, Subscription>();
+  private nextSubscription = FIRST_FEATURE_SUBSCRIPTION;
   private readonly sendScratch = new Uint8Array(SEND_BUFFER_SIZE);
   private nextStream = 1;
   private nextCall = 1;
@@ -140,6 +157,26 @@ export class MuxConnection {
       this.calls.set(callId, { resolve, reject });
       this.send(CONTROL_STREAM, { type: "Call", callId, actionId, inputJson: encoder.encode(JSON.stringify(input)) });
     });
+  }
+
+  /**
+   * Subscribes to a topic of server events (contracts/plugin.md §5). The subscription is sent again after every
+   * welcome (a new socket has none), and `onOpen` runs each time so the owner can resync: events sent while the
+   * socket was down are not replayed. Returns the unsubscribe function.
+   */
+  subscribe(filter: { topic: string }, onEvent: (event: Record<string, unknown>) => void, onOpen?: () => void): () => void {
+    const subId = this.nextSubscription++;
+    this.subscriptions.set(subId, { filter, onEvent, onOpen });
+    if (this.isWelcomed) this.openSubscription(subId);
+    return () => { this.subscriptions.delete(subId); };
+  }
+
+  /** Sends one subscription's filter (first connect and each reconnect) and lets its owner resync. */
+  private openSubscription(subId: number): void {
+    const sub = this.subscriptions.get(subId);
+    if (!sub) return;
+    this.send(CONTROL_STREAM, { type: "Subscribe", subId, filterJson: encoder.encode(JSON.stringify(sub.filter)) });
+    sub.onOpen?.();
   }
 
   /** A stream attached (true) or detached (false): drives the connection indicator. */
@@ -297,6 +334,7 @@ export class MuxConnection {
         };
         this.welcomed = true;
         this.retryAttempt = 0;
+        for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         if (!this.resumeSent) this.writersUsed.clear();
         for (const s of [...this.streams.values()]) s.onWelcome(this.resumeSent);
         return;
@@ -304,13 +342,19 @@ export class MuxConnection {
         const pending = this.calls.get(frame.callId);
         if (!pending) { this.fail("server returned an unexpected action result"); return; }
         this.calls.delete(frame.callId);
-        if (!frame.ok) { pending.reject(new Error("the server refused the action")); return; }
+        if (!frame.ok) { pending.reject(new ActionRefused()); return; }
         try {
           pending.resolve(asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.json)) as unknown));
         } catch { pending.reject(new Error("the server returned an unreadable result")); }
         return;
       }
-      case "Event":
+      case "Event": {
+        const feature = this.subscriptions.get(frame.subId);
+        if (feature) {
+          // A feature's events are its own to validate; a malformed one must not take the connection down.
+          try { feature.onEvent(asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.eventJson)) as unknown)); } catch { /* ignored: the owner resyncs on the next snapshot */ }
+          return;
+        }
         if (frame.subId !== RECOVERY_SUBSCRIPTION) return;
         try {
           const event = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.eventJson)) as unknown);
@@ -320,6 +364,7 @@ export class MuxConnection {
           this.config.onRecoveryPending?.(readyAt as number | undefined);
         } catch { this.fail("server returned invalid recovery state"); }
         return;
+      }
       case "Ping":
         this.send(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
         return;
