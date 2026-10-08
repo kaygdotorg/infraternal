@@ -88,8 +88,8 @@ export function shortcutsSection(): SettingsSection {
         capturing = undefined;
         const why = terminalNeeds(combo);
         const clash = allShortcuts().find((e) => e.shortcut.id !== id && (() => { const c = bindingOf(e.shortcut); return c ? sameCombo(c, combo) : false; })());
-        if (why) pending = { id, combo, message: `${comboLabel(combo)} can not be used. ${why}` };
-        else if (clash) pending = { id, combo, message: `${comboLabel(combo)} is already ${clash.shortcut.label}.`, swapWith: clash.shortcut.id };
+        if (why) pending = { id, combo, message: `${comboLabel(combo)} cannot be used. ${why}` };
+        else if (clash) pending = { id, combo, message: `${comboLabel(combo)} is already used for ${clash.shortcut.label}.`, swapWith: clash.shortcut.id };
         else { setBinding(id, combo); return; }
         paint();
       };

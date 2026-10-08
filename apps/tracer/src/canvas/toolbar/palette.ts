@@ -39,7 +39,7 @@ export function installPalette(cx: Ctx): () => void {
       out.push({ group: "Settings", glyph: "⚙", icon: viewIcon("settings"), label: "Settings", hint: "view · appearance · toolbar · shortcuts", action: "canvas:settings:appearance" });
       for (const sec of SETTINGS_SECTIONS) {
         if (!settings.wins.has(`s-${sec.id}`)) continue;
-        out.push({ group: "Settings", glyph: "⚙", icon: SECTION_ICON[sec.id] ?? viewIcon("settings"), label: `Settings → ${sec.title}`, hint: "settings", action: `canvas:settings:${sec.id}` });
+        out.push({ group: "Settings", glyph: "⚙", icon: SECTION_ICON[sec.id] ?? viewIcon("settings"), label: `Settings: ${sec.title}`, hint: "settings", action: `canvas:settings:${sec.id}` });
       }
     }
     if (cx.sharing) out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.next, label: "Share layout…", hint: "send views to a person or a group", action: "canvas:share" });

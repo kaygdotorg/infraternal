@@ -78,7 +78,7 @@ export function createSharing(cx: Ctx, adapter: SharingAdapter): SharingModule {
       const { id } = await adapter.send({ to: choice.to, publish: choice.publish, views: picked.map((c) => ({ key: c.view.id, name: c.view.name, snapshot: snapshotOf(c) })) });
       if (choice.publish) for (const c of picked) c.view.published = { shareId: id, key: c.view.id };
       toast.show({ message: `Shared ${picked.map((c) => c.view.name).join(", ")} with ${choice.to.map(labelOfRecipient).join(", ")}` });
-    } catch { toast.show({ message: "Could not share", tone: "error" }); }
+    } catch { toast.show({ message: "Could not share the layout. Try again.", tone: "error" }); }
   };
   const publishTimers = new Map<string, number>();
   const schedulePublish = (c: ViewRec): void => {
@@ -143,7 +143,7 @@ export function createSharing(cx: Ctx, adapter: SharingAdapter): SharingModule {
     }
     if (arrived.length) {
       const first = arrived[0]!;
-      toast.show({ message: `${first.from} shared ${arrived.map((a) => a.name).join(", ")}`, action: { label: "Open", onSelect: () => cx.nav.flyView(first.id) } });
+      toast.show({ message: `${first.from} shared ${arrived.map((a) => a.name).join(", ")} with you`, action: { label: "Open", onSelect: () => cx.nav.flyView(first.id) } });
       cx.nav.flyView(first.id);
     }
   };
