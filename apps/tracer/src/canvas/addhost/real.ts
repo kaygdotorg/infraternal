@@ -69,6 +69,15 @@ async function call(path: string, init?: { method: string; body: unknown }): Pro
   }
 }
 
+/**
+ * The body as JSON, or undefined when it is not JSON. A server that serves the web app for every unknown path
+ * answers 200 with HTML for an endpoint it does not have; that is "not available", not a broken answer.
+ */
+async function jsonOf(response: Response): Promise<unknown> {
+  if (!(response.headers.get("content-type") ?? "").includes("json")) return undefined;
+  try { return await response.json(); } catch { return undefined; }
+}
+
 /** Maps a refusal to words the person can act on. `what` completes "…can't <what>". */
 function refusal(response: Response, what: string): ServiceError {
   if (response.status === 404 || response.status === 405 || response.status === 501) return new ServiceError(`This server can't ${what} yet.`, "unavailable");
@@ -84,7 +93,7 @@ export function createRealProvisioning(): ProvisioningService {
       // No discovery on this server: the person types or pastes hosts instead. Not an error.
       if (response.status === 404 || response.status === 405 || response.status === 501 || response.status === 503) return [];
       if (!response.ok) throw refusal(response, "list hosts");
-      const body: unknown = await response.json();
+      const body = await jsonOf(response);
       const rows = isRecord(body) && Array.isArray(body.hosts) ? body.hosts : [];
       return rows.map(parseDiscovered).filter((host): host is DiscoveredHost => !!host);
     },
@@ -92,7 +101,7 @@ export function createRealProvisioning(): ProvisioningService {
     async serverKey() {
       const response = await call("/v1/bootstrap/ssh-key");
       if (!response.ok) return undefined;
-      return parseServerKey(await response.json());
+      return parseServerKey(await jsonOf(response));
     },
 
     // The browser keeps no passkey-wrapped SSH key yet; the choose-a-method page then offers paste and password only.
@@ -106,7 +115,8 @@ export function createRealProvisioning(): ProvisioningService {
         : { kind: secret.kind, secret: secret.text };
       const response = await call("/v1/bootstrap/credential", { method: "POST", body });
       if (!response.ok) throw refusal(response, "take a one-time sign-in");
-      const reply: unknown = await response.json();
+      const reply = await jsonOf(response);
+      if (reply === undefined) throw new ServiceError("This server can't take a one-time sign-in yet.", "unavailable");
       if (!isRecord(reply) || typeof reply.reference !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(reply.reference)) throw new ServiceError("The server's answer was not understood.");
       return reply.reference;
     },
@@ -120,7 +130,7 @@ export function createRealProvisioning(): ProvisioningService {
       const response = await call("/v1/bootstrap/install-command", { method: "POST", body: { host } });
       if (response.status === 404 || response.status === 405 || response.status === 501) return undefined;
       if (!response.ok) throw refusal(response, "make an install command");
-      return parseInstallCommand(await response.json());
+      return parseInstallCommand(await jsonOf(response));
     },
   };
 }
