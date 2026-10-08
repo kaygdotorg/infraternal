@@ -98,7 +98,9 @@ Mesh management action grants inventory view access, narrowed by its scopes;
 there is no separate `mesh.view` permission (D187). A filtered list or
 subscription requires access to the requested tag. Role scopes also filter
 which changes a live subscription reveals. Permission checks are repeated for
-each operation and live invalidation.
+each operation and live invalidation. Membership edits notify viewers of every
+pre-edit host tag and the edited tag. Cascading tag renames also notify viewers
+of the other tags on affected hosts, because node tag metadata changes.
 
 Browser node/tag/grant deletion, membership removal, grant endpoint moves, and
 role definition/assignment require a passkey verification within the existing

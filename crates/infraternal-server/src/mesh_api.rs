@@ -808,6 +808,10 @@ impl MeshService {
     ) -> Result<u64, MeshApiError> {
         let mut tx = self.begin_change().await?;
         authorize(&mut tx, actor, MANAGE_TAGS, &[]).await?;
+        // Renaming cascades through every member's tag metadata, including
+        // snapshots viewed through a different tag on the same host.
+        let mut changed_scopes = tag_member_scopes(&mut tx, &request.name).await?;
+        changed_scopes.extend([request.name.clone(), request.new_name.clone()]);
         let changed = sqlx::query("UPDATE mesh_tags SET name=? WHERE name=?")
             .bind(&request.new_name)
             .bind(&request.name)
@@ -837,10 +841,7 @@ impl MeshService {
             &request.name,
             now,
             json!({"name":request.name,"new_name":request.new_name}),
-            Some(BTreeSet::from([
-                request.name.clone(),
-                request.new_name.clone(),
-            ])),
+            Some(changed_scopes),
         )
         .await
     }
@@ -897,6 +898,9 @@ impl MeshService {
         }
         requirements.push(vec![request.tag.clone()]);
         authorize(&mut tx, actor, MANAGE_TAGS, &requirements).await?;
+        // Both existing viewers and viewers gaining this host must refresh.
+        let mut changed_scopes: BTreeSet<_> = scopes.into_iter().collect();
+        changed_scopes.insert(request.tag.clone());
         let sql = if add {
             "INSERT INTO mesh_tag_members(tag_name,node_id) VALUES (?,?)"
         } else {
@@ -930,7 +934,7 @@ impl MeshService {
             &request.tag,
             now,
             detail,
-            Some(BTreeSet::from([request.tag.clone()])),
+            Some(changed_scopes),
         )
         .await
     }
@@ -1323,6 +1327,21 @@ async fn authorize(
 /// Require a scoped node editor to hold access to every tag the edit can affect.
 fn require_each_scope(scopes: &[String]) -> Vec<Vec<String>> {
     scopes.iter().map(|scope| vec![scope.clone()]).collect()
+}
+
+/// Collect every tag whose viewers see metadata changed by a cascading tag rename.
+async fn tag_member_scopes(
+    tx: &mut Transaction<'_, Sqlite>,
+    name: &str,
+) -> Result<BTreeSet<String>, MeshApiError> {
+    let tags: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT peer.tag_name FROM mesh_tag_members AS changed JOIN mesh_tag_members AS peer ON peer.node_id=changed.node_id WHERE changed.tag_name=? ORDER BY peer.tag_name",
+    )
+    .bind(name)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sql_error)?;
+    Ok(tags.into_iter().collect())
 }
 
 async fn endpoint_scopes(
