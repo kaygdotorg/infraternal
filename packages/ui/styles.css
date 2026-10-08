@@ -490,7 +490,7 @@
 @media (pointer: coarse) { .ui-sidebar-foot, .ui-sidebar-foot[data-variant="b"] { --pill-h: 44px; } }
 .ui-sidebar-foot .ui-pill { cursor: pointer; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, box-shadow 160ms ease; }
 @media (hover: hover) and (pointer: fine) { .ui-sidebar-foot .ui-pill:hover:not(:active) { box-shadow: var(--shadow), 0 2px 8px -2px rgb(0 0 0 / 0.18); } }
-.ui-sidebar-user { flex: 1; min-width: 0; justify-content: flex-start; gap: 10px; padding: 0 14px 0 5px; text-align: left; }
+.ui-sidebar-user { flex: 0 1 auto; min-width: 0; max-width: calc(100% - var(--pill-h) - 8px); justify-content: flex-start; gap: 10px; padding: 0 14px 0 5px; text-align: left; }
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-user { padding-right: 12px; }
 .ui-sidebar-avatar {
   display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 10px); height: calc(var(--pill-h) - 10px); border-radius: 50%; color: #fff;

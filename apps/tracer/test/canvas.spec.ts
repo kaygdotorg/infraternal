@@ -358,6 +358,17 @@ test("sidebar footer: the person and settings pills line up, press, and open Set
     return { userH: user.height, gearH: gear.height, centre: Math.abs((user.top + user.height / 2) - (gear.top + gear.height / 2)), gap: sidebar.bottom - foot.bottom };
   });
   expect(geometry.userH).toBeCloseTo(geometry.gearH, 0);
+  // The person's pill hugs its content (avatar, name, padding); the gear stays at the right edge.
+  const hug = await page.evaluate(() => {
+    const user = document.querySelector(".ui-sidebar-user")!.getBoundingClientRect();
+    const gear = document.querySelector(".ui-sidebar-settings")!.getBoundingClientRect();
+    const foot = document.querySelector(".ui-sidebar-foot")!.getBoundingClientRect();
+    const names = document.querySelector(".ui-sidebar-names")!.getBoundingClientRect();
+    return { userRight: user.right, gearLeft: gear.left, gearRight: gear.right, footRight: foot.right, trailing: user.right - names.right };
+  });
+  expect(hug.gearRight).toBeCloseTo(hug.footRight, 0);
+  expect(hug.gearLeft - hug.userRight).toBeGreaterThan(40);
+  expect(hug.trailing).toBeLessThan(20);
   expect(geometry.centre).toBeLessThan(0.5);
   expect(geometry.gap).toBeLessThan(12);
   // Both are real buttons: pressing scales them (nothing is inert).
