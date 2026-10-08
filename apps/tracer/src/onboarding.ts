@@ -386,10 +386,10 @@ function mountSignIn(
       <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
       <h1 id="signin-title">Welcome back</h1>
       <p class="auth-lede">Your passkey is all you need.</p>
+      <div class="auth-note"><div><p class="auth-message" id="auth-error" role="alert"></p></div></div>
       <button class="auth-primary auth-login" id="login-passkey" type="button">${KEY_MARK}<span>Continue with passkey</span></button>
       ${recoveryUiEnabled() ? '<button class="auth-text-button" id="use-recovery" type="button">use recovery key</button>' : ""}
       <div class="auth-note"><div><p class="auth-loading" id="login-loading" role="status" aria-live="polite"><span class="busy-count" hidden></span></p></div></div>
-      <div class="auth-note"><div><p class="auth-message" id="auth-error" role="alert"></p></div></div>
     </section>
   </section>`; });
   host.querySelector<HTMLElement>("#auth-error")!.textContent = message;
