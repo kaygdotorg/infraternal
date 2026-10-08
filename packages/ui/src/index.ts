@@ -32,3 +32,6 @@ export * from "./shortcuts";
 export * from "./shortcuts-view";
 export * from "./settings-overlay";
 export * from "./pill-morph";
+export * from "./icons";
+export * from "./connection-indicator";
+export * from "./toolbar-settings";

@@ -565,3 +565,75 @@
   .ui-settings-main { flex-direction: column; }
   .ui-settings-nav { width: auto; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--line); }
 }
+
+/* ---- connection indicator (src/connection-indicator.ts) ------------------------------------
+   One 16 px box; each glyph is its own layer. The shown glyph is chosen by transitions on
+   opacity and transform only, so a state change retargets from the current frame. Looping
+   animations are paused (never removed) when hidden, so they cannot jump. */
+.ui-conn { position: relative; display: inline-block; flex: none; width: var(--ui-conn-size, 16px); height: var(--ui-conn-size, 16px); vertical-align: middle; cursor: default; -webkit-tap-highlight-color: transparent; }
+.ui-conn[hidden] { display: none; }
+@media (pointer: coarse) { .ui-conn::after { content: ""; position: absolute; inset: -8px; } }
+.ui-conn-g { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transform: scale(0.6); pointer-events: none;
+  transition: opacity 160ms ease-out, transform 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.ui-conn-g svg, .ui-conn-pulse, .ui-conn-spin { grid-area: 1 / 1; width: 100%; height: 100%; overflow: visible; fill: none; }
+/* Glyph parts opt in to a stroke; an inherited page-wide svg stroke must not outline the filled ones. */
+.ui-conn-g svg { stroke: none; }
+.ui-conn-g svg * { stroke: none; }
+.ui-conn[data-state="connected"] .ui-conn-g-connected,
+.ui-conn[data-state="slow"] .ui-conn-g-slow,
+.ui-conn[data-state="connecting"] .ui-conn-g-reconnecting,
+.ui-conn[data-state="reconnecting"] .ui-conn-g-reconnecting,
+.ui-conn[data-state="resumed"] .ui-conn-g-resumed,
+.ui-conn[data-state="approximate"] .ui-conn-g-approximate,
+.ui-conn[data-state="offline"] .ui-conn-g-offline { opacity: 1; transform: none; }
+
+.ui-conn-g-connected .core { fill: var(--ok); }
+.ui-conn-g-connected .halo { fill: color-mix(in oklab, var(--ok) 20%, transparent); }
+.ui-conn-g-slow .core { fill: var(--warn); }
+.ui-conn-g-slow .halo { fill: color-mix(in oklab, var(--warn) 22%, transparent); }
+.ui-conn .ui-conn-g-slow .ring { stroke: var(--warn); stroke-width: 1.2; }
+.ui-conn-pulse { position: absolute; inset: 0; transform-origin: 50% 50%; opacity: 0; animation: ui-conn-pulse 1700ms cubic-bezier(0.23, 1, 0.32, 1) infinite; animation-play-state: paused; }
+.ui-conn[data-state="slow"] .ui-conn-pulse { animation-play-state: running; }
+@keyframes ui-conn-pulse { 0% { opacity: 0.7; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.1); } }
+
+.ui-conn .ui-conn-g-reconnecting .track { stroke: var(--fg-3); stroke-width: 1.4; opacity: 0.4; }
+.ui-conn .ui-conn-g-reconnecting .arc { stroke: var(--fg-2); stroke-width: 1.7; stroke-linecap: round; stroke-dasharray: 28 72; }
+.ui-conn-spin { position: absolute; inset: 0; animation: ui-conn-turn 900ms linear infinite; animation-play-state: paused; }
+.ui-conn[data-state="reconnecting"] .ui-conn-spin, .ui-conn[data-state="connecting"] .ui-conn-spin { animation-play-state: running; }
+@keyframes ui-conn-turn { to { transform: rotate(1turn); } }
+
+.ui-conn-g-resumed .disc { fill: color-mix(in oklab, var(--ok) 22%, transparent); }
+.ui-conn .ui-conn-g-resumed .tick { stroke: var(--ok); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* The tick arrives with a little overshoot, because something just happened. */
+.ui-conn[data-state="resumed"] .ui-conn-g-resumed { transition-timing-function: ease-out, cubic-bezier(0.34, 1.4, 0.64, 1); }
+
+.ui-conn .ui-conn-g-approximate .frame { stroke: var(--fg-2); stroke-width: 1.4; }
+.ui-conn-g-approximate .fill { fill: var(--fg-2); opacity: 0.55; }
+.ui-conn .ui-conn-g-approximate .foot { stroke: var(--fg-2); stroke-width: 1.4; stroke-linecap: round; }
+
+.ui-conn .ui-conn-g-offline .ring { stroke: var(--fg-2); stroke-width: 1.4; opacity: 0.8; }
+.ui-conn .ui-conn-g-offline .slash { stroke: var(--fg-2); stroke-width: 1.4; stroke-linecap: round; opacity: 0.8; }
+
+/* Reduced motion: glyphs cross-fade; nothing moves or loops. The reconnecting arc stays as a static mark. */
+@media (prefers-reduced-motion: reduce) {
+  .ui-conn-g { transform: none; transition: opacity 200ms ease; }
+  .ui-conn-pulse, .ui-conn-spin { animation: none; }
+  .ui-conn-pulse { display: none; }
+}
+
+/* Settings, Toolbar (toolbar-settings.ts): rows of controls with a grip, an icon, a name and a switch. */
+.ui-toolbar-settings { display: grid; gap: 14px; }
+.ui-ts-title { margin: 0; padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.ui-ts-item { position: relative; display: flex; align-items: center; gap: 10px; min-height: var(--ui-row-h, 32px); border-bottom: 1px solid var(--line); background: transparent; }
+.ui-ts-item:last-child { border-bottom: 0; }
+.ui-ts-item[data-dragging] { z-index: 2; background: var(--overlay-solid); border-radius: 10px; box-shadow: var(--shadow); }
+.ui-ts-grip { display: grid; flex: none; place-items: center; width: var(--ui-control-h, 30px); height: var(--ui-control-h, 30px); padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-3); cursor: grab; touch-action: none; }
+.ui-ts-grip svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-linecap: round; }
+.ui-ts-item[data-dragging] .ui-ts-grip { cursor: grabbing; }
+.ui-ts-icon { display: grid; flex: none; color: var(--fg-2); }
+.ui-ts-icon svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-ts-label { flex: 1; min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-ts-reset { justify-self: start; min-height: var(--ui-control-h, 30px); padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-ts-reset:active { transform: scale(var(--ui-press-scale, 0.97)); }
+@media (hover: hover) and (pointer: fine) { .ui-ts-reset:hover, .ui-ts-grip:hover { background: var(--hover); } }
