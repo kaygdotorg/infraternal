@@ -36,6 +36,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `sharing/` | share dialog, received copies, team layouts | `SharingModule`, adapter `SharingAdapter` |
 | `model/` | runtime model, the **canvas document** (D180), persistence | `toDocument` `parseDocument` `columnsFromDocument`, adapter `CanvasStore`, `DocumentSync` |
 | `sessions/` | binding terminal windows to sessions | adapter `SessionService` / `SessionBinding`; `live.ts` is the product one |
+| `addhost/` | the add-host wizard: detect-first sign-in (D183), progress from provisioning events, host key and credential pages | `createAddHost`, adapter `ProvisioningService`, hook `AddHostSink`, `FlowHost` |
 | `backdrop.ts` | the dotted canvas behind the views | `createBackdrop` |
 | `mock/` | everything fake: scenes, roles, fake hosts, grants, devices, probe | `mountMockup` |
 
@@ -48,7 +49,10 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `MeshSource` (`mesh/source.ts`) | mock data; Mesh view not offered in the product | the mesh API (#108) |
 | `SharingAdapter` (`sharing/adapter.ts`) | mock only; product offers no sharing | instance sharing (#93, D182) |
 | `SettingsSource` (`views/settings-body.ts`) | built-in sections only | devices, account, users, grants, discovery as their APIs land |
-| `Adapters.containers`, `Adapters.addHost` | absent in the product (view and button not offered) | host API; add-host flow (#78) |
+| `ProvisioningService` (`addhost/service.ts`) | `real.ts`: `/v1/bootstrap/ws` and `/v1/bootstrap/ssh-key` of contracts/ssh-bootstrap.md, plus the endpoints proposed on #87; mockups: the same adapter against the test double | one service, no change |
+| `AddHostSink` (`addhost/service.ts`) | mockups: opens a Console window for each enrolled host (`cx.win.open`), which is how the sidebar tree learns of it | the sessions service adds the host to `hosts()` and calls `onChange`, then `cx.win.open(host)` |
+| `Adapters.containers` | absent in the product (view not offered) | host API |
+| `Adapters.addHost` | `createAddHost(...).open` in mockups; the product mounts it the same way once it passes a `ProvisioningService` and a sink | add-host flow (#78, #87) |
 
 A feature whose adapter is missing is **not offered at all** (no view, no button, no palette row). The product
 never shows mockup UI.

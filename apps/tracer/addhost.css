@@ -332,3 +332,58 @@
 
 /* A failed host shows its reason and a retry button; the danger cross would read as "dismiss". */
 .ah-job[data-state="failed"] .ah-mark { display: none; }
+
+/* ═══ The product wizard (canvas/addhost): the same card, over the canvas stage ═══════════════════════
+   New class names (`ah-run`, `ah-seg`, `ah-stages`, `ah-keyblock`, …) so the mock-only window prototype
+   above keeps its own rules. */
+.ah-overlay { position: absolute; z-index: 10; inset: 0; }
+.ah-overlay .ah-stage { padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+@media (max-width: 600px) { .ah-overlay .ah-stage { padding: max(8px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom)); } }
+.ah-code { padding: 1px 5px; border-radius: 5px; background: rgb(from var(--fg) r g b / 0.06); color: var(--fg); font-weight: var(--fw-label); overflow-wrap: anywhere; }
+.ah-note { display: flex; align-items: center; gap: 10px; margin: 14px 10px 0; color: var(--fg-2); }
+.ah-note .ah-icon { flex: none; }
+.ah-load-error .ah-icon { color: var(--danger); }
+.ah-loading .ui-spinner { --ui-spinner-size: 14px; flex: none; }
+.ah-link { padding: 0; border: 0; background: none; color: var(--fg); font: var(--fw-label) 13.5px/1.4 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: color-mix(in oklab, var(--fg) 35%, transparent); cursor: pointer; }
+@media (pointer: coarse) { .ah-link { min-height: 44px; } }
+.ah-alt { margin-top: 18px; }
+.ah-error { margin: 14px 0 0; color: var(--danger); text-wrap: pretty; animation: ah-error-in 220ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+@keyframes ah-error-in { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .ah-error { animation: none; } }
+.ah-keyblock { margin: 0 0 14px; }
+.ah-keyblock .ui-kv { margin: 0; }
+.ah-input { display: block; width: 100%; height: var(--ah-field-h); margin: 12px 0 0; padding: 0 14px; border: 1px solid var(--line); border-radius: 12px; outline: none; background: var(--ah-field); color: var(--fg); font: var(--fw-body) 14px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
+.ah-input::placeholder { color: var(--fg-3); opacity: 1; }
+.ah-input:focus { border-color: rgb(from var(--fg) r g b / 0.28); background: var(--ah-field-focus); }
+/* The key/value highlight reaches 6 px past its text; the revealed block clips, so it carries that room itself. */
+.ah-reveal-in { margin-inline: -8px; padding-inline: 8px; }
+.ah-reveal .ah-keyblock { margin-top: 12px; }
+.ah-reveal .ah-text { margin: 0 0 4px; }
+:root[data-focus-ring="on"] .ah :is(.ah-input, .ah-link, .ah-run-toggle):focus-visible { outline: 2px solid var(--ah-ring); outline-offset: 2px; }
+
+/* One block per host: the head is always visible; the steps open under it. */
+.ah-run { position: relative; border-radius: 12px; }
+.ah-run-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; column-gap: 12px; padding: 4px 10px 4px; border-radius: 10px; }
+.ah-run-toggle { display: grid; min-width: 0; grid-template-columns: var(--ah-icon) minmax(0, 1fr); align-items: center; column-gap: 12px; margin: 0; padding: 4px 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+@media (hover: hover) and (pointer: fine) { .ah-run-head:hover { background: var(--hover); } }
+.ah-run[data-state="failed"] .ah-job-step { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
+.ah-run[data-state="pending"] :is(.ah-name, .ah-os-mark) { color: var(--fg-3); }
+.ah-run[data-state="failed"] .ah-mark { display: none; }
+.ah-seg { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3px; margin: 2px 10px 8px calc(10px + var(--ah-icon) + 12px); }
+.ah-seg > span { display: block; height: 2px; border-radius: 1px; background: var(--line); transition: background-color 260ms ease; }
+.ah-seg > span[data-state="running"] { background: var(--fg-2); }
+.ah-seg > span[data-state="done"] { background: var(--ok); }
+.ah-seg > span[data-state="failed"] { background: var(--danger); }
+.ah-stages { display: grid; margin: 0 10px 0 calc(10px + var(--ah-icon) + 12px); grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 340ms var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1)), opacity 200ms ease, margin-bottom 340ms var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1)); }
+.ah-run[data-open="true"] .ah-stages { grid-template-rows: 1fr; opacity: 1; margin-bottom: 8px; }
+.ah-stages-in { min-height: 0; margin: 0; padding: 0; overflow: hidden; list-style: none; transition: visibility 0s linear 340ms; }
+.ah-run[data-open="true"] .ah-stages-in { transition-delay: 0s; }
+.ah-run:not([data-open="true"]) .ah-stages-in { visibility: hidden; }
+.ah-stage-row { display: grid; grid-template-columns: var(--ah-icon) minmax(0, 1fr); column-gap: 12px; align-items: start; padding: 4px 0; }
+.ah-stage-mark { --ui-step-status-size: var(--ah-icon); --ui-spinner-size: 14px; margin-top: 2px; }
+.ah-stage-text { display: grid; min-width: 0; }
+.ah-stage-name { color: var(--fg); font-weight: var(--fw-body); }
+.ah-stage-row[data-state="pending"] .ah-stage-name { color: var(--fg-3); }
+.ah-stage-detail { color: var(--fg-2); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.ah-stage-detail:empty { display: none; }
+.ah-stage-row[data-state="failed"] .ah-stage-detail { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
