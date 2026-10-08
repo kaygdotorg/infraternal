@@ -1,5 +1,6 @@
-//! Relays control calls and resumable terminal streams through the local socketpair infraternal agent [9][13].
+//! Relays control calls and resumable terminal streams through local socketpair or admitted remote infraternal agents [9][13][64].
 
+use crate::remote_link::RemoteLink;
 use bytes::{Buf, Bytes, BytesMut};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
@@ -77,7 +78,7 @@ pub(crate) enum TerminalOutput {
     Closed { code: u16 },
 }
 
-/// A single client attachment to a terminal session owned by the embedded infraternal agent.
+/// A single client attachment to a terminal session owned by its host infraternal agent.
 pub(crate) struct TerminalAttachment {
     handle: AttachmentHandle,
     output: mpsc::Receiver<TerminalOutput>,
@@ -137,11 +138,38 @@ impl EmbeddedAgent {
     /// Start the on-demand agent supervisor for the server's own executable.
     pub fn spawn(executable: PathBuf) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-        tokio::spawn(run_actor(executable, None, receiver));
+        tokio::spawn(run_actor(
+            Source::Embedded {
+                executable,
+                initial: None,
+            },
+            receiver,
+        ));
         Self {
             commands,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// Reuse the terminal actor for an enrolled host; only admitted listeners supply links.
+    pub(crate) fn remote(uid: u32) -> (Self, mpsc::Sender<RemoteLink>) {
+        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (accepts, incoming) = mpsc::channel(1);
+        tokio::spawn(run_actor(
+            Source::Remote {
+                incoming,
+                uid,
+                pending: None,
+            },
+            receiver,
+        ));
+        (
+            Self {
+                commands,
+                next_attachment_id: Arc::new(AtomicU64::new(1)),
+            },
+            accepts,
+        )
     }
 
     /// Open a terminal on the embedded infraternal agent's host.
@@ -200,7 +228,13 @@ impl EmbeddedAgent {
     #[cfg(test)]
     pub(crate) fn from_test_socket(stream: UnixStream) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-        tokio::spawn(run_actor(PathBuf::new(), Some(stream), receiver));
+        tokio::spawn(run_actor(
+            Source::Embedded {
+                executable: PathBuf::new(),
+                initial: Some(stream),
+            },
+            receiver,
+        ));
         Self {
             commands,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
@@ -242,9 +276,116 @@ struct AttachmentState {
     output: mpsc::Sender<TerminalOutput>,
 }
 
+enum Peer {
+    Local {
+        reader: OwnedReadHalf,
+        writer: OwnedWriteHalf,
+    },
+    Remote(Box<RemoteLink>),
+}
+
+enum Source {
+    Embedded {
+        executable: PathBuf,
+        initial: Option<UnixStream>,
+    },
+    Remote {
+        incoming: mpsc::Receiver<RemoteLink>,
+        uid: u32,
+        pending: Option<Box<RemoteLink>>,
+    },
+}
+
+impl Source {
+    async fn connect(&mut self) -> Result<AgentConnection, AgentError> {
+        match self {
+            Self::Embedded {
+                executable,
+                initial,
+            } => connect_agent(executable, initial.take()).await,
+            Self::Remote {
+                incoming,
+                uid,
+                pending,
+            } => {
+                let link = if let Some(link) = pending.take() {
+                    *link
+                } else {
+                    incoming.recv().await.ok_or(AgentError::Unavailable)?
+                };
+                let mut receive = BytesMut::with_capacity(4096);
+                let mut scratch = vec![0; READ_CHUNK];
+                let hello = Frame::Hello {
+                    version: 1,
+                    caps: infraternal_agent::remote_quic::REMOTE_WRITER_BINDING,
+                    client_info: "infraternal-server/0.1",
+                };
+                let mut encode = Vec::new();
+                encode_muxed_frame_into(0, &hello, &mut encode)
+                    .map_err(|_| AgentError::Protocol)?;
+                let handshake = async {
+                    link.write(0, &hello, &encode)
+                        .await
+                        .map_err(|_| AgentError::Unavailable)?;
+                    loop {
+                        match decode_muxed_frame(&receive) {
+                            Ok(decoded) => {
+                                if decoded.stream_id != 0
+                                    || !matches!(decoded.frame, Frame::Hello { version: 1, .. })
+                                {
+                                    return Err(AgentError::Protocol);
+                                }
+                                link.hello(&decoded.frame)
+                                    .await
+                                    .map_err(|_| AgentError::Protocol)?;
+                                receive.advance(decoded.wire_len);
+                                return Ok(());
+                            }
+                            Err(DecodeError::Incomplete) => {}
+                            Err(_) => return Err(AgentError::Protocol),
+                        }
+                        if link
+                            .read(&mut receive, &mut scratch)
+                            .await
+                            .map_err(|_| AgentError::Unavailable)?
+                            == 0
+                        {
+                            return Err(AgentError::Unavailable);
+                        }
+                    }
+                };
+                tokio::time::timeout(Duration::from_secs(5), handshake)
+                    .await
+                    .map_err(|_| AgentError::Unavailable)??;
+                Ok(AgentConnection {
+                    peer: Peer::Remote(Box::new(link)),
+                    execution_uid: *uid,
+                    pid: None,
+                    receive,
+                    scratch,
+                    encode: Vec::new(),
+                    next_call_id: 1,
+                })
+            }
+        }
+    }
+    async fn replacement(&mut self) -> Option<RemoteLink> {
+        match self {
+            Self::Remote { incoming, .. } => incoming.recv().await,
+            Self::Embedded { .. } => std::future::pending().await,
+        }
+    }
+    fn closed(&self) -> bool {
+        matches!(self, Self::Remote { incoming, pending: None,.. } if incoming.is_closed() && incoming.is_empty())
+    }
+    fn remote(&self) -> bool {
+        matches!(self, Self::Remote { .. })
+    }
+}
+
 struct AgentConnection {
-    reader: OwnedReadHalf,
-    writer: OwnedWriteHalf,
+    peer: Peer,
+    execution_uid: u32,
     pid: Option<nix::unistd::Pid>,
     receive: BytesMut,
     scratch: Vec<u8>,
@@ -320,12 +461,7 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
-async fn run_actor(
-    executable: PathBuf,
-    initial_connection: Option<UnixStream>,
-    mut commands: mpsc::Receiver<Command>,
-) {
-    let mut initial_connection = initial_connection;
+async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
     let mut attachments = HashMap::<u64, AttachmentState>::new();
     let mut routes = HashMap::<u32, u64>::new();
     let mut pending = HashMap::<u32, PendingCall>::new();
@@ -335,14 +471,17 @@ async fn run_actor(
 
     loop {
         if connection.is_none() {
+            if source.closed() {
+                return;
+            }
             if commands.is_closed() {
                 return;
             }
-            if !first_attempt {
+            if !first_attempt && !source.remote() {
                 tokio::time::sleep(backoff).await;
             }
             first_attempt = false;
-            if let Ok(mut fresh) = connect_agent(&executable, initial_connection.take()).await {
+            if let Ok(mut fresh) = source.connect().await {
                 if !reattach_all(&mut fresh, &mut attachments, &mut routes).await {
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                     routes.clear();
@@ -352,9 +491,7 @@ async fn run_actor(
                 connection = Some(fresh);
                 backoff = Duration::from_millis(200);
             } else {
-                tracing::warn!(
-                    "embedded infraternal agent connection failed; retrying with backoff"
-                );
+                tracing::warn!("infraternal agent connection failed; awaiting reconnect");
                 backoff = (backoff * 2).min(Duration::from_secs(30));
                 continue;
             }
@@ -364,6 +501,11 @@ async fn run_actor(
             continue;
         };
         tokio::select! {
+            replacement = source.replacement(), if source.remote() => {
+                let Some(replacement) = replacement else { return; };
+                if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
+                if let Some(old) = connection.take() { connection_lost(old,&mut attachments,&mut routes,&mut pending).await; }
+            }
             command = commands.recv() => {
                 let Some(command) = command else { return; };
                 let ok = process_command(
@@ -452,8 +594,8 @@ async fn connect_agent(
     };
     let (reader, writer) = socket.into_split();
     Ok(AgentConnection {
-        reader,
-        writer,
+        peer: Peer::Local { reader, writer },
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
         pid,
         receive,
         scratch,
@@ -517,11 +659,11 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
             };
-            // The trusted local host identity never comes from browser JSON.
+            // The trusted enrolled or local host identity never comes from browser JSON.
             // Pixel geometry is sent later through Resize; the daemon opens a
             // PTY using its approved {uid, cols, rows} action schema [9][13].
             let request = serde_json::json!({
-                "uid": nix::unistd::Uid::effective().as_raw(),
+                "uid": connection.execution_uid,
                 "cols": size.cols,
                 "rows": size.rows,
             });
@@ -1079,13 +1221,22 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
         if connection.receive.len() >= MAX_BUFFERED_WIRE {
             return None;
         }
-        let read = connection.reader.read(&mut connection.scratch).await.ok()?;
+        let read = match &mut connection.peer {
+            Peer::Local { reader, .. } => {
+                let count = reader.read(&mut connection.scratch).await.ok()?;
+                connection
+                    .receive
+                    .extend_from_slice(&connection.scratch[..count]);
+                count
+            }
+            Peer::Remote(link) => link
+                .read(&mut connection.receive, &mut connection.scratch)
+                .await
+                .ok()?,
+        };
         if read == 0 {
             return Some(Incoming::Disconnected);
         }
-        connection
-            .receive
-            .extend_from_slice(&connection.scratch[..read]);
     }
 }
 
@@ -1100,12 +1251,18 @@ fn share_payload(wire: &Bytes, payload: &[u8]) -> Option<Bytes> {
 }
 
 async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &Frame<'_>) -> bool {
-    let (writer, encode) = (&mut connection.writer, &mut connection.encode);
+    let (peer, encode) = (&mut connection.peer, &mut connection.encode);
     if encode_muxed_frame_into(stream_id, frame, encode).is_err() {
         return false;
     }
     matches!(
-        tokio::time::timeout(Duration::from_secs(1), writer.write_all(encode)).await,
+        tokio::time::timeout(Duration::from_secs(1), async {
+            match peer {
+                Peer::Local { writer, .. } => writer.write_all(encode).await,
+                Peer::Remote(link) => link.write(stream_id, frame, encode).await,
+            }
+        })
+        .await,
         Ok(Ok(()))
     )
 }

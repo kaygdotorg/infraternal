@@ -6,8 +6,8 @@ fn connection() -> (AgentConnection, UnixStream) {
     let (reader, writer) = socket.into_split();
     (
         AgentConnection {
-            reader,
-            writer,
+            peer: Peer::Local { reader, writer },
+            execution_uid: nix::unistd::Uid::effective().as_raw(),
             pid: None,
             receive: BytesMut::new(),
             scratch: vec![0; 4096],

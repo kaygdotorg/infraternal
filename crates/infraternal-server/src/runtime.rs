@@ -190,8 +190,27 @@ pub async fn serve_with_enrollment(
     config: ServerConfig,
     enrollment: Option<crate::remote_http::EnrollmentService>,
 ) -> Result<(), ServerError> {
+    serve_inner(config, enrollment, None).await
+}
+
+/// Serve enrollment, host transports and browser routing using trusted D168 sources.
+/// # Errors
+/// Returns sanitized configuration, storage, TLS or listener failures.
+pub async fn serve_with_remote(
+    config: ServerConfig,
+    remote: crate::remote_runtime::RemoteService,
+) -> Result<(), ServerError> {
+    serve_inner(config, Some(remote.enrollment.clone()), Some(remote)).await
+}
+
+async fn serve_inner(
+    config: ServerConfig,
+    enrollment: Option<crate::remote_http::EnrollmentService>,
+    remote: Option<crate::remote_runtime::RemoteService>,
+) -> Result<(), ServerError> {
     init_logging();
-    let (app, setup_token) = build_router_with_enrollment(config.clone(), None, enrollment).await?;
+    let (app, setup_token, _listeners) =
+        build_router_core(config.clone(), None, enrollment, remote).await?;
     if let Some(token) = setup_token {
         start_setup_token_socket(&config.data_dir, token)?;
     }
@@ -250,11 +269,29 @@ async fn build_router(
     build_router_with_enrollment(config, supplied_agent, None).await
 }
 
+#[cfg(test)]
 async fn build_router_with_enrollment(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
     enrollment: Option<crate::remote_http::EnrollmentService>,
 ) -> Result<(Router, Option<String>), ServerError> {
+    let (app, setup, _) = build_router_core(config, supplied_agent, enrollment, None).await?;
+    Ok((app, setup))
+}
+
+async fn build_router_core(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+    mut enrollment: Option<crate::remote_http::EnrollmentService>,
+    remote: Option<crate::remote_runtime::RemoteService>,
+) -> Result<
+    (
+        Router,
+        Option<String>,
+        Option<crate::remote_runtime::RemoteListeners>,
+    ),
+    ServerError,
+> {
     validate_config(&config)?;
     if let Some(web_root) = &config.web_root
         && !web_root.is_dir()
@@ -298,10 +335,29 @@ async fn build_router_with_enrollment(
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
         EmbeddedAgent::spawn(executable)
     };
+    let hosts = crate::remote_runtime::RemoteHosts::default();
+    let listeners = if let Some(remote) = remote {
+        Some(
+            crate::remote_runtime::RemoteListeners::start(
+                remote.enrollment.endpoint.endpoint,
+                &remote.identity,
+                &remote.roots,
+                crate::enrollment::EnrollmentStore::new(pool.clone()),
+                hosts.clone(),
+            )
+            .await
+            .map_err(ServerError::Listener)?,
+        )
+    } else {
+        None
+    };
+    if let (Some(service), Some(listeners)) = (&mut enrollment, &listeners) {
+        service.endpoint.endpoint = listeners.local_addr().map_err(ServerError::Listener)?;
+    }
     let remote_api = enrollment.map(|service| {
         crate::remote_http::router(auth.clone(), pool.clone(), service.source, service.endpoint)
     });
-    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent);
+    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent).with_remote_hosts(hosts);
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
@@ -325,6 +381,7 @@ async fn build_router_with_enrollment(
     Ok((
         app.layer(from_fn_with_state(admission, source_admission)),
         setup_token,
+        listeners,
     ))
 }
 
