@@ -129,6 +129,10 @@ with that `sub_id`:
 {"type":"error","error":"forbidden"}
 ```
 
+Authoritative `snapshot` and `resync` events apply even at the currently shown
+revision: liveness expires with time without a database edit. Older revisions
+and delayed list replies at an already delivered revision never replace them.
+
 The initial event is a permission-filtered snapshot. A `changed` event is an
 invalidation; the viewer reloads `mesh.list` with the same tag filter. If a
 subscriber falls behind the bounded change buffer, the server sends a fresh

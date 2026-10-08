@@ -231,8 +231,11 @@ export class MeshClient {
     let pendingRevision = -1;
     let refreshing = false;
 
-    const publish = (snapshot: MeshSnapshot): void => {
-      if (stopped || snapshot.revision <= deliveredRevision) {
+    const publish = (snapshot: MeshSnapshot, authoritative = false): void => {
+      // Liveness can expire without a database revision. Server snapshots are
+      // authoritative at equality; delayed list replies cannot replace them.
+      if (stopped || snapshot.revision < deliveredRevision
+        || (!authoritative && snapshot.revision === deliveredRevision)) {
         return;
       }
       deliveredRevision = snapshot.revision;
@@ -276,7 +279,7 @@ export class MeshClient {
 
     const unsubscribe = this.transport.subscribe(wireFilter, (event) => {
       if (event.type === "snapshot" || event.type === "resync") {
-        publish(event.snapshot);
+        publish(event.snapshot, true);
       } else if (event.type === "error") {
         if (!stopped) {
           listener(event);
