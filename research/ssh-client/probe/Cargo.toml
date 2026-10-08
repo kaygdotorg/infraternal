@@ -1,0 +1,28 @@
+# Research-only SSH client candidate; not part of the product workspace or an engine choice.
+[package]
+name = "infraternal-ssh-research"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[workspace]
+
+[dependencies]
+russh = { version = "=0.63.1", default-features = false, features = ["ring"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "io-std"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"
+
+# Apply the same Rust safety and review strictness to this isolated experiment.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
