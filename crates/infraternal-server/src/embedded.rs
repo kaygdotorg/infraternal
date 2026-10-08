@@ -48,6 +48,9 @@ pub(crate) enum AgentError {
     /// The terminal action was rejected by the embedded infraternal agent.
     #[error("terminal action failed")]
     Rejected,
+    /// The remote peer did not negotiate live renewal.
+    #[error("remote infraternal agent lacks live renewal")]
+    Unsupported,
 }
 
 /// Dimensions passed to the core terminal.open action.
@@ -183,6 +186,35 @@ impl EmbeddedAgent {
         )
     }
 
+    /// A bounded control call shares the existing id allocator and reply dispatcher.
+    #[expect(
+        dead_code,
+        reason = "renewal scheduler wiring follows in its own module commit"
+    )]
+    pub(crate) async fn control_call(
+        &self,
+        action: &'static str,
+        json: Vec<u8>,
+    ) -> Result<Vec<u8>, AgentError> {
+        if json.len() > infraternal_agent::remote_renewal::MAX_RENEWAL_JSON {
+            return Err(AgentError::Rejected);
+        }
+        let (reply, result) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            self.commands
+                .send(Command::Control {
+                    action,
+                    json,
+                    reply,
+                })
+                .await
+                .map_err(|_| AgentError::Unavailable)?;
+            result.await.map_err(|_| AgentError::Unavailable)?
+        })
+        .await
+        .map_err(|_| AgentError::Unavailable)?
+    }
+
     /// Open a terminal on the embedded infraternal agent's host.
     pub async fn open(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
         let (reply, result) = oneshot::channel();
@@ -254,6 +286,11 @@ impl EmbeddedAgent {
 }
 
 enum Command {
+    Control {
+        action: &'static str,
+        json: Vec<u8>,
+        reply: oneshot::Sender<Result<Vec<u8>, AgentError>>,
+    },
     Open {
         size: TerminalSize,
         reply: oneshot::Sender<Result<[u8; 16], AgentError>>,
@@ -442,8 +479,21 @@ enum Incoming {
     Disconnected,
 }
 
-struct PendingCall {
-    reply: oneshot::Sender<Result<[u8; 16], AgentError>>,
+enum PendingCall {
+    Open(oneshot::Sender<Result<[u8; 16], AgentError>>),
+    Control(oneshot::Sender<Result<Vec<u8>, AgentError>>),
+}
+impl PendingCall {
+    fn refuse(self, error: AgentError) {
+        match self {
+            Self::Open(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Control(reply) => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -661,6 +711,42 @@ async fn process_command(
     pending: &mut HashMap<u32, PendingCall>,
 ) -> bool {
     match command {
+        Command::Control {
+            action,
+            json,
+            reply,
+        } => {
+            if reply.is_closed() {
+                return true;
+            }
+            if !matches!(&connection.peer, Peer::Remote(link) if link.supports_renewal()) {
+                let _ = reply.send(Err(AgentError::Unsupported));
+                return true;
+            }
+            if json.len() > infraternal_agent::remote_renewal::MAX_RENEWAL_JSON
+                || pending
+                    .values()
+                    .any(|call| matches!(call, PendingCall::Control(_)))
+            {
+                let _ = reply.send(Err(AgentError::Rejected));
+                return true;
+            }
+            let Some(call_id) = allocate_call_id(connection, pending) else {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return true;
+            };
+            let frame = Frame::Call {
+                call_id,
+                action_id: action,
+                input_json: &json,
+            };
+            if !write_frame(connection, CONTROL_STREAM, &frame).await {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
+            pending.insert(call_id, PendingCall::Control(reply));
+            true
+        }
         Command::Open { size, reply } => {
             if let Peer::Remote(link) = &connection.peer
                 && link.admit_operation().await.is_err()
@@ -697,7 +783,7 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return false;
             }
-            pending.insert(call_id, PendingCall { reply });
+            pending.insert(call_id, PendingCall::Open(reply));
             true
         }
         Command::Attach {
@@ -971,15 +1057,21 @@ async fn process_incoming(
                 return false;
             };
             if !ok {
-                let _ = call.reply.send(Err(AgentError::Rejected));
+                call.refuse(AgentError::Rejected);
                 return true;
             }
+            let PendingCall::Open(reply) = call else {
+                if let PendingCall::Control(reply) = call {
+                    let _ = reply.send(Ok(json));
+                }
+                return true;
+            };
             let session = serde_json::from_slice::<OpenResult>(&json);
             let result = session
                 .ok()
                 .and_then(|value| decode_session_id(&value.session_id))
                 .ok_or(AgentError::Protocol);
-            let _ = call.reply.send(result);
+            let _ = reply.send(result);
             true
         }
         Incoming::Output {
@@ -1189,11 +1281,15 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                 };
                 let stream_id = decoded.stream_id;
                 let frame = match decoded.frame {
-                    Frame::Result { call_id, ok, json } => Incoming::Result {
-                        call_id,
-                        ok,
-                        json: json.to_vec(),
-                    },
+                    Frame::Result { call_id, ok, json }
+                        if json.len() <= infraternal_agent::remote_renewal::MAX_RENEWAL_JSON =>
+                    {
+                        Incoming::Result {
+                            call_id,
+                            ok,
+                            json: json.to_vec(),
+                        }
+                    }
                     Frame::Output { out_seq, bytes } => Incoming::Output {
                         stream_id,
                         out_seq,
@@ -1298,7 +1394,7 @@ async fn connection_lost(
 ) {
     routes.clear();
     for (_, call) in pending.drain() {
-        let _ = call.reply.send(Err(AgentError::Unavailable));
+        call.refuse(AgentError::Unavailable);
     }
     if let Some(pid) = connection.pid.take() {
         stop_child(pid).await;

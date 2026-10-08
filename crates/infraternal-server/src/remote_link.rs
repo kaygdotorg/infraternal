@@ -30,6 +30,7 @@ enum LinkTransport {
 pub(crate) struct RemoteLink {
     transport: LinkTransport,
     authority: Option<crate::remote_guard::AuthorityGuard>,
+    renewal: std::sync::atomic::AtomicBool,
 }
 
 pub(crate) struct QuicLink {
@@ -135,6 +136,7 @@ impl RemoteLink {
                 prefix: Mutex::new(Some(Bytes::from(prefix))),
             },
             authority: None,
+            renewal: std::sync::atomic::AtomicBool::new(false),
         })
     }
     pub(crate) async fn quic(connection: quinn::Connection) -> io::Result<Self> {
@@ -166,6 +168,7 @@ impl RemoteLink {
                 pumps: Mutex::new(pumps),
             }),
             authority: None,
+            renewal: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -214,7 +217,16 @@ impl RemoteLink {
         }
     }
 
+    pub(crate) fn supports_renewal(&self) -> bool {
+        self.renewal.load(std::sync::atomic::Ordering::Acquire)
+    }
     pub(crate) async fn hello(&self, frame: &Frame<'_>) -> io::Result<()> {
+        if let Frame::Hello { caps, .. } = frame {
+            self.renewal.store(
+                caps & infraternal_agent::remote_renewal::LIVE_RENEWAL != 0,
+                std::sync::atomic::Ordering::Release,
+            );
+        }
         if let LinkTransport::Quic(link) = &self.transport {
             *link.binding.lock().await =
                 Some(remote_quic::negotiate_binding(&link.connection, frame)?);
