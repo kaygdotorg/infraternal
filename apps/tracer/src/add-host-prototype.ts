@@ -46,6 +46,17 @@ import {
 import type { AddHostFixture } from "./add-host-contract";
 import type { CanvasController, CanvasFlowWindow, CanvasHost, CanvasWindowHandle } from "./canvas";
 import type { CoreScreen } from "./core-screen";
+import {
+  foldEvent,
+  pendingTarget,
+  PHASES,
+  ProvisioningRun,
+  targetIdFor,
+  type BootstrapEvent,
+  type FailureKind,
+  type StartTarget,
+  type TargetView,
+} from "./provisioning-client";
 
 const FIXTURES_URL = "/__mock/proto/addhost";
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -56,12 +67,6 @@ const SOURCE_LABELS: Record<HostSource, string> = {
   "ssh-config": "SSH config",
   "already-added": "Added",
 };
-const BOOTSTRAP_STEPS = [
-  { id: "check", label: "Checking the system" },
-  { id: "install", label: "Installing the agent" },
-  { id: "facts", label: "Gathering host facts" },
-  { id: "connect", label: "Connecting" },
-] as const;
 
 /** Line icons on a 24 px grid, drawn with currentColor at a 1.5 stroke. */
 const ICON = {
@@ -85,11 +90,13 @@ const ICON = {
 const svg = (paths: string, className = "ah-icon"): string => `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
 
 type Step = "empty" | "discovery" | "credentials" | "root" | "progress" | "failure";
-type FailureKind = "unreachable" | "authentication" | "mesh-policy";
-type Failure = { kind: FailureKind; host: AddHostFixture };
+/** A failed host as the server reported it: kind, its human text and its log tail. */
+type Failure = { kind: FailureKind; host: AddHostFixture; message: string; evidence: string; phase: number };
 type Direction = 1 | -1 | 0;
-type JobState = "pending" | "running" | "done" | "failed";
-type Job = { host: AddHostFixture; step: number; state: JobState; failure: Failure | undefined; timers: number[] };
+/** One host of the batch. Everything about its progress is `view`, folded from server events. */
+type Job = { host: AddHostFixture; target: string; view: TargetView; run: ProvisioningRun | undefined };
+/** A finished batch whose failed hosts can still be retried on its open run. */
+type Review = { failures: Failure[]; run: ProvisioningRun };
 
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
@@ -107,12 +114,6 @@ function platformOf(host: AddHostFixture): HostPlatform {
   return "unknown";
 }
 
-function failureFor(host: AddHostFixture): Failure | undefined {
-  if (host.reachability === "unreachable") return { kind: "unreachable", host };
-  if (host.reachability === "mesh-policy") return { kind: "mesh-policy", host };
-  if (host.authentication === "refused") return { kind: "authentication", host };
-  return undefined;
-}
 
 /** Parses `user@host[:port]`; returns undefined for text that cannot name a host. */
 function parseTarget(raw: string): { user: string | undefined; host: string; port: number | undefined } | undefined {
@@ -130,28 +131,37 @@ function statusOf(host: AddHostFixture): { label: string; tone: "ok" | "warn" | 
   return { label: "No answer", tone: "off", icon: ICON.silent };
 }
 
-function failureCopy(item: Failure): { title: string; happened: string; next: string; short: string; step: number } {
+function failureCopy(item: Failure): { title: string; happened: string; next: string } {
   const name = item.host.id;
   if (item.kind === "unreachable") return {
     title: `${name} didn't answer`,
     happened: `Nothing answered on SSH port 22 at ${name}.`,
     next: "Check that the host is on and SSH is running, then retry.",
-    short: "No SSH answer on port 22",
-    step: 0,
   };
-  if (item.kind === "authentication") return {
+  if (item.kind === "auth") return {
     title: `${name} refused the key`,
     happened: `${name} answered, but refused the SSH identity.`,
     next: "Choose another identity, or add this server's key to the host, then retry.",
-    short: "SSH key refused",
-    step: 1,
+  };
+  if (item.kind === "host-key") return {
+    title: `${name} has an untrusted key`,
+    happened: `${name} answered with an SSH host key this server does not trust.`,
+    next: "Check the host's key fingerprint, add it to known hosts, then retry.",
+  };
+  if (item.kind === "unsupported") return {
+    title: `${name} isn't supported yet`,
+    happened: `${name} does not have what the infraternal agent needs.`,
+    next: "Use a Linux host with systemd, then add it again.",
+  };
+  if (item.kind === "install") return {
+    title: `${name} could not be set up`,
+    happened: `The installation on ${name} did not finish, and it was rolled back.`,
+    next: "Check the details, then retry.",
   };
   return {
     title: "Blocked by the mesh policy",
     happened: `The mesh access policy blocks SSH (TCP 22) from this server to ${name}.`,
     next: "Ask a mesh admin to allow TCP 22 from this server, then retry.",
-    short: "Blocked by the mesh policy",
-    step: 0,
   };
 }
 
@@ -187,6 +197,8 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
   const added: AddHostFixture[] = [];
   let wizard: Wizard | undefined;
   let confirmTip: ConfirmTipController | undefined;
+  /** The connection of the last batch that ended with failures, until Review takes it over. */
+  let reviewRun: ProvisioningRun | undefined;
 
   /** One wizard: a floating card over a new window that becomes the first host's terminal. */
   class Wizard {
@@ -213,10 +225,14 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     private failure: Failure | undefined;
     private asRoot = false;
     private timers: number[] = [];
+    /** The batch's connection: one per start, kept open while failed hosts can be retried. */
+    private run: ProvisioningRun | undefined;
+    /** Ports typed after `user@host:`; the fixture has no field for them. */
+    private readonly ports = new Map<string, number>();
     private alive = true;
     private finished = false;
 
-    constructor(startEmpty: boolean, animate: boolean, review?: Failure[]) {
+    constructor(startEmpty: boolean, animate: boolean, review?: Review) {
       this.win = canvas.openFlowWindow({ title: "Add hosts", icon: svg(ICON.plus, "is-line") });
       this.card = this.win.card.root;
       this.card.classList.add("ah");
@@ -251,8 +267,12 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         this.float.style.transform = `translateY(${(1 - value) * 12}px) scale(${0.97 + value * 0.03})`;
         scrim.style.opacity = String(clamped);
       }, { visualDuration: 0.32, bounce: 0.14 });
-      if (review?.length) {
-        this.jobs = review.map((failure) => ({ host: failure.host, step: failureCopy(failure).step, state: "failed", failure, timers: [] }));
+      if (review?.failures.length) {
+        this.run = review.run;
+        this.jobs = review.failures.map((failure) => ({
+          host: failure.host, target: targetIdFor(failure.host.id), run: review.run,
+          view: { state: "failed", attempt: 1, phase: failure.phase, message: failure.message, failure: { kind: failure.kind, message: failure.message, log_tail: [failure.evidence] }, elapsedMs: 0 },
+        }));
         this.go("progress", 0);
       } else this.go(startEmpty ? "empty" : "discovery", 0);
       if (animate) requestAnimationFrame(() => this.spring.set(1));
@@ -374,14 +394,15 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         operatingSystem: "Linux",
         architecture: "unknown",
         sources: [],
-        reachability: target.host.startsWith("10.99.") ? "unreachable" : "ready",
-        evidence: `connect ${target.host}:${target.port ?? 22}: no response after 3 attempts (5 s each); no login was attempted`,
+        reachability: "ready",
+        evidence: "",
         alreadyAdded: false,
         rootAvailable: true,
         credentialRequired: false,
         authentication: "accepted",
       };
       this.typed = [host, ...this.typed];
+      if (target.port) this.ports.set(host.id, target.port);
       if (this.current) this.renderList(this.current);
       return this.chipFor(host);
     }
@@ -498,9 +519,57 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     // ── Progress: every host, concurrently ────────────────────────────────────
     private startInstall(root: boolean): void {
       this.asRoot = root;
-      this.jobs = this.selected.map((host) => ({ host, step: 0, state: "pending", failure: undefined, timers: [] }));
+      this.closeRun();
+      const targets = this.selected.map((host): StartTarget => {
+        const target: StartTarget = { id: targetIdFor(host.id), address: this.addressOf(host) };
+        // Root needs explicit consent; the consent page asked for it, and only for hosts that offer sudo.
+        if (root && host.rootAvailable) { target.mode = "root"; target.root_consent = true; }
+        return target;
+      });
+      this.jobs = this.selected.map((host, index) => ({ host, target: targets[index]!.id, view: pendingTarget(), run: undefined }));
       this.go("progress");
-      this.jobs.forEach((job, index) => this.run(job, 140 + index * 110));
+      const run = new ProvisioningRun({
+        onEvent: (event) => this.onEvent(run, event),
+        onClose: () => { if (this.run === run) this.run = undefined; },
+      });
+      this.run = run;
+      for (const job of this.jobs) job.run = run;
+      run.start(targets);
+    }
+
+    /** A discovered host goes by inventory id; anything typed, or with another login name, goes as text. */
+    private addressOf(host: AddHostFixture): StartTarget["address"] {
+      const listed = hosts.find((item) => item.id === host.id);
+      if (listed && !this.typed.includes(host)) return { kind: "discovered", value: host.id };
+      const port = this.ports.get(host.id);
+      return { kind: "manual", value: `${host.user}@${host.address}${port ? `:${port}` : ""}` };
+    }
+
+    private closeRun(): void {
+      this.run?.close();
+      this.run = undefined;
+    }
+
+    /** The one way progress changes: a server event, folded into that host's view. */
+    private onEvent(run: ProvisioningRun, event: BootstrapEvent): void {
+      if (!this.alive) return;
+      const job = this.jobs.find((item) => item.run === run && item.target === event.target);
+      if (!job) return;
+      job.view = foldEvent(job.view, event);
+      this.paint(job);
+      this.summarise();
+      if (job.view.state === "done" || job.view.state === "failed") this.settle();
+    }
+
+    /** Retries on the batch's own connection; the server owns the attempt and its address. */
+    private retryJob(job: Job): void {
+      if (!job.run?.open) return;
+      this.finished = false;
+      job.view = { ...pendingTarget(), attempt: job.view.attempt };
+      this.paint(job);
+      this.summarise();
+      this.setFoot("");
+      job.run.retry(job.target);
     }
 
     private renderProgress(page: HTMLElement): void {
@@ -517,62 +586,31 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       this.marks = new Map();
       for (const job of this.jobs) {
         const row = page.querySelector<HTMLElement>(`[data-job="${CSS.escape(job.host.id)}"]`)!;
-        this.marks.set(job.host.id, mountStepStatus(row.querySelector<HTMLElement>(".ah-mark")!, job.state === "running" ? "running" : job.state));
+        this.marks.set(job.host.id, mountStepStatus(row.querySelector<HTMLElement>(".ah-mark")!, job.view.state));
       }
       this.setFoot("");
       for (const job of this.jobs) this.paint(job, page);
       this.summarise(page);
     }
 
-    /** Mock install: staggered per-host timings; failing hosts stop at the step that fails. */
-    private run(job: Job, delay: number): void {
-      for (const id of job.timers) window.clearTimeout(id);
-      job.timers = [];
-      job.state = "pending";
-      job.step = 0;
-      job.failure = undefined;
-      const fail = failureFor(job.host);
-      const failAt = fail ? failureCopy(fail).step : -1;
-      const tick = (stepIndex: number): void => {
-        if (!this.alive) return;
-        if (stepIndex === failAt) {
-          job.state = "failed";
-          job.failure = fail;
-        } else if (stepIndex >= BOOTSTRAP_STEPS.length) {
-          job.state = "done";
-        } else {
-          job.state = "running";
-          job.step = stepIndex;
-          const pace = 420 + ((job.host.id.length * 97 + stepIndex * 53) % 380);
-          job.timers.push(window.setTimeout(() => tick(stepIndex + 1), stepIndex + 1 === failAt ? pace + 400 : pace));
-        }
-        this.paint(job);
-        this.summarise();
-        if (job.state === "done" || job.state === "failed") this.settle();
-      };
-      job.timers.push(window.setTimeout(() => tick(0), delay));
-      this.paint(job);
-    }
-
     private paint(job: Job, page: HTMLElement | undefined = this.current): void {
       const row = page?.querySelector<HTMLElement>(`[data-job="${CSS.escape(job.host.id)}"]`);
       if (!row) return;
-      row.dataset.state = job.state;
-      const text = job.state === "done" ? (this.asRoot && job.host.rootAvailable ? "Ready · root" : "Ready")
-        : job.state === "failed" ? failureCopy(job.failure!).short
-          : job.state === "running" ? BOOTSTRAP_STEPS[job.step]!.label : "Waiting";
-      row.querySelector<HTMLElement>(".ah-job-step")!.textContent = text;
-      const fraction = job.state === "done" ? 1 : job.state === "pending" ? 0 : (job.step + (job.state === "running" ? 0.5 : 0)) / BOOTSTRAP_STEPS.length;
+      const { state, phase, message } = job.view;
+      row.dataset.state = state;
+      // The server's own text for the latest event; a host with no event yet is queued.
+      row.querySelector<HTMLElement>(".ah-job-step")!.textContent = state === "pending" ? "Waiting" : message;
+      const fraction = state === "done" ? 1 : state === "pending" ? 0 : (phase + (state === "running" ? 0.5 : 0)) / PHASES.length;
       row.querySelector<HTMLElement>(".ah-bar > span")!.style.transform = `scaleX(${fraction})`;
-      row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = job.state !== "failed";
-      this.marks.get(job.host.id)?.set(job.state);
+      row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed";
+      this.marks.get(job.host.id)?.set(state);
     }
 
     private summarise(page: HTMLElement | undefined = this.current): void {
       const summary = page?.querySelector<HTMLElement>(".ah-summary");
       if (!summary) return;
-      const done = this.jobs.filter((job) => job.state === "done").length;
-      const failed = this.jobs.filter((job) => job.state === "failed").length;
+      const done = this.jobs.filter((job) => job.view.state === "done").length;
+      const failed = this.jobs.filter((job) => job.view.state === "failed").length;
       const running = this.jobs.length - done - failed;
       summary.textContent = this.jobs.length === 1
         ? (running ? "This takes a few seconds." : done ? "Ready." : "This host needs attention.")
@@ -581,9 +619,9 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
 
     /** When nothing is running: open what succeeded; a lone failure gets its own page. */
     private settle(): void {
-      if (this.jobs.some((job) => job.state === "pending" || job.state === "running") || this.finished) return;
-      const done = this.jobs.filter((job) => job.state === "done").map((job) => job.host);
-      const failed = this.jobs.filter((job) => job.state === "failed").map((job) => job.failure!);
+      if (this.jobs.some((job) => job.view.state === "pending" || job.view.state === "running") || this.finished) return;
+      const done = this.jobs.filter((job) => job.view.state === "done").map((job) => job.host);
+      const failed = this.jobs.filter((job) => job.view.state === "failed").map((job) => this.failureOf(job));
       if (done.length === 0) {
         if (this.jobs.length === 1) { this.failure = failed[0]; this.later(500, () => this.go("failure")); }
         else this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button>`);
@@ -593,12 +631,21 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       this.later(600, () => this.finish(done, failed));
     }
 
+    private failureOf(job: Job): Failure {
+      const detail = job.view.failure;
+      return {
+        kind: detail?.kind ?? "install", host: job.host, phase: job.view.phase,
+        message: detail?.message ?? job.view.message,
+        evidence: (detail?.log_tail.length ? detail.log_tail : [detail?.message ?? job.view.message]).join("\n"),
+      };
+    }
+
     private renderFailure(page: HTMLElement): void {
       const copy = failureCopy(this.failure!);
       page.innerHTML = `${this.hero(ICON.warning, "danger")}<h1 class="ah-title">${escapeHtml(copy.title)}</h1>
         <p class="ah-lede">${escapeHtml(copy.happened)}</p>
         <p class="ah-text">${escapeHtml(copy.next)}</p>
-        <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(this.failure!.host.evidence)}</pre></details>`;
+        <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(this.failure!.evidence)}</pre></details>`;
       this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>Retry</span></button>`);
     }
 
@@ -637,13 +684,23 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         fades = [...card.pill.children].map((child) => child.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: EASE, fill: "forwards" }));
         void (fades[0]?.finished ?? Promise.resolve()).then(swapHeader);
       }
+      // A batch with failures keeps its connection: Review retries on it, and closing it
+      // would cancel the work. Anything else is finished, so the connection ends here.
+      if (reviewRun !== this.run) reviewRun?.close();
+      reviewRun = undefined;
+      if (failed.length && this.run) reviewRun = this.run; else this.run?.close();
+      this.run = undefined;
       const message = failed.length
         ? `${done.length} ${done.length === 1 ? "host" : "hosts"} ready · ${failed.length} need attention`
         : done.length > 1 ? `${done.length} hosts are ready` : `${first.id} is ready`;
       toast.show({
         message,
         action: failed.length
-          ? { label: "Review", onSelect: () => openWizard(true, true, failed) }
+          ? { label: "Review", onSelect: () => {
+            const run = reviewRun;
+            reviewRun = undefined;
+            openWizard(true, true, run ? { failures: failed, run } : undefined);
+          } }
           : { label: "Add another", onSelect: () => openWizard(true, true) },
       });
       if (wizard === this) wizard = undefined;
@@ -653,7 +710,6 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       this.alive = false;
       this.resize.disconnect();
       this.clearTimers();
-      for (const job of this.jobs) for (const id of job.timers) window.clearTimeout(id);
       this.card.removeEventListener("click", this.onClick);
       this.card.removeEventListener("change", this.onChange);
       this.card.removeEventListener("keydown", this.onKeyDown);
@@ -662,7 +718,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     close(): void {
       this.alive = false;
       this.clearTimers();
-      for (const job of this.jobs) for (const id of job.timers) window.clearTimeout(id);
+      this.closeRun();
       this.card.removeEventListener("click", this.onClick);
       this.card.removeEventListener("change", this.onChange);
       this.card.removeEventListener("keydown", this.onKeyDown);
@@ -692,17 +748,14 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       else if (action === "as-user") this.startInstall(false);
       else if (action === "back") this.go("discovery", -1);
       else if (action === "retry") {
-        const host = this.failure?.host;
-        if (!host) return;
-        this.selected = [{ ...host, reachability: "ready", authentication: "accepted" }];
-        this.startInstall(this.asRoot);
+        const job = this.jobs.find((item) => item.host.id === this.failure?.host.id);
+        if (!job) return;
+        this.jobs = [job];
+        this.go("progress");
+        this.retryJob(job);
       } else if (action === "retry-job") {
         const job = this.jobs.find((item) => item.host.id === target.dataset.id);
-        if (!job) return;
-        job.host = { ...job.host, reachability: "ready", authentication: "accepted" };
-        this.finished = false;
-        this.setFoot("");
-        this.run(job, 0);
+        if (job) this.retryJob(job);
       }
     };
 
@@ -737,7 +790,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     dispose(): void {
       this.alive = false;
       this.clearTimers();
-      for (const job of this.jobs) for (const id of job.timers) window.clearTimeout(id);
+      this.closeRun();
       this.resize.disconnect();
     }
   }
@@ -774,7 +827,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     card.header.querySelector<HTMLElement>(".ui-window-actions")!.append(pill);
   }
 
-  function openWizard(animate: boolean, fresh = false, review?: Failure[]): void {
+  function openWizard(animate: boolean, fresh = false, review?: Review): void {
     if (wizard && !fresh) { wizard.focus(); return; }
     wizard = new Wizard(false, animate, review);
     wizard.focus();
@@ -818,6 +871,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
   return {
     dispose() {
       wizard?.dispose();
+      reviewRun?.close();
       confirmTip?.close(false);
       toast.dispose();
       window.removeEventListener("tracer:proto-action", onProtoAction);
