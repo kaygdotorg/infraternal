@@ -1219,6 +1219,46 @@ export class TerminalClient {
       .then(() => this.repaintAll(), () => undefined);
   }
 
+  /**
+   * Frees the canvas's backing store while the terminal cannot be seen (a hidden page, a locked phone, a
+   * view far from the screen): a 0 x 0 canvas holds no pixels. The terminal's state is untouched, so
+   * `restoreSurface` re-renders everything from it.
+   */
+  releaseSurface(): void {
+    const canvas = this.config.host.querySelector<HTMLCanvasElement>("canvas");
+    if (!canvas || this.surfaceReleased) return;
+    this.surfaceReleased = true;
+    // The renderer would size the canvas again on its next frame (a blinking cursor is enough), so its drawing
+    // calls are silenced until the surface is restored.
+    const renderer = this.ghostty.renderer as unknown as Record<string, unknown> | undefined;
+    if (renderer) {
+      this.silenced = {};
+      for (const name of ["render", "renderLine", "renderCursor", "resize"]) {
+        const original = renderer[name];
+        if (typeof original !== "function") continue;
+        this.silenced[name] = original;
+        renderer[name] = () => undefined;
+      }
+    }
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+
+  /** Gives the canvas its size back and draws the whole screen again from the terminal state. */
+  restoreSurface(): void {
+    const renderer = this.ghostty.renderer;
+    if (!renderer || !this.surfaceReleased || this.closed) return;
+    this.surfaceReleased = false;
+    const target = renderer as unknown as Record<string, unknown>;
+    for (const [name, original] of Object.entries(this.silenced ?? {})) target[name] = original;
+    this.silenced = undefined;
+    renderer.resize(this.terminal.cols, this.terminal.rows);
+    this.repaintAll();
+  }
+
+  private surfaceReleased = false;
+  private silenced: Record<string, unknown> | undefined;
+
   private repaintAll(): void {
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
