@@ -295,8 +295,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ...(options.addHostPrototype ? [
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
-    { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
     ...(options.addHostPrototype ? [
+      { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
       // The hint carries the aliases, so "version", "build" and "commit" find it.
       { group: "Help", glyph: "i", label: "About infraternal", hint: "version · build · commit", action: "settings:about" },
     ] : []),
@@ -518,7 +518,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       setPalette(palette.hidden, "keyboard");
       return;
     }
-    if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isTypingTarget(event.target) && palette.hidden) {
+    if (options.addHostPrototype && event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isTypingTarget(event.target) && palette.hidden) {
       event.preventDefault();
       event.stopPropagation();
       shortcuts.toggle();
