@@ -18,6 +18,11 @@ const INPUT_FRAME_LIMIT = 16 * 1024;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
+/** The family declared in style.css; the fallback is metric-matched so a late face moves nothing. */
+const TERMINAL_FONT_NAME = "Maple Mono NF";
+const TERMINAL_FONT_FAMILY = `"${TERMINAL_FONT_NAME}", "Maple Mono NF Fallback", ui-monospace, monospace`;
+const TERMINAL_FONT_SIZE_DESKTOP = 14;
+const TERMINAL_FONT_SIZE_TOUCH = 13;
 const THEME_HISTORY_PROBE_ROWS = 10_000;
 const THEME_HISTORY_INDEXED_COLUMN = "theme-history-00000 | ".length;
 const THEME_HISTORY_TRUECOLOR_COLUMN = THEME_HISTORY_INDEXED_COLUMN + 4;
@@ -44,6 +49,7 @@ interface GhosttyActivityControls {
     renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
     renderCursor(x: number, y: number, line: unknown[] | null): void;
     naturalCellWidth?: number;
+    ctx?: CanvasRenderingContext2D;
     devicePixelRatio?: number;
     theme?: { foreground?: string; cursor?: string };
     render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown, scrollbarOpacity?: number): void;
@@ -210,6 +216,7 @@ export class TerminalClient {
   private sessionId: Uint8Array | undefined;
   private retryTimer = 0;
   private retryAttempt = 0;
+  private symbolFaceRequested = false;
   private outputWriteInFlight = false;
   private outputWriteLength = 0;
   private snapshotWriteInFlight = false;
@@ -296,13 +303,17 @@ export class TerminalClient {
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
   }
 
-  /** Loads Geist and the WASM terminal once, then opens the one-session client. */
+  /**
+   * Loads the regular Maple Mono NF face and the WASM terminal once, then opens the
+   * one-session client. Only the regular face gates the first paint, because the cell
+   * grid is measured from it; italic, bold and Nerd Font faces load afterwards.
+   */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
-    await document.fonts.load('14px "Geist Mono"');
+    await document.fonts.load(`${TERMINAL_FONT_SIZE_DESKTOP}px "${TERMINAL_FONT_NAME}"`);
     await init();
     const terminal = new Terminal({
-      fontFamily: '"Geist Mono", ui-monospace, monospace',
-      fontSize: matchMedia("(pointer: coarse)").matches ? 13 : 14,
+      fontFamily: TERMINAL_FONT_FAMILY,
+      fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
       cursorStyle: "bar",
       scrollback: config.scrollbackLimit ?? 10_000,
@@ -316,6 +327,8 @@ export class TerminalClient {
     });
     const client = new TerminalClient(config, terminal);
     client.remeasureFont();
+    client.keepLigaturesOff();
+    client.loadStyledFaces();
     return client;
   }
 
@@ -950,6 +963,7 @@ export class TerminalClient {
       this.snapshotWriteInFlight = true;
       this.prediction?.resetForSnapshot();
       this.terminal.reset();
+      this.requestSymbolsIfNeeded(snapshot.bytes);
       this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
       this.terminal.write(snapshot.bytes, () => {
         const callbackAt = performance.now();
@@ -976,6 +990,7 @@ export class TerminalClient {
       }
       this.outputWriteInFlight = true;
       this.outputWriteLength = region.byteLength;
+      this.requestSymbolsIfNeeded(region);
       const writeSequence = this.lastOutSeq;
       this.traceRange(writeSequence, region.byteLength, "termWrite", performance.now());
       this.terminal.write(region, () => {
@@ -1051,6 +1066,77 @@ export class TerminalClient {
       naturalWidth: this.ghostty.renderer?.naturalCellWidth ?? metrics.width,
       baseline: metrics.baseline,
     };
+  }
+
+  /**
+   * Terminal ligatures stay off, on purpose (D175, measured in test/font-maple.spec.ts).
+   *
+   * The renderer draws a run of plain ASCII cells with one fillText and a canvas
+   * letterSpacing that stretches the font's natural advance onto the device-pixel cell
+   * (cell = round(advance x dpr) / dpr). Chromium turns Maple Mono's contextual
+   * ligatures off whenever letterSpacing is non-zero, and the spacing is zero only when
+   * the natural advance already equals the cell. So with the default `auto` text
+   * rendering the same text would show ligatures on one display and not on another,
+   * and a colour or style change would split them mid-sequence. Rather than ship that,
+   * choose "optimizeSpeed", which disables ligatures and kerning in every case and
+   * leaves every glyph exactly on its cell.
+   *
+   * A canvas resize resets the context's state, so the mode is applied at the start of
+   * every render instead of once.
+   */
+  private keepLigaturesOff(): void {
+    const renderer = this.ghostty.renderer;
+    const context = renderer?.ctx;
+    if (!renderer || !context) return;
+    const render = renderer.render.bind(renderer);
+    renderer.render = (...args) => {
+      context.textRendering = "optimizeSpeed";
+      render(...args);
+    };
+  }
+
+  /**
+   * Canvas text never waits for a web font: a face that is not loaded yet is drawn with
+   * the fallback and is not repainted by the browser. So every face the renderer can ask
+   * for is loaded here, and the whole screen is repainted once each arrives.
+   * Italic and bold cells are drawn one cell at a time, so they stay on the grid.
+   */
+  private loadStyledFaces(): void {
+    const size = this.terminal.options.fontSize ?? TERMINAL_FONT_SIZE_DESKTOP;
+    const load = (): void => {
+      void Promise.all([
+        document.fonts.load(`italic ${size}px "${TERMINAL_FONT_NAME}"`),
+        document.fonts.load(`600 ${size}px "${TERMINAL_FONT_NAME}"`),
+        document.fonts.load(`italic 600 ${size}px "${TERMINAL_FONT_NAME}"`),
+      ]).then(() => this.repaintAll(), () => undefined);
+    };
+    // Off the critical path: the first prompt must not wait behind these downloads.
+    // Safari has no requestIdleCallback; the lib types claim it always exists, so widen it.
+    const idle = (window as { requestIdleCallback?: Window["requestIdleCallback"] }).requestIdleCallback;
+    if (idle) idle.call(window, load, { timeout: 3000 });
+    else window.setTimeout(load, 1000);
+  }
+
+  /**
+   * Fetches the Nerd Font symbol face the first time output holds a private-use code
+   * point. In UTF-8 the private-use area U+E000..U+F8FF starts with 0xEE or 0xEF, and
+   * Uint8Array.indexOf scans natively, so a screen without prompt icons never pays the
+   * download and the check costs next to nothing per chunk.
+   */
+  private requestSymbolsIfNeeded(bytes: Uint8Array): void {
+    if (this.symbolFaceRequested) return;
+    if (bytes.indexOf(0xee) < 0 && bytes.indexOf(0xef) < 0) return;
+    this.symbolFaceRequested = true;
+    const size = this.terminal.options.fontSize ?? TERMINAL_FONT_SIZE_DESKTOP;
+    void document.fonts.load(`${size}px "${TERMINAL_FONT_NAME}"`, "\ue0b0\uf015\ue718")
+      .then(() => this.repaintAll(), () => undefined);
+  }
+
+  private repaintAll(): void {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer || this.closed) return;
+    renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
   }
 
   /** Rebuilds backing dimensions from the loaded web font before the first frame. */

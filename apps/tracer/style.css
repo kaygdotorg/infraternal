@@ -1,28 +1,122 @@
 /** Base dark shell and full viewport terminal surface for the tracer. */
+/* Maple Mono NF, self-hosted and subset by fonts/subset.sh (SIL OFL 1.1, fonts/OFL-LICENSE.txt).
+   Each face's unicode-range must match that script. The Nerd Font symbols are their own face so
+   pages that never draw a prompt icon never fetch them; the terminal loads them on demand.
+   The browser keeps one font face per weight/style combination and picks a single combination
+   per request, so the symbols are declared once for each of the combinations above (one file,
+   fetched once).
+   Weights: the UI's body weight 450 maps to Regular, 500-550 to Medium, 600 and up to SemiBold. */
 @font-face {
-  /* The terminal waits for its selected face before mount; never paint it with a swapping fallback. */
+  font-family: "Maple Mono NF";
+  src: url("./fonts/MapleMonoNF-Regular.latin.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400 450;
+  font-display: swap;
+  unicode-range: U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+0160-0161,U+0178,U+017D-017E,U+02C6,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-21FF,U+2212,U+2215,U+221A,U+221E,U+2248,U+2260-2265,U+2303,U+2318,U+2325-2326,U+232B,U+238B,U+23CE,U+2500-25FF,U+2713-2717,U+2800-28FF;
+}
+@font-face {
+  font-family: "Maple Mono NF";
+  src: url("./fonts/MapleMonoNF-Medium.latin.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 500 550;
+  font-display: swap;
+  unicode-range: U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+0160-0161,U+0178,U+017D-017E,U+02C6,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-21FF,U+2212,U+2215,U+221A,U+221E,U+2248,U+2260-2265,U+2303,U+2318,U+2325-2326,U+232B,U+238B,U+23CE,U+2500-25FF,U+2713-2717,U+2800-28FF;
+}
+@font-face {
+  font-family: "Maple Mono NF";
+  src: url("./fonts/MapleMonoNF-SemiBold.latin.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 600 900;
+  font-display: swap;
+  unicode-range: U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+0160-0161,U+0178,U+017D-017E,U+02C6,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-21FF,U+2212,U+2215,U+221A,U+221E,U+2248,U+2260-2265,U+2303,U+2318,U+2325-2326,U+232B,U+238B,U+23CE,U+2500-25FF,U+2713-2717,U+2800-28FF;
+}
+@font-face {
+  font-family: "Maple Mono NF";
+  src: url("./fonts/MapleMonoNF-Italic.latin.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 400 450;
+  font-display: swap;
+  unicode-range: U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+0160-0161,U+0178,U+017D-017E,U+02C6,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-21FF,U+2212,U+2215,U+221A,U+221E,U+2248,U+2260-2265,U+2303,U+2318,U+2325-2326,U+232B,U+238B,U+23CE,U+2500-25FF,U+2713-2717,U+2800-28FF;
+}
+@font-face {
+  font-family: "Maple Mono NF";
+  src: url("./fonts/MapleMonoNF-SemiBoldItalic.latin.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 500 900;
+  font-display: swap;
+  unicode-range: U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+0160-0161,U+0178,U+017D-017E,U+02C6,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-21FF,U+2212,U+2215,U+221A,U+221E,U+2248,U+2260-2265,U+2303,U+2318,U+2325-2326,U+232B,U+238B,U+23CE,U+2500-25FF,U+2713-2717,U+2800-28FF;
+}
+@font-face {
+  font-family: "Maple Mono NF";
+  src: url("./fonts/MapleMonoNF-symbols.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400 450;
+  font-display: swap;
+  unicode-range: U+E000-E00A,U+E0A0-E0D7,U+E5FA-E6B7,U+E700-E7C5,U+F000-F2E0,U+F300-F381,U+F400-F532;
+}
+@font-face {
+  font-family: "Maple Mono NF";
+  src: url("./fonts/MapleMonoNF-symbols.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 500 550;
+  font-display: swap;
+  unicode-range: U+E000-E00A,U+E0A0-E0D7,U+E5FA-E6B7,U+E700-E7C5,U+F000-F2E0,U+F300-F381,U+F400-F532;
+}
+@font-face {
+  font-family: "Maple Mono NF";
+  src: url("./fonts/MapleMonoNF-symbols.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 600 900;
+  font-display: swap;
+  unicode-range: U+E000-E00A,U+E0A0-E0D7,U+E5FA-E6B7,U+E700-E7C5,U+F000-F2E0,U+F300-F381,U+F400-F532;
+}
+@font-face {
+  font-family: "Maple Mono NF";
+  src: url("./fonts/MapleMonoNF-symbols.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 400 450;
+  font-display: swap;
+  unicode-range: U+E000-E00A,U+E0A0-E0D7,U+E5FA-E6B7,U+E700-E7C5,U+F000-F2E0,U+F300-F381,U+F400-F532;
+}
+@font-face {
+  font-family: "Maple Mono NF";
+  src: url("./fonts/MapleMonoNF-symbols.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 500 900;
+  font-display: swap;
+  unicode-range: U+E000-E00A,U+E0A0-E0D7,U+E5FA-E6B7,U+E700-E7C5,U+F000-F2E0,U+F300-F381,U+F400-F532;
+}
+/* Metric-compatible stand-in while the web font loads (font-display: swap): a local monospace
+   scaled to Maple's 0.6 em advance and 1.02/0.30 em ascent/descent, so the swap moves no line. */
+@font-face {
+  font-family: "Maple Mono NF Fallback";
+  src: local("Menlo"), local("DejaVu Sans Mono"), local("Liberation Mono"), local("Cousine");
+  size-adjust: 100%;
+  ascent-override: 102%;
+  descent-override: 30%;
+  line-gap-override: 0%;
+}
+@font-face {
   font-family: "Geist Sans";
   src: url("./fonts/Geist-Variable.woff2") format("woff2");
   font-style: normal;
   font-weight: 100 900;
   font-display: block;
 }
-@font-face {
-  font-family: "Geist Mono";
-  src: url("./fonts/GeistMono-Variable.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 100 900;
-  font-display: block;
-}
 
 :root {
+  --font-maple: "Maple Mono NF", "Maple Mono NF Fallback", ui-monospace, monospace;
   color-scheme: dark;
-  font-family: "Geist Mono", ui-monospace, monospace;
+  font-family: var(--font-maple);
   /* Auth tooltips remain monospace until the terminal explicitly selects its UI face. */
-  --font-ui: "Geist Mono", ui-monospace, monospace;
+  --font-ui: var(--font-maple);
   background: #101113;
   color: #e6e7e9;
   font-synthesis: none;
+  /* Maple Mono ligatures are contextual alternates (calt) that keep every glyph on its 0.6 em cell.
+     Chrome drops them when letter-spacing is non-zero, so ligature-heavy text must not be tracked. */
+  font-variant-ligatures: contextual common-ligatures;
+  font-feature-settings: "calt" 1, "liga" 1;
   text-size-adjust: 100%;
   -webkit-text-size-adjust: 100%;
   touch-action: pan-x pan-y;
@@ -83,7 +177,7 @@ button { color: inherit; }
   border-radius: 9px;
   background: #191a1d;
   color: #f2f3f5;
-  font: 450 15px/1.8 "Geist Mono", ui-monospace, monospace;
+  font: 450 15px/1.8 var(--font-maple);
 }
 .account-copy { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; align-items: center; }
 .account-copy span { color: #a6a8ad; font-size: 12px; }
@@ -227,12 +321,12 @@ button { color: inherit; }
   .access { padding-right: 20px; padding-left: 20px; }
 }
 
-.boot-error { margin: 30vh auto 0; max-width: 28rem; padding: 0 20px; text-align: center; color: #9a9aa2; font: 450 15px/1.5 "Geist Mono", ui-monospace, monospace; }
+.boot-error { margin: 30vh auto 0; max-width: 28rem; padding: 0 20px; text-align: center; color: #9a9aa2; font: 450 15px/1.5 var(--font-maple); }
 
 /* Core terminal shell: one padded pane card keeps the renderer ready for later splits. */
 .terminal-screen {
   --terminal-prediction-opacity: 0.74;
-  --font-mono: "Geist Mono", ui-monospace, monospace;
+  --font-mono: var(--font-maple);
   --r-sm: 8px;
   --r-md: 12px;
   --r-lg: 18px;

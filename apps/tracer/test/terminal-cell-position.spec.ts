@@ -119,7 +119,7 @@ for (const dpr of [1, 2, 3]) {
           }
         }
 
-        context.font = `400 ${metrics.fontSize}px "Geist Mono"`;
+        context.font = `400 ${metrics.fontSize}px "Maple Mono NF"`;
         const advance = context.measureText("M").width;
         return {
           dpr: window.devicePixelRatio,
@@ -132,7 +132,7 @@ for (const dpr of [1, 2, 3]) {
           cellWidth: metrics.cellWidth,
           cellHeight: metrics.cellHeight,
           fontSize: metrics.fontSize,
-          fontLoaded: document.fonts.check('14px "Geist Mono"'),
+          fontLoaded: document.fonts.check('14px "Maple Mono NF"'),
           letterSpacingSupported: typeof context.letterSpacing === "string",
           canvasWidth: canvas.width,
           canvasHeight: canvas.height,
@@ -182,12 +182,15 @@ for (const dpr of [1, 2, 3]) {
       expect(pixels.cursorAccentMinX).toBe(pixels.expectedCursorLeft);
       expect(pixels.cursorAccentMaxX).toBe(pixels.expectedCursorLeft + 2 * dpr - 1);
       expect(pixels.lastMixedM.count).toBeGreaterThan(0);
-      expect(pixels.lastMixedM.maxX).toBe(pixels.expectedCursorLeft - 1);
+      // Ink ends at or just inside the cell edge: a glyph's right side bearing may leave up to one CSS pixel.
+      expect(pixels.lastMixedM.maxX).toBeLessThanOrEqual(pixels.expectedCursorLeft - 1);
+      expect(pixels.lastMixedM.maxX).toBeGreaterThanOrEqual(pixels.expectedCursorLeft - 1 - dpr);
       expect(pixels.cjk.count).toBeGreaterThan(0);
       expect(pixels.emoji.count).toBeGreaterThan(0);
       expect(pixels.combiningMark.count).toBeGreaterThan(0);
       expect(pixels.combiningMark.maxX).toBeLessThan(pixels.expectedCursorLeft);
-      expect(pixels.barRightEdges.every((edge) => edge === pixels.expectedCursorLeft - 1)).toBe(true);
+      // A narrow bar glyph sits inside its cell, so its edge is compared across rows (drift), not with the cell edge.
+      expect(pixels.barRightEdges.every((edge) => edge < pixels.expectedCursorLeft && edge >= pixels.expectedCursorLeft - 1 - Math.ceil(pixels.cellWidth * dpr))).toBe(true);
       expect(Math.max(...pixels.barRightEdges) - Math.min(...pixels.barRightEdges)).toBeLessThanOrEqual(0.5);
     } finally {
       await context.close();
