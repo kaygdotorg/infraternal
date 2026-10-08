@@ -161,7 +161,7 @@ function installForegroundListener(): void {
  * test double hands the session cookie out on that load. After the double restarts, a tab that
  * was open lands here instead of on a dead "Could not reach the server".
  */
-const previewProto = (): boolean => { const q = new URLSearchParams(location.search); return q.get("mock") === "1" && !!q.get("proto"); };
+const previewProto = (): boolean => { if (!__CLUSTERS_PREVIEW__) return false; const q = new URLSearchParams(location.search); return q.get("mock") === "1" && !!q.get("proto"); };
 let healTimer = 0;
 function healPreview(): void {
   if (!previewProto()) return;
