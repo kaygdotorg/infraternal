@@ -20,7 +20,7 @@
  * - saved key / password: a credential minted at `POST /v1/bootstrap/credential` and passed in `start`
  * - `needs-key*` / nix-cache: every automatic method refused (auth + choose_method) until a credential is given
  * - `refused*`: one refusal without `choose_method`; the retry signs in
- * - o1 and `newkey*`: unknown host key (host-key + fingerprint) until trusted at `POST /v1/bootstrap/host-key`
+ * - `newkey*`: unknown host key (host-key + fingerprint) until trusted at `POST /v1/bootstrap/host-key`
  * - `unsupported*`: reported after sign-in, never succeeds; `broken*`: install fails, the retry works
  * HTTP side (`handleBootstrapHttp`): the proposed endpoints of #87 (ssh-key, discovery, credential, host-key,
  * install-command) plus `/__mock/bootstrap/*` switches the specs use to reach empty and error states.
@@ -133,7 +133,7 @@ function failureOf(target: Target): Failure | undefined {
   const host = target.fixture;
   const name = target.name;
   if (/^unsupported/.test(name)) return { phase: 0, beforeLogin: false, kind: "unsupported", message: "This host does not run systemd as a user service.", evidence: "init: openrc\nuser systemd: unavailable" };
-  if ((name === "o1" || /^newkey/.test(name)) && !trusted.has(name)) {
+  if (/^newkey/.test(name) && !trusted.has(name)) {
     return { phase: 0, beforeLogin: true, kind: "host-key", message: "The SSH host key is not trusted.", evidence: "Checking SSH and host support.", fingerprints: [fingerprintOf(name)] };
   }
   if (target.fixed) return undefined;
