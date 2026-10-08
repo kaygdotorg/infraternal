@@ -111,7 +111,7 @@ impl Session {
     }
     fn command(&self) -> Command {
         let mut command = Command::new(&self.ssh);
-        // Force these after config loading: host keys cannot be accepted or rewritten;
+        // Command-line precedence forces these over config: host keys cannot be accepted or rewritten;
         // forwarding/control sockets from server config must not outlive bootstrap.
         command.args([
             "-T",
@@ -142,6 +142,8 @@ impl Session {
             "-o",
             "ControlPersist=no",
             "-o",
+            "ForkAfterAuthentication=no",
+            "-o",
             "ConnectionAttempts=1",
             "-o",
             "ConnectTimeout=10",
@@ -165,7 +167,9 @@ async fn effective_destination(
     destination: &Destination,
 ) -> Result<Destination, Failure> {
     let mut configuration = Command::new(ssh);
-    configuration.args(["-G", "-l"]).arg(destination.user());
+    configuration
+        .args(["-G", "-o", "ForkAfterAuthentication=no", "-l"])
+        .arg(destination.user());
     if let Some(port) = destination.port() {
         configuration.arg("-p").arg(port.to_string());
     }
