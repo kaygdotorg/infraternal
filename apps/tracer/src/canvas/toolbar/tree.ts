@@ -14,7 +14,7 @@ import type { BranchSection } from "../../../../../packages/ui/src/branched";
 import type { Ctx } from "../context";
 import type { ViewId } from "../model/types";
 import { coarse } from "../dom";
-import { byFrecency, type SessionRecord } from "../sessions/inventory";
+import { onDemand } from "../../on-demand";
 
 export interface TreeModule {
   /** Rebuilds the sidebar tree from the views (coalesced). */
@@ -25,17 +25,13 @@ export interface TreeModule {
 export function createTree(cx: Ctx): TreeModule {
   const { core, stage, signal, views, state } = cx;
   const inv = cx.adapters.inventory;
-  const sessionLeaf = (host: string, s: SessionRecord): BranchSection["leaves"][number] => {
-    const mark = s.state === "exited" ? ((s.exit?.code ?? 0) !== 0 ? "fail" : "ok") : s.activity;
-    return { id: `s:${host}/${s.id}`, label: s.name, state: s.state, ...(mark ? { mark } : {}), ...(s.state === "detached" ? { meta: "detached" } : s.state === "exited" ? { meta: String(s.exit?.code ?? 0) } : {}) };
-  };
-  /** The Console view's items: each host's name, then its sessions, whether or not they have a window. */
-  const consoleLeaves = (): BranchSection["leaves"] => {
-    const allowed = new Set(cx.adapters.sessions.hosts().map((h) => h.name));
-    return inv!.hosts().filter((h) => allowed.has(h)).flatMap((host) => [
-      { id: `h:${host}`, label: host, heading: true },
-      ...[...inv!.list(host)].sort(byFrecency).map((s) => sessionLeaf(host, s)),
-    ]);
+  // The session list (markers, marks, hosts as captions) loads the first time the sidebar shows it (D188).
+  let leavesOf: ((cx: Ctx) => BranchSection["leaves"]) | undefined;
+  let loadingLeaves = false;
+  const loadLeaves = (): void => {
+    if (leavesOf || loadingLeaves) return;
+    loadingLeaves = true;
+    void onDemand(() => import("./session-tree.on-demand")).then((m) => { leavesOf = m.consoleLeaves; loadingLeaves = false; render(); }, () => { loadingLeaves = false; });
   };
   const viewSections = (): BranchSection[] => [...views.values()].map((c) => {
     const graph = c.view.layout === "graph";
@@ -52,8 +48,10 @@ export function createTree(cx: Ctx): TreeModule {
   const sections = (): BranchSection[] => {
     const all = viewSections();
     if (!inv || inv.status() !== "ready") return all;
+    if (!leavesOf) { loadLeaves(); return all; }
     // Console lists the sessions of its hosts, not only the ones that have a window (D178).
-    return all.map((sec) => (sec.id === "view:console" ? { ...sec, meta: `${consoleLeaves().filter((l) => !l.heading).length}`, leaves: consoleLeaves() } : sec));
+    const leaves = leavesOf(cx);
+    return all.map((sec) => (sec.id === "view:console" ? { ...sec, meta: `${leaves.filter((l) => !l.heading).length}`, leaves } : sec));
   };
   const current = (): string => {
     const w = state.activeWin;

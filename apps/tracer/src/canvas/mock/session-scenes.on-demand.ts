@@ -1,10 +1,10 @@
 /**
  * The ten sessions scenes of the mockup (⌘K "Mockup: sessions scene N", or `?sessions=N` in the URL): each puts the
  * canvas in one state of the session UI (D121, D127, D178, D183) so it can be looked at, clicked and captured.
+ * On demand (D188): `index.ts` lists the scenes from `session-scene-list.ts` and loads this file when one runs.
  * Test-double scaffolding only: the product never imports this. Every scene starts from the inventory as served
  * and a freshly built Console, so scenes can be run one after another.
  */
-import type { PaletteEntry } from "../../core-screen";
 import type { Ctx, WinRec } from "../context";
 import { reduced } from "../dom";
 import type { MockInventory } from "./inventory";
@@ -12,7 +12,6 @@ import type { MockInventory } from "./inventory";
 interface SceneDef { title: string; hint: string; run(): void | Promise<void> }
 
 export interface SessionScenes {
-  entries(): PaletteEntry[];
   run(n: number): Promise<void>;
   dispose(): void;
 }
@@ -89,7 +88,6 @@ export function installSessionScenes(env: { cx: Ctx; inventory: MockInventory; /
     { title: "Sessions unavailable", hint: "error · Try again", run() { reset(); inventory.force("error"); manager("build-01"); } },
   ];
   return {
-    entries: () => scenes.map((scene, i) => ({ group: "Mockup", glyph: "▷", label: `Mockup: sessions scene ${i + 1}`, hint: scene.hint, action: `proto:sessions-scene:${i + 1}` })),
     async run(n) {
       const scene = scenes[n - 1];
       if (!scene) return;

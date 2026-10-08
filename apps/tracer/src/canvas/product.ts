@@ -54,8 +54,6 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
   const canvas = createCanvas(core, {
     adapters: { sessions, inventory, store, settings: { sections: [], render: () => undefined } },
-  const canvas = createCanvas(core, {
-    adapters: { sessions, store, settings: { sections: [], render: () => undefined } },
     float: false,
     persisted: (id) => id === "console",
   });

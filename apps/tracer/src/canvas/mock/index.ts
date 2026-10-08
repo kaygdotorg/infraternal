@@ -19,7 +19,9 @@ import { CONTAINERS, INITIAL_GRANTS, buildViews, type Role } from "./data";
 import { DEFAULT_SESSION, createMockInventory } from "./inventory";
 import { createMockMesh } from "./mesh";
 import { createMockSessions } from "./sessions";
-import { installSessionScenes } from "./session-scenes";
+import { onDemand } from "../../on-demand";
+import { SESSION_SCENES } from "./session-scene-list";
+import type { SessionScenes } from "./session-scenes.on-demand";
 import { createMockSettings } from "./settings";
 import { createMockSharing } from "./shares";
 import { createMockWorld } from "./world";
@@ -129,7 +131,16 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   };
 
   // ---- palette rows and actions that exist only in the mockup ---------------------------------------
-  const sessionScenes = installSessionScenes({ cx, inventory, rebuild: () => { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("console", true); } });
+  // The scenes' code loads the first time one runs.
+  let scenesLoaded: Promise<SessionScenes> | undefined;
+  const sessionScenes = {
+    run: async (n: number): Promise<void> => {
+      scenesLoaded ??= onDemand(() => import("./session-scenes.on-demand")).then((m) => m.installSessionScenes({ cx, inventory, rebuild: () => { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("console", true); } }));
+      await (await scenesLoaded).run(n);
+    },
+    entries: (): PaletteEntry[] => SESSION_SCENES.map((scene, i) => ({ group: "Mockup", glyph: "▷", label: `Mockup: sessions scene ${i + 1}`, hint: scene.hint, action: `proto:sessions-scene:${i + 1}` })),
+    dispose: (): void => { void scenesLoaded?.then((loaded) => loaded.dispose()); },
+  };
   const removeProvider = core.addPaletteProvider(() => {
     const out: PaletteEntry[] = [...sessionScenes.entries()];
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));

@@ -1082,8 +1082,8 @@ test("window header actions are one pill: as tall as the title pill, on its line
     return { aTop: a.top, aH: a.height, tTop: t.top, tH: t.height, buttons, gaps, tip: [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => b.dataset.tip) };
   }, id);
   const d = await geometry(page, "w-nix-cache");
-  expect(d.buttons).toEqual(["split-right", "split-down", "close"]);
-  expect(d.tip).toEqual(["Split right", "Split down", "Close"]);
+  expect(d.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);
+  expect(d.tip).toEqual(["Split right", "Split down", "Sessions", "Close"]);
   expect(Math.abs(d.aH - d.tH)).toBeLessThan(0.5);
   expect(Math.abs(d.aTop - d.tTop)).toBeLessThan(0.5);
   expect(Math.max(...d.gaps) - Math.min(...d.gaps)).toBeLessThan(0.5); // equal spacing
@@ -1092,7 +1092,7 @@ test("window header actions are one pill: as tall as the title pill, on its line
   try {
     const p = t.page;
     const pd = await geometry(p, "w-build-01");
-    expect(pd.buttons).toEqual(["split-right", "split-down", "close"]);
+    expect(pd.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);
     expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(0.5);
     expect(Math.abs(pd.aTop - pd.tTop)).toBeLessThan(0.5);
     const hits = await p.evaluate(() => {
@@ -1104,7 +1104,7 @@ test("window header actions are one pill: as tall as the title pill, on its line
         return at(cx - 21, cy) && at(cx + 21, cy) && at(cx, cy - 21) && at(cx, cy + 21);
       });
     });
-    expect(hits).toEqual([true, true, true]);
+    expect(hits).toEqual([true, true, true, true]);
   } finally { await t.close(); }
 });
 

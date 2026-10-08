@@ -16,6 +16,10 @@
  * session name slides in and the frame lights up for a moment (opacity only); a removed row fades and the rows
  * below close the gap by transform. Transform and opacity only, interruptible, nothing left transformed at rest.
  *
+ * This file is on demand (D188): it loads the first time someone opens the manager, shows an exited session or
+ * a session another device sized. The tiny hooks that stay on the critical and deferred paths are in
+ * `session-hooks.ts`, which owns the inventory's change listener and `windowFor`.
+ *
  * The inventory is the source of truth: every change it reports repaints the windows, the tree and an open
  * manager. This module never changes a session itself except through the inventory's verbs.
  */
@@ -31,15 +35,14 @@ import { byFrecency, type SessionRecord, type SessionState } from "../sessions/i
 import { isTerminal } from "../views/body";
 import { SESSION_ICON } from "../views/icons";
 
-export interface SessionUi {
-  /** Brings a window's own surfaces (final-screen strip, size badge, status dot) in line with its session. */
+/** What the on-demand half does; `session-hooks.ts` calls it once it has loaded. */
+export interface SessionUiPart {
   paint(rec: WinRec): void;
   toggleManager(rec: WinRec, anchor: HTMLElement, source: PopoverSource): void;
   closeManager(): void;
-  /** A window was pointed at another session: its name slides in and its frame lights up. */
   arrived(rec: WinRec): void;
-  /** The window whose session is `id` on `host`, in any view. */
-  windowFor(host: string, id: string): WinRec | undefined;
+  /** Repaints an open manager (the inventory changed). */
+  render(): void;
   dispose(): void;
 }
 
@@ -54,14 +57,13 @@ const button = (cls: string, label: string, paths: string): HTMLButtonElement =>
   return node;
 };
 
-export function createSessionUi(cx: Ctx): SessionUi {
+export function createSessionUi(cx: Ctx): SessionUiPart {
   const inventory = cx.adapters.inventory!;
-  const { stage, signal, views } = cx;
+  const { stage, signal } = cx;
   let manager: Manager | undefined;
   let confirm: ConfirmTipController | undefined;
 
-  const allWindows = (): WinRec[] => [...views.values()].flatMap((c) => [...c.wins.values()]);
-  const windowFor = (host: string, id: string): WinRec | undefined => allWindows().find((w) => isTerminal(w) && w.model.host === host && w.model.sessionId === id);
+  const windowFor = (host: string, id: string): WinRec | undefined => cx.sessionUi?.windowFor(host, id);
   const recordOf = (rec: WinRec): SessionRecord | undefined => (rec.model.sessionId ? inventory.get(rec.model.host, rec.model.sessionId) : undefined);
 
   // ---- the window's own surfaces -----------------------------------------------------------------
@@ -474,15 +476,6 @@ export function createSessionUi(cx: Ctx): SessionUi {
     };
   }
 
-  // ---- one refresh after any change ---------------------------------------------------------------
-  const off = inventory.onChange(() => {
-    if (signal.aborted) return;
-    for (const rec of allWindows()) if (isTerminal(rec)) { cx.win.syncSession(rec); paint(rec); }
-    cx.tree.render();
-    manager?.render();
-  });
-  signal.addEventListener("abort", () => off(), { once: true });
-
   return {
     paint,
     toggleManager(rec, anchor, source) {
@@ -493,7 +486,7 @@ export function createSessionUi(cx: Ctx): SessionUi {
     },
     closeManager() { manager?.close("keyboard"); },
     arrived(rec) { slideLabel(rec); flash(rec); },
-    windowFor,
-    dispose() { manager?.close("keyboard"); confirm?.close(false); off(); },
+    render() { manager?.render(); },
+    dispose() { manager?.close("keyboard"); confirm?.close(false); },
   };
 }
