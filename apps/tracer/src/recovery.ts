@@ -12,6 +12,14 @@ import { tick, springCheckbox } from "../../../packages/ui/src/tick";
 const dictionary = new Set(wordlist);
 const titles = ["Use your recovery key", "Recovery started", "Create a new passkey", "Save your new recovery key"];
 
+/** Words are derived with Web Crypto and the passkey needs WebAuthn; browsers hide both on plain http
+ * (anything but https or localhost). Without them no step can work, so say so instead of failing
+ * with a generic message. */
+export const SECURE_CONNECTION_MESSAGE = "Recovery needs a secure connection (https)";
+export function secureConnection(): boolean {
+  return window.isSecureContext && typeof crypto !== "undefined" && crypto.subtle !== undefined;
+}
+
 /** Reuses auth card, pane motion, stepper ticks and saved-word controls from onboarding. */
 export function mountRecovery(host: HTMLElement, back: () => void,
   complete: (userId: string, firstSetup: boolean, displayName?: string, instant?: boolean) => void,
@@ -155,6 +163,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     void advance();
   });
   async function advance(): Promise<void> {
+    if ((step === 0 || step === 2) && !secureConnection()) { error.textContent = SECURE_CONNECTION_MESSAGE; return; }
     busy = true; update(); markMotion(true); error.textContent = "";
     const waiting = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
     try {
