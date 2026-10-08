@@ -14,6 +14,8 @@
  *
  * The cost is linear in the node count (a sort and one pass), so 1,000 nodes lay out in a few milliseconds.
  */
+import { tagNodeId } from "./source";
+
 export interface LayoutHost { id: string; tags: readonly string[] }
 export interface LayoutInput {
   /** Hosts, in any order. */
@@ -30,7 +32,6 @@ export interface Layout { nodes: Placed[]; size: { w: number; h: number }; clust
 
 const GAP_X = 24, GAP_Y = 24, FRAME = 28, EDGE = 30, SMALL_HOSTS = 8, UNTAGGED = "untagged";
 const byName = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
-export const tagNodeId = (tag: string): string => `tag:${tag}`;
 
 export function layoutMesh(input: LayoutInput): Layout {
   const { nodeW, nodeH, pins } = input;

@@ -20,11 +20,9 @@
  * - Positions are the canvas's: the server holds none. Pins arrive from the saved canvas document and leave
  *   through the canvas document (`pin` marks the node; the canvas saves it, D180).
  */
-import type { Metrics } from "../layout/geometry";
-import type { Grant, NodeModel } from "../model/types";
+import type { Grant } from "../model/types";
 import { ACTION, ActionRefused, TOPIC, endpointJson, parseAnswer, parseEvent, parseSnapshot, type MeshTransport, type Snapshot, type WireAccess, type WireGrant, type WireNode } from "./protocol";
-import { layoutMesh, tagNodeId, type Cluster } from "./layout";
-import { grantLabel, type MeshLayout, type MeshSource, type MeshStatus } from "./source";
+import { grantLabel, tagNodeId, type MeshSource, type MeshStatus } from "./source";
 
 export interface MeshApiOptions {
   transport: MeshTransport;
@@ -60,7 +58,6 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   let retryTimer = 0, notifyTimer = 0, refreshTimer = 0, retryStep = 0;
   let notifyQueued = false;
   let inflight = 0, dirty = false, wanted = 0;
-  let cache: { key: string; layout: MeshLayout } | undefined;
   let version = 0;
 
   const notify = (immediate: boolean): void => {
@@ -152,49 +149,6 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   const offReady = transport.onReady(() => { if (skipReady) { skipReady = false; return; } refresh(); });
   if (options.prime) { apply(options.prime); subscribe(); }
 
-  // ---- layout -----------------------------------------------------------------------------------------------------
-  const subOf = (n: WireNode): string => {
-    if (n.state === "offline") return "offline";
-    if (n.state === "behind") return "rules behind";
-    const path = n.path === "relay" ? `via ${n.via ?? "relay"}` : n.path === "direct" ? "direct" : "";
-    const rtt = n.rttMs === undefined ? "" : `${Math.round(n.rttMs)} ms`;
-    return [path, rtt].filter(Boolean).join(" · ") || "online";
-  };
-  const objects = new Map<string, NodeModel>();
-  const layout = (m: Metrics): MeshLayout => {
-    const key = `${version}:${m.nodeW}x${m.nodeH}`;
-    if (cache?.key === key) return cache.layout;
-    const memberOf = new Map<string, string[]>();
-    for (const [tag, members] of Object.entries(tags)) for (const h of members) (memberOf.get(h) ?? memberOf.set(h, []).get(h)!).push(tag);
-    const placed = layoutMesh({
-      hosts: [...nodes.keys()].map((id) => ({ id, tags: memberOf.get(id) ?? [] })),
-      tags: Object.keys(tags),
-      pins: Object.fromEntries(pins),
-      nodeW: m.nodeW, nodeH: m.nodeH,
-    });
-    const out: NodeModel[] = [];
-    for (const p of placed.nodes) {
-      const w = p.kind === "host" ? nodes.get(p.id) : undefined;
-      const members = p.kind === "tag" ? tags[p.id.slice(4)] ?? [] : [];
-      const fields = p.kind === "host" && w
-        ? { label: w.name, detail: w.address ?? (memberOf.get(w.name)?.map((t) => `tag:${t}`).join(", ") || "no tags"), sub: subOf(w), state: w.state, ...(w.os ? { os: w.os } : {}) }
-        : { label: p.id, detail: `${members.length} member${members.length === 1 ? "" : "s"}`, sub: members.slice(0, 3).join(", ") };
-      // The same object for the same node, so cards and arrows that hold it follow the new values.
-      let n = objects.get(p.id);
-      if (!n) { n = { id: p.id, kind: p.kind, x: p.x, y: p.y, ...fields } as NodeModel; objects.set(p.id, n); }
-      else { Object.assign(n, fields); n.x = p.x; n.y = p.y; if (!("os" in fields)) delete n.os; if (!("state" in fields)) delete n.state; }
-      if (p.pinned) n.pinned = true; else delete n.pinned;
-      out.push(n);
-    }
-    const live = new Set(placed.nodes.map((p) => p.id));
-    for (const id of [...objects.keys()]) if (!live.has(id)) objects.delete(id);
-    const clusters: Cluster[] = placed.clusters;
-    // With nothing to draw the view keeps a usable size for its loading, empty and error states.
-    const result: MeshLayout = { nodes: out, size: out.length ? placed.size : { w: 880, h: 400 }, clusters };
-    cache = { key, layout: result };
-    return result;
-  };
-
   // ---- edits ------------------------------------------------------------------------------------------------------
   const uniqueName = (base: string, except?: Grant): string => {
     const taken = new Set(grants.filter((g) => g !== except).map((g) => g.name));
@@ -228,7 +182,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   const end = (name: string): Record<string, unknown> | undefined => endpointJson(name, idOf);
 
   const source: MeshSource = {
-    layout,
+    data: () => ({ version, nodes, tags, pins }),
     grants: () => grants,
     tags: () => Object.fromEntries(Object.entries(tags).map(([k, v]) => [tagNodeId(k), v])),
     status: () => status,
@@ -281,7 +235,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       notify(true);
       send(`remove ${grantLabel(grant)}`, ACTION.remove, { name: grant.name }, () => { grants.splice(Math.min(at, grants.length), 0, grant); grantById.set(grant.id, grant); }, () => undefined);
     },
-    pin(id, x, y) { pins.set(id, { x: Math.round(x), y: Math.round(y) }); const n = objects.get(id); if (n) n.pinned = true; },
+    pin(id, x, y) { pins.set(id, { x: Math.round(x), y: Math.round(y) }); },
     onChange(l) { listeners.add(l); return () => { listeners.delete(l); }; },
     onFailure(l) { failures.add(l); return () => { failures.delete(l); }; },
     dispose() { disposed = true; window.clearTimeout(retryTimer); window.clearTimeout(notifyTimer); window.clearTimeout(refreshTimer); offReady(); unsubscribe?.(); listeners.clear(); failures.clear(); },

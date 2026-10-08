@@ -13,9 +13,9 @@
  *   `onFailure`) when the server refuses or the socket drops. The server decides what a person may do.
  * - The source tells the canvas what the person may do (`canView`, `canEdit`); it never decides for the server.
  */
-import type { Metrics } from "../layout/geometry";
 import type { Grant, NodeModel } from "../model/types";
 import type { Cluster } from "./layout";
+import type { WireNode } from "./protocol";
 
 /**
  * Where the data stands. `unavailable`: the server has no Mesh for this person (the view is not offered).
@@ -32,9 +32,21 @@ export interface MeshLayout {
   clusters: Cluster[];
 }
 
+/** What the source knows about the mesh, unlaid: the Mesh view's own code turns it into cards (layout-model.ts). */
+export interface MeshData {
+  /** Changes whenever the mesh does; a cache of anything derived from it is valid while this stays. */
+  version: number;
+  nodes: ReadonlyMap<string, WireNode>;
+  /** Tag name (no prefix) to member host names. */
+  tags: Readonly<Record<string, readonly string[]>>;
+  /** Positions the person pinned. */
+  pins: ReadonlyMap<string, { x: number; y: number }>;
+}
+
+export const tagNodeId = (tag: string): string => `tag:${tag}`;
+
 export interface MeshSource {
-  /** The layout. The same arrays come back until the mesh changes, so callers may keep them. */
-  layout(metrics: Metrics): MeshLayout;
+  data(): MeshData;
   /** The grants, in a stable order. The array and its objects are live: callers read them, never change them. */
   grants(): readonly Grant[];
   /** Tags and the hosts that carry them. */

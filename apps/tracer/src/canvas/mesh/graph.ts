@@ -29,11 +29,11 @@ import type { Ctx, ViewRec, WinRec } from "../context";
 import { el } from "../dom";
 import { createSpinner } from "../../../../../packages/ui/src/spinner";
 import { ICON, lineIcon } from "../views/icons";
-import type { Rect } from "../layout/geometry";
+import type { Metrics, Rect } from "../layout/geometry";
 import type { Grant, NodeModel } from "../model/types";
 import { Arrow } from "./arrows";
 import type { Cluster } from "./layout";
-import { grantLabel, type MeshSource } from "./source";
+import { grantLabel, type MeshLayout, type MeshSource } from "./source";
 
 export interface TopoArrow { grant: Grant; arrow: Arrow; label?: SVGTextElement }
 
@@ -71,7 +71,7 @@ export interface GraphController {
 
 const SMALL = 40, MAX_ARROWS = 240, ARROWS_PER_FRAME = 40, MOUNTS_PER_FRAME = 8, ENTER_CLUSTERS = 0.62, LEAVE_CLUSTERS = 0.7, MAX_CLUSTER_ARROWS = 400;
 
-export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: GraphHooks): GraphController {
+export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (m: Metrics) => MeshLayout, hooks: GraphHooks): GraphController {
   const { camera, state } = cx;
   const cam = camera.cam;
   let level: Level = "cards";
@@ -252,9 +252,15 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
   };
 
   // ---- one pass ----------------------------------------------------------------------------------------------------
-  const pickLevel = (): Level => {
+  /**
+   * The representation changes at rest, or well past the threshold while the camera still moves: a zoom gesture that
+   * crosses the threshold keeps drawing what it has (frames stay frames, cards stay cards) and swaps where it stops,
+   * so no frame of the gesture pays for the swap. A long zoom still gets the right one once it is clearly past.
+   */
+  const pickLevel = (atRest: boolean): Level => {
     if (small()) return "cards";
-    return level === "cards" ? (cam.z < ENTER_CLUSTERS ? "clusters" : "cards") : (cam.z > LEAVE_CLUSTERS ? "cards" : "clusters");
+    const enter = atRest ? ENTER_CLUSTERS : ENTER_CLUSTERS * 0.72, leave = atRest ? LEAVE_CLUSTERS : LEAVE_CLUSTERS * 1.3;
+    return level === "cards" ? (cam.z < enter ? "clusters" : "cards") : (cam.z > leave ? "cards" : "clusters");
   };
 
   const passCards = (full: boolean): void => {
@@ -331,7 +337,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
   };
 
   const run = (force: boolean): void => {
-    const next = pickLevel();
+    const next = pickLevel(force);
     const key = `${dataKey}|${next}|${Math.round(cam.cx / 48)}|${Math.round(cam.cy / 48)}|${cam.z.toFixed(3)}`;
     if (!force && key === lastKey && !needsAnotherFrame) return;
     lastKey = key;
@@ -418,7 +424,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
 
   // ---- data ---------------------------------------------------------------------------------------------------------
   const sync = (): void => {
-    const layout = source.layout(state.metrics);
+    const layout = layoutOf(state.metrics);
     nodes = new Map(layout.nodes.map((n) => [n.id, n]));
     clusters = layout.clusters;
     clusterOf = new Map();

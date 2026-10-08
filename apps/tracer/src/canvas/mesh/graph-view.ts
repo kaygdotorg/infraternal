@@ -1,0 +1,319 @@
+/**
+ * The Mesh view's own code: its node cards, the grant arrows and their editing (drag a head or tail, snap, confirm,
+ * drop on empty canvas to remove), the layout and the levels of detail (graph.ts). Loaded on demand
+ * (`mesh.on-demand.ts`): the first time the Mesh view is on screen. The rest of the canvas, which only needs to know
+ * whether to offer the view and to draw reach arrows between terminals, lives in index.ts.
+ *
+ * Arrow geometry is the only per-frame geometry of the graph, and it is redrawn on the next animation frame after the
+ * camera moves (`cull`, called by index.ts from the context's coalesced invalidate).
+ */
+import { Spring } from "../../../../../packages/ui/src/spring";
+import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
+import { createWindowCard } from "../../../../../packages/ui/src/window-card";
+import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
+import { clamp } from "../camera/camera";
+import type { Ctx, ViewRec, WinRec } from "../context";
+import { SVG_NS, el } from "../dom";
+import { contentSize, type Pt, type Rect } from "../layout/geometry";
+import type { Grant, NodeModel, WindowModel } from "../model/types";
+import { ICON, lineIcon } from "../views/icons";
+import { Arrow, DragArrow, anchors } from "./arrows";
+import { createGraph, type GraphController, type TopoArrow } from "./graph";
+import { createLayoutModel } from "./layout-model";
+import { grantLabel, type MeshSource } from "./source";
+
+export interface GraphViewModule {
+  /** Fills a graph view with its node cards and arrows. */
+  buildGraph(c: ViewRec): void;
+  /** The mesh (or the person's rights) changed: read it again into every graph view. */
+  changed(rightsChanged: boolean): void;
+  /** Re-reads the mesh into one graph view (after an edit made elsewhere in the canvas). */
+  refresh(c: ViewRec): void;
+  /** A grant that was just made: its arrow fades in and its head pulses once. */
+  pulseNew(c: ViewRec, g: Grant): void;
+  /** The camera moved (the next frame after it). */
+  cull(): void;
+  /** The camera came to rest. */
+  rest(): void;
+  stats(): ({ level: string } & ReturnType<GraphController["stats"]>) | undefined;
+}
+
+export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
+  const { signal, camera, state, views } = cx;
+  const cam = camera.cam;
+  const toWorld = (x: number, y: number): Pt => camera.toWorld(x, y);
+  const toClient = (p: Pt): Pt => camera.toClient(p);
+  const worldRect = (n: Element): Rect => camera.worldRect(n);
+  const layoutOf = createLayoutModel(source);
+  const headSize = (): number => clamp(7 / cam.z, 7, 16);
+  // ---- mesh arrows -----------------------------------------------------------------------------------
+  const nodeRect = (c: ViewRec, id: string): Rect | undefined => {
+    const n = graphOf(c)?.node(id);
+    return n ? { x: n.x, y: n.y, w: state.metrics.nodeW, h: state.metrics.nodeH } : undefined;
+  };
+  /** A grant is shown by its name only: who may reach what ("ops→build-01"), never ports or ranges (D180). */
+  const grantName = grantLabel;
+  /** An arrow for a grant, not yet in the document: the graph module decides which arrows exist. */
+  const makeTopoArrow = (g: Grant): TopoArrow => {
+    const arrow = new Arrow({ ...(g.via ? { dashed: true } : {}), tone: "accent", editable: source.canEdit() });
+    arrow.g.dataset.grant = g.id;
+    arrow.g.dataset.tip = grantName(g); // hover names the grant (warm tooltip); D180: edges carry grant names only
+    const entry: TopoArrow = { grant: g, arrow };
+    if (g.via) {
+      const t = document.createElementNS(SVG_NS, "text");
+      t.setAttribute("class", "cl-arrow-label");
+      t.textContent = `via ${g.via}`;
+      entry.label = t;
+      arrow.g.append(t);
+    }
+    return entry;
+  };
+  /** A grant that was just made: its arrow fades in and its head pulses once. */
+  const pulseNew = (c: ViewRec, g: Grant): void => {
+    const entry = topoOf(c).find((t) => t.grant === g);
+    if (!entry) return;
+    const { arrow } = entry;
+    arrow.g.dataset.fresh = "";
+    requestAnimationFrame(() => requestAnimationFrame(() => arrow.g.removeAttribute("data-fresh")));
+    const pulse = new Spring(1.9, (v) => arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 });
+    pulse.set(1);
+  };
+  const drawTopoArrow = (c: ViewRec, e: TopoArrow): void => {
+    const a = nodeRect(c, e.grant.from), b = nodeRect(c, e.grant.to);
+    if (!a || !b) return;
+    // Arrows that end on the same card fan out along its edge instead of piling onto one point.
+    const lane = graphOf(c)?.lane(e.grant) ?? 0;
+    e.arrow.between(a, b, headSize(), lane * Math.max(1, (headSize() * 1.5) / 14));
+    if (e.label) {
+      const n = anchors(a, b);
+      e.label.setAttribute("x", String((n.p0.x + n.p1.x) / 2));
+      e.label.setAttribute("y", String((n.p0.y + n.p1.y) / 2 - 8));
+      e.label.setAttribute("text-anchor", "middle");
+    }
+  };
+  let lastTopoZ = 0;
+  const redrawMesh = (): void => {
+    const c = views.get("mesh");
+    if (!c) return;
+    graphOf(c)?.rest();
+    if (Math.abs(cam.z - lastTopoZ) / cam.z < 0.04) return;
+    lastTopoZ = cam.z;
+    graphOf(c)?.redraw();
+  };
+
+  const makeNode = (c: ViewRec, n: NodeModel): WinRec => {
+    const m: WindowModel = { id: `n-${n.id}`, kind: "node", host: n.label };
+    const status = n.kind === "tag" ? "none" : n.state === "offline" ? "offline" : n.state === "behind" ? "connecting" : "live";
+    const card = createWindowCard({ id: m.id, title: { host: n.label }, icon: n.kind === "tag" ? lineIcon(ICON.tag) : hostIconMarkup(n.os ?? "unknown", "ui-host-mark"), status, label: `${n.label} node` });
+    const rec: WinRec = { model: m, card, owner: c };
+    card.root.dataset.kind = "node";
+    card.root.style.cssText = `position:absolute;left:0;top:0;width:${state.metrics.nodeW}px;height:${state.metrics.nodeH}px;transform:translate(${n.x}px,${n.y}px)`;
+    const meta = el("div", "cl-node-meta");
+    meta.innerHTML = `<span class="cl-node-detail"></span><span class="cl-node-sub"></span>`;
+    (meta.children[0] as HTMLElement).textContent = n.detail;
+    (meta.children[1] as HTMLElement).textContent = n.sub;
+    card.body.append(meta);
+    wireNode(rec, n);
+    return rec;
+  };
+
+  const wireNode = (rec: WinRec, n: NodeModel): void => {
+    const pill = rec.card.pill;
+    pill.style.touchAction = "none";
+    pill.dataset.grab = "";
+    let d: { id: number; x: number; y: number; nx: number; ny: number } | undefined;
+    pill.addEventListener("pointerdown", (e) => {
+      if (camera.lod === "thumb") return;
+      pill.setPointerCapture(e.pointerId);
+      d = { id: e.pointerId, x: e.clientX, y: e.clientY, nx: n.x, ny: n.y };
+      rec.card.root.dataset.lifted = "";
+    }, { signal });
+    pill.addEventListener("pointermove", (e) => {
+      if (!d || e.pointerId !== d.id) return;
+      const size = contentSize(rec.owner.view, state.metrics);
+      n.x = clamp(d.nx + (e.clientX - d.x) / cam.z, 0, size.w - state.metrics.nodeW);
+      n.y = clamp(d.ny + (e.clientY - d.y) / cam.z, 0, size.h - state.metrics.nodeH);
+      n.pinned = true; // a node the person moved stays where it is (D180); the canvas document keeps it
+      source.pin(n.id, n.x, n.y);
+      rec.card.root.style.transform = `translate(${n.x}px, ${n.y}px)`;
+      // Arrows stay attached to the card they belong to while it moves.
+      for (const t of topoOf(rec.owner)) if (t.grant.from === n.id || t.grant.to === n.id) drawTopoArrow(rec.owner, t);
+    }, { signal });
+    const up = (e: PointerEvent): void => {
+      if (!d || e.pointerId !== d.id) return;
+      const moved = d.nx !== n.x || d.ny !== n.y;
+      d = undefined;
+      delete rec.card.root.dataset.lifted;
+      if (moved) cx.store.changed();
+    };
+    pill.addEventListener("pointerup", up, { signal });
+    pill.addEventListener("pointercancel", up, { signal });
+  };
+
+  // ---- editing a grant: grab an arrow's head or tail, unsnap it, snap it to another node or drop it on empty canvas ----------------
+  /** Where a confirmation is anchored: a point on the screen, as a 1 px element. */
+  const tipAt = (client: Pt): { anchor: HTMLElement; done(): void } => {
+    const anchor = el("div", "cl-tip-anchor");
+    anchor.style.cssText = `position:fixed;left:${client.x}px;top:${client.y}px;width:1px;height:1px;pointer-events:none`;
+    document.body.append(anchor);
+    return { anchor, done: () => { window.setTimeout(() => anchor.remove(), 260); } };
+  };
+  const beginEdit = (c: ViewRec, entry: TopoArrow, end: "tail" | "head", e: PointerEvent, handle: SVGElement): void => {
+    const g = entry.grant;
+    const fixedId = end === "head" ? g.from : g.to;
+    const homeId = end === "head" ? g.to : g.from;
+    const fixed = nodeRect(c, fixedId), home = nodeRect(c, homeId);
+    if (!fixed || !home) return;
+    handle.setPointerCapture(e.pointerId);
+    // The graph's arrows live in the view's own coordinates; the pointer comes in world coordinates.
+    const origin = cx.view.contentRect(c);
+    const toLocal = (clientX: number, clientY: number): Pt => { const w = toWorld(clientX, clientY); return { x: w.x - origin.x, y: w.y - origin.y }; };
+    const live = new DragArrow(fixed, toLocal(e.clientX, e.clientY), cx.invalidate, end === "tail");
+    if (g.via) live.arrow.g.dataset.dashed = "";
+    c.graphSvg!.append(live.arrow.g);
+    live.snapNow(home); // the end starts attached, so pulling it off is an unsnap
+    entry.arrow.g.dataset.editing = "";
+    let candidate: string | undefined = homeId;
+    let over: HTMLElement | undefined;
+    const taken = (id: string): boolean => source.grants().some((o) => o !== g && (end === "head" ? o.from === g.from && o.to === id : o.to === g.to && o.from === id));
+    const move = (ev: PointerEvent): void => {
+      const w = toLocal(ev.clientX, ev.clientY);
+      live.move(w, headSize());
+      // Graph nodes take no pointer events of their own, so the node under the pointer is found by geometry.
+      let id = c.view.nodes.find((n) => { const r = nodeRect(c, n.id); return !!r && w.x >= r.x && w.x <= r.x + r.w && w.y >= r.y && w.y <= r.y + r.h; })?.id;
+      // Near its own node the end stays attached: a short pull does not unsnap it.
+      const slack = 28 / cam.z;
+      const nearHome = w.x > home.x - slack && w.x < home.x + home.w + slack && w.y > home.y - slack && w.y < home.y + home.h + slack;
+      if (nearHome && !id) id = homeId;
+      if (id === fixedId || (id && id !== homeId && taken(id))) id = undefined;
+      if (id !== candidate) {
+        over?.removeAttribute("data-drop");
+        over = id && id !== homeId ? c.wins.get(`n-${id}`)?.card.root : undefined;
+        over?.setAttribute("data-drop", "");
+        candidate = id;
+        const r = id ? nodeRect(c, id) : undefined;
+        live.setTarget(r);
+      }
+    };
+    const finish = (): void => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      over?.removeAttribute("data-drop");
+    };
+    const springBack = (): void => {
+      live.setTarget(home);
+      entry.arrow.g.removeAttribute("data-editing");
+      window.setTimeout(() => live.dispose(), 380);
+    };
+    const up = (ev: PointerEvent): void => {
+      finish();
+      const at = tipAt({ x: ev.clientX, y: ev.clientY });
+      if (ev.type === "pointercancel" || candidate === homeId) { springBack(); at.done(); return; }
+      if (candidate) {
+        const next: Grant = end === "head" ? { ...g, to: candidate } : { ...g, from: candidate };
+        const endTip = tipAt(toClient({ x: live.end().x + origin.x, y: live.end().y + origin.y }));
+        mountConfirmTip(endTip.anchor, {
+          label: `Move grant ${grantName(g)}`, message: `Move grant ${grantName(g)} to ${grantLabel({ id: "", from: next.from, to: next.to })}?`,
+          confirmLabel: "Move", cancelLabel: "Cancel",
+          onConfirm: () => {
+            source.moveGrant(g, end === "head" ? { to: next.to } : { from: next.from });
+            entry.arrow.g.dataset.tip = grantName(g);
+            entry.arrow.g.removeAttribute("data-editing");
+            refreshGraph(c);
+            const pulse = new Spring(1.9, (v) => entry.arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 });
+            pulse.set(1);
+            live.dispose();
+            for (const cl of views.values()) cx.view.geometry(cl);
+            cx.toast.show({ message: `Grant moved to ${grantName(g)}` });
+            endTip.done();
+          },
+          onCancel: () => { springBack(); endTip.done(); },
+        });
+        at.done();
+        return;
+      }
+      // Dropped on empty canvas: offer to remove the grant.
+      mountConfirmTip(at.anchor, {
+        label: `Remove grant ${grantName(g)}`, message: `Remove grant ${grantName(g)}?`,
+        confirmLabel: "Remove", cancelLabel: "Keep",
+        onConfirm: () => {
+          source.removeGrant(g);
+          live.dispose();
+          refreshGraph(c); // the arrow fades out; the grants listed in the graph are the source's
+          for (const cl of views.values()) cx.view.geometry(cl);
+          cx.toast.show({ message: `Grant ${grantName(g)} removed` });
+        },
+        onCancel: springBack,
+      });
+      at.done();
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  };
+  // ---- the graph view ----------------------------------------------------------------------------------
+  const graphs = new WeakMap<ViewRec, GraphController>();
+  const graphOf = (c: ViewRec): GraphController | undefined => graphs.get(c);
+  const topoOf = (c: ViewRec): TopoArrow[] => graphOf(c)?.arrows() ?? [];
+  /** Re-reads the mesh into a graph view: its nodes, its size, what is drawn, what the sidebar counts. */
+  let sized = "";
+  const refreshGraph = (c: ViewRec): void => {
+    const graph = graphOf(c);
+    if (!graph) return;
+    const layout = layoutOf(state.metrics);
+    c.view.nodes = layout.nodes;
+    c.view.graph = layout.size;
+    graph.sync();
+    cx.view.geometry(c);
+    const size = `${layout.size.w}x${layout.size.h}`;
+    if (size !== sized) { sized = size; cx.view.settle(c.view.id); }
+    cx.tree.render();
+    cx.pill.paint(); // the top pill counts the nodes
+  };
+  const buildGraph = (c: ViewRec): void => {
+    c.colsEl.classList.add("cl-graph");
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "cl-graph-arrows");
+    c.colsEl.append(svg);
+    c.graphSvg = svg;
+    svg.addEventListener("pointerdown", (e) => {
+      const handle = (e.target as Element).closest<SVGElement>(".cl-arrow-handle");
+      const entry = topoOf(c).find((t) => t.arrow.g === handle?.closest(".cl-arrow"));
+      if (!handle || !entry || e.button !== 0) return;
+      e.stopPropagation(); e.preventDefault();
+      beginEdit(c, entry, handle.dataset.end === "tail" ? "tail" : "head", e, handle);
+    }, { signal });
+    const graph = createGraph(cx, c, source, layoutOf, {
+      makeCard: (n) => makeNode(c, n),
+      dropCard: (rec) => { rec.card.dispose(); rec.card.root.remove(); },
+      makeArrow: makeTopoArrow,
+      dropArrow: (entry, fade) => {
+        if (!fade) { entry.arrow.remove(); return; }
+        entry.arrow.g.dataset.leaving = "";
+        window.setTimeout(() => entry.arrow.remove(), 240);
+      },
+      drawArrow: (entry) => drawTopoArrow(c, entry),
+      headSize,
+    });
+    graphs.set(c, graph);
+    refreshGraph(c);
+    // The view was built empty and the camera may already be framing it: now that it has its size (and, if it is
+    // big, no stops and a free canvas) the camera goes to where the view really rests.
+    if (state.currentView === c.view.id && cx.camera.target) cx.nav.flyView(c.view.id);
+  };
+
+  return {
+    buildGraph,
+    refresh: refreshGraph,
+    pulseNew,
+    changed(rightsChanged) {
+      // Handles on arrows exist only for people who may use them (D187): arrows are made again when that changes.
+      if (rightsChanged) for (const c of views.values()) graphOf(c)?.reset();
+      for (const c of views.values()) if (c.view.layout === "graph") refreshGraph(c);
+    },
+    cull() { const c = views.get("mesh"); if (c) graphOf(c)?.cull(); },
+    rest() { redrawMesh(); },
+    stats() { const c = views.get("mesh"); const g = c && graphOf(c); if (!g) return undefined; return { level: g.level(), ...g.stats() }; },
+  };
+}

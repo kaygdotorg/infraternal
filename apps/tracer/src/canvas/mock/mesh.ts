@@ -64,7 +64,7 @@ export function createMockMesh(world: MockWorld): MockMesh {
     get server() { return server; },
     reset() { build(); for (const l of [...listeners]) l(); },
     pins: () => Object.fromEntries(pinned),
-    layout: (m) => inner.layout(m),
+    data: () => inner.data(),
     grants: () => inner.grants(),
     tags: () => inner.tags(),
     status: () => inner.status(),
