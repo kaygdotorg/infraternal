@@ -11,8 +11,10 @@
 export interface FlowSurface {
   /** A positioned element the wizard fills; the wizard centres its card inside it. */
   readonly body: HTMLElement;
-  /** Takes the surface away. The wizard has already played its own exit. */
+  /** Takes the surface away. The wizard has already played its own exit. Safe to call twice. */
   remove(): void;
+  /** Tells the wizard the surface went away on its own (the person closed its window). */
+  onGone?(callback: () => void): void;
 }
 
 export interface FlowHost {

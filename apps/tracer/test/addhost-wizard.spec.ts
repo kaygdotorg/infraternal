@@ -24,11 +24,11 @@ async function open(page: Page, query = "", settings: Record<string, string> = {
   await page.waitForTimeout(400);
 }
 
-const wizard = (page: Page) => page.locator(".ah-overlay .ah-float");
+const wizard = (page: Page) => page.locator(".ah-float");
 /** Buttons of the wizard card only: the canvas has its own Back, Close and Retry-like controls. */
 const inWizard = (page: Page, name: string) => wizard(page).getByRole("button", { name, exact: true });
 /** Waits until a closed wizard has finished its exit, so the next one is the only one on screen. */
-const gone = (page: Page) => expect(page.locator(".ah-overlay")).toHaveCount(0);
+const gone = (page: Page) => expect(page.locator(".ah-float")).toHaveCount(0);
 async function openWizard(page: Page): Promise<void> {
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:addhost", source: "keyboard" } })));
   await expect(page.locator(".ah-page[data-page='discovery']")).toBeVisible();
@@ -58,6 +58,8 @@ test("the toolbar button and the palette open the wizard", async ({ page }) => {
 test("network access: detected, shown by name, and the host lands in Console and the sidebar", async ({ page }) => {
   await open(page);
   await openWizard(page);
+  // The wizard is a window of its own kind, next to the focused window, and it is gone when the flow is done.
+  await expect(page.locator(".ui-window[data-kind='flow']")).toHaveCount(1);
   await page.locator(".ah-row[data-host='remoternal']").click();
   await inWizard(page, "Continue").click();
   // remoternal offers sudo: rootless is the default, root needs its own consent.
@@ -69,6 +71,16 @@ test("network access: detected, shown by name, and the host lands in Console and
   await expect(page.locator("#tree")).toContainText("remoternal");
   await expect(page.locator(".toast, [role='status']").filter({ hasText: "remoternal is ready" })).toBeVisible();
   await expect(wizard(page)).toHaveCount(0);
+  await expect(page.locator(".ui-window[data-kind='flow']")).toHaveCount(0);
+});
+
+test("closing the flow window from its own frame ends the wizard", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await page.locator(".ui-window[data-kind='flow'] [data-action='close']").click();
+  await expect(wizard(page)).toHaveCount(0);
+  await openWizard(page);
+  await expect(wizard(page)).toBeVisible();
 });
 
 test("the server's own key is the fallback when the network does not sign in", async ({ page }) => {
@@ -301,6 +313,8 @@ test("the wizard works on a phone and keeps the footer on screen", async ({ brow
     await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none");
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     await openWizard(page);
+    // The camera flies to the new window first; measure once it rests.
+    await page.waitForTimeout(1500);
     const box = await page.locator(".ah-foot").boundingBox();
     expect(box!.y + box!.height).toBeLessThanOrEqual(852);
     const float = await wizard(page).boundingBox();

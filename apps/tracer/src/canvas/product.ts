@@ -10,6 +10,10 @@
 import { MuxConnection } from "../connection";
 import type { CoreScreen } from "../core-screen";
 import type { TerminalClient, TerminalHooks } from "../terminal";
+import { createAddHost } from "./addhost";
+import { createOverlayFlowHost } from "./addhost/flow-host";
+import { createRealProvisioning } from "./addhost/real";
+import { createWindowFlowHost } from "./addhost/window-host";
 import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
 import { columnsFromDocument, type DocTarget } from "./model/document";
@@ -50,8 +54,15 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
   });
   const store = new LocalCanvasStore(options.accountId);
+  // The add-host wizard on the real provisioning API, in a flow window. A host that finishes enrolling needs a
+  // remote-host session binding (#78) before a shell can open on it; until `sessions.hosts()` lists remote hosts
+  // the sink has nothing to open, and the wizard's own "ready" toast is the whole result.
+  const addHost = createAddHost(core, {
+    service: createRealProvisioning(), sink: { enrolled: () => undefined },
+    host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
+  });
   const canvas = createCanvas(core, {
-    adapters: { sessions, store, settings: { sections: [], render: () => undefined } },
+    adapters: { sessions, store, settings: { sections: [], render: () => undefined }, addHost: () => addHost.open() },
     float: false,
     persisted: (id) => id === "console",
   });
@@ -77,6 +88,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     dispose() {
       canvas.flush();
       offRoundTrip();
+      addHost.dispose();
       canvas.dispose();
       sessions.dispose();
       connection.dispose();

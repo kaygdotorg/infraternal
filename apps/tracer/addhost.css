@@ -357,8 +357,6 @@
 .ah-input:focus { border-color: rgb(from var(--fg) r g b / 0.28); background: var(--ah-field-focus); }
 /* Rows and highlights bleed 6-10 px past the text column. The step viewport clips, so it carries that room itself
    (padding out, margin back in: the text column does not move). Revealed blocks sit back on the text column. */
-.ah-overlay .ah-pages { margin-inline: -12px; padding-inline: 12px; }
-.ah-overlay .ah-options .ah-reveal { margin-inline: 10px; }
 .ah-reveal .ah-keyblock { margin-top: 12px; }
 .ah-reveal .ah-text { margin: 0 0 4px; }
 :root[data-focus-ring="on"] .ah :is(.ah-input, .ah-link, .ah-run-toggle):focus-visible { outline: 2px solid var(--ah-ring); outline-offset: 2px; }
@@ -393,3 +391,8 @@
 .ah-keyblock + .ah-text, .ah-install .ah-text { margin-top: 0; }
 .ah-install .ui-kv { margin-bottom: 14px; }
 .ah-empty .ah-icon { color: var(--fg-3); }
+
+/* ── The wizard inside a flow window: the window body is the surface ──────────────────────────────── */
+.cl-flow { position: relative; display: block; overflow: hidden; }
+.ah-surface .ah-pages { margin-inline: -12px; padding-inline: 12px; }
+.ah-surface .ah-options .ah-reveal { margin-inline: 10px; }

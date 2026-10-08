@@ -7,13 +7,15 @@
  * `AddHostSink` that learns about hosts as they finish enrolling, and optionally a `FlowHost` that decides
  * where the card is drawn (default: an overlay over the canvas stage).
  *
- * One wizard at a time: opening while it is open focuses it. A host that finished stays enrolled when the
+ * The wizard itself is on-demand code (`add-host.on-demand.ts`): this file, the service seam and the palette row
+ * are all that loads with the canvas. One wizard at a time: opening while it is open focuses it. A host that finished stays enrolled when the
  * wizard closes; closing mid-install cancels what is still running (the server rolls it back).
  */
 import type { CoreScreen } from "../../core-screen";
 import { createOverlayFlowHost, type FlowHost } from "./flow-host";
 import type { AddHostSink, ProvisioningService } from "./service";
-import { Wizard } from "./wizard";
+import { onDemand } from "../../on-demand";
+import type { Wizard } from "./wizard";
 
 export interface AddHostOptions {
   service: ProvisioningService;
@@ -30,12 +32,19 @@ export interface AddHost {
 export function createAddHost(core: CoreScreen, options: AddHostOptions): AddHost {
   const host = options.host ?? createOverlayFlowHost(core.stage);
   let wizard: Wizard | undefined;
+  let loading = false;
   const open = (): void => {
     // A wizard that is playing its exit counts as gone: reopening starts a fresh one at once.
     if (wizard && !wizard.isClosing) { wizard.focus(); return; }
-    const fresh: Wizard = new Wizard({ service: options.service, sink: options.sink, host, toast: core.toast, onClosed: () => { if (wizard === fresh) wizard = undefined; } });
-    wizard = fresh;
-    fresh.focus();
+    if (loading) return;
+    loading = true;
+    // The wizard's code loads the first time it is opened; a failed load says so and a second tap tries again.
+    void onDemand(() => import("./add-host.on-demand")).then(({ Wizard: Open }) => {
+      const fresh: Wizard = new Open({ service: options.service, sink: options.sink, host, toast: core.toast, onClosed: () => { if (wizard === fresh) wizard = undefined; } });
+      wizard = fresh;
+      fresh.focus();
+    }, () => core.toast.show({ message: "The add-host flow couldn't load. Check your connection and try again." }))
+      .finally(() => { loading = false; });
   };
   const removeProvider = core.addPaletteProvider(() => [{ group: "Actions", glyph: "+", label: "Add hosts", hint: "ssh · install · server", action: "canvas:addhost" }]);
   const onAction = (event: Event): void => {

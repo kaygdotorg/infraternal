@@ -128,7 +128,9 @@ export class Wizard {
     installFocusRing();
     this.surface = deps.host.open({ title: "Add hosts" });
     this.root = this.surface.body;
-    this.root.classList.add("ah");
+    this.root.classList.add("ah", "ah-surface");
+    // A window closed from its own frame ends the wizard and cancels what is running.
+    this.surface.onGone?.(() => { if (this.alive) { this.dispose(); this.deps.onClosed(); } });
     this.root.innerHTML = `
       <div class="ah-stage">
         <div class="ah-scrim"></div>
@@ -149,7 +151,8 @@ export class Wizard {
     this.resize.observe(this.scroller);
     this.resize.observe(this.pages);
     // The card is modal: the rest of the stage is unreachable by keyboard and assistive technology until it closes.
-    for (const sibling of this.root.parentElement?.children ?? []) {
+    // (Only an overlay covers the stage; a flow window is one window among others and stays part of the canvas.)
+    for (const sibling of this.root.classList.contains("ah-overlay") ? this.root.parentElement?.children ?? [] : []) {
       if (sibling !== this.root && !sibling.hasAttribute("inert")) { sibling.setAttribute("inert", ""); this.inerted.push(sibling); }
     }
     this.root.addEventListener("click", this.onClick);

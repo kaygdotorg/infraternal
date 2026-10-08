@@ -16,6 +16,8 @@ import { MemoryCanvasStore } from "../model/store";
 import type { ViewId } from "../model/types";
 import { el } from "../dom";
 import { createAddHost } from "../addhost";
+import { createOverlayFlowHost } from "../addhost/flow-host";
+import { createWindowFlowHost } from "../addhost/window-host";
 import type { EnrolledHost } from "../addhost/service";
 import { createMockProvisioning } from "./addhost-service";
 import { CONTAINERS, INITIAL_GRANTS, buildViews, type Role } from "./data";
@@ -43,6 +45,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   // The add-host wizard runs on the real adapter against the test double. A host that finishes enrolling gets a
   // shell window in Console, which is also how the sidebar inventory learns of it (the tree lists windows).
   const addHost = createAddHost(core, {
+    host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
     service: createMockProvisioning({ savedKey: new URLSearchParams(location.search).get("savedkey") === "1" }),
     sink: { enrolled: (hosts) => enrol(hosts) },
   });
