@@ -1385,3 +1385,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      text legible (ghost-text and contrast checks). Per-level performance
      benchmarking is deferred; the code paths stay cheap (Solid windows paint
      no transparency or blur).
+190. **The droplet split (owner, 2026-10-08):**
+     - **Budding:** a small droplet swells out of the window's edge on the
+       split side, pinches off through a liquid neck, snaps free with a
+       wobble, then grows into the new window while the original springs to
+       its new size.
+     - **Content:** stays crisp. The liquid is the frame and outline only;
+       the new shell fades in once grown, and text is never warped.
+     - **Timing:** about 500 ms (bulge ~120, stretch and pinch ~150, snap,
+       wobble and growth ~230), interruptible; reduced motion crossfades.
+     - **Closing a split window** plays the reverse: it shrinks into a
+       droplet that flows back and is absorbed with a small ripple.
+     - **Rendering:** a per-pixel signed-distance smooth-min silhouette in a
+       single short-lived GPU surface (iOS memory rule), anti-aliased at the
+       device's real density, held to 60 fps or more.
