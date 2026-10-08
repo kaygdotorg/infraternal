@@ -833,7 +833,11 @@ test("sharing: the dialog sends a view; the recipient gets their own copy named 
     const ids = views.map((v) => v.id);
     expect(ids.indexOf("settings")).toBe(ids.length - 1); // Settings stays last
     await expect(asha.locator(".ui-toast", { hasText: "kayg shared Incident" })).toHaveCount(1);
-    for (let i = 0; i < views.length; i++) for (let j = i + 1; j < views.length; j++) expect(overlap(views[i]!, views[j]!)).toBe(false);
+    // At rest, not mid-glide: Settings slides to make room for the copy, and a snapshot taken while it moves overlaps.
+    await expect.poll(async () => {
+      const now = await probe(asha, (p) => p.views());
+      return now.flatMap((a, i) => now.slice(i + 1).map((b) => overlap(a, b))).some(Boolean);
+    }, { timeout: 4000 }).toBe(false);
     // The camera flew to it, locked on.
     await expect.poll(async () => (await probe(asha, (p) => p.canvasLock())).view, { timeout: 4000 }).toBe("incident-from-kayg-sh1");
     // edge-arm is outside her grants: a calm explanation, not an error.
