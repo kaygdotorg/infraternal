@@ -1,0 +1,74 @@
+/* The Mesh view at scale and in its states (src/canvas/mesh/graph.ts). Surfaces, pills, window cards, tooltips and
+   the toast come from packages/ui; only the cluster frames and the state marks are drawn here. */
+
+/* ---- cluster frames: what the far zoom shows instead of cards ------------------------------------ */
+.cl-chips { position: absolute; inset: 0; z-index: 0; pointer-events: none; opacity: 0; transition: opacity 200ms var(--ease-out, ease-out); }
+.cl-chips[data-on="true"] { opacity: 1; }
+.cl-chip {
+  position: absolute; box-sizing: border-box; margin: 0; padding: 0; border: calc(1px * var(--inv, 1)) solid var(--overlay-line); border-radius: 28px;
+  background: color-mix(in oklab, var(--fg) 5%, transparent); color: var(--fg); font: inherit; text-align: left; cursor: pointer; pointer-events: none;
+  transition: background-color 160ms var(--ease-out, ease-out);
+}
+.cl-chips[data-on="true"] .cl-chip { pointer-events: auto; }
+@media (hover: hover) and (pointer: fine) { .cl-chip:hover { background: color-mix(in oklab, var(--fg) 9%, transparent); } }
+/* The label keeps a readable size at any zoom: --inv is 1 / zoom, and the label's width shrinks by the same factor so it
+   still fits the frame it names. */
+.cl-chip-label {
+  position: absolute; left: 20px; top: 16px; display: grid; gap: 2px; width: calc((100% - 40px) / var(--inv, 1)); transform-origin: 0 0; scale: var(--inv, 1);
+  letter-spacing: var(--ui-tracking); pointer-events: none;
+}
+.cl-chip-name { overflow: hidden; font: var(--ui-type-button); text-overflow: ellipsis; white-space: nowrap; }
+.cl-chip-meta { overflow: hidden; color: var(--ui-text-secondary); font: var(--ui-type-label); text-overflow: ellipsis; white-space: nowrap; }
+.cl-chip[data-degraded] .cl-chip-meta { color: var(--fg); }
+
+/* Cards and arrows change level with a short fade; the DOM is only changed once it has played. */
+@keyframes cl-node-in { from { opacity: 0; } }
+@keyframes cl-node-out { to { opacity: 0; } }
+.cl-cards { position: absolute; inset: 0; pointer-events: none; }
+.cl-cards[data-enter] { animation: cl-node-in 180ms var(--ease-out, ease-out); }
+.cl-cards[data-leaving] { animation: cl-node-out 160ms var(--ease-out, ease-out) forwards; }
+.cl-graph-arrows .cl-arrow[data-leaving] { opacity: 0; }
+
+/* ---- states: loading, unreachable, empty, stale -------------------------------------------------- */
+.cl-meshstate { opacity: 1; transition: opacity 200ms var(--ease-out, ease-out); }
+.cl-meshstate[data-open="false"] { opacity: 0; }
+.cl-meshstate-mark { display: grid; place-items: center; width: 32px; height: 32px; margin-bottom: 4px; color: var(--fg-2); }
+.cl-meshstate-mark svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-meshstate-mark .ui-spinner { --ui-spinner-size: 20px; }
+.cl-empty-add svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.cl-meshnote { position: absolute; right: 0; top: 0; z-index: 3; --pill-h: 30px; color: var(--fg-2); cursor: pointer; pointer-events: auto; transition: opacity 200ms var(--ease-out, ease-out); }
+.cl-meshnote[data-open="false"] { opacity: 0; }
+.cl-meshnote svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* A quiet breathing says the data is old and the connection is being waited for. */
+@keyframes cl-note-breathe { 50% { opacity: 0.55; } }
+.cl-meshnote[data-open="true"] svg { animation: cl-note-breathe 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .cl-meshnote[data-open="true"] svg { animation: none; } }
+
+/* A node card is dragged by its pill (to pin it, D180); the rest of the card takes no pointer events, so the arrows
+   that run beside it keep theirs. At the thumbnail zoom nothing on a card is live, as everywhere on the canvas. */
+.cl-world:not([data-lod="thumb"]) .cl-graph .ui-window-pill { pointer-events: auto; cursor: grab; }
+
+/* In a big graph the cards' shadow is small and plain: the soft blur costs a raster tile per card per move (mesh/graph.ts). */
+.cl-graph[data-big] .ui-window { box-shadow: 0 1px 3px rgb(0 0 0 / 0.3); }
+
+/* The graph's arrows are one SVG in the scaled world. A stroke that stays one pixel wide at every zoom (non-scaling
+   stroke) is drawn again from its path on every frame of a zoom; a plain stroke is scaled with the layer. So the width
+   is the world width that is one pixel at the zoom the camera last rested at (--k, set by mesh/graph.ts). */
+.cl-graph-arrows { --k: 1; }
+.cl-graph-arrows .cl-arrow-line, .cl-graph-arrows .cl-arrow-hit, .cl-graph-arrows .cl-arrow-handle { vector-effect: none; }
+.cl-graph-arrows .cl-arrow-line { stroke-width: calc(1.5px * var(--k)); }
+.cl-graph-arrows .cl-arrow:hover .cl-arrow-line { stroke-width: calc(2.5px * var(--k)); }
+.cl-graph-arrows .cl-arrow-hit { stroke-width: calc(16px * var(--k)); }
+.cl-graph-arrows .cl-arrow-handle { stroke-width: calc(1.5px * var(--k)); }
+.cl-graph-arrows .cl-arrow[data-dashed] .cl-arrow-line { stroke-dasharray: calc(5px * var(--k)) calc(5px * var(--k)); }
+
+/* The connector on a terminal's pill exists only for a person who may grant access (D187); the attribute must win over its display. */
+.cl-port[hidden] { display: none; }
+
+/* An arrow between clusters sums up grants and is quieter than one grant's own arrow (the stroke, not the group, so no layer per arrow). */
+.cl-graph-arrows .cl-arrow[data-cluster] .cl-arrow-line { stroke-opacity: 0.55; }
+.cl-graph-arrows .cl-arrow[data-cluster] .cl-arrow-head { fill-opacity: 0.55; }
+
+/* While the camera zooms the arrows are not drawn (a zoom scales every stroke, and every frame draws them again); they fade back in at rest. */
+.cl-graph[data-zooming] .cl-graph-arrows { visibility: hidden; }
+.cl-graph-arrows[data-in] { animation: cl-node-in 200ms var(--ease-out, ease-out); }

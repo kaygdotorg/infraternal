@@ -19,6 +19,8 @@ export const ICON = {
   chevron: '<path d="m9 6 6 6-6 6"/>',
   port: '<path d="M6 12h10m-4-4 4 4-4 4"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  retry: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
+  offline: '<path d="M3 3l18 18M8.5 8.6A7 7 0 0 0 5 14.5M12 7a6.5 6.5 0 0 1 5.8 3.5A4.5 4.5 0 0 1 17.5 19H9M6.5 19a4 4 0 0 1-1.3-7.2"/>',
   views: ICONS.views,
 } as const;
 export const lineIcon = (path: string): string => `<svg viewBox="0 0 24 24" class="is-line" aria-hidden="true">${path}</svg>`;

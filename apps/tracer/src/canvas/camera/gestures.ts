@@ -205,6 +205,9 @@ export function installGestures(cx: Ctx): void {
     pan = undefined;
     delete viewport.dataset.panning;
     if (p.moved) return;
+    // A tap on a Mesh cluster frame: the pan captured the pointer, so the frame never got its click; give it one.
+    const chip = p.target.closest?.<HTMLElement>(".cl-chip");
+    if (chip) { chip.click(); return; }
     // A tap: on a view's region it flies in; on empty canvas it clears the active window.
     const region = p.target.closest?.(".cl-region");
     const c = [...views.values()].find((x) => x.region === region);

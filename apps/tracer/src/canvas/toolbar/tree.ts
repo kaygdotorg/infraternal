@@ -8,6 +8,7 @@ import type { BranchSection } from "../../../../../packages/ui/src/branched";
 import type { Ctx } from "../context";
 import type { ViewId } from "../model/types";
 import { coarse } from "../dom";
+import { isFreeView } from "../layout/stops";
 
 export interface TreeModule {
   /** Rebuilds the sidebar tree from the views (coalesced). */
@@ -22,10 +23,12 @@ export function createTree(cx: Ctx): TreeModule {
     return {
       id: `view:${c.view.id}`,
       label: c.view.name,
-      meta: graph ? `${c.view.nodes.length} nodes` : `${c.wins.size}`,
+      meta: graph ? `${c.view.nodes.filter((v) => v.kind === "host").length} hosts` : `${c.wins.size}`,
       open: c.view.id !== "settings",
+      // A big graph lists no nodes: a thousand rows would be the cost of the sidebar, and its cards are not all in the
+      // DOM. The section still flies to the view, where the clusters are.
       leaves: graph
-        ? c.view.nodes.map((n) => ({ id: `n-${n.id}`, label: n.label, glyph: n.kind === "tag" ? "#" : "◦" }))
+        ? (isFreeView(c.view) ? [] : c.view.nodes).map((n) => ({ id: `n-${n.id}`, label: n.label, glyph: n.kind === "tag" ? "#" : "◦" }))
         : [...c.wins.values()].map((w) => ({ id: w.model.id, label: w.model.kind === "terminal" ? `${w.model.host}${w.model.session ? ` · ${w.model.session}` : ""}` : w.model.kind === "settings" ? w.model.host : (w.model.session ?? w.model.kind), glyph: w.model.kind === "terminal" ? "›_" : "▤" })),
     };
   });

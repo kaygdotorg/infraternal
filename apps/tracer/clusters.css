@@ -95,7 +95,8 @@
 .cl-node-meta { display: grid; gap: 1px; padding: 4px 14px 10px; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .cl-node-detail { color: var(--fg); }
 .cl-node-sub { color: var(--ui-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cl-graph-arrows { position: absolute; left: 0; top: 0; z-index: 1; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+/* Arrows pass under the cards, so a line that crosses a card is hidden by it instead of cutting through its text. */
+.cl-graph-arrows { position: absolute; left: 0; top: 0; z-index: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
 .cl-world[data-lod="thumb"] .cl-node-meta { opacity: 1; }
 
 /* ---- arrows ------------------------------------------------------------------------------ */
