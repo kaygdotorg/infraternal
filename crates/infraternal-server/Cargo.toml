@@ -38,6 +38,7 @@ openssl.workspace = true
 [dev-dependencies]
 aes-gcm.workspace = true
 hkdf.workspace = true
+nix = { workspace = true, features = ["time"] }
 tower.workspace = true
 http-body-util.workspace = true
 tokio-tungstenite.workspace = true

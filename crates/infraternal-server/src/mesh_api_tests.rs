@@ -728,8 +728,15 @@ async fn mesh_api_scale_benchmark() {
     let (list_samples, list_payload_bytes) =
         measure_scale_lists(&fixture.service, &viewers, &filter).await;
     let op_samples = measure_scale_operations(&fixture.service, &viewers).await;
-    let (fanout_samples, outbound_event_bytes) =
-        measure_scale_fanout(&fixture.service, &viewers, &filter).await;
+    let (
+        fanout_samples,
+        fanout_cpu_samples_ns,
+        outbound_event_bytes,
+        subscriber_receiver_bytes,
+        subscriber_rss_before_kib,
+        subscriber_rss_after_kib,
+    ) = measure_scale_fanout(&fixture.service, &viewers, &filter).await;
+    let subscriber_receiver_bytes_50 = subscriber_receiver_bytes * SCALE_VIEWER_COUNT;
 
     let page_count: i64 = sqlx::query_scalar("PRAGMA page_count")
         .fetch_one(pool)
@@ -750,7 +757,7 @@ async fn mesh_api_scale_benchmark() {
         .unwrap()
         .stdout;
     println!(
-        "METRIC name=mesh_api_scale host={} cpus={} loadavg_1m={} loadavg_5m={} loadavg_15m={} nodes={SCALE_NODE_COUNT} tags={SCALE_TAG_COUNT} grants={SCALE_GRANT_COUNT} memberships={} viewers={SCALE_VIEWER_COUNT} list_samples={} list_p50_ms={:.3} list_p99_ms={:.3} list_payload_bytes={list_payload_bytes} op=mesh.node.observe op_samples={} op_p50_ms={:.3} op_p99_ms={:.3} fanout_samples={} fanout_viewers={SCALE_VIEWER_COUNT} fanout_p50_ms={:.3} fanout_p99_ms={:.3} fanout_outbound_event_bytes_total={outbound_event_bytes} rss_base_kib={rss_base_kib} rss_final_kib={} rss_hwm_kib={} sqlite_page_count={page_count} sqlite_page_size={page_size}",
+        "METRIC name=mesh_api_scale host={} cpus={} loadavg_1m={} loadavg_5m={} loadavg_15m={} nodes={SCALE_NODE_COUNT} tags={SCALE_TAG_COUNT} grants={SCALE_GRANT_COUNT} memberships={} viewers={SCALE_VIEWER_COUNT} list_samples={} list_p50_ms={:.3} list_p95_ms={:.3} list_p99_ms={:.3} list_payload_bytes={list_payload_bytes} op=mesh.node.observe op_samples={} op_p50_ms={:.3} op_p95_ms={:.3} op_p99_ms={:.3} fanout_samples={} fanout_viewers={SCALE_VIEWER_COUNT} fanout_p50_ms={:.3} fanout_p95_ms={:.3} fanout_p99_ms={:.3} fanout_cpu_p50_us={} fanout_cpu_p95_us={} fanout_cpu_p99_us={} fanout_cpu_per_viewer_p50_ns={} fanout_cpu_per_viewer_p95_ns={} fanout_cpu_per_viewer_p99_ns={} fanout_event_bytes_per_viewer={} fanout_event_bytes_per_change={} fanout_outbound_event_bytes_total={outbound_event_bytes} subscriber_receiver_bytes_each={subscriber_receiver_bytes} subscriber_receiver_bytes_50={subscriber_receiver_bytes_50} subscriber_rss_before_kib={subscriber_rss_before_kib} subscriber_rss_after_kib={subscriber_rss_after_kib} rss_base_kib={rss_base_kib} rss_final_kib={} rss_hwm_kib={} sqlite_page_count={page_count} sqlite_page_size={page_size}",
         String::from_utf8_lossy(&host).trim(),
         std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
         load.first().map_or("unknown", String::as_str),
@@ -759,13 +766,24 @@ async fn mesh_api_scale_benchmark() {
         SCALE_NODE_COUNT * SCALE_MEMBERSHIPS_PER_NODE,
         list_samples.len(),
         percentile_ms(&list_samples, 50),
+        percentile_ms(&list_samples, 95),
         percentile_ms(&list_samples, 99),
         op_samples.len(),
         percentile_ms(&op_samples, 50),
+        percentile_ms(&op_samples, 95),
         percentile_ms(&op_samples, 99),
         fanout_samples.len(),
         percentile_ms(&fanout_samples, 50),
+        percentile_ms(&fanout_samples, 95),
         percentile_ms(&fanout_samples, 99),
+        percentile_u128(&fanout_cpu_samples_ns, 50) / 1_000,
+        percentile_u128(&fanout_cpu_samples_ns, 95) / 1_000,
+        percentile_u128(&fanout_cpu_samples_ns, 99) / 1_000,
+        percentile_u128(&fanout_cpu_samples_ns, 50) / u128::try_from(SCALE_VIEWER_COUNT).unwrap(),
+        percentile_u128(&fanout_cpu_samples_ns, 95) / u128::try_from(SCALE_VIEWER_COUNT).unwrap(),
+        percentile_u128(&fanout_cpu_samples_ns, 99) / u128::try_from(SCALE_VIEWER_COUNT).unwrap(),
+        outbound_event_bytes / fanout_samples.len() / SCALE_VIEWER_COUNT,
+        outbound_event_bytes / fanout_samples.len(),
         proc_status_kib("VmRSS:"),
         proc_status_kib("VmHWM:"),
     );
@@ -908,13 +926,18 @@ async fn measure_scale_fanout(
     service: &MeshService,
     viewers: &[String],
     filter: &MeshFilter,
-) -> (Vec<Duration>, usize) {
+) -> (Vec<Duration>, Vec<u128>, usize, usize, u64, u64) {
     const SAMPLES: usize = 100;
     let input = serde_json::to_vec(&json!({"node_id":1,"last_rtt_us":1234})).unwrap();
+    let subscriber_rss_before_kib = proc_status_kib("VmRSS:");
     let mut receivers: Vec<_> = (0..SCALE_VIEWER_COUNT)
         .map(|_| service.subscribe())
         .collect();
+    let subscriber_rss_after_kib = proc_status_kib("VmRSS:");
+    let subscriber_receiver_bytes = std::mem::size_of_val(receivers.first().unwrap());
+    let subscriber_receiver_allocation_bytes = receivers.capacity() * subscriber_receiver_bytes;
     let mut samples = Vec::with_capacity(SAMPLES);
+    let mut cpu_samples_ns = Vec::with_capacity(SAMPLES);
     let mut outbound_bytes = 0_usize;
     for sample in 0..SAMPLES {
         let actor = &viewers[sample % SCALE_VIEWER_COUNT];
@@ -923,6 +946,7 @@ async fn measure_scale_fanout(
             .execute(actor, "mesh.node.observe", &input, now)
             .await
             .unwrap();
+        let cpu_started = process_cpu_ns();
         let started = Instant::now();
         let updates = join_all(
             receivers
@@ -960,8 +984,20 @@ async fn measure_scale_fanout(
             outbound_bytes += encoded.len();
         }
         samples.push(started.elapsed());
+        cpu_samples_ns.push(process_cpu_ns() - cpu_started);
     }
-    (samples, outbound_bytes)
+    assert_eq!(
+        subscriber_receiver_allocation_bytes,
+        subscriber_receiver_bytes * SCALE_VIEWER_COUNT
+    );
+    (
+        samples,
+        cpu_samples_ns,
+        outbound_bytes,
+        subscriber_receiver_bytes,
+        subscriber_rss_before_kib,
+        subscriber_rss_after_kib,
+    )
 }
 
 fn percentile_ms(samples: &[Duration], percentile: usize) -> f64 {
@@ -969,6 +1005,18 @@ fn percentile_ms(samples: &[Duration], percentile: usize) -> f64 {
     sorted.sort_unstable();
     let index = (sorted.len() * percentile).div_ceil(100).saturating_sub(1);
     sorted[index].as_secs_f64() * 1_000.0
+}
+
+fn percentile_u128(samples: &[u128], percentile: usize) -> u128 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let index = (sorted.len() * percentile).div_ceil(100).saturating_sub(1);
+    sorted[index]
+}
+
+fn process_cpu_ns() -> u128 {
+    let cpu = nix::time::clock_gettime(nix::time::ClockId::CLOCK_PROCESS_CPUTIME_ID).unwrap();
+    u128::try_from(cpu.tv_sec()).unwrap() * 1_000_000_000 + u128::try_from(cpu.tv_nsec()).unwrap()
 }
 
 fn proc_status_kib(field: &str) -> u64 {
