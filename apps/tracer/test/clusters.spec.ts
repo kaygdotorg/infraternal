@@ -325,13 +325,17 @@ test("toolbar: the keyboard row follows terminal focus, the canvas row follows a
     // Tap empty canvas: the canvas row.
     await page.touchscreen.tap(359, 400);
     await expect.poll(row).toBe("canvas");
-    const tray = (await page.locator("#keytray").boundingBox())!;
+    let tray = (await page.locator("#keytray").boundingBox())!;
     expect(tray.height).toBeGreaterThanOrEqual(44);
-    // Swipe down shows the key row (the lower one), swipe up the canvas row (the upper one).
-    await swipe(t, { x: tray.x + 100, y: tray.y + 12 }, { x: tray.x + 100, y: tray.y + 44 }, 6);
+    // A swipe up reveals the row below (the key row), a swipe down the row above (the canvas row).
+    await page.waitForTimeout(700);
+    tray = (await page.locator("#keytray").boundingBox())!;
+    await t.touch("touchStart", [{ x: tray.x + 100, y: tray.y + 32 }]);
+    for (let i = 1; i <= 7; i++) { await t.touch("touchMove", [{ x: tray.x + 100, y: tray.y + 32 - i * 6 }]); await page.waitForTimeout(40); }
+    await t.touch("touchEnd", []);
     await expect.poll(row).toBe("keys");
     await page.waitForTimeout(500);
-    await swipe(t, { x: tray.x + 100, y: tray.y + 32 }, { x: tray.x + 100, y: tray.y }, 6);
+    await swipe(t, { x: tray.x + 100, y: tray.y + 12 }, { x: tray.x + 100, y: tray.y + 44 }, 6);
     await expect.poll(row).toBe("canvas");
     await page.waitForTimeout(500);
     // Horizontal swipe scrolls the overflowing canvas row.
@@ -515,4 +519,24 @@ test("canvas backdrop: the dots move exactly with the windows, one layer fades t
   const far = await dotAt();
   expect(far.level0).toBe(0);
   expect(far.level1).toBe(1);
+});
+
+test("toolbar: the row stack follows the finger one to one (swipe up moves it up and reveals the key row)", async ({ browser }) => {
+  const t = await touchPage(browser, 3);
+  try {
+    const { page } = t;
+    await page.touchscreen.tap(359, 400);
+    await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "canvas");
+    await page.waitForTimeout(900);
+    const tray = (await page.locator("#keytray").boundingBox())!;
+    const offset = (): Promise<number> => page.evaluate(() => Number(/-?[\d.]+/.exec(document.querySelector<HTMLElement>("#keyrows")!.style.transform || "0")?.[0] ?? 0));
+    await t.touch("touchStart", [{ x: tray.x + 100, y: tray.y + 32 }]);
+    const seen: number[] = [];
+    for (let i = 1; i <= 7; i++) { await t.touch("touchMove", [{ x: tray.x + 100, y: tray.y + 32 - i * 6 }]); await page.waitForTimeout(40); seen.push(await offset()); }
+    // After the direction locks, the stack is above where it started and keeps moving up with the finger.
+    expect(seen[6]!).toBeLessThan(-25);
+    expect(seen[6]!).toBeLessThan(seen[3]!);
+    await t.touch("touchEnd", []);
+    await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "keys");
+  } finally { await t.close(); }
 });

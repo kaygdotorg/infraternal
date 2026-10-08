@@ -879,8 +879,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     }
     if (sw.axis !== "y") return;
     // Follows the finger one to one, with rubber past either row.
-    // Swipe up shows the canvas row (the upper one), swipe down the key row (the lower one), always.
-    let v = sw.from + (event.clientY - sw.y) / rowHeight();
+    // The stack follows the finger one to one: dragging up moves it up and reveals the row below (the key
+    // row); dragging down reveals the row above (the canvas row).
+    let v = sw.from - (event.clientY - sw.y) / rowHeight();
     if (v < 0) v = v * 0.25; else if (v > 1) v = 1 + (v - 1) * 0.25;
     rowSpring.value = v;
     paintRow(v);
@@ -894,7 +895,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (sw.axis !== "y") return;
     const a = sw.samples[0]!, b = sw.samples[sw.samples.length - 1]!;
     const vel = b.t > a.t ? (b.y - a.y) / (b.t - a.t) : 0; // px/ms, finger direction (up is negative)
-    const projected = rowSpring.value + (vel * 120) / rowHeight();
+    const projected = rowSpring.value - (vel * 120) / rowHeight();
     settleRow(projected > 0.5 ? 1 : 0);
   };
   keytray.addEventListener("pointerup", endRowSwipe);
