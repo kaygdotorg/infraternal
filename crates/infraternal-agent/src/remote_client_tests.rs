@@ -480,3 +480,42 @@ async fn tcp_winner_cancels_silent_udp_drivers_without_waiting_for_drain() {
         "cancelled UDP connection unexpectedly authenticated"
     );
 }
+
+#[tokio::test]
+async fn expired_local_identity_stops_instead_of_retrying_forever() {
+    let ca = root();
+    let key = openssl::pkey::PKey::generate_ed25519().unwrap();
+    let mut certificate = X509::builder().unwrap();
+    certificate.set_version(2).unwrap();
+    certificate
+        .set_subject_name(ca.certificate.subject_name())
+        .unwrap();
+    certificate
+        .set_issuer_name(ca.certificate.subject_name())
+        .unwrap();
+    certificate.set_pubkey(&key).unwrap();
+    certificate
+        .set_not_before(&openssl::asn1::Asn1Time::from_unix(1).unwrap())
+        .unwrap();
+    certificate
+        .set_not_after(&openssl::asn1::Asn1Time::from_unix(2).unwrap())
+        .unwrap();
+    certificate
+        .sign(&ca.key, openssl::hash::MessageDigest::null())
+        .unwrap();
+    let identity = RemoteIdentity {
+        identity: Identity {
+            certificate: certificate.build(),
+            key,
+        },
+        roots: vec![ca.certificate],
+        endpoint: "127.0.0.1:1".parse().unwrap(),
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    let result = tokio::time::timeout(Duration::from_millis(200), run(&identity, None)).await;
+    assert!(
+        matches!(result, Ok(Err(error)) if error.kind() == io::ErrorKind::PermissionDenied),
+        "expired identity kept retrying"
+    );
+}
