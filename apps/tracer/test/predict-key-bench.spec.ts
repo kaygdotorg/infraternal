@@ -43,12 +43,24 @@ test.skip(!(keyCount > 0), "set TRACER_PREDICT_KEYS=400 to run the per-key cost 
 
 test(`predictive echo cost per key over ${keyCount} keys`, async ({ page, context }) => {
   test.setTimeout(120_000 + keyCount * 400);
-  await context.request.post("/__mock/reset");
-  await context.request.post("/__mock/open-terminal");
+  // Self-contained: the test double needs nothing but these two calls (a fresh owner and its auth cookie, which the
+  // page shares through the browser context) and the page URL. No other spec has to run first.
+  const problems: string[] = [];
+  page.on("console", (message) => { if (message.type() === "error") problems.push(`console: ${message.text()}`); });
+  page.on("pageerror", (error) => problems.push(`page error: ${error.message}`));
+  const reset = await context.request.post("/__mock/reset");
+  const opened = await context.request.post("/__mock/open-terminal");
+  expect([reset.status(), opened.status()], "the test double answers /__mock/reset and /__mock/open-terminal").toEqual([200, 200]);
   await page.setViewportSize({ width: 1000, height: 800 });
   await page.addInitScript(() => sessionStorage.clear());
   await page.goto("/?mock=1&predict=1");
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+  try {
+    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+  } catch (error) {
+    // Say what the page showed instead of only that it never connected.
+    const shown = await page.evaluate(() => `${location.href} :: ${document.body.innerText.slice(0, 300).replace(/\s+/g, " ")}`).catch(() => "page unavailable");
+    throw new Error(`the terminal never connected. Page: ${shown}. Problems: ${problems.join(" | ") || "none"}. Original: ${String(error)}`);
+  }
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0), { timeout: 30_000 })
     .toBeGreaterThan(60);
   await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
