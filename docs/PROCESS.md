@@ -128,10 +128,14 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Baseline | Maximum |
   | --- | ---: | ---: |
-  | `x86_64-unknown-linux-musl` | 16,142,672 bytes | 16,404,816 bytes |
-  | `aarch64-unknown-linux-musl` | 13,555,672 bytes | 13,817,816 bytes |
+  | `x86_64-unknown-linux-musl` | 16,521,648 bytes | 16,783,792 bytes |
+  | `aarch64-unknown-linux-musl` | 13,881,576 bytes | 14,143,720 bytes |
 
-  The baseline is the #57 measurement on the Debian 13, 8-vCPU build guest.
+  The baseline is the #87 integrated bootstrap measurement on infraternal-dev,
+  Debian 13, eight logical cores, CPUWeight=10000. Relative to #57, the
+  authenticated progress/runtime, private helpers and owned SSH lifecycle add
+  378,976 / 325,904 bytes. The measurements and rationale precede this update
+  on #87; no SSH library is embedded. The 256 KiB allowance is unchanged.
   An intentional size increase needs target-specific measurements and a
   rationale on its issue before the baseline is changed.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
