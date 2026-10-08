@@ -227,10 +227,8 @@ test("tapping a detached session opens it in a new window and flies the canvas t
       expect(await stateOf(page, "build-01", "journal")).toBe("open");
       if (viewport.touch) await expect(page.locator("#sidebar")).toBeHidden();
       await expect(page.locator(".ui-window[data-active] .ui-window-session")).toHaveText("journal");
-      // On a phone the new window is framed whole. With the sidebar docked on desktop the canvas frames the last column
-      // by its own rule (its right edge can pass the viewport): only check that the camera moved to it.
-      if (viewport.touch) await expect.poll(async () => { const b = await page.locator(".ui-window[data-active]").boundingBox(); return b ? b.x >= -1 && b.x + b.width <= viewport.width + 1 : false; }, { timeout: 5000 }).toBe(true);
-      else await expect.poll(async () => (await page.locator(".ui-window[data-active]").boundingBox())!.x, { timeout: 5000 }).toBeGreaterThan(300);
+      // The canvas frames the new window whole, on a phone and on a desktop (the sidebar is a layer over the canvas, not a dock).
+      await expect.poll(async () => { const b = await page.locator(".ui-window[data-active]").boundingBox(); return b ? b.x >= -1 && b.x + b.width <= viewport.width + 1 : false; }, { timeout: 5000 }).toBe(true);
     } finally { await context.close(); }
   }
 });
