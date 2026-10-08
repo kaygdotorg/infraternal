@@ -12,7 +12,7 @@
  * starts drawing 50 ms after the icon transition. Going back is quicker than coming in.
  */
 import { TICK_PATH } from "./tick";
-import { refreshTip } from "./tooltip";
+import { flashTip, refreshTip } from "./tooltip";
 
 // Long enough to register, short enough to be gone before the next glance (owner:
 // 1.4 s was too long).
@@ -29,10 +29,14 @@ const TICK_ICON = `<svg class="is-done" viewBox="0 0 24 24" aria-hidden="true"><
 /** The whole content of an icon-only action button: its icon, with the tick behind it. */
 export const swapIcon = (paths: string) => `<span class="swap"><svg class="is-idle" viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>${TICK_ICON}</span>`;
 
+/** An inline tick for text that copies (no idle glyph): it morphs in with the same motion as `swapIcon`. */
+export const inlineTick = (): string => `<span class="swap ui-inline-tick" aria-hidden="true">${TICK_ICON}</span>`;
+
 const timers = new WeakMap<HTMLElement, number>();
 
 /** Plays the icon → tick → icon swap; keyboard activations expose the result instantly. */
 export function confirmAction(button: HTMLElement, doneLabel: string, instant = false): void {
+  // Text cells have no label of their own: the empty idle label restores to "no attribute".
   const idle = button.dataset.idleLabel ??= button.getAttribute("aria-label") ?? "";
   clearTimeout(timers.get(button));
   button.toggleAttribute("data-instant", instant);
@@ -42,17 +46,22 @@ export function confirmAction(button: HTMLElement, doneLabel: string, instant = 
   timers.set(button, window.setTimeout(() => {
     delete button.dataset.done;
     button.removeAttribute("data-instant");
-    button.setAttribute("aria-label", idle);
+    if (idle) button.setAttribute("aria-label", idle); else button.removeAttribute("aria-label");
     refreshTip(button);
   }, HOLD));
 }
 
-/** Copies `text` and confirms after acceptance; keyboard activation is immediate. */
-export async function copyFeedback(button: HTMLElement, text: string, instant = false): Promise<boolean> {
+/**
+ * Copies `text` and confirms after acceptance; keyboard activation is immediate. This is the one
+ * copy gesture of the product (sign-in, recovery, key/value cells, About). Elements that have no
+ * tooltip of their own (a text cell) pass `tip: true` to show the shared "Copied" tooltip too.
+ */
+export async function copyFeedback(button: HTMLElement, text: string, instant = false, tip = false): Promise<boolean> {
   try {
     if (!navigator.clipboard) return false;
     await navigator.clipboard.writeText(text);
     confirmAction(button, "Copied", instant);
+    if (tip) flashTip(button, "Copied", HOLD);
     return true;
   } catch {
     return false;

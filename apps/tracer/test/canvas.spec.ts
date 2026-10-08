@@ -98,7 +98,7 @@ test("details popover: keys left, values right, each cell copies with a tick", a
   expect(key!.x).toBeLessThan(rowBox.x + 8);
   expect(Math.abs(value!.x + value!.width - (rowBox.x + rowBox.width))).toBeLessThan(8);
   await row.locator(".ui-kv-value").click();
-  await expect(row.locator(".ui-kv-value")).toHaveAttribute("data-copied", "");
+  await expect(row.locator(".ui-kv-value")).toHaveAttribute("data-done", "");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("6.8.0-58-generic");
   await row.locator(".ui-kv-key").click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Kernel");
@@ -376,7 +376,7 @@ test("sidebar footer: the person and settings pills line up, press, and open Set
   await expect(about.locator(".ui-settings-nav-row[aria-current='true']")).toHaveText("About");
   const commit = about.locator(".ui-kv-row", { hasText: "Commit" }).locator(".ui-kv-value");
   await commit.click();
-  await expect(commit).toHaveAttribute("data-copied", "");
+  await expect(commit).toHaveAttribute("data-done", "");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/^[0-9a-f]{40}$|^dev$/);
   await expect(page.locator(".tip")).toContainText("Copied");
   const version = about.locator(".ui-kv-row", { hasText: "Version" }).locator(".ui-kv-value");
@@ -695,4 +695,25 @@ test("details popover tabs: the selected capsule glides (does not jump) and the 
   await page.keyboard.press("ArrowRight");
   await expect(page.locator(".canvas-popover .ui-tab[data-tab='session']")).toHaveAttribute("aria-selected", "true");
   expect(await page.locator(".ui-tabs-capsule").evaluate((node) => node.style.transition)).toBe("none");
+});
+
+test("copyable values: the highlight hugs the text with even padding, on keys and right-aligned values", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.locator(".ui-window").first().locator(".ui-window-pill").click();
+  const measure = (kind: "key" | "value") => page.evaluate((which) => {
+    const row = [...document.querySelectorAll(".canvas-popover .ui-kv-row")].find((node) => node.textContent!.includes("Virtualization"))!;
+    const span = row.querySelector(`.ui-kv-${which} .ui-kv-text`)!;
+    const text = document.createRange();
+    text.selectNodeContents([...span.childNodes].find((node) => node.nodeType === 3)!);
+    const box = span.getBoundingClientRect(), glyphs = text.getBoundingClientRect();
+    return { left: glyphs.left - box.left, right: box.right - glyphs.right };
+  }, kind);
+  for (const kind of ["key", "value"] as const) {
+    const pad = await measure(kind);
+    expect(Math.abs(pad.left - 6)).toBeLessThan(0.6);
+    expect(Math.abs(pad.right - 6)).toBeLessThan(0.6);
+  }
+  // Wrapped values keep a highlight per line: the decoration is cloned across the lines.
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector(".ui-kv-text")!).getPropertyValue("box-decoration-break"))).toBe("clone");
 });

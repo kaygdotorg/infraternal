@@ -333,23 +333,32 @@
 }
 .ui-kv-row:last-child { border-bottom: 0; }
 .ui-kv-cell {
-  display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; margin: 0 -6px; padding: 3px 6px; border: 0; border-radius: 6px;
-  background: none; color: inherit; cursor: copy; text-align: left; font: inherit; transition: background-color 120ms ease;
+  display: block; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: copy; text-align: left; font: inherit;
+  transition: transform 140ms var(--ease-out, ease-out);
   -webkit-user-select: text; user-select: text; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
 }
 .ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
-.ui-kv-value { justify-self: end; justify-content: flex-end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
-.ui-kv-text { min-width: 0; overflow-wrap: anywhere; }
-.ui-kv-tick { width: 12px; height: 12px; flex: none; align-self: center; fill: none; stroke: var(--ok); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 150ms var(--ease-out, ease-out); }
-.ui-kv-cell[data-copied] .ui-kv-tick { opacity: 1; transform: none; }
+.ui-kv-value { justify-self: end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
+.ui-kv-cell:active { transform: scale(0.98); }
+/* The highlighted run: 6 px of even padding either side (cancelled by a -6 px margin so the text
+   still lines up with the row's edges), cloned across wrapped lines. */
+.ui-kv-text {
+  display: inline; margin: 0 -6px; padding: 3px 6px; border-radius: 6px; overflow-wrap: anywhere; transition: background-color 120ms ease;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+/* The tick takes no room until a copy happens, so the highlight never carries empty space. */
+.ui-kv-text .ui-inline-tick { width: 0; height: 12px; margin-right: 0; overflow: hidden; vertical-align: -1px; transition: width 150ms var(--ease-out, ease-out), margin 150ms var(--ease-out, ease-out); }
+
+.ui-kv-cell[data-done] .ui-kv-text .ui-inline-tick { width: 12px; }
+.ui-kv-key[data-done] .ui-kv-text .ui-inline-tick { margin-left: 6px; }
+.ui-kv-value[data-done] .ui-kv-text .ui-inline-tick { margin-right: 6px; }
 .ui-kv-meter { grid-column: 1 / -1; position: relative; height: 3px; margin: 4px 0 2px; overflow: hidden; border-radius: 2px; background: var(--line); }
 .ui-kv-meter::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--accent); transform: scaleX(var(--meter, 0)); transform-origin: left; }
 @media (hover: hover) and (pointer: fine) {
-  .ui-kv-cell:hover { background: var(--hover); }
+  .ui-kv-cell:hover .ui-kv-text { background: var(--hover); }
 }
 @media (prefers-reduced-motion: reduce) {
   .ui-window-pill:active, .ui-window-action:active { transform: none; }
-  .ui-kv-tick { transform: none; }
 }
 
 /* DECISION 120 icon slot for branched-menu hosts. */
