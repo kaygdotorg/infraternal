@@ -6,7 +6,7 @@
  */
 import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
-import { renderSettingsBody } from "./settings-body";
+import { onDemand } from "../../on-demand";
 
 /** True for kinds whose window is a terminal session: the only kind that can split or take input. */
 export const isTerminal = (rec: WinRec): boolean => rec.model.kind === "terminal" && !rec.model.noAccess;
@@ -32,7 +32,16 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     binding.mount(body);
     return;
   }
-  if (m.kind === "settings") { rec.cleanup = renderSettingsBody(cx, m.id.slice(2), body); return; }
+  if (m.kind === "settings") {
+    // The panels load the first time a Settings window is drawn (on demand); until then the window is empty for a frame or two.
+    let release: (() => void) | undefined, gone = false;
+    rec.cleanup = () => { gone = true; release?.(); };
+    void onDemand(() => import("./settings-body.on-demand")).then((mod) => {
+      if (gone) return;
+      release = mod.renderSettingsBody(cx, m.id.slice(2), body);
+    });
+    return;
+  }
   if (m.kind === "logs") {
     const pre = el("pre", "canvas-preview cl-preview cl-logs");
     pre.innerHTML = (m.lines ?? []).map((l) => {

@@ -40,7 +40,7 @@ import type { ViewList } from "./toolbar/viewlist";
 import type { TreeModule } from "./toolbar/tree";
 import type { ToolbarModule } from "./toolbar/row";
 import type { SessionUi } from "./windows/session-ui";
-import type { SettingsSource } from "./views/settings-body";
+import type { SettingsSource } from "./views/settings-body.on-demand";
 
 /** One window on the canvas: its card, its model and the things that must be undone when it goes. */
 export interface WinRec {
