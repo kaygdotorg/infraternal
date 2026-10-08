@@ -4,6 +4,8 @@
 pub mod auth;
 mod embedded;
 pub mod mesh_api;
+#[cfg(test)]
+mod mesh_api_tests;
 mod runtime;
 mod web_assets;
 mod websocket;

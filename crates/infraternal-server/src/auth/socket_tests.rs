@@ -442,3 +442,178 @@ async fn recovery_subscription_updates_every_signed_in_socket() {
     );
     server.abort();
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep one real socket's handshake, snapshot, edits, and invalidations ordered.
+async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "mesh-api",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Subscribe {
+            sub_id: 72,
+            filter_json: br#"{"topic":"mesh"}"#,
+        },
+    )
+    .await;
+    let snapshot = read_client_frame(&mut socket).await;
+    let Frame::Event {
+        sub_id: 72,
+        event_json,
+    } = decode_muxed_frame(&snapshot).unwrap().frame
+    else {
+        panic!("missing initial Mesh snapshot")
+    };
+    let snapshot: Value = serde_json::from_slice(event_json).unwrap();
+    assert_eq!(snapshot["type"], "snapshot");
+    assert_eq!(snapshot["snapshot"]["revision"], 0);
+    assert_eq!(snapshot["snapshot"]["nodes"], json!([]));
+
+    let node_input = serde_json::to_vec(&json!({
+        "name":"db-1",
+        "public_key":vec![1_u8; 32],
+    }))
+    .unwrap();
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 1,
+            action_id: "mesh.node.enroll",
+            input_json: &node_input,
+        },
+    )
+    .await;
+    let result = read_client_frame(&mut socket).await;
+    let Frame::Result {
+        call_id: 1,
+        ok: true,
+        json: result_json,
+    } = decode_muxed_frame(&result).unwrap().frame
+    else {
+        panic!("mesh.node.enroll did not return a successful Result")
+    };
+    let result: Value = serde_json::from_slice(result_json).unwrap();
+    let node_id = result["node_id"].as_u64().unwrap();
+    assert_eq!(result["revision"], 1);
+    let change = read_client_frame(&mut socket).await;
+    let Frame::Event {
+        sub_id: 72,
+        event_json,
+    } = decode_muxed_frame(&change).unwrap().frame
+    else {
+        panic!("mesh.node.enroll did not notify its subscriber")
+    };
+    let change: Value = serde_json::from_slice(event_json).unwrap();
+    assert_eq!(change, json!({"type":"changed","revision":1}));
+
+    let tag_input = serde_json::to_vec(&json!({"name":"ops"})).unwrap();
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 2,
+            action_id: "mesh.tag.create",
+            input_json: &tag_input,
+        },
+    )
+    .await;
+    let result = read_client_frame(&mut socket).await;
+    let Frame::Result {
+        call_id: 2,
+        ok: true,
+        json: result_json,
+    } = decode_muxed_frame(&result).unwrap().frame
+    else {
+        panic!("mesh.tag.create did not return a successful Result")
+    };
+    let result: Value = serde_json::from_slice(result_json).unwrap();
+    assert_eq!(result["revision"], 2);
+    let change = read_client_frame(&mut socket).await;
+    let Frame::Event {
+        sub_id: 72,
+        event_json,
+    } = decode_muxed_frame(&change).unwrap().frame
+    else {
+        panic!("mesh.tag.create did not notify its subscriber")
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(event_json).unwrap(),
+        json!({"type":"changed","revision":2})
+    );
+
+    let member_input = serde_json::to_vec(&json!({"tag":"ops","node_id":node_id})).unwrap();
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 3,
+            action_id: "mesh.tag.member.add",
+            input_json: &member_input,
+        },
+    )
+    .await;
+    let result = read_client_frame(&mut socket).await;
+    assert!(matches!(
+        decode_muxed_frame(&result).unwrap().frame,
+        Frame::Result {
+            call_id: 3,
+            ok: true,
+            ..
+        }
+    ));
+    let change = read_client_frame(&mut socket).await;
+    let Frame::Event {
+        sub_id: 72,
+        event_json,
+    } = decode_muxed_frame(&change).unwrap().frame
+    else {
+        panic!("membership edit did not notify its subscriber")
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(event_json).unwrap(),
+        json!({"type":"changed","revision":3})
+    );
+
+    let list_input = b"{}";
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 4,
+            action_id: "mesh.list",
+            input_json: list_input,
+        },
+    )
+    .await;
+    let list = read_client_frame(&mut socket).await;
+    let Frame::Result {
+        call_id: 4,
+        ok: true,
+        json: list_json,
+    } = decode_muxed_frame(&list).unwrap().frame
+    else {
+        panic!("mesh.list did not return a successful Result")
+    };
+    let list: Value = serde_json::from_slice(list_json).unwrap();
+    assert_eq!(list["nodes"][0]["node"]["id"], node_id);
+    assert_eq!(list["tags"][0]["members"][0], node_id);
+    server.abort();
+}
