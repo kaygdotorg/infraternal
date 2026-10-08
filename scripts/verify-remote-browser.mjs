@@ -16,7 +16,9 @@ async function focusTerminal(page) {
   });
 }
 
-const browser = await chromium.launch({ args: ['--disable-renderer-backgrounding'] });
+const launchArgs = ['--disable-renderer-backgrounding'];
+if (fixture.resolver_address) launchArgs.push(`--host-resolver-rules=MAP localhost ${fixture.resolver_address}`);
+const browser = await chromium.launch({ args: launchArgs });
 let stage = 'launch';
 try {
   for (const [name, device] of [['desktop', { viewport: { width: 1440, height: 900 } }], ['iphone', devices['iPhone 15']]]) {
@@ -45,7 +47,7 @@ try {
       await page.waitForFunction(value => window.__tracerTestDouble?.screenText().includes(value), marker, { timeout: 15000 });
       const roundtrip = performance.now() - started;
       await mkdir('evidence/remote-agents/screenshots', { recursive: true });
-      await page.screenshot({ path: `evidence/remote-agents/screenshots/run7-real-remote-${name}.png` });
+      await page.screenshot({ path: `evidence/remote-agents/screenshots/${fixture.screenshot_prefix ?? 'run7-real-remote'}-${name}.png` });
       console.log(`remote_browser viewport=${name} real_server=true real_host_daemon=true production_renderer=true enter_to_glyph_ms=${roundtrip.toFixed(3)}`);
       stage = `${name}:probe`;
       await page.locator('#probe-run').click();

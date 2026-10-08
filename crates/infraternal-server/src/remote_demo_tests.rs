@@ -95,6 +95,25 @@ async fn invitation(
     cookie: &str,
     host: uuid::Uuid,
 ) -> Vec<u8> {
+    invitation_for_uid(
+        address,
+        root,
+        origin,
+        cookie,
+        host,
+        nix::unistd::Uid::effective().as_raw(),
+    )
+    .await
+}
+
+async fn invitation_for_uid(
+    address: SocketAddr,
+    root: &X509,
+    origin: &str,
+    cookie: &str,
+    host: uuid::Uuid,
+    uid: u32,
+) -> Vec<u8> {
     use http_body_util::BodyExt;
     let stream = tls(address, root).await;
     let (mut sender, connection) =
@@ -102,7 +121,10 @@ async fn invitation(
             .await
             .unwrap();
     let task = tokio::spawn(connection);
-    let body = serde_json::to_vec(&serde_json::json!({"host_id":host,"mode":"rootless","execution_uid":nix::unistd::Uid::effective().as_raw()})).unwrap();
+    let body = serde_json::to_vec(
+        &serde_json::json!({"host_id":host,"mode":"rootless","execution_uid":uid}),
+    )
+    .unwrap();
     let request = hyper::Request::builder()
         .method("POST")
         .uri("/remote/invitations")
@@ -160,6 +182,15 @@ impl Drop for Fixture {
 }
 
 async fn fixture(directory: &Directory) -> Fixture {
+    fixture_at(
+        directory,
+        "127.0.0.1:4701".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .await
+}
+
+async fn fixture_at(directory: &Directory, address: SocketAddr, endpoint: SocketAddr) -> Fixture {
     let server_data = directory.0.join("server");
     let pool = open_database(&server_data).await.unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
@@ -172,7 +203,6 @@ async fn fixture(directory: &Directory) -> Fixture {
     let root = material.issuer().clone();
     let signer = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(root.clone()));
     signer.unlock_from(&Administrator(material)).unwrap();
-    let address: SocketAddr = "127.0.0.1:4701".parse().unwrap();
     let origin = "https://localhost:4701";
     let config = ServerConfig {
         listen: address,
@@ -197,7 +227,7 @@ async fn fixture(directory: &Directory) -> Fixture {
             source: signer,
             endpoint: crate::remote_http::EnrollmentEndpoint {
                 ca_der: root.to_der().unwrap(),
-                endpoint: "127.0.0.1:0".parse().unwrap(),
+                endpoint,
                 server_name: "localhost".into(),
             },
         },
@@ -432,7 +462,9 @@ async fn browser_proof(fixture: &Fixture, host: uuid::Uuid, session: uuid::Uuid)
         .spawn()
         .unwrap();
     let private = serde_json::to_vec(&serde_json::json!({
-        "cookie":fixture.cookie,"host":host,"session":session
+        "cookie":fixture.cookie,"host":host,"session":session,
+        "resolver_address": (!fixture.address.ip().is_loopback()).then(|| fixture.address.ip().to_string()),
+        "screenshot_prefix": if fixture.address.ip().is_loopback() { "run7-real-remote" } else { "run8-o1-real-remote" }
     }))
     .unwrap();
     child
@@ -635,3 +667,6 @@ async fn remote_cli_enrollment_and_browser_terminal_two_processes() {
     drop(directory);
     assert_eq!(remaining_shims(&state), 0, "fixture left a surviving shim");
 }
+
+#[path = "remote_host_tests.rs"]
+mod real_host;

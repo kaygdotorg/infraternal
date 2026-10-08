@@ -91,6 +91,7 @@ fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) {
         .append_extension(
             SubjectAlternativeName::new()
                 .dns("localhost")
+                .ip("10.69.69.125")
                 .build(&server.x509v3_context(Some(&root), None))
                 .unwrap(),
         )
