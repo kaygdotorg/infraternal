@@ -1,0 +1,9 @@
+# Role: Raw command output for handshake-300ms-quinn repetition 5 attempt 1. SPDX-License-Identifier: AGPL-3.0-only
+qdisc netem 803e: root refcnt 2 limit 1000 delay 150ms  15ms seed 17219538295524914886
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+quinn-rustls-ring,handshake-1rtt,fresh-mtls,1,282255,282255,282255,282255,4904,4904.000,0.000,0.000000
+qdisc netem 803e: root refcnt 2 limit 1000 delay 150ms  15ms seed 17219538295524914886
+ Sent 5454 bytes 6 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 1979b 5p requeues 0

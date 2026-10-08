@@ -1,0 +1,7 @@
+# Role: Raw measured benchmark rows for 0rtt-loopback-quinn. SPDX-License-Identifier: AGPL-3.0-only
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,1919,1919,1919,1919,2714,2714.000,0.008,21203.125000
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,1508,1508,1508,1508,946,946.000,0.010,7390.625000
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,1795,1795,1795,1795,2575,2575.000,0.009,20117.187500
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,1888,1888,1888,1888,2807,2807.000,0.008,21929.687500
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,1414,1414,1414,1414,742,742.000,0.011,5796.875000

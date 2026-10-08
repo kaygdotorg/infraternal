@@ -1,0 +1,7 @@
+# Role: Raw measured benchmark rows for handshake-300ms-openssl. SPDX-License-Identifier: AGPL-3.0-only
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+openssl-native-3.6.3,handshake-1rtt,fresh-mtls,1,893771,893771,893771,893771,7594,7594.000,0.000,0.000000
+openssl-native-3.6.3,handshake-1rtt,fresh-mtls,1,896211,896211,896211,896211,6930,6930.000,0.000,0.000000
+openssl-native-3.6.3,handshake-1rtt,fresh-mtls,1,900567,900567,900567,900567,6217,6217.000,0.000,0.000000
+openssl-native-3.6.3,handshake-1rtt,fresh-mtls,1,894039,894039,894039,894039,6840,6840.000,0.000,0.000000
+openssl-native-3.6.3,handshake-1rtt,fresh-mtls,1,902122,902122,902122,902122,7206,7206.000,0.000,0.000000

@@ -1,0 +1,3 @@
+# Role: Raw command output for handshake-loopback-openssl repetition 4 attempt 1. SPDX-License-Identifier: AGPL-3.0-only
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+openssl-native-3.6.3,handshake-1rtt,fresh-mtls,1000,2731,4883,11844,30026,7552085,7552.085,0.000,0.000000

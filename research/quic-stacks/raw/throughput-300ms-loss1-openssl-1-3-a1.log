@@ -1,0 +1,9 @@
+# Role: Raw command output for throughput-300ms-loss1-openssl-1 repetition 3 attempt 1. SPDX-License-Identifier: AGPL-3.0-only
+qdisc netem 807a: root refcnt 2 limit 1000 delay 150ms  15ms loss 1% seed 8298431404083877077
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,44400508,44400508,44400508,44400508,310585,0.296,0.023,37.024617
+qdisc netem 807a: root refcnt 2 limit 1000 delay 150ms  15ms loss 1% seed 8298431404083877077
+ Sent 1206803 bytes 1668 pkt (dropped 19, overlimits 0 requeues 0)
+ backlog 66b 1p requeues 0

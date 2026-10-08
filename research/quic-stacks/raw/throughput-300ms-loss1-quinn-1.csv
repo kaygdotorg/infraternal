@@ -1,0 +1,7 @@
+# Role: Raw measured benchmark rows for throughput-300ms-loss1-quinn-1. SPDX-License-Identifier: AGPL-3.0-only
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+quinn-rustls-ring,stream-throughput,1-bidi-stream,1048576,1942891,1942891,1942891,1942891,48830,0.047,0.515,5.820990
+quinn-rustls-ring,stream-throughput,1-bidi-stream,1048576,1939254,1939254,1939254,1939254,45632,0.044,0.516,5.439758
+quinn-rustls-ring,stream-throughput,1-bidi-stream,1048576,2380507,2380507,2380507,2380507,41319,0.039,0.420,4.925609
+quinn-rustls-ring,stream-throughput,1-bidi-stream,1048576,2027528,2027528,2027528,2027528,42580,0.041,0.493,5.075932
+quinn-rustls-ring,stream-throughput,1-bidi-stream,1048576,1929768,1929768,1929768,1929768,40053,0.038,0.518,4.774690

@@ -1,0 +1,3 @@
+# Role: Raw command output for memory-1000-quinn repetition 2 attempt 1. SPDX-License-Identifier: AGPL-3.0-only
+stack,connections,baseline_rss_bytes,idle_rss_bytes,active_rss_bytes,idle_bytes_per_connection,stream_bytes_per_connection
+quinn-rustls-ring,1000,2744320,46702592,47345664,43958,643
