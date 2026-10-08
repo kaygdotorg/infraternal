@@ -184,7 +184,7 @@ test("every floating card uses the one overlay material", async ({ page }) => {
     return { popover, shared };
   });
   expect(material.popover).toEqual(material.shared);
-  expect(material.shared.filter).toContain("blur(4px)");
+  expect(material.shared.filter).toContain("blur(16px)");
 });
 
 // ---- the connection line is never a second toast ---------------------------------------
@@ -601,7 +601,7 @@ test("shortcuts: ? morphs the capsule into the list, current area first, one sho
   const palette = await panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd").allTextContents();
   expect(palette).toEqual(["Ctrl", "K"]);
   const material = await panel.evaluate((node) => { const s = getComputedStyle(node); return { filter: s.backdropFilter, bg: s.backgroundColor }; });
-  expect(material.filter).toContain("blur(4px)");
+  expect(material.filter).toContain("blur(16px)");
   // At rest nothing is left animating: no transform, no opacity on the content.
   expect(await panel.evaluate((node) => [getComputedStyle(node).transform, getComputedStyle(node.querySelector(".ui-shortcuts-body")!).opacity])).toEqual(["none", "1"]);
   await page.keyboard.press("Escape");
@@ -919,4 +919,19 @@ test("palette: Ctrl+K then typing within 20 ms lands every character; arrow sele
   expect(transitions.every((duration) => duration === "0s")).toBe(true);
   // The key-triggered open is short (about 180 ms) and the pointer one longer.
   expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).transitionDuration)).toBe("0.18s");
+});
+
+// ---- text behind glass is never legible through it --------------------------------------------
+test("glass surfaces blur what is behind them by about a line of text, so letters never read through", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.locator("#sidebar-toggle").click();
+  await page.keyboard.press("Control+k");
+  await page.waitForTimeout(400);
+  const blurs = await page.evaluate(() => Object.fromEntries(["#palette", "#sidebar"].map((selector) => [selector, parseFloat(/blur\(([\d.]+)px\)/.exec(getComputedStyle(document.querySelector(selector)!).backdropFilter)?.[1] ?? "0")])));
+  await page.keyboard.press("Escape");
+  await page.locator(".ui-window-pill").nth(1).click();
+  const popover = await page.evaluate(() => parseFloat(/blur\(([\d.]+)px\)/.exec(getComputedStyle(document.querySelector(".canvas-popover")!).backdropFilter)?.[1] ?? "0"));
+  // A terminal line is about 18 px tall: the blur radius is at least that, measured from captures over dense text.
+  for (const value of [...Object.values(blurs), popover]) expect(value).toBeGreaterThanOrEqual(16);
 });

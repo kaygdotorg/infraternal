@@ -16,7 +16,7 @@
 
 /* The one material's blur and saturation: surfaces and pills read these two tokens, so tuning them
    here tunes every floating thing at once. */
-:root { --ui-overlay-blur: 4px; --ui-overlay-saturation: 160%; }
+:root { --ui-overlay-blur: 16px; --ui-overlay-saturation: 160%; }
 
 /* One theme-aware glass material for every floating surface (D72, D160): popovers, sheets,
    palette, sidebar and tooltips, never in-page controls. No top-edge highlight (TASTE §1).
