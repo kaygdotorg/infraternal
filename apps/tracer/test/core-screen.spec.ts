@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "playwright/test";
 import { contrastRatio } from "../../../packages/ui/src/color";
 import { THEMES, overlayMaterial } from "../../../packages/ui/src/themes";
+import { FONTS } from "../../../packages/ui/src/fonts";
 
 async function waitForAttached(page: Page): Promise<void> {
   await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
@@ -89,6 +90,7 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
         rootPanel: root.getPropertyValue("--overlay-panel").trim(),
         rootLine: root.getPropertyValue("--overlay-line").trim(),
         rootShadow: root.getPropertyValue("--shadow").trim(),
+        rootLargeShadow: root.getPropertyValue("--overlay-shadow-large").trim(),
         stage: getComputedStyle(stage).getPropertyValue("--overlay").trim(),
         stageLine: getComputedStyle(stage).getPropertyValue("--overlay-line").trim(),
         stageShadow: getComputedStyle(stage).getPropertyValue("--shadow").trim(),
@@ -124,7 +126,7 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     // The sidebar is a large floating surface: the thinner shared panel material, not the pill one.
     expect(cssChannels(sidebarMaterial.background)).toEqual(cssChannels(material.rootPanel));
     expect(cssChannels(sidebarMaterial.line)).toEqual(cssChannels(material.rootLine));
-    expect(sidebarMaterial.shadow).toBe(material.layers[0]!.shadow);
+    expect(material.rootLargeShadow).not.toBe("");
     paths.push(await saveScreenshot(page, testInfo, `${prefix}-sidebar-open`));
     await page.locator("#sidebar-toggle").click();
     await expect(page.locator("#sidebar")).toBeHidden();
@@ -136,7 +138,8 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     });
     expect(cssChannels(paletteMaterial.background)).toEqual(cssChannels(material.root));
     expect(cssChannels(paletteMaterial.line)).toEqual(cssChannels(material.rootLine));
-    expect(paletteMaterial.shadow).toBe(material.layers[0]!.shadow);
+    expect(paletteMaterial.shadow).toBe(sidebarMaterial.shadow);
+    expect(paletteMaterial.shadow).not.toBe(material.layers[0]!.shadow);
     paths.push(await saveScreenshot(page, testInfo, `${prefix}-palette-open`));
     await page.keyboard.press("Escape");
   }
@@ -194,9 +197,10 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   const paletteActions = await palette.locator(".result").evaluateAll((results) =>
     results.map((result) => (result as HTMLButtonElement).dataset.action ?? ""));
   expect(paletteActions.sort()).toEqual([
-    "session:current", "host:current", "bg:mesh", "bg:none", ...Object.keys(THEMES).map((id) => `theme:${id}`),
+    "session:current", "host:current", "bg:mesh", "bg:none", ...Object.keys(THEMES).map((id) => `theme:${id}`), ...FONTS.map((font) => `font:${font.id}`),
   ].sort());
-  expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0s");
+  // Superseded (TASTE: animation never gets in the way): a key-triggered open is a short 180 ms fade, never blocking input.
+  expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0.18s");
   const previousMesh = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"));
   await page.locator("#palette-input").fill("dracula");
   await expect(page.getByRole("option", { name: /Dracula/ })).toBeVisible();

@@ -8,6 +8,8 @@ import { gunzipSync } from "node:zlib";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
+import { serveProvisioning } from "./provisioning-double";
+import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 
 const HOST = "localhost";
 // The browser connects to TRACER_TEST_PORT; the TCP latency proxy reaches this private upstream port.
@@ -96,6 +98,17 @@ let socketCloseCount = 0;
 
 server.on("upgrade", (request, socket, head) => {
   const path = new URL(request.url ?? "/", `http://${request.headers.host ?? `${HOST}:${PORT}`}`).pathname;
+  if (path === "/v1/bootstrap/ws") {
+    // Same admission as the real route: exact Origin (403), then the unlocked owner session (401).
+    const status = !sameOrigin(request) ? "403 Forbidden" : !isAuthenticated(request) ? "401 Unauthorized" : undefined;
+    if (status) {
+      socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      socket.destroy();
+      return;
+    }
+    webSockets.handleUpgrade(request, socket, head, (webSocket) => serveProvisioning(webSocket, request));
+    return;
+  }
   if (path !== "/v1/ws") {
     socket.destroy();
     return;
@@ -157,18 +170,17 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method === "GET" && url.pathname === "/health") {
     return sendJson(response, 200, { ok: true });
   }
+  if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
+    return sendJson(response, 200, { hosts: prototypeHosts });
+  }
+  if (request.method === "GET" && url.pathname === "/__mock/proto/addhost") {
+    return sendJson(response, 200, { hosts: addHostFixtures });
+  }
   if (request.method === "GET" && url.pathname === "/__mock/setup-token") {
     return sendJson(response, 200, { setup_token: setupToken });
   }
   if (request.method === "POST" && url.pathname === "/__mock/open-terminal") {
-    owner = {
-      userId: randomUuid(),
-      username: "renderer_test",
-      displayName: "Renderer test",
-      credentialId: newToken(),
-      passkeyWrap: {},
-      prfInput: newToken(),
-    };
+    owner = makeMockOwner();
     activeAuthCookie = newToken();
     setAuthCookie(response, activeAuthCookie);
     return sendJson(response, 200, { ok: true });
@@ -391,6 +403,14 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   }
   if (request.method !== "GET" && request.method !== "HEAD") {
     return sendJson(response, 404, { error: "not found" });
+  }
+  if ((url.pathname === "/" || url.pathname === "/index.html") && ["windows", "addhost"].includes(url.searchParams.get("proto") ?? "")) {
+    if (!owner) owner = makeMockOwner();
+    activeAuthCookie = newToken();
+    unlockPending = false;
+    pendingTransaction = undefined;
+    pendingLogin = undefined;
+    setPreviewAuthCookie(response, activeAuthCookie);
   }
   await serveDist(url.pathname, request.method === "HEAD", response);
 }
@@ -788,21 +808,39 @@ function sameOrigin(request: IncomingMessage): boolean {
 }
 
 function isAuthenticated(request: IncomingMessage): boolean {
-  return Boolean(owner && activeAuthCookie && cookieValue(request) === activeAuthCookie);
+  const cookie = activeAuthCookie;
+  return Boolean(owner && cookie && [cookieValue(request, "__Host-infraternal"), cookieValue(request, "infraternal-mock-session")].includes(cookie));
 }
 
 function hasAuthCookie(request: IncomingMessage): boolean {
   return isAuthenticated(request);
 }
 
-function cookieValue(request: IncomingMessage): string | undefined {
-  const item = request.headers.cookie?.split(";").map((part) => part.trim())
-    .find((part) => part.startsWith("__Host-infraternal="));
-  return item?.slice("__Host-infraternal=".length);
+function cookieValue(request: IncomingMessage, name: string): string | undefined {
+  const prefix = `${name}=`;
+  const item = request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith(prefix));
+  return item?.slice(prefix.length);
 }
 
 function setAuthCookie(response: ServerResponse, value: string): void {
   response.setHeader("Set-Cookie", `__Host-infraternal=${value}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`);
+}
+
+function setPreviewAuthCookie(response: ServerResponse, value: string): void {
+  // The owner's preview is plain HTTP on a private IP, where browsers reject Secure cookies.
+  // Keep this HTTP-only cookie confined to the test double and leave product auth unchanged.
+  response.setHeader("Set-Cookie", `infraternal-mock-session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`);
+}
+
+function makeMockOwner(): MockOwner {
+  return {
+    userId: randomUuid(),
+    username: "renderer_test",
+    displayName: "Renderer test",
+    credentialId: newToken(),
+    passkeyWrap: {},
+    prfInput: newToken(),
+  };
 }
 
 function resetMockState(): void {

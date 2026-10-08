@@ -4,6 +4,8 @@ import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/s
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { installFocusRing } from "../../../packages/ui/src/focus-ring";
+import { applyFontVars, loadFont } from "../../../packages/ui/src/fonts";
+import { initialFont } from "./font-preference";
 import { mountOnboarding } from "./onboarding";
 import { BRAND_MARK } from "./auth-marks";
 import { loading } from "../../../packages/ui/src/countup";
@@ -44,6 +46,8 @@ declare global {
         viewportY: number;
         cursorVisible: boolean;
         fontSize: number;
+        fontFamily: string;
+        fontId: string;
         wasmMemoryBytes: number;
         themeColorsMs: number;
         themeRenderMs: number;
@@ -86,8 +90,12 @@ void start();
 async function start(): Promise<void> {
   installFocusRing();
   installForegroundListener();
+  // The chosen font applies to the whole app, sign-in card included, before the first paint.
+  // The default is already declared in CSS and preloaded; another font is fetched here.
+  const font = initialFont();
+  applyFontVars(font, document.documentElement);
   const fontsReady = Promise.race([
-    document.fonts.load('450 14px "Maple Mono NF"').then(() => undefined),
+    loadFont(font),
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
   ]).catch(() => undefined);
   try {
@@ -266,6 +274,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   // The app paints its own theme; the sign-in scheme lets go once the backdrop has faded out.
   window.setTimeout(() => { if (!app.querySelector(".auth-screen")) releaseAuthScheme(); }, instant ? 0 : 260);
   currentTerminal?.dispose();
+  canvasPrototype?.dispose();
+  canvasPrototype = undefined;
   coreScreen?.dispose();
   performanceProbe?.dispose();
   currentTerminal = undefined;
@@ -273,6 +283,10 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   performanceProbe = undefined;
   const query = new URLSearchParams(location.search);
   const mockMode = query.get("mock") === "1";
+  // One combined preview (D160): `?proto=windows` is the canvas, and the add-host flow opens
+  // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
+  const proto = query.get("proto");
+  const canvasMode = mockMode && (proto === "windows" || proto === "addhost");
   const probeMode = query.get("probe") === "1";
   const predictiveEcho = query.get("predict") === "1";
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
@@ -281,20 +295,36 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     const { mountCoreScreen } = await import("./core-screen");
     // The screen mounts only after its selected face is ready, preventing a one-frame
     // fallback and keeping the mobile layout stable while the font loads.
-    await document.fonts.load(uiFont === "mono" ? '450 13px "Maple Mono NF"' : '450 14px "Geist Sans"');
+    await (uiFont === "mono" ? loadFont(initialFont()) : document.fonts.load('450 14px "Geist Sans"'));
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
+      addHostPrototype: canvasMode,
+      ...(identity?.display_name ? { displayName: identity.display_name } : {}),
+      ...(identity?.username ? { username: identity.username } : {}),
+      ...(query.get("footer") === "b" ? { footerVariant: "b" as const } : {}),
       ...(recoveryUiEnabled() ? {
         onRecovery: () => { void showRecovery(); },
         onCancelRecovery: async () => { await recoveryAuth.post("recovery-cancel", {}); await checkForegroundSession(); },
       } : {}),
     });
   } catch (error: unknown) {
+    screen?.dispose();
     renderUnavailable(safeMessage(error));
     return;
   }
   coreScreen = screen;
+  if (canvasMode) {
+    // Gated mockup (D162): the window canvas and the add-host flow on it, built against the
+    // test double only. The canvas mounts first; the flow hangs its windows on the canvas.
+    const { mountCanvas } = await import("./canvas");
+    const { mountAddHostPrototype } = await import("./add-host-prototype");
+    const canvas = mountCanvas(screen, hostName);
+    let addHost: { dispose(): void } | undefined;
+    try { addHost = await mountAddHostPrototype(screen, canvas, query.get("empty") === "1", proto === "addhost" || query.get("wizard") === "1"); }
+    catch (error: unknown) { canvas.dispose(); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
+    canvasPrototype = { dispose() { addHost?.dispose(); canvas.dispose(); } };
+  }
   if (probeMode) performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
   const probeHooks = performanceProbe?.hooks();
   // Session continuity across reloads (integration, #34): the tab remembers its
@@ -329,6 +359,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
       screen: screen.stage,
       status: screen.status,
       theme: screen.theme(),
+      font: screen.font(),
       hooks,
       predictiveEcho,
       onRoundTrip: (milliseconds) => screen?.setRoundTrip(milliseconds),
@@ -342,6 +373,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     });
     currentTerminal = client;
     screen.bindTerminal(client);
+    if (canvasMode && mockMode && query.get("fixture") !== "none") void seedItalicFixture(client);
     performanceProbe?.bind(client);
     if (mockMode) {
       window.__tracerTestDouble = {
@@ -402,6 +434,9 @@ async function showRecovery(): Promise<void> {
 
 /** URL choices win and are remembered when storage is available; private mode still works. */
 function uiFontPreference(): UiFont {
+  // The canvas mockup is monospace throughout (owner rule, docs/design/TASTE.md §2).
+  const proto = new URLSearchParams(location.search).get("proto");
+  if (proto === "windows" || proto === "addhost") return "mono";
   const requested = new URLSearchParams(location.search).get("ui");
   if (requested === "sans" || requested === "mono") {
     try { window.localStorage.setItem("tracer.ui-font", requested); } catch { /* The URL remains the preference without storage. */ }
@@ -428,6 +463,7 @@ function probeCount(value: string | null): number {
 }
 
 let recoveryNoticeGeneration = 0;
+let canvasPrototype: { dispose(): void } | undefined;
 
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
@@ -448,9 +484,11 @@ async function checkForegroundSession(): Promise<void> {
       activeUserId = undefined;
       renderAuth(false, "Your session ended. Sign in again to reconnect.");
     }
-  } catch (error: unknown) {
-    const status = document.querySelector<HTMLElement>("#connection-status");
-    if (status) status.textContent = safeMessage(error);
+  } catch {
+    // The session check is background housekeeping, not something the person asked for. When it
+    // cannot complete (the server restarting, the link dropping, a proxy answering with a page)
+    // nothing is said: the terminal's own reconnection shows state through the status icon, and
+    // the next return to the tab checks again. Only a definite "no session" (401) changes the UI.
   } finally {
     checkingResume = false;
   }
@@ -481,4 +519,23 @@ function mustGet<ElementType extends HTMLElement = HTMLElement>(selector: string
 
 function missingMount(): never {
   throw new Error("tracer mount point is missing");
+}
+
+/**
+ * Preview only: writes a prompt line and italic, bold and bold-italic output into the fresh mock
+ * terminal, so every font in the picker can be judged on slanted text (a font without a real italic
+ * is slanted by the browser, which is part of what the owner compares). `?fixture=none` skips it.
+ */
+async function seedItalicFixture(client: import("./terminal").TerminalClient): Promise<void> {
+  for (let attempt = 0; attempt < 40 && !client.isConnected; attempt++) await new Promise((resolve) => setTimeout(resolve, 100));
+  const text = [
+    "infraternal-dev:~$ printf '\\e[3mitalic\\e[0m'",
+    "\u001b[3mitalic: the quick brown fox jumps over the lazy dog\u001b[0m",
+    "\u001b[1mbold\u001b[0m regular \u001b[1;3mbold italic\u001b[0m \u001b[3m0123456789 -> => != ===\u001b[0m",
+    "",
+    "infraternal-dev:~$ ",
+  ].join("\r\n");
+  try {
+    await fetch("/__mock/text-output", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+  } catch { /* a resumed session or a closed socket: the fixture is a convenience, never an error */ }
 }
