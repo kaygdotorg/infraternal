@@ -10,12 +10,11 @@ use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::sync::broadcast;
 
-const VIEW: &str = "mesh.view";
 const MANAGE_NODES: &str = "mesh.manage_nodes";
 const MANAGE_TAGS: &str = "mesh.manage_tags";
 const MANAGE_GRANTS: &str = "mesh.manage_grants";
 const MANAGE_ROLES: &str = "mesh.manage_roles";
-const ROLE_ACTIONS: [&str; 5] = [VIEW, MANAGE_NODES, MANAGE_TAGS, MANAGE_GRANTS, MANAGE_ROLES];
+const ROLE_ACTIONS: [&str; 4] = [MANAGE_NODES, MANAGE_TAGS, MANAGE_GRANTS, MANAGE_ROLES];
 const NODE_LIVE_SECONDS: i64 = 30;
 const CHANGE_BUFFER: usize = 256;
 

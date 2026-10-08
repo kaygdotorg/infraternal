@@ -121,6 +121,10 @@ fn parser_rejects_unknown_fields_user_endpoints_and_invalid_bounds() {
             br#"{"name":"web","from":{"Tag":"prod"},"to":{"Tag":"db"},"both_ways":false,"ports":{"Ports":[{"protocol":"Tcp","number":0}]}}"#,
         ),
         ("mesh.tag.create", br#"{"name":"bad_name"}"#),
+        (
+            "mesh.role.define",
+            br#"{"name":"read-only","actions":["mesh.view"]}"#,
+        ),
         ("mesh.unknown", b"{}"),
     ] {
         assert_eq!(parse_action(action, input), Err(MeshApiError::InvalidInput));
