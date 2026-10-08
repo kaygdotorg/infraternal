@@ -1146,3 +1146,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      self-hosted as woff2 to keep load time low; ligatures are on in the UI,
      and in the terminal only where they keep every glyph on its cell
      (measured, with cursor-alignment tests).
+176. **QUIC stays on quinn + rustls + ring (owner, 2026-10-08, #88):** measured
+     against OpenSSL's native QUIC on the same harness. rustls + ring
+     handshakes in 0.96 ms vs 4.9 ms, holds 44 KB per idle connection vs
+     70 KB (about 44 MB vs 70 MB at 1,000 hosts), matches throughput on a fast
+     link, integrates directly with the async runtime and supports 0-RTT.
+     OpenSSL's only advantage is about 1.8 MB of binary size, already
+     accepted in D173. The delayed-path row needs a rerun with matched packet
+     loss before its exact gap is quoted; it does not affect this choice.
+     Next: measure BBR congestion control at the India–Germany latency.
