@@ -18,8 +18,8 @@
    palette, sidebar and tooltips, never in-page controls. No top-edge highlight (TASTE §1).
    Instances can tune the blur, saturation, border or shadow through custom properties. */
 .ui-overlay-surface, .ui-panel {
-  --ui-overlay-blur: 20px;
-  --ui-overlay-saturation: 180%;
+  --ui-overlay-blur: 14px;
+  --ui-overlay-saturation: 160%;
   background: var(--ui-overlay-background, var(--overlay));
   border: 1px solid var(--ui-overlay-border, var(--overlay-line));
   box-shadow: var(--ui-overlay-shadow, var(--shadow));
@@ -428,5 +428,5 @@
 /* Window: see the window card block above; terminals draw into a block canvas. */
 .ui-window canvas { display: block; }
 
-/* Panel: the same material for large floating surfaces such as the sidebar, a touch thinner. */
-.ui-panel { --ui-overlay-background: var(--overlay-panel, var(--overlay)); --ui-overlay-saturation: 160%; border-radius: var(--r-lg, 18px); }
+/* Panel: the same material for large floating surfaces such as the sidebar; only the radius differs. */
+.ui-panel { border-radius: var(--r-lg, 18px); }

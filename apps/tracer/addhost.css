@@ -49,12 +49,14 @@
   display: grid;
   /* A definite row, so the card's max-height: 100% holds and its footer stays on screen. */
   grid-template-rows: minmax(0, 1fr);
-  padding: 24px;
+  /* One inset on every side, equal to the window card's own header padding (8 px), so the flow
+     card at its maximum height sits inside the window with the same gap all round. */
+  padding: 8px;
   overflow: hidden;
 }
 .ah-scrim { position: absolute; inset: 0; background: rgb(from var(--bg) r g b / 0.5); }
 
-/* ── The floating card: elevated, solid, never glass ──────────────────── */
+/* ── The floating card: the shared overlay material (styles.css), lifted by --elevation ── */
 .ah-float {
   position: relative;
   display: flex;
@@ -63,8 +65,7 @@
   flex-direction: column;
   margin: auto;
   border-radius: 22px;
-  background: var(--overlay-solid);
-  box-shadow: var(--elevation);
+  --ui-overlay-shadow: var(--elevation);
   color: var(--fg);
   font: 450 14px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: -0.01em;
@@ -99,7 +100,6 @@
 @media (hover: hover) and (pointer: fine) { .ah-close:hover { background: var(--hover); color: var(--fg); } }
 .ah-close:active { transform: scale(0.94); }
 @media (max-width: 600px) {
-  .ah-stage { padding: 8px; }
   .ah-float { width: 100%; border-radius: 20px; }
   .ah-scroll { padding: 28px 22px 0; }
 }

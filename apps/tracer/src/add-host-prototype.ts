@@ -239,7 +239,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       this.win.card.body.innerHTML = `
         <div class="ah-stage">
           <div class="ah-scrim"></div>
-          <section class="ah-float" role="dialog" aria-label="Add hosts">
+          <section class="ah-float ui-overlay-surface" data-overlay-size="large" role="dialog" aria-label="Add hosts">
             <button class="ah-close" type="button" data-ah="close" aria-label="Close" data-tip="Close">${svg(ICON.close, "")}</button>
             <div class="ah-scroll" data-canvas-scroll><div class="ah-pages"></div></div>
             <footer class="ah-foot"></footer>

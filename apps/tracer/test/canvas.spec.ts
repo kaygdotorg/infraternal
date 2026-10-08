@@ -137,3 +137,52 @@ for (const dpr of [1, 2]) {
     }
   });
 }
+
+// ---- floating cards stay inside their window (TASTE §4) --------------------------------
+for (const viewport of [{ width: 1440, height: 900, touch: false }, { width: 393, height: 852, touch: true }, { width: 375, height: 667, touch: true }]) {
+  test(`details popover stays inside its window with an equal inset at ${viewport.width}×${viewport.height}`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport, hasTouch: viewport.touch, isMobile: viewport.touch });
+    const page = await context.newPage();
+    try {
+      await openCanvas(page);
+      const pill = page.locator(".ui-window").first().locator(".ui-window-pill");
+      if (viewport.touch) await pill.tap(); else await pill.click();
+      await expect(page.locator(".canvas-popover")).toBeVisible();
+      await page.waitForTimeout(300);
+      const box = await page.evaluate(() => {
+        const p = document.querySelector(".canvas-popover")!.getBoundingClientRect();
+        const w = document.querySelector(".ui-window")!.getBoundingClientRect();
+        return { left: p.left - w.left, right: w.right - p.right, bottom: w.bottom - p.bottom, top: p.top - w.top };
+      });
+      // Never past the window; the left and right gaps are the same 9 px (8 px padding + 1 px frame).
+      expect(box.left).toBeGreaterThanOrEqual(8);
+      expect(box.right).toBeGreaterThanOrEqual(8);
+      expect(box.bottom).toBeGreaterThanOrEqual(8);
+      if (viewport.touch) {
+        expect(Math.abs(box.left - box.right)).toBeLessThan(1.5);
+        // On a phone the content is taller than the window, so the bottom gap is the same inset.
+        expect(Math.abs(box.bottom - box.left)).toBeLessThan(1.5);
+      }
+    } finally {
+      await context.close();
+    }
+  });
+}
+
+test("every floating card uses the one overlay material", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.locator(".ui-window").first().locator(".ui-window-pill").click();
+  const material = await page.evaluate(() => {
+    const read = (el: Element) => { const s = getComputedStyle(el); return { background: s.backgroundColor, filter: s.backdropFilter }; };
+    const popover = read(document.querySelector(".canvas-popover")!);
+    const probe = document.createElement("div");
+    probe.className = "ui-overlay-surface";
+    document.body.append(probe);
+    const shared = read(probe);
+    probe.remove();
+    return { popover, shared };
+  });
+  expect(material.popover).toEqual(material.shared);
+  expect(material.shared.filter).toContain("blur(14px)");
+});

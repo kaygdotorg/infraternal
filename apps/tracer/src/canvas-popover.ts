@@ -33,7 +33,8 @@ interface DetailsInput {
 type Section = "machine" | "connection" | "session";
 
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
-const MARGIN = 12;
+/** The window header's padding: the gap kept between the popover and its window's edges. */
+const INSET = 8;
 
 function rows(section: Section, host: CanvasHost, session: CanvasSession): KeyValueRow[] {
   const present = (list: KeyValueRow[]): KeyValueRow[] => list.filter((row) => row.value.trim() !== "");
@@ -122,22 +123,26 @@ export function openDetailsPopover(
   show("machine", false);
   stage.append(root);
 
-  // ---- placement: under the pill, inside the visible viewport, above the key tray ----
+  // ---- placement: inside the window, under the pill, one inset on every side ----------
+  // The inset equals the window header's padding, so at its maximum height the popover sits
+  // in its window with the same gap on the left, right and bottom as the pill has at the
+  // top. The visible viewport and the key tray only ever shrink it further.
   const place = (): void => {
     const pill = anchor.getBoundingClientRect();
-    const card = anchor.closest(".ui-window")?.getBoundingClientRect() ?? pill;
+    const win = anchor.closest(".ui-window")?.getBoundingClientRect() ?? pill;
     const screen = stage.getBoundingClientRect();
-    const touch = matchMedia("(pointer: coarse)").matches;
-    const width = Math.min(touch ? card.width - 16 : 400, screen.width - MARGIN * 2);
-    const left = Math.round(Math.max(MARGIN, Math.min(pill.left - 4, screen.width - width - MARGIN)));
-    const top = Math.round(pill.bottom + 8);
+    const frame = parseFloat(getComputedStyle(anchor.closest(".ui-window") ?? anchor).borderLeftWidth) || 0;
+    const inset = INSET + frame;
+    const width = Math.min(400, win.width - inset * 2);
+    const left = Math.round(Math.max(win.left + inset, Math.min(pill.left, win.right - inset - width)));
+    const top = Math.round(pill.bottom + INSET);
     const tray = stage.querySelector<HTMLElement>("#keybar");
     const trayTop = tray && getComputedStyle(tray).display !== "none" ? tray.getBoundingClientRect().top : screen.bottom;
-    const bottom = Math.min(trayTop, (window.visualViewport?.height ?? innerHeight)) - MARGIN;
-    root.style.left = `${left}px`;
-    root.style.top = `${top}px`;
+    const bottom = Math.min(win.bottom - inset, trayTop - INSET, (window.visualViewport?.height ?? innerHeight) - INSET);
+    root.style.left = `${left - screen.left}px`;
+    root.style.top = `${top - screen.top}px`;
     root.style.width = `${Math.round(width)}px`;
-    root.style.maxHeight = `${Math.max(160, Math.round(bottom - top))}px`;
+    root.style.maxHeight = `${Math.max(0, Math.floor(bottom - top))}px`;
     root.style.transformOrigin = `${Math.round(pill.left + pill.width / 2 - left)}px 0`;
   };
   place();

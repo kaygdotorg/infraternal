@@ -83,7 +83,10 @@ export interface OverlayMaterial {
 /** Keeps dark glass close to its palette and computes the same alpha composite used by the contrast audit. */
 export function overlayMaterial(active: Theme): OverlayMaterial {
   const tinted = mix(active.bg, "#ffffff", active.dark ? 0.06 : 0.6);
-  const opacity = active.dark ? 0.68 : 0.66;
+  // The one floating-card material (popover, flow card, confirmation, sidebar, toast): content
+  // behind must stay recognisable, so the fill is a little over half opaque and the blur is
+  // soft (14 px in styles.css). Secondary text over the busiest terminal state stays above 4.5:1.
+  const opacity = active.dark ? 0.5 : 0.58;
   const channels = (hex: string) => [1, 3, 5].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
   const rgb = (hex: string) => channels(hex).join(" ");
   const tint = channels(tinted);
@@ -92,7 +95,7 @@ export function overlayMaterial(active: Theme): OverlayMaterial {
 
   return {
     overlay: `rgb(${rgb(tinted)} / ${opacity})`,
-    overlayPanel: `rgb(${rgb(tinted)} / ${active.dark ? 0.56 : 0.6})`,
+    overlayPanel: `rgb(${rgb(tinted)} / ${opacity})`,
     overlaySolid: mix(active.bg, "#ffffff", active.dark ? 0.07 : 0.7),
     overlayLine: `rgb(${rgb(active.fg)} / 0.09)`,
     shadow: active.dark
