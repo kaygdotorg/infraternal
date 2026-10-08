@@ -29,3 +29,4 @@ export * from "./lock-toggle";
 export * from "./shortcuts";
 export * from "./shortcuts-view";
 export * from "./settings-overlay";
+export * from "./pill-morph";
