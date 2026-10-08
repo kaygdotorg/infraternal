@@ -315,7 +315,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
           return;
         }
         // Off screen: the arrow runs to the viewport edge and a marker names where it leads.
-        const ex = clamp(sc.x, vp.left + inset, vp.right - inset), ey = clamp(sc.y, vp.top + inset, vp.bottom - inset);
+        // On a phone the bottom edge keeps clear of the test-double badge.
+        const ex = clamp(sc.x, vp.left + inset, vp.right - inset), ey = clamp(sc.y, vp.top + inset, vp.bottom - inset - (coarse.matches ? 56 : 0));
         const end = toWorld(ex, ey);
         const n = anchors(src, { x: end.x, y: end.y, w: 0, h: 0 }, 0);
         const dx = end.x - n.p0.x, dy = end.y - n.p0.y, len = Math.hypot(dx, dy) || 1;
@@ -644,6 +645,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
 
   // ---- wiring: cluster ---------------------------------------------------------------------------------------
   let summaryTimer = 0, summaryFor: ViewId | undefined;
+  /** True while a window is being moved by its pill: no hover cards then. */
+  let movingWindow = false;
   const hideSummary = (): void => {
     window.clearTimeout(summaryTimer);
     if (summary.hidden) return;
@@ -652,7 +655,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     window.setTimeout(() => { if (summary.dataset.open === "false") summary.hidden = true; }, 170);
   };
   const showSummary = (c: ClusterRec): void => {
-    if (zoomBand !== "out" || !matchMedia("(hover: hover) and (pointer: fine)").matches || drag || clusterDrag) return;
+    if (zoomBand !== "out" || !matchMedia("(hover: hover) and (pointer: fine)").matches || drag || clusterDrag || movingWindow) return;
     window.clearTimeout(summaryTimer);
     if (summaryFor === c.view.id && !summary.hidden) return;
     summaryFor = c.view.id;
@@ -824,6 +827,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   };
 
   const resizeHost = (rec: WinRec): WindowResizeHost => ({
+    // The pill has its own long-press (arrows on demand), so the resize hold starts on the rest of the header.
+    holdOnPill: false,
     begin(): ResizeStart {
       const colEl = rec.card.root.parentElement as HTMLElement;
       return { width: colEl.offsetWidth * cam.z - 28 * cam.z, height: rec.card.root.offsetHeight * cam.z, top: 0, minWidth: 300 * cam.z, minHeight: 160 * cam.z, maxWidth: 900 * cam.z, areaHeight: 4000 };
@@ -875,6 +880,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const c = rec.cluster;
     if (c.view.layout !== "tiled") return;
     hideReach(true);
+    movingWindow = true;
+    hideSummary();
     const root = rec.card.root;
     const rect0 = root.getBoundingClientRect();
     const contentBox = c.content.getBoundingClientRect();
@@ -951,6 +958,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
         root.style.cssText = fixedH ? `height:${fixedH}` : "";
         root.classList.remove("is-lifted");
         slot.replaceWith(root);
+        movingWindow = false;
         geometry(c);
         settle(c.view.id);
         renderTree();
@@ -1592,7 +1600,11 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     { name: "Fly in", hint: "The camera springs into Console; windows go live above 60 % zoom. Press Esc to fly out. In the command palette, type build and open a shell on build-01.",
       enter() { role = "operator"; omit = ["build-01"]; build(); flyTo(overviewCam, true); window.setTimeout(() => { if (sceneIndex === 1 && camTarget === overviewCam) flyView("console"); }, 650); } },
     { name: "Arrows on demand", hint: "Hover a terminal's pill (long-press on touch) to see where it can reach. Drag from the connector next to the pill onto another terminal to allow access.",
-      enter() { role = "operator"; omit = []; build(); flyView("console", true); } },
+      enter() {
+        role = "operator"; omit = []; build();
+        // A phone zooms out far enough (live, above 60 %) to see two columns, so a link can be dragged between them.
+        if (metrics.narrow) { const r = contentRect(clusters.get("console")!); flyTo(() => ({ cx: r.x + (vw / 2 - 12) / 0.62, cy: r.y + (vh / 2 - 16) / 0.62, z: 0.62 }), true); } else flyView("console", true);
+      } },
     { name: "Open from a container", hint: "Click a container: the top pill morphs into a floating terminal; the camera stays here. Expand it to fly into Console, or close it. The terminal has Split; the list does not.",
       enter() { role = "operator"; omit = []; build(); flyView("containers", true); } },
     { name: "Access by grants", hint: "The views a person sees come from their grants. Switch who is signed in.",

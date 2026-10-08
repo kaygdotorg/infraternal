@@ -66,6 +66,11 @@ export interface WindowResizeHost {
    * settle); with `snap` it rests on the nearest snap point.
    */
   rubber?: boolean;
+  /**
+   * Whether the touch press-and-hold also starts on the header's pill (default true). A host that
+   * gives the pill its own long-press says false: the hold then starts only on the rest of the header.
+   */
+  holdOnPill?: boolean;
   /** Where a released size rests, within the limits (for example a default size it clings to). */
   snap?(frame: ResizeFrame): ResizeFrame;
   begin(): ResizeStart;
@@ -247,6 +252,7 @@ export function attachWindowResize(card: WindowCard, host: WindowResizeHost): Wi
   let swallowClick = false;
   card.header.addEventListener("pointerdown", (event) => {
     if (event.pointerType !== "touch" || touchMode || hold) return;
+    if (host.holdOnPill === false && (event.target as Element).closest(".ui-window-pill, .cl-port")) return;
     const press = { id: event.pointerId, x: event.clientX, y: event.clientY, timer: 0, cue: undefined as Animation | undefined };
     // The window leans in a little while the finger rests, so the hold reads as deliberate;
     // it settles back when the handles appear. Composited transform only, no fill.

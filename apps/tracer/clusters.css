@@ -220,3 +220,6 @@
   .cl-cursor { animation: none; }
   .cl-region, .cl-port, .cl-badge, .cl-summary { transition: opacity 120ms ease; transform: none; }
 }
+
+/* On a phone the host matters more than the user, as on the product canvas: drop `user@` in the pill. */
+@media (max-width: 480px) { .cl-viewport .ui-window-user, .cl-float .ui-window-user { display: none; } }
