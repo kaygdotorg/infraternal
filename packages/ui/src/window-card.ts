@@ -93,6 +93,7 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     button.className = "ui-window-action";
     button.dataset.action = action.id;
     button.setAttribute("aria-label", action.label);
+    button.dataset.tip = action.label; // the warm tooltip names the control
     button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${action.icon}</svg>`;
     const handler = (event: MouseEvent): void => action.onSelect(event);
     button.addEventListener("click", handler);

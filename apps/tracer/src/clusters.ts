@@ -63,7 +63,8 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 
 const ICON = {
   close: '<path d="m7 7 10 10M17 7 7 17"/>',
-  split: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M4 12h16"/>',
+  splitRight: ICONS.splitRight,
+  splitDown: ICONS.splitDown,
   terminal: '<path d="m5 8 4 4-4 4M12 16h7"/>',
   containers: '<path d="M12 3 4 7v10l8 4 8-4V7z"/><path d="m4 7 8 4 8-4M12 11v10"/>',
   logs: '<path d="M5 6h14M5 10h10M5 14h14M5 18h8"/>',
@@ -651,7 +652,10 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const rec: WinRec = {} as WinRec;
     // The window's kind decides what it can do: only a terminal has a split control.
     const readOnly = Boolean(c.view.team);
-    if (m.kind === "terminal" && !m.noAccess && !readOnly) actions.push({ id: "split", label: "Split", icon: ICON.split, onSelect: () => { void splitWindow(rec); } });
+    if (m.kind === "terminal" && !m.noAccess && !readOnly) {
+      actions.push({ id: "split-right", label: "Split right", icon: ICON.splitRight, onSelect: () => { void splitWindow(rec, "right"); } });
+      actions.push({ id: "split-down", label: "Split down", icon: ICON.splitDown, onSelect: () => { void splitWindow(rec, "down"); } });
+    }
     if (m.kind !== "node" && m.kind !== "settings" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => closeWindow(rec) });
     const title = { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
     const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" && !m.noAccess ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: () => updateToolbar() });
@@ -1339,23 +1343,39 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     spring.set(1);
   };
 
-  const splitWindow = async (rec: WinRec): Promise<void> => {
+  /**
+   * Splits a terminal window. `down` stacks the new window below it in the same column; `right` opens it in a new
+   * column next to it (same width). Both lay the view out first and then play the droplet in their direction.
+   */
+  const splitWindow = async (rec: WinRec, direction: "down" | "right" = "down"): Promise<void> => {
     const c = rec.cluster;
     const root = rec.card.root;
     const colEl = root.parentElement as HTMLElement;
     const m = rec.model;
-    const h = root.offsetHeight;
-    const half = Math.round((h - COLUMN_GAP) / 2);
     const nm: WindowModel = { ...m, id: `${m.id}-s${++serial}`, session: `split ${serial}`, lines: shellLines(m.user ?? "kayg", m.host, "echo ready") };
+    const before = flipMeasure(flipTargets(c));
     const b = makeWindow(c, nm);
     c.wins.set(nm.id, b);
-    root.style.height = `${half}px`; root.style.flex = "none";
-    b.card.root.style.height = `${half}px`; b.card.root.style.flex = "none";
-    root.after(b.card.root);
+    if (direction === "down") {
+      const half = Math.round((root.offsetHeight - COLUMN_GAP) / 2);
+      root.style.height = `${half}px`; root.style.flex = "none";
+      b.card.root.style.height = `${half}px`; b.card.root.style.flex = "none";
+      root.after(b.card.root);
+    } else {
+      const next = newCol(c, { id: `c${++serial}`, w: Number(colEl.dataset.w) || metrics.colW, wins: [nm] });
+      next.append(b.card.root);
+      colEl.after(next);
+    }
     geometry(c);
+    settle(c.view.id);
     renderTree();
+    if (direction === "right") {
+      flipPlay(before);
+      // Canvas locked: glide so the window and its new neighbour are both on screen while the droplet divides.
+      if (canvasLock) focusWindow(rec);
+    }
     colEl.dataset.split = "";
-    await dropletSplit(root, b.card.root);
+    await dropletSplit(root, b.card.root, direction, c.colsEl);
     delete colEl.dataset.split;
   };
 
@@ -1896,6 +1916,10 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     if (clusters.get(currentView)?.view.team) out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.unlock, label: "Unlink team layout to edit", hint: "keep your own copy", action: "proto:unlink" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.snap, label: "Canvas lock on", hint: `${canvasLock ? "on now · " : ""}${bindingText("canvas-lock")}`, action: "proto:canvaslock:on" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free canvas · all views · Esc", action: "proto:canvaslock:off" });
+    if (activeWin?.model.kind === "terminal") {
+      out.push({ group: "Canvas", glyph: "▥", icon: ICONS.splitRight, label: "Split right", hint: `new window beside · ${bindingText("split-right")}`, action: "proto:split:right" });
+      out.push({ group: "Canvas", glyph: "▤", icon: ICONS.splitDown, label: "Split down", hint: `new window below · ${bindingText("split-down")}`, action: "proto:split:down" });
+    }
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.lock, label: inputLock ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "proto:inputlock" });
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
@@ -1920,6 +1944,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     else if (kind === "devicechip") showContinueChip();
     else if (kind === "share") void openShare();
     else if (kind === "unlink") unlinkCurrent();
+    else if (kind === "split") { if (activeWin?.model.kind === "terminal" && !activeWin.model.noAccess) void splitWindow(activeWin, value === "right" ? "right" : "down"); }
     else if (kind === "canvaslock") setCanvasLock(value === "on");
     else if (kind === "inputlock") toggleInputLock();
     else if (kind === "scene" && value) goScene(Number(value) - 1);
@@ -1934,6 +1959,10 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   const removeShortcuts = registerShortcuts({ id: "clusters", title: "Canvas", area: "canvas", shortcuts: [
     { id: "canvas-lock", label: "Canvas lock", keys: "", combo: { code: "KeyG", mod: true, shift: true } },
     { id: "input-lock", label: "Input lock", keys: "", combo: { code: "KeyL", mod: true, shift: true } },
+    // Command+D and Command+Shift+D on a Mac. Elsewhere plain Control+D is the terminal's end-of-input, so the
+    // defaults add Shift (right) and Alt+Shift (down); both can be rebound in Settings, Shortcuts.
+    { id: "split-right", label: "Split right", keys: "", combo: isMacPlatform() ? { code: "KeyD", mod: true } : { code: "KeyD", mod: true, shift: true } },
+    { id: "split-down", label: "Split down", keys: "", combo: isMacPlatform() ? { code: "KeyD", mod: true, shift: true } : { code: "KeyD", mod: true, shift: true, alt: true } },
     { id: "next-window", label: "Next window", keys: "", combo: { code: "ArrowRight", mod: true, shift: true } },
     { id: "previous-window", label: "Previous window", keys: "", combo: { code: "ArrowLeft", mod: true, shift: true } },
     { id: "overview", label: "Canvas lock off (all views)", keys: "Esc" },
@@ -1943,6 +1972,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   const removeBindings = [
     bindShortcut("canvas-lock", () => setCanvasLock(!canvasLock)),
     bindShortcut("input-lock", () => toggleInputLock()),
+    bindShortcut("split-right", () => { if (!inputLock && activeWin?.model.kind === "terminal" && !activeWin.model.noAccess) void splitWindow(activeWin, "right"); }),
+    bindShortcut("split-down", () => { if (!inputLock && activeWin?.model.kind === "terminal" && !activeWin.model.noAccess) void splitWindow(activeWin, "down"); }),
     bindShortcut("next-window", () => { if (!inputLock) stepOrder(1, true); }),
     bindShortcut("previous-window", () => { if (!inputLock) stepOrder(-1, true); }),
   ];
@@ -2009,7 +2040,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     { id: "canvas-lock", label: "Canvas lock", icon: ICONS.snap, pressed: true, onSelect: () => { if (!inputLock) setCanvasLock(!canvasLock); } },
     { id: "overview", label: "All views", icon: ICONS.overview, onSelect: () => { if (!inputLock) setCanvasLock(false); } },
     { id: "input-lock", label: "Input lock", icon: ICONS.lock, onSelect: toggleInputLock },
-    { id: "split", label: "Split", icon: ICONS.split, onSelect: () => { if (activeWin?.model.kind === "terminal") void splitWindow(activeWin); } },
+    { id: "split-right", label: "Split right", icon: ICONS.splitRight, onSelect: () => { if (activeWin?.model.kind === "terminal") void splitWindow(activeWin, "right"); } },
+    { id: "split-down", label: "Split down", icon: ICONS.splitDown, onSelect: () => { if (activeWin?.model.kind === "terminal") void splitWindow(activeWin, "down"); } },
     { id: "add", label: "Add host", icon: ICONS.plus, onSelect: () => toast.show({ message: "Add host is its own mockup (proto=addhost)." }) },
     { id: "sidebar", label: "Sidebar", icon: ICONS.sidebar, onSelect: () => stage.querySelector<HTMLButtonElement>("#sidebar-toggle")?.click() },
   ]);
@@ -2021,7 +2053,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     toolbar?.update("next", { disabled: locked });
     toolbar?.update("overview", { disabled: locked });
     toolbar?.update("input-lock", { pressed: locked, disabled: !terminal && !locked, label: locked ? "Input lock on" : "Input lock off", icon: locked ? ICONS.lock : ICONS.unlock });
-    toolbar?.update("split", { disabled: !terminal });
+    toolbar?.update("split-right", { disabled: !terminal });
+    toolbar?.update("split-down", { disabled: !terminal });
   }
   updateToolbar();
 

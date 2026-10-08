@@ -62,8 +62,12 @@ function rgba(css: string): [number, number, number, number] {
 
 export interface SplitProbe { frames: number; drawMs: number; maxDrawMs: number; trace?: Array<[number, number]> }
 
-/** Plays the split of `a` (top) and `b` (bottom), already in their final places in the column. */
-export function dropletSplit(a: HTMLElement, b: HTMLElement, probe?: SplitProbe): Promise<void> {
+/**
+ * Plays the split of `a` and `b`, already in their final places. `down`: b is below a in the same column
+ * (the layer lives in that column). `right`: b is in the next column to the right of a (the layer lives in
+ * `host`, the element both columns sit in). Both directions are the same drawing, rotated a quarter turn.
+ */
+export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" | "right" = "down", host?: HTMLElement, probe?: SplitProbe): Promise<void> {
   probe ??= (window as unknown as { __splitProbe?: SplitProbe }).__splitProbe;
   const t00 = performance.now();
   return new Promise((resolve) => {
@@ -73,12 +77,23 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, probe?: SplitProbe)
       b.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: "ease-out" }).onfinish = () => resolve();
       return;
     }
-    const column = a.parentElement!;
-    const ar = { x: a.offsetLeft, y: a.offsetTop, w: a.offsetWidth, h: a.offsetHeight };
-    const br = { x: b.offsetLeft, y: b.offsetTop, w: b.offsetWidth, h: b.offsetHeight };
-    const g = br.y - (ar.y + ar.h); // the final gap
-    const H = br.y + br.h - ar.y; // the old window's footprint
-    const css = { x: ar.x - 6, y: ar.y - 6, w: ar.w + 12, h: H + 12 };
+    const column = direction === "right" ? host! : a.parentElement!;
+    const right = direction === "right";
+    // Rects relative to the layer's parent, in its own (unzoomed) pixels, whatever camera zoom is applied above it.
+    const origin = column.getBoundingClientRect();
+    const zoom = column.offsetWidth ? origin.width / column.offsetWidth : 1;
+    const rectOf = (n: HTMLElement): { x: number; y: number; w: number; h: number } => {
+      if (!right) return { x: n.offsetLeft, y: n.offsetTop, w: n.offsetWidth, h: n.offsetHeight };
+      const r = n.getBoundingClientRect();
+      return { x: (r.left - origin.left) / zoom, y: (r.top - origin.top) / zoom, w: n.offsetWidth, h: n.offsetHeight };
+    };
+    const ar = rectOf(a), br = rectOf(b);
+    // `along` runs from a to b; `across` is the other axis.
+    const g = right ? br.x - (ar.x + ar.w) : br.y - (ar.y + ar.h); // the final gap
+    const H = right ? br.x + br.w - ar.x : br.y + br.h - ar.y; // the old window's footprint along the axis
+    const css = right
+      ? { x: ar.x - 6, y: Math.min(ar.y, br.y) - 6, w: H + 12, h: Math.max(ar.y + ar.h, br.y + br.h) - Math.min(ar.y, br.y) + 12 }
+      : { x: ar.x - 6, y: ar.y - 6, w: ar.w + 12, h: H + 12 };
     const dpr = Math.min(devicePixelRatio || 1, 2);
     const canvas = document.createElement("canvas");
     canvas.className = "cl-goo";
@@ -115,11 +130,12 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, probe?: SplitProbe)
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
-    column.insertBefore(canvas, a);
+    if (right) column.prepend(canvas); else column.insertBefore(canvas, a);
     for (const w of [a, b]) { w.dataset.goo = ""; }
     const partsA = content(a), partsB = content(b);
     for (const p of partsB) p.style.opacity = "0";
-    const top = ar.y, bottom = ar.y + H;
+    const top = right ? ar.x : ar.y, bottom = top + H;
+    const extent = (r: { w: number; h: number }): number => (right ? r.w : r.h); // along the axis
 
     let brokeAt = 0;
     const draw = (gap: number): void => {
@@ -129,19 +145,31 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, probe?: SplitProbe)
       // Surface tension: while the lobes are pulled past their resting gap, their facing corners round off,
       // so the bridge between them narrows to a neck.
       const pull = brokeAt ? clamp((gap - g) / (K - g), 0, 1) : smooth(0, 1, gap / (K * 0.55));
-      const rf = radius + pull * (Math.min(ar.w, hA) * 0.5 - radius);
-      gl.uniform4f(U("uRA"), rf, radius, rf, radius);
-      gl.uniform4f(U("uRB"), radius, rf, radius, rf);
-      const cx = ar.w / 2 + 6;
-      gl.uniform4f(U("uA"), cx, top - css.y + hA / 2, ar.w / 2, hA / 2);
-      gl.uniform4f(U("uB"), cx, bottom - css.y - hA / 2, br.w / 2, hA / 2);
+      const rf = radius + pull * (Math.min(right ? ar.h : ar.w, hA) * 0.5 - radius);
+      // Corner order: right-bottom, right-top, left-bottom, left-top. The facing corners are the rounded ones.
+      if (right) { gl.uniform4f(U("uRA"), rf, rf, radius, radius); gl.uniform4f(U("uRB"), radius, radius, rf, rf); }
+      else { gl.uniform4f(U("uRA"), rf, radius, rf, radius); gl.uniform4f(U("uRB"), radius, rf, radius, rf); }
+      if (right) {
+        gl.uniform4f(U("uA"), top - css.x + hA / 2, ar.y + ar.h / 2 - css.y, hA / 2, ar.h / 2);
+        gl.uniform4f(U("uB"), bottom - css.x - hA / 2, br.y + br.h / 2 - css.y, hA / 2, br.h / 2);
+      } else {
+        const cx = ar.w / 2 + 6;
+        gl.uniform4f(U("uA"), cx, top - css.y + hA / 2, ar.w / 2, hA / 2);
+        gl.uniform4f(U("uB"), cx, bottom - css.y - hA / 2, br.w / 2, hA / 2);
+      }
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      // Contents ride with their shapes: A stays at the top, B follows its lobe's top edge.
-      b.style.transform = `translateY(${bottom - hA - br.y}px)`;
-      const cutA = Math.max(0, ar.h - hA), cutB = Math.max(0, br.h - hA);
-      a.style.clipPath = cutA > 0.5 ? `inset(0 0 ${cutA}px 0)` : "";
-      b.style.clipPath = cutB > 0.5 ? `inset(0 0 ${cutB}px 0)` : "";
+      // Contents ride with their shapes: A stays at its start, B follows its lobe's leading edge.
+      const cutA = Math.max(0, extent(ar) - hA), cutB = Math.max(0, extent(br) - hA);
+      if (right) {
+        b.style.transform = `translateX(${bottom - hA - br.x}px)`;
+        a.style.clipPath = cutA > 0.5 ? `inset(0 ${cutA}px 0 0)` : "";
+        b.style.clipPath = cutB > 0.5 ? `inset(0 ${cutB}px 0 0)` : "";
+      } else {
+        b.style.transform = `translateY(${bottom - hA - br.y}px)`;
+        a.style.clipPath = cutA > 0.5 ? `inset(0 0 ${cutA}px 0)` : "";
+        b.style.clipPath = cutB > 0.5 ? `inset(0 0 ${cutB}px 0)` : "";
+      }
       // The new content appears after the neck has broken.
       const show = brokeAt ? smooth(0, 150, performance.now() - brokeAt) : 0;
       for (const p of partsB) p.style.opacity = String(show);

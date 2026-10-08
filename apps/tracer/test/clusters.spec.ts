@@ -105,16 +105,55 @@ test("arrows on demand: none by default, hover shows reach, a drag asks and then
 
 test("a window kind decides its controls, and a terminal splits", async ({ page }) => {
   await open(page, 4);
-  await expect(page.locator('.ui-window[data-window-id="w-containers"] [data-action="split"]')).toHaveCount(0);
-  await expect(page.locator('.ui-window[data-window-id="w-logs"] [data-action="split"]')).toHaveCount(0);
+  await expect(page.locator('.ui-window[data-window-id="w-containers"] [data-action^="split"]')).toHaveCount(0);
+  await expect(page.locator('.ui-window[data-window-id="w-logs"] [data-action^="split"]')).toHaveCount(0);
   await page.locator('.cl-row[data-name="web-api"]').click();
   await expect(page.locator(".cl-float")).toBeVisible();
   await page.locator('.cl-float [data-action="close"]').click();
   await expect(page.locator(".cl-badge[data-open='true']")).toContainText("session in Console");
   await open(page, 3);
   const before = await page.locator('.cl[data-view="console"] .ui-window').count();
-  await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split"]').click();
+  await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split-down"]').click();
   await expect(page.locator('.cl[data-view="console"] .ui-window')).toHaveCount(before + 1);
+});
+
+test("split right opens a new column beside the window, split down stacks below it, from the header, the shortcuts and the palette", async ({ page }) => {
+  await open(page, 3);
+  const id = "w-studio-mac";
+  const rect = (sel: string) => page.locator(sel).first().evaluate((n) => { const r = n.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; });
+  const count = () => page.locator('.cl[data-view="console"] .ui-window').count();
+  const n0 = await count();
+  // Two controls with names, and the right one is first.
+  const actions = await page.locator(`.ui-window[data-window-id="${id}"] .ui-window-action`).evaluateAll((b) => b.map((x) => [(x as HTMLElement).dataset.action, (x as HTMLElement).dataset.tip]));
+  expect(actions.slice(0, 2)).toEqual([["split-right", "Split right"], ["split-down", "Split down"]]);
+  const a0 = await rect(`.ui-window[data-window-id="${id}"]`);
+  await page.locator(`.ui-window[data-window-id="${id}"] [data-action="split-right"]`).click();
+  await expect.poll(count).toBe(n0 + 1);
+  await page.waitForTimeout(1200);
+  const created = await page.locator('.cl[data-view="console"] .ui-window[data-window-id^="w-studio-mac-s"]').first().evaluate((n) => { const r = n.getBoundingClientRect(); return { id: (n as HTMLElement).dataset.windowId, x: r.x, y: r.y, w: r.width, h: r.height }; });
+  const a1 = await rect(`.ui-window[data-window-id="${id}"]`);
+  expect(created.x).toBeGreaterThan(a1.x + a1.w - 1); // beside it
+  expect(Math.abs(created.y - a1.y)).toBeLessThan(2); // same top
+  expect(Math.abs(a1.w - a0.w)).toBeLessThan(2); // the old window keeps its width
+  // Split down from the shortcut (Ctrl+Alt+Shift+D here; the default is platform dependent).
+  await page.keyboard.press("Control+Alt+Shift+D");
+  await expect.poll(count).toBe(n0 + 2);
+  await page.waitForTimeout(1200);
+  // The newest window (highest serial) is the one the last split made; it sits below its parent, not at the top of a column.
+  const below = await page.locator('.cl[data-view="console"] .ui-window[data-window-id^="w-studio-mac-s"]').evaluateAll((nodes) => {
+    const newest = nodes.map((n) => ({ n, k: Number((n as HTMLElement).dataset.windowId!.replace(/\D+/g, "")) })).sort((p, q) => q.k - p.k)[0]!.n;
+    const r = newest.getBoundingClientRect(); return { y: r.y, x: r.x };
+  });
+  expect(below.y).toBeGreaterThan(a1.y + 20);
+  // Split right from the palette and the shortcut.
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("split right");
+  await expect(page.locator(".palette .result", { hasText: "Split right" })).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect.poll(count).toBe(n0 + 3);
+  await page.waitForTimeout(1200);
+  await page.keyboard.press("Control+Shift+D");
+  await expect.poll(count).toBe(n0 + 4);
 });
 
 test("container shell: the camera stays, the pill morphs into a floating terminal that resizes with its aspect locked and expands into Console", async ({ page }) => {
@@ -547,7 +586,7 @@ test("droplet split: a goo layer exists only while it runs, the gap pulls past i
   await open(page, 3);
   await page.evaluate(() => ((window as unknown as { __splitProbe: unknown }).__splitProbe = { frames: 0, drawMs: 0, maxDrawMs: 0, trace: [] }));
   expect(await page.locator(".cl-goo").count()).toBe(0);
-  await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split"]').click();
+  await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split-down"]').click();
   await expect(page.locator(".cl-goo")).toHaveCount(1, { timeout: 2000 });
   await expect(page.locator(".cl-goo")).toHaveCount(0, { timeout: 3000 });
   const r = await page.evaluate(() => (window as unknown as { __splitProbe: { frames: number; drawMs: number; maxDrawMs: number; trace: Array<[number, number]> } }).__splitProbe);
@@ -697,7 +736,7 @@ test("team layouts: followers see a marker and a read-only copy that follows the
     await expect(asha.locator(".cl-unlink")).toBeVisible();
     await expect(asha.locator("#capsule")).toContainText("team");
     await expect(asha.locator(`.cl[data-view="${id}"] .cl-team`)).toHaveCount(1);
-    await expect(asha.locator(`.cl[data-view="${id}"] [data-action="close"], .cl[data-view="${id}"] [data-action="split"]`)).toHaveCount(0); // read-only
+    await expect(asha.locator(`.cl[data-view="${id}"] [data-action="close"], .cl[data-view="${id}"] [data-action^="split"]`)).toHaveCount(0); // read-only
     const colOf = (page: Page, suffix: string): Promise<string | null> => page.locator(`.ui-window[data-window-id$="${suffix}"]`).evaluate((n) => n.parentElement?.dataset.id ?? null);
     expect(await colOf(asha, ":i-logs")).toBe("i2");
     // The publisher moves the log window into the first column; the follower's copy follows, on its own.
