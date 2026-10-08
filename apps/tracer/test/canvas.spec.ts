@@ -701,6 +701,7 @@ test("copyable values: the highlight hugs the text with even padding, on keys an
   await page.setViewportSize({ width: 1440, height: 900 });
   await openCanvas(page);
   await page.locator(".ui-window").first().locator(".ui-window-pill").click();
+  await page.waitForTimeout(500); // the popover's scale-in settles before it is measured
   const measure = (kind: "key" | "value") => page.evaluate((which) => {
     const row = [...document.querySelectorAll(".canvas-popover .ui-kv-row")].find((node) => node.textContent!.includes("Virtualization"))!;
     const span = row.querySelector(`.ui-kv-${which} .ui-kv-text`)!;

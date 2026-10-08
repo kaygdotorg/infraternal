@@ -344,6 +344,7 @@ for (const viewport of [DESKTOP, PHONE]) {
         return { card: read(document.querySelector(".ah-float")!), shared };
       });
       expect(material.card).toEqual(material.shared);
+      await page.waitForTimeout(600); // the card's rise settles before it is measured
       const inset = await page.evaluate(() => {
         const f = document.querySelector(".ah-float")!.getBoundingClientRect();
         const w = document.querySelector(".ah.ui-window")!.getBoundingClientRect();
