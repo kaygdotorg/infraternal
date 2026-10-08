@@ -724,3 +724,32 @@ test("a restarted mock never strands an open preview tab: an unknown session coo
   const status = await page.evaluate(() => fetch("/auth/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", credentials: "same-origin" }).then((r) => r.status));
   expect(status).toBe(200);
 });
+
+test("the window lock sits at the exact centre of its window and the title pill yields", async ({ page }) => {
+  await open(page, 1);
+  const centreOff = (): Promise<number[]> => page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".ui-window")].map((w) => {
+    const l = w.querySelector<HTMLElement>(".ui-window-lock")!.getBoundingClientRect(), r = w.getBoundingClientRect();
+    return r.width === 0 || l.width === 0 ? 0 : Math.abs((l.left + l.width / 2) - (r.left + r.width / 2)) + (Math.abs(l.width - 44 * (r.width / w.offsetWidth)) > 1 ? 1000 : 0);
+  }));
+  const ok = async (label: string): Promise<void> => { for (const d of await centreOff()) expect(d, label).toBeLessThanOrEqual(0.5); };
+  await ok("at rest");
+  const win = page.locator(".ui-window").first();
+  const box = (await win.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 6);
+  await page.waitForTimeout(250);
+  await ok("hover near the top edge");
+  await page.evaluate(() => { document.querySelector(".ui-window .ui-window-host")!.textContent = "an-extremely-long-host-name-that-wants-the-whole-header.example.internal"; });
+  await page.waitForTimeout(100);
+  await ok("long title");
+  const geo = await page.evaluate(() => {
+    const w = document.querySelector(".ui-window")!;
+    return { pillRight: w.querySelector(".ui-window-pill")!.getBoundingClientRect().right, lockLeft: w.querySelector(".ui-window-lock")!.getBoundingClientRect().left + 11 };
+  });
+  expect(geo.pillRight).toBeLessThanOrEqual(geo.lockLeft + 11);
+  await page.setViewportSize({ width: 900, height: 700 });
+  await page.waitForTimeout(500);
+  await ok("after resize");
+  await page.keyboard.press("Control+Shift+G");
+  await page.waitForTimeout(400);
+  await ok("after the canvas lock changes");
+});

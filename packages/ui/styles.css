@@ -290,6 +290,8 @@
   display: inline-flex; align-items: center; gap: 8px; min-width: 0; height: var(--ui-control-h); padding: 0 10px 0 8px;
   border: 1px solid var(--overlay-line); border-radius: 999px; background: transparent; color: var(--fg);
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: pointer;
+  /* The lock owns the exact centre of the frame line: the pill never reaches past half the header minus the lock's hit area. */
+  max-width: calc(50% - 26px);
   transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
 .ui-window-pill:active { transform: scale(var(--ui-press-scale)); }
@@ -519,7 +521,7 @@
    44 px invisible hit area. On touch there is no frame lock: locking lives in the toolbar and the
    palette. */
 .ui-window-lock {
-  position: absolute; z-index: 6; top: -22px; left: var(--ui-lock-x, 50%); width: 44px; height: 44px; margin-left: -22px;
+  position: absolute; z-index: 6; top: -22px; left: 50%; width: 44px; height: 44px; margin-left: -22px;
   display: grid; place-items: center; padding: 0; border: 0; border-radius: 10px; background: none; color: var(--fg);
   opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 160ms ease-out, color 160ms ease-out;
 }
