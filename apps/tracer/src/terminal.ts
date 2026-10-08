@@ -543,13 +543,11 @@ export class TerminalClient {
     if (suspended) {
       window.clearTimeout(this.renderIdleTimer);
       this.pauseTerminal();
-      const canvas = this.terminal.renderer?.getCanvas();
-      if (canvas) { canvas.width = 0; canvas.height = 0; }
+      this.releaseSurface();
       return;
     }
-    this.ghostty.renderer?.resize(this.terminal.cols, this.terminal.rows);
+    this.restoreSurface();
     this.scheduleFit();
-    this.repaintAll();
     this.wakeTerminal();
   }
 
