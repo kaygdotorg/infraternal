@@ -1224,3 +1224,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        flies to it. Section expansion belongs to the account.
      - **Settings → Devices:** lists every device signed in to the account,
        with where each is looking, for handoff.
+179. **Settings is a view on the canvas, not an overlay (owner, 2026-10-08, #89):**
+     Settings is a view like Console or Topology, listed last in the sidebar
+     and the view switcher. Each section (Appearance, Toolbar, Shortcuts,
+     Devices, Account, About; admin sections by grant) is a window in that
+     view, using the same window frame, tiling and canvas lock. ⌘K jumps to
+     any section. Leaving Settings is switching views. Changes apply live.
+     Supersedes the Settings overlay mentioned in D177 and D178.
