@@ -9,8 +9,10 @@ import { DEFAULT_FONT_ID, FONTS } from "../../../packages/ui/src/fonts";
 
 const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
 const baseURL = `http://localhost:${port}`;
-// 86 cells: ligature-prone operators first, then a final wide "M" so the cursor must sit right after it.
-const line86 = `${"=> -> != === <= >= ".repeat(5)}`.slice(0, 85) + "M";
+// 86 cells: ligature-prone operators, then prompt-like text of mixed glyph widths (letters with wide
+// tails, digits, punctuation), then a final wide "M" so the cursor must sit right after it. A font
+// whose real advance differs from the measured cell advance would drift along this line.
+const line86 = `${"=> -> != === <= >= dev@host:~/infraternal$ 0123456789 ".repeat(3)}`.slice(0, 85) + "M";
 
 for (const font of FONTS) for (const dpr of font.id === DEFAULT_FONT_ID ? [1, 2, 3] : [1, 2]) {
   test(`${font.label}: 86-character line keeps the cursor on its cell at DPR ${dpr}`, async ({ browser }, testInfo) => {
@@ -46,6 +48,16 @@ for (const font of FONTS) for (const dpr of font.id === DEFAULT_FONT_ID ? [1, 2,
           const o = (y * cursorLeft + x) * 4;
           if (row[o]! + row[o + 1]! + row[o + 2]! < 3 * 255 - 240) lastInk = Math.max(lastInk, x);
         }
+        // Nothing but the bar may be inked at or after the cursor: a font whose glyphs advance by more
+        // than its cells (browser rounding per glyph) pushes the end of the line past the cursor, which
+        // the scan above cannot see because it stops at the cursor.
+        const afterStart = cursorLeft + Math.ceil(2 * devicePixelRatio);
+        const after = context.getImageData(afterStart, 0, Math.ceil(cellWidth * 3), Math.ceil(cellHeight)).data;
+        let inkAfter = 0;
+        for (let i = 0; i < after.length; i += 4) {
+          const accentPixel = after[i] === accent[0] && after[i + 1] === accent[1] && after[i + 2] === accent[2];
+          if (!accentPixel && after[i]! + after[i + 1]! + after[i + 2]! < 3 * 255 - 240) inkAfter += 1;
+        }
         const bar = context.getImageData(cursorLeft, 2, Math.ceil(cellWidth), Math.ceil(cellHeight) - 4).data;
         let barMin = Infinity;
         for (let i = 0; i < bar.length; i += 4) {
@@ -55,7 +67,7 @@ for (const font of FONTS) for (const dpr of font.id === DEFAULT_FONT_ID ? [1, 2,
         const mapleLoaded = [...document.fonts].some((face) => face.family.replaceAll('"', "") === family && face.status === "loaded" && face.style === "normal")
           && window.__tracerTestDouble!.rendererMetrics()!.fontFamily.startsWith(`"${family}"`)
           && getComputedStyle(document.documentElement).fontFamily.startsWith(`"${family}"`);
-        return { mapleLoaded, cursorX: metrics.cursorX, renderCursorX: metrics.renderCursorX, cellWidth: metrics.cellWidth, natural: metrics.naturalCellWidth, cursorLeft, lastInk, barMin, dpr: devicePixelRatio, cellWidthPx: cellWidth };
+        return { mapleLoaded, cursorX: metrics.cursorX, renderCursorX: metrics.renderCursorX, cellWidth: metrics.cellWidth, natural: metrics.naturalCellWidth, cursorLeft, lastInk, inkAfter, barMin, dpr: devicePixelRatio, cellWidthPx: cellWidth };
       }, font.family);
       const bench = await page.evaluate(() => window.__tracerTestDouble?.benchmarkFullRedraw(30));
       const sorted = bench!.slice().sort((a, b) => a - b);
@@ -65,6 +77,7 @@ for (const font of FONTS) for (const dpr of font.id === DEFAULT_FONT_ID ? [1, 2,
       expect(result.cursorX).toBe(86);
       expect(result.renderCursorX).toBe(86);
       // The cursor bar starts exactly at the cell edge, and the last glyph's ink ends inside the cell before it.
+      expect(result.inkAfter).toBe(0);
       expect(result.barMin).toBe(0);
       expect(result.lastInk).toBeLessThan(result.cursorLeft);
       expect(result.lastInk).toBeGreaterThanOrEqual(result.cursorLeft - Math.ceil(result.cellWidthPx));

@@ -1128,6 +1128,7 @@ export class TerminalClient {
     const memo = this.weightMemo;
     this.canvasWeights.regular = this.font.terminalWeight;
     this.canvasWeights.bold = this.font.boldWeight;
+    this.applyGlyphPlacement();
     Object.defineProperty(context, "font", {
       configurable: true,
       get: () => get.call(context) as string,
@@ -1160,10 +1161,24 @@ export class TerminalClient {
     this.canvasWeights.regular = font.terminalWeight;
     this.canvasWeights.bold = font.boldWeight;
     this.weightMemo.clear();
+    this.applyGlyphPlacement();
     this.terminal.options.fontFamily = fontStack(font);
     this.scheduleFit();
     this.wakeTerminal();
     this.loadStyledFaces();
+  }
+
+  /**
+   * Chooses between the renderer's two ways of putting text on the grid (see `placeGlyphs` in
+   * the registry). The renderer stretches a run with canvas letter spacing when the context
+   * has it, and otherwise draws one glyph per cell. Hiding the property on this context for
+   * the fonts that need exact placement selects the second way without touching the renderer.
+   */
+  private applyGlyphPlacement(): void {
+    const context = this.ghostty.renderer?.ctx;
+    if (!context) return;
+    if (this.font.placeGlyphs) Object.defineProperty(context, "letterSpacing", { value: undefined, writable: true, configurable: true });
+    else delete (context as { letterSpacing?: string }).letterSpacing;
   }
 
   /**

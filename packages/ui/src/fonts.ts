@@ -58,6 +58,16 @@ export interface MonoFont {
   /** Fallback face scaled to this family's metrics, to keep layout still while it loads. */
   metricFallback?: string;
   faces: readonly FontFaceSource[];
+  /**
+   * Set when the terminal must put every glyph on its cell itself. The renderer normally draws a
+   * run of text with one call and stretches the font's advance onto the cell with letter
+   * spacing, which assumes the browser advances every glyph by the same amount. Chrome without
+   * subpixel glyph positioning (Linux at DPR 1) rounds each glyph's advance on its own, and for
+   * a family whose advance is not near a whole pixel it rounds some glyphs up and others down:
+   * Monaspace Neon (0.62 em) drew lines up to 9% wider than their cells. One glyph per call is
+   * exact on every platform, at the cost of more draw calls (measured in the metrics spec).
+   */
+  placeGlyphs?: boolean;
 }
 
 const variable = (id: string): FontFaceSource[] => [
@@ -93,8 +103,10 @@ export const FONTS: readonly MonoFont[] = [
     bodyWeight: 450, terminalWeight: 450, boldWeight: 700, range: [400, 700], faces: variable("jetbrains-mono") },
   { id: "commit-mono", label: "Commit Mono", family: "Commit Mono", hint: "",
     bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], discrete: [400, 700], faces: staticPair("commit-mono") },
+  // Terminal weight 500, not 450: at 450 Chrome measures the advance as 8 px against a true 8.68, so
+  // the cell would be narrower than the glyphs; at 500 it measures 9.
   { id: "monaspace-neon", label: "Monaspace Neon", family: "Monaspace Neon", hint: "",
-    bodyWeight: 450, terminalWeight: 450, boldWeight: 700, range: [400, 700], faces: variable("monaspace-neon") },
+    bodyWeight: 450, terminalWeight: 500, boldWeight: 700, range: [400, 700], placeGlyphs: true, faces: variable("monaspace-neon") },
   { id: "ibm-plex-mono", label: "IBM Plex Mono", family: "IBM Plex Mono", hint: "",
     bodyWeight: 450, terminalWeight: 450, boldWeight: 700, range: [400, 700], faces: variable("ibm-plex-mono") },
   { id: "cascadia-code", label: "Cascadia Code", family: "Cascadia Code", hint: "",
