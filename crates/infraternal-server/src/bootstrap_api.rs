@@ -1,8 +1,11 @@
 //! Additive owner-authenticated bootstrap WebSocket; #78 runtime injects the trusted backend [63][138][139].
 
-use crate::auth::Auth;
+use crate::{
+    auth::Auth,
+    ssh_key::{SshKeySource, UnavailableSshKey},
+};
 use axum::{
-    Router,
+    Json, Router,
     extract::{
         State, WebSocketUpgrade,
         ws::{Message, WebSocket},
@@ -28,15 +31,30 @@ struct Api {
     auth: Auth,
     runner: Bootstrap,
     sockets: Arc<Semaphore>,
+    ssh_key: Arc<dyn SshKeySource>,
 }
 
 /// Mount an additive router with a trusted runtime backend; unavailable enrollment fails before mutation.
 pub fn router(auth: Auth, runner: Bootstrap) -> Router {
+    router_with_ssh_key(auth, runner, Arc::new(UnavailableSshKey))
+}
+
+/// Share the runtime's dedicated identity source without exposing private material.
+pub fn router_with_ssh_key(
+    auth: Auth,
+    runner: Bootstrap,
+    ssh_key: Arc<dyn SshKeySource>,
+) -> Router {
     Router::new()
         .route("/v1/bootstrap/ws", get(upgrade))
+        .route(
+            "/v1/bootstrap/ssh-key",
+            get(public_ssh_key).post(public_ssh_key),
+        )
         .with_state(Arc::new(Api {
             auth,
             runner,
+            ssh_key,
             sockets: Arc::new(Semaphore::new(16)),
         }))
 }
@@ -62,22 +80,9 @@ async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if headers.get_all(header::ORIGIN).iter().count() != 1
-        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(api.auth.origin())
-    {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    if headers.get_all(header::COOKIE).iter().count() != 1 {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Some(token) = crate::websocket::session_cookie(&headers) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let Ok(now) = now() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    let Ok(owner) = api.auth.bootstrap_owner(token, now).await else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let (owner, token) = match authenticate_headers(&api, &headers).await {
+        Ok(identity) => identity,
+        Err(status) => return status.into_response(),
     };
     let Ok(permit) = api.sockets.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -89,6 +94,48 @@ async fn upgrade(
             let _permit = permit;
             run(socket, api, owner, token).await;
         })
+}
+
+/// Both Settings and WebSocket admission require the exact pinned browser Origin
+/// and current unlocked owner capability, including fresh revocation checks.
+async fn authenticate_headers<'a>(
+    api: &Api,
+    headers: &'a HeaderMap,
+) -> Result<(String, &'a str), StatusCode> {
+    if headers.get_all(header::ORIGIN).iter().count() != 1
+        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(api.auth.origin())
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if headers.get_all(header::COOKIE).iter().count() != 1 {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let Some(token) = crate::websocket::session_cookie(headers) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let Ok(now) = now() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let Ok(owner) = api.auth.bootstrap_owner(token, now).await else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    Ok((owner, token))
+}
+
+async fn public_ssh_key(State(api): State<Arc<Api>>, headers: HeaderMap) -> Response {
+    let mut response = match authenticate_headers(&api, &headers).await {
+        Err(status) => status.into_response(),
+        Ok(_) => match api.ssh_key.public_key() {
+            Ok(public) => Json(public).into_response(),
+            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        },
+    };
+    // No proxy/browser cache may retain even public identity or authorization state.
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 async fn send(socket: &mut WebSocket, text: String) -> Result<(), ()> {

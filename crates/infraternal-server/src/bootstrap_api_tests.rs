@@ -130,6 +130,7 @@ async fn fixture(
     let api = Arc::new(Api {
         auth: auth.clone(),
         runner,
+        ssh_key: Arc::new(UnavailableSshKey),
         sockets: Arc::new(Semaphore::new(16)),
     });
     let app = Router::new()
