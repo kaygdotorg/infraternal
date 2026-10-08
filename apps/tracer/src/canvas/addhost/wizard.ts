@@ -119,6 +119,8 @@ export class Wizard {
   private installFrom: "choose" | "failure" = "failure";
   private busy = false;
   private timers: number[] = [];
+  /** Stage siblings made inert while the card is open. */
+  private readonly inerted: Element[] = [];
   private alive = true;
   private closing = false;
 
@@ -146,6 +148,10 @@ export class Wizard {
     this.resize = new ResizeObserver(overflow);
     this.resize.observe(this.scroller);
     this.resize.observe(this.pages);
+    // The card is modal: the rest of the stage is unreachable by keyboard and assistive technology until it closes.
+    for (const sibling of this.root.parentElement?.children ?? []) {
+      if (sibling !== this.root && !sibling.hasAttribute("inert")) { sibling.setAttribute("inert", ""); this.inerted.push(sibling); }
+    }
     this.root.addEventListener("click", this.onClick);
     this.root.addEventListener("change", this.onChange);
     // Keys go through the document: after a step change the focused button is gone, and focus is on the body.
@@ -533,8 +539,10 @@ export class Wizard {
   /** Runs one attempt for a failed host again: on its open run, or on a fresh run when that ended. */
   private retryJob(job: Job, credential?: string): void {
     this.fixing = undefined;
-    job.view = { ...pendingTarget(), attempt: job.view.attempt };
-    if (credential || !job.run?.open) {
+    // A fresh run numbers its attempts from one again; a retry on the same run continues the server's count.
+    const fresh = !!credential || !job.run?.open;
+    job.view = { ...pendingTarget(), attempt: fresh ? 0 : job.view.attempt };
+    if (fresh) {
       const old = job.run;
       const run = this.openRun(credential);
       job.run = run;
@@ -542,7 +550,7 @@ export class Wizard {
       if (job.root) { start.mode = "root"; start.root_consent = true; }
       run.start([start]);
       this.releaseRun(old);
-    } else job.run.retry(job.target);
+    } else job.run?.retry(job.target);
     if (this.page !== "progress") this.go("progress", -1);
     else { this.paint(job); this.summarise(); }
     this.setFoot("");
@@ -877,6 +885,7 @@ export class Wizard {
     if (!this.alive) return;
     this.alive = false;
     this.resize.disconnect();
+    this.release();
     this.surface.remove();
     if (this.opener instanceof HTMLElement && this.opener.isConnected) this.opener.focus({ preventScroll: true });
     this.deps.onClosed();
@@ -891,7 +900,12 @@ export class Wizard {
     this.root.removeEventListener("change", this.onChange);
     document.removeEventListener("keydown", this.onKeyDown, true);
     this.root.removeEventListener("paste", this.onPaste, true);
-    if (this.alive) { this.alive = false; this.resize.disconnect(); this.surface.remove(); }
+    if (this.alive) { this.alive = false; this.resize.disconnect(); this.release(); this.surface.remove(); }
+  }
+
+  private release(): void {
+    for (const sibling of this.inerted) sibling.removeAttribute("inert");
+    this.inerted.length = 0;
   }
 
   get isClosing(): boolean { return this.closing; }
