@@ -3,6 +3,7 @@
 
 mod embedded_cli;
 mod install;
+mod remote;
 
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
@@ -23,6 +24,12 @@ enum Command {
     Agent {
         #[command(flatten)]
         boot: embedded_cli::Options,
+        /// Persistent enrolled identity directory (XDG by default).
+        #[arg(long)]
+        data: Option<PathBuf>,
+        /// Operator/bootstrap actions; users enroll through the server UI later [132].
+        #[command(subcommand)]
+        action: Option<AgentAction>,
     },
     /// Internal session owner; not a public CLI interface.
     #[command(name = "__shim", hide = true)]
@@ -42,6 +49,14 @@ enum Command {
         #[arg(long, default_value_t = 8 * 1024 * 1024)]
         ring_capacity: usize,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentAction {
+    /// Redeem a private-stdin invitation over pinned HTTPS, then connect.
+    Join { url: String },
+    /// Reconnect using the local enrolled identity.
+    Run,
 }
 
 #[derive(Debug, Args)]
@@ -181,8 +196,11 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Command::Agent { boot } => {
+        Command::Agent { boot, data, action } => {
             let embedded_cli::Options { fd, state } = boot;
+            if let Some(action) = action {
+                return run_remote_agent(action, fd, state, data);
+            }
             let Some(fd) = fd else {
                 eprintln!("not implemented");
                 return ExitCode::from(2);
@@ -195,6 +213,41 @@ fn main() -> ExitCode {
                 }
             }
         }
+    }
+}
+
+/// Startup reads an invitation once; reconnects use only the private local identity.
+fn run_remote_agent(
+    action: AgentAction,
+    fd: Option<i32>,
+    state: Option<PathBuf>,
+    data: Option<PathBuf>,
+) -> ExitCode {
+    if fd.is_some() {
+        eprintln!("incompatible infraternal agent modes");
+        return ExitCode::from(2);
+    }
+    let Ok(data) = data.map_or_else(remote::default_data, Ok) else {
+        eprintln!("infraternal agent data directory unavailable");
+        return ExitCode::FAILURE;
+    };
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Read;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        if let AgentAction::Join { url } = action {
+            let mut invitation = Vec::with_capacity(8192);
+            std::io::stdin().take(8193).read_to_end(&mut invitation)?;
+            runtime.block_on(remote::join(&url, &data, &invitation))?;
+        }
+        runtime.block_on(remote::run(&data, state))
+    })();
+    if result.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("remote infraternal agent operation failed");
+        ExitCode::FAILURE
     }
 }
 
