@@ -45,7 +45,7 @@ interface GhosttyActivityControls {
     renderCursor(x: number, y: number, line: unknown[] | null): void;
     naturalCellWidth?: number;
     devicePixelRatio?: number;
-    theme?: { foreground?: string; cursor?: string };
+    theme?: { background?: string; foreground?: string; cursor?: string };
     render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown, scrollbarOpacity?: number): void;
   };
 }
@@ -989,7 +989,7 @@ export class TerminalClient {
         if (this.predictionScreenUnsafe()) this.prediction?.unsafeScreen();
         else {
           this.prediction?.rendererPainted();
-          this.prediction?.paintedOutput(region.subarray(0, consumed));
+          this.prediction?.paintedOutput();
         }
         this.config.hooks?.onPaintedOutput?.(region.subarray(0, consumed), paintedAt, writeSequence);
         this.outputQueue.consume(consumed);
@@ -999,7 +999,10 @@ export class TerminalClient {
         this.drainOutput();
         this.tryAttach();
       });
+      // The terminal state includes these bytes now; only their paint is a frame away. Reconcile the
+      // prediction against them at once, so a key typed in that frame is placed from a consistent cursor.
       if (this.predictionUnsafe()) this.prediction?.unsafeScreen();
+      else this.prediction?.hostWritten(region.subarray(0, region.byteLength));
       return;
     }
     this.tryAttach();
@@ -1166,6 +1169,7 @@ export class TerminalClient {
       fontFamily: this.terminal.options.fontFamily,
       fontSize: this.terminal.options.fontSize,
       devicePixelRatio: this.ghostty.renderer?.devicePixelRatio,
+      background: this.ghostty.renderer?.theme?.background ?? (this.terminal.options.theme as ITheme | undefined)?.background,
       foreground: this.ghostty.renderer?.theme?.foreground ?? (this.terminal.options.theme as ITheme | undefined)?.foreground,
       cursorStyle: this.terminal.options.cursorStyle,
       cursorColor: this.ghostty.renderer?.theme?.cursor ?? (this.terminal.options.theme as ITheme | undefined)?.cursor ?? "#c8ceff",
