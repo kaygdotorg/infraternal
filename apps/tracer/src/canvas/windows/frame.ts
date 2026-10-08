@@ -116,12 +116,20 @@ function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
       const colEl = rec.card.root.parentElement as HTMLElement;
       const w = Math.round(f.width / cam.z);
       colEl.dataset.w = String(w);
+      colEl.dataset.user = "1";
       colEl.style.setProperty("--w", `${w}px`);
       rec.card.root.style.height = `${Math.round(f.height / cam.z)}px`;
       rec.card.root.style.flex = "none";
       cx.view.geometry(rec.owner);
       cx.invalidate();
     },
-    end(): void { cx.view.settle(rec.owner.view.id); rec.binding?.refit(); cx.store.changed(); },
+    end(): void {
+      cx.view.settle(rec.owner.view.id);
+      rec.binding?.refit();
+      cx.store.changed();
+      // The view's stops moved with its width: with the canvas lock on the framing follows (centred stays centred).
+      const c = rec.owner;
+      if (cx.state.canvasLock && cx.state.currentView === c.view.id) cx.nav.goStop(c, cx.nav.nearestStop(c, cx.camera.cam.cx));
+    },
   };
 }
