@@ -338,3 +338,6 @@ async fn real_pty_resumes_native_writer_after_25_connection_replacements() {
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
+
+#[path = "native_credit_tests.rs"]
+mod credits;
