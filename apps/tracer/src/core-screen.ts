@@ -357,19 +357,24 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const paletteSearchText = new Map<PaletteEntry, string>();
   const paletteOptionIds = new Map<PaletteEntry, string>();
   const paletteGroupIds = new Map<string, string>();
+  // The fixed rows are built, indexed and given their DOM rows once; only the rows a provider computes from
+  // state (Lock or Unlock) are new at each open, so opening the palette re-attaches rows instead of rebuilding them.
+  const staticEntries = baseEntries();
+  const indexEntry = (entry: PaletteEntry, index: number): void => {
+    paletteSearchText.set(entry, `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase());
+    // Normalize IDs once so typing never sanitizes every matching result.
+    paletteOptionIds.set(entry, `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`);
+    if (!paletteGroupIds.has(entry.group)) paletteGroupIds.set(entry.group, `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`);
+  };
+  staticEntries.forEach(indexEntry);
+  let contextual: PaletteEntry[] = [];
   const refreshEntries = (): void => {
-    entries.length = 0;
+    for (const entry of contextual) { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); }
     // Context first: a provider's rows (actions on the current window) lead the list.
-    entries.push(...[...providers].flatMap((provider) => provider()), ...baseEntries());
-    paletteSearchText.clear();
-    paletteOptionIds.clear();
-    paletteGroupIds.clear();
-    entries.forEach((entry, index) => {
-      paletteSearchText.set(entry, `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase());
-      // Normalize IDs once so typing never sanitizes every matching result.
-      paletteOptionIds.set(entry, `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`);
-      if (!paletteGroupIds.has(entry.group)) paletteGroupIds.set(entry.group, `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`);
-    });
+    contextual = [...providers].flatMap((provider) => provider());
+    contextual.forEach((entry, index) => indexEntry(entry, 1000 + index));
+    entries.length = 0;
+    entries.push(...contextual, ...staticEntries);
   };
   refreshEntries();
   let visibleEntries: PaletteEntry[] = [];
@@ -529,20 +534,23 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
 
   const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer"): void => {
-    palette.hidden = !open;
-    scrim.hidden = !open;
-    // The source of the last open or close decides its motion: keyboard is instant, pointer animates.
+    // The source of the last open or close decides its motion (a key-triggered open is the shorter one).
     palette.dataset.openKind = source;
     if (open) {
       shortcuts.close(true);
       settings?.close("keyboard");
+      // Fill the list while the palette is still display:none (no layout runs for it), then show it and
+      // focus the field: the browser lays the palette out once, for the focus, not once per step.
       refreshEntries();
       selected = 0;
       paletteInput.value = "";
-      paletteResults.scrollTop = 0;
       renderPalette();
+      palette.hidden = false;
+      scrim.hidden = false;
       paletteInput.focus({ preventScroll: true });
     } else {
+      palette.hidden = true;
+      scrim.hidden = true;
       paletteInput.removeAttribute("aria-activedescendant");
       syncFontPreview();
     }
@@ -931,6 +939,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     dispose() {
       toast.dispose();
+      overlayWatch.disconnect();
       cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
       shortcuts.dispose();
@@ -939,7 +948,6 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       sidebarFoot?.dispose();
       sidebarToggle.removeEventListener("click", sidebarClick);
       capsule.removeEventListener("click", capsuleClick);
-      overlayWatch.disconnect();
       scrim.removeEventListener("click", scrimClick);
       window.removeEventListener("keydown", keydown, true);
       window.removeEventListener("resize", resize);

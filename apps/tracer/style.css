@@ -482,6 +482,7 @@ button { color: inherit; }
 .palette-input svg { flex: none; color: var(--fg-2); }
 .palette-input input { width: 100%; height: 56px; border: 0; outline: 0; background: transparent; color: var(--fg); font: var(--fw-body) var(--text-input)/1.3 var(--font-ui); }
 .palette-input input::placeholder { color: var(--fg-3); }
+.palette-results .result, .palette-results .group-label { content-visibility: auto; contain-intrinsic-size: auto 36px; }
 .palette-results { max-height: min(54vh, 470px); overflow: auto; padding: 8px; overscroll-behavior: contain; }
 .group-label { padding: 10px 8px 4px; color: var(--fg-3); font: var(--fw-title) var(--text-caption)/12px var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; }
 .result { display: flex; align-items: center; width: 100%; min-height: calc(var(--row) + 4px); gap: 8px; padding: 0 8px; border-radius: 6px; text-align: left; position: relative; isolation: isolate; }
