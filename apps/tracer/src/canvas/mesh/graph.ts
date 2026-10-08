@@ -69,7 +69,7 @@ export interface GraphController {
   dispose(): void;
 }
 
-const SMALL = 40, MAX_ARROWS = 240, MOUNTS_PER_FRAME = 8, ENTER_CLUSTERS = 0.62, LEAVE_CLUSTERS = 0.7, MAX_CLUSTER_ARROWS = 400;
+const SMALL = 40, MAX_ARROWS = 240, ARROWS_PER_FRAME = 40, MOUNTS_PER_FRAME = 8, ENTER_CLUSTERS = 0.62, LEAVE_CLUSTERS = 0.7, MAX_CLUSTER_ARROWS = 400;
 
 export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: GraphHooks): GraphController {
   const { camera, state } = cx;
@@ -87,16 +87,18 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
   let dataKey = 0, lastKey = "", lastInv = 0, chipTimer = 0, cardTimer = 0, clusterKey = -1;
   /** Where (and at what zoom) the arrows were last chosen; the next batch is due when the camera has left it. */
   let arrowAt: { x: number; y: number; z: number; data: number } | undefined;
-  /** Cards that appear because the level changed fade in; cards that scroll into view just appear. */
-  let enterFade = false;
   // What the passes cost (read by the specs that measure frame times): the time inside passes, and cards made.
   let passes = 0, passMs = 0, mounted_ = 0;
   let needsAnotherFrame = false;
+  let lastZ = 0;
 
-  // The chip layer sits under the cards, over the dotted canvas.
+  // The chip layer sits under the cards, over the dotted canvas. The cards live in one layer of their own so that a
+  // change of level fades one element, not a hundred (each fading card would be a layer to paint).
   const chipLayer = el("div", "cl-chips");
   chipLayer.dataset.on = "false";
   c.colsEl.prepend(chipLayer);
+  const cardLayer = el("div", "cl-cards");
+  c.colsEl.append(cardLayer);
 
   const small = (): boolean => nodes.size <= SMALL;
 
@@ -113,10 +115,9 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
   const mountCard = (n: NodeModel): void => {
     const rec = hooks.makeCard(n);
     mounted_ += 1;
-    if (enterFade) { rec.card.root.dataset.enter = ""; rec.card.root.addEventListener("animationend", () => rec.card.root.removeAttribute("data-enter"), { once: true }); }
     cards.set(n, rec);
     c.wins.set(rec.model.id, rec);
-    c.colsEl.append(rec.card.root);
+    cardLayer.append(rec.card.root);
   };
   const unmountCard = (n: NodeModel): void => {
     const rec = cards.get(n);
@@ -203,7 +204,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
     return [...counts.entries()].map(([key, v]) => ({ key, ...v })).sort((p, q) => q.count - p.count).slice(0, MAX_CLUSTER_ARROWS);
   };
   /** Heads of the far zoom are drawn larger in the graph so they still read at the thumbnail scale. */
-  const clusterHead = (): number => Math.min(72, Math.max(hooks.headSize(), 11 / cam.z));
+  const clusterHead = (): number => Math.min(64, Math.max(hooks.headSize(), 9 / cam.z));
   const paintClusterArrows = (): void => {
     const edges = clusterEdges();
     const live = new Set(edges.map((e) => e.key));
@@ -215,6 +216,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
       let arrow = clusterArrows.get(e.key);
       if (!arrow) {
         arrow = new Arrow({ tone: "accent" });
+        arrow.g.dataset.cluster = ""; // quieter than a grant's own arrow (mesh.css)
         arrow.g.dataset.fresh = "";
         const fresh = arrow;
         requestAnimationFrame(() => requestAnimationFrame(() => fresh.g.removeAttribute("data-fresh")));
@@ -239,7 +241,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
   };
   /** Entering the clusters level: the cards and host arrows fade out (a short animation) and are then taken out of the DOM. */
   const leaveCards = (): void => {
-    for (const rec of cards.values()) rec.card.root.dataset.leaving = "";
+    cardLayer.dataset.leaving = "";
     for (const e of mounted) e.arrow.g.dataset.leaving = "";
     window.clearTimeout(cardTimer);
     cardTimer = window.setTimeout(() => {
@@ -290,7 +292,13 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
     for (const g of both) { if (want.size >= MAX_ARROWS) break; want.add(g); }
     for (const g of one) { if (want.size >= MAX_ARROWS) break; want.add(g); }
     for (const g of [...arrows.keys()]) if (!want.has(g)) unmountArrow(g);
-    for (const g of want) if (!arrows.has(g)) mountArrow(g);
+    // A big batch is made over a few frames: each arrow is a handful of SVG elements.
+    let arrowBudget = ARROWS_PER_FRAME;
+    for (const g of want) {
+      if (arrows.has(g)) continue;
+      if (arrowBudget-- <= 0) { arrowAt = undefined; needsAnotherFrame = true; break; }
+      mountArrow(g);
+    }
   };
   /** Whether the arrows should be chosen again now (see the invariants above). */
   const arrowsDue = (full: boolean): boolean => {
@@ -333,14 +341,19 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
       level = next;
       c.colsEl.dataset.level = level;
       if (level === "cards") clearClusterLevel(); else leaveCards();
-      enterFade = level === "cards";
+      if (level === "cards") {
+        window.clearTimeout(cardTimer);
+        delete cardLayer.dataset.leaving;
+        cardLayer.dataset.enter = "";
+        cardLayer.addEventListener("animationend", () => cardLayer.removeAttribute("data-enter"), { once: true });
+      }
     }
     const t0 = performance.now();
     if (level === "clusters") {
       scaleChips();
       // The frames and their arrows depend on the data and the level only: nothing is rewritten while the camera moves.
       if (force || levelChanged || clusterKey !== dataKey) { clusterKey = dataKey; passClusters(); }
-    } else { passCards(force || levelChanged); enterFade = false; }
+    } else passCards(force || levelChanged);
     passes += 1; passMs += performance.now() - t0;
     if (needsAnotherFrame) cx.invalidate();
   };
@@ -437,8 +450,23 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
 
   return {
     sync,
-    cull() { run(false); },
-    rest() { run(true); },
+    cull() {
+      // Zooming scales every stroke of the arrow layer, and a software rasteriser draws all of them again on every
+      // frame: while the zoom changes the arrows wait, and they fade back in where the camera stops (TASTE: costly
+      // paint is held during motion and refreshed at rest). Panning leaves them: a pan does not repaint them.
+      if (lastZ && Math.abs(Math.log(cam.z / lastZ)) > 0.003 && !small() && c.colsEl.dataset.zooming === undefined) c.colsEl.dataset.zooming = "";
+      lastZ = cam.z;
+      run(false);
+    },
+    rest() {
+      lastZ = 0;
+      if (c.colsEl.dataset.zooming !== undefined) {
+        delete c.colsEl.dataset.zooming;
+        const svg = c.graphSvg;
+        if (svg) { svg.dataset.in = ""; svg.addEventListener("animationend", () => svg.removeAttribute("data-in"), { once: true }); }
+      }
+      run(true);
+    },
     level: () => level,
     stats: () => ({ cards: cards.size, arrows: arrows.size, chips: chips.size && level === "clusters" ? chips.size : 0, clusterArrows: clusterArrows.size, passes, passMs: Math.round(passMs * 10) / 10, mounted: mounted_ }),
     arrows: () => mounted,
@@ -456,6 +484,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, hooks: Grap
       for (const a of clusterArrows.values()) a.remove();
       window.clearTimeout(chipTimer); window.clearTimeout(cardTimer);
       chipLayer.remove();
+      cardLayer.remove();
       stateEl?.remove();
     },
   };

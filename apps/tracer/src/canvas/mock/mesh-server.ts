@@ -157,6 +157,8 @@ export class FakeMeshServer implements MeshTransport {
     if (topic !== TOPIC) return () => undefined;
     const id = this.nextSub++;
     this.open.set(id, { onEvent, onOpen });
+    // Like the server: a subscription starts with the list it would have answered.
+    queueMicrotask(() => { if (!this.muted && this.open.has(id) && this.state === "ready" && this.access.view) onEvent({ type: "snapshot", snapshot: this.listJson() }); });
     return () => { this.open.delete(id); };
   }
 
@@ -166,6 +168,8 @@ export class FakeMeshServer implements MeshTransport {
   release(state: FakeMeshState = "ready"): void { this.state = state; const run = this.held; this.held = []; for (const r of run) r(); }
   /** The socket drops and comes back: events in between are lost, and every subscriber is told to resync. */
   reconnect(lose: () => void = () => undefined): void { lose(); for (const l of [...this.ready]) queueMicrotask(l); for (const s of this.open.values()) queueMicrotask(s.onOpen); }
+  /** The server fell behind a subscriber and pushes the whole list instead of the changes it missed. */
+  resync(): void { for (const s of this.open.values()) s.onEvent({ type: "resync", snapshot: this.listJson() }); }
   setAccess(access: { view: boolean; manageGrants: boolean }): void { this.access = access; this.bump(); }
 
   /** Changes a host the way a live mesh does (liveness, round trip) and tells the subscribers. */
@@ -276,6 +280,6 @@ export class FakeMeshServer implements MeshTransport {
   private bump(): void { this.revision += 1; this.send(this.revision); }
   private send(revision: number): void {
     if (this.muted) return;
-    for (const s of this.open.values()) s.onEvent({ topic: TOPIC, revision });
+    for (const s of this.open.values()) s.onEvent({ type: "changed", revision });
   }
 }

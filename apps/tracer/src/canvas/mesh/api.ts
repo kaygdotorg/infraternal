@@ -2,9 +2,9 @@
  * The real `MeshSource`: the Mesh API of #108 over the multiplexed connection (protocol.ts has the contract).
  *
  * State lives here and nowhere else: the last `mesh.list` and the edits in flight. The invariants:
- * - **One revision line.** `rev` is the server's revision of what this source shows. A `mesh` event announces a
- *   newer revision and the source lists again (coalesced to one list per 200 ms), so a missed event costs
- *   nothing: any later event, a reconnect or a retry brings everything up to date. A list older than what is on
+ * - **One revision line.** `rev` is the server's revision of what this source shows. A `changed` event announces
+ *   a newer revision and the source lists again (coalesced to one list per 200 ms; a pushed snapshot is applied
+ *   as it is), so a missed event costs nothing: any later event, a reconnect or a retry brings everything up to date. A list older than what is on
  *   screen (an answer that raced an edit) is dropped.
  * - **Stable objects.** A grant or node keeps its object across updates (fields are changed in place), because
  *   the canvas holds arrows and cards by identity. The arrays only grow, shrink or reorder.
@@ -130,9 +130,17 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   };
 
   const onEvent = (raw: Record<string, unknown>): void => {
-    const to = parseEvent(raw);
-    if (to === undefined || status === "loading" || to <= rev) return;
-    invalidate(to);
+    const ev = parseEvent(raw);
+    if (!ev || status === "loading") return;
+    if (ev.kind === "changed") { if (ev.rev > rev) invalidate(ev.rev); return; }
+    if (ev.kind === "snapshot") {
+      // The server's own list, pushed: the same as asking, unless an edit is in flight or it is older than ours.
+      if (inflight > 0) { dirty = true; return; }
+      if (ev.snapshot.rev >= rev) apply(ev.snapshot);
+      return;
+    }
+    // The subscription is over. Withdrawn view: the Mesh goes; anything else: ask again (and it will say why).
+    if (ev.reason === "forbidden") { status = "unavailable"; access = { view: false, manageGrants: false }; notify(true); } else invalidate(rev + 1);
   };
 
   // Events are subscribed only after the server has answered a list: a server that does not serve the Mesh does not

@@ -15,8 +15,10 @@
  * | `mesh.grant.delete` | `{ name }`                                         | `{ revision }`            |
  *
  * An endpoint is `{ "Node": <id> }` or `{ "Tag": "<name>" }`. A grant is referenced by its name (D180); its arrow id
- * is stable across renames, so the canvas keys arrows by it. Events on topic `mesh` carry the new `revision`: they
- * invalidate, and the canvas lists again (coalesced), so a missed event costs nothing.
+ * is stable across renames, so the canvas keys arrows by it. A subscription is `{ "topic": "mesh" }`; its events are
+ * `{ "type": "snapshot" | "resync", "snapshot": <a list> }` (the canvas applies it), `{ "type": "changed",
+ * "revision": n }` (it invalidates: the canvas lists again, coalesced, so a missed event costs nothing) and
+ * `{ "type": "error", "error": "<word>" }` (the subscription is over; `forbidden` means the view is withdrawn).
  *
  * What the server does not send yet, and the canvas reads as absent (never invented), is marked PROPOSED and is on
  * the issue: `access` (what the person may do, D187), a node's `os`, `address`, `path`, `via` and `behind`.
@@ -163,10 +165,20 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
   return access ? { rev: v.revision, access, nodes, tags, grants } : undefined;
 }
 
-/** The revision a `mesh` event announces, or nothing when it is not one. */
-export function parseEvent(v: Record<string, unknown>): number | undefined {
-  const rev = v.revision ?? v.rev;
-  return v.topic === TOPIC && count(rev) ? rev : undefined;
+export type MeshEvent =
+  | { kind: "changed"; rev: number }
+  | { kind: "snapshot"; snapshot: Snapshot }
+  | { kind: "error"; reason: string };
+
+/** Reads one event of the `mesh` subscription, or nothing when it is not one. */
+export function parseEvent(v: Record<string, unknown>): MeshEvent | undefined {
+  if ((v.type === "snapshot" || v.type === "resync") && v.snapshot !== undefined) {
+    const snapshot = parseSnapshot(v.snapshot);
+    return snapshot ? { kind: "snapshot", snapshot } : undefined;
+  }
+  if (v.type === "changed" && count(v.revision)) return { kind: "changed", rev: v.revision };
+  if (v.type === "error" && typeof v.error === "string" && v.error.length <= 64) return { kind: "error", reason: v.error };
+  return undefined;
 }
 
 /** The revision in an action's answer (and the new grant's arrow id, for a create). */

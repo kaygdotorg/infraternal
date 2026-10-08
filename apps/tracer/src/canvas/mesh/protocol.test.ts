@@ -54,10 +54,11 @@ test("a node's own tag list and the tag table agree even when a server sends onl
   expect(onlyNode.tags).toEqual({ x: ["a"] });
 });
 
-test("events announce a revision, and nothing else is one", () => {
-  expect(parseEvent({ topic: "mesh", revision: 9 })).toBe(9);
-  expect(parseEvent({ topic: "mesh", rev: 9 })).toBe(9);
-  for (const bad of [{ topic: "other", revision: 9 }, { topic: "mesh" }, { topic: "mesh", revision: "9" }, { topic: "mesh", revision: -1 }]) expect(parseEvent(bad)).toBeUndefined();
+test("the subscription's events: a pushed list, a revision that invalidates, and the end of the subscription", () => {
+  expect(parseEvent({ type: "changed", revision: 9 })).toEqual({ kind: "changed", rev: 9 });
+  for (const type of ["snapshot", "resync"]) expect(parseEvent({ type, snapshot: today })).toMatchObject({ kind: "snapshot", snapshot: { rev: 7 } });
+  expect(parseEvent({ type: "error", error: "forbidden" })).toEqual({ kind: "error", reason: "forbidden" });
+  for (const bad of [{ type: "changed" }, { type: "changed", revision: "9" }, { type: "changed", revision: -1 }, { type: "snapshot" }, { type: "snapshot", snapshot: {} }, { type: "other" }, {}]) expect(parseEvent(bad)).toBeUndefined();
 });
 
 test("answers carry the new revision, and a create the new arrow's id", () => {

@@ -24,8 +24,9 @@
 /* Cards and arrows change level with a short fade; the DOM is only changed once it has played. */
 @keyframes cl-node-in { from { opacity: 0; } }
 @keyframes cl-node-out { to { opacity: 0; } }
-.cl-graph .ui-window[data-enter] { animation: cl-node-in 180ms var(--ease-out, ease-out); }
-.cl-graph .ui-window[data-leaving] { animation: cl-node-out 160ms var(--ease-out, ease-out) forwards; }
+.cl-cards { position: absolute; inset: 0; pointer-events: none; }
+.cl-cards[data-enter] { animation: cl-node-in 180ms var(--ease-out, ease-out); }
+.cl-cards[data-leaving] { animation: cl-node-out 160ms var(--ease-out, ease-out) forwards; }
 .cl-graph-arrows .cl-arrow[data-leaving] { opacity: 0; }
 
 /* ---- states: loading, unreachable, empty, stale -------------------------------------------------- */
@@ -60,3 +61,14 @@
 .cl-graph-arrows .cl-arrow-hit { stroke-width: calc(16px * var(--k)); }
 .cl-graph-arrows .cl-arrow-handle { stroke-width: calc(1.5px * var(--k)); }
 .cl-graph-arrows .cl-arrow[data-dashed] .cl-arrow-line { stroke-dasharray: calc(5px * var(--k)) calc(5px * var(--k)); }
+
+/* The connector on a terminal's pill exists only for a person who may grant access (D187); the attribute must win over its display. */
+.cl-port[hidden] { display: none; }
+
+/* An arrow between clusters sums up grants and is quieter than one grant's own arrow (the stroke, not the group, so no layer per arrow). */
+.cl-graph-arrows .cl-arrow[data-cluster] .cl-arrow-line { stroke-opacity: 0.55; }
+.cl-graph-arrows .cl-arrow[data-cluster] .cl-arrow-head { fill-opacity: 0.55; }
+
+/* While the camera zooms the arrows are not drawn (a zoom scales every stroke, and every frame draws them again); they fade back in at rest. */
+.cl-graph[data-zooming] .cl-graph-arrows { visibility: hidden; }
+.cl-graph-arrows[data-in] { animation: cl-node-in 200ms var(--ease-out, ease-out); }

@@ -527,7 +527,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
       for (const c of views.values()) graphOf(c)?.reset();
     }
     for (const c of views.values()) if (c.view.layout === "graph") refreshGraph(c);
-    for (const port of ports) port.hidden = !canEdit;
+    for (const port of ports) { if (port.isConnected) port.hidden = !canEdit; else ports.delete(port); } // a closed window's connector goes with it
   });
   const offFailure = source.onFailure((message) => cx.toast.show({ message }));
   return {

@@ -20,21 +20,27 @@ export interface Stops {
 
 /** A graph with more nodes than this is too big to snap card by card: it opens fitted whole, with the canvas free. */
 export const FREE_GRAPH_NODES = 40;
+const MIN_FREE_ZOOM = 0.1;
 export const isFreeView = (view: ViewModel): boolean => view.layout === "graph" && view.nodes.length > FREE_GRAPH_NODES;
 
 export function stopsFor(view: ViewModel, r: Rect, vw: number, vh: number): Stops {
   // A big graph has one stop, at the zoom where all of it fits; from there the person zooms into a cluster.
-  const z = isFreeView(view) ? Math.min(1, vh / r.h, vw / r.w) : Math.min(1, vh / r.h);
+  // (with a margin, so the view's label above it and the top pill over it stay clear of the content)
+  // On a narrow screen it does not shrink below where the names of the clusters can still be read: it starts at the
+  // top left of the graph and the person pans.
+  const free = isFreeView(view);
+  const z = free ? Math.max(MIN_FREE_ZOOM, Math.min(1, (0.86 * vh) / r.h, (0.9 * vw) / r.w)) : Math.min(1, vh / r.h);
   const width = vw / z;
   let lefts: number[];
-  if (r.w <= width) lefts = [Math.round(r.x + r.w / 2 - width / 2)];
+  if (free && r.w > width) lefts = [Math.round(r.x - 0.04 * width)];
+  else if (r.w <= width) lefts = [Math.round(r.x + r.w / 2 - width / 2)];
   else {
     const max = Math.round(r.x + r.w - width);
     let x = r.x;
     const raw = view.layout === "graph" ? view.nodes.map((n) => r.x + n.x - 30) : view.cols.map((col) => { const at = x - Math.max(0, (width - col.w) / 2); x += col.w + COLUMN_GAP; return at; });
     lefts = [...new Set(raw.map((v) => Math.round(clamp(v, r.x, max))).concat(max))].sort((p, q) => p - q);
   }
-  return { z, cy: r.h * z <= vh ? r.y + r.h / 2 : r.y + vh / (2 * z), lefts, view: width };
+  return { z, cy: r.h * z <= vh ? r.y + r.h / 2 : r.y + (free ? vh / (2 * z) - 0.04 * vh / z : vh / (2 * z)), lefts, view: width };
 }
 
 /** The index of the stop whose centre is nearest to world x `cx`. */
