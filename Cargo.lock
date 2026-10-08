@@ -1412,6 +1412,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-openssl",
  "tokio-tungstenite",
  "tower",
  "tower-http",
