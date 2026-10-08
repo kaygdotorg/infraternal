@@ -1,6 +1,7 @@
 /** Renders the real setup wizard and discoverable passkey sign-in for the tracer. */
 import { recoveryWords } from "./recovery-words";
 import { recoveryUiEnabled } from "./recovery-ui";
+import { swapCard } from "./auth-motion";
 import { AuthError, checkSetupToken, loginWithPasskey, registerOwner } from "./auth";
 import { copyFeedback, swapIcon, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { loading, type Loading } from "../../../packages/ui/src/countup";
@@ -378,8 +379,10 @@ function mountSignIn(
   host: HTMLElement,
   message: string,
   onAuthenticated: (userId: string, firstSetup: boolean, welcomeName?: string, instant?: boolean) => void,
+  /** -1 when arriving from the recovery card, so the swap slides the other way. */
+  from: 0 | -1 = 0,
 ): void {
-  host.innerHTML = `<section class="auth-screen" aria-label="Sign in">
+  swapCard(host, from, () => { host.innerHTML = `<section class="auth-screen" aria-label="Sign in">
     <section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="signin-title">
       <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
       <h1 id="signin-title">Welcome back</h1>
@@ -389,15 +392,17 @@ function mountSignIn(
       <div class="auth-note"><div><p class="auth-loading" id="login-loading" role="status" aria-live="polite"><span class="busy-count" hidden></span></p></div></div>
       <div class="auth-note"><div><p class="auth-message" id="auth-error" role="alert"></p></div></div>
     </section>
-  </section>`;
+  </section>`; });
   host.querySelector<HTMLElement>("#auth-error")!.textContent = message;
+  // Fetch the recovery code while the person is still reading, so pressing the action never waits.
+  if (recoveryUiEnabled()) window.setTimeout(() => { void import("./recovery"); }, 0);
   const events = new AbortController();
   const button = host.querySelector<HTMLButtonElement>("#login-passkey")!;
   host.querySelector<HTMLButtonElement>("#use-recovery")?.addEventListener("click", () => {
     if (button.disabled || !recoveryUiEnabled()) return;
     void import("./recovery").then(({ mountRecovery }) => {
       events.abort();
-      mountRecovery(host, () => mountSignIn(host, "", onAuthenticated), onAuthenticated);
+      mountRecovery(host, () => mountSignIn(host, "", onAuthenticated, -1), onAuthenticated);
     });
   });
   const card = host.querySelector<HTMLElement>(".auth-card")!;
