@@ -3,6 +3,7 @@
 
 pub mod auth;
 mod embedded;
+pub mod mesh_api;
 mod runtime;
 mod web_assets;
 mod websocket;
