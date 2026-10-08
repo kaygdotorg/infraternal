@@ -1,6 +1,7 @@
 //! Defines the single `infraternal server` and `infraternal agent` entry point [7][20].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+mod embedded_cli;
 mod install;
 
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
@@ -20,12 +21,8 @@ enum Command {
     Server(ServerArgs),
     /// Run the per-host infraternal agent.
     Agent {
-        /// Trusted socketpair inherited from the spawning server.
-        #[arg(long)]
-        fd: Option<i32>,
-        /// Override the private runtime state directory.
-        #[arg(long)]
-        state: Option<std::path::PathBuf>,
+        #[command(flatten)]
+        boot: embedded_cli::Options,
     },
     /// Internal session owner; not a public CLI interface.
     #[command(name = "__shim", hide = true)]
@@ -108,6 +105,9 @@ struct InstallArgs {
 }
 
 fn main() -> ExitCode {
+    if let Some(result) = embedded_cli::run_if_requested() {
+        return result;
+    }
     match Cli::parse().command {
         Command::Server(args) => {
             // Preserve the no-argument status used by the fast CLI smoke gate while
@@ -181,7 +181,8 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Command::Agent { fd, state } => {
+        Command::Agent { boot } => {
+            let embedded_cli::Options { fd, state } = boot;
             let Some(fd) = fd else {
                 eprintln!("not implemented");
                 return ExitCode::from(2);

@@ -1,0 +1,39 @@
+# Real inherited-fd startup working-set and replay evidence for #78; remote demo WIP enabled, infraternal-dev.
+Running as unit: run-p2694719-i11082466.scope; invocation ID: d8a94994fb474ffb8fbdd44847a5ebbd
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/remote-agents/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.51s
+     Running tests/agent_daemon.rs (target/debug/deps/agent_daemon-a9f8069fee2c71c2)
+
+running 1 test
+idle infraternal agent: 0 scheduled slices over 2.201 s (0.000/min); RSS=14472 KiB
+idle attached infraternal agent: 0 scheduled slices over 2.200 s; idle session shim: 0 over 2.200 s
+real terminal.open/type/output and terminal.exited status=7: PASS
+abrupt stop/restart 01/24 before-forward: 470784 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 02/24 PTY-write-before-Ack: 1464 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 03/24 mid-stream: 192000 bytes, output observed before stop=37376; exact input/output replay: PASS
+abrupt stop/restart 04/24 mid-stream: 208768 bytes, output observed before stop=35840; exact input/output replay: PASS
+abrupt stop/restart 05/24 PTY-write-before-Ack: 515 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 06/24 before-forward: 143360 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 07/24 before-forward: 202752 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 08/24 mid-stream: 287488 bytes, output observed before stop=65532; exact input/output replay: PASS
+abrupt stop/restart 09/24 after-send: 172544 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 10/24 PTY-write-before-Ack: 1747 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 11/24 after-send: 172544 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 12/24 mid-stream: 420736 bytes, output observed before stop=86011; exact input/output replay: PASS
+abrupt stop/restart 13/24 PTY-write-before-Ack: 575 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 14/24 after-send: 163072 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 15/24 mid-stream: 216832 bytes, output observed before stop=108032; exact input/output replay: PASS
+abrupt stop/restart 16/24 after-send: 280832 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 17/24 before-forward: 187776 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 18/24 after-send: 173952 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 19/24 mid-stream: 219520 bytes, output observed before stop=105472; exact input/output replay: PASS
+abrupt stop/restart 20/24 PTY-write-before-Ack: 1283 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 21/24 before-forward: 206464 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 22/24 before-forward: 468224 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 23/24 after-send: 516480 bytes, output observed before stop=0; exact input/output replay: PASS
+abrupt stop/restart 24/24 PTY-write-before-Ack: 684 bytes, output observed before stop=0; exact input/output replay: PASS
+24-iteration restart fixture seed=20: 4710396 payload bytes, all four stop positions x 6: PASS
+test real_binary_preserves_input_and_output_across_24_abrupt_stops ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.21s
+
