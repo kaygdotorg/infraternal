@@ -109,10 +109,9 @@ async fn control_precedes_bulk_without_reordering_snapshot_notice() {
     );
     assert!(control.try_send(Message::Pong(456, 0)).is_ok());
     let (written, mut frames) = mpsc::unbounded_channel();
-    let task =
-        tokio::spawn(
-            async move { writer(&Capture(written), bulk_rx, Some(control_rx), false).await },
-        );
+    let task = tokio::spawn(async move {
+        writer(&Capture(written), bulk_rx, Some(control_rx), false, false).await
+    });
     let first = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
         .await
         .unwrap()

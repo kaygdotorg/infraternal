@@ -70,6 +70,7 @@ async fn writer(
     mut messages: mpsc::Receiver<Message>,
     mut control: Option<mpsc::Receiver<Message>>,
     greeting: bool,
+    renewal: bool,
 ) -> io::Result<()> {
     let mut tx = Transmit::default();
     if greeting {
@@ -78,11 +79,15 @@ async fn writer(
             0,
             &Frame::Hello {
                 version: 1,
-                caps: if socket.native_stream_id().is_some() {
+                caps: (if socket.native_stream_id().is_some() {
                     crate::remote_quic::REMOTE_WRITER_BINDING
                 } else {
                     0
-                },
+                }) | (if renewal {
+                    crate::remote_renewal::LIVE_RENEWAL
+                } else {
+                    0
+                }),
                 client_info: "infraternal agent",
             },
         )
@@ -183,7 +188,7 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
         return Err(sessions::invalid("embedded leg B requires fd 3"));
     }
     let socket = Socket::inherited(fd)?;
-    run_channel(&socket, state, None).await
+    run_channel(&socket, state, None, None).await
 }
 
 /// Dispatch an admitted remote server connection through the same session and shim path.
@@ -197,6 +202,18 @@ pub async fn run_authenticated(
     state: Option<PathBuf>,
     execution_uid: u32,
 ) -> io::Result<()> {
+    run_authenticated_with_renewal(channel, state, execution_uid, None).await
+}
+
+/// Dispatch remote terminal and bounded certificate control actions on one authenticated channel.
+/// # Errors
+/// Refuses uid, greeting, state, framing or publication failure.
+pub async fn run_authenticated_with_renewal(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    execution_uid: u32,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+) -> io::Result<()> {
     if channel.native_stream_id().is_some_and(|writer| writer != 0)
         || execution_uid != nix::unistd::Uid::effective().as_raw()
     {
@@ -207,7 +224,7 @@ pub async fn run_authenticated(
     // Cancellation retires the authenticated channel as well as its task set;
     // a caller cannot reuse it with detached readers or unfinished wire writes.
     let _retire = RetireChannel(channel);
-    run_channel(channel, state, Some(execution_uid)).await
+    run_channel(channel, state, Some(execution_uid), renewal).await
 }
 
 struct RetireChannel<'a, C: Channel>(&'a C);
@@ -222,6 +239,7 @@ async fn run_channel(
     socket: &impl Channel,
     state: Option<PathBuf>,
     execution_uid: Option<u32>,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
 ) -> io::Result<()> {
     let state = sessions::state(state)?;
     let manager = Manager::detect().await;
@@ -251,6 +269,7 @@ async fn run_channel(
         }
         let mut streams: HashMap<u32, Stream> = HashMap::new();
         let mut jobs: JoinSet<(u32, io::Result<()>)> = JoinSet::new();
+        let mut renewals = JoinSet::new();
         let mut opens: JoinSet<(u32, u32, io::Result<Session>)> = JoinSet::new();
         loop {
             tokio::select! {
@@ -264,6 +283,11 @@ async fn run_channel(
                             reply(&control, Message::Close(stream, "terminal shim disconnected"))?;
                         }
                     }
+                }
+                result = renewals.join_next(), if !renewals.is_empty() => {
+                    let (call_id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| sessions::invalid("missing renewal task"))?.map_err(io::Error::other)?;
+                    let (ok, json) = match result { Ok(json) => (true, json), Err(_) => (false, b"{}".to_vec()) };
+                    reply(&control, Message::Result(0, call_id, ok, json))?;
                 }
                 result = opens.join_next(), if !opens.is_empty() => {
                     let (stream, call_id, result) = result.ok_or_else(|| sessions::invalid("missing launch task"))?.map_err(io::Error::other)?;
@@ -285,6 +309,15 @@ async fn run_channel(
                     match decoded.frame {
                         Frame::Hello {version: 1, ..} if stream == 0 => {}
                         Frame::Ping {nonce, sent_us} if stream == 0 => reply(&control, Message::Pong(nonce, sent_us))?,
+                        Frame::Call {call_id, action_id, input_json} if stream == 0 && matches!(action_id, "transport.csr" | "transport.certificate") && renewal.is_some() => {
+                            if !renewals.is_empty() || input_json.len() > crate::remote_renewal::MAX_RENEWAL_JSON {
+                                reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;
+                            } else {
+                                let renewal = renewal.ok_or_else(|| sessions::invalid("missing renewal identity"))?.clone();
+                                let action = action_id.to_owned(); let input = input_json.to_vec();
+                                renewals.spawn_blocking(move || (call_id, renewal.action(&action, &input)));
+                            }
+                        }
                         Frame::Call {call_id, action_id: "terminal.open", input_json} if execution_uid.is_none() || stream == 0 => {
                             let input = serde_json::from_slice::<Open>(input_json);
                             if let Ok(input) = input && execution_uid.is_none_or(|uid| input.uid == uid) && registry.len() + opens.len() < sessions::MAX_SESSIONS {
@@ -346,7 +379,7 @@ async fn run_channel(
             }
         }
     };
-    tokio::select! { result = dispatch => result, result = writer(socket, rx, Some(control_rx), true) => result }
+    tokio::select! { result = dispatch => result, result = writer(socket, rx, Some(control_rx), true, renewal.is_some()) => result }
 }
 
 /// Run one authenticated, capability-bound native terminal using the common shim relay.
@@ -407,7 +440,7 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
     };
     tokio::select! {
         result = dispatch => result,
-        result = writer(channel, rx, None, false) => result,
+        result = writer(channel, rx, None, false, false) => result,
         result = terminal(path, id, writer_id, cursor, input, command_rx, tx) => result,
     }
 }
