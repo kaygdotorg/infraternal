@@ -182,6 +182,17 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const sidebar = get<HTMLElement>("#sidebar");
   const sidebarToggle = get<HTMLButtonElement>("#sidebar-toggle");
   const toast = mountToast(stage);
+  // Whether any floating thing is open (the test-double badge steps aside for it). A flag from script:
+  // `:has()` selectors on the screen or the body would re-evaluate on every change below them.
+  const OVERLAYS = ".sidebar:not([hidden]), .palette:not([hidden]), .ui-toast:not([hidden]), .ah-float, .canvas-popover, .ui-settings, .ui-shortcuts";
+  let overlayQueued = false;
+  const syncOverlay = (): void => {
+    overlayQueued = false;
+    stage.toggleAttribute("data-overlay", stage.querySelector(OVERLAYS) !== null || document.querySelector(".ui-confirm-tip") !== null);
+  };
+  const overlayWatch = new MutationObserver(() => { if (!overlayQueued) { overlayQueued = true; queueMicrotask(syncOverlay); } });
+  overlayWatch.observe(document.body, { childList: true }); // the anchored confirmation lives on the body
+  overlayWatch.observe(stage, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
   // The footer (who is signed in, settings, the build) is part of the canvas preview.
   // Settings is a shell; About is the only section so far (the build's name, version, commit, date).
   const build = buildVersion();
@@ -928,6 +939,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       sidebarFoot?.dispose();
       sidebarToggle.removeEventListener("click", sidebarClick);
       capsule.removeEventListener("click", capsuleClick);
+      overlayWatch.disconnect();
       scrim.removeEventListener("click", scrimClick);
       window.removeEventListener("keydown", keydown, true);
       window.removeEventListener("resize", resize);

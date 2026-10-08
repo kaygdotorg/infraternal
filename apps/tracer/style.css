@@ -213,9 +213,9 @@ button { color: inherit; }
   font-size: 10px;
   letter-spacing: 0.08em;
 }
-/* Translucent overlays would show the badge blurred through them; it steps aside instead. */
-.terminal-screen:has(.sidebar:not([hidden]), .palette:not([hidden]), .ui-toast:not([hidden]), .ah-float) .test-double-badge,
-body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge { opacity: 0; }
+/* Translucent overlays would show the badge blurred through them; it steps aside instead. (A flag set from script,
+   not `:has()` on the screen or the body: those re-evaluate on every DOM change under them.) */
+.terminal-screen[data-overlay] .test-double-badge { opacity: 0; }
 .probe-panel {
   position: absolute;
   z-index: 5;
