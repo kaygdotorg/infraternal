@@ -15,8 +15,8 @@
  * - the interactions the owner's open questions are about: arrows on demand, structure
  *   (drag a pill, drag a view), where a new session opens, and the droplet split.
  *
- * Scenes and the "mockup" stepper are scaffolding for the review round and live in
- * clusters-stepper.ts; nothing here is meant to ship as is. Motion is transform and opacity
+ * Scenes are scaffolding for the review round and live in the command palette ("Mockup: ...")
+ * plus a small "mockup" tag in the top-right corner; nothing here is meant to ship as is. Motion is transform and opacity
  * only (arrow geometry excepted), every spring comes from packages/ui spring.ts, and reduced
  * motion jumps instead.
  */
@@ -38,7 +38,11 @@ import {
 } from "./clusters-model";
 import { Arrow, DragArrow, anchors, type Pt, type Rect } from "./clusters-arrows";
 import { dropletSplit } from "./clusters-split";
-import { mountStepper, type Stepper } from "./clusters-stepper";
+import { isTypingTarget } from "../../../packages/ui/src/shortcuts-view";
+import { refreshTip } from "../../../packages/ui/src/tooltip";
+import { ICONS, iconSvg } from "../../../packages/ui/src/icons";
+import { createConnectionIndicator } from "../../../packages/ui/src/connection-indicator";
+import type { ToolbarRow } from "./core-screen";
 
 const reduced = matchMedia("(prefers-reduced-motion: reduce)");
 const coarse = matchMedia("(pointer: coarse)");
@@ -64,6 +68,7 @@ const ICON = {
   chevron: '<path d="m9 6 6 6-6 6"/>',
   port: '<path d="M6 12h10m-4-4 4 4-4 4"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  views: ICONS.views,
 } as const;
 const lineIcon = (path: string): string => `<svg viewBox="0 0 24 24" class="is-line" aria-hidden="true">${path}</svg>`;
 const VIEW_ICON: Record<ViewId, string> = { console: ICON.console, containers: ICON.containers, topology: ICON.node };
@@ -250,21 +255,100 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     return { cx: r.x + r.w / 2, cy: r.y + r.h / 2, z };
   };
   const overviewCam = (): Cam => fitRect(bounds([...clusters.values()].map(frameOf)).w ? bounds([...clusters.values()].map((c) => { const f = frameOf(c); return { x: f.x, y: f.y - 70, w: f.w, h: f.h + 70 }; })) : { x: 0, y: 0, w: 1, h: 1 }, 0.92, 1);
-  const viewCam = (id: ViewId): Cam => {
-    const c = clusters.get(id);
-    if (!c) return overviewCam();
+  // ---- canvasLock mode (structured freeform) -------------------------------------------------------------------
+  // Snapped, the camera is locked to the current view at a fixed zoom and rests only on a stop: one stop
+  // per column (or per graph column of nodes). Horizontal gestures move between stops, vertical ones
+  // between the windows of a column (the column's own scroll, snapped to window starts). No zoom, no free
+  // pan. Off, the canvas is free (pan, zoom, thumbnails). Switching views or flying to a window turns it on.
+  let canvasLock = true;
+  let snapIdx = 0;
+  const canvasLockBtn = el("button", "ui-pill ui-pill-icon cl-snap");
+  canvasLockBtn.type = "button";
+  canvasLockBtn.innerHTML = iconSvg("snap");
+  // Desktop: the canvasLock toggle and the view switcher sit next to the top pill. Touch has them in the toolbar's canvas row.
+  const viewsBtn = el("button", "ui-pill ui-pill-icon cl-viewsbtn");
+  viewsBtn.type = "button";
+  viewsBtn.innerHTML = iconSvg("views");
+  viewsBtn.setAttribute("aria-label", "Views");
+  viewsBtn.dataset.tip = "Views";
+  stage.querySelector(".tabs")?.prepend(viewsBtn, canvasLockBtn);
+  const stopsFor = (c: ClusterRec): { z: number; cy: number; lefts: number[]; view: number } => {
     const r = contentRect(c);
-    if (metrics.narrow) {
-      // A phone shows one column and the edge of the next; the camera starts at the first column.
-      const z = Math.min(1, (vw - 40) / Math.max(1, c.view.cols[0]?.w ?? r.w));
-      return { cx: r.x - 20 / z + vw / (2 * z), cy: r.y - 12 / z + vh / (2 * z), z };
+    const z = Math.min(1, vh / (r.h + 8));
+    const view = vw / z;
+    let lefts: number[];
+    if (r.w <= view) lefts = [Math.round(r.x + r.w / 2 - view / 2)];
+    else {
+      const max = Math.round(r.x + r.w - view);
+      let x = r.x;
+      const raw = c.view.layout === "graph" ? c.view.nodes.map((n) => r.x + n.x - 30) : c.view.cols.map((col) => { const at = x - Math.max(0, (view - col.w) / 2); x += col.w + COLUMN_GAP; return at; });
+      lefts = [...new Set(raw.map((v) => Math.round(clamp(v, r.x, max))).concat(max))].sort((p, q) => p - q);
     }
-    return fitRect({ x: r.x, y: r.y - 40, w: r.w, h: r.h + 40 }, 0.94, 1);
+    return { z, cy: r.h * z <= vh ? r.y + r.h / 2 : r.y + vh / (2 * z), lefts, view };
   };
-  const windowCam = (rec: WinRec): Cam => {
-    const r = worldRect(rec.card.root);
-    const z = clamp(Math.min((vw * 0.88) / r.w, (vh * 0.9) / r.h), 0.62, 1);
-    return { cx: r.x + r.w / 2, cy: r.y + r.h / 2, z };
+  const snapCam = (c: ClusterRec, i: number): Cam => {
+    const st = stopsFor(c);
+    snapIdx = clamp(i, 0, st.lefts.length - 1);
+    return { cx: st.lefts[snapIdx]! + st.view / 2, cy: st.cy, z: st.z };
+  };
+  const nearestStop = (c: ClusterRec, cx: number): number => {
+    const st = stopsFor(c);
+    let best = 0;
+    st.lefts.forEach((l, i) => { if (Math.abs(l + st.view / 2 - cx) < Math.abs(st.lefts[best]! + st.view / 2 - cx)) best = i; });
+    return best;
+  };
+  const paintCanvasLock = (): void => {
+    world.toggleAttribute("data-snap", canvasLock);
+    viewport.toggleAttribute("data-snap", canvasLock);
+    canvasLockBtn.setAttribute("aria-pressed", String(canvasLock));
+    canvasLockBtn.dataset.tip = canvasLock ? "Canvas lock on" : "Canvas lock off";
+    canvasLockBtn.setAttribute("aria-label", canvasLockBtn.dataset.tip);
+    refreshTip(canvasLockBtn);
+    updateToolbar();
+  };
+  const applyCanvasLock = (on: boolean): void => { canvasLock = on; paintCanvasLock(); };
+  const goStop = (c: ClusterRec, i: number, instant = false): void => { flyTo(() => snapCam(c, i), instant); };
+  const setCanvasLock = (on: boolean, instant = false): void => {
+    applyCanvasLock(on);
+    const c = clusters.get(currentView);
+    if (on && c) goStop(c, nearestStop(c, cam.cx), instant); else if (!on) flyTo(overviewCam, instant);
+  };
+  /** Springs a column's scroll to a window's start (the column scrolls by itself; snapping is ours to animate). */
+  const scrollColumn = (colEl: HTMLElement, top: number): void => {
+    const target = clamp(top, 0, colEl.scrollHeight - colEl.clientHeight);
+    if (reduced.matches) { colEl.scrollTop = target; return; }
+    colEl.dataset.wheel = "";
+    const sp = new Spring(colEl.scrollTop, (v) => { colEl.scrollTop = v; if (v === target) delete colEl.dataset.wheel; }, { visualDuration: 0.4, bounce: 0.1 });
+    sp.set(target);
+  };
+  const stepWindow = (colEl: HTMLElement, dir: number): void => {
+    const wins = [...colEl.querySelectorAll<HTMLElement>(":scope > .ui-window")];
+    if (wins.length < 2) return;
+    let at = 0;
+    wins.forEach((w, i) => { if (Math.abs(w.offsetTop - 14 - colEl.scrollTop) < Math.abs(wins[at]!.offsetTop - 14 - colEl.scrollTop)) at = i; });
+    scrollColumn(colEl, wins[clamp(at + dir, 0, wins.length - 1)]!.offsetTop - 14);
+  };
+  /** Flies to a window: snapped to its column's stop, with the column scrolled to the window. */
+  const focusWindow = (rec: WinRec, instant = false, keepFree = false): void => {
+    const c = rec.cluster;
+    if (keepFree && !canvasLock) {
+      // The canvas lock stays off until a view switch or a fly-in: centre the window at the current zoom.
+      const r = worldRect(rec.card.root);
+      flyTo(() => ({ cx: r.x + r.w / 2, cy: r.y + r.h / 2, z: cam.z }), instant);
+      return;
+    }
+    if (c.view.layout !== "tiled") { flyView(c.view.id, instant); return; }
+    currentView = c.view.id; applyCanvasLock(true); paintCapsule();
+    const colEl = rec.card.root.parentElement as HTMLElement;
+    const cols = [...c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")];
+    let left = 0;
+    for (const col of cols) { if (col === colEl) break; left += (Number(col.dataset.w) || metrics.colW) + COLUMN_GAP; }
+    const st = stopsFor(c);
+    const target = contentRect(c).x + left;
+    let best = 0;
+    st.lefts.forEach((l, i) => { if (Math.abs(l - target) < Math.abs(st.lefts[best]! - target)) best = i; });
+    goStop(c, best, instant);
+    scrollColumn(colEl, rec.card.root.offsetTop - 14);
   };
 
   const updateCurrentView = (): void => {
@@ -276,12 +360,30 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     }
     if (best && best.view.id !== currentView) { currentView = best.view.id; paintCapsule(); }
   };
+  /**
+   * The real top pill: the view's icon and name, a quiet session count, the connection icon and (desktop) the
+   * command hint. It does not name the active window. A tap opens the view switcher.
+   */
+  const capsuleConn = createConnectionIndicator({ announce: false });
+  stage.querySelector("#capsule .capsule-kbd")?.before(capsuleConn.root);
+  capsuleConn.set("connected");
+  const rttWatch = new MutationObserver(() => { const m = /(\d+)\s*ms/.exec(stage.querySelector("#rtt")?.textContent ?? ""); capsuleConn.setRoundTrip(m ? Number(m[1]) : undefined); });
+  const rttEl = stage.querySelector("#rtt");
+  if (rttEl) rttWatch.observe(rttEl, { childList: true, characterData: true, subtree: true });
   const paintCapsule = (): void => {
     const c = clusters.get(currentView);
+    const free = !canvasLock && lod === "thumb";
     const host = stage.querySelector<HTMLElement>("#capsule-host");
-    // Zoomed all the way out no single view is current.
-    if (host) host.textContent = lod === "thumb" ? "All views" : (c?.view.name ?? "");
-    stage.querySelector<HTMLElement>("#capsule")?.setAttribute("data-flow", "");
+    const sess = stage.querySelector<HTMLElement>(".capsule-session");
+    const os = stage.querySelector<HTMLElement>("#capsule-os");
+    const sep = stage.querySelector<HTMLElement>(".capsule-sep");
+    if (sep) sep.style.display = "none";
+    if (host) host.textContent = free ? "All views" : (c?.view.name ?? "");
+    const n = !c ? 0 : c.view.layout === "graph" ? c.view.nodes.length : c.wins.size;
+    const noun = !c ? "" : c.view.id === "console" ? "session" : c.view.layout === "graph" ? "node" : "window";
+    if (sess) sess.textContent = free || !c ? `· ${clusters.size} views` : `· ${n} ${noun}${n === 1 ? "" : "s"}`;
+    stage.querySelector<HTMLElement>("#capsule")?.removeAttribute("data-flow");
+    if (os) os.innerHTML = lineIcon(free || !c ? ICON.views : VIEW_ICON[c.view.id]);
   };
 
   // ---- overlay: arrows on demand, trails and edge markers --------------------------------------------
@@ -410,10 +512,16 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     m.kind === "terminal" ? (m.os ? hostIconMarkup(m.os, "ui-host-mark") : lineIcon(ICON.terminal))
       : m.kind === "containers" ? lineIcon(ICON.containers) : m.kind === "logs" ? lineIcon(ICON.logs) : lineIcon(ICON.node);
 
+  // The one live terminal (the real renderer) sits in the build-01 window, as on the product canvas.
+  const holder = el("div", "cl-holder");
+  holder.setAttribute("aria-hidden", "true");
+  stage.append(holder);
+  holder.append(core.terminalHost);
   const makeBody = (rec: WinRec): void => {
     const m = rec.model;
     const body = rec.card.body;
     body.replaceChildren();
+    if (m.id === "w-build-01") { body.append(core.terminalHost); return; }
     if (m.kind === "terminal") {
       const pre = el("pre", "canvas-preview cl-preview");
       const lines = m.lines ?? [];
@@ -459,7 +567,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     if (m.kind === "terminal") actions.push({ id: "split", label: "Split", icon: ICON.split, onSelect: () => { void splitWindow(rec); } });
     if (m.kind !== "node") actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => closeWindow(rec) });
     const title = { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
-    const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}` });
+    const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: () => updateToolbar() });
     Object.assign(rec, { model: m, card, cluster: c });
     card.root.dataset.kind = m.kind;
     if (m.h) { card.root.style.height = `${m.h}px`; card.root.style.flex = "none"; }
@@ -694,8 +802,9 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const c = clusters.get(id);
     if (!c) return;
     currentView = id;
+    applyCanvasLock(true);
     paintCapsule();
-    flyTo(() => viewCam(id), instant);
+    goStop(c, 0, instant);
   };
 
   const wireCluster = (c: ClusterRec): void => {
@@ -761,6 +870,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     activeWin?.card.setActive(false);
     activeWin = rec;
     rec?.card.setActive(true);
+    paintCapsule();
+    updateToolbar();
     renderTree();
   };
 
@@ -768,6 +879,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const root = rec.card.root;
     const pill = rec.card.pill;
     root.addEventListener("pointerdown", () => setActive(rec), { signal, capture: true });
+    // A tap in the live terminal's window types into it (the keyboard row of the toolbar then shows).
+    if (rec.model.id === "w-build-01") root.addEventListener("click", (e) => { if (!(e.target as Element).closest(".ui-window-head, .ui-window-lock, .ui-window-resize")) core.terminalHost.focus({ preventScroll: true }); }, { signal });
     // The pill moves the window; it never opens anything in this mockup (the details popover is a separate mockup).
     pill.addEventListener("click", (e) => e.preventDefault(), { signal });
     pill.style.touchAction = "none";
@@ -1094,6 +1207,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
 
   const closeWindow = (rec: WinRec): void => {
     const c = rec.cluster;
+    if (inputLock?.win === rec) toggleInputLock();
     if (activeWin === rec) setActive(undefined);
     if (reachFor === rec) hideReach(true);
     const root = rec.card.root;
@@ -1166,7 +1280,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
       rec = addColumn(c, model, c.view.cols.length, metrics.colW, !here);
     } else if (here) pulse(rec);
     setActive(rec);
-    if (here) { const target = rec; flyTo(() => windowCam(target)); } else openFloat(rec);
+    if (here) focusWindow(rec); else openFloat(rec);
   };
 
   // ---- the floating terminal: a view of a Console session, morphed out of the top pill -------------------------------
@@ -1306,7 +1420,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const x0 = rect0.left - rest0.left, y0 = rect0.top - rest0.top;
     panel.style.transform = `translate(${x0}px, ${y0}px) scale(${s0})`;
     root.style.opacity = "0";
-    flyTo(() => windowCam(f.rec));
+    focusWindow(f.rec);
     const done = (): void => {
       root.style.opacity = "";
       panel.style.transform = "";
@@ -1399,7 +1513,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
         const target = [...clusters.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === id);
         if (!target) return;
         setActive(target);
-        if (target.model.kind === "node") flyView("topology"); else flyTo(() => windowCam(target));
+        if (target.model.kind === "node") flyView("topology"); else focusWindow(target);
         if (coarse.matches) stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click();
       });
     });
@@ -1410,6 +1524,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const id = head?.parentElement?.dataset.id?.replace(/^view:/, "") as ViewId | undefined;
     if (id && clusters.has(id)) flyView(id);
   }, { signal });
+  canvasLockBtn.addEventListener("click", () => setCanvasLock(!canvasLock), { signal });
+  viewsBtn.addEventListener("click", () => toggleViewList(), { signal });
   const sideTitle = stage.querySelector<HTMLElement>(".sidebar-title");
   if (sideTitle) sideTitle.textContent = "Views";
 
@@ -1420,7 +1536,11 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     [...clusters.values()].forEach((c, i) => {
       out.push({ group: "Views", glyph: "▦", icon: VIEW_ICON[c.view.id], label: `Go to ${c.view.name}`, hint: `view · ${shortcutLabel(viewKeys(i))}`, action: `proto:view:${c.view.id}` });
     });
-    out.push({ group: "Views", glyph: "▦", label: "Zoom out to all views", hint: "Esc", action: "proto:overview" });
+    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.snap, label: "Canvas lock on", hint: `${canvasLock ? "on now · " : ""}${shortcutLabel({ mac: `⌘⇧${CANVAS_LOCK_SHORTCUT.label}`, other: `Ctrl+Shift+${CANVAS_LOCK_SHORTCUT.label}` })}`, action: "proto:canvaslock:on" });
+    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free canvas · all views · Esc", action: "proto:canvaslock:off" });
+    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.lock, label: inputLock ? "Input lock off" : "Input lock on", hint: "the active window only", action: "proto:inputlock" });
+    scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} ${sc.name}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
+    for (const r of ["viewer", "operator", "new"] as const) out.push({ group: "Mockup", glyph: "◇", label: `Mockup: sign in as ${r === "new" ? "a new user" : `a ${r}`}`, hint: "grants", action: `proto:role:${r}` });
     // Any session by name. Keywords ride in the hint so "ssh", "terminal", "console", "vnc" and "rdp" find them.
     for (const host of allowedHosts()) {
       out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host}`, hint: "terminal · ssh · console", action: `proto:open:${host}` });
@@ -1433,24 +1553,37 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const action = (event as CustomEvent<{ action?: string }>).detail?.action ?? "";
     const [, kind, value] = action.split(":");
     if (kind === "view" && value) flyView(value as ViewId);
-    else if (kind === "overview") flyTo(overviewCam);
+    else if (kind === "overview") setCanvasLock(false);
+    else if (kind === "canvaslock") setCanvasLock(value === "on");
+    else if (kind === "inputlock") toggleInputLock();
+    else if (kind === "scene" && value) goScene(Number(value) - 1);
+    else if (kind === "role" && value) { role = value as Role; forcedRole = true; goScene(4); }
     else if (kind === "open" && value) openSession(value);
     else if (kind === "ctr" && value) {
       openSession("build-01", value);
     } else if (kind === "later") toast.show({ message: "Remote desktop arrives later.", tone: "ok" });
     else if (kind === "addhost") toast.show({ message: "Add host is its own mockup (proto=addhost)." });
   }, { signal });
+  /** The canvas lock's shortcut (owner: Command+Shift+G, Ctrl+Shift+G elsewhere), wired through the registry so `?` and the palette show it. */
+  const CANVAS_LOCK_SHORTCUT: { code: string; label: string; shift?: boolean } = { code: "KeyG", label: "G", shift: true };
   const removeShortcuts = registerShortcuts({ id: "clusters", title: "Canvas", area: "canvas", shortcuts: [
-    { id: "overview", label: "Zoom out to all views", keys: "Esc" },
-    { id: "zoom", label: "Zoom", keys: { mac: "⌘+Scroll", other: "Ctrl+Scroll" } },
-    { id: "pan", label: "Pan the canvas", keys: "Scroll" },
+    { id: "canvas-lock", label: "Canvas lock", keys: { mac: `⌘⇧${CANVAS_LOCK_SHORTCUT.label}`, other: `Ctrl+Shift+${CANVAS_LOCK_SHORTCUT.label}` } },
+    { id: "overview", label: "Free canvas (all views)", keys: "Esc" },
+    { id: "pan", label: "Next window or column", keys: "Scroll" },
     { id: "views", label: "Go to view 1 to 3", keys: { mac: "⌘1–3", other: "Ctrl+1–3" } },
   ] });
   window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape" || e.defaultPrevented || stage.querySelector(".palette:not([hidden])") || document.querySelector(".ui-confirm-tip[data-open='true']")) return;
+    if (isTypingTarget(e.target)) return;
     if (float && !float.expanding) { closeFloat(); return; }
-    flyTo(overviewCam);
+    setCanvasLock(false);
   }, { signal });
+  window.addEventListener("keydown", (e) => {
+    const k = CANVAS_LOCK_SHORTCUT;
+    if (e.code !== k.code || !(isMacPlatform() ? e.metaKey : e.ctrlKey) || e.shiftKey !== Boolean(k.shift)) return;
+    e.preventDefault(); e.stopPropagation();
+    setCanvasLock(!canvasLock);
+  }, { signal, capture: true });
   // Every jump is the same camera spring: Command or Ctrl with 1 to 9.
   window.addEventListener("keydown", (e) => {
     const mod = isMacPlatform() ? e.metaKey : e.ctrlKey;
@@ -1461,6 +1594,65 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     closeViewList(true);
     flyView(id);
   }, { signal, capture: true });
+
+  // ---- the toolbar's canvas row (touch): the same actions the desktop has near the top pill ---------------------
+  const flat = (): WinRec[] => { const c = clusters.get(currentView); return c ? [...c.colsEl.querySelectorAll<HTMLElement>(".ui-window")].map((n) => c.wins.get(n.dataset.windowId ?? "")).filter((w): w is WinRec => !!w) : []; };
+  const stepOrder = (dir: number): void => {
+    const list = flat();
+    if (!list.length) return;
+    const at = activeWin ? list.indexOf(activeWin) : -1;
+    const next = list[clamp((at < 0 ? (dir > 0 ? -1 : list.length) : at) + dir, 0, list.length - 1)]!;
+    setActive(next);
+    focusWindow(next, false, true);
+  };
+  const openPalette = (): void => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: isMacPlatform(), ctrlKey: !isMacPlatform(), bubbles: true })); };
+  /** The input lock (the padlock): input goes only to the active window and swipes do not move windows. */
+  let inputLock: { win: WinRec; before: boolean } | undefined;
+  function toggleInputLock(): void {
+    if (inputLock) {
+      const { win, before } = inputLock;
+      inputLock = undefined;
+      win.card.setLocked(false);
+      core.lockToolbarRow(undefined);
+      // Unlocking restores the canvas lock to what it was before.
+      if (!before) applyCanvasLock(false);
+      updateToolbar();
+      return;
+    }
+    const win = activeWin;
+    if (!win || win.model.kind !== "terminal") return;
+    const before = canvasLock;
+    // Locked while the canvas is free: the canvas snaps to that window first.
+    if (!canvasLock) focusWindow(win);
+    inputLock = { win, before };
+    win.card.setLocked(true);
+    core.lockToolbarRow("keys");
+    if (win.model.id === "w-build-01") core.terminalHost.focus({ preventScroll: true });
+    updateToolbar();
+  }
+  const toolbar: ToolbarRow = core.setCanvasRow([
+    { id: "search", label: "Search and actions", icon: ICONS.search, onSelect: openPalette },
+    { id: "views", label: "Views", icon: ICONS.views, onSelect: () => toggleViewList() },
+    { id: "previous", label: "Previous window", icon: ICONS.previous, onSelect: () => { if (!inputLock) stepOrder(-1); } },
+    { id: "next", label: "Next window", icon: ICONS.next, onSelect: () => { if (!inputLock) stepOrder(1); } },
+    { id: "canvas-lock", label: "Canvas lock", icon: ICONS.snap, pressed: true, onSelect: () => { if (!inputLock) setCanvasLock(!canvasLock); } },
+    { id: "overview", label: "All views", icon: ICONS.overview, onSelect: () => { if (!inputLock) setCanvasLock(false); } },
+    { id: "input-lock", label: "Input lock", icon: ICONS.lock, onSelect: toggleInputLock },
+    { id: "split", label: "Split", icon: ICONS.split, onSelect: () => { if (activeWin?.model.kind === "terminal") void splitWindow(activeWin); } },
+    { id: "add", label: "Add host", icon: ICONS.plus, onSelect: () => toast.show({ message: "Add host is its own mockup (proto=addhost)." }) },
+    { id: "sidebar", label: "Sidebar", icon: ICONS.sidebar, onSelect: () => stage.querySelector<HTMLButtonElement>("#sidebar-toggle")?.click() },
+  ]);
+  function updateToolbar(): void {
+    const locked = Boolean(inputLock);
+    const terminal = activeWin?.model.kind === "terminal";
+    toolbar?.update("canvas-lock", { pressed: canvasLock, label: canvasLock ? "Canvas lock on" : "Canvas lock off", disabled: locked });
+    toolbar?.update("previous", { disabled: locked });
+    toolbar?.update("next", { disabled: locked });
+    toolbar?.update("overview", { disabled: locked });
+    toolbar?.update("input-lock", { pressed: locked, disabled: !terminal && !locked, label: locked ? "Input lock on" : "Input lock off", icon: locked ? ICONS.lock : ICONS.unlock });
+    toolbar?.update("split", { disabled: !terminal });
+  }
+  updateToolbar();
 
   // ---- gestures on the canvas ---------------------------------------------------------------------------------------------
   const touches = new Map<number, Pt>();
@@ -1476,7 +1668,97 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     springCx.value = cam.cx; springCy.value = cam.cy; springLz.value = Math.log(cam.z);
     applyCam();
   };
+  // ---- snapped gestures: a wheel or trackpad gesture moves one column or window (a long flick, two) ------
+  const wheelG = { t: 0, x: 0, y: 0, fired: 0, axis: "" };
+  const snapWheel = (e: WheelEvent): void => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) return; // no zoom while snapped
+    const now = performance.now();
+    if (now - wheelG.t > 140) { wheelG.x = 0; wheelG.y = 0; wheelG.fired = 0; wheelG.axis = ""; }
+    wheelG.t = now;
+    let dx = e.deltaX, dy = e.deltaY;
+    if (e.shiftKey && !dx) { dx = dy; dy = 0; }
+    wheelG.x += dx; wheelG.y += dy;
+    if (!wheelG.axis && Math.hypot(wheelG.x, wheelG.y) > 24) wheelG.axis = Math.abs(wheelG.x) > Math.abs(wheelG.y) ? "x" : "y";
+    if (!wheelG.axis) return;
+    const total = wheelG.axis === "x" ? wheelG.x : wheelG.y;
+    const due = wheelG.fired === 0 ? Math.abs(total) >= 24 : wheelG.fired === 1 && Math.abs(total) >= 900;
+    if (!due) return;
+    wheelG.fired++;
+    const dir = Math.sign(total);
+    if (wheelG.axis === "x") {
+      const c = clusters.get(currentView);
+      if (c) goStop(c, snapIdx + dir);
+    } else {
+      const colEl = (e.target as Element).closest<HTMLElement>(".cl-col");
+      if (colEl) stepWindow(colEl, dir);
+    }
+  };
+  /**
+   * Touch: one finger always scrolls the terminal it is on. Two fingers move between windows: a
+   * horizontal drag follows the fingers and springs to the nearest column (a flick may pass two), a
+   * vertical drag steps to the window above or below in the column under them.
+   */
+  let two: { x: number; y: number; cx0: number; idx0: number; axis: "" | "x" | "y"; stepped: boolean; col: HTMLElement | null; samples: Array<{ x: number; t: number }> } | undefined;
+  const centroid = (e: TouchEvent): Pt => ({ x: (e.touches[0]!.clientX + e.touches[1]!.clientX) / 2, y: (e.touches[0]!.clientY + e.touches[1]!.clientY) / 2 });
+  viewport.addEventListener("touchstart", (e) => {
+    if (!canvasLock || inputLock || e.touches.length !== 2) return;
+    const c = centroid(e);
+    stopCam(); camTarget = undefined;
+    two = { x: c.x, y: c.y, cx0: cam.cx, idx0: snapIdx, axis: "", stepped: false, col: (document.elementFromPoint(c.x, c.y) as Element | null)?.closest<HTMLElement>(".cl-col") ?? null, samples: [{ x: c.x, t: e.timeStamp }] };
+  }, { passive: true, capture: true, signal });
+  viewport.addEventListener("touchmove", (e) => {
+    if (!two || e.touches.length !== 2) return;
+    const c = centroid(e);
+    if (!two.axis) {
+      const dx = c.x - two.x, dy = c.y - two.y;
+      if (Math.hypot(dx, dy) < 10) return;
+      two.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+    }
+    if (e.cancelable) e.preventDefault();
+    if (two.axis === "y") {
+      if (!two.stepped && Math.abs(c.y - two.y) > 36 && two.col) { two.stepped = true; stepWindow(two.col, Math.sign(two.y - c.y)); }
+      return;
+    }
+    const cl = clusters.get(currentView);
+    if (!cl) return;
+    const st = stopsFor(cl);
+    const lo = st.lefts[0]! + st.view / 2, hi = st.lefts[st.lefts.length - 1]! + st.view / 2;
+    let cx = two.cx0 - (c.x - two.x) / cam.z;
+    if (cx < lo) cx = lo - Math.min(60, (lo - cx) * 0.3); else if (cx > hi) cx = hi + Math.min(60, (cx - hi) * 0.3);
+    cam.cx = cx; springCx.value = cx;
+    applyCam();
+    two.samples.push({ x: c.x, t: e.timeStamp });
+    if (two.samples.length > 6) two.samples.shift();
+  }, { passive: false, capture: true, signal });
+  const twoEnd = (e: TouchEvent): void => {
+    const t = two;
+    if (!t || e.touches.length >= 2) return;
+    two = undefined;
+    if (t.axis !== "x") return;
+    const cl = clusters.get(currentView);
+    if (!cl) return;
+    const first = t.samples[0]!, last = t.samples[t.samples.length - 1]!;
+    const v = last.t > first.t ? (last.x - first.x) / (last.t - first.t) : 0; // px per ms, finger direction
+    const projected = cam.cx - (v * 160) / cam.z;
+    const allowed = Math.abs(v) > 1.2 ? 2 : 1;
+    goStop(cl, clamp(nearestStop(cl, projected), t.idx0 - allowed, t.idx0 + allowed));
+  };
+  viewport.addEventListener("touchend", twoEnd, { capture: true, signal });
+  viewport.addEventListener("touchcancel", twoEnd, { capture: true, signal });
+  // A tap on a neighbour peeking in at the edge moves there.
+  viewport.addEventListener("click", (e) => {
+    if (!canvasLock || inputLock) return;
+    const colEl = (e.target as Element).closest<HTMLElement>(".cl-col");
+    if (!colEl || (e.target as Element).closest("button, .ui-window-pill, .cl-port")) return;
+    const vp = viewport.getBoundingClientRect(), r = colEl.getBoundingClientRect();
+    if (r.left > vp.left - 1 && r.right < vp.right + 1) return;
+    const first = colEl.querySelector<HTMLElement>(":scope > .ui-window");
+    const rec = first ? [...clusters.values()].flatMap((cl) => [...cl.wins.values()]).find((w) => w.card.root === first) : undefined;
+    if (rec) { e.stopPropagation(); e.preventDefault(); setActive(rec); focusWindow(rec); }
+  }, { capture: true, signal });
   viewport.addEventListener("wheel", (e) => {
+    if (canvasLock) { if (inputLock) { e.preventDefault(); return; } snapWheel(e); return; }
     const inCol = (e.target as Element).closest(".cl-col");
     if (!(e.ctrlKey || e.metaKey) && inCol && Math.abs(e.deltaY) > Math.abs(e.deltaX) && lod === "live") {
       const colEl = inCol as HTMLElement;
@@ -1493,8 +1775,9 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     applyCam();
   }, { passive: false, signal });
   viewport.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "touch") touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (canvasLock) return;
     if (e.pointerType === "touch") {
-      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (touches.size === 2) {
         const [a, b] = [...touches.values()] as [Pt, Pt];
         stopCam();
@@ -1511,6 +1794,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   }, { signal, capture: true });
   viewport.addEventListener("pointermove", (e) => {
     if (e.pointerType === "touch" && touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (canvasLock) return;
     if (pinch && touches.size >= 2) {
       const [a, b] = [...touches.values()] as [Pt, Pt];
       const z = clamp(pinch.z0 * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0), 0.08, 2);
@@ -1533,6 +1817,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   }, { signal });
   const pointerEnd = (e: PointerEvent): void => {
     touches.delete(e.pointerId);
+    if (canvasLock) return;
     if (touches.size < 2) pinch = undefined;
     if (!pan || e.pointerId !== pan.id) return;
     const p = pan;
@@ -1574,8 +1859,17 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   const springCy = new Spring(0, (v) => { cam.cy = v; applyCam(); }, FLIGHT);
   const springLz = new Spring(0, (v) => { cam.z = Math.exp(v); applyCam(); }, FLIGHT);
 
+  // The live terminal's test double starts empty; give it one prompt so the window reads as a shell.
+  let seedTries = 0;
+  const seedTimer = window.setInterval(() => {
+    const td = (window as unknown as { __tracerTestDouble?: { isConnected(): boolean; seedPrompt(): Promise<void> } }).__tracerTestDouble;
+    if (td?.isConnected()) { window.clearInterval(seedTimer); void td.seedPrompt(); } else if (++seedTries > 80) window.clearInterval(seedTimer);
+  }, 100);
+
   // ---- scenes ---------------------------------------------------------------------------------------------------------------
   const clear = (): void => {
+    if (inputLock) { inputLock = undefined; core.lockToolbarRow(undefined); }
+    holder.append(core.terminalHost);
     hideReach(true);
     hideSummary();
     drag?.arrow.dispose(); drag = undefined;
@@ -1593,39 +1887,39 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     renderTree();
   };
 
-  interface SceneDef { name: string; hint: string; options?: () => { label: string; tabs: Array<{ id: string; label: string }>; selected: string; onChange(id: string): void } }
-  const scenes: Array<SceneDef & { enter(): void }> = [
-    { name: "Overview", hint: "Three views on one canvas. Hover a region for its summary; click one to fly in. The sidebar and the command palette list the views.",
-      enter() { role = "operator"; omit = []; build(); flyTo(overviewCam, true); } },
-    { name: "Fly in", hint: "The camera springs into Console; windows go live above 60 % zoom. Press Esc to fly out. In the command palette, type build and open a shell on build-01.",
-      enter() { role = "operator"; omit = ["build-01"]; build(); flyTo(overviewCam, true); window.setTimeout(() => { if (sceneIndex === 1 && camTarget === overviewCam) flyView("console"); }, 650); } },
+  const scenes: Array<{ name: string; hint: string; enter(): void }> = [
+    { name: "Overview", hint: "Three views on one canvas, canvasLock off. Hover a region for its summary; click one to fly in (canvasLock turns on). The sidebar and the command palette list the views.",
+      enter() { role = "operator"; omit = []; build(); applyCanvasLock(false); flyTo(overviewCam, true); } },
+    { name: "Fly in", hint: "The camera springs into Console and snaps. Esc flies out. In the command palette, type build and open a shell on build-01.",
+      enter() { role = "operator"; omit = ["build-01"]; build(); applyCanvasLock(false); flyTo(overviewCam, true); window.setTimeout(() => { if (sceneIndex === 1 && camTarget === overviewCam) flyView("console"); }, 650); } },
     { name: "Arrows on demand", hint: "Hover a terminal's pill (long-press on touch) to see where it can reach. Drag from the connector next to the pill onto another terminal to allow access.",
-      enter() {
-        role = "operator"; omit = []; build();
-        // A phone zooms out far enough (live, above 60 %) to see two columns, so a link can be dragged between them.
-        if (metrics.narrow) { const r = contentRect(clusters.get("console")!); flyTo(() => ({ cx: r.x + (vw / 2 - 12) / 0.62, cy: r.y + (vh / 2 - 16) / 0.62, z: 0.62 }), true); } else flyView("console", true);
-      } },
+      enter() { role = "operator"; omit = []; build(); flyView("console", true); } },
     { name: "Open from a container", hint: "Click a container: the top pill morphs into a floating terminal; the camera stays here. Expand it to fly into Console, or close it. The terminal has Split; the list does not.",
       enter() { role = "operator"; omit = []; build(); flyView("containers", true); } },
-    { name: "Access by grants", hint: "The views a person sees come from their grants. Switch who is signed in.",
-      options: () => ({ label: "Signed in as", tabs: [{ id: "viewer", label: "viewer" }, { id: "operator", label: "operator" }, { id: "new", label: "new user" }], selected: role, onChange: (id) => { role = id as Role; scenes[4]!.enter(); } }),
-      enter() { omit = []; if (role === "operator" && sceneIndex !== 4) role = "viewer"; build(); if (role === "operator") flyTo(overviewCam, true); else flyView("console", true); } },
-    { name: "Structure", hint: "Drag a window by its pill: the others reflow and it lands with a bounce. Drag a view by its label: it snaps to the grid and pushes a neighbour aside.",
-      enter() { role = "operator"; omit = []; build(); const c = clusters.get("console")!; const r = contentRect(c); flyTo(() => ({ cx: r.x + r.w / 2 + (metrics.narrow ? 0 : 180), cy: r.y + r.h / 2 + (metrics.narrow ? 120 : 200), z: 0.62 }), true); } },
+    { name: "Access by grants", hint: "The views a person sees come from their grants. Palette: Mockup, sign in as viewer, operator or new user.",
+      enter() { omit = []; if (role === "operator" && !forcedRole) role = "viewer"; build(); if (role === "operator") { applyCanvasLock(false); flyTo(overviewCam, true); } else flyView("console", true); } },
+    { name: "Structure", hint: "Drag a window by its pill: the others reflow and it lands with a bounce. Drag a view by its label: it snaps to the grid and pushes a neighbour aside. Snap is off here.",
+      enter() { role = "operator"; omit = []; build(); applyCanvasLock(false); const c = clusters.get("console")!; const r = contentRect(c); flyTo(() => ({ cx: r.x + r.w / 2 + (metrics.narrow ? 0 : 180), cy: r.y + r.h / 2 + (metrics.narrow ? 120 : 200), z: 0.62 }), true); } },
   ];
-  let stepper: Stepper | undefined;
+  let forcedRole = Boolean(options.role);
+  const mockupTag = el("button", "ui-pill cl-mockup", "mockup");
+  mockupTag.type = "button";
+  mockupTag.setAttribute("aria-label", "Mockup scenes");
+  stage.append(mockupTag);
+  mockupTag.addEventListener("click", () => {
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: isMacPlatform(), ctrlKey: !isMacPlatform(), bubbles: true }));
+    window.setTimeout(() => { const input = stage.querySelector<HTMLInputElement>("#palette-input"); if (input) { input.value = "mockup"; input.dispatchEvent(new Event("input", { bubbles: true })); } }, 60);
+  }, { signal });
   const goScene = (i: number): void => {
     sceneIndex = (i + scenes.length) % scenes.length;
     const def = scenes[sceneIndex]!;
-    if (sceneIndex === 4 && role === "operator" && !new URLSearchParams(location.search).has("role")) role = "viewer";
     def.enter();
-    stepper?.set(sceneIndex, def.name, def.hint, def.options?.());
+    mockupTag.dataset.tip = `Scene ${sceneIndex + 1} of ${scenes.length}, ${def.name}. ${def.hint}`;
     const url = new URL(location.href);
     url.searchParams.set("scene", String(sceneIndex + 1));
     history.replaceState(null, "", url);
     paintCapsule();
   };
-  stepper = mountStepper(stage, { count: scenes.length, onStep: (delta) => goScene(sceneIndex + delta) });
 
   // Refit when the pane changes size (sidebar docks, rotation) so the framing holds.
   let lastW = 0, lastH = 0;
@@ -1640,6 +1934,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   applyCam(true);
   const startScene = clamp(((options.scene ?? 1) | 0) - 1, 0, scenes.length - 1);
   if (options.role) role = options.role;
+  paintCanvasLock();
   goScene(startScene);
 
   const probe = {
@@ -1649,10 +1944,12 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     views: () => [...clusters.values()].map((c) => ({ id: c.view.id, name: c.view.name, x: c.x, y: c.y, w: boxOf(c.view, metrics).w, h: boxOf(c.view, metrics).h, windows: [...c.wins.keys()] })),
     grants: () => grants.map((g) => ({ ...g })),
     flyView: (id: ViewId) => flyView(id),
-    overview: () => flyTo(overviewCam),
+    overview: () => setCanvasLock(false),
     openSession,
     float: () => (float ? { cols: float.cells.cols, rows: float.cells.rows, width: float.morph.panel.offsetWidth, height: float.morph.panel.offsetHeight } : undefined),
-    setRole: (r: Role) => { role = r; scenes[4]!.enter(); stepper?.set(4, scenes[4]!.name, scenes[4]!.hint, scenes[4]!.options?.()); },
+    setRole: (r: Role) => { role = r; forcedRole = true; goScene(4); },
+    canvasLock: () => ({ on: canvasLock, index: snapIdx, stops: (() => { const c = clusters.get(currentView); return c ? stopsFor(c).lefts.length : 0; })(), view: currentView }),
+    setCanvasLock: (on: boolean) => setCanvasLock(on),
     reachFor: () => reachFor?.model.id,
     reachCount: () => reachItems.length,
   };
@@ -1666,11 +1963,18 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
       ro.disconnect();
       removeProvider();
       removeShortcuts();
+      window.clearInterval(seedTimer);
+      holder.remove();
       closeViewList(true);
       if (float) { float.morph.close(true); dropFloat(float); }
       badge.remove();
       clear();
-      stepper?.dispose();
+      capsuleConn.dispose();
+      rttWatch.disconnect();
+      mockupTag.remove();
+      canvasLockBtn.remove();
+      viewsBtn.remove();
+      toolbar.dispose();
       toast.dispose();
       summary.remove();
       viewport.remove();

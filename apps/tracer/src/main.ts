@@ -308,8 +308,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     });
     } catch (error: unknown) { console.error("clusters mockup failed", error); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
     canvasPrototype = clusters;
-    screen.setConnection(true);
-    return;
+    // The flow carries on: the live terminal opens into the build-01 window the mockup hosts it in.
   }
   if (canvasMode) {
     // Gated mockup (D162): the window canvas and the add-host flow on it, built against the

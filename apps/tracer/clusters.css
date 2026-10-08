@@ -2,11 +2,6 @@
    `.terminal-screen[data-clusters]` or to `cl-` classes; surfaces, pills, window cards,
    tooltips and the toast come from packages/ui and are not restyled. */
 
-/* No terminal key tray in this mockup; the canvas gets the whole pane area. */
-.terminal-screen[data-clusters] .keybar, .terminal-screen[data-clusters] .keyblur { display: none !important; }
-.terminal-screen[data-clusters] .panes { bottom: 64px; }
-
-.terminal-screen[data-clusters] .capsule-rtt { display: none; }
 .cl-viewport { position: absolute; inset: 0; overflow: hidden; overflow: clip; touch-action: none; -webkit-user-select: none; user-select: none; }
 .cl-viewport[data-panning] { cursor: grabbing; }
 .cl-world { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; --z: 1; --inv: 1; }
@@ -195,27 +190,21 @@
 .cl-badge[hidden] { display: none; }
 .cl-badge[data-open="true"] { opacity: 1; transform: none; }
 
-/* ---- mockup scaffolding: the scene stepper ------------------------------------------------------ */
-.cl-stepper {
-  position: absolute; z-index: 6; left: 50%; translate: -50% 0; bottom: calc(14px + env(safe-area-inset-bottom));
-  display: grid; justify-items: center; gap: 8px; pointer-events: none;
-}
-.cl-stepper > * { pointer-events: auto; }
-.cl-stepper-pill { --pill-h: 36px; gap: 2px; padding: 0 4px; white-space: nowrap; }
-.cl-stepper-options { padding: 3px; border-radius: 999px; }
-.cl-stepper-options[hidden] { display: none; }
-.cl-stepper-tag { padding: 0 8px 0 10px; color: var(--fg-3); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
-.cl-stepper-btn { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--fg-2); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
-.cl-stepper-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-.cl-stepper-btn:active { transform: scale(0.94); }
-@media (hover: hover) and (pointer: fine) { .cl-stepper-btn:hover { background: var(--hover); } }
-.cl-stepper-name { display: inline-flex; gap: 8px; padding: 0 6px; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); outline: none; }
-.cl-stepper-count { color: var(--fg-3); }
-@media (pointer: coarse) {
-  .cl-stepper-pill { --pill-h: 44px; }
-  .cl-stepper-btn { width: 44px; height: 44px; }
-  .cl-stepper-name { font-size: var(--text-secondary); }
-}
+/* ---- mockup scaffolding: a small tag in the top-right corner (scenes live in the palette) ---- */
+.cl-mockup { position: absolute; z-index: 6; top: calc(10px + env(safe-area-inset-top) + var(--pill-h, 38px) + 4px); right: var(--gutter); height: 22px; padding: 0 9px; color: var(--fg-3); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; cursor: pointer; }
+
+/* The snap toggle takes the slot of the disabled "+" in the top bar's right group. */
+.cl-snap, .cl-viewsbtn { color: var(--fg-2); }
+.cl-viewsbtn svg, .cl-snap svg { stroke-width: 1.6; }
+/* On touch the toolbar has these (canvas row), and its row replaces the frame lock. */
+@media (pointer: coarse) { .cl-snap, .cl-viewsbtn { display: none; } .terminal-screen[data-clusters] .ui-window-lock { display: none; } }
+.cl-snap[aria-pressed="true"] { color: var(--accent); }
+.cl-snap svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); }
+.cl-world[data-snap] .cl-label, .cl-world[data-snap] .cl-region { opacity: 0; pointer-events: none; }
+.cl-viewport[data-snap] { touch-action: pan-x pan-y; }
+/* Canvas lock on: columns do not scroll by hand; windows step (wheel, two fingers, toolbar) and one finger scrolls the terminal. */
+.cl-world[data-snap] .cl-col { overflow-y: hidden; }
+
 @media (prefers-reduced-motion: reduce) {
   .cl-cursor { animation: none; }
   .cl-region, .cl-port, .cl-badge, .cl-summary { transition: opacity 120ms ease; transform: none; }
@@ -223,3 +212,8 @@
 
 /* On a phone the host matters more than the user, as on the product canvas: drop `user@` in the pill. */
 @media (max-width: 480px) { .cl-viewport .ui-window-user, .cl-float .ui-window-user { display: none; } }
+
+.cl-holder { position: absolute; left: -9999px; top: 0; width: 440px; height: 560px; visibility: hidden; pointer-events: none; }
+.cl-col .ui-window-body > .terminal-host { position: absolute; inset: 0; }
+.terminal-screen[data-clusters] .capsule-rtt { display: none; }
+.terminal-screen[data-clusters] .capsule-session { color: var(--fg-3); }
