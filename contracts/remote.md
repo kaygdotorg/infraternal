@@ -112,6 +112,13 @@ An expired or revoked certificate may prove identity for this restricted
 removal exchange only, never for terminal/action admission. An arbitrary
 handshake failure must not cause deletion.
 
+Retire the matching in-memory host actor and attachment bookkeeping when its
+authority is revoked or expires, freeing its bounded registry slot. Cleanup
+must be specific to the admitted generation: a superseded expiry waiter must
+never remove a newly admitted replacement. Ordinary transport loss retains
+the actor for byte-offset recovery. Durable public tombstones remain in SQLite;
+freeing runtime bookkeeping is not an authenticated host uninstall.
+
 Rootless uninstall removes only the installation's own services, slots and
 user-level identity/state. An operator command handles unreachable servers.
 Enumerate sessions before destructive removal; ordinary transport loss or
@@ -187,4 +194,31 @@ private key or takes an unlock secret in argv. `MemoryCaSource` already exposes
 the administrator-policy and process-only handoff interfaces. Production
 encrypted envelopes, administrator passkey unlock/notifications and automatic
 update IPC are still unimplemented; this activation does not satisfy those
-remaining D168 requirements or live renewal/revocation.
+remaining D168 requirements or live renewal. Host revocation is available while
+the signer is locked, as described below.
+
+## Owner revocation API and retained authority
+
+`POST /remote/revocations` accepts `{host_id: UUID}` with the same 8192-byte
+body, five-second deadline and eight shared admission slots as enrollment.
+It requires the exact Origin and an unlocked, unexpired browser session with
+current core owner permission for the host. This permission is independent of
+administrator CA unlock. Unknown JSON fields are refused. Missing session is
+401; invalid permission is 403; successful durable revocation is 204.
+
+Recheck session expiry, unlocked state, owner permission and host ownership in
+the revocation transaction. The HTTPS router and both remote listeners share
+one `EnrollmentStore` event scope. After authorized mutation, a process-owned
+finalizer commits the tombstone and publishes cancellation even if the HTTP
+caller has disconnected. It never makes permission checks survive an earlier
+unauthorized request. Storage failure is reported; an ambiguous commit also
+retires current authority conservatively. A process exit retires its transports.
+
+Each retained connection has its exact admitted fingerprint, host identity,
+revocation signal and a monotonic certificate-expiry cap. New Open/Attach
+operations recheck the ledger. Streaming bytes check the signal and expiry
+without a SQLite read per keystroke. Revocation wakes blocked transport reads
+and writes, closing both TCP and QUIC. An already-held browser attachment may
+remain for offset recovery, but it cannot forward new input through the retired
+transport. Shims keep running. This implements immediate authority retirement;
+authenticated removal notices and operator uninstall remain separate work.
