@@ -32,8 +32,9 @@ import { aspectFrame, aspectRange, attachWindowResize, settleResize, type Resize
 import type { BranchSection } from "../../../packages/ui/src/branched";
 import type { CoreScreen } from "./core-screen";
 import { previewLine } from "./canvas";
+import { buildShareDialog, type ShareChoice } from "./clusters-share";
 import {
-  SETTINGS_SECTIONS, CELL, COLUMN_GAP, CONTAINERS, INITIAL_GRANTS, MARGIN, boxOf, buildViews, contentSize, metricsFor, reach, resolve, shellLines, snapToGrid,
+  copyForRecipient, incidentView, usernameOf, SETTINGS_SECTIONS, CELL, COLUMN_GAP, CONTAINERS, INITIAL_GRANTS, MARGIN, boxOf, buildViews, contentSize, metricsFor, reach, resolve, shellLines, snapToGrid,
   type Box, type ColumnModel, type Grant, type Metrics, type NodeModel, type Role, type ViewId, type ViewModel, type WindowModel,
 } from "./clusters-model";
 import { Arrow, DragArrow, anchors, type Pt, type Rect } from "./clusters-arrows";
@@ -75,7 +76,9 @@ const ICON = {
   views: ICONS.views,
 } as const;
 const lineIcon = (path: string): string => `<svg viewBox="0 0 24 24" class="is-line" aria-hidden="true">${path}</svg>`;
-const VIEW_ICON: Record<ViewId, string> = { console: ICON.console, containers: ICON.containers, mesh: ICON.node, settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/>' };
+const VIEW_ICON: Record<string, string> = { console: ICON.console, containers: ICON.containers, mesh: ICON.node, settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/>' };
+/** A shared or custom view has the generic layout icon. */
+const viewIcon = (id: string): string => VIEW_ICON[id] ?? ICON.views;
 const SECTION_ICON: Record<string, string> = {
   appearance: '<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/>',
   toolbar: '<rect x="3" y="14" width="18" height="6" rx="3"/><path d="M7 17h.01M12 17h.01M17 17h.01"/><path d="M8 9h8M10 5h4"/>',
@@ -410,9 +413,11 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     if (host) host.textContent = free ? "All views" : (c?.view.name ?? "");
     const n = !c ? 0 : c.view.layout === "graph" ? c.view.nodes.length : c.wins.size;
     const noun = !c ? "" : c.view.id === "console" ? "session" : c.view.layout === "graph" ? "node" : "window";
-    if (sess) sess.innerHTML = free || !c ? `· ${clusters.size}<span class="cl-noun"> views</span>` : `· ${n}<span class="cl-noun"> ${noun}${n === 1 ? "" : "s"}</span>`;
+    if (sess) sess.innerHTML = free || !c ? `· ${clusters.size}<span class="cl-noun"> views</span>` : `· ${n}<span class="cl-noun"> ${noun}${n === 1 ? "" : "s"}</span>${c.view.team ? " · team" : ""}`;
     stage.querySelector<HTMLElement>("#capsule")?.removeAttribute("data-flow");
-    if (os) os.innerHTML = lineIcon(free || !c ? ICON.views : VIEW_ICON[c.view.id]);
+    const linked = Boolean(c?.view.team) && !free;
+    if (typeof unlinkBtn !== "undefined") { if (linked && unlinkBtn.hidden) { unlinkBtn.hidden = false; requestAnimationFrame(() => { unlinkBtn.dataset.open = "true"; }); } else if (!linked && !unlinkBtn.hidden) { unlinkBtn.dataset.open = "false"; unlinkBtn.hidden = true; } }
+    if (os) os.innerHTML = lineIcon(free || !c ? ICON.views : viewIcon(c.view.id));
   };
 
   // ---- overlay: arrows on demand, trails and edge markers --------------------------------------------
@@ -539,7 +544,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   // ---- building the world ------------------------------------------------------------------------------
   const iconFor = (m: WindowModel): string =>
     m.kind === "terminal" ? (m.os ? hostIconMarkup(m.os, "ui-host-mark") : lineIcon(ICON.terminal))
-      : m.kind === "settings" ? lineIcon(SECTION_ICON[m.id.slice(2)] ?? VIEW_ICON.settings) : m.kind === "containers" ? lineIcon(ICON.containers) : m.kind === "logs" ? lineIcon(ICON.logs) : lineIcon(ICON.node);
+      : m.kind === "settings" ? lineIcon(SECTION_ICON[m.id.slice(2)] ?? viewIcon("settings")) : m.kind === "containers" ? lineIcon(ICON.containers) : m.kind === "logs" ? lineIcon(ICON.logs) : lineIcon(ICON.node);
 
   // ---- Settings: a view whose windows are the sections --------------------------------------------------
   let devices: DeviceRow[] = [
@@ -594,6 +599,13 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const m = rec.model;
     const body = rec.card.body;
     body.replaceChildren();
+    if (m.noAccess) {
+      const box = el("div", "cl-noaccess");
+      box.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/></svg><p class="cl-noaccess-title">No access</p><p class="cl-noaccess-hint"></p>`;
+      (box.querySelector(".cl-noaccess-hint") as HTMLElement).textContent = `Your grants do not include ${m.host}. Ask ${rec.cluster.view.from ?? "an admin"} or an admin for access.`;
+      body.append(box);
+      return;
+    }
     if (m.id === "w-build-01") { body.append(core.terminalHost); return; }
     if (m.kind === "settings") { rec.cleanup = renderSettingsBody(m.id.slice(2), body); return; }
     if (m.kind === "terminal") {
@@ -638,10 +650,11 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const actions: WindowAction[] = [];
     const rec: WinRec = {} as WinRec;
     // The window's kind decides what it can do: only a terminal has a split control.
-    if (m.kind === "terminal") actions.push({ id: "split", label: "Split", icon: ICON.split, onSelect: () => { void splitWindow(rec); } });
-    if (m.kind !== "node" && m.kind !== "settings") actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => closeWindow(rec) });
+    const readOnly = Boolean(c.view.team);
+    if (m.kind === "terminal" && !m.noAccess && !readOnly) actions.push({ id: "split", label: "Split", icon: ICON.split, onSelect: () => { void splitWindow(rec); } });
+    if (m.kind !== "node" && m.kind !== "settings" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => closeWindow(rec) });
     const title = { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
-    const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: () => updateToolbar() });
+    const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" && !m.noAccess ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: () => updateToolbar() });
     Object.assign(rec, { model: m, card, cluster: c });
     card.root.dataset.kind = m.kind;
     if (m.h) { card.root.style.height = m.h <= 1 ? `calc(var(--clh) * ${m.h})` : `${m.h}px`; card.root.style.flex = "none"; }
@@ -679,8 +692,10 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const region = el("div", "cl-region");
     const label = el("button", "cl-label ui-pill");
     label.type = "button";
-    label.innerHTML = `<span class="cl-label-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${VIEW_ICON[view.id]}</svg></span><span class="cl-label-name"></span><span class="cl-label-meta"></span>`;
+    label.innerHTML = `<span class="cl-label-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(view.id)}</svg></span><span class="cl-label-name"></span><span class="cl-label-meta"></span>${view.team ? '<span class="ui-ts-tag cl-team">team</span>' : ""}<span class="cl-label-menu" role="button" tabindex="0" aria-label="View menu" data-tip="Share layout…"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg></span>`;
     (label.querySelector(".cl-label-name") as HTMLElement).textContent = view.name;
+    label.querySelector(".cl-label-menu")!.addEventListener("pointerdown", (e) => e.stopPropagation());
+    label.querySelector(".cl-label-menu")!.addEventListener("click", (e) => { e.stopPropagation(); void openShare([view.id]); });
     const content = el("div", "cl-content");
     const colsEl = el("div", "cl-cols");
     const lift = el("div", "cl-lift");
@@ -747,6 +762,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const count = c.view.layout === "graph" ? `${c.view.nodes.length} nodes · ${grants.length} grants` : `${c.wins.size} window${c.wins.size === 1 ? "" : "s"}`;
     c.labelMeta.textContent = c.wins.size || c.view.layout === "graph" ? `· ${count}` : "· empty";
     c.label.setAttribute("aria-label", `${c.view.name}, ${count}. Fly to this view`);
+    if (c.view.published) schedulePublish(c);
   };
 
   /** After a view changed size: push neighbours aside (never the changed one). */
@@ -844,7 +860,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const rows = c.view.layout === "graph"
       ? [["Nodes", String(c.view.nodes.length)], ["Grants", String(grants.length)], ["Via relay", String(grants.filter((g) => g.via).length)]]
       : [...c.wins.values()].map((w) => [w.model.kind === "terminal" ? w.model.host : (w.model.session ?? w.model.kind), w.model.kind === "terminal" ? "shell" : w.model.kind]);
-    summary.innerHTML = `<div class="cl-summary-head"><span class="cl-summary-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${VIEW_ICON[c.view.id]}</svg></span><span class="cl-summary-name"></span></div><div class="cl-summary-rows"></div>`;
+    summary.innerHTML = `<div class="cl-summary-head"><span class="cl-summary-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(c.view.id)}</svg></span><span class="cl-summary-name"></span></div><div class="cl-summary-rows"></div>`;
     (summary.querySelector(".cl-summary-name") as HTMLElement).textContent = c.view.name;
     const list = summary.querySelector(".cl-summary-rows") as HTMLElement;
     if (!rows.length) rows.push(["No windows", ""]);
@@ -961,7 +977,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     pill.dataset.grab = "";
     let press: { id: number; x: number; y: number; timer: number; touch: boolean } | undefined;
     pill.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0 || lod === "thumb") return;
+      if (e.button !== 0 || lod === "thumb" || rec.cluster.view.team) return;
       const touch = e.pointerType !== "mouse";
       press = { id: e.pointerId, x: e.clientX, y: e.clientY, touch, timer: 0 };
       if (touch && rec.model.kind === "terminal") {
@@ -982,7 +998,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     };
     pill.addEventListener("pointerup", release, { signal });
     pill.addEventListener("pointercancel", release, { signal });
-    if (rec.model.kind !== "terminal") return;
+    if (rec.model.kind !== "terminal" || rec.model.noAccess) return;
 
     // Arrows on demand: hovering the pill (long-press on touch) shows where this window's host can reach.
     let hoverTimer = 0, leaveTimer = 0;
@@ -1007,7 +1023,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     for (const t of [pill, port]) { t.addEventListener("pointerenter", enter, { signal }); t.addEventListener("pointerleave", leave, { signal }); }
     port.addEventListener("pointerdown", (e) => { if (e.button === 0) { e.preventDefault(); beginLink(rec, e); } }, { signal });
     rec.card.pill.addEventListener("keydown", (e) => { if (e.key === "ArrowRight" && e.altKey) showReach(rec, true); }, { signal });
-    if (rec.model.kind === "terminal" && !rec.model.id.includes("-s")) {
+    if (rec.model.kind === "terminal" && !/-s\d+$/.test(rec.model.id) && !rec.cluster.view.team) {
       // Resizing is shared with the product canvas (window-resize.ts); here it sets the column width and the window height.
       rec.stopResize = attachWindowResize(rec.card, resizeHost(rec)).dispose;
     }
@@ -1588,7 +1604,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
       b.type = "button";
       b.dataset.view = c.view.id;
       if (c.view.id === currentView) b.setAttribute("aria-current", "true");
-      b.innerHTML = `<span class="cl-viewrow-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${VIEW_ICON[c.view.id]}</svg></span><span class="cl-viewrow-name"></span><span class="cl-viewrow-meta"></span><span class="cl-viewrow-keys"></span>`;
+      b.innerHTML = `<span class="cl-viewrow-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(c.view.id)}</svg></span><span class="cl-viewrow-name"></span><span class="cl-viewrow-meta"></span><span class="cl-viewrow-keys"></span>`;
       (b.querySelector(".cl-viewrow-name") as HTMLElement).textContent = c.view.name;
       (b.querySelector(".cl-viewrow-meta") as HTMLElement).textContent = c.view.layout === "graph" ? `${c.view.nodes.length} nodes` : `${c.wins.size} windows`;
       const keys = b.querySelector(".cl-viewrow-keys") as HTMLElement;
@@ -1664,6 +1680,167 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   capsule.addEventListener("pointercancel", pillEnd, { signal });
 
 
+  // ---- sharing layouts (D182) ---------------------------------------------------------------------------------
+  // A layout (one or more views) is sent to users or groups. The recipient gets a copy that is theirs, as a
+  // new view named after the sender, never replacing or merging into anything. Windows connect through the
+  // recipient's own grants ("no access" where they have none). An operator can also publish to the team:
+  // followers keep a linked, read-only copy that follows the publisher's arrangement until they unlink it.
+  // Transport is the test double (/__mock/shares); a person who can receive polls it while signed in.
+  const received = new Set<string>();
+  const revs = new Map<string, number>();
+  const viewOfKey = new Map<string, string>();
+  let pollTimer = 0;
+  const me = (): string => usernameOf(role);
+  const labelOfRecipient = (id: string): string => id.replace(/^(user|group):/, "");
+  let shareMorph: PillMorph | undefined;
+  let shareDialog: ReturnType<typeof buildShareDialog> | undefined;
+  let shareAbort: AbortController | undefined;
+  const closeShare = (instant = false): void => {
+    shareAbort?.abort(); shareAbort = undefined;
+    shareMorph?.close(instant);
+  };
+  const openShare = async (preselect?: string[]): Promise<void> => {
+    if (shareMorph?.isOpen) { closeShare(); return; }
+    closeViewList(true);
+    if (float) closeFloat(true);
+    const views = [...clusters.values()].filter((c) => c.view.id !== "settings").map((c) => ({ id: c.view.id, name: c.view.name }));
+    if (!views.length) return;
+    const selected = (preselect ?? [currentView]).filter((id) => views.some((v) => v.id === id));
+    const dialog = buildShareDialog({ views, selected: selected.length ? selected : [views[0]!.id], sender: me(), canPublish: role === "operator", onSend: (choice) => { void sendShare(choice); closeShare(); } });
+    shareDialog = dialog;
+    shareMorph = createPillMorph({ pill: capsule, stage, panel: dialog.panel, content: dialog.content, width: 400, onClosed: () => { dialog.dispose(); if (shareDialog === dialog) shareDialog = undefined; } });
+    shareAbort = new AbortController();
+    const sig = shareAbort.signal;
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeShare(); } }, { capture: true, signal: sig });
+    document.addEventListener("pointerdown", (e) => { const t = e.target as Element; if (!dialog.panel.contains(t) && !capsule.contains(t) && !t.closest(".ui-confirm-tip, .tip")) closeShare(); }, { capture: true, signal: sig });
+    shareMorph.open();
+    window.setTimeout(() => dialog.focus(), 420);
+  };
+  const snapshotOf = (c: ClusterRec): ViewModel => {
+    geometry(c);
+    const { team: _team, published: _published, ...rest } = c.view;
+    return JSON.parse(JSON.stringify(rest)) as ViewModel;
+  };
+  const sendShare = async (choice: ShareChoice): Promise<void> => {
+    const picked = choice.views.map((id) => clusters.get(id)).filter((c): c is ClusterRec => !!c);
+    if (!picked.length || !choice.to.length) return;
+    try {
+      const r = await fetch("/__mock/shares", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: me(), to: choice.to, publish: choice.publish, views: picked.map((c) => ({ key: c.view.id, name: c.view.name, snapshot: snapshotOf(c) })) }) });
+      const { id } = (await r.json()) as { id: string };
+      if (choice.publish) for (const c of picked) c.view.published = { shareId: id, key: c.view.id };
+      toast.show({ message: `Shared ${picked.map((c) => c.view.name).join(", ")} with ${choice.to.map(labelOfRecipient).join(", ")}` });
+    } catch { toast.show({ message: "Could not share", tone: "error" }); }
+  };
+  const publishTimers = new Map<string, number>();
+  const schedulePublish = (c: ClusterRec): void => {
+    const pub = c.view.published;
+    if (!pub) return;
+    window.clearTimeout(publishTimers.get(c.view.id));
+    publishTimers.set(c.view.id, window.setTimeout(() => {
+      const { team: _t, published: _p, ...rest } = c.view;
+      void fetch("/__mock/shares/update", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: pub.shareId, key: pub.key, snapshot: JSON.parse(JSON.stringify(rest)) }) }).catch(() => undefined);
+    }, 300));
+  };
+  /** Puts a received view next to the existing ones (to the right, or below on a phone), before Settings, and never over anything. */
+  const addSharedView = (view: ViewModel): ClusterRec => {
+    const others = [...clusters.values()].filter((c) => c.view.id !== "settings");
+    const boxesNow = others.map((c) => boxOf(c.view, metrics));
+    view.x = metrics.narrow ? 0 : Math.max(0, ...boxesNow.map((b) => b.x + b.w));
+    view.y = metrics.narrow ? Math.max(0, ...boxesNow.map((b) => b.y + b.h)) : 0;
+    const rec = buildCluster(view);
+    const entries = [...clusters.entries()];
+    clusters.clear();
+    for (const [k, v] of entries) { if (k === "settings") clusters.set(view.id, rec); clusters.set(k, v); }
+    if (!clusters.has(view.id)) clusters.set(view.id, rec);
+    settle(view.id);
+    renderTree();
+    return rec;
+  };
+  const replaceCluster = (id: string): void => {
+    const old = clusters.get(id);
+    if (!old) return;
+    const view = old.view;
+    for (const w of old.wins.values()) { w.stopResize?.(); w.cleanup?.(); w.card.dispose(); }
+    old.el.remove();
+    const entries = [...clusters.entries()];
+    clusters.clear();
+    for (const [k, v] of entries) clusters.set(k, k === id ? buildCluster(view) : v);
+    renderTree();
+    paintCapsule();
+  };
+  /** A team layout changed: the follower's copy takes the publisher's arrangement, moving there (FLIP on the shared spring). */
+  const applyTeamSnapshot = (c: ClusterRec, fresh: ViewModel): void => {
+    const before = flipMeasure(flipTargets(c));
+    const keep = new Set<string>();
+    const colEls = new Map([...c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")].map((e) => [e.dataset.id ?? "", e] as const));
+    const order: HTMLElement[] = [];
+    for (const col of fresh.cols) {
+      const colEl = colEls.get(col.id) ?? newCol(c, col);
+      colEls.delete(col.id);
+      colEl.dataset.w = String(col.w);
+      colEl.style.setProperty("--w", `${col.w}px`);
+      for (const w of col.wins) {
+        let rec = c.wins.get(w.id);
+        if (!rec) { rec = makeWindow(c, w); c.wins.set(w.id, rec); }
+        keep.add(w.id);
+        colEl.append(rec.card.root);
+        if (w.h) { rec.card.root.style.height = w.h <= 1 ? `calc(var(--clh) * ${w.h})` : `${w.h}px`; rec.card.root.style.flex = "none"; } else { rec.card.root.style.height = ""; rec.card.root.style.flex = ""; }
+      }
+      order.push(colEl);
+    }
+    for (const [id, rec] of [...c.wins]) if (!keep.has(id)) { rec.stopResize?.(); rec.cleanup?.(); rec.card.dispose(); c.wins.delete(id); }
+    for (const e of colEls.values()) e.remove();
+    for (const e of order) c.colsEl.append(e);
+    c.view.cols = fresh.cols;
+    geometry(c);
+    settle(c.view.id);
+    flipPlay(before, true);
+    renderTree();
+    if (canvasLock && currentView === c.view.id) goStop(c, nearestStop(c, cam.cx));
+  };
+  const syncShares = async (): Promise<void> => {
+    let shares: Array<{ id: string; from: string; to: string[]; publish: boolean; rev: number; views: Array<{ key: string; name: string; snapshot: ViewModel }> }>;
+    try { shares = ((await (await fetch(`/__mock/shares?for=${me()}`, { credentials: "same-origin" })).json()) as { shares: typeof shares }).shares; } catch { return; }
+    const arrived: Array<{ from: string; name: string; id: string }> = [];
+    for (const share of shares) {
+      if (share.from === me()) continue;
+      for (const v of share.views) {
+        const key = `${share.id}:${v.key}`;
+        const copy = copyForRecipient(v.snapshot, share.from, allowedHosts(), share.id);
+        if (!received.has(key)) {
+          received.add(key); revs.set(key, share.rev); viewOfKey.set(key, copy.id);
+          if (share.publish) copy.team = { from: share.from, shareId: share.id, key: v.key, rev: share.rev };
+          addSharedView(copy);
+          arrived.push({ from: share.from, name: v.name, id: copy.id });
+        } else if (share.publish && share.rev > (revs.get(key) ?? 0)) {
+          revs.set(key, share.rev);
+          const c = clusters.get(viewOfKey.get(key) ?? "");
+          if (c?.view.team) applyTeamSnapshot(c, copy);
+        }
+      }
+    }
+    if (arrived.length) {
+      const first = arrived[0]!;
+      toast.show({ message: `${first.from} shared ${arrived.map((a) => a.name).join(", ")}`, action: { label: "Open", onSelect: () => flyView(first.id) } });
+      flyView(first.id);
+    }
+  };
+  const unlinkBtn = el("button", "ui-pill cl-unlink");
+  unlinkBtn.type = "button";
+  unlinkBtn.hidden = true;
+  unlinkBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1M4 4l16 16"/></svg><span>Unlink to edit</span>`;
+  unlinkBtn.setAttribute("aria-label", "Unlink to edit");
+  stage.append(unlinkBtn);
+  const unlinkCurrent = (): void => {
+    const c = clusters.get(currentView);
+    if (!c?.view.team) return;
+    delete c.view.team;
+    replaceCluster(c.view.id);
+    toast.show({ message: `${c.view.name} is now your own copy` });
+  };
+  unlinkBtn.addEventListener("click", unlinkCurrent, { signal });
+
   // ---- sidebar tree and palette ----------------------------------------------------------------------------------
   const treeSections = (): BranchSection[] => [...clusters.values()].map((c) => {
     const graph = c.view.layout === "graph";
@@ -1707,19 +1884,23 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   if (sideTitle) sideTitle.textContent = "Views";
 
   const visibleHosts = (): string[] => [...(consoleView()?.wins.values() ?? [])].filter((w) => w.model.kind === "terminal" && !w.model.id.includes("-s") && !w.model.id.startsWith("w-shell")).map((w) => w.model.host);
-  const allowedHosts = (): string[] => (role === "viewer" ? ["build-01", "nix-cache"] : role === "new" ? [] : ["build-01", "edge-arm", "nix-cache", "studio-mac"]);
+  const allowedHosts = (): string[] => (role === "viewer" || role === "asha" ? ["build-01", "nix-cache"] : role === "new" ? [] : ["build-01", "edge-arm", "nix-cache", "studio-mac"]);
   const removeProvider = core.addPaletteProvider(() => {
     const out: import("./core-screen").PaletteEntry[] = [];
     [...clusters.values()].forEach((c, i) => {
-      out.push({ group: "Views", glyph: "▦", icon: VIEW_ICON[c.view.id], label: `Go to ${c.view.name}`, hint: `view · ${shortcutLabel(viewKeys(i))}`, action: `proto:view:${c.view.id}` });
+      out.push({ group: "Views", glyph: "▦", icon: viewIcon(c.view.id), label: `Go to ${c.view.name}`, hint: `view · ${shortcutLabel(viewKeys(i))}`, action: `proto:view:${c.view.id}` });
     });
-    out.push({ group: "Settings", glyph: "⚙", icon: VIEW_ICON.settings, label: "Settings", hint: "view · appearance · toolbar · shortcuts · devices", action: "proto:settings:appearance" });
-    for (const sec of SETTINGS_SECTIONS.filter((x) => !x.admin || role === "operator")) out.push({ group: "Settings", glyph: "⚙", icon: SECTION_ICON[sec.id] ?? VIEW_ICON.settings, label: `Settings → ${sec.title}`, hint: "settings", action: `proto:settings:${sec.id}` });
+    out.push({ group: "Settings", glyph: "⚙", icon: viewIcon("settings"), label: "Settings", hint: "view · appearance · toolbar · shortcuts · devices", action: "proto:settings:appearance" });
+    for (const sec of SETTINGS_SECTIONS.filter((x) => !x.admin || role === "operator")) out.push({ group: "Settings", glyph: "⚙", icon: SECTION_ICON[sec.id] ?? viewIcon("settings"), label: `Settings → ${sec.title}`, hint: "settings", action: `proto:settings:${sec.id}` });
+    out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.next, label: "Share layout…", hint: "send views to a person or a group", action: "proto:share" });
+    if (clusters.get(currentView)?.view.team) out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.unlock, label: "Unlink team layout to edit", hint: "keep your own copy", action: "proto:unlink" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.snap, label: "Canvas lock on", hint: `${canvasLock ? "on now · " : ""}${bindingText("canvas-lock")}`, action: "proto:canvaslock:on" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free canvas · all views · Esc", action: "proto:canvaslock:off" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.lock, label: inputLock ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "proto:inputlock" });
-    scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} ${sc.name}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
+    scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
+    out.push({ group: "Mockup", glyph: "◇", label: "Mockup: view as asha", hint: "receives shared layouts", action: "proto:role:asha" });
+    out.push({ group: "Mockup", glyph: "◇", label: "Mockup: view as kayg", hint: "the owner", action: "proto:role:operator" });
     for (const r of ["viewer", "operator", "new"] as const) out.push({ group: "Mockup", glyph: "◇", label: `Mockup: sign in as ${r === "new" ? "a new user" : `a ${r}`}`, hint: "grants", action: `proto:role:${r}` });
     // Any session by name. Keywords ride in the hint so "ssh", "terminal", "console", "vnc" and "rdp" find them.
     for (const host of allowedHosts()) {
@@ -1737,6 +1918,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     else if (kind === "overview") setCanvasLock(false);
     else if (kind === "settings") openSettings(value ?? "appearance");
     else if (kind === "devicechip") showContinueChip();
+    else if (kind === "share") void openShare();
+    else if (kind === "unlink") unlinkCurrent();
     else if (kind === "canvaslock") setCanvasLock(value === "on");
     else if (kind === "inputlock") toggleInputLock();
     else if (kind === "scene" && value) goScene(Number(value) - 1);
@@ -2063,6 +2246,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
 
   // ---- scenes ---------------------------------------------------------------------------------------------------------------
   const clear = (): void => {
+    window.clearInterval(pollTimer);
     if (inputLock) { inputLock = undefined; core.lockToolbarRow(undefined); }
     holder.append(core.terminalHost);
     hideReach(true);
@@ -2078,9 +2262,14 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches);
     vw = viewport.clientWidth; vh = viewport.clientHeight;
     world.style.setProperty("--clh", `${metrics.clh}px`);
-    for (const v of buildViews(role, metrics, screens, omit)) clusters.set(v.id, buildCluster(v));
+    for (const v of buildViews(role, metrics, screens, omit, sceneIndex === 6 && role === "operator")) clusters.set(v.id, buildCluster(v));
     world.dataset.lod = lod;
+    received.clear(); revs.clear();
+    window.clearInterval(pollTimer);
+    // Mock transport for shares: only a person who can receive polls, and only while signed in as them.
+    if (role === "asha") { pollTimer = window.setInterval(() => { void syncShares(); }, 1500); void syncShares(); }
     renderTree();
+    paintCapsule();
   };
 
   const scenes: Array<{ name: string; hint: string; enter(): void }> = [
@@ -2096,6 +2285,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
       enter() { omit = []; if (role === "operator" && !forcedRole) role = "viewer"; build(); if (role === "operator") { applyCanvasLock(false); flyTo(overviewCam, true); } else flyView("console", true); } },
     { name: "Structure", hint: "Drag a window by its pill: the others reflow and it lands with a bounce. Drag a view by its label: it snaps to the grid and pushes a neighbour aside. Snap is off here.",
       enter() { role = "operator"; omit = []; build(); applyCanvasLock(false); const c = clusters.get("console")!; const r = contentRect(c); flyTo(() => ({ cx: r.x + r.w / 2 + (metrics.narrow ? 0 : 180), cy: r.y + r.h / 2 + (metrics.narrow ? 120 : 200), z: 0.62 }), true); } },
+    { name: "Sharing", hint: "Share layout… (⌘K or a view label's menu) sends views to a person or group. Then Mockup: view as asha: the copy arrives as a new view. Publish to team keeps followers linked and read-only.",
+      enter() { role = "operator"; omit = []; build(); flyView("incident", true); } },
   ];
   let forcedRole = Boolean(options.role);
   const mockupTag = el("button", "ui-pill cl-mockup", "mockup");
@@ -2143,7 +2334,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     camera: () => ({ ...cam, lod, zoomBand, tx, ty }),
     setCamera: (cx: number, cy: number, z: number) => { applyCanvasLock(false); setCam({ cx, cy, z }); },
     flyCamera: (cx: number, cy: number, z: number) => { applyCanvasLock(false); flyTo(() => ({ cx, cy, z })); },
-    views: () => [...clusters.values()].map((c) => ({ id: c.view.id, name: c.view.name, x: c.x, y: c.y, w: boxOf(c.view, metrics).w, h: boxOf(c.view, metrics).h, windows: [...c.wins.keys()] })),
+    views: () => [...clusters.values()].map((c) => ({ id: c.view.id, name: c.view.name, team: Boolean(c.view.team), x: c.x, y: c.y, w: boxOf(c.view, metrics).w, h: boxOf(c.view, metrics).h, windows: [...c.wins.keys()] })),
     grants: () => grants.map((g) => ({ ...g })),
     flyView: (id: ViewId) => flyView(id),
     overview: () => setCanvasLock(false),

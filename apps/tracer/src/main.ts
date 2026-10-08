@@ -153,6 +153,21 @@ function installForegroundListener(): void {
   });
 }
 
+/**
+ * A mockup preview (`?mock=1&proto=...`) re-creates its mock session by loading the page again: the
+ * test double hands the session cookie out on that load. After the double restarts, a tab that
+ * was open lands here instead of on a dead "Could not reach the server".
+ */
+const previewProto = (): boolean => { const q = new URLSearchParams(location.search); return q.get("mock") === "1" && !!q.get("proto"); };
+let healTimer = 0;
+function healPreview(): void {
+  if (!previewProto()) return;
+  window.clearInterval(healTimer);
+  healTimer = window.setInterval(() => {
+    void fetch("/health", { cache: "no-store" }).then((r) => { if (r.ok) location.reload(); }).catch(() => undefined);
+  }, 2000);
+}
+
 function renderUnavailable(message: string): void {
   document.documentElement.removeAttribute("data-ui-font");
   app.innerHTML = `<section class="auth-screen"><section class="auth-card auth-signin">
@@ -160,7 +175,8 @@ function renderUnavailable(message: string): void {
     <p id="status-error" class="auth-message" role="alert"></p>
     <button id="retry-status" class="auth-primary" type="button">Try again</button></section></section>`;
   mustGet<HTMLElement>("#status-error").textContent = message;
-  mustGet<HTMLButtonElement>("#retry-status").addEventListener("click", () => { void refreshAuth(); }, { once: true });
+  mustGet<HTMLButtonElement>("#retry-status").addEventListener("click", () => { if (previewProto()) location.reload(); else void refreshAuth(); }, { once: true });
+  healPreview();
   scheduleBackdrop();
 }
 
@@ -305,7 +321,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     try {
       clusters = await mountClusters(screen, {
       ...(scene ? { scene } : {}),
-      ...(roleParam === "viewer" || roleParam === "operator" || roleParam === "new" ? { role: roleParam } : {}),
+      ...(roleParam === "viewer" || roleParam === "operator" || roleParam === "new" || roleParam === "asha" ? { role: roleParam } : {}),
     });
     } catch (error: unknown) { console.error("clusters mockup failed", error); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
     canvasPrototype = clusters;
@@ -470,6 +486,7 @@ async function checkForegroundSession(): Promise<void> {
     const session = await checkSession();
     // A delayed HTTP snapshot must not overwrite a newer WebSocket state event.
     if (session && noticeGeneration === recoveryNoticeGeneration) coreScreen?.setRecoveryPending(session.recovery_pending?.ready_at);
+    if (!session && previewProto()) { location.reload(); return; }
     if (!session) {
       currentTerminal?.dispose();
       currentTerminal = undefined;

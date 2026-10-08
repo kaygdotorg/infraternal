@@ -230,3 +230,28 @@
 .cl-continue[data-open="true"] { opacity: 1; transform: none; }
 .cl-continue-text { padding-right: 6px; }
 @media (prefers-reduced-motion: reduce) { .cl-continue { transform: none; } }
+
+/* ---- sharing (clusters-share.ts): the dialog is the shared overlay material; chips, switch and pill are the shared ones ---- */
+.cl-share { position: absolute; z-index: 9; display: flex; flex-direction: column; border-radius: var(--r-lg, 18px); color: var(--fg); }
+.cl-share-head { display: flex; align-items: center; height: var(--pill-h, 38px); padding: 0 14px; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.cl-share-body { display: grid; gap: 6px; padding: 0 14px 4px; }
+.cl-share-label { margin: 6px 0 0; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.cl-share-views { display: flex; flex-wrap: wrap; gap: 6px; }
+.cl-share-publish { display: flex; align-items: center; justify-content: space-between; min-height: var(--ui-row-h, 32px); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-share-note { margin: 4px 0 0; color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 12px); letter-spacing: var(--ui-tracking); }
+.cl-share-foot { display: flex; justify-content: flex-end; padding: 6px 10px 10px; }
+.cl-share-send { --pill-h: var(--ui-control-h, 30px); color: var(--accent); }
+.cl-share-send:disabled { color: var(--fg-3); opacity: 0.6; }
+.cl-unlink { position: absolute; z-index: 9; left: 50%; top: calc(env(safe-area-inset-top) + 10px + var(--pill-h, 38px) + 10px); translate: -50% 0; gap: 8px; padding: 0 14px 0 10px; white-space: nowrap; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); cursor: pointer; opacity: 0; transform: translateY(-6px) scale(0.97); transition: opacity 200ms ease, transform 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.cl-unlink[data-open="true"] { opacity: 1; transform: none; }
+.cl-unlink[hidden] { display: none; }
+.cl-unlink svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-team { margin-left: 6px; }
+.cl-noaccess { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 6px; padding: 24px; text-align: center; }
+.cl-noaccess-title { margin: 0; color: var(--fg-2); font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.cl-noaccess-hint { margin: 0; max-width: 28ch; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-noaccess svg { width: 22px; height: 22px; fill: none; stroke: var(--fg-3); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-world[data-snap] .cl-label-menu { display: none; }
+.cl-label-menu { display: grid; place-items: center; width: 22px; height: 22px; margin-right: -6px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--fg-3); cursor: pointer; }
+.cl-label-menu svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+@media (hover: hover) and (pointer: fine) { .cl-label-menu:hover { background: var(--hover); color: var(--fg); } }

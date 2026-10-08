@@ -700,3 +700,7 @@
 .ui-sp-actions { display: flex; flex: none; gap: 2px; }
 .ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
 .keyedit-list::before { white-space: nowrap; }
+
+/* A chip used as a toggle (a view to share, a filter): pressed is a quiet accent fill, nothing else changes. */
+.ui-chip[aria-pressed] { padding-right: 10px; cursor: pointer; }
+.ui-chip[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }

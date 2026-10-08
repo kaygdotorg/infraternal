@@ -7,7 +7,7 @@ import { expect, test, type Browser, type Page } from "playwright/test";
 type Probe = {
   scene(): number;
   camera(): { cx: number; cy: number; z: number; lod: string; zoomBand: string; tx: number; ty: number };
-  views(): Array<{ id: string; x: number; y: number; w: number; h: number; windows: string[] }>;
+  views(): Array<{ id: string; name: string; team: boolean; x: number; y: number; w: number; h: number; windows: string[] }>;
   grants(): Array<{ id: string; from: string; to: string }>;
   reachFor(): string | undefined;
   reachCount(): number;
@@ -38,7 +38,7 @@ test("the six scenes load from the palette and the mockup tag, without a page er
   await expect(page.locator(".cl-mockup")).toHaveText(/mockup/i);
   await page.keyboard.press("Control+k");
   await page.keyboard.type("mockup: scene");
-  await expect(page.getByText("Mockup: scene 4 Open from a container")).toBeVisible();
+  await expect(page.getByText("Mockup: scene 4 – open from a container")).toBeVisible();
   await page.keyboard.press("Escape");
   for (let scene = 1; scene <= 6; scene++) {
     await probe(page, (p) => p.setScene(0)).catch(() => undefined);
@@ -638,4 +638,89 @@ test("devices: the name edits in place, a sign-out asks first, and a device swit
   await page.keyboard.press("Enter");
   await expect(page.locator(".cl-continue[data-open='true']")).toContainText("Continue from");
   await expect(page.locator(".cl-continue")).toHaveCount(0, { timeout: 12_000 }); // it fades on its own
+});
+
+async function sharedPair(browser: Browser, publish: boolean): Promise<{ kayg: Page; asha: Page; close(): Promise<void> }> {
+  const context = await browser.newContext({ baseURL: `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}`, viewport: { width: 1440, height: 900 } });
+  await context.request.post("/__mock/reset").catch(() => undefined);
+  const kayg = await context.newPage();
+  await open(kayg, 7);
+  // Share the Incident view with asha from the palette.
+  await kayg.keyboard.press("Control+k");
+  await kayg.keyboard.type("share layout");
+  await kayg.keyboard.press("Enter");
+  await expect(kayg.locator(".cl-share")).toBeVisible();
+  await expect(kayg.locator('.cl-share-chip[data-view="incident"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(kayg.locator(".cl-share-send")).toBeDisabled();
+  await kayg.locator(".cl-share .ui-chip-text").pressSequentially("asha"); // a name that matches becomes a chip as soon as it is unambiguous
+  await expect(kayg.locator(".cl-share .ui-chip", { hasText: "asha" })).toHaveCount(1);
+  await expect(kayg.locator(".cl-share-note")).toHaveText("They get their own copy. Windows connect with their access.");
+  if (publish) await kayg.locator(".cl-share-publish").click();
+  await kayg.locator(".cl-share-send").click();
+  await expect(kayg.locator(".ui-toast", { hasText: "Shared Incident with asha" })).toHaveCount(1);
+  const asha = await context.newPage();
+  await open(asha, 5, "&role=asha");
+  return { kayg, asha, close: () => context.close() };
+}
+
+test("sharing: the dialog sends a view; the recipient gets their own copy named after the sender, with no-access windows, and nothing is replaced", async ({ browser }) => {
+  const pair = await sharedPair(browser, false);
+  try {
+    const { asha } = pair;
+    await expect.poll(async () => (await probe(asha, (p) => p.views())).map((v) => v.id), { timeout: 6000 }).toContain("incident-from-kayg-sh1");
+    const views = await probe(asha, (p) => p.views());
+    expect(views.find((v) => v.id === "console")!.windows).toHaveLength(2); // her own view is untouched
+    expect(views.find((v) => v.id === "incident-from-kayg-sh1")!.name).toBe("Incident (from kayg)");
+    const ids = views.map((v) => v.id);
+    expect(ids.indexOf("settings")).toBe(ids.length - 1); // Settings stays last
+    await expect(asha.locator(".ui-toast", { hasText: "kayg shared Incident" })).toHaveCount(1);
+    for (let i = 0; i < views.length; i++) for (let j = i + 1; j < views.length; j++) expect(overlap(views[i]!, views[j]!)).toBe(false);
+    // The camera flew to it, locked on.
+    await expect.poll(async () => (await probe(asha, (p) => p.canvasLock())).view, { timeout: 4000 }).toBe("incident-from-kayg-sh1");
+    // edge-arm is outside her grants: a calm explanation, not an error.
+    const blocked = asha.locator('.ui-window[data-window-id$=":i-edge-arm"]');
+    await expect(blocked).toContainText("No access");
+    await expect(blocked).toContainText("Your grants do not include edge-arm");
+    await expect(asha.locator('.ui-window[data-window-id$=":i-build-01"] .terminal-host, .ui-window[data-window-id$=":i-build-01"] .canvas-preview')).toHaveCount(1);
+    // It is her copy: editable (close is there).
+    await expect(asha.locator('.ui-window[data-window-id$=":i-build-01"] [data-action="close"]')).toHaveCount(1);
+  } finally { await pair.close(); }
+});
+
+test("team layouts: followers see a marker and a read-only copy that follows the publisher live, until they unlink it", async ({ browser }) => {
+  const pair = await sharedPair(browser, true);
+  try {
+    const { kayg, asha } = pair;
+    const id = "incident-from-kayg-sh1";
+    await expect.poll(async () => (await probe(asha, (p) => p.views())).map((v) => v.id), { timeout: 6000 }).toContain(id);
+    await expect.poll(async () => (await probe(asha, (p) => p.canvasLock())).view, { timeout: 4000 }).toBe(id);
+    await expect(asha.locator(".cl-unlink")).toBeVisible();
+    await expect(asha.locator("#capsule")).toContainText("team");
+    await expect(asha.locator(`.cl[data-view="${id}"] .cl-team`)).toHaveCount(1);
+    await expect(asha.locator(`.cl[data-view="${id}"] [data-action="close"], .cl[data-view="${id}"] [data-action="split"]`)).toHaveCount(0); // read-only
+    const colOf = (page: Page, suffix: string): Promise<string | null> => page.locator(`.ui-window[data-window-id$="${suffix}"]`).evaluate((n) => n.parentElement?.dataset.id ?? null);
+    expect(await colOf(asha, ":i-logs")).toBe("i2");
+    // The publisher moves the log window into the first column; the follower's copy follows, on its own.
+    await kayg.locator('.ui-window[data-window-id="i-logs"] .ui-window-pill').scrollIntoViewIfNeeded();
+    const pill = (await kayg.locator('.ui-window[data-window-id="i-logs"] .ui-window-pill').boundingBox())!;
+    const target = (await kayg.locator('.ui-window[data-window-id="i-build-01"]').boundingBox())!;
+    await kayg.mouse.move(pill.x + 30, pill.y + 10);
+    await kayg.mouse.down();
+    await kayg.mouse.move(pill.x - 60, pill.y - 40, { steps: 6 });
+    await kayg.mouse.move(target.x + 150, target.y + target.height - 40, { steps: 8 });
+    await kayg.mouse.up();
+    await expect.poll(() => colOf(asha, ":i-logs"), { timeout: 8000 }).toBe("i1");
+    // She cannot edit it until she unlinks; then it is hers.
+    await asha.locator(".cl-unlink").click();
+    await expect(asha.locator(".cl-unlink")).toBeHidden();
+    await expect(asha.locator(`.cl[data-view="${id}"] .cl-team`)).toHaveCount(0);
+    await expect(asha.locator('.ui-window[data-window-id$=":i-build-01"] [data-action="close"]')).toHaveCount(1);
+  } finally { await pair.close(); }
+});
+
+test("a restarted mock never strands an open preview tab: an unknown session cookie gets a fresh mock session", async ({ page, context }) => {
+  await open(page, 1);
+  await context.clearCookies(); // what a restart does to a tab: its cookie is no longer known
+  const status = await page.evaluate(() => fetch("/auth/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", credentials: "same-origin" }).then((r) => r.status));
+  expect(status).toBe(200);
 });

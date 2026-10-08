@@ -21,8 +21,14 @@ export const MARGIN = { l: 48, t: 96, r: 48, b: 48 };
 export const COLUMN_GAP = 12;
 
 export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings";
-export type ViewId = "console" | "containers" | "mesh" | "settings";
-export type Role = "viewer" | "operator" | "new";
+/** The built-in views have fixed ids; a view someone shared with you gets an id of its own. */
+export type ViewId = string;
+/** Who is signed in: grants decide the views. "asha" is a second person with a viewer's grants (two hosts). */
+export type Role = "viewer" | "operator" | "new" | "asha";
+/** The username the role stands for (the owner is kayg; names are never shortened). */
+export const usernameOf = (role: Role): string => (role === "asha" ? "asha" : "kayg");
+export const PEOPLE = ["kayg", "asha", "ravi"];
+export const GROUPS: Record<string, string[]> = { ops: ["kayg", "asha"], sre: ["ravi", "asha"] };
 
 export interface WindowModel {
   id: string;
@@ -35,6 +41,8 @@ export interface WindowModel {
   /** Fixed height in px; a window without one shares its column's height equally. */
   h?: number;
   lines?: string[];
+  /** The window's host is not covered by the viewer's grants (a shared layout connects through your own access). */
+  noAccess?: boolean;
 }
 
 export interface ColumnModel { id: string; w: number; wins: WindowModel[] }
@@ -53,6 +61,12 @@ export interface ViewModel {
   graph?: { w: number; h: number };
   x: number;
   y: number;
+  /** Arrived from someone: a copy that is yours (`from` only names where it came from). */
+  from?: string;
+  /** A published team layout you follow: read-only until you unlink it. */
+  team?: { from: string; shareId: string; key: string; rev: number };
+  /** Mine, and published to the team: changes to its arrangement go to the people who follow it. */
+  published?: { shareId: string; key: string };
 }
 
 export interface Metrics { colW: number; clh: number; narrow: boolean; nodeW: number; nodeH: number }
@@ -184,7 +198,8 @@ export const shellLines = (user: string, host: string, extra: string): string[] 
 ];
 
 /** Builds the views a person with this role sees. Hosts come from the test double. */
-export function buildViews(role: Role, m: Metrics, screens: Map<string, { os: HostPlatform; user: string; screen: string[] }>, omit: string[] = []): ViewModel[] {
+export function buildViews(roleIn: Role, m: Metrics, screens: Map<string, { os: HostPlatform; user: string; screen: string[] }>, omit: string[] = [], withIncident = false): ViewModel[] {
+  const role: Exclude<Role, "asha"> = roleIn === "asha" ? "viewer" : roleIn;
   const hostWin = (name: string, h?: number): WindowModel => {
     const s = screens.get(name);
     return { id: `w-${name}`, kind: "terminal", host: name, user: s?.user ?? "kayg", os: s?.os ?? "unknown", ...(h ? { h } : {}), lines: s?.screen ?? [`kayg@${name}:~$ `] };
@@ -236,8 +251,13 @@ export function buildViews(role: Role, m: Metrics, screens: Map<string, { os: Ho
   containers.y = box(console_).h;
   if (m.narrow) mesh.y = containers.y + box(containers).h;
   else mesh.x = box(console_).w + CELL;
-  if (m.narrow) settings.y = mesh.y + boxOf(mesh, m).h; else { settings.x = mesh.x; settings.y = boxOf(mesh, m).h; }
-  const out = [console_, containers, mesh, settings];
+  const incident = withIncident ? incidentView(m, screens) : undefined;
+  if (incident) {
+    if (m.narrow) incident.y = mesh.y + boxOf(mesh, m).h; else { incident.x = mesh.x; incident.y = boxOf(mesh, m).h; }
+  }
+  const above = incident ?? mesh;
+  if (m.narrow) settings.y = above.y + boxOf(above, m).h; else { settings.x = mesh.x; settings.y = above.y + boxOf(above, m).h; }
+  const out = [console_, containers, mesh, ...(incident ? [incident] : []), settings];
   // Console may grow wider than its default box; keep the order stable and the starts on the grid.
   return out;
 }
@@ -264,4 +284,32 @@ export function buildSettingsView(role: Role, m: Metrics): ViewModel {
     id: "settings", name: "Settings", layout: "tiled", nodes: [], x: 0, y: 0,
     cols: sections.map((s) => ({ id: `s-${s.id}`, w: m.colW, wins: [{ id: `s-${s.id}`, kind: "settings" as const, host: s.title }] })),
   };
+}
+
+/** The sender's own working view for the sharing scene: two shells and a log, one of them on a host asha's grants do not cover. */
+export function incidentView(m: Metrics, screens: Map<string, { os: HostPlatform; user: string; screen: string[] }>): ViewModel {
+  const term = (host: string, id: string): WindowModel => {
+    const sc = screens.get(host);
+    return { id, kind: "terminal", host, user: sc?.user ?? "kayg", os: sc?.os ?? "unknown", lines: sc?.screen ?? [`kayg@${host}:~$ `] };
+  };
+  return {
+    id: "incident", name: "Incident", layout: "tiled", nodes: [], x: 0, y: 0,
+    cols: [
+      { id: "i1", w: m.colW, wins: [term("build-01", "i-build-01")] },
+      { id: "i2", w: m.colW, wins: [term("edge-arm", "i-edge-arm"), { id: "i-logs", kind: "logs", host: "build-01", session: "logs · web-api", lines: LOG_LINES, h: 0.4 }] },
+    ],
+  };
+}
+
+/** A copy of a view as the recipient gets it: their own, with hosts outside their grants shown as "no access". */
+export function copyForRecipient(snapshot: ViewModel, from: string, allowedHosts: readonly string[], idSuffix: string): ViewModel {
+  const copy: ViewModel = JSON.parse(JSON.stringify(snapshot)) as ViewModel;
+  copy.id = `${snapshot.id}-from-${from}-${idSuffix}`;
+  copy.name = `${snapshot.name} (from ${from})`;
+  copy.from = from;
+  for (const col of copy.cols) for (const w of col.wins) {
+    w.id = `${copy.id}:${w.id}`;
+    if (w.kind === "terminal" && !allowedHosts.includes(w.host)) { w.noAccess = true; w.lines = []; }
+  }
+  return copy;
 }

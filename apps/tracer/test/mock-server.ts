@@ -164,6 +164,7 @@ server.listen(PORT, HOST, () => {
 
 async function routeHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
   response.setHeader(TEST_DOUBLE_HEADER, "true");
+  ensurePreviewSession(request, response);
   const host = request.headers.host ?? `${HOST}:${PORT}`;
   const url = new URL(request.url ?? "/", `http://${host}`);
 
@@ -185,6 +186,31 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       accountToolbar = body;
       return sendJson(response, 200, { ok: true });
     }
+  }
+  // Shared layouts (D182): a copy sent to users or groups, and team layouts that stay linked (a revision per update).
+  if (url.pathname === "/__mock/shares") {
+    if (request.method === "GET") {
+      const person = url.searchParams.get("for") ?? "";
+      const groups = Object.entries(mockGroups).filter(([, members]) => members.includes(person)).map(([g]) => `group:${g}`);
+      const mine = mockShares.filter((x) => x.to.includes(`user:${person}`) || x.to.some((t) => groups.includes(t)));
+      return sendJson(response, 200, { shares: mine });
+    }
+    if (request.method === "POST") {
+      const body = await readJson(request);
+      if (body === undefined || typeof body !== "object") return sendJson(response, 400, { error: "invalid request" });
+      const share = { ...(body as object), id: `sh${mockShares.length + 1}`, rev: 1 } as MockShare;
+      mockShares.push(share);
+      return sendJson(response, 200, { id: share.id });
+    }
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/shares/update") {
+    const body = (await readJson(request)) as { id?: string; key?: string; snapshot?: unknown } | undefined;
+    const share = mockShares.find((x) => x.id === body?.id);
+    const view = share?.views.find((v) => v.key === body?.key);
+    if (!share || !view || !share.publish) return sendJson(response, 404, { error: "not found" });
+    view.snapshot = body!.snapshot;
+    share.rev++;
+    return sendJson(response, 200, { rev: share.rev });
   }
   if (request.method === "GET" && url.pathname === "/__mock/setup-token") {
     return sendJson(response, 200, { setup_token: setupToken });
@@ -811,6 +837,22 @@ function sameOrigin(request: IncomingMessage): boolean {
   return request.headers.origin === `http://${request.headers.host ?? `${HOST}:${PORT}`}`;
 }
 
+/**
+ * Test double only: a mockup preview page (`?mock=1&proto=...`) whose session cookie this process does not
+ * know (the double restarted, or the cookie expired) gets a fresh mock session on its next request, so a
+ * restart never strands an open tab. Plain `?mock=1` pages (the sign-in and onboarding tests) are left alone.
+ */
+function ensurePreviewSession(request: IncomingMessage, response: ServerResponse): void {
+  const referer = request.headers.referer ?? "";
+  if (!/[?&]mock=1(&|$)/.test(referer) || !/[?&]proto=/.test(referer)) return;
+  if (!request.url?.startsWith("/auth/") && !request.url?.startsWith("/__mock/")) return;
+  if (request.url.startsWith("/__mock/reset") || isAuthenticated(request)) return;
+  if (!owner) owner = makeMockOwner();
+  activeAuthCookie = newToken();
+  setPreviewAuthCookie(response, activeAuthCookie);
+  request.headers.cookie = `infraternal-mock-session=${activeAuthCookie}`;
+}
+
 function isAuthenticated(request: IncomingMessage): boolean {
   const cookie = activeAuthCookie;
   return Boolean(owner && cookie && [cookieValue(request, "__Host-infraternal"), cookieValue(request, "infraternal-mock-session")].includes(cookie));
@@ -847,8 +889,12 @@ function makeMockOwner(): MockOwner {
   };
 }
 
+interface MockShare { id: string; from: string; to: string[]; publish: boolean; rev: number; views: Array<{ key: string; name: string; snapshot: unknown }> }
+const mockShares: MockShare[] = [];
+const mockGroups: Record<string, string[]> = { ops: ["kayg", "asha"], sre: ["ravi", "asha"] };
 let accountToolbar: unknown;
 function resetMockState(): void {
+  mockShares.length = 0;
   accountToolbar = undefined;
   owner = undefined;
   activeAuthCookie = undefined;
