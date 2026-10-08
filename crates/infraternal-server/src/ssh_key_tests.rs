@@ -213,3 +213,50 @@ fn material_refuses_invalid_pem_and_non_ed25519_algorithms() {
         .unwrap();
     assert!(SshKeyMaterial::from_pem(&Secret::new(pem)).is_err());
 }
+
+#[tokio::test]
+async fn lock_during_administrator_unwrap_cannot_reinstall_private_material() {
+    struct LockDuringUnwrap<'a> {
+        source: &'a StoredSshKey,
+        vault: &'a Vault,
+    }
+    impl AdministratorSshKeyUnlock for LockDuringUnwrap<'_> {
+        fn unlock(&self, envelope: &[u8]) -> Result<SshKeyMaterial, SshKeyError> {
+            let material = self.vault.unlock(envelope)?;
+            // Deterministically interleave an explicit lock after authorization
+            // and decryption, before the source can install returned material.
+            self.source.lock()?;
+            Ok(material)
+        }
+    }
+    let pool = database().await;
+    let vault = Vault::new();
+    let source = StoredSshKey::initialize(&pool, &vault).await.unwrap();
+    let adapter = LockDuringUnwrap {
+        source: &source,
+        vault: &vault,
+    };
+    assert!(
+        source.unlock_from(&adapter).is_err(),
+        "stale unlock must not win an explicit lock"
+    );
+    assert!(source.load().is_err());
+    assert!(source.public_key().unwrap().locked);
+    source.unlock_from(&vault).unwrap();
+    assert!(source.load().is_ok());
+}
+
+#[tokio::test]
+async fn lock_generation_exhaustion_never_wraps_into_an_unlocked_source() {
+    let pool = database().await;
+    let vault = Vault::new();
+    let source = StoredSshKey::initialize(&pool, &vault).await.unwrap();
+    source.unlock_from(&vault).unwrap();
+    source.material.write().unwrap().generation = Some(u64::MAX);
+    source.lock().unwrap();
+    assert!(source.load().is_err());
+    assert!(source.unlock_from(&vault).is_err());
+    source.lock().unwrap();
+    assert!(source.unlock_from(&vault).is_err());
+    assert!(source.public_key().unwrap().locked);
+}

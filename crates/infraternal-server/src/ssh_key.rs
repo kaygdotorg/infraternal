@@ -102,7 +102,14 @@ pub struct PublicSshKey {
 pub struct StoredSshKey {
     public: Vec<u8>,
     envelope: Vec<u8>,
-    material: RwLock<Option<SshKeyMaterial>>,
+    material: RwLock<KeyState>,
+}
+
+/// Each explicit lock invalidates any unwrap already in progress. Exhausting the
+/// generation counter leaves the source permanently locked instead of wrapping.
+struct KeyState {
+    generation: Option<u64>,
+    material: Option<SshKeyMaterial>,
 }
 
 /// Automatic updates carry unlocked material only in memory; no disk, Debug or serde constructor.
@@ -155,7 +162,10 @@ impl StoredSshKey {
         Ok(Some(Self {
             public,
             envelope,
-            material: RwLock::new(None),
+            material: RwLock::new(KeyState {
+                generation: Some(0),
+                material: None,
+            }),
         }))
     }
 
@@ -163,11 +173,21 @@ impl StoredSshKey {
     /// # Errors
     /// Refuses authorization failures, changed identities or poisoned state.
     pub fn unlock_from(&self, adapter: &impl AdministratorSshKeyUnlock) -> Result<(), SshKeyError> {
+        let generation = self
+            .material
+            .read()
+            .map_err(|_| SshKeyError)?
+            .generation
+            .ok_or(SshKeyError)?;
         let material = adapter.unlock(&self.envelope)?;
         if material.public()? != self.public {
             return Err(SshKeyError);
         }
-        *self.material.write().map_err(|_| SshKeyError)? = Some(material);
+        let mut state = self.material.write().map_err(|_| SshKeyError)?;
+        if state.generation != Some(generation) {
+            return Err(SshKeyError);
+        }
+        state.material = Some(material);
         Ok(())
     }
 
@@ -176,7 +196,11 @@ impl StoredSshKey {
     /// # Errors
     /// Refuses poisoned state.
     pub fn lock(&self) -> Result<(), SshKeyError> {
-        *self.material.write().map_err(|_| SshKeyError)? = None;
+        let mut state = self.material.write().map_err(|_| SshKeyError)?;
+        state.material = None;
+        state.generation = state
+            .generation
+            .and_then(|generation| generation.checked_add(1));
         Ok(())
     }
 
@@ -201,7 +225,10 @@ impl StoredSshKey {
         Ok(Self {
             public: handoff.public,
             envelope: handoff.envelope,
-            material: RwLock::new(Some(handoff.material)),
+            material: RwLock::new(KeyState {
+                generation: Some(0),
+                material: Some(handoff.material),
+            }),
         })
     }
 }
@@ -220,13 +247,19 @@ impl SshKeySource for StoredSshKey {
                 "SHA256:{}",
                 B64.encode(Sha256::digest(&blob)).trim_end_matches('=')
             ),
-            locked: self.material.read().map_err(|_| SshKeyError)?.is_none(),
+            locked: self
+                .material
+                .read()
+                .map_err(|_| SshKeyError)?
+                .material
+                .is_none(),
         })
     }
     fn load(&self) -> Result<SshKeyMaterial, SshKeyError> {
         self.material
             .read()
             .map_err(|_| SshKeyError)?
+            .material
             .clone()
             .ok_or(SshKeyError)
     }
