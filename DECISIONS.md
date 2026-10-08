@@ -1224,6 +1224,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        flies to it. Section expansion belongs to the account.
      - **Settings → Devices:** lists every device signed in to the account,
        with where each is looking, for handoff.
+       Each device has an editable name, type, last seen, current view and
+       online state, with "Jump to its view" and "Sign out this device"
+       (compact confirm). Opening the app on a different device shows a
+       one-time "Continue from <device>?" chip that fades on its own.
 179. **Settings is a view on the canvas, not an overlay (owner, 2026-10-08, #89):**
      Settings is a view like Console or Topology, listed last in the sidebar
      and the view switcher. Each section (Appearance, Toolbar, Shortcuts,
