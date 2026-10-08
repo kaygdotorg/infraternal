@@ -103,15 +103,15 @@ function makeSection(section: BranchSection): HTMLElement {
     const spoken = [leaf.label, leaf.state, leaf.mark ? MARK_NAME[leaf.mark] : "", leaf.meta].filter(Boolean);
     button.setAttribute("aria-label", spoken.join(", "));
     const glyph = el("span", "glyph");
-    glyph.textContent = leaf.state ? "" : leaf.glyph ?? "›_";
+    if (leaf.state) { glyph.className = "glyph ui-state-dot"; glyph.dataset.state = leaf.state; }
+    else glyph.textContent = leaf.glyph ?? "›_";
     const label = el("span", "bm-label");
     label.textContent = leaf.label;
     const leafMeta = el("span", "bm-meta");
     leafMeta.textContent = leaf.meta ?? "";
-    if (leaf.state) button.dataset.state = leaf.state;
     button.append(glyph, label);
     if (leaf.mark) {
-      const mark = el("span", "bm-mark");
+      const mark = el("span", "ui-mark");
       mark.dataset.mark = leaf.mark;
       mark.setAttribute("aria-hidden", "true");
       button.append(mark);
