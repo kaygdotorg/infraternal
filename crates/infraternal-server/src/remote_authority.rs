@@ -88,7 +88,7 @@ impl EnrollmentStore {
         Ok(())
     }
 
-    /// Durably revoke a host on an owner-authorized write; transport cancellation follows this commit.
+    /// Quiesce retained transports before committing an owner-authorized host tombstone.
     /// # Errors
     /// Refuses wrong owner, unknown host, invalid time and storage failure.
     pub async fn revoke(&self, owner: &str, host: Uuid, now: i64) -> Result<(), EnrollmentError> {
@@ -114,7 +114,7 @@ impl EnrollmentStore {
     }
 
     /// HTTP authority is rechecked in the tombstone write, including logout or
-    /// role change racing a request. Publish cancellation only after commit.
+    /// role change racing a request. Cancellation follows authorization, before commit.
     pub(crate) async fn revoke_for_session(
         &self,
         session_hash: &str,
@@ -156,10 +156,18 @@ impl EnrollmentStore {
     ) -> Result<(), EnrollmentError> {
         let store = self.clone();
         tokio::spawn(async move {
+            // The authorized writer transaction is prepared. Cut and drain
+            // frame writes before COMMIT; keeping the signal alive fences a new
+            // registration until the durable tombstone is visible. Storage
+            // failure conservatively retains cancellation, as before.
+            let _fence = store.1.quiesce(host).await.map_err(|_| {
+                EnrollmentError::Storage(sqlx::Error::Protocol(
+                    "revocation fence unavailable".into(),
+                ))
+            })?;
             let committed = transaction.commit().await;
-            // Permission succeeded under the writer lock. A commit error also
-            // refuses retained authority conservatively; report storage failure.
-            store.1.revoke(host);
+            #[cfg(test)]
+            store.1.after_commit().await;
             committed.map_err(EnrollmentError::Storage)
         })
         .await

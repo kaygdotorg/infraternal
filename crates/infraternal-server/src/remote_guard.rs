@@ -1,4 +1,4 @@
-//! Cancels retained remote authority on durable revocation or certificate expiry, with ledger reads at admission rather than per keystroke [134], #78.
+//! Fences admitted remote writes across durable revocation and certificate expiry, without per-keystroke ledger reads [134], #78.
 
 use crate::enrollment::{EnrollmentStore, HostAuthority};
 use std::{
@@ -13,13 +13,39 @@ use uuid::Uuid;
 /// One event source per runtime store, shared by its clones. Weak entries do not
 /// retain transports, and dead host registrations are pruned at the host cap.
 #[derive(Default)]
-pub(crate) struct Revocations(Mutex<HashMap<Uuid, Weak<watch::Sender<bool>>>>);
+pub(crate) struct Revocations {
+    signals: Mutex<HashMap<Uuid, Weak<Revocation>>>,
+    #[cfg(test)]
+    pub(crate) publication_pause: Mutex<Option<Arc<PublicationPause>>>,
+}
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct PublicationPause {
+    pub(crate) committed: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
+}
+/// Cancellation is visible before draining admitted writes. Retaining this
+/// registration through COMMIT prevents admission from creating a fresh false
+/// signal while the tombstone is not yet visible to a different reader.
+pub(crate) struct Revocation {
+    changed: watch::Sender<bool>,
+    writes: Arc<tokio::sync::RwLock<()>>,
+}
+
 impl Revocations {
-    fn register(&self, host: Uuid) -> io::Result<Arc<watch::Sender<bool>>> {
+    #[cfg(test)]
+    pub(crate) async fn after_commit(&self) {
+        let pause = self.publication_pause.lock().unwrap().take();
+        if let Some(pause) = pause {
+            pause.committed.notify_one();
+            pause.release.notified().await;
+        }
+    }
+    fn register(&self, host: Uuid) -> io::Result<Arc<Revocation>> {
         // This map contains only independent weak registrations; Rust containers
         // retain their invariants after unwinding, so poison can be recovered.
         let mut signals = self
-            .0
+            .signals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(signal) = signals.get(&host).and_then(Weak::upgrade) {
@@ -31,21 +57,22 @@ impl Revocations {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
         }
-        let signal = Arc::new(watch::channel(false).0);
+        let signal = Arc::new(Revocation {
+            changed: watch::channel(false).0,
+            writes: Arc::default(),
+        });
         signals.insert(host, Arc::downgrade(&signal));
         Ok(signal)
     }
 
-    pub(crate) fn revoke(&self, host: Uuid) {
-        let signals = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(signal) = signals.get(&host).and_then(Weak::upgrade) {
-            // Publish before the storage API returns. Readers and partially
-            // blocked writes wake without a heartbeat or a database polling task.
-            signal.send_replace(true);
-        }
+    pub(crate) async fn quiesce(
+        &self,
+        host: Uuid,
+    ) -> io::Result<(Arc<Revocation>, tokio::sync::OwnedRwLockWriteGuard<()>)> {
+        let signal = self.register(host)?;
+        signal.changed.send_replace(true);
+        let drained = signal.writes.clone().write_owned().await;
+        Ok((signal, drained))
     }
 }
 
@@ -55,7 +82,7 @@ pub(crate) struct AuthorityGuard {
     store: EnrollmentStore,
     fingerprint: [u8; 32],
     pub(crate) identity: HostAuthority,
-    signal: Arc<watch::Sender<bool>>,
+    signal: Arc<Revocation>,
     expires: Instant,
 }
 impl AuthorityGuard {
@@ -70,7 +97,7 @@ impl AuthorityGuard {
         // Register before the final ledger read, so revocation racing initial
         // admission either denies that read or marks the already registered guard.
         let live = store.admit(&fingerprint, now).await.map_err(|_| denied())?;
-        if live != identity || *signal.borrow() {
+        if live != identity || *signal.changed.borrow() {
             return Err(denied());
         }
         let remaining_at_admission =
@@ -103,11 +130,24 @@ impl AuthorityGuard {
     }
 
     pub(crate) fn permits(&self) -> bool {
-        !*self.signal.borrow() && Instant::now() < self.expires
+        !*self.signal.changed.borrow() && Instant::now() < self.expires
+    }
+
+    /// A frame holds this permit until its write completes or cancellation
+    /// drops it. Revocation drains these permits before committing its tombstone.
+    pub(crate) async fn write_permit(&self) -> io::Result<tokio::sync::OwnedRwLockReadGuard<()>> {
+        if !self.permits() {
+            return Err(denied());
+        }
+        let permit = self.signal.writes.clone().read_owned().await;
+        if !self.permits() {
+            return Err(denied());
+        }
+        Ok(permit)
     }
 
     pub(crate) async fn cancelled(&self) {
-        let mut changed = self.signal.subscribe();
+        let mut changed = self.signal.changed.subscribe();
         if !self.permits() {
             return;
         }

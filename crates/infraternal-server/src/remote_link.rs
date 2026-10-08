@@ -105,6 +105,7 @@ impl RemoteLink {
             self.retire();
             return Err(io::ErrorKind::PermissionDenied.into());
         }
+        let _permit = authority.write_permit().await?;
         tokio::select! {
             biased;
             () = authority.cancelled() => {
