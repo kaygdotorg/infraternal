@@ -326,13 +326,18 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     const move = (ev: PointerEvent): void => {
       const w = toLocal(ev.clientX, ev.clientY);
       live.move(w, headSize());
-      // Graph nodes take no pointer events of their own, so the node under the pointer is found by geometry.
-      let id = c.view.nodes.find((n) => { const r = nodeRect(c, n.id); return !!r && w.x >= r.x && w.x <= r.x + r.w && w.y >= r.y && w.y <= r.y + r.h; })?.id;
-      // Near its own node the end stays attached: a short pull does not unsnap it.
-      const slack = 28 / cam.z;
-      const nearHome = w.x > home.x - slack && w.x < home.x + home.w + slack && w.y > home.y - slack && w.y < home.y + home.h + slack;
-      if (nearHome && !id) id = homeId;
-      if (id === fixedId || (id && id !== homeId && taken(id))) id = undefined;
+      // Snap: the nearest node whose edge is within the snap radius of the pointer (about 32 px, larger on touch).
+      // Once snapped the radius is a quarter wider before it lets go, so the arrow does not flicker at the edge.
+      const radius = (coarse.matches ? 48 : 32) / cam.z;
+      const gap = (r: Rect): number => Math.hypot(Math.max(r.x - w.x, 0, w.x - (r.x + r.w)), Math.max(r.y - w.y, 0, w.y - (r.y + r.h)));
+      let id: string | undefined, best = Infinity;
+      for (const n of c.view.nodes) {
+        const r = nodeRect(c, n.id);
+        if (!r || n.id === fixedId) continue;
+        const d = gap(r), limit = n.id === candidate ? radius * 1.25 : radius;
+        if (d <= limit && d < best) { best = d; id = n.id; }
+      }
+      if (id && id !== homeId && taken(id)) id = undefined;
       if (id !== candidate) {
         over?.removeAttribute("data-drop");
         over = id && id !== homeId ? c.wins.get(`n-${id}`)?.card.root : undefined;
@@ -472,6 +477,9 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     c.colsEl.append(svg);
     c.graphSvg = svg;
     svg.addEventListener("pointerdown", (e) => {
+      // Touch: a tap on an arrow selects it (its handles show); a tap on another arrow moves the selection.
+      const hitEl = (e.target as Element).closest(".cl-arrow-hit, .cl-arrow-handle")?.closest(".cl-arrow");
+      for (const t of topoOf(c)) t.arrow.g.toggleAttribute("data-selected", t.arrow.g === hitEl);
       const handle = (e.target as Element).closest<SVGElement>(".cl-arrow-handle");
       const entry = topoOf(c).find((t) => t.arrow.g === handle?.closest(".cl-arrow"));
       if (!handle || !entry || e.button !== 0) return;

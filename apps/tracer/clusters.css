@@ -113,7 +113,11 @@
 .cl-arrow:hover .cl-arrow-head { filter: none; }
 .cl-arrow[data-editing] { opacity: 0.25; }
 .cl-arrow-handle:active { cursor: grabbing; }
-@media (pointer: coarse) { .cl-arrow-handle { opacity: 0.85; pointer-events: all; } }
+/* Touch: no hover, so a tap on an arrow selects it and only then does it show its two handles (rings that leave the
+   arrowhead visible); a wider invisible line makes it easy to hit. */
+.cl-arrow[data-selected] .cl-arrow-handle { pointer-events: all; opacity: 1; }
+.cl-arrow-handle { fill: transparent; }
+@media (pointer: coarse) { .cl-arrow-hit { stroke-width: 30px; } }
 .cl-arrow[data-dashed] .cl-arrow-line { stroke-dasharray: 5 5; }
 .cl-arrow[data-fresh], .cl-arrow[data-leaving] { opacity: 0; }
 .cl-arrow[data-live]:not([data-snapped]) .cl-arrow-line { opacity: 0.8; }
