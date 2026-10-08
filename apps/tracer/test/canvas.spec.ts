@@ -920,3 +920,33 @@ test("palette: Ctrl+K then typing within 20 ms lands every character; arrow sele
   // The key-triggered open is short (about 180 ms) and the pointer one longer.
   expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).transitionDuration)).toBe("0.18s");
 });
+
+// ---- ?pills=large: the larger desktop pill proportions ---------------------------------------------
+test("pills=large: desktop pills take the larger sizes through tokens, nothing overflows; phones and the default are unchanged", async ({ browser }) => {
+  const sizes = async (query: string, viewport: { width: number; height: number }, touch = false) => {
+    const context = await browser.newContext({ viewport, hasTouch: touch, isMobile: touch });
+    const page = await context.newPage();
+    await page.goto(`/?mock=1&proto=windows&bg=none&fixture=none${query}`);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __tracerCanvas?: { windows(): string[] } }).__tracerCanvas?.windows().length ?? 0), { timeout: 30_000 }).toBeGreaterThan(2);
+    if (!touch) { await page.locator("#sidebar-toggle").click(); await page.waitForTimeout(500); }
+    await page.locator(".ui-window-pill").nth(1).click();
+    await page.waitForTimeout(400);
+    const measured = await page.evaluate(() => {
+      const h = (selector: string) => Math.round(document.querySelector(selector)!.getBoundingClientRect().height * 10) / 10;
+      const clipped = [...document.querySelectorAll<HTMLElement>(".ui-tab, #capsule, .ui-sidebar-user, .ui-sidebar-settings")].filter((node) => node.scrollWidth > node.clientWidth + 1).length;
+      return { tabs: h(".canvas-popover .ui-tabs"), tab: h(".canvas-popover .ui-tab[aria-selected='true']"), capsule: h("#capsule"), font: getComputedStyle(document.querySelector(".canvas-popover .ui-tab")!).fontSize, clipped };
+    });
+    await context.close();
+    return measured;
+  };
+  const standard = await sizes("", { width: 1440, height: 900 });
+  const large = await sizes("&pills=large", { width: 1440, height: 900 });
+  expect(standard).toMatchObject({ tabs: 30, capsule: 38, font: "13.5px", clipped: 0 });
+  // A 46 px pill with a 4 px inset, a 38 px selected segment, 16 px labels.
+  expect(large).toMatchObject({ tabs: 46, tab: 38, capsule: 46, font: "16px", clipped: 0 });
+  // Phones keep their sizes whatever the parameter says.
+  const phone = await sizes("&pills=large", { width: 393, height: 852 }, true);
+  const phoneStandard = await sizes("", { width: 393, height: 852 }, true);
+  expect(phone).toEqual(phoneStandard);
+  expect(phone.font).toBe("13.5px");
+});

@@ -235,6 +235,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const params = new URLSearchParams(location.search);
   // `?glass=1..4`: how much shows through the floating cards (1 thickest, 4 thinnest; default 3).
   const glassParam = Number(params.get("glass"));
+  // `?pills=large`: the larger desktop pill proportions (size tokens in packages/ui/styles.css), to compare.
+  if (params.get("pills") === "large") ROOT.dataset.pills = "large"; else delete ROOT.dataset.pills;
   const glassLevel = Number.isInteger(glassParam) && glassParam >= 1 && glassParam <= 4 ? glassParam : DEFAULT_GLASS;
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
   let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "ink" : "paper");
