@@ -866,7 +866,12 @@ test("devices: the name edits in place, a sign-out asks first, and a device swit
   await expect(row.locator(".ui-sp-kind svg")).toHaveCount(1);
   const before = await page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device').count();
   await row.locator('[aria-label="Sign out this device"]').click();
-  await expect(page.locator(".ui-confirm-tip")).toContainText("Sign out");
+  // The confirmation says what happens in plain words, and its two buttons carry their names.
+  const tip = page.locator(".ui-confirm-tip");
+  await expect(tip.locator(".ui-confirm-tip-message")).toContainText(/^Sign out .+\?$/);
+  await expect(tip.locator(".ui-confirm-tip-detail")).toHaveText("That device will be signed out and will need your passkey to sign in again.");
+  await expect(tip.locator(".ui-confirm-yes")).toHaveText("Sign out device");
+  await expect(tip.locator(".ui-confirm-no")).toHaveText("Keep signed in");
   await page.locator(".ui-confirm-yes").click();
   await expect(page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device')).toHaveCount(before - 1);
   await page.keyboard.press("Control+k");
