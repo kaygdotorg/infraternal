@@ -662,6 +662,12 @@ async fn process_command(
 ) -> bool {
     match command {
         Command::Open { size, reply } => {
+            if let Peer::Remote(link) = &connection.peer
+                && link.admit_operation().await.is_err()
+            {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
             if pending.len() >= COMMAND_CAPACITY {
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
@@ -703,6 +709,12 @@ async fn process_command(
             output,
             reply,
         } => {
+            if let Peer::Remote(link) = &connection.peer
+                && link.admit_operation().await.is_err()
+            {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
             if stream_id == 0 || stream_id % 2 != 0 {
                 let _ = reply.send(Err(AgentError::Protocol));
                 return true;

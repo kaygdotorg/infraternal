@@ -279,3 +279,6 @@ pub(crate) fn server_material() -> (Identity, crate::ca::CaMaterial) {
     let (server, _, _, material) = identities();
     (server, material)
 }
+
+#[path = "remote_revocation_tests.rs"]
+mod revocation;

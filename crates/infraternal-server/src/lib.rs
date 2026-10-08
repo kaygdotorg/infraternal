@@ -8,6 +8,7 @@ pub mod csr;
 mod embedded;
 pub mod enrollment;
 pub mod remote_enrollment;
+mod remote_guard;
 pub mod remote_http;
 mod remote_link;
 mod remote_runtime;

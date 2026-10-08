@@ -72,14 +72,23 @@ pub enum EnrollmentError {
 }
 
 /// Storage using the server's existing bounded SQLite pool; no idle worker.
+/// Construct once per configured runtime and pass clones to authority writers
+/// and transports so committed revocation reaches their shared event scope.
 #[derive(Clone)]
-pub struct EnrollmentStore(SqlitePool);
+pub struct EnrollmentStore(
+    pub(crate) SqlitePool,
+    pub(crate) std::sync::Arc<crate::remote_guard::Revocations>,
+);
 
 impl EnrollmentStore {
     /// Use an already migrated server database. This creates no listener/timer.
+    /// Each construction creates a distinct revocation scope; cloning retains it.
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
-        Self(pool)
+        Self(
+            pool,
+            std::sync::Arc::new(crate::remote_guard::Revocations::default()),
+        )
     }
 
     /// Cheap public-authority preflight before CSR verification or private signing.

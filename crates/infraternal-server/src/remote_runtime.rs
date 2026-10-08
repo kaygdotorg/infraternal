@@ -1,18 +1,15 @@
 //! Admits dial-out hosts against the durable certificate ledger and supplies their transport to the existing terminal actor [9][64], #78.
 
-use crate::{embedded::EmbeddedAgent, enrollment::EnrollmentStore, remote_link::RemoteLink};
+use crate::{
+    embedded::EmbeddedAgent, enrollment::EnrollmentStore, remote_guard::AuthorityGuard,
+    remote_link::RemoteLink,
+};
 use infraternal_agent::{
     remote_quic,
     remote_tls::{self, Identity},
 };
 use openssl::x509::X509;
-use std::{
-    collections::HashMap,
-    io,
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     net::TcpListener,
     sync::{Mutex, Semaphore, mpsc},
@@ -35,14 +32,25 @@ pub struct RemoteService {
 pub(crate) struct RemoteHosts(Arc<Mutex<HashMap<Uuid, Host>>>);
 struct Host {
     uid: u32,
+    authority: AuthorityGuard,
     actor: EmbeddedAgent,
     accepts: mpsc::Sender<RemoteLink>,
 }
 impl RemoteHosts {
     pub(crate) async fn actor(&self, id: Uuid) -> Option<EmbeddedAgent> {
-        self.0.lock().await.get(&id).map(|host| host.actor.clone())
+        self.0
+            .lock()
+            .await
+            .get(&id)
+            .filter(|host| host.authority.permits())
+            .map(|host| host.actor.clone())
     }
-    async fn admit(&self, id: Uuid, uid: u32, link: RemoteLink) -> io::Result<()> {
+    async fn admit(&self, authority: AuthorityGuard, link: RemoteLink) -> io::Result<()> {
+        if !authority.permits() {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let id = authority.identity.host;
+        let uid = authority.identity.execution_uid;
         let mut hosts = self.0.lock().await;
         if !hosts.contains_key(&id) && hosts.len() >= 10_000 {
             return Err(io::ErrorKind::WouldBlock.into());
@@ -51,6 +59,7 @@ impl RemoteHosts {
             let (actor, accepts) = EmbeddedAgent::remote(uid);
             Host {
                 uid,
+                authority: authority.clone(),
                 actor,
                 accepts,
             }
@@ -59,12 +68,18 @@ impl RemoteHosts {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         host.accepts
-            .try_send(link)
-            .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))
+            .try_send(link.authorize(authority.clone()))
+            .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
+        // A rejected concurrent replacement must not change the retained actor's
+        // admission cap or hide its still-valid active transport.
+        host.authority = authority;
+        Ok(())
     }
 }
 
+#[cfg(test)]
 fn now() -> io::Result<i64> {
+    use std::time::{SystemTime, UNIX_EPOCH};
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
@@ -129,14 +144,9 @@ impl RemoteListeners {
                     };
                     let admitted = tokio::time::timeout(Duration::from_secs(5), async {
                         let fingerprint = remote_quic::peer_fingerprint(&connection)?;
-                        let authority = store
-                            .admit(&fingerprint, now()?)
-                            .await
-                            .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?;
+                        let authority = AuthorityGuard::admit(store, fingerprint).await?;
                         let link = RemoteLink::quic(connection.clone()).await?;
-                        hosts
-                            .admit(authority.host, authority.execution_uid, link)
-                            .await
+                        hosts.admit(authority, link).await
                     })
                     .await;
                     if !matches!(admitted, Ok(Ok(()))) {
@@ -160,12 +170,9 @@ impl RemoteListeners {
                     let Ok(connection) = remote_tls::accept(socket, &tls).await else {
                         return;
                     };
-                    let Ok(instant) = now() else {
-                        return;
-                    };
                     let Ok(Ok(authority)) = tokio::time::timeout(
                         Duration::from_secs(5),
-                        store.admit(&connection.peer_fingerprint, instant),
+                        AuthorityGuard::admit(store, connection.peer_fingerprint),
                     )
                     .await
                     else {
@@ -174,9 +181,7 @@ impl RemoteListeners {
                     let Ok(link) = RemoteLink::tcp(connection.channel).await else {
                         return;
                     };
-                    let _ = hosts
-                        .admit(authority.host, authority.execution_uid, link)
-                        .await;
+                    let _ = hosts.admit(authority, link).await;
                 });
             }
         });

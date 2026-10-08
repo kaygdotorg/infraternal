@@ -16,13 +16,20 @@ use tokio::{
 };
 
 /// Remote TCP keeps the existing mux; native QUIC fans raw streams into bounded actor delivery.
-pub(crate) enum RemoteLink {
+enum LinkTransport {
     Tcp {
         channel: TcpTls,
         receive: Mutex<Receive>,
         prefix: Mutex<Option<Bytes>>,
     },
     Quic(QuicLink),
+}
+
+/// Authority is attached only after durable mTLS admission and guards both
+/// transport directions; direct actor tests may still construct an unguarded link.
+pub(crate) struct RemoteLink {
+    transport: LinkTransport,
+    authority: Option<crate::remote_guard::AuthorityGuard>,
 }
 
 pub(crate) struct QuicLink {
@@ -48,6 +55,66 @@ impl Drop for QuicLink {
 }
 
 impl RemoteLink {
+    pub(crate) fn authorize(mut self, authority: crate::remote_guard::AuthorityGuard) -> Self {
+        self.authority = Some(authority);
+        self
+    }
+    pub(crate) async fn admit_operation(&self) -> io::Result<()> {
+        match &self.authority {
+            Some(authority) => authority.admit_operation().await,
+            None => Ok(()),
+        }
+    }
+    fn retire(&self) {
+        match &self.transport {
+            LinkTransport::Tcp { channel, .. } => channel.retire(),
+            LinkTransport::Quic(link) => link.connection.close(0u32.into(), b""),
+        }
+    }
+    pub(crate) async fn read(
+        &self,
+        target: &mut BytesMut,
+        scratch: &mut [u8],
+    ) -> io::Result<usize> {
+        let Some(authority) = &self.authority else {
+            return self.read_transport(target, scratch).await;
+        };
+        if !authority.permits() {
+            self.retire();
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        tokio::select! {
+            biased;
+            () = authority.cancelled() => {
+                self.retire();
+                Err(io::ErrorKind::PermissionDenied.into())
+            },
+            result = self.read_transport(target, scratch) => result,
+        }
+    }
+    pub(crate) async fn write(
+        &self,
+        stream: u32,
+        frame: &Frame<'_>,
+        muxed: &[u8],
+    ) -> io::Result<()> {
+        let Some(authority) = &self.authority else {
+            return self.write_transport(stream, frame, muxed).await;
+        };
+        if !authority.permits() {
+            self.retire();
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        tokio::select! {
+            biased;
+            () = authority.cancelled() => {
+                self.retire();
+                Err(io::ErrorKind::PermissionDenied.into())
+            },
+            result = self.write_transport(stream, frame, muxed) => result,
+        }
+    }
+
     pub(crate) async fn tcp(channel: TcpTls) -> io::Result<Self> {
         let mut receive = Receive::default();
         let hello = tokio::time::timeout(Duration::from_secs(5), receive.next(&channel))
@@ -60,10 +127,13 @@ impl RemoteLink {
         encode_muxed_frame_into(0, &hello.frame, &mut prefix).map_err(io::Error::other)?;
         // TLS losers in the outgoing dial race send no application greeting;
         // they must never supersede the winning host transport in the registry.
-        Ok(Self::Tcp {
-            channel,
-            receive: Mutex::new(receive),
-            prefix: Mutex::new(Some(Bytes::from(prefix))),
+        Ok(Self {
+            transport: LinkTransport::Tcp {
+                channel,
+                receive: Mutex::new(receive),
+                prefix: Mutex::new(Some(Bytes::from(prefix))),
+            },
+            authority: None,
         })
     }
     pub(crate) async fn quic(connection: quinn::Connection) -> io::Result<Self> {
@@ -84,24 +154,27 @@ impl RemoteLink {
             control_output.clone(),
             connection.clone(),
         ));
-        Ok(Self::Quic(QuicLink {
-            connection,
-            binding: Mutex::new(None),
-            streams: Mutex::new(HashMap::from([(0, control)])),
-            incoming: Mutex::new(incoming),
-            _control: control_output,
-            output,
-            pumps: Mutex::new(pumps),
-        }))
+        Ok(Self {
+            transport: LinkTransport::Quic(QuicLink {
+                connection,
+                binding: Mutex::new(None),
+                streams: Mutex::new(HashMap::from([(0, control)])),
+                incoming: Mutex::new(incoming),
+                _control: control_output,
+                output,
+                pumps: Mutex::new(pumps),
+            }),
+            authority: None,
+        })
     }
 
-    pub(crate) async fn read(
+    async fn read_transport(
         &self,
         target: &mut BytesMut,
         _scratch: &mut [u8],
     ) -> io::Result<usize> {
-        match self {
-            Self::Tcp {
+        match &self.transport {
+            LinkTransport::Tcp {
                 channel,
                 receive,
                 prefix,
@@ -119,7 +192,7 @@ impl RemoteLink {
                 target.extend_from_slice(&bytes);
                 Ok(count)
             }
-            Self::Quic(link) => {
+            LinkTransport::Quic(link) => {
                 tokio::select! {
                     biased;
                     _ = link.connection.closed() => Ok(0),
@@ -141,22 +214,22 @@ impl RemoteLink {
     }
 
     pub(crate) async fn hello(&self, frame: &Frame<'_>) -> io::Result<()> {
-        if let Self::Quic(link) = self {
+        if let LinkTransport::Quic(link) = &self.transport {
             *link.binding.lock().await =
                 Some(remote_quic::negotiate_binding(&link.connection, frame)?);
         }
         Ok(())
     }
 
-    pub(crate) async fn write(
+    async fn write_transport(
         &self,
         stream: u32,
         frame: &Frame<'_>,
         muxed: &[u8],
     ) -> io::Result<()> {
-        match self {
-            Self::Tcp { channel, .. } => channel.write(muxed).await,
-            Self::Quic(link) => {
+        match &self.transport {
+            LinkTransport::Tcp { channel, .. } => channel.write(muxed).await,
+            LinkTransport::Quic(link) => {
                 let mut streams = link.streams.lock().await;
                 if let std::collections::hash_map::Entry::Vacant(entry) = streams.entry(stream) {
                     if !matches!(frame, Frame::AttachTerm { .. }) {

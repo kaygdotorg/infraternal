@@ -4,7 +4,7 @@ use crate::enrollment::{CertificateRecord, EnrollmentError, EnrollmentStore, Mod
 use uuid::Uuid;
 
 /// Trusted enrolled identity; the execution uid never comes from browser input.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostAuthority {
     /// Host that owns this certificate and the remote sessions.
     pub host: Uuid,
@@ -12,6 +12,8 @@ pub struct HostAuthority {
     pub mode: Mode,
     /// Unix uid selected by the trusted enrollment operation on that host.
     pub execution_uid: u32,
+    /// Exact current certificate validity cap, independent of host reconnects.
+    pub not_after: i64,
 }
 
 impl EnrollmentStore {
@@ -26,8 +28,8 @@ impl EnrollmentStore {
         if now < 0 {
             return Err(EnrollmentError::Denied);
         }
-        let row: Option<(Vec<u8>, String, i64)> = sqlx::query_as(
-            "SELECT h.id, h.mode, h.execution_uid FROM remote_hosts h \
+        let row: Option<(Vec<u8>, String, i64, i64)> = sqlx::query_as(
+            "SELECT h.id, h.mode, h.execution_uid, c.not_after FROM remote_hosts h \
              JOIN remote_certificates c ON c.host_id=h.id \
              WHERE c.fingerprint=? AND c.not_before<=? AND c.not_after>? \
              AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
@@ -37,7 +39,7 @@ impl EnrollmentStore {
         .bind(now)
         .fetch_optional(&self.0)
         .await?;
-        let (host, mode, uid) = row.ok_or(EnrollmentError::Denied)?;
+        let (host, mode, uid, not_after) = row.ok_or(EnrollmentError::Denied)?;
         let host = Uuid::from_slice(&host).map_err(|_| EnrollmentError::Denied)?;
         let execution_uid = u32::try_from(uid).map_err(|_| EnrollmentError::Denied)?;
         let mode = match mode.as_str() {
@@ -49,6 +51,7 @@ impl EnrollmentStore {
             host,
             mode,
             execution_uid,
+            not_after,
         })
     }
 
@@ -106,6 +109,7 @@ impl EnrollmentStore {
         if changed != 1 {
             return Err(EnrollmentError::Denied);
         }
+        self.1.revoke(host);
         Ok(())
     }
 }
@@ -165,7 +169,8 @@ pub(crate) mod tests {
             HostAuthority {
                 host,
                 mode: Mode::Rootless,
-                execution_uid: 1002
+                execution_uid: 1002,
+                not_after: 604_900,
             }
         );
         for time in [-1, 99, 604_900, i64::MAX] {
