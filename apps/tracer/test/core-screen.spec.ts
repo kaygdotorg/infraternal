@@ -199,7 +199,8 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   expect(paletteActions.sort()).toEqual([
     "session:current", "host:current", "bg:mesh", "bg:none", ...Object.keys(THEMES).map((id) => `theme:${id}`), ...FONTS.map((font) => `font:${font.id}`),
   ].sort());
-  expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0s");
+  // Superseded (TASTE: animation never gets in the way): a key-triggered open is a short 180 ms fade, never blocking input.
+  expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0.18s");
   const previousMesh = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"));
   await page.locator("#palette-input").fill("dracula");
   await expect(page.getByRole("option", { name: /Dracula/ })).toBeVisible();
