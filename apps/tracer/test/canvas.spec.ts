@@ -497,3 +497,82 @@ test("lock (touch): a header tap shows a 44 px lock, a tap locks it, and the loc
   await expect(window0).not.toHaveAttribute("data-locked", "");
   await context.close();
 });
+
+// ---- the `?` shortcuts view ---------------------------------------------------------------
+const blurTerminal = (page: Page): Promise<void> => page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+
+test("shortcuts: ? morphs the capsule into the list, current area first, one shortcut per action; Esc, ? and a click outside morph it back", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  // Typing into the terminal is never hijacked.
+  await page.locator(".ui-window").first().locator(".terminal-host").click();
+  await page.keyboard.press("Shift+Slash");
+  await expect(page.locator(".ui-shortcuts")).toHaveCount(0);
+  await blurTerminal(page);
+  const pillBox = (await page.locator("#capsule").boundingBox())!;
+  await page.keyboard.press("Shift+Slash");
+  const panel = page.locator(".ui-shortcuts");
+  await expect(panel).toBeVisible();
+  // Mid-morph: the shape is clipped to part of the panel and the pill is fading out.
+  const mid = await panel.evaluate((node) => ({ clip: getComputedStyle(node).clipPath, pill: getComputedStyle(document.querySelector("#capsule")!).opacity }));
+  expect(mid.clip === "none" || mid.clip.startsWith("inset(")).toBe(true);
+  await expect.poll(() => panel.evaluate((node) => getComputedStyle(node).clipPath)).toBe("none");
+  // The panel starts where the pill is and is the same material as every floating card.
+  const box = (await panel.boundingBox())!;
+  expect(Math.abs(box.y - pillBox.y)).toBeLessThan(1.5);
+  expect(box.width).toBeGreaterThan(pillBox.width);
+  const titles = await panel.locator(".ui-shortcuts-title").allTextContents();
+  expect(titles).toEqual(["Canvas", "Terminal", "Everywhere"]);
+  const labels = await panel.locator(".ui-shortcuts-label").allTextContents();
+  expect(new Set(labels).size).toBe(labels.length);
+  // One shortcut per action: the palette shows Ctrl+K here, never ⌘K as well.
+  const palette = await panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd").allTextContents();
+  expect(palette).toEqual(["Ctrl", "K"]);
+  const material = await panel.evaluate((node) => { const s = getComputedStyle(node); return { filter: s.backdropFilter, bg: s.backgroundColor }; });
+  expect(material.filter).toContain("blur(14px)");
+  // At rest nothing is left animating: no transform, no opacity on the content.
+  expect(await panel.evaluate((node) => [getComputedStyle(node).transform, getComputedStyle(node.querySelector(".ui-shortcuts-body")!).opacity])).toEqual(["none", "1"]);
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+  await expect(page.locator("#capsule")).toHaveCSS("opacity", "1");
+  // ? again toggles; a press outside closes.
+  await page.keyboard.press("Shift+Slash");
+  await expect(panel).toBeVisible();
+  await page.keyboard.press("Shift+Slash");
+  await expect(panel).toHaveCount(0);
+  await page.keyboard.press("Shift+Slash");
+  await expect(panel).toBeVisible();
+  await page.mouse.click(300, 700);
+  await expect(panel).toHaveCount(0);
+});
+
+test("shortcuts: the palette offers Keyboard shortcuts, lock shortcuts are listed, and a Mac sees ⌘K", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await context.addInitScript(() => Object.defineProperty(navigator, "platform", { get: () => "MacIntel" }));
+  const page = await context.newPage();
+  await openCanvas(page);
+  await page.keyboard.press("Meta+k");
+  await page.locator("#palette-input").fill("shortcuts");
+  await page.keyboard.press("Enter");
+  const panel = page.locator(".ui-shortcuts");
+  await expect(panel).toBeVisible();
+  await expect(panel.locator(".ui-shortcuts-row", { hasText: "Lock or unlock" }).locator("kbd")).toHaveText(["Ctrl", "Shift", "L"]);
+  await expect(panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd")).toHaveText(["⌘", "K"]);
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+  await context.close();
+});
+
+test("shortcuts (reduced motion): the panel crossfades without any shape travel", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
+  const page = await context.newPage();
+  await openCanvas(page);
+  await blurTerminal(page);
+  await page.keyboard.press("Shift+Slash");
+  const panel = page.locator(".ui-shortcuts");
+  await expect(panel).toBeVisible();
+  expect(await panel.evaluate((node) => getComputedStyle(node).clipPath)).toBe("none");
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+  await context.close();
+});

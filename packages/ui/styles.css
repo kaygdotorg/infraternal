@@ -508,3 +508,18 @@
 .ui-window[data-locked] { border-color: color-mix(in oklab, var(--accent) 78%, var(--overlay-line)); box-shadow: var(--shadow), 0 0 0 1px color-mix(in oklab, var(--accent) 28%, transparent); }
 @media (prefers-reduced-motion: reduce) { .ui-window-lock { transition: opacity 160ms ease; } }
 .ui-window[data-status="none"] .ui-window-lock { display: none; }
+
+/* Shortcuts view (shortcuts-view.ts): the capsule's morph target. The material is the shared
+   overlay surface; only the layout lives here. */
+.ui-shortcuts { position: absolute; z-index: 7; display: flex; flex-direction: column; min-height: 0; border-radius: var(--r-lg, 18px); color: var(--fg); outline: none; }
+.ui-shortcuts-head { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; height: var(--pill-h, 38px); padding: 0 8px 0 14px; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.ui-shortcuts-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 4px 14px 14px; scrollbar-width: thin; }
+.ui-shortcuts-section + .ui-shortcuts-section { margin-top: 12px; }
+.ui-shortcuts-title { margin: 0; padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-shortcuts-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.ui-shortcuts-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: var(--row, 28px); border-bottom: 1px solid var(--line); }
+.ui-shortcuts-row:last-child { border-bottom: 0; }
+.ui-shortcuts-label { min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-shortcuts-keys { display: inline-flex; flex: none; gap: 4px; }
+.ui-shortcuts kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
+@media (pointer: coarse) { .ui-shortcuts-label { font-size: var(--text-body); } .ui-shortcuts-head { padding-right: 14px; } }

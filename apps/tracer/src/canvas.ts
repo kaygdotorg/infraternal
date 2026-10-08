@@ -32,6 +32,7 @@ import { Spring } from "../../../packages/ui/src/spring";
 import { createWindowCard, type WindowCard } from "../../../packages/ui/src/window-card";
 import { hostIconMarkup, type HostPlatform } from "../../../packages/ui/src/host-icons";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
+import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResize, type WindowResizeHost } from "../../../packages/ui/src/window-resize";
 import { openDetailsPopover, type DetailsPopover } from "./canvas-popover";
 import type { BranchSection, BranchedMenu } from "../../../packages/ui/src/branched";
@@ -231,6 +232,12 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   }, { capture: true, signal });
   const LOCK_ICON = '<rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/>';
   const UNLOCK_ICON = '<rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V7.5a3.5 3.5 0 0 1 6.6-1.6"/>';
+  const removeShortcuts = registerShortcuts({ id: "canvas", title: "Canvas", area: "canvas", shortcuts: [
+    { id: "lock", label: "Lock or unlock", keys: "Ctrl+Shift+L" },
+    { id: "previous", label: "Previous window", keys: "Ctrl+Shift+←" },
+    { id: "next", label: "Next window", keys: "Ctrl+Shift+→" },
+    { id: "pan", label: "Pan sideways", keys: "Shift+Scroll" },
+  ] });
   const removeProvider = core.addPaletteProvider(() => {
     if (!active || active.flow) return [];
     const isLocked = locked === active;
@@ -921,6 +928,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     dispose() {
       events.abort();
       removeProvider();
+      removeShortcuts();
       statusWatch.disconnect();
       toast.dispose();
       resizeObserver.disconnect();

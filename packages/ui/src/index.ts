@@ -26,3 +26,5 @@ export * from "./terminal-text-overlay";
 export * from "./sidebar-foot";
 export * from "./platform";
 export * from "./lock-toggle";
+export * from "./shortcuts";
+export * from "./shortcuts-view";

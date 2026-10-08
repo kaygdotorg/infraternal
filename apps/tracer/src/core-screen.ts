@@ -3,6 +3,8 @@ import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../pa
 import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
+import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
+import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
 import { buildVersion } from "./build-version";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
@@ -274,6 +276,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ...(options.addHostPrototype ? [
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
+    { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
     ...(recoveryUiEnabled() && options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
   ];
   // Rows can come from providers (the canvas offers Lock or Unlock by state), so the list and its
@@ -437,6 +440,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     // The source of the last open or close decides its motion: keyboard is instant, pointer animates.
     palette.dataset.openKind = source;
     if (open) {
+      shortcuts.close(true);
       refreshEntries();
       selected = 0;
       paletteInput.value = "";
@@ -448,6 +452,24 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     }
   };
   const sidebarClick = (event: MouseEvent): void => setSidebar(sidebar.hidden, event.detail === 0);
+  // The `?` view: the capsule morphs into the shortcut list. Sections come from the registry; the
+  // canvas registers its own, and a future container or cluster area registers its sections the same way.
+  const shortcuts = mountShortcutsView({
+    pill: capsule,
+    stage,
+    areas: () => stage.dataset.canvas === "on" ? ["canvas", "terminal"] : ["terminal"],
+  });
+  const removeShortcuts = [
+    registerShortcuts({ id: "terminal", title: "Terminal", area: "terminal", shortcuts: [
+      { id: "tray", label: "Focus the key tray", keys: "F6" },
+      { id: "back", label: "Back to the terminal", keys: "Shift+F6" },
+    ] }),
+    registerShortcuts({ id: "global", title: "Everywhere", area: "global", shortcuts: [
+      { id: "palette", label: "Open the command palette", keys: { mac: "⌘K", other: "Ctrl+K" } },
+      { id: "shortcuts", label: "Show these shortcuts", keys: "?" },
+      { id: "close", label: "Close the open panel", keys: "Esc" },
+    ] }),
+  ];
   const capsuleClick = (event: MouseEvent): void => setPalette(true, event.detail === 0 ? "keyboard" : "pointer");
   const scrimClick = (): void => setPalette(false, "pointer");
 
@@ -470,6 +492,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       event.preventDefault();
       event.stopPropagation();
       setPalette(palette.hidden, "keyboard");
+      return;
+    }
+    if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isTypingTarget(event.target) && palette.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      shortcuts.toggle();
       return;
     }
     if (event.key === "Escape") {
@@ -686,6 +714,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       writeLocal("tracer.background", value);
       swapLook();
       return true;
+    } else if (kind === "shortcuts") {
+      // After the palette has gone, so the morph starts from the settled pill.
+      setPalette(false, source);
+      requestAnimationFrame(() => shortcuts.open());
+      return true;
     } else if (kind === "session" || kind === "host") {
       terminalHost.focus({ preventScroll: true });
     } else if (kind === "proto" && options.addHostPrototype) {
@@ -775,6 +808,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       window.clearTimeout(recoveryToastTimer);
       cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
+      shortcuts.dispose();
+      for (const remove of removeShortcuts) remove();
       sidebarFoot?.dispose();
       sidebarToggle.removeEventListener("click", sidebarClick);
       capsule.removeEventListener("click", capsuleClick);
