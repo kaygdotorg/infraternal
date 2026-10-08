@@ -299,3 +299,53 @@ for (const width of [320, 375, 393]) {
     }
   });
 }
+
+// ---- the flow card is a floating card like the others (TASTE §4) --------------------------
+async function runToProgress(page: Page, viewport: Viewport): Promise<void> {
+  for (const id of ["o1", "o2", "remoternal"]) await press(page, viewport, `.ah-row[data-host='${id}']`);
+  await press(page, viewport, "[data-ah='continue']");
+  for (let step = 0; step < 4; step++) {
+    if (await page.locator(".ah-page[data-page='progress']").count()) break;
+    await page.waitForTimeout(500);
+    const next = (await page.locator("[data-ah='credentials']").count()) ? "[data-ah='credentials']" : (await page.locator("[data-ah='as-user']").count()) ? "[data-ah='as-user']" : "[data-ah='continue']";
+    await press(page, viewport, next);
+  }
+  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
+  await page.waitForTimeout(900);
+}
+
+for (const viewport of [DESKTOP, PHONE]) {
+  test(`flow card: shared overlay material, inside its window with one inset, lists end with padding (${viewport.width}×${viewport.height})`, async ({ browser }) => {
+    const { context, page } = await open(browser, viewport);
+    try {
+      const material = await page.evaluate(() => {
+        const read = (el: Element) => { const s = getComputedStyle(el); return { background: s.backgroundColor, filter: s.backdropFilter }; };
+        const probe = document.createElement("div");
+        probe.className = "ui-overlay-surface";
+        document.body.append(probe);
+        const shared = read(probe);
+        probe.remove();
+        return { card: read(document.querySelector(".ah-float")!), shared };
+      });
+      expect(material.card).toEqual(material.shared);
+      const inset = await page.evaluate(() => {
+        const f = document.querySelector(".ah-float")!.getBoundingClientRect();
+        const w = document.querySelector(".ah.ui-window")!.getBoundingClientRect();
+        return { left: f.left - w.left, right: w.right - f.right, bottom: w.bottom - f.bottom };
+      });
+      // 8 px window padding plus the 1 px frame, never less, and the same on each side.
+      for (const side of [inset.left, inset.right, inset.bottom]) expect(side).toBeGreaterThanOrEqual(8.5);
+      if (viewport.touch) for (const side of [inset.left, inset.right, inset.bottom]) expect(Math.abs(side - 9)).toBeLessThan(1.5);
+      await runToProgress(page, viewport);
+      const tail = await page.evaluate(() => {
+        const card = document.querySelector(".ah-float")!.getBoundingClientRect();
+        const last = [...document.querySelectorAll(".ah-job")].at(-1)!.getBoundingClientRect();
+        return card.bottom - last.bottom;
+      });
+      // The last host row ends at least 28 px above the card's edge.
+      expect(tail).toBeGreaterThanOrEqual(28);
+    } finally {
+      await context.close();
+    }
+  });
+}

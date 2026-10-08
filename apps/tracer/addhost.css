@@ -75,8 +75,13 @@
      than the theme's --fg-2 does; the window computes the lift, the card uses it. */
   --fg-2: var(--ah-fg2);
 }
-.ah-scroll { touch-action: pan-y; min-height: 0; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; padding: 36px 32px 0; scrollbar-width: thin; }
+.ah-scroll { touch-action: pan-y; min-height: 0; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; padding: 36px 32px 36px; scrollbar-width: thin; }
+/* With actions below, the list ends 20 px above them; with none (a running batch) it ends with the
+   same 36 px it starts with, so the last row never touches the card edge. */
+.ah-float:has(.ah-foot:not([hidden])) .ah-scroll { padding-bottom: 20px; }
 .ah-pages { display: grid; }
+/* The footer's own top padding already separates a short page from its actions. */
+.ah-float:not(.is-overflowing):has(.ah-foot:not([hidden])) .ah-scroll { padding-bottom: 0; }
 .ah-page { min-width: 0; }
 .ah-close {
   position: absolute;
@@ -101,7 +106,8 @@
 .ah-close:active { transform: scale(0.94); }
 @media (max-width: 600px) {
   .ah-float { width: 100%; border-radius: 20px; }
-  .ah-scroll { padding: 28px 22px 0; }
+  .ah-scroll { padding: 28px 22px 28px; }
+  .ah-float:has(.ah-foot:not([hidden])) .ah-scroll { padding-bottom: 16px; }
 }
 @media (pointer: coarse) { .ah-close { top: 8px; right: 8px; width: 44px; height: 44px; } .ah-close::before { inset: 0; } }
 
