@@ -19,7 +19,7 @@ import { COLUMN_GAP } from "../layout/geometry";
 import type { ViewId, WindowModel } from "../model/types";
 import { reduced } from "../dom";
 import { makeWindow, setActive } from "./frame";
-import { isTerminal } from "../views/body";
+import { isTerminal, makeBody } from "../views/body";
 
 export interface WindowsModule {
   make(c: ViewRec, m: WindowModel): WinRec;
@@ -27,7 +27,14 @@ export interface WindowsModule {
   /** Adds a window in a new column at `index` of a tiled view; the others glide aside. */
   addColumn(c: ViewRec, m: WindowModel, index: number, w?: number, silent?: boolean): WinRec;
   close(rec: WinRec): void;
-  split(rec: WinRec, direction?: "down" | "right"): Promise<void>;
+  /** Splits a terminal window: a new shell beside or below it, or (with `session`) an existing session of the host. */
+  split(rec: WinRec, direction?: "down" | "right", session?: string): Promise<void>;
+  /** Points a terminal window at another session of its host; the old one keeps running (detached). */
+  attach(rec: WinRec, sessionId: string): void;
+  /** Brings a window's name and screen in line with its session in the inventory (a rename, a run again). */
+  syncSession(rec: WinRec): void;
+  /** Shows a session: flies to its window, or opens one (a detached or exited session) in Console. */
+  openSession(host: string, sessionId: string): WinRec | undefined;
   /** Opens a shell on `host` as a window in Console (or flies to the one that is already there). */
   open(host: string, container?: string): WinRec | undefined;
   /** Scales the window up a little and back: "this is the one". */
@@ -72,8 +79,40 @@ export function createWindows(cx: Ctx): WindowsModule {
     return rec;
   };
 
+  /** Where a closed window stood, so Undo can put it back. */
+  interface Placed { view: ViewId; model: WindowModel; colIndex: number; aboveId: string | undefined; w: number }
+  const placeOf = (rec: WinRec): Placed => {
+    const root = rec.card.root;
+    const colEl = root.parentElement as HTMLElement;
+    const cols = [...rec.owner.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")];
+    const above = root.previousElementSibling as HTMLElement | null;
+    return { view: rec.owner.view.id, model: rec.model, colIndex: Math.max(0, cols.indexOf(colEl)), aboveId: above?.dataset.windowId, w: Number(colEl.dataset.w) || state.metrics.colW };
+  };
+  /** Undo of a close: the window comes back where it was (under its upper neighbour, or in its own column). */
+  const reopen = (at: Placed): void => {
+    const c = views.get(at.view);
+    const inv = cx.adapters.inventory;
+    if (!c || c.wins.has(at.model.id)) return;
+    const above = at.aboveId ? c.wins.get(at.aboveId) : undefined;
+    const rec = above ? undefined : addColumn(c, at.model, Math.min(at.colIndex, c.colsEl.querySelectorAll(":scope > .cl-col").length), at.w);
+    if (above) void splitInto(above, "down", at.model);
+    const shown = rec ?? c.wins.get(at.model.id);
+    if (!shown) return;
+    if (at.model.sessionId) inv?.attach(at.model.host, at.model.sessionId);
+    setActive(cx, shown);
+    cx.nav.focusWindow(shown);
+    cx.store.changed();
+  };
+
   const close = (rec: WinRec): void => {
     const c = rec.owner;
+    // Closing never ends the session (D178): it keeps running, detached, and the toast says so.
+    const inv = cx.adapters.inventory;
+    const sess = inv && isTerminal(rec) && rec.model.sessionId ? inv.get(rec.model.host, rec.model.sessionId) : undefined;
+    const placed = sess ? placeOf(rec) : undefined;
+    const wasRunning = sess?.state === "open";
+    if (sess && wasRunning) inv!.detach(rec.model.host, sess.id);
+    if (placed && wasRunning) cx.toast.show({ message: "Session keeps running", action: { label: "Undo", onSelect: () => reopen(placed) }, duration: 6000 });
     if (cx.inputLock.state?.win === rec) cx.inputLock.toggle();
     if (state.activeWin === rec) setActive(cx, undefined);
     if (cx.mesh?.reachFor() === rec) cx.mesh.hideReach(true);
@@ -120,12 +159,17 @@ export function createWindows(cx: Ctx): WindowsModule {
     spring.set(1);
   };
 
-  const split = async (rec: WinRec, direction: "down" | "right" = "down"): Promise<void> => {
+  const split = async (rec: WinRec, direction: "down" | "right" = "down", session?: string): Promise<void> => {
     if (!isTerminal(rec)) return;
+    const nm = session ? { ...cx.adapters.sessions.open(rec.model.host, { session }), splitOf: rec.model.id } : cx.adapters.sessions.open(rec.model.host, { from: rec.model });
+    await splitInto(rec, direction, nm);
+  };
+
+  /** Puts a window for model `nm` beside or below `rec` and plays the droplet. Splits are windows in the one structure: no nesting. */
+  const splitInto = async (rec: WinRec, direction: "down" | "right", nm: WindowModel): Promise<void> => {
     const c = rec.owner;
     const root = rec.card.root;
     const colEl = root.parentElement as HTMLElement;
-    const nm = cx.adapters.sessions.open(rec.model.host, { from: rec.model });
     const before = flip.measure(flip.targets(c.colsEl));
     const b = makeWindow(cx, c, nm);
     c.wins.set(nm.id, b);
@@ -154,6 +198,57 @@ export function createWindows(cx: Ctx): WindowsModule {
     rec.binding?.refit();
     b.binding?.refit();
     cx.store.changed();
+  };
+
+  /** Makes the window's model, title and body agree with its session in the inventory. */
+  const syncSession = (rec: WinRec): void => {
+    const s = isTerminal(rec) && rec.model.sessionId ? cx.adapters.inventory?.get(rec.model.host, rec.model.sessionId) : undefined;
+    if (!s) return;
+    const renamed = rec.model.session !== s.name;
+    const reshown = rec.model.lines !== s.screen;
+    rec.model.session = s.name;
+    rec.model.lines = s.screen;
+    if (renamed) {
+      rec.card.setTitle({ host: rec.model.host, ...(rec.model.user ? { user: rec.model.user } : {}), session: s.name });
+      cx.pill.paint();
+    }
+    // A different screen (another session, a run again): the old binding goes and the new one mounts. The work is
+    // done at once; only the frame and the name animate (session-ui.ts).
+    if (reshown) {
+      rec.binding?.dispose();
+      makeBody(cx, rec);
+      rec.binding?.setActive(state.activeWin === rec);
+      rec.binding?.refit();
+      cx.sessionUi?.paint(rec);
+    }
+    if (renamed || reshown) { cx.tree.render(); cx.store.changed(); }
+  };
+
+  const attach = (rec: WinRec, sessionId: string): void => {
+    const inv = cx.adapters.inventory;
+    if (!inv || !isTerminal(rec) || rec.model.sessionId === sessionId || !inv.get(rec.model.host, sessionId)) return;
+    const previous = rec.model.sessionId;
+    // The window's model first, so the change events the inventory sends see a consistent window.
+    rec.model.sessionId = sessionId;
+    if (previous) inv.detach(rec.model.host, previous);
+    inv.attach(rec.model.host, sessionId);
+    syncSession(rec);
+    cx.sessionUi?.arrived(rec);
+  };
+
+  /** Shows a session: its window if it has one, else a new window in Console that the camera flies to. */
+  const openSession = (host: string, sessionId: string): WinRec | undefined => {
+    const inv = cx.adapters.inventory;
+    const c = views.get("console" as ViewId);
+    if (!inv || !c || !inv.get(host, sessionId)) return undefined;
+    const existing = cx.sessionUi?.windowFor(host, sessionId);
+    const model = cx.adapters.sessions.open(host, { session: sessionId });
+    const rec = existing ?? addColumn(c, model, c.colsEl.querySelectorAll(":scope > .cl-col").length, state.metrics.colW, false);
+    if (existing) pulse(rec);
+    setActive(cx, rec);
+    cx.nav.focusWindow(rec);
+    cx.store.changed();
+    return rec;
   };
 
   const pulse = (rec: WinRec): void => {
@@ -187,7 +282,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   return {
     make: (c, m) => makeWindow(cx, c, m),
     setActive: (rec) => setActive(cx, rec),
-    addColumn, close, split, open, pulse, flat,
+    addColumn, close, split, attach, syncSession, openSession, open, pulse, flat,
     step(dir, instant = false) {
       const list = flat();
       if (!list.length) return;

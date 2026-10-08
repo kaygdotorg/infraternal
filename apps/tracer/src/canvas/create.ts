@@ -35,6 +35,7 @@ import { createViewList } from "./toolbar/viewlist";
 import { createFloat } from "./windows/float";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
+import { createSessionUi } from "./windows/session-ui";
 
 export interface CanvasOptions {
   adapters: Adapters;
@@ -105,6 +106,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.win = createWindows(cx);
   cx.float = createFloat(cx);
   cx.inputLock = createInputLock(cx);
+  if (options.adapters.inventory) cx.sessionUi = createSessionUi(cx);
   cx.pill = createPill(cx);
   cx.viewList = createViewList(cx);
   cx.tree = createTree(cx);
@@ -161,6 +163,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.store.dispose();
       cx.toolbar.dispose();
       cx.tree.dispose();
+      cx.sessionUi?.dispose();
       cx.pill.dispose();
       cx.sharing?.dispose();
       cx.mesh?.dispose();
