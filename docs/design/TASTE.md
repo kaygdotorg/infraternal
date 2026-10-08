@@ -104,6 +104,7 @@ Related documents: `segmented-selection.md` and `toast.md` in this folder.
 | **The canvas is dotted and the dots travel with it.** The background (theme gradient, mesh or a picture) shows through an even dot grid that moves exactly with the windows when panning and flying, and thins out when zoomed far out, so moving through the canvas feels physical. | "Can we have a dotted canvas background instead?… any picture or any gradient, but dotted so that moving through it, I think it's a very nice effect" | Pan and fly: dots move 1:1 with windows; at 40% zoom the grid is calm, not noisy; frame time unchanged. |
 | **Closing re-tiles.** Closing a window reflows the structure: the remaining windows in its column grow to fill it, an emptied column disappears and its neighbours close the gap, with the layout spring. | "they don't automatically tile back after one window is closed… I close the bottom one, the top one doesn't extend to the bottom" | Close the top and the bottom of a two-window column, and the last window of a column: no gaps remain. |
 | **Swipes follow the finger.** Anything dragged or swiped moves in the same direction as the finger, 1:1 until release. | "the bar swipe is inverted. If I swipe up, it swipes down" | Touch-drag every swipeable surface up, down, left and right. |
+| **Error and empty states get the same rhythm as the happy path.** An error card uses the same spacing, brand mark and button style as the screen it replaces: the gap between the message and its action equals the sign-in card's, never cramped. | "the button is too close to the text? why did it slip from your UI audit?" | Capture every error, offline, expired and loading state; measure the text-to-action gap against the sign-in card. |
 
 ## 5. Rendering
 
@@ -119,6 +120,6 @@ Related documents: `segmented-selection.md` and `toast.md` in this folder.
 ## 6. Process (how taste gets enforced)
 
 - **Only the orchestrator builds UI** (D171). Codex jobs never design or restyle UI.
-- **Nothing reaches the owner unverified.** Click through every state in a real browser at 1440×900, 393×852 and 375×667, in the ink and paper themes. Read every screenshot, and check this file row by row. A passing test suite is not proof of taste.
+- **Nothing reaches the owner unverified.** Click through every state in a real browser at 1440×900, 393×852 and 375×667, in the ink and paper themes, including the unhappy ones: errors, offline, expired, empty and loading states, not only the happy path. Read every screenshot, and check this file row by row. A passing test suite is not proof of taste.
 - **Mockups come before product** (D162). No new UI ships without mockup rounds and the owner's approval.
 - **When the owner spots something, write it here first, then fix it.**
