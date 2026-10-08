@@ -59,7 +59,8 @@ export function createWindows(cx: Ctx): WindowsModule {
       root.style.opacity = String(clamp(1 - p * 1.4, 0, 1));
       cx.invalidate();
     }, { visualDuration: 0.5, bounce: 0.28 });
-    restAt(spring, SCALE_REST);
+    // p scales the window by 6 % and fades it: it rests when the scale is within 0.0005 (p about 0.008).
+    restAt(spring, SCALE_REST / 0.06);
     spring.set(0);
   };
 
