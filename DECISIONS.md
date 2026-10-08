@@ -1313,3 +1313,20 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      unsigned or wrongly signed artifacts. The release signing key's public
      half is built into the binary and the private half never lives on a
      server.
+185. **Updates, channels and relays (owner, 2026-10-08, backend grill round 3):**
+     - **Updates:** the server updates itself automatically as soon as a
+       verified release appears, keeping the previous binary for automatic
+       rollback when the new one fails its health check (mirroring the agent
+       A/B swap, D135). A quiet window or manual updates are optional
+       settings.
+     - **Channels:** "stable" by default; anyone can opt in to "edge" (the
+       owner runs edge).
+     - **Signatures:** minisign-style Ed25519 (D184), verifiable offline.
+     - **Relay and direct path, side by side:** relay mode (the TURN relay in
+       the same binary, the server relaying by default, and the "Run a relay
+       here" checkbox) and the WebRTC direct path are built side by side, so
+       they can be benchmarked against each other.
+     - **Relay choice:** the client automatically uses the relay with the
+       lowest measured round trip, re-checks on network changes and switches
+       mid-session without losing bytes; the user can override the choice
+       at any time.
