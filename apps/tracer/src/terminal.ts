@@ -1144,6 +1144,29 @@ export class TerminalClient {
   }
 
   /**
+   * Switches the terminal to another font without reopening the session: the whole font
+   * changes (family and weights) and the grid is measured again from the new font box.
+   * The caller loads the font's faces first (`loadFont`), because canvas text never waits for a
+   * face and would draw the fallback.
+   *
+   * Setting the family makes the renderer re-measure its cells (device-pixel advance and the
+   * font's ascent plus descent) and resize its canvas; `scheduleFit` then recomputes columns
+   * and rows for the new cell size, which also tells the host. The cursor, drawn from those
+   * cells, moves with them: no stored pixel position survives the change.
+   */
+  setFont(font: MonoFont): void {
+    if (font === this.font || this.closed) return;
+    this.font = font;
+    this.canvasWeights.regular = font.terminalWeight;
+    this.canvasWeights.bold = font.boldWeight;
+    this.weightMemo.clear();
+    this.terminal.options.fontFamily = fontStack(font);
+    this.scheduleFit();
+    this.wakeTerminal();
+    this.loadStyledFaces();
+  }
+
+  /**
    * Canvas text never waits for a web font: a face that is not loaded yet is drawn with
    * the fallback and is not repainted by the browser. So the italic faces are loaded here,
    * and the whole screen is repainted once they arrive. The upright faces already carry

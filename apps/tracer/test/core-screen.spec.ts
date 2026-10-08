@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "playwright/test";
 import { contrastRatio } from "../../../packages/ui/src/color";
 import { THEMES, overlayMaterial } from "../../../packages/ui/src/themes";
+import { FONTS } from "../../../packages/ui/src/fonts";
 
 async function waitForAttached(page: Page): Promise<void> {
   await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
@@ -194,7 +195,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   const paletteActions = await palette.locator(".result").evaluateAll((results) =>
     results.map((result) => (result as HTMLButtonElement).dataset.action ?? ""));
   expect(paletteActions.sort()).toEqual([
-    "session:current", "host:current", "bg:mesh", "bg:none", ...Object.keys(THEMES).map((id) => `theme:${id}`),
+    "session:current", "host:current", "bg:mesh", "bg:none", ...Object.keys(THEMES).map((id) => `theme:${id}`), ...FONTS.map((font) => `font:${font.id}`),
   ].sort());
   expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0s");
   const previousMesh = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"));
