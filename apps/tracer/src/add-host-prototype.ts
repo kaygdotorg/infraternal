@@ -808,6 +808,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       confirmTip?.close(false);
       confirmTip = mountConfirmTip(pill, {
         label: "Install as root",
+        boundary: pill.closest(".ui-window"),
         message: `Install as root on ${host.id}?`,
         detail: "The infraternal agent will have root access to this host.",
         confirmLabel: "Install as root",

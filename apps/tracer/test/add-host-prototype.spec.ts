@@ -246,6 +246,22 @@ test("the shared confirmation is compact, icon-only and quiet on open", async ({
         title: getComputedStyle(document.querySelector(".ui-confirm-tip-message")!).fontSize,
       };
     });
+    // The confirmation is the same translucent overlay material as the other floating cards, and
+    // it stays inside the window it belongs to.
+    const surface = await page.evaluate(() => {
+      const read = (el: Element) => { const s = getComputedStyle(el); return { background: s.backgroundColor, filter: s.backdropFilter }; };
+      const tip = document.querySelector(".ui-confirm-tip")!;
+      const win = document.querySelector(".ui-window[data-active]")!.getBoundingClientRect();
+      const box = tip.getBoundingClientRect();
+      const probe = document.createElement("div");
+      probe.className = "ui-overlay-surface";
+      document.body.append(probe);
+      const card = read(probe);
+      probe.remove();
+      return { tip: read(tip), card, inside: box.left >= win.left + 8 && box.right <= win.right - 8 && box.bottom <= win.bottom - 8 };
+    });
+    expect(surface.tip).toEqual(surface.card);
+    expect(surface.inside).toBe(true);
     expect(metrics.sizes).toEqual([28, 28]);
     expect(metrics.labels).toEqual(["Cancel", "Install as root"]);
     expect(metrics.text).toEqual(["", ""]);

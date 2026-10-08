@@ -59,8 +59,8 @@ const STYLE = `
 .ui-confirm-tip[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
 .ui-confirm-tip-arrow { position: absolute; left: var(--ui-confirm-tail, 50%); width: 10px; height: 10px; margin-left: -5px; background: inherit;
   border: inherit; border-radius: 2px; transform: rotate(45deg); }
-.ui-confirm-tip[data-side="bottom"] .ui-confirm-tip-arrow { top: -5px; border-right: 0; border-bottom: 0; }
-.ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -5px; border-top: 0; border-left: 0; }
+.ui-confirm-tip[data-side="bottom"] .ui-confirm-tip-arrow { top: -5px; border-right: 0; border-bottom: 0; clip-path: polygon(0 0, 100% 0, 0 100%); }
+.ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -5px; border-top: 0; border-left: 0; clip-path: polygon(0 100%, 100% 100%, 100% 0); }
 .ui-confirm-tip-text { display: grid; gap: 3px; }
 .ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 13px)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-detail { margin: 0; color: var(--fg-2); font: 450 var(--text-secondary, 12px)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
@@ -109,6 +109,8 @@ export interface ConfirmTipOptions {
   cancelLabel: string;
   onConfirm(): void;
   onCancel?(): void;
+  /** A card the confirmation must stay inside (a window), with the same 9 px inset the window's own overlays keep. */
+  boundary?: HTMLElement | null;
 }
 
 export interface ConfirmTipController { close(restoreFocus?: boolean): void }
@@ -176,10 +178,13 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
     // Layout size: the open animation scales the tip, and a scaled rect would misplace it.
     const width = tip.offsetWidth;
     const height = tip.offsetHeight;
-    const left = Math.max(12, Math.min(innerWidth - width - 12, anchorRect.left + anchorRect.width / 2 - width / 2));
-    const below = innerHeight - anchorRect.bottom;
-    const side = below >= height + 18 || below >= anchorRect.top ? "bottom" : "top";
-    const top = side === "bottom" ? anchorRect.bottom + 8 : Math.max(12, anchorRect.top - height - 8);
+    const bound = options.boundary?.getBoundingClientRect();
+    const minX = bound ? bound.left + 9 : 12, maxX = (bound ? bound.right - 9 : innerWidth - 12) - width;
+    const minY = bound ? bound.top + 9 : 12, maxY = (bound ? bound.bottom - 9 : innerHeight - 12) - height;
+    const left = Math.max(minX, Math.min(maxX, anchorRect.left + anchorRect.width / 2 - width / 2));
+    const below = (bound ? bound.bottom : innerHeight) - anchorRect.bottom;
+    const side = below >= height + 18 || below >= anchorRect.top - (bound?.top ?? 0) ? "bottom" : "top";
+    const top = Math.max(minY, Math.min(Math.max(minY, maxY), side === "bottom" ? anchorRect.bottom + 8 : anchorRect.top - height - 8));
     tip.style.left = `${left}px`;
     tip.style.top = `${top}px`;
     const tail = Math.max(16, Math.min(width - 16, anchorRect.left + anchorRect.width / 2 - left));
