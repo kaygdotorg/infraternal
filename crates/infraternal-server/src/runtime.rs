@@ -180,8 +180,16 @@ pub enum ServerError {
 ///
 /// Returns a sanitized startup, storage, migration, TLS, or listener error.
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
+    serve_with_bootstrap(config, None).await
+}
+
+/// Reuse startup and serving with one trusted bootstrap factory.
+pub(crate) async fn serve_with_bootstrap(
+    config: ServerConfig,
+    factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
+) -> Result<(), ServerError> {
     init_logging();
-    let (app, setup_token) = build_router(config.clone(), None).await?;
+    let (app, setup_token) = build_router_with_bootstrap(config.clone(), None, factory).await?;
     if let Some(token) = setup_token {
         start_setup_token_socket(&config.data_dir, token)?;
     }
@@ -231,9 +239,18 @@ pub(crate) async fn router_with_agent(
         .ok_or(ServerError::InvalidConfiguration)
 }
 
+#[cfg(test)]
 async fn build_router(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
+) -> Result<(Router, Option<String>), ServerError> {
+    build_router_with_bootstrap(config, supplied_agent, None).await
+}
+
+async fn build_router_with_bootstrap(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+    factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
 ) -> Result<(Router, Option<String>), ServerError> {
     validate_config(&config)?;
     if let Some(web_root) = &config.web_root
@@ -278,12 +295,20 @@ async fn build_router(
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
         EmbeddedAgent::spawn(executable)
     };
+    // A single runner owns concurrency across all sockets. The factory receives
+    // this live Auth (including revocation state) and this migrated database,
+    // never a second authenticator or enrollment store [23][138][168].
+    let bootstrap = match factory {
+        Some(factory) => factory(auth.clone(), pool.clone()),
+        None => crate::bootstrap_runtime::default_runner(&config.data_dir)?,
+    };
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent);
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
-        .merge(auth::router(auth))
-        .merge(websocket::router(ws_state));
+        .merge(auth::router(auth.clone()))
+        .merge(websocket::router(ws_state))
+        .merge(crate::bootstrap_api::router(auth, bootstrap));
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
     } else {
@@ -617,6 +642,43 @@ mod tests {
         let ipv6 = ProxyNetwork::from_str("2001:db8::/32").expect("valid IPv6 network");
         assert!(ipv6.contains("2001:db8:1::1".parse().expect("valid IP")));
         assert!(ProxyNetwork::from_str("10.0.0.1/33").is_err());
+    }
+
+    /// The ordinary runtime, rather than a standalone plugin router, must expose admission.
+    #[tokio::test]
+    async fn production_router_exposes_bootstrap_owner_admission() {
+        use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
+        let data_dir =
+            PathBuf::from("target").join(format!("bootstrap-route-{}", uuid::Uuid::new_v4()));
+        let (socket, _peer) = tokio::net::UnixStream::pair().expect("fixture socket");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(socket),
+        )
+        .await
+        .expect("ordinary runtime router");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let serving = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("fixture serving");
+        });
+        let mut request = format!("ws://{address}/v1/bootstrap/ws")
+            .into_client_request()
+            .expect("WebSocket handshake");
+        request.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            "https://localhost:47361".parse().expect("fixture Origin"),
+        );
+        let result = connect_async(request).await;
+        serving.abort();
+        let _ = serving.await;
+        std::fs::remove_dir_all(data_dir).expect("remove fixture storage");
+        let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = result else {
+            panic!("unauthenticated bootstrap must be refused");
+        };
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
