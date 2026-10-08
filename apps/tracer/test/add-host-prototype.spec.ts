@@ -144,7 +144,7 @@ test("the wizard floats over a dimmed window that becomes the host's terminal", 
     }));
     expect(card.shadow).not.toBe("none");
     // Superseded: the flow card is the shared translucent overlay material, softly blurred (TASTE §4).
-    expect(card.backdrop).toContain("blur(14px)");
+    expect(card.backdrop).toContain("blur(4px)");
     expect(card.scrimAlpha).toContain("0.5");
     expect(card.pillShadow).not.toContain("inset");
     // While the flow owns the window, the capsule is its title once: no separator, session or dot.
@@ -344,6 +344,7 @@ for (const viewport of [DESKTOP, PHONE]) {
         return { card: read(document.querySelector(".ah-float")!), shared };
       });
       expect(material.card).toEqual(material.shared);
+      await page.waitForTimeout(600); // the card's rise settles before it is measured
       const inset = await page.evaluate(() => {
         const f = document.querySelector(".ah-float")!.getBoundingClientRect();
         const w = document.querySelector(".ah.ui-window")!.getBoundingClientRect();

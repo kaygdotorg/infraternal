@@ -1,5 +1,6 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
+import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import {
@@ -18,6 +19,8 @@ const INPUT_FRAME_LIMIT = 16 * 1024;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
+const TERMINAL_FONT_SIZE_DESKTOP = 14;
+const TERMINAL_FONT_SIZE_TOUCH = 13;
 const THEME_HISTORY_PROBE_ROWS = 10_000;
 const THEME_HISTORY_INDEXED_COLUMN = "theme-history-00000 | ".length;
 const THEME_HISTORY_TRUECOLOR_COLUMN = THEME_HISTORY_INDEXED_COLUMN + 4;
@@ -44,6 +47,7 @@ interface GhosttyActivityControls {
     renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
     renderCursor(x: number, y: number, line: unknown[] | null): void;
     naturalCellWidth?: number;
+    ctx?: CanvasRenderingContext2D;
     devicePixelRatio?: number;
     theme?: { foreground?: string; cursor?: string };
     render(buffer: unknown, forceAll?: boolean, viewportY?: number, scrollbackProvider?: unknown, scrollbarOpacity?: number): void;
@@ -104,6 +108,8 @@ export interface TerminalConfig {
   hooks?: TerminalHooks;
   /** Curated theme shared by the floating controls and Ghostty. */
   theme?: ITheme;
+  /** The chosen font (registry); the default family when absent. */
+  font?: MonoFont;
   onRoundTrip?: (milliseconds: number | undefined) => void;
   onConnectionChange?: (connected: boolean) => void;
   onScroll?: (scrolled: boolean) => void;
@@ -210,6 +216,11 @@ export class TerminalClient {
   private sessionId: Uint8Array | undefined;
   private retryTimer = 0;
   private retryAttempt = 0;
+  private symbolFaceRequested = false;
+  /** The font in use and the two canvas weights drawn from it (see installFontWeights). */
+  private font: MonoFont;
+  private readonly canvasWeights = { regular: 400, bold: 700 };
+  private readonly weightMemo = new Map<string, string>();
   private outputWriteInFlight = false;
   private outputWriteLength = 0;
   private snapshotWriteInFlight = false;
@@ -243,8 +254,9 @@ export class TerminalClient {
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
   private readonly disposeTouch: () => void;
 
-  private constructor(private readonly config: TerminalConfig, terminal: Terminal) {
+  private constructor(private readonly config: TerminalConfig, terminal: Terminal, font: MonoFont) {
     this.terminal = terminal;
+    this.font = font;
     this.ghostty = terminal as unknown as GhosttyActivityControls;
     this.screen = config.screen ?? config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
@@ -296,13 +308,18 @@ export class TerminalClient {
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
   }
 
-  /** Loads Geist and the WASM terminal once, then opens the one-session client. */
+  /**
+   * Loads the chosen font's upright faces and the WASM terminal once, then opens the
+   * one-session client. Only the upright faces gate the first paint, because the cell
+   * grid is measured from them; italic and Nerd Font faces load afterwards.
+   */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
-    await document.fonts.load('14px "Geist Mono"');
+    const font = config.font ?? fontById(DEFAULT_FONT_ID)!;
+    await loadFont(font);
     await init();
     const terminal = new Terminal({
-      fontFamily: '"Geist Mono", ui-monospace, monospace',
-      fontSize: matchMedia("(pointer: coarse)").matches ? 13 : 14,
+      fontFamily: fontStack(font),
+      fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
       cursorStyle: "bar",
       scrollback: config.scrollbackLimit ?? 10_000,
@@ -314,8 +331,12 @@ export class TerminalClient {
         selectionBackground: "#44485c",
       },
     });
-    const client = new TerminalClient(config, terminal);
+    const client = new TerminalClient(config, terminal, font);
+    // Weights go in before the first measurement so the grid is measured from the face it draws.
+    client.installFontWeights();
     client.remeasureFont();
+    client.keepLigaturesOff();
+    client.loadStyledFaces();
     return client;
   }
 
@@ -365,6 +386,8 @@ export class TerminalClient {
     viewportY: number;
     cursorVisible: boolean;
     fontSize: number;
+    fontFamily: string;
+    fontId: string;
     wasmMemoryBytes: number;
   } {
     const wasmTerm = this.terminal.wasmTerm;
@@ -394,6 +417,8 @@ export class TerminalClient {
       viewportY: this.terminal.viewportY,
       cursorVisible: Boolean(cursor?.visible),
       fontSize: this.terminal.options.fontSize,
+      fontFamily: this.terminal.options.fontFamily ?? "",
+      fontId: this.font.id,
       wasmMemoryBytes: memory?.buffer.byteLength ?? 0,
     };
   }
@@ -950,6 +975,7 @@ export class TerminalClient {
       this.snapshotWriteInFlight = true;
       this.prediction?.resetForSnapshot();
       this.terminal.reset();
+      this.requestSymbolsIfNeeded(snapshot.bytes);
       this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
       this.terminal.write(snapshot.bytes, () => {
         const callbackAt = performance.now();
@@ -976,6 +1002,7 @@ export class TerminalClient {
       }
       this.outputWriteInFlight = true;
       this.outputWriteLength = region.byteLength;
+      this.requestSymbolsIfNeeded(region);
       const writeSequence = this.lastOutSeq;
       this.traceRange(writeSequence, region.byteLength, "termWrite", performance.now());
       this.terminal.write(region, () => {
@@ -1051,6 +1078,149 @@ export class TerminalClient {
       naturalWidth: this.ghostty.renderer?.naturalCellWidth ?? metrics.width,
       baseline: metrics.baseline,
     };
+  }
+
+  /**
+   * Terminal ligatures stay off, on purpose (D175, measured in test/font-maple.spec.ts).
+   *
+   * The renderer draws a run of plain ASCII cells with one fillText and a canvas
+   * letterSpacing that stretches the font's natural advance onto the device-pixel cell
+   * (cell = round(advance x dpr) / dpr). Chromium turns Maple Mono's contextual
+   * ligatures off whenever letterSpacing is non-zero, and the spacing is zero only when
+   * the natural advance already equals the cell. So with the default `auto` text
+   * rendering the same text would show ligatures on one display and not on another,
+   * and a colour or style change would split them mid-sequence. Rather than ship that,
+   * choose "optimizeSpeed", which disables ligatures and kerning in every case and
+   * leaves every glyph exactly on its cell.
+   *
+   * A canvas resize resets the context's state, so the mode is applied at the start of
+   * every render instead of once.
+   */
+  private keepLigaturesOff(): void {
+    const renderer = this.ghostty.renderer;
+    const context = renderer?.ctx;
+    if (!renderer || !context) return;
+    const render = renderer.render.bind(renderer);
+    renderer.render = (...args) => {
+      context.textRendering = "optimizeSpeed";
+      render(...args);
+    };
+  }
+
+  /**
+   * The renderer asks the canvas for plain, bold and italic text with the keywords `bold` and
+   * `italic` only, so every font would draw at weight 400 and 700 whatever its registry
+   * weights say. A canvas has no weight setting apart from that string, so the font property
+   * of this one context rewrites the weight keyword on its way in: plain text takes the
+   * font's terminal weight, bold takes its bold weight. Everything else in the string,
+   * including the family list and the size, passes through untouched, so the renderer's own
+   * measurement (cell width and font box) is made from the very face it will draw with.
+   *
+   * The rewrite is memoised per distinct string because the renderer sets the property for
+   * every run it draws; the redraw benchmark shows the cost.
+   */
+  private installFontWeights(): void {
+    const context = this.ghostty.renderer?.ctx;
+    if (!context) return;
+    const native = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "font");
+    if (!native?.get || !native.set) return;
+    const get = native.get, set = native.set;
+    const memo = this.weightMemo;
+    this.canvasWeights.regular = this.font.terminalWeight;
+    this.canvasWeights.bold = this.font.boldWeight;
+    this.applyGlyphPlacement();
+    Object.defineProperty(context, "font", {
+      configurable: true,
+      get: () => get.call(context) as string,
+      set: (value: string) => {
+        let rewritten = memo.get(value);
+        if (rewritten === undefined) {
+          const parts = /^(italic )?(bold )?(.*)$/.exec(value)!;
+          rewritten = `${parts[1] ?? ""}${parts[2] ? this.canvasWeights.bold : this.canvasWeights.regular} ${parts[3]}`;
+          memo.set(value, rewritten);
+        }
+        set.call(context, rewritten);
+      },
+    });
+  }
+
+  /**
+   * Switches the terminal to another font without reopening the session: the whole font
+   * changes (family and weights) and the grid is measured again from the new font box.
+   * The caller loads the font's faces first (`loadFont`), because canvas text never waits for a
+   * face and would draw the fallback.
+   *
+   * Setting the family makes the renderer re-measure its cells (device-pixel advance and the
+   * font's ascent plus descent) and resize its canvas; `scheduleFit` then recomputes columns
+   * and rows for the new cell size, which also tells the host. The cursor, drawn from those
+   * cells, moves with them: no stored pixel position survives the change.
+   */
+  setFont(font: MonoFont): void {
+    if (font === this.font || this.closed) return;
+    this.font = font;
+    this.canvasWeights.regular = font.terminalWeight;
+    this.canvasWeights.bold = font.boldWeight;
+    this.weightMemo.clear();
+    this.applyGlyphPlacement();
+    this.terminal.options.fontFamily = fontStack(font);
+    this.scheduleFit();
+    this.wakeTerminal();
+    this.loadStyledFaces();
+  }
+
+  /**
+   * Chooses between the renderer's two ways of putting text on the grid (see `placeGlyphs` in
+   * the registry). The renderer stretches a run with canvas letter spacing when the context
+   * has it, and otherwise draws one glyph per cell. Hiding the property on this context for
+   * the fonts that need exact placement selects the second way without touching the renderer.
+   */
+  private applyGlyphPlacement(): void {
+    const context = this.ghostty.renderer?.ctx;
+    if (!context) return;
+    if (this.font.placeGlyphs) Object.defineProperty(context, "letterSpacing", { value: undefined, writable: true, configurable: true });
+    else delete (context as { letterSpacing?: string }).letterSpacing;
+  }
+
+  /**
+   * Canvas text never waits for a web font: a face that is not loaded yet is drawn with
+   * the fallback and is not repainted by the browser. So the italic faces are loaded here,
+   * and the whole screen is repainted once they arrive. The upright faces already carry
+   * every weight (one variable face, or the regular and bold static faces), so bold needs
+   * no request of its own. Italic and bold cells are drawn one cell at a time, so they stay
+   * on the grid.
+   */
+  private loadStyledFaces(): void {
+    const font = this.font;
+    const load = (): void => {
+      void loadFont(font, true).then(() => { if (this.font === font) this.repaintAll(); }, () => undefined);
+    };
+    // Off the critical path: the first prompt must not wait behind these downloads.
+    // Safari has no requestIdleCallback; the lib types claim it always exists, so widen it.
+    const idle = (window as { requestIdleCallback?: Window["requestIdleCallback"] }).requestIdleCallback;
+    if (idle) idle.call(window, load, { timeout: 3000 });
+    else window.setTimeout(load, 1000);
+  }
+
+  /**
+   * Fetches the Nerd Font symbol face the first time output holds a private-use code
+   * point. In UTF-8 the private-use area U+E000..U+F8FF starts with 0xEE or 0xEF, and
+   * Uint8Array.indexOf scans natively, so a screen without prompt icons never pays the
+   * download and the check costs next to nothing per chunk.
+   */
+  private requestSymbolsIfNeeded(bytes: Uint8Array): void {
+    if (this.symbolFaceRequested) return;
+    if (bytes.indexOf(0xee) < 0 && bytes.indexOf(0xef) < 0) return;
+    this.symbolFaceRequested = true;
+    const size = this.terminal.options.fontSize ?? TERMINAL_FONT_SIZE_DESKTOP;
+    void document.fonts.load(`${size}px "Nerd Symbols"`, "\ue0b0\uf015\ue718")
+      .then(() => this.repaintAll(), () => undefined);
+  }
+
+  private repaintAll(): void {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer || this.closed) return;
+    renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
   }
 
   /** Rebuilds backing dimensions from the loaded web font before the first frame. */

@@ -3,7 +3,7 @@
 /* One type scale per platform (TASTE.md section 2). Desktop follows the macOS sizes, touch the iOS
    sizes. Every product surface (top bar, sidebar, palette, tooltip, toast, windows) uses these
    tokens rather than its own pixel values. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input stays 16 px on touch so iOS never zooms. */
-:root { --text-body: 13px; --text-secondary: 12px; --text-caption: 11px; --text-input: 13px; --row: 28px; }
+:root { --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --text-body: 13px; --text-secondary: 12px; --text-caption: 11px; --text-input: 13px; --row: 28px; }
 @media (pointer: coarse) { :root { --text-body: 16px; --text-secondary: 15px; --text-caption: 13px; --text-input: 16px; --row: 44px; } }
 
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
@@ -11,22 +11,31 @@
 :focus-visible { outline: none; }
 [data-focus-ring="on"] :focus-visible { outline: 2px solid var(--focus-ring, var(--accent, #7a9cff)); outline-offset: 2px; }
 .countup { font-variant-numeric: tabular-nums; }
-.busy-count { font: 500 13px/1 "Geist Mono", ui-monospace, monospace; color: rgb(0 0 0 / 0.6); }
+.busy-count { font: var(--fw-label, 500) 13px/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
 .terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
+
+/* The one material's blur and saturation: surfaces and pills read these two tokens, so tuning them
+   here tunes every floating thing at once. */
+:root { --ui-overlay-blur: 4px; --ui-overlay-saturation: 160%; }
 
 /* One theme-aware glass material for every floating surface (D72, D160): popovers, sheets,
    palette, sidebar and tooltips, never in-page controls. No top-edge highlight (TASTE §1).
    Instances can tune the blur, saturation, border or shadow through custom properties. */
 .ui-overlay-surface, .ui-panel {
-  --ui-overlay-blur: 14px;
-  --ui-overlay-saturation: 160%;
   background: var(--ui-overlay-background, var(--overlay));
   border: 1px solid var(--ui-overlay-border, var(--overlay-line));
   box-shadow: var(--ui-overlay-shadow, var(--shadow));
   color: var(--ui-overlay-color, var(--fg));
+  /* A soft halo in the tint colour keeps text legible over a dense terminal without adding tint. */
+  text-shadow: 0 0 1px var(--ui-overlay-halo, transparent), 0 0 2px var(--ui-overlay-halo, transparent), 0 0 3px var(--ui-overlay-halo, transparent), 0 0 4px var(--ui-overlay-halo, transparent), 0 0 6px var(--ui-overlay-halo, transparent), 0 0 10px var(--ui-overlay-halo, transparent);
   -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
   backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
 }
+/* On the thin material secondary text is a step stronger than on a page (contrast over a busy terminal comes
+   from text colour and the halo, never from more tint). */
+.ui-overlay-surface, .ui-panel { --ui-text-secondary: color-mix(in oklab, var(--fg) 80%, var(--bg)); }
+/* Form controls reset text-shadow in the browser's own styles; they take the halo too. */
+.ui-overlay-surface :is(button, input, textarea, select) { text-shadow: inherit; }
 .ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
 .ui-button {
   min-height: var(--ui-button-height, 44px);
@@ -111,12 +120,12 @@
 .ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
 /* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
 .ui-toast { min-height: 44px; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 14px; }
-.ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: 450; line-height: 1.4; }
+.ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
 .ui-toast-marker { display: grid; width: 22px; height: 22px; flex: none; place-items: center; }
 .ui-toast-marker .tick { width: 20px; height: 20px; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
 .ui-toast-marker .tick svg { width: 14px; height: 14px; stroke: var(--bg); }
-.ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: 500; white-space: nowrap; }
+.ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
 .ui-toast-marker .tick { width: 18px; height: 18px; }
 @media (pointer: coarse) {
   .ui-toast { min-height: 54px; gap: 12px; padding: 7px 9px 7px 12px; border-radius: 15px; }
@@ -269,7 +278,8 @@
 
 /* Window card (window-card.ts): the pane card's surface plus a quiet header. */
 .ui-window {
-  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
+  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  /* Not clipped: the lock's shackle rises over the frame line. The body clips its own content. */
   background: color-mix(in oklab, var(--bg) 88%, transparent);
   border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); box-shadow: var(--shadow);
   transition: border-color 180ms var(--ease-out, ease-out);
@@ -282,15 +292,15 @@
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: pointer;
   transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
-.ui-window-pill:active { transform: scale(0.97); }
+.ui-window-pill:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-mark { display: grid; flex: none; place-items: center; width: var(--ui-icon); height: var(--ui-icon); color: var(--fg-2); }
 .ui-window-mark svg { width: 100%; height: 100%; fill: currentColor; stroke: none; }
 /* Line glyphs (a flow's mark, not a host platform) draw as the 1.5 stroke icons everywhere else. */
 .ui-window-mark svg.is-line { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-window-title { display: inline-flex; min-width: 0; overflow: hidden; }
-.ui-window-user { color: var(--ui-text-secondary); font-weight: 450; }
+.ui-window-user { color: var(--ui-text-secondary); font-weight: var(--fw-secondary); }
 .ui-window-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ui-window-session { color: var(--fg-3); font-weight: 450; }
+.ui-window-session { color: var(--fg-3); font-weight: var(--fw-secondary); }
 .ui-window-session::before { content: "·"; margin-right: 8px; color: var(--fg-3); }
 .ui-window-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--ok); }
 .ui-window[data-status="connecting"] .ui-window-dot { background: var(--fg-3); }
@@ -301,9 +311,9 @@
   display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); border: 0; border-radius: 8px;
   background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
-.ui-window-action:active { transform: scale(0.97); }
+.ui-window-action:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ui-window-body { position: relative; flex: 1; min-height: 0; }
+.ui-window-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 calc(var(--r-lg, 18px) - 1px) calc(var(--r-lg, 18px) - 1px); }
 @media (hover: hover) and (pointer: fine) {
   .ui-window-pill:hover { background: var(--hover); }
   .ui-window-action:hover { background: var(--hover); color: var(--fg-2); }
@@ -333,23 +343,32 @@
 }
 .ui-kv-row:last-child { border-bottom: 0; }
 .ui-kv-cell {
-  display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; margin: 0 -6px; padding: 3px 6px; border: 0; border-radius: 6px;
-  background: none; color: inherit; cursor: copy; text-align: left; font: inherit; transition: background-color 120ms ease;
+  display: block; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
+  transition: transform 140ms var(--ease-out, ease-out);
   -webkit-user-select: text; user-select: text; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
 }
 .ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
-.ui-kv-value { justify-self: end; justify-content: flex-end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
-.ui-kv-text { min-width: 0; overflow-wrap: anywhere; }
-.ui-kv-tick { width: 12px; height: 12px; flex: none; align-self: center; fill: none; stroke: var(--ok); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 150ms var(--ease-out, ease-out); }
-.ui-kv-cell[data-copied] .ui-kv-tick { opacity: 1; transform: none; }
+.ui-kv-value { justify-self: end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
+.ui-kv-cell:active { transform: scale(var(--ui-press-scale-soft)); }
+/* The highlighted run: 6 px of even padding either side (cancelled by a -6 px margin so the text
+   still lines up with the row's edges), cloned across wrapped lines. */
+.ui-kv-text {
+  display: inline; margin: 0 -6px; padding: 3px 6px; border-radius: 6px; overflow-wrap: anywhere; transition: background-color 120ms ease;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+/* The tick takes no room until a copy happens, so the highlight never carries empty space. */
+.ui-kv-text .ui-inline-tick { width: 0; height: 12px; margin-right: 0; overflow: hidden; vertical-align: -1px; transition: width 150ms var(--ease-out, ease-out), margin 150ms var(--ease-out, ease-out); }
+
+.ui-kv-cell[data-done] .ui-kv-text .ui-inline-tick { width: 12px; }
+.ui-kv-key[data-done] .ui-kv-text .ui-inline-tick { margin-left: 6px; }
+.ui-kv-value[data-done] .ui-kv-text .ui-inline-tick { margin-right: 6px; }
 .ui-kv-meter { grid-column: 1 / -1; position: relative; height: 3px; margin: 4px 0 2px; overflow: hidden; border-radius: 2px; background: var(--line); }
 .ui-kv-meter::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--accent); transform: scaleX(var(--meter, 0)); transform-origin: left; }
 @media (hover: hover) and (pointer: fine) {
-  .ui-kv-cell:hover { background: var(--hover); }
+  .ui-kv-cell:hover .ui-kv-text { background: var(--hover); }
 }
 @media (prefers-reduced-motion: reduce) {
   .ui-window-pill:active, .ui-window-action:active { transform: none; }
-  .ui-kv-tick { transform: none; }
 }
 
 /* DECISION 120 icon slot for branched-menu hosts. */
@@ -381,7 +400,7 @@
   outline: none;
   background: transparent;
   color: var(--fg);
-  font: 450 16px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-body) 16px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: 0.01em;
 }
 /* With chips present the input needs room for a few characters only; it grows on its own row
@@ -398,7 +417,7 @@
   border-radius: 999px;
   background: rgb(from var(--fg) r g b / 0.08);
   color: var(--fg);
-  font: 500 13px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-label) 13px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: -0.01em;
   transform-origin: left center;
   transition: background-color 120ms ease;
@@ -417,10 +436,10 @@
 .ui-pill {
   appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 38px);
   border: 1px solid var(--overlay-line) !important; border-radius: 999px; background: var(--overlay); box-shadow: var(--shadow);
-  -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation)); backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
   transition: transform 140ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
-.ui-pill:active:not(:disabled) { transform: scale(0.97); }
+.ui-pill:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
 .ui-pill-icon { width: var(--pill-h, 38px); padding: 0; color: var(--fg-2); }
 .ui-pill-icon svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.6; }
 @media (hover: hover) and (pointer: fine) { .ui-pill:hover:not(:disabled) { background: var(--overlay-solid); } }
@@ -478,7 +497,7 @@
 @media (pointer: coarse) { .ui-sidebar-foot, .ui-sidebar-foot[data-variant="b"] { --pill-h: 44px; } }
 .ui-sidebar-foot .ui-pill { cursor: pointer; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, box-shadow 160ms ease; }
 @media (hover: hover) and (pointer: fine) { .ui-sidebar-foot .ui-pill:hover:not(:active) { box-shadow: var(--shadow), 0 2px 8px -2px rgb(0 0 0 / 0.18); } }
-.ui-sidebar-user { flex: 1; min-width: 0; justify-content: flex-start; gap: 10px; padding: 0 14px 0 5px; text-align: left; }
+.ui-sidebar-user { flex: 0 1 auto; min-width: 0; max-width: calc(100% - var(--pill-h) - 8px); justify-content: flex-start; gap: 10px; padding: 0 14px 0 5px; text-align: left; }
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-user { padding-right: 12px; }
 .ui-sidebar-avatar {
   display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 10px); height: calc(var(--pill-h) - 10px); border-radius: 50%; color: #fff;
@@ -488,26 +507,30 @@
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-avatar { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--accent) 40%, transparent); }
 @media (pointer: coarse) { .ui-sidebar-avatar { font-size: 14px; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
 .ui-sidebar-names { display: grid; min-width: 0; gap: 3px; }
-.ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: 500; }
+.ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: var(--fw-label); }
 .ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: 11px; }
 @media (pointer: coarse) { .ui-sidebar-secondary { font-size: 12px; } }
 .ui-sidebar-settings svg { stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
-/* Window lock (lock-toggle.ts, window-card.ts): invisible until the pointer is near the window's
-   top edge (or the header is tapped), then 35 % strong; locked, it stays at full strength with an
-   accent tint and the window's hairline is stronger than the active window's. */
+/* Window lock (lock-toggle.ts, window-card.ts): the padlock glyph itself, no chip. It is centred on
+   the window's top frame line: the shackle rises above the line and the body hangs just below it, so
+   it looks anchored on the frame. Invisible until the pointer is near the top edge, then 35 %;
+   locked, it stays at 0.9 with an accent tint and the window's hairline is stronger. The button is a
+   44 px invisible hit area. On touch there is no frame lock: locking lives in the toolbar and the
+   palette. */
 .ui-window-lock {
-  position: absolute; z-index: 4; /* -1 px: the frame's own 1 px line, so the chip's top edge is the frame's top edge */ top: -1px; left: var(--ui-lock-x, 50%); width: var(--ui-control-h); height: var(--ui-control-h); margin-left: calc(var(--ui-control-h) / -2);
-  display: grid; place-items: center; padding: 0; border: 1px solid var(--overlay-line); border-radius: 8px; background: color-mix(in oklab, var(--bg) 92%, var(--fg)); color: var(--fg);
-  opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 160ms ease-out, color 160ms ease-out, background-color 140ms ease;
+  position: absolute; z-index: 6; top: -22px; left: var(--ui-lock-x, 50%); width: 44px; height: 44px; margin-left: -22px;
+  display: grid; place-items: center; padding: 0; border: 0; border-radius: 10px; background: none; color: var(--fg);
+  opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 160ms ease-out, color 160ms ease-out;
 }
-.ui-window-lock svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
+.ui-window-lock svg { width: 16px; height: 16px; transform: translateY(0.5px); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
 .ui-window[data-lock-near] .ui-window-lock { opacity: 0.35; pointer-events: auto; }
 .ui-window[data-locked] .ui-window-lock { opacity: 0.9; pointer-events: auto; color: var(--accent); }
 .ui-window-lock:focus-visible { opacity: 0.8; }
-@media (hover: hover) and (pointer: fine) { .ui-window .ui-window-lock:hover { opacity: 0.8; background: var(--hover); } }
-.ui-window-lock:active { transform: scale(0.94); }
+@media (hover: hover) and (pointer: fine) { .ui-window .ui-window-lock:hover { opacity: 0.8; } }
+.ui-window-lock:active svg { transform: translateY(0.5px) scale(var(--ui-press-scale-small)); }
 .ui-window[data-locked] { border-color: color-mix(in oklab, var(--accent) 78%, var(--overlay-line)); box-shadow: var(--shadow), 0 0 0 1px color-mix(in oklab, var(--accent) 28%, transparent); }
+@media (pointer: coarse) { .ui-window-lock { display: none; } }
 @media (prefers-reduced-motion: reduce) { .ui-window-lock { transition: opacity 160ms ease; } }
 .ui-window[data-status="none"] .ui-window-lock { display: none; }
 
@@ -530,10 +553,8 @@
 .ui-settings { position: absolute; z-index: 8; top: 50%; left: 50%; display: flex; flex-direction: column; width: min(560px, calc(100% - 24px)); max-height: min(520px, calc(100% - 24px)); margin: 0; translate: -50% -50%; border-radius: var(--r-lg, 18px); color: var(--fg); outline: none; }
 .ui-settings-head { display: flex; flex: none; align-items: center; justify-content: space-between; height: 52px; padding: 0 8px 0 18px; }
 .ui-settings-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
-.ui-settings-close { display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-2); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
-.ui-settings-close svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
-.ui-settings-close:active, .ui-settings-nav-row:active { transform: scale(0.97); }
-@media (hover: hover) and (pointer: fine) { .ui-settings-close:hover, .ui-settings-nav-row:hover { background: var(--hover); } }
+.ui-settings-nav-row:active { transform: scale(var(--ui-press-scale)); }
+@media (hover: hover) and (pointer: fine) { .ui-settings-nav-row:hover { background: var(--hover); } }
 .ui-settings-main { display: flex; min-height: 0; flex: 1; border-top: 1px solid var(--line); }
 .ui-settings-nav { display: flex; flex: none; flex-direction: column; gap: 2px; width: 150px; padding: 8px; border-right: 1px solid var(--line); }
 .ui-settings-nav-row { display: flex; align-items: center; gap: 8px; height: var(--ui-row-h, 32px); padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }

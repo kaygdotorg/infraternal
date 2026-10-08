@@ -6,13 +6,14 @@
  *
  * Look and motion:
  * - At rest it is invisible. A mouse within 64 px of the window's top edge fades it in at
- *   35 % opacity; on touch a tap on the header shows it for a few seconds. Locked, it stays
+ *   35 % opacity (touch has no frame lock; the toolbar and the palette lock there). Locked, it stays
  *   at full strength with an accent tint, and the window's hairline gets stronger (styles.css).
  * - The shackle is one spring value `t` (0 open, 1 shut) with a tiny overshoot, about 260 ms:
  *   it starts lifted and tilted, drops and snaps shut. Unlocking plays it in reverse from
  *   wherever it is (interruptible, velocity kept). Reduced motion: no shackle travel, a short
  *   crossfade of the whole icon instead.
- * - It sits on the window's frame: its top edge is the frame's top line, centred (styles.css).
+ * - It is the glyph itself, centred on the window's top frame line: the shackle rises above the line,
+ *   the body hangs below it (styles.css). The button is a 44 px invisible hit area.
  * - The warm tooltip is short and literal: "Lock input" / "Unlock input".
  *
  *   const lock = createLockToggle({ onToggle: (next, source) => … });
@@ -105,7 +106,6 @@ export function createLockToggle(options: LockToggleOptions): LockToggle {
 // One document listener serves every window. A frame at most reads each tracked window's
 // top edge, and only a change of state touches the DOM.
 const NEAR = 64;
-const TOUCH_SHOW_MS = 3500;
 const tracked = new Set<{ root: HTMLElement; lock: LockToggle }>();
 let listening = false;
 let frame = 0;
@@ -127,7 +127,7 @@ const sweep = (): void => {
   for (const entry of tracked) {
     const box = entry.root.getBoundingClientRect();
     const near = !!pointer && pointer.x >= box.left && pointer.x <= box.right && pointer.y >= box.top - 16 && pointer.y <= box.top + NEAR;
-    if (near !== entry.root.hasAttribute("data-lock-near") && !entry.root.hasAttribute("data-lock-touch")) {
+    if (near !== entry.root.hasAttribute("data-lock-near")) {
       if (near) placeLock(entry.root);
       entry.root.toggleAttribute("data-lock-near", near);
     }
@@ -147,16 +147,5 @@ export function trackLockReveal(root: HTMLElement, lock: LockToggle): () => void
     }, { passive: true });
     document.addEventListener("pointerleave", () => { pointer = undefined; if (!frame) frame = requestAnimationFrame(sweep); });
   }
-  let timer = 0;
-  const onHeader = (event: PointerEvent): void => {
-    if (event.pointerType !== "touch") return;
-    placeLock(root);
-    root.setAttribute("data-lock-touch", "");
-    root.setAttribute("data-lock-near", "");
-    window.clearTimeout(timer);
-    timer = window.setTimeout(() => { root.removeAttribute("data-lock-touch"); root.removeAttribute("data-lock-near"); }, TOUCH_SHOW_MS);
-  };
-  const head = root.querySelector(".ui-window-head");
-  head?.addEventListener("pointerdown", onHeader as EventListener);
-  return () => { tracked.delete(entry); window.clearTimeout(timer); head?.removeEventListener("pointerdown", onHeader as EventListener); };
+  return () => { tracked.delete(entry); };
 }

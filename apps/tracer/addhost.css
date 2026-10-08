@@ -67,7 +67,7 @@
   border-radius: 22px;
   --ui-overlay-shadow: var(--elevation);
   color: var(--fg);
-  font: 450 14px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-body) 14px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: -0.01em;
   --ui-tick-border-color: color-mix(in oklab, var(--fg) 34%, transparent);
   --ui-tick-border-width: 1.5px;
@@ -103,7 +103,7 @@
 .ah-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
 .ah-close::before { content: ""; position: absolute; inset: -8px; }
 @media (hover: hover) and (pointer: fine) { .ah-close:hover { background: var(--hover); color: var(--fg); } }
-.ah-close:active { transform: scale(0.94); }
+.ah-close:active { transform: scale(var(--ui-press-scale-small)); }
 @media (max-width: 600px) {
   .ah-float { width: 100%; border-radius: 20px; }
   .ah-scroll { padding: 28px 22px 28px; }
@@ -124,10 +124,10 @@
 }
 .ah-hero .ah-icon { width: 18px; height: 18px; }
 .ah-hero[data-tone="danger"] { background: rgb(from var(--danger) r g b / 0.13); color: var(--danger); }
-.ah-title { margin: 0 40px 10px 0; font-size: 21px; font-weight: 600; line-height: 1.25; letter-spacing: -0.03em; text-wrap: balance; }
+.ah-title { margin: 0 40px 10px 0; font-size: 21px; font-weight: var(--fw-title); line-height: 1.25; letter-spacing: -0.03em; text-wrap: balance; }
 .ah-lede { margin: 0 0 24px; color: var(--fg-2); text-wrap: pretty; }
 .ah-text { margin: -12px 0 18px; color: var(--fg-2); text-wrap: pretty; }
-.ah-quote { margin: 0 0 6px; font-weight: 500; }
+.ah-quote { margin: 0 0 6px; font-weight: var(--fw-label); }
 .ah-note { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; color: var(--fg-2); font-size: 13px; }
 .ah-note .ah-icon { color: color-mix(in oklab, var(--danger) 70%, var(--fg-2)); }
 @media (max-width: 480px) { .ah-title { font-size: 23px; } }
@@ -146,7 +146,7 @@
   outline: none;
   background: var(--ah-field);
   color: var(--fg);
-  font: 450 14px/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-body) 14px/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   resize: vertical;
 }
 .ah-secret::placeholder { color: var(--fg-3); opacity: 1; }
@@ -176,9 +176,9 @@
 .ah-row.is-added .tick { opacity: 0.4; }
 .ah-os-mark { width: var(--ah-icon); height: var(--ah-icon); flex: none; fill: currentColor; color: var(--fg-2); }
 .ah-main { display: grid; min-width: 0; }
-.ah-name { color: var(--fg); font-weight: 500; overflow-wrap: anywhere; }
-.ah-candidate .ah-name { font-weight: 450; }
-.ah-manual-target { font-weight: 500; }
+.ah-name { color: var(--fg); font-weight: var(--fw-label); overflow-wrap: anywhere; }
+.ah-candidate .ah-name { font-weight: var(--fw-body); }
+.ah-manual-target { font-weight: var(--fw-label); }
 .ah-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 0 10px; color: var(--fg-2); font-size: 13px; line-height: 1.55; }
 /* Never an ellipsis (TASTE): the line wraps between items (OS, architecture, source icons). */
 .ah-meta > span { white-space: nowrap; }
@@ -205,8 +205,8 @@
 .ah-option input { position: absolute; opacity: 0; pointer-events: none; }
 .ah-radio { width: var(--ah-check); height: var(--ah-check); margin-top: 2px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--ui-tick-border-color); transition: box-shadow 260ms cubic-bezier(0.34, 1.4, 0.64, 1); }
 .ah-option input:checked + .ah-radio { box-shadow: inset 0 0 0 5px var(--fg); }
-.ah-option-text { display: grid; gap: 2px; font-weight: 500; }
-.ah-option-hint { color: var(--fg-2); font-size: 13px; font-weight: 450; }
+.ah-option-text { display: grid; gap: 2px; font-weight: var(--fw-label); }
+.ah-option-hint { color: var(--fg-2); font-size: 13px; font-weight: var(--fw-body); }
 .ah-consent { display: flex; align-items: center; gap: 10px; min-height: 44px; margin-top: 12px; color: var(--fg-2); cursor: pointer; }
 
 /* ── Progress: one compact row per host ─────────────────────────────── */
@@ -231,7 +231,7 @@
 .ah-icon-button .ah-icon { width: 16px; height: 16px; }
 .ah-icon-button[hidden] { display: none; }
 @media (hover: hover) and (pointer: fine) { .ah-icon-button:hover { background: var(--hover); color: var(--fg); } }
-.ah-icon-button:active { transform: scale(0.94); }
+.ah-icon-button:active { transform: scale(var(--ui-press-scale-small)); }
 @media (pointer: coarse) { .ah-icon-button { width: 44px; height: 44px; } }
 
 /* ── Details ──────────────────────────────────────────────────────────────── */
@@ -240,7 +240,7 @@
 .ah-details summary::-webkit-details-marker { display: none; }
 .ah-details summary .ah-icon { width: 14px; height: 14px; transition: transform 180ms var(--ease-out); }
 .ah-details[open] summary .ah-icon { transform: rotate(90deg); }
-.ah-details pre { margin: 8px 0 0; padding: 12px 14px; border-radius: 10px; background: var(--ah-field); color: var(--fg-2); font: 450 13px/1.6 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ah-details pre { margin: 8px 0 0; padding: 12px 14px; border-radius: 10px; background: var(--ah-field); color: var(--fg-2); font: var(--fw-body) 13px/1.6 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ── Actions (the sign-in card's pill and text buttons) ───────────────────── */
 /* Actions sit in the card's own footer, pinned below its scrolling body. */
@@ -262,13 +262,13 @@
   border-radius: 999px;
   background: var(--fg);
   color: var(--bg);
-  font: 600 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-title) 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: -0.01em;
   cursor: pointer;
   transition: transform 140ms var(--ease-out), background-color 160ms ease;
 }
 .ah-primary .ah-icon { width: 18px; height: 18px; }
-.ah-primary:active:not(:disabled) { transform: scale(0.97); }
+.ah-primary:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
 /* Solid, not translucent: a disabled button over scrolled content must not show it through. */
 .ah-primary:disabled { background: color-mix(in oklab, var(--fg) 30%, var(--bg)); color: color-mix(in oklab, var(--bg) 85%, var(--fg)); cursor: default; }
 .ah-secondary {
@@ -279,12 +279,12 @@
   border-radius: 8px;
   background: none;
   color: var(--fg-2);
-  font: 500 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-label) 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   cursor: pointer;
   transition: color 120ms ease, transform 140ms var(--ease-out);
 }
 @media (hover: hover) and (pointer: fine) { .ah-secondary:hover { color: var(--fg); } }
-.ah-secondary:active { transform: scale(0.97); }
+.ah-secondary:active { transform: scale(var(--ui-press-scale)); }
 @media (max-width: 480px) {
   .ah-foot:has(.ah-secondary) { flex-direction: column-reverse; align-items: stretch; }
   .ah-foot:has(.ah-secondary) :is(.ah-primary, .ah-secondary) { width: 100%; margin: 0; }
@@ -318,7 +318,7 @@
 }
 .ah-sidebar-add .ah-icon { width: 16px; height: 16px; }
 @media (hover: hover) and (pointer: fine) { .ah-sidebar-add:hover { background: var(--hover); color: var(--fg); } }
-.ah-sidebar-add:active { transform: scale(0.98); }
+.ah-sidebar-add:active { transform: scale(var(--ui-press-scale-soft)); }
 /* The root offer is a second window pill: the shared pill supplies size, hairline and type. */
 .ah-root-pill { gap: 6px; padding: 0 10px 0 8px; color: var(--fg-2); }
 @media (max-width: 480px) { .ah-root-pill { width: var(--ui-control-h); justify-content: center; padding: 0; } .ah-root-pill > span { display: none; } }

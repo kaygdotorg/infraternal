@@ -38,6 +38,6 @@ test("production account state exposes no recovery controls", async ({ page }) =
   await page.locator("#capsule").click();
   await expect(page.locator('[data-action="account:recovery"]')).toHaveCount(0);
   await expect(page.locator("#recovery-notice")).toBeHidden();
-  await expect(page.locator("#recovery-toast")).toBeHidden();
+  await expect(page.locator(".ui-toast")).toBeHidden();
   await expect(page.getByText("replace recovery words", { exact: false })).toHaveCount(0);
 });

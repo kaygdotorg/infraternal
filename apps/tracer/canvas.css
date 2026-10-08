@@ -9,6 +9,8 @@
   /* Windows cast shadows past the viewport edge; give them room without clipping. */
   margin: 0 calc(var(--gutter) * -1) -16px; padding: 0 var(--gutter) 16px;
   touch-action: none;
+  /* A window's lock shackle rises a few pixels over its top frame line. */
+  overflow-clip-margin: 10px;
 }
 .canvas-viewport[data-grab="ready"] { cursor: grab; }
 .canvas-viewport[data-grab="dragging"] { cursor: grabbing; }
@@ -24,7 +26,7 @@
 .canvas-preview {
   --preview-font: 14px;
   position: absolute; inset: 0; margin: 0; padding: 14px 16px; overflow: auto;
-  color: var(--fg); font: 400 var(--preview-font)/1.2857 "Geist Mono", ui-monospace, monospace;
+  color: var(--fg); font: var(--fw-body, 450) var(--preview-font)/1.2857 var(--font-mono, "Maple Mono NF"), ui-monospace, monospace;
   letter-spacing: 0; white-space: pre; tab-size: 8;
   overscroll-behavior: contain; scrollbar-width: none; touch-action: pan-x pan-y;
   -webkit-user-select: text; user-select: text;
@@ -32,6 +34,9 @@
 .canvas-preview::-webkit-scrollbar { display: none; }
 @media (pointer: coarse) { .canvas-preview { --preview-font: 13px; } }
 .canvas-prompt { color: var(--accent); }
+/* SGR 3 (italic) and 1 (bold) in a static preview; the font's own italic is used when it has one, the browser slants the upright face when it has none. */
+.canvas-preview i { font-style: italic; }
+.canvas-preview b { font-weight: 700; }
 .canvas-cmd { color: var(--fg); }
 .canvas-out { color: color-mix(in oklab, var(--fg) 82%, var(--bg)); }
 
@@ -42,7 +47,7 @@
 .ui-host-mark { width: 100%; height: 100%; fill: currentColor; }
 
 /* The status line's text goes to the shared toast (canvas.ts); the line itself never shows. */
-.terminal-screen[data-canvas="on"] .connection-status { display: none; }
+.terminal-screen[data-preview] .connection-status, .terminal-screen[data-canvas="on"] .connection-status { display: none; }
 
 /* ---- details popover ------------------------------------------------------------- */
 .canvas-popover {

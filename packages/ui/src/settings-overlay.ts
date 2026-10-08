@@ -117,7 +117,7 @@ export function createSettingsOverlay(options: SettingsOverlayOptions): Settings
     card.tabIndex = -1;
     card.innerHTML = `
       <header class="ui-settings-head"><span class="ui-settings-title">Settings</span>
-        <button class="ui-settings-close" type="button" aria-label="Close" data-tip="Close"><svg viewBox="0 0 24 24" aria-hidden="true">${CLOSE_ICON}</svg></button></header>
+        <button class="ui-window-action ui-settings-close" type="button" aria-label="Close" data-tip="Close"><svg viewBox="0 0 24 24" aria-hidden="true">${CLOSE_ICON}</svg></button></header>
       <div class="ui-settings-main"><nav class="ui-settings-nav" aria-label="Settings sections"></nav><div class="ui-settings-pane" role="region"></div></div>`;
     const nav = card.querySelector<HTMLElement>(".ui-settings-nav")!;
     const pane = card.querySelector<HTMLElement>(".ui-settings-pane")!;

@@ -31,7 +31,7 @@
 import { Spring } from "../../../packages/ui/src/spring";
 import { createWindowCard, type WindowCard } from "../../../packages/ui/src/window-card";
 import { hostIconMarkup, type HostPlatform } from "../../../packages/ui/src/host-icons";
-import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
+import type { ToastController } from "../../../packages/ui/src/toast";
 import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResize, type WindowResizeHost } from "../../../packages/ui/src/window-resize";
 import { openDetailsPopover, type DetailsPopover } from "./canvas-popover";
@@ -148,11 +148,14 @@ const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) =
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[char]!);
 
+/** Italic (`ESC[3m`) and bold (`ESC[1m`) runs of a fixture line, closed by `ESC[0m`, become <i> and <b>. */
+const sgr = (html: string): string => html.replace(/\u001b\[3m(.*?)\u001b\[0m/g, "<i>$1</i>").replace(/\u001b\[1m(.*?)\u001b\[0m/g, "<b>$1</b>").replace(/\u001b\[[0-9;]*m/g, "");
+
 /** Splits a prompt line into its prompt and command so previews colour them like a shell. */
 export function previewLine(line: string): string {
   const match = /^(\S+@\S+:[^$#]*[$#])(.*)$/.exec(line);
-  if (!match) return `<span class="canvas-out">${escapeHtml(line) || " "}</span>`;
-  return `<span class="canvas-prompt">${escapeHtml(match[1]!)}</span><span class="canvas-cmd">${escapeHtml(match[2]!)}</span>`;
+  if (!match) return `<span class="canvas-out">${sgr(escapeHtml(line)) || " "}</span>`;
+  return `<span class="canvas-prompt">${escapeHtml(match[1]!)}</span><span class="canvas-cmd">${sgr(escapeHtml(match[2]!))}</span>`;
 }
 
 /** Mounts the canvas into the core screen's pane area and returns its disposer. */
@@ -179,12 +182,13 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   // The terminal client reports connection state and transient failures by writing text into
   // the core screen's status line. On the canvas that line is hidden (canvas.css) and its text
   // is shown through the shared toast instead, so nothing toast-like ever appears on its own.
-  const toast = mountToast(stage);
+  const toast = core.toast;
   let relaying = false;
   const relayStatus = (): void => {
     const message = core.status.textContent?.trim() ?? "";
-    // "Connecting…" and the like are progress, not news: the capsule's dot already shows them.
-    if (message && !/(…|\.\.\.)$/.test(message)) {
+    // Routine connection states (starting, connecting, reconnecting, resuming, resumed, paused)
+    // never produce text: they belong to the status icon. Only a real failure reaches the toast.
+    if (message && !/(…|\.\.\.)$/.test(message) && !/reconnect|resum|connecting|starting|paused|approximate/i.test(message)) {
       relaying = true;
       toast.show({ message, tone: /could not|failed|error|unavailable/i.test(message) ? "error" : "ok", duration: 5000 });
     } else if (relaying) {
@@ -388,6 +392,9 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     // A window that only hosts a flow has no session: the capsule shows its title once.
     stage.querySelector<HTMLElement>("#capsule")?.toggleAttribute("data-flow", Boolean(window.flow));
     const sessionLabel = stage.querySelector<HTMLElement>(".capsule-session");
+    // The pill shows the window's host operating system (a flow shows the add mark) instead of the dot.
+    const os = stage.querySelector<HTMLElement>("#capsule-os");
+    if (os) os.innerHTML = window.flow ? '<svg viewBox="0 0 24 24" aria-hidden="true" class="is-line"><path d="M12 5v14M5 12h14"/></svg>' : hostIconMarkup(window.host.os, "ui-host-mark");
     if (hostLabel) hostLabel.textContent = window.live ? hostName : `${window.host.user ? `${window.host.user}@` : ""}${window.host.name}`;
     if (sessionLabel) sessionLabel.textContent = window.flow ? "" : window.session.name;
   };
@@ -614,6 +621,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       Object.assign(liveHost, { ...first!, id: "live", name: hostName, sessions: [] });
       liveWindow.card.setIcon(hostIconMarkup(liveHost.os, "ui-host-mark"));
       liveWindow.card.setTitle({ host: hostName, user: liveHost.user, session: liveSession.name });
+      if (active === liveWindow) updateCapsule(liveWindow);
       // Inserted after the live window in order, ahead of any flow window already open.
       let anchor = liveWindow;
       for (const host of [first!, ...rest]) anchor = addWindow(host, host.sessions[0]!, false, anchor);
@@ -656,6 +664,9 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     }
     const target = windowOf(event.target);
     if (!target) return;
+    // The lock acts for itself, on any window: one click focuses that window and locks it (moving a
+    // lock from another window), so it must not be swallowed as the "first touch activates" press.
+    if ((event.target as Element).closest(".ui-window-lock")) return;
     // A locked window keeps the input: presses elsewhere are ignored, with a pulse on the lock.
     if (lockedAgainst(target) && !(event.target as Element).closest(".ui-window-head")) { event.preventDefault(); event.stopPropagation(); return; }
     if (target === active) return;
@@ -957,7 +968,6 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       removeProvider();
       removeShortcuts();
       statusWatch.disconnect();
-      toast.dispose();
       resizeObserver.disconnect();
       popover?.close("keyboard");
       for (const entry of windows) { entry.resize?.dispose(); entry.card.dispose(); }

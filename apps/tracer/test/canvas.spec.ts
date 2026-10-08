@@ -3,7 +3,7 @@
  * trackpad and two-finger panning, crisp resting offset, copyable key/value cells and the
  * live terminal's cursor staying on its text inside a window card.
  */
-import { expect, test, type BrowserContext, type Page } from "playwright/test";
+import { chromium, expect, test, type BrowserContext, type Page } from "playwright/test";
 
 type CanvasOffset = { x: number; y: number; minX: number; moving: boolean; transform: string };
 
@@ -11,7 +11,7 @@ async function openCanvas(page: Page): Promise<void> {
   // The reset closes the previous test's sockets; a pooled keep-alive connection through the
   // latency proxy can be among them, so one retry absorbs that hang-up.
   await page.context().request.post("/__mock/reset").catch(() => page.context().request.post("/__mock/reset"));
-  await page.goto("/?mock=1&proto=windows&bg=none");
+  await page.goto("/?mock=1&proto=windows&bg=none&fixture=none");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
   await expect.poll(() => page.evaluate(() => (window as unknown as { __tracerCanvas?: { windows(): string[] } }).__tracerCanvas?.windows().length ?? 0)).toBeGreaterThan(2);
 }
@@ -98,7 +98,7 @@ test("details popover: keys left, values right, each cell copies with a tick", a
   expect(key!.x).toBeLessThan(rowBox.x + 8);
   expect(Math.abs(value!.x + value!.width - (rowBox.x + rowBox.width))).toBeLessThan(8);
   await row.locator(".ui-kv-value").click();
-  await expect(row.locator(".ui-kv-value")).toHaveAttribute("data-copied", "");
+  await expect(row.locator(".ui-kv-value")).toHaveAttribute("data-done", "");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("6.8.0-58-generic");
   await row.locator(".ui-kv-key").click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Kernel");
@@ -184,7 +184,7 @@ test("every floating card uses the one overlay material", async ({ page }) => {
     return { popover, shared };
   });
   expect(material.popover).toEqual(material.shared);
-  expect(material.shared.filter).toContain("blur(14px)");
+  expect(material.shared.filter).toContain("blur(4px)");
 });
 
 // ---- the connection line is never a second toast ---------------------------------------
@@ -232,9 +232,10 @@ test("desktop: edges and corners resize with the right cursors, neighbours shift
   expect(Math.abs(corner.height - (moved.height - 200))).toBeLessThan(2);
   // A north edge drag moves the top down and keeps the bottom where it was.
   const bottom = corner.y + corner.height;
-  await page.mouse.move(corner.x + corner.width / 2, corner.y + 2);
+  // Off-centre: the middle of the top edge belongs to the window's lock.
+  await page.mouse.move(corner.x + 60, corner.y + 2);
   await page.mouse.down();
-  await page.mouse.move(corner.x + corner.width / 2, corner.y + 82, { steps: 8 });
+  await page.mouse.move(corner.x + 60, corner.y + 82, { steps: 8 });
   await page.mouse.up();
   const north = await windowBox(page, 1);
   expect(Math.abs(north.y + north.height - bottom)).toBeLessThan(1);
@@ -358,6 +359,17 @@ test("sidebar footer: the person and settings pills line up, press, and open Set
     return { userH: user.height, gearH: gear.height, centre: Math.abs((user.top + user.height / 2) - (gear.top + gear.height / 2)), gap: sidebar.bottom - foot.bottom };
   });
   expect(geometry.userH).toBeCloseTo(geometry.gearH, 0);
+  // The person's pill hugs its content (avatar, name, padding); the gear stays at the right edge.
+  const hug = await page.evaluate(() => {
+    const user = document.querySelector(".ui-sidebar-user")!.getBoundingClientRect();
+    const gear = document.querySelector(".ui-sidebar-settings")!.getBoundingClientRect();
+    const foot = document.querySelector(".ui-sidebar-foot")!.getBoundingClientRect();
+    const names = document.querySelector(".ui-sidebar-names")!.getBoundingClientRect();
+    return { userRight: user.right, gearLeft: gear.left, gearRight: gear.right, footRight: foot.right, trailing: user.right - names.right };
+  });
+  expect(hug.gearRight).toBeCloseTo(hug.footRight, 0);
+  expect(hug.gearLeft - hug.userRight).toBeGreaterThan(40);
+  expect(hug.trailing).toBeLessThan(20);
   expect(geometry.centre).toBeLessThan(0.5);
   expect(geometry.gap).toBeLessThan(12);
   // Both are real buttons: pressing scales them (nothing is inert).
@@ -376,7 +388,7 @@ test("sidebar footer: the person and settings pills line up, press, and open Set
   await expect(about.locator(".ui-settings-nav-row[aria-current='true']")).toHaveText("About");
   const commit = about.locator(".ui-kv-row", { hasText: "Commit" }).locator(".ui-kv-value");
   await commit.click();
-  await expect(commit).toHaveAttribute("data-copied", "");
+  await expect(commit).toHaveAttribute("data-done", "");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/^[0-9a-f]{40}$|^dev$/);
   await expect(page.locator(".tip")).toContainText("Copied");
   const version = about.locator(".ui-kv-row", { hasText: "Version" }).locator(".ui-kv-value");
@@ -394,7 +406,8 @@ test("palette: About infraternal opens Settings, About, and is found by version,
     await page.locator("#palette-input").fill(alias);
     await expect(page.locator(".result[data-action='settings:about']")).toBeVisible();
     if (alias === "commit") {
-      await page.keyboard.press("Enter");
+      // "commit" also finds the Commit Mono font row, so pick About by name.
+      await page.locator(".result[data-action='settings:about']").click();
       await expect(page.locator(".ui-settings")).toBeVisible();
       await page.keyboard.press("Escape");
     } else await page.keyboard.press("Escape");
@@ -419,15 +432,20 @@ test("lock: the icon appears near a window's top edge, locks with a click, stays
     return { lockLeft: l.left, pillRight: p.right, size: l.width };
   });
   expect(geometry.lockLeft).toBeGreaterThanOrEqual(geometry.pillRight);
-  // On the frame: the chip's top edge is the window's top border line, and it is centred.
+  // The glyph itself sits on the frame: the shackle above the window's top line, the body below it.
   const frame = await page.evaluate(() => {
-    const l = document.querySelector(".ui-window-lock")!.getBoundingClientRect();
     const w = document.querySelector(".ui-window")!.getBoundingClientRect();
-    return { top: l.top - w.top, centre: Math.abs((l.left + l.width / 2) - (w.left + w.width / 2)) };
+    const body = document.querySelector(".ui-lock-body")!.getBoundingClientRect();
+    const shackle = document.querySelector(".ui-lock-shackle")!.getBoundingClientRect();
+    const button = document.querySelector(".ui-window-lock")!.getBoundingClientRect();
+    return { shackleBottom: shackle.bottom - w.top, shackleTop: shackle.top - w.top, bodyTop: body.top - w.top, hit: [button.width, button.height], bg: getComputedStyle(document.querySelector(".ui-window-lock")!).backgroundColor, border: getComputedStyle(document.querySelector(".ui-window-lock")!).borderTopWidth };
   });
-  expect(Math.abs(frame.top)).toBeLessThan(0.6);
-  // Centred, except when the title pill reaches past the middle: then it sits just right of the pill.
-  expect(frame.centre < 1 || geometry.lockLeft - geometry.pillRight < 10).toBe(true);
+  expect(frame.shackleTop).toBeLessThan(-3);
+  expect(Math.abs(frame.bodyTop)).toBeLessThan(1.2);
+  expect(Math.abs(frame.shackleBottom)).toBeLessThan(1.2);
+  expect(frame.hit).toEqual([44, 44]);
+  expect(frame.bg).toBe("rgba(0, 0, 0, 0)");
+  expect(frame.border).toBe("0px");
   await expect(lock).toHaveAttribute("data-tip", "Lock input");
   await lock.click();
   await expect(window0).toHaveAttribute("data-locked", "");
@@ -520,26 +538,36 @@ test("lock: on macOS, ⌘K still opens the palette while locked and offers Unloc
   await context.close();
 });
 
-test("lock (touch): a header tap shows a 44 px lock, a tap locks it, and the lock stays", async ({ browser }) => {
+test("lock (touch): there is no frame lock on a phone; the palette locks", async ({ browser }) => {
   const context = await browser.newContext({ hasTouch: true, isMobile: true, deviceScaleFactor: 3, viewport: { width: 393, height: 852 } });
   const page = await touchContext(context);
   await openCanvas(page);
-  await page.keyboard.press("Control+Shift+ArrowRight"); // bring the second window onto the screen
-  await page.waitForTimeout(700);
-  const window0 = page.locator(".ui-window").nth(1);
-  const lock = window0.locator(".ui-window-lock");
-  await expect(lock).toHaveCSS("opacity", "0");
-  await window0.locator(".ui-window-head").tap({ position: { x: 330, y: 20 } });
-  await expect(lock).toHaveCSS("opacity", "0.35");
-  const size = await lock.evaluate((node) => node.getBoundingClientRect().width);
-  expect(size).toBeGreaterThanOrEqual(44);
-  await lock.tap();
+  const window0 = page.locator(".ui-window").first();
+  expect(await window0.locator(".ui-window-lock").evaluate((node) => getComputedStyle(node).display)).toBe("none");
+  await page.keyboard.press("Control+Shift+KeyL");
   await expect(window0).toHaveAttribute("data-locked", "");
-  await page.waitForTimeout(4200); // the header reveal times out; the locked icon does not
-  await expect(lock).toHaveCSS("opacity", "0.9");
-  await lock.tap();
-  await expect(window0).not.toHaveAttribute("data-locked", "");
   await context.close();
+});
+
+test("lock: one click on an unfocused window's lock focuses that window and locks it", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  const second = page.locator(".ui-window").nth(1);
+  expect(await activeWindow(page)).toMatch(/^live:/);
+  const box = (await second.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 20);
+  await expect(second).toHaveAttribute("data-lock-near", "");
+  await second.locator(".ui-window-lock").click();
+  await expect(second).toHaveAttribute("data-locked", "");
+  expect(await activeWindow(page)).toMatch(/^build-01:/);
+  await expect(page.locator(".ui-window[data-locked]")).toHaveCount(1);
+  // Locking another window moves the lock.
+  const first = page.locator(".ui-window").first();
+  const firstBox = (await first.boundingBox())!;
+  await page.mouse.move(firstBox.x + firstBox.width / 2, firstBox.y + 20);
+  await first.locator(".ui-window-lock").click();
+  await expect(first).toHaveAttribute("data-locked", "");
+  await expect(second).not.toHaveAttribute("data-locked", "");
 });
 
 // ---- the `?` shortcuts view ---------------------------------------------------------------
@@ -573,7 +601,7 @@ test("shortcuts: ? morphs the capsule into the list, current area first, one sho
   const palette = await panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd").allTextContents();
   expect(palette).toEqual(["Ctrl", "K"]);
   const material = await panel.evaluate((node) => { const s = getComputedStyle(node); return { filter: s.backdropFilter, bg: s.backgroundColor }; });
-  expect(material.filter).toContain("blur(14px)");
+  expect(material.filter).toContain("blur(4px)");
   // At rest nothing is left animating: no transform, no opacity on the content.
   expect(await panel.evaluate((node) => [getComputedStyle(node).transform, getComputedStyle(node.querySelector(".ui-shortcuts-body")!).opacity])).toEqual(["none", "1"]);
   await page.keyboard.press("Escape");
@@ -695,4 +723,127 @@ test("details popover tabs: the selected capsule glides (does not jump) and the 
   await page.keyboard.press("ArrowRight");
   await expect(page.locator(".canvas-popover .ui-tab[data-tab='session']")).toHaveAttribute("aria-selected", "true");
   expect(await page.locator(".ui-tabs-capsule").evaluate((node) => node.style.transition)).toBe("none");
+});
+
+test("copyable values: the highlight hugs the text with even padding, on keys and right-aligned values", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.locator(".ui-window").first().locator(".ui-window-pill").click();
+  await page.waitForTimeout(500); // the popover's scale-in settles before it is measured
+  const measure = (kind: "key" | "value") => page.evaluate((which) => {
+    const row = [...document.querySelectorAll(".canvas-popover .ui-kv-row")].find((node) => node.textContent!.includes("Virtualization"))!;
+    const span = row.querySelector(`.ui-kv-${which} .ui-kv-text`)!;
+    const text = document.createRange();
+    text.selectNodeContents([...span.childNodes].find((node) => node.nodeType === 3)!);
+    const box = span.getBoundingClientRect(), glyphs = text.getBoundingClientRect();
+    return { left: glyphs.left - box.left, right: box.right - glyphs.right };
+  }, kind);
+  for (const kind of ["key", "value"] as const) {
+    const pad = await measure(kind);
+    expect(Math.abs(pad.left - 6)).toBeLessThan(0.6);
+    expect(Math.abs(pad.right - 6)).toBeLessThan(0.6);
+  }
+  // Wrapped values keep a highlight per line: the decoration is cloned across the lines.
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector(".ui-kv-text")!).getPropertyValue("box-decoration-break"))).toBe("clone");
+});
+
+// ---- nothing in the bottom-left corner -------------------------------------------------------
+test("a normal preview session never writes text bottom left: reload, a failing session check, state messages", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const cornerText = (): Promise<string[]> => page.evaluate(() => {
+    const found: string[] = [];
+    for (const node of document.querySelectorAll<HTMLElement>("body *")) {
+      if (node.children.length || !node.textContent?.trim()) continue;
+      const box = node.getBoundingClientRect(), style = getComputedStyle(node);
+      if (box.width === 0 || box.height === 0 || style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) continue;
+      if (node.closest(".ui-window, .sidebar, .palette")) continue; // windows own their own content
+      if (box.left < 320 && box.bottom > innerHeight - 140) found.push(node.textContent.trim());
+    }
+    return found;
+  });
+  await openCanvas(page);
+  // The very first frames after a reload: the status line's "Starting terminal…" is never drawn.
+  await page.reload();
+  for (let frame = 0; frame < 10; frame++) {
+    expect(await page.locator("#connection-status").evaluate((node) => getComputedStyle(node).display)).toBe("none");
+    await page.waitForTimeout(60);
+  }
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+  // The server goes away while the tab is in the background, then the person returns.
+  await page.route("**/auth/session", (route) => route.abort("connectionrefused"));
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(1200);
+  await page.unroute("**/auth/session");
+  // Routine connection states raise no toast and no text, in any corner.
+  for (const message of ["Connecting…", "Connection lost; resuming…", "Connection interrupted; reconnecting…", "Reconnected with an approximate screen.", "Starting terminal…"]) {
+    await page.evaluate((text) => { document.querySelector("#connection-status")!.textContent = text; }, message);
+    await page.waitForTimeout(150);
+    await expect(page.locator(".ui-toast")).toBeHidden();
+  }
+  await page.evaluate(() => { document.querySelector("#connection-status")!.textContent = ""; });
+  expect(await cornerText()).toEqual([]);
+  // The shared toast sits bottom centre and takes the theme's material (light on paper).
+  await page.evaluate(() => { document.querySelector("#connection-status")!.textContent = "The server could not open this terminal."; });
+  await expect(page.locator(".ui-toast")).toBeVisible();
+  const toast = await page.locator(".ui-toast").evaluate((node) => { const r = node.getBoundingClientRect(); return { centre: r.left + r.width / 2, bottom: innerHeight - r.bottom }; });
+  expect(Math.abs(toast.centre - 720)).toBeLessThan(4);
+  expect(toast.bottom).toBeLessThan(40);
+});
+
+// ---- copying from an insecure origin ---------------------------------------------------------
+test("copy works from a plain-http, non-localhost origin: no async clipboard, the fallback copies and the feedback plays", async () => {
+  // `insecure.test` resolves to the loopback proxy, but the browser treats it as a non-secure
+  // origin (as the LAN address of the preview is), so `navigator.clipboard` is undefined there.
+  const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
+  const browser = await chromium.launch({ args: [`--host-resolver-rules=MAP insecure.test 127.0.0.1`] });
+  try {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    await page.goto(`http://insecure.test:${port}/?mock=1&proto=windows&bg=none`);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __tracerCanvas?: { windows(): string[] } }).__tracerCanvas?.windows().length ?? 0), { timeout: 30_000 }).toBeGreaterThan(2);
+    expect(await page.evaluate(() => ({ secure: isSecureContext, clipboard: typeof navigator.clipboard }))).toEqual({ secure: false, clipboard: "undefined" });
+    // Record what execCommand("copy") is asked to copy, then let it succeed.
+    await page.evaluate(() => {
+      const copied: string[] = [];
+      (window as unknown as { __copied: string[] }).__copied = copied;
+      document.execCommand = (command: string): boolean => {
+        if (command === "copy") copied.push((document.activeElement as HTMLTextAreaElement).value);
+        return true;
+      };
+    });
+    await page.locator(".ui-window").first().locator(".ui-window-pill").click();
+    const value = page.locator(".canvas-popover .ui-kv-value").first();
+    await value.click();
+    await expect(value).toHaveAttribute("data-done", "");
+    expect(await page.evaluate(() => (window as unknown as { __copied: string[] }).__copied)).toEqual(["6.8.0-58-generic"]);
+    // The tick morphs in (opacity rises) and the shared "Copied" tooltip shows.
+    await expect(value.locator(".ui-inline-tick .is-done")).toHaveCSS("opacity", "1");
+    await expect(page.locator(".tip")).toContainText("Copied");
+    // The cursor over a copyable value is the pointer, never the green plus of `copy`.
+    expect(await value.evaluate((node) => getComputedStyle(node).cursor)).toBe("pointer");
+    // If both paths fail, the same slot says so.
+    await page.evaluate(() => { document.execCommand = () => false; });
+    const key = page.locator(".canvas-popover .ui-kv-key").first();
+    await key.click();
+    await expect(page.locator(".tip")).toContainText("Couldn't copy");
+    await expect(key).not.toHaveAttribute("data-done", "");
+  } finally {
+    await browser.close();
+  }
+});
+
+test("top pill: the host's operating-system icon replaces the connection dot and follows the active window", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  const pill = page.locator("#capsule");
+  await expect(pill.locator("#connection-dot")).toBeHidden();
+  await expect(pill.locator("#capsule-os svg")).toBeVisible();
+  const first = await pill.locator("#capsule-os").innerHTML();
+  await page.locator(".ui-window").nth(2).locator(".ui-window-body").click(); // an Arch/Debian-family host, not the first
+  await expect.poll(() => pill.locator("#capsule-os").innerHTML()).not.toBe(first);
 });

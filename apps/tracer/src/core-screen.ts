@@ -1,13 +1,17 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
 import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
-import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
+import { applyTheme, DEFAULT_GLASS, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
+import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
 import { aboutSection, createSettingsOverlay } from "../../../packages/ui/src/settings-overlay";
 import { buildVersion } from "./build-version";
+import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
+import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
+import { initialFont, rememberFont } from "./font-preference";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
 import { recoveryUiEnabled } from "./recovery-ui";
@@ -39,8 +43,12 @@ export interface CoreScreen {
   status: HTMLElement;
   probePanel: HTMLElement;
   theme(): ITheme;
+  /** The font the person has chosen (a preview in progress does not count). */
+  font(): MonoFont;
   bindTerminal(client: TerminalClient): void;
   /** Replaces the host/session tree (the canvas lists its windows here); returns the new tree. */
+  /** The one shared toast of the screen: every transient message (recovery, connection, flows) uses it. */
+  readonly toast: ToastController;
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
   /** Adds palette rows computed each time the palette opens (state-dependent actions); returns a remover. */
   addPaletteProvider(provider: () => PaletteEntry[]): () => void;
@@ -84,6 +92,7 @@ const SCREEN = `
     <header class="top" aria-label="Terminal controls">
       <span class="top-spacer" aria-hidden="true"></span>
       <button class="ui-pill capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
+        <span class="capsule-os" id="capsule-os" aria-hidden="true"></span>
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
         <span class="capsule-session">SSH shell</span><span class="capsule-rtt" id="rtt" aria-label="Round trip">··</span>
@@ -93,7 +102,7 @@ const SCREEN = `
         <button class="ui-pill ui-pill-icon tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
       </nav>
     </header>
-    <aside class="ui-panel sidebar" id="sidebar" aria-label="Hosts" hidden>
+    <aside class="ui-panel ui-overlay-surface sidebar" id="sidebar" data-overlay-size="large" aria-label="Hosts" hidden>
       <div class="sidebar-head"><span class="sidebar-title">Hosts</span></div>
       <div id="tree"></div>
     </aside>
@@ -107,7 +116,7 @@ const SCREEN = `
       <p id="recovery-notice-time"></p><button class="ui-pill" id="recovery-cancel" type="button">Cancel recovery</button>
       <p id="recovery-cancel-error" role="alert"></p>
     </section>
-    <p class="ui-window recovery-toast" id="recovery-toast" role="status" hidden></p>` : ""}
+    ` : ""}
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
       <div id="keytray" class="keytray ui-pill" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
@@ -143,14 +152,6 @@ const get = <T extends HTMLElement>(selector: string): T => {
   return node;
 };
 
-const readLocal = (key: string): string | null => {
-  try { return localStorage.getItem(key); } catch { return null; }
-};
-
-const writeLocal = (key: string, value: string): void => {
-  try { localStorage.setItem(key, value); } catch { /* preferences are optional in private mode */ }
-};
-
 function themeId(value: string | null): string | undefined {
   return value && Object.hasOwn(THEMES, value) ? value : undefined;
 }
@@ -164,17 +165,23 @@ export interface PaletteEntry {
   hint: string;
   action?: string;
   swatch?: Theme;
+  /** Set on font rows: hovering or arrowing onto the row shows that font until the palette closes. */
+  previewFont?: MonoFont;
 }
 
 /** Mounts the authenticated server host, its live shell session, and terminal controls. */
 export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): CoreScreen {
   app.innerHTML = SCREEN;
   const stage = get<HTMLElement>("#terminal-screen");
+  // The canvas preview never draws the status line, from the first frame (the canvas chunk loads a
+  // moment after the screen mounts, and the line's "Starting terminal…" must not flash meanwhile).
+  if (options.addHostPrototype) stage.dataset.preview = "";
   const terminalHost = get<HTMLElement>("#terminal-host");
   const status = get<HTMLElement>("#connection-status");
   const probePanel = get<HTMLElement>("#probe-panel");
   const sidebar = get<HTMLElement>("#sidebar");
   const sidebarToggle = get<HTMLButtonElement>("#sidebar-toggle");
+  const toast = mountToast(stage);
   // The footer (who is signed in, settings, the build) is part of the canvas preview.
   // Settings is a shell; About is the only section so far (the build's name, version, commit, date).
   const build = buildVersion();
@@ -215,8 +222,17 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   liveHost.setAttribute("aria-label", hostName);
 
   const params = new URLSearchParams(location.search);
+  // `?glass=1..4`: how much shows through the floating cards (1 thickest, 4 thinnest; default 3).
+  const glassParam = Number(params.get("glass"));
+  const glassLevel = Number.isInteger(glassParam) && glassParam >= 1 && glassParam <= 4 ? glassParam : DEFAULT_GLASS;
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
   let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "ink" : "paper");
+  // The font follows the same order as the theme: URL, then the saved choice, then the default.
+  // `committedFont` is what the person chose; `shownFont` is what is on screen, which differs
+  // only while a palette row previews another font.
+  let committedFont = initialFont();
+  let shownFont = committedFont;
+  let fontRequest = 0;
   let background = params.get("bg") === "mesh" || params.get("bg") === "none"
     ? params.get("bg")!
     : (readLocal("tracer.background") === "mesh" ? "mesh" : "none");
@@ -260,7 +276,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ROOT.dataset.bg = background;
     stage.dataset.theme = currentThemeId;
     stage.dataset.bg = background;
-    applyTheme(active, ROOT);
+    applyTheme(active, ROOT, glassLevel);
     THEME_COLOR?.setAttribute("content", active.bg);
     client?.setTheme(terminalTheme(active, background === "mesh"));
     if (background === "mesh") return paintMesh();
@@ -280,19 +296,39 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
 
 
+  /**
+   * Shows a font on the whole screen: UI text, the sign-in tokens and the terminal together.
+   * A font that has never been used is fetched first and the previous one stays on screen
+   * until it arrives, so a preview never flashes a fallback. Each call supersedes the ones
+   * before it: arrowing quickly down the list applies only the row the person stopped on.
+   */
+  const showFont = (font: MonoFont): void => {
+    const request = ++fontRequest;
+    if (font === shownFont) return;
+    void loadFont(font).then(() => {
+      if (request !== fontRequest) return;
+      shownFont = font;
+      applyFontVars(font, ROOT);
+      client?.setFont(font);
+    }, () => undefined);
+  };
+
   const baseEntries = (): PaletteEntry[] => [
     { group: "Sessions", glyph: "›_", label: "SSH shell", hint: hostName, action: "session:current" },
     { group: "Hosts", glyph: "●", label: hostName, hint: "current", action: "host:current" },
     ...Object.entries(THEMES).map(([id, theme]) => ({
       group: "Theme", glyph: "◉", label: theme.name, hint: theme.dark ? "dark" : "light", action: `theme:${id}`, swatch: theme,
     })),
+    ...FONTS.map((font) => ({
+      group: "Font", glyph: "Aa", label: font.label, hint: font.hint, action: `font:${font.id}`, previewFont: font,
+    })),
     { group: "Background", glyph: "▦", label: "Mesh from the theme", hint: "one still · no idle work", action: "bg:mesh" },
     { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
     ...(options.addHostPrototype ? [
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
-    { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
     ...(options.addHostPrototype ? [
+      { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
       // The hint carries the aliases, so "version", "build" and "commit" find it.
       { group: "Help", glyph: "i", label: "About infraternal", hint: "version · build · commit", action: "settings:about" },
     ] : []),
@@ -324,6 +360,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let visibleOptions: HTMLButtonElement[] = [];
   let selected = 0;
   const headingByGroup = new Map<string, HTMLDivElement>();
+  const rowCache = new WeakMap<PaletteEntry, HTMLButtonElement>();
+
+  /**
+   * Keeps the screen in step with the selected palette row: a font row previews its font, any
+   * other row (or a closed palette) shows the chosen font. Called on every selection change,
+   * so hover, arrows, filtering, opening and closing all go through one rule, and Escape or a
+   * click outside revert simply by closing.
+   */
+  const syncFontPreview = (): void => {
+    const entry = palette.hidden ? undefined : visibleEntries[selected];
+    showFont(entry?.previewFont ?? committedFont);
+  };
 
   const keepPaletteOptionVisible = (option: HTMLButtonElement, index: number): void => {
     option.scrollIntoView({ block: "nearest", behavior: "instant" });
@@ -348,6 +396,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       paletteInput.setAttribute("aria-activedescendant", nextOption.id);
     }
     keepPaletteOptionVisible(nextOption, boundedIndex);
+    syncFontPreview();
   };
 
   const visiblePalettePageSize = (): number => {
@@ -371,37 +420,46 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     let previousGroup = "";
     visibleEntries.forEach((entry, index) => {
       if (entry.group !== previousGroup) {
-        const heading = document.createElement("div");
-        heading.id = paletteGroupIds.get(entry.group)!;
-        heading.className = "group-label";
-        heading.textContent = entry.group;
-        headingByGroup.set(entry.group, heading);
+        let heading = headingByGroup.get(entry.group);
+        if (!heading) {
+          heading = document.createElement("div");
+          heading.id = paletteGroupIds.get(entry.group)!;
+          heading.className = "group-label";
+          heading.textContent = entry.group;
+          headingByGroup.set(entry.group, heading);
+        }
         paletteResults.append(heading);
         previousGroup = entry.group;
       }
-      const result = document.createElement("button");
-      result.id = paletteOptionIds.get(entry)!;
-      result.type = "button";
-      result.className = "result";
-      result.setAttribute("role", "option");
-      result.setAttribute("aria-selected", String(index === selected));
-      result.dataset.action = entry.action ?? "";
-      const icon = document.createElement("span");
-      icon.className = "result-icon";
-      if (entry.icon) { icon.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${entry.icon}</svg>`; icon.classList.add("has-svg"); }
-      else icon.textContent = entry.glyph;
-      if (entry.swatch) {
-        icon.classList.add("swatch");
-        icon.style.backgroundColor = entry.swatch.bg;
-        icon.style.boxShadow = `inset 0 0 0 3px ${entry.swatch.accent}`;
+      // Rows are built once per entry and re-attached on every filter: the list grows with every
+      // group added (fonts doubled it), and rebuilding it per keystroke cost more than the budget.
+      let result = rowCache.get(entry);
+      if (!result) {
+        result = document.createElement("button");
+        result.id = paletteOptionIds.get(entry)!;
+        result.type = "button";
+        result.className = "result";
+        result.setAttribute("role", "option");
+        result.dataset.action = entry.action ?? "";
+        const icon = document.createElement("span");
+        icon.className = "result-icon";
+        if (entry.icon) { icon.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${entry.icon}</svg>`; icon.classList.add("has-svg"); }
+        else icon.textContent = entry.glyph;
+        if (entry.swatch) {
+          icon.classList.add("swatch");
+          icon.style.backgroundColor = entry.swatch.bg;
+          icon.style.boxShadow = `inset 0 0 0 3px ${entry.swatch.accent}`;
+        }
+        const label = document.createElement("span");
+        label.className = "result-label";
+        label.textContent = entry.label;
+        const hint = document.createElement("span");
+        hint.className = "result-hint";
+        hint.textContent = entry.hint;
+        result.append(icon, label, hint);
+        rowCache.set(entry, result);
       }
-      const label = document.createElement("span");
-      label.className = "result-label";
-      label.textContent = entry.label;
-      const hint = document.createElement("span");
-      hint.className = "result-hint";
-      hint.textContent = entry.hint;
-      result.append(icon, label, hint);
+      result.setAttribute("aria-selected", String(index === selected));
       visibleOptions.push(result);
       paletteResults.append(result);
     });
@@ -419,6 +477,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       empty.textContent = "No matching hosts, sessions or actions.";
       paletteResults.append(empty);
     }
+    syncFontPreview();
   };
 
   // Desktop docks the sidebar beside the windows instead of over them, so nothing under it
@@ -469,6 +528,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       paletteInput.focus({ preventScroll: true });
     } else {
       paletteInput.removeAttribute("aria-activedescendant");
+      syncFontPreview();
     }
   };
   const sidebarClick = (event: MouseEvent): void => setSidebar(sidebar.hidden, event.detail === 0);
@@ -514,7 +574,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       setPalette(palette.hidden, "keyboard");
       return;
     }
-    if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isTypingTarget(event.target) && palette.hidden) {
+    if (options.addHostPrototype && event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isTypingTarget(event.target) && palette.hidden) {
       event.preventDefault();
       event.stopPropagation();
       shortcuts.toggle();
@@ -579,6 +639,19 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       setPalette(false, "keyboard");
       event.preventDefault();
     }
+  });
+  // Hover selects the row under a moving pointer, so a font row previews on hover like it does
+  // on arrow keys. Only real movement counts: arrowing scrolls rows under a resting pointer, and
+  // that must not steal the selection back.
+  let lastPointer = { x: -1, y: -1 };
+  paletteResults.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "touch" || (event.clientX === lastPointer.x && event.clientY === lastPointer.y)) return;
+    lastPointer = { x: event.clientX, y: event.clientY };
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const result = target.closest<HTMLButtonElement>(".result");
+    const index = result ? visibleOptions.indexOf(result) : -1;
+    if (index >= 0 && index !== selected) selectPaletteOption(index);
   });
   paletteResults.addEventListener("click", (event) => {
     const target = event.target;
@@ -730,6 +803,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       writeLocal("tracer.theme", currentThemeId);
       swapLook();
       return true;
+    } else if (kind === "font" && fontById(value)) {
+      committedFont = fontById(value)!;
+      rememberFont(committedFont);
+      showFont(committedFont);
+      return false;
     } else if (kind === "bg" && (value === "mesh" || value === "none")) {
       background = value;
       writeLocal("tracer.background", value);
@@ -753,9 +831,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   }
 
   const recoveryNotice = stage.querySelector<HTMLElement>("#recovery-notice")!;
-  const recoveryToast = stage.querySelector<HTMLElement>("#recovery-toast")!;
   const cancelRecovery = stage.querySelector<HTMLButtonElement>("#recovery-cancel")!;
-  let recoveryReady: number | undefined, recoveryToastTimer = 0;
+  let recoveryReady: number | undefined;
   const cancelClick = (): void => {
     cancelRecovery.disabled = true;
     const error = stage.querySelector<HTMLElement>("#recovery-cancel-error")!;
@@ -772,8 +849,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     status,
     probePanel,
     theme: () => terminalTheme(THEMES[currentThemeId]!, background === "mesh"),
+    font: () => committedFont,
     bindTerminal(value) {
       client = value;
+      client.setFont(shownFont);
       client.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
       for (const name of MODIFIER_KEYS) client.setInputModifier(name, modifiers[name]);
     },
@@ -781,6 +860,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       providers.add(provider);
       return () => { providers.delete(provider); };
     },
+    toast,
     setHostTree(sections, activeLeaf, onSelect) {
       branch.dispose();
       branch = branchedMenu(get<HTMLElement>("#tree"), sections, { active: activeLeaf, onSelect });
@@ -802,13 +882,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (readyAt !== undefined) {
         stage.querySelector<HTMLElement>("#recovery-notice-time")!.textContent = `Account recovery requested · Available ${new Date(readyAt * 1000).toLocaleString()}`;
         if (recoveryReady !== readyAt) {
-          recoveryToast.textContent = "Recovery requested. You can cancel it from this device.";
-          recoveryToast.hidden = false;
-          window.clearTimeout(recoveryToastTimer);
-          recoveryToastTimer = window.setTimeout(() => { recoveryToast.hidden = true; }, 5000);
+          toast.show({ message: "Recovery requested. You can cancel it from this device.", duration: 5000 });
         }
       } else {
-        window.clearTimeout(recoveryToastTimer); recoveryToast.hidden = true;
+        toast.dismiss();
       }
       recoveryReady = readyAt;
     },
@@ -830,7 +907,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       keyblur.classList.remove("is-away");
     },
     dispose() {
-      window.clearTimeout(recoveryToastTimer);
+      toast.dispose();
       cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
       shortcuts.dispose();

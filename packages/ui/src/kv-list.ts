@@ -7,12 +7,12 @@
  * - desktop: one click copies;
  * - touch: a double tap copies (a single tap stays free for scrolling and selection);
  * - keyboard: Enter or Space on a focused cell copies.
- * The cell confirms with the shared tick and a "Copied" tooltip for 900 ms.
+ * The cell confirms through the shared copy feedback (copy-feedback.ts: the tick that morphs in,
+ * plus the "Copied" tooltip), exactly as the sign-in and recovery copy buttons do.
  *
  * Meters (memory, disk) are a thin bar under the value; they span the value column.
  */
-import { TICK_PATH } from "./tick";
-import { flashTip } from "./tooltip";
+import { copyFeedback, inlineTick } from "./copy-feedback";
 
 export interface KeyValueRow {
   key: string;
@@ -30,7 +30,6 @@ export interface KeyValueList {
 
 const DOUBLE_TAP_MS = 320;
 const DOUBLE_TAP_SLOP = 12;
-const HOLD_MS = 900;
 
 /** Builds a list; call `set` to (re)fill it. */
 export function createKeyValueList(label: string): KeyValueList {
@@ -39,19 +38,8 @@ export function createKeyValueList(label: string): KeyValueList {
   root.setAttribute("role", "list");
   root.setAttribute("aria-label", label);
 
-  const timers = new WeakMap<HTMLElement, number>();
-  const copy = async (cell: HTMLElement): Promise<void> => {
-    const text = cell.dataset.copy ?? "";
-    try {
-      if (!navigator.clipboard) return;
-      await navigator.clipboard.writeText(text);
-    } catch {
-      return;
-    }
-    clearTimeout(timers.get(cell));
-    cell.dataset.copied = "";
-    flashTip(cell, "Copied", HOLD_MS);
-    timers.set(cell, window.setTimeout(() => { delete cell.dataset.copied; }, HOLD_MS));
+  const copy = async (cell: HTMLElement, instant = false): Promise<void> => {
+    await copyFeedback(cell, cell.dataset.copy ?? "", instant, true);
   };
 
   let lastTap: { cell: HTMLElement; time: number; x: number; y: number } | undefined;
@@ -63,7 +51,7 @@ export function createKeyValueList(label: string): KeyValueList {
     if (lastTap && lastTap.cell === cell && now - lastTap.time < DOUBLE_TAP_MS
       && Math.hypot(event.clientX - lastTap.x, event.clientY - lastTap.y) < DOUBLE_TAP_SLOP) {
       lastTap = undefined;
-      void copy(cell);
+      void copy(cell, false);
     } else {
       lastTap = { cell, time: now, x: event.clientX, y: event.clientY };
     }
@@ -73,25 +61,28 @@ export function createKeyValueList(label: string): KeyValueList {
   const click = (event: MouseEvent): void => {
     const cell = (event.target as Element | null)?.closest<HTMLElement>(".ui-kv-cell");
     if (!cell || touchActivation) return;
-    void copy(cell);
+    void copy(cell, event.detail === 0);
   };
 
   root.addEventListener("pointerdown", pointerdown);
   root.addEventListener("pointerup", pointerup);
   root.addEventListener("click", click);
 
-  const tick = `<svg class="ui-kv-tick" viewBox="0 0 24 24" aria-hidden="true"><path d="${TICK_PATH}"/></svg>`;
   const cell = (kind: "key" | "value", text: string, copyText = text): HTMLButtonElement => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `ui-kv-cell ui-kv-${kind}`;
     button.dataset.copy = copyText;
     button.setAttribute("aria-description", "Copies to the clipboard");
+    // The highlight belongs to the text run, not to the button: an inline span with cloned box
+    // decoration hugs the text with even padding and follows every line of a wrapped value. The
+    // tick lives inside the run, so it is inside the highlight when it appears.
     const span = document.createElement("span");
     span.className = "ui-kv-text";
-    span.textContent = text;
-    button.innerHTML = tick;
-    if (kind === "key") button.prepend(span); else button.append(span);
+    const label = document.createTextNode(text);
+    span.innerHTML = inlineTick();
+    if (kind === "key") span.prepend(label); else span.append(label);
+    button.append(span);
     return button;
   };
 

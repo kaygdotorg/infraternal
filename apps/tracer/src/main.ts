@@ -4,6 +4,8 @@ import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/s
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { installFocusRing } from "../../../packages/ui/src/focus-ring";
+import { applyFontVars, loadFont } from "../../../packages/ui/src/fonts";
+import { initialFont } from "./font-preference";
 import { mountOnboarding } from "./onboarding";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
@@ -41,6 +43,8 @@ declare global {
         viewportY: number;
         cursorVisible: boolean;
         fontSize: number;
+        fontFamily: string;
+        fontId: string;
         wasmMemoryBytes: number;
         themeColorsMs: number;
         themeRenderMs: number;
@@ -86,8 +90,12 @@ void start();
 async function start(): Promise<void> {
   installFocusRing();
   installForegroundListener();
+  // The chosen font applies to the whole app, sign-in card included, before the first paint.
+  // The default is already declared in CSS and preloaded; another font is fetched here.
+  const font = initialFont();
+  applyFontVars(font, document.documentElement);
   const fontsReady = Promise.race([
-    document.fonts.load('450 14px "Geist Mono"').then(() => undefined),
+    loadFont(font),
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
   ]).catch(() => undefined);
   try {
@@ -269,7 +277,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     const { mountCoreScreen } = await import("./core-screen");
     // The screen mounts only after its selected face is ready, preventing a one-frame
     // fallback and keeping the mobile layout stable while the font loads.
-    await document.fonts.load(uiFont === "mono" ? '450 13px "Geist Mono"' : '450 14px "Geist Sans"');
+    await (uiFont === "mono" ? loadFont(initialFont()) : document.fonts.load('450 14px "Geist Sans"'));
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
@@ -348,6 +356,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
       screen: screen.stage,
       status: screen.status,
       theme: screen.theme(),
+      font: screen.font(),
       hooks,
       predictiveEcho,
       onRoundTrip: (milliseconds) => screen?.setRoundTrip(milliseconds),
@@ -361,6 +370,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     });
     currentTerminal = client;
     screen.bindTerminal(client);
+    if (canvasMode && mockMode && query.get("fixture") !== "none") void seedItalicFixture(client);
     performanceProbe?.bind(client);
     if (mockMode) {
       window.__tracerTestDouble = {
@@ -471,9 +481,11 @@ async function checkForegroundSession(): Promise<void> {
       activeUserId = undefined;
       renderAuth(false, "Your session ended. Sign in again to reconnect.");
     }
-  } catch (error: unknown) {
-    const status = document.querySelector<HTMLElement>("#connection-status");
-    if (status) status.textContent = safeMessage(error);
+  } catch {
+    // The session check is background housekeeping, not something the person asked for. When it
+    // cannot complete (the server restarting, the link dropping, a proxy answering with a page)
+    // nothing is said: the terminal's own reconnection shows state through the status icon, and
+    // the next return to the tab checks again. Only a definite "no session" (401) changes the UI.
   } finally {
     checkingResume = false;
   }
@@ -504,4 +516,23 @@ function mustGet<ElementType extends HTMLElement = HTMLElement>(selector: string
 
 function missingMount(): never {
   throw new Error("tracer mount point is missing");
+}
+
+/**
+ * Preview only: writes a prompt line and italic, bold and bold-italic output into the fresh mock
+ * terminal, so every font in the picker can be judged on slanted text (a font without a real italic
+ * is slanted by the browser, which is part of what the owner compares). `?fixture=none` skips it.
+ */
+async function seedItalicFixture(client: import("./terminal").TerminalClient): Promise<void> {
+  for (let attempt = 0; attempt < 40 && !client.isConnected; attempt++) await new Promise((resolve) => setTimeout(resolve, 100));
+  const text = [
+    "infraternal-dev:~$ printf '\\e[3mitalic\\e[0m'",
+    "\u001b[3mitalic: the quick brown fox jumps over the lazy dog\u001b[0m",
+    "\u001b[1mbold\u001b[0m regular \u001b[1;3mbold italic\u001b[0m \u001b[3m0123456789 -> => != ===\u001b[0m",
+    "",
+    "infraternal-dev:~$ ",
+  ].join("\r\n");
+  try {
+    await fetch("/__mock/text-output", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+  } catch { /* a resumed session or a closed socket: the fixture is a convenience, never an error */ }
 }
