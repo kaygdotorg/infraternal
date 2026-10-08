@@ -44,12 +44,28 @@ async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
         scratch: fixture.clone(),
         command_timeout: Duration::from_secs(30),
     };
+    // D183 network auth must not inherit the fixture's authorized SSH agent.
+    let network = adapter
+        .open(
+            Destination::parse(&format!("{user}@127.0.0.1:{port}")).unwrap(),
+            Credentials::Network,
+            MeshEvidence::default(),
+        )
+        .await
+        .unwrap();
+    let network_result = network.run(CHECK_SCRIPT, Input::Empty).await;
+    assert!(
+        matches!(network_result, Err(ref error) if error.kind == FailureKind::Auth),
+        "network-only authentication must not use ambient local SSH identities"
+    );
+    drop(network);
+    let private = Secret::new(private);
     let opened = Instant::now();
     let session = adapter
         .open(
             Destination::parse(&format!("{user}@127.0.0.1:{port}")).unwrap(),
             Credentials::PrivateKey {
-                key: Secret::new(private),
+                key: Secret::new(private.expose().to_vec()),
                 passphrase: None,
             },
             MeshEvidence::default(),
@@ -80,7 +96,10 @@ async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
         let session = adapter
             .open(
                 Destination::parse(&format!("{user}@127.0.0.1:{port}")).unwrap(),
-                Credentials::ServerIdentity,
+                Credentials::PrivateKey {
+                    key: Secret::new(private.expose().to_vec()),
+                    passphrase: None,
+                },
                 MeshEvidence::default(),
             )
             .await
@@ -138,7 +157,7 @@ async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
     let session = adapter
         .open(
             Destination::parse(&format!("{user}@127.0.0.1")).unwrap(),
-            Credentials::ServerIdentity,
+            Credentials::Network,
             MeshEvidence::default(),
         )
         .await

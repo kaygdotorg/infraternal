@@ -77,7 +77,7 @@ impl Backend for PendingRemoteRuntime {
             };
             Ok(Resolved {
                 destination: Destination::parse(address)?,
-                credentials: Credentials::ServerIdentity,
+                credentials: Credentials::Network,
                 mesh: MeshEvidence::default(),
             })
         })

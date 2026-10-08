@@ -49,7 +49,12 @@ impl CredentialSession {
             askpass: None,
             password: false,
         };
-        if matches!(credentials, Credentials::ServerIdentity) {
+        if matches!(credentials, Credentials::Automatic(_)) {
+            return Err(Failure::install(
+                "Automatic SSH authentication requires its ordered adapter.",
+            ));
+        }
+        if matches!(credentials, Credentials::Network) {
             return Ok(session);
         }
         match std::fs::DirBuilder::new()
@@ -95,7 +100,7 @@ impl CredentialSession {
             })?;
         session.directory = Some(directory.clone());
         let (key, prompt_secret) = match credentials {
-            Credentials::ServerIdentity => unreachable!(),
+            Credentials::Network | Credentials::Automatic(_) => unreachable!(),
             Credentials::PrivateKey { key, passphrase } => (Some(key), passphrase),
             Credentials::Password(password) => {
                 session.password = true;
@@ -210,8 +215,8 @@ impl CredentialSession {
 
     fn configure_helpers(&self, command: &mut Command) {
         if let Some(directory) = &self.directory {
-            // These are paths, never credential values. Inherited SSH identity remains
-            // untouched for ServerIdentity; supplied keys replace only this child's agent.
+            // These are paths, never credential values. Supplied keys use only
+            // this child's ephemeral helper, independently of inherited identities.
             if self.agent.is_some() {
                 command.env("SSH_AUTH_SOCK", directory.join("agent.sock"));
             }
@@ -234,7 +239,48 @@ impl CredentialSession {
 
     /// Apply credential paths and authentication policy to one OpenSSH child.
     pub fn configure(&self, command: &mut Command) {
+        // Replace the inherited agent only with this scope's helper, if any.
+        command.env_remove("SSH_AUTH_SOCK");
         self.configure_helpers(command);
+        command.env("LC_ALL", "C");
+        // No method may accidentally use system identity files, certificates or
+        // hardware providers inherited from the server user's SSH configuration.
+        command.args([
+            "-o",
+            "IdentityFile=none",
+            "-o",
+            "CertificateFile=none",
+            "-o",
+            "PKCS11Provider=none",
+            "-o",
+            "HostbasedAuthentication=no",
+            "-o",
+            "GSSAPIDelegateCredentials=no",
+        ]);
+        if self.directory.is_none() {
+            command
+                .env_remove("SSH_AUTH_SOCK")
+                .env_remove("SSH_ASKPASS")
+                .env("SSH_ASKPASS_REQUIRE", "never");
+            command.args([
+                "-o",
+                "IdentityAgent=none",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "PubkeyAuthentication=no",
+                "-o",
+                "PasswordAuthentication=no",
+                "-o",
+                "KbdInteractiveAuthentication=no",
+                "-o",
+                "GSSAPIDelegateCredentials=no",
+            ]);
+            // Agent-free mesh SSH can authenticate its network identity without
+            // any local public-key/password material. Trusted inventory reports
+            // the provider; a remote banner is never authority for that label.
+            return;
+        }
         if self.agent.is_some() {
             command.args(["-o", "IdentityFile=none", "-o", "IdentitiesOnly=no"]);
             if let Some(directory) = &self.directory {
@@ -246,6 +292,12 @@ impl CredentialSession {
         }
         if self.password {
             command.args([
+                "-o",
+                "IdentityAgent=none",
+                "-o",
+                "PasswordAuthentication=yes",
+                "-o",
+                "KbdInteractiveAuthentication=no",
                 "-o",
                 "BatchMode=no",
                 "-o",

@@ -48,7 +48,7 @@ impl Backend for HeldBackend {
             );
             Ok(Resolved {
                 destination: Destination::parse("user@fixture").unwrap(),
-                credentials: Credentials::ServerIdentity,
+                credentials: Credentials::Network,
                 mesh: MeshEvidence::default(),
             })
         })

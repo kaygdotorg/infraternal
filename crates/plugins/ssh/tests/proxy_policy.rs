@@ -38,7 +38,7 @@ async fn unchecked_proxy_hops_are_refused_before_credential_helpers_or_network()
     let opened = adapter
         .open(
             Destination::parse("user@fixture").unwrap(),
-            Credentials::ServerIdentity,
+            Credentials::Network,
             MeshEvidence::default(),
         )
         .await;

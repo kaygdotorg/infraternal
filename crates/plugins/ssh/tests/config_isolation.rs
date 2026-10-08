@@ -46,7 +46,7 @@ printf '%s\n' 'isolated-public-policy'
     let session = adapter
         .open(
             Destination::parse("user@alias.invalid").unwrap(),
-            Credentials::ServerIdentity,
+            Credentials::Network,
             MeshEvidence::default(),
         )
         .await

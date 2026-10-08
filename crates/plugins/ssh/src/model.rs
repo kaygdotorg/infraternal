@@ -189,6 +189,9 @@ pub struct Failure {
     pub log_tail: Vec<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fingerprints: Vec<String>,
+    /// Only exhausted D183 authentication permits the UI to request another method.
+    #[serde(skip_serializing_if = "is_false")]
+    pub choose_method: bool,
 }
 impl Failure {
     #[must_use]
@@ -198,6 +201,7 @@ impl Failure {
             message,
             log_tail: Vec::new(),
             fingerprints: Vec::new(),
+            choose_method: false,
         }
     }
     #[must_use]
@@ -209,6 +213,14 @@ impl Failure {
         Self::new(FailureKind::Install, message)
     }
 }
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip predicates receive a reference."
+)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.message)

@@ -31,7 +31,7 @@ async fn configured_backgrounding_is_overridden_for_owned_bootstrap_commands() {
     let session = adapter
         .open(
             Destination::parse("user@fixture").unwrap(),
-            Credentials::ServerIdentity,
+            Credentials::Network,
             MeshEvidence::default(),
         )
         .await

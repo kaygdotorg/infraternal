@@ -1,6 +1,9 @@
 //! Keeps bootstrap independent of an SSH engine; only the system OpenSSH adapter is selected by the brief.
 
-use crate::model::{Destination, Failure, MeshEvidence};
+use crate::{
+    auth_order::{AuthProvider, Authentication},
+    model::{Destination, Failure, MeshEvidence},
+};
 use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 
 /// Object-safe asynchronous boundary without adding an async-trait dependency.
@@ -26,9 +29,10 @@ impl Drop for Secret {
     }
 }
 
-/// Server identity is used in place; vault material is never stored by bootstrap.
+/// Network-only attempts exclude local identities; later material is requested lazily per attempt.
 pub enum Credentials {
-    ServerIdentity,
+    Network,
+    Automatic(Arc<dyn AuthProvider>),
     PrivateKey {
         key: Secret,
         passphrase: Option<Secret>,
@@ -60,6 +64,10 @@ pub trait SshTransport: Send + Sync {
 
 /// A session owns ephemeral credentials and cleans them when its final owner drops it.
 pub trait SshSession: Send + Sync {
+    /// Public method evidence becomes available only after trusted authentication.
+    fn authentication(&self) -> Option<Authentication> {
+        None
+    }
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput>;
 }
 
