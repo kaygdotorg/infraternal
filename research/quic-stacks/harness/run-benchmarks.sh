@@ -6,9 +6,21 @@ harness_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_dir=$(cd -- "$harness_dir/../../.." && pwd)
 scratch_dir=${QUIC_RESEARCH_SCRATCH:-"$HOME/.cache/codex-scratch/quic-research"}
 target_dir=${CARGO_TARGET_DIR:-"$scratch_dir/target"}
-results_dir=${1:-"$repo_dir/research/quic-stacks/raw"}
 binary="$target_dir/x86_64-unknown-linux-musl/release/quic-stack-bench"
-mkdir -p -- "$results_dir"
+if [[ $# -gt 1 ]]; then
+  printf 'usage: %s [new-results-directory]\n' "$0" >&2
+  exit 2
+fi
+if [[ -n "${1:-}" ]]; then
+  results_dir=$1
+else
+  results_dir="$repo_dir/research/quic-stacks/raw/run-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+mkdir -p -- "$(dirname -- "$results_dir")"
+if ! mkdir -- "$results_dir" >/dev/null 2>&1; then
+  printf 'refusing to overwrite existing results directory: %s\n' "$results_dir" >&2
+  exit 2
+fi
 
 ip_bin=$(/nix/var/nix/profiles/default/bin/nix shell nixpkgs#iproute2 --command /bin/sh -c 'command -v ip')
 tc_bin=$(/nix/var/nix/profiles/default/bin/nix shell nixpkgs#iproute2 --command /bin/sh -c 'command -v tc')
