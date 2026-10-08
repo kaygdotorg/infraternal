@@ -78,6 +78,9 @@
   -webkit-text-size-adjust: 100%;
   touch-action: pan-x pan-y;
 }
+/* Fira Code has no italic design. Every other family has real italics, so synthesis stays off;
+   here the browser slants the upright face, for DOM text and the terminal canvas alike. */
+:root[data-font="fira-code"] { font-synthesis: style; }
 :root[data-ui-font="sans"] { --font-ui: "Geist Sans", system-ui, sans-serif; }
 
 * { box-sizing: border-box; }
