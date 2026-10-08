@@ -1375,3 +1375,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      views, Mesh, toolbar editing, the droplet, settings windows) has its own
      separate budget, so neither can grow unnoticed. Budgets change only with
      measurements in the commit.
+189. **Card and window transparency (owner, 2026-10-08):** four levels for each,
+     "Glass" renamed **Frosted**. Dark/light tint and blur:
+     - **Solid:** cards 1.00/1.00, 0 px; windows 1.00/1.00, 0 px.
+     - **Tinted:** cards 0.70/0.78, 8 px; windows 0.85/0.90, 0 px.
+     - **Clear:** cards 0.40/0.50, 24 px; windows 0.65/0.75, 0 px.
+     - **Frosted:** cards 0.20/0.30, 32 px; windows 0.45/0.55, 24 px.
+     Defaults are **Tinted cards and Solid windows**. Every level must keep
+     text legible (ghost-text and contrast checks). Per-level performance
+     benchmarking is deferred; the code paths stay cheap (Solid windows paint
+     no transparency or blur).
