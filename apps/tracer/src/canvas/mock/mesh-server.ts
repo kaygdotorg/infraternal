@@ -24,7 +24,7 @@ export interface FakeGrant { name: string; arrowId: number; from: string; to: st
 export interface FakeMeshSeed { nodes: FakeNode[]; tags: Record<string, number[]>; grants: FakeGrant[] }
 
 const OS: HostPlatform[] = ["ubuntu", "debian", "nixos", "apple", "redhat", "proxmox"];
-const derive = (from: string, to: string): string => `${from.replace(/^tag:/, "")}→${to.replace(/^tag:/, "")}`;
+const derive = (from: string, to: string): string => `${from.replace(/^tag:/, "")} to ${to.replace(/^tag:/, "")}`;
 
 /** The four hosts, two tags and seven grants the mockup has always shown. */
 export function seedMesh(grants: ReadonlyArray<{ id: string; from: string; to: string; via?: string }>): FakeMeshSeed {

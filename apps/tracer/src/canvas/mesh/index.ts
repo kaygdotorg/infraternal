@@ -213,11 +213,12 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     document.body.append(tipAnchor);
     const cleanup = (): void => { window.setTimeout(() => tipAnchor.remove(), 260); };
     mountConfirmTip(tipAnchor, {
-      label: `Allow ${from} to reach ${to}`,
-      message: `Let ${from} reach ${to}?`,
-      detail: "It can then open connections to it.",
+      label: `Let ${from} reach ${to}`,
+      title: `Let ${from} reach ${to}?`,
+      effect: `${from} will be able to connect to ${to}. You can stop it any time.`,
       confirmLabel: "Allow access",
       cancelLabel: "Cancel",
+      named: true,
       onConfirm: () => {
         cleanup();
         const g = source.addGrant(from, to);
@@ -255,8 +256,8 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     };
     const port = el("button", "cl-port");
     port.type = "button";
-    port.dataset.tip = "Drag to another window to allow access";
-    port.setAttribute("aria-label", "Allow access to another window");
+    port.dataset.tip = "Drag onto another window to let this host reach it";
+    port.setAttribute("aria-label", "Let this host reach another window");
     port.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON.port}</svg>`;
     port.style.touchAction = "none";
     port.hidden = !source.canEdit(); // the connector exists only for people who may grant access (D187)
@@ -284,7 +285,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
       const box = el("div", "cl-empty cl-meshstate");
       const mark = el("div", "cl-meshstate-mark");
       mark.append(createSpinner());
-      box.append(mark, el("p", "cl-empty-title", "Loading the mesh"), el("p", "cl-empty-hint", "Asking the server for hosts and grants."));
+      box.append(mark, el("p", "cl-empty-title", "Loading the mesh"), el("p", "cl-empty-hint", "Getting your hosts and who can reach what."));
       box.setAttribute("role", "status");
       box.dataset.open = "false";
       c.content.append(box);
@@ -324,15 +325,15 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     for (const port of ports) { if (port.isConnected) port.hidden = !canEdit; else ports.delete(port); } // a closed window's connector goes with it
   });
   const offFailure = source.onFailure((message) => cx.toast.show({ message }));
-  const nodeCount = (): number => { const d = source.data(); return d.nodes.size + Object.keys(d.tags).length; };
+  const hostCount = (): number => source.data().nodes.size;
   return {
     buildGraph, redraw, updateOverlay, wireTerminal, showReach, hideReach,
     reachFor: () => reachFor,
     reachCount: () => reachItems.length,
     dragging: () => Boolean(drag),
     reachPinned: () => reachPinned,
-    summaryRows: () => [["Nodes", String(nodeCount())], ["Grants", String(source.grants().length)], ["Via relay", String(source.grants().filter((g) => g.via).length)]],
-    countText: () => `${nodeCount()} nodes · ${source.grants().length} grants`,
+    summaryRows: () => [["Hosts", String(hostCount())], ["Allowed access", String(source.grants().length)], ["Through another host", String(source.grants().filter((g) => g.via).length)]],
+    countText: () => `${hostCount()} host${hostCount() === 1 ? "" : "s"} · ${source.grants().length} allowed`,
     grants: () => source.grants().map((g) => ({ ...g })),
     graphStats: () => gv?.stats(),
     dispose() { disposed = true; offChange(); offFailure(); reachLayer.remove(); for (const box of quiet.values()) box.remove(); },

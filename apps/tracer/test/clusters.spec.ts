@@ -210,9 +210,9 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   const arrow = page.locator('.cl[data-view="mesh"] .cl-arrow[data-grant="g3"]');
   const hit = await centre('.cl[data-view="mesh"] .cl-arrow[data-grant="g3"] .cl-arrow-hit');
   await page.mouse.move(hit.x, hit.y);
-  await expect(arrow).toHaveAttribute("data-tip", "nix-cache→studio-mac");
+  await expect(arrow).toHaveAttribute("data-tip", "nix-cache can reach studio-mac");
   await expect.poll(() => arrow.locator(".cl-arrow-handle").first().evaluate((n) => getComputedStyle(n).opacity)).toBe("1");
-  await expect(page.locator(".ui-tooltip, .tip-pos").first()).toContainText("nix-cache→studio-mac");
+  await expect(page.locator(".ui-tooltip, .tip-pos").first()).toContainText("nix-cache can reach studio-mac");
   // Head to another node: nix-cache -> studio-mac becomes nix-cache -> edge-arm, after a confirmation.
   const head = await centre('.cl-arrow[data-grant="g3"] .cl-arrow-handle[data-end="head"]');
   const edge = await centre('.ui-window[data-window-id="n-edge-arm"]');
@@ -224,7 +224,7 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   await expect(page.locator('.ui-window[data-window-id="n-edge-arm"][data-drop]')).toHaveCount(1);
   await expect(page.locator('.cl-arrow[data-live][data-snapped]')).toHaveCount(1); // snapped on the new node
   await page.mouse.up();
-  await expect(page.locator(".ui-confirm-tip")).toContainText("Move grant nix-cache→studio-mac to nix-cache→edge-arm?");
+  await expect(page.locator(".ui-confirm-tip")).toContainText("Let nix-cache reach edge-arm instead of studio-mac?");
   await page.locator(".ui-confirm-yes").click();
   await expect.poll(async () => (await grantsOf()).find((g) => g.id === "g3")?.to).toBe("edge-arm");
   // Cancelling springs the arrow back and changes nothing: ci -> nix-cache, tail to studio-mac.
@@ -237,7 +237,7 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   await page.mouse.move(tail.x - 10, tail.y + 110, { steps: 5 });
   await page.mouse.move(studio.x, studio.y, { steps: 14 });
   await page.mouse.up();
-  await expect(page.locator(".ui-confirm-tip")).toContainText("Move grant ci→nix-cache to studio-mac→nix-cache?");
+  await expect(page.locator(".ui-confirm-tip")).toContainText("Let studio-mac reach nix-cache instead of tag:ci?");
   await page.locator(".ui-confirm-no").click();
   await page.waitForTimeout(500);
   expect((await grantsOf()).find((g) => g.id === "g7")).toMatchObject({ from: "tag:ci", to: "nix-cache" });
@@ -251,7 +251,7 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   await page.mouse.down();
   await page.mouse.move(head2.x + 10, head2.y + 220, { steps: 10 });
   await page.mouse.up();
-  await expect(page.locator(".ui-confirm-tip")).toContainText("Remove grant nix-cache→edge-arm?");
+  await expect(page.locator(".ui-confirm-tip")).toContainText("Stop nix-cache reaching edge-arm?");
   await page.locator(".ui-confirm-yes").click();
   await expect.poll(async () => (await grantsOf()).length).toBe(n0 - 1);
   await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveCount(0);

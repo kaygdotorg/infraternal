@@ -22,7 +22,7 @@
  */
 import type { Grant } from "../model/types";
 import { ACTION, ActionRefused, TOPIC, endpointJson, parseAnswer, parseEvent, parseSnapshot, type MeshTransport, type Snapshot, type WireAccess, type WireGrant, type WireNode } from "./protocol";
-import { grantLabel, tagNodeId, type MeshSource, type MeshStatus } from "./source";
+import { derivedGrantName, endName, tagNodeId, type MeshSource, type MeshStatus } from "./source";
 
 export interface MeshApiOptions {
   transport: MeshTransport;
@@ -37,7 +37,7 @@ const REFRESH_COALESCE_MS = 200;
 const NOTIFY_COALESCE_MS = 80;
 
 /** What a grant is called when nobody named it: who may reach what. */
-const derivedName = (from: string, to: string): string => grantLabel({ id: "", from, to });
+const derivedName = derivedGrantName;
 
 export function createMeshApi(options: MeshApiOptions): MeshSource {
   const { transport } = options;
@@ -170,10 +170,10 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
     }, (error: unknown) => {
       if (disposed) return;
       undo(); notify(true);
-      fail(!(error instanceof ActionRefused) ? `Could not ${what}. Check the connection and try again.`
+      fail(!(error instanceof ActionRefused) ? `Could not ${what}. Check your connection and try again.`
         : error.reason === "forbidden" ? `You are not allowed to ${what}.`
-        : error.reason === "conflict" ? `Could not ${what}: that name or arrow already exists.`
-        : `Could not ${what}. The mesh did not accept it.`);
+        : error.reason === "conflict" ? `Could not ${what}: that already exists.`
+        : `Could not ${what}. Please try again.`);
       dirty = true; // what the server holds may differ from what was tried: list again once nothing is in flight
       inflight -= 1; settled();
     });
@@ -195,8 +195,8 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       notify(true);
       const a = end(from), b = end(to);
       const drop = (): void => { grants = grants.filter((o) => o !== g); grantById.delete(g.id); };
-      if (!a || !b) { queueMicrotask(() => { drop(); notify(true); fail(`Could not allow ${g.name}: the host is not in the mesh.`); }); return g; }
-      send(`allow ${g.name}`, ACTION.create, { name: g.name, from: a, to: b, both_ways: false }, drop, (answer) => {
+      if (!a || !b) { queueMicrotask(() => { drop(); notify(true); fail(`Could not let ${endName(from)} reach ${endName(to)}: that host is no longer in the mesh.`); }); return g; }
+      send(`let ${endName(from)} reach ${endName(to)}`, ACTION.create, { name: g.name, from: a, to: b, both_ways: false }, drop, (answer) => {
         grantById.delete(g.id);
         if (answer.grantId) g.id = answer.grantId;
         const twin = grantById.get(g.id);
@@ -215,8 +215,9 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       if (follow) grant.name = newName;
       notify(true);
       const back = (): void => { grant.from = before.from; grant.to = before.to; if (before.name !== undefined) grant.name = before.name; };
-      if (!target) { queueMicrotask(() => { back(); notify(true); fail(`Could not move ${before.name ?? grant.id}: the host is not in the mesh.`); }); return; }
-      send(`move ${before.name ?? grant.id}`, ACTION.move, { name: before.name ?? "", side: to.to ? "to" : "from", endpoint: target }, back, () => {
+      const moving = to.to ? `change who ${endName(before.from)} can reach` : `change who can reach ${endName(before.to)}`;
+      if (!target) { queueMicrotask(() => { back(); notify(true); fail(`Could not ${moving}: that host is no longer in the mesh.`); }); return; }
+      send(moving, ACTION.move, { name: before.name ?? "", side: to.to ? "to" : "from", endpoint: target }, back, () => {
         if (!follow || newName === before.name) return;
         // The name still said where the grant went; it now says where it goes (a second, audited action).
         send(`rename ${before.name}`, ACTION.rename, { name: before.name ?? "", new_name: newName }, () => { grant.name = before.name!; grant.auto = false; }, () => { grant.auto = true; });
@@ -233,7 +234,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       if (at < 0) return;
       grants = grants.filter((o) => o !== grant); grantById.delete(grant.id);
       notify(true);
-      send(`remove ${grantLabel(grant)}`, ACTION.remove, { name: grant.name }, () => { grants.splice(Math.min(at, grants.length), 0, grant); grantById.set(grant.id, grant); }, () => undefined);
+      send(`stop ${endName(grant.from)} reaching ${endName(grant.to)}`, ACTION.remove, { name: grant.name }, () => { grants.splice(Math.min(at, grants.length), 0, grant); grantById.set(grant.id, grant); }, () => undefined);
     },
     pin(id, x, y) { pins.set(id, { x: Math.round(x), y: Math.round(y) }); },
     onChange(l) { listeners.add(l); return () => { listeners.delete(l); }; },

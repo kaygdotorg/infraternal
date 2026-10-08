@@ -85,7 +85,7 @@ export function createViews(cx: Ctx): ViewsModule {
     if (summaryFor === c.view.id && !summary.hidden) return;
     summaryFor = c.view.id;
     const rows = c.view.layout === "graph"
-      ? (cx.mesh?.summaryRows(c) ?? [["Nodes", String(c.view.nodes.length)]])
+      ? (cx.mesh?.summaryRows(c) ?? [["Hosts", String(c.view.nodes.filter((v) => v.kind === "host").length)]])
       : [...c.wins.values()].map((w) => [w.model.kind === "terminal" ? w.model.host : (w.model.session ?? w.model.kind), w.model.kind === "terminal" ? "shell" : w.model.kind]);
     summary.innerHTML = `<div class="cl-summary-head"><span class="cl-summary-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(c.view.id)}</svg></span><span class="cl-summary-name"></span></div><div class="cl-summary-rows"></div>`;
     (summary.querySelector(".cl-summary-name") as HTMLElement).textContent = c.view.name;
@@ -240,7 +240,7 @@ export function createViews(cx: Ctx): ViewsModule {
     c.region.style.cssText = `left:${MARGIN.l - 16}px;top:${MARGIN.t - 16}px;width:${size.w + 32}px;height:${size.h + 32}px`;
     c.label.style.left = `${MARGIN.l - 16}px`;
     c.label.style.top = `${MARGIN.t - 16}px`;
-    const count = c.view.layout === "graph" ? (cx.mesh?.countText(c) ?? `${c.view.nodes.length} nodes`) : `${c.wins.size} window${c.wins.size === 1 ? "" : "s"}`;
+    const count = c.view.layout === "graph" ? (cx.mesh?.countText(c) ?? `${c.view.nodes.filter((v) => v.kind === "host").length} hosts`) : `${c.wins.size} window${c.wins.size === 1 ? "" : "s"}`;
     c.labelMeta.textContent = c.wins.size || c.view.layout === "graph" ? `· ${count}` : "· empty";
     c.label.setAttribute("aria-label", `${c.view.name}, ${count}. Fly to this view`);
     if (c.view.published) cx.sharing?.schedulePublish(c);

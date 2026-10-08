@@ -14,8 +14,8 @@ import { tagNodeId, type MeshData, type MeshLayout, type MeshSource } from "./so
 
 const subOf = (n: WireNode): string => {
   if (n.state === "offline") return "offline";
-  if (n.state === "behind") return "rules behind";
-  const path = n.path === "relay" ? `via ${n.via ?? "relay"}` : n.path === "direct" ? "direct" : "";
+  if (n.state === "behind") return "not up to date";
+  const path = n.path === "relay" ? `through ${n.via ?? "another host"}` : n.path === "direct" ? "direct" : "";
   const rtt = n.rttMs === undefined ? "" : `${Math.round(n.rttMs)} ms`;
   return [path, rtt].filter(Boolean).join(" · ") || "online";
 };

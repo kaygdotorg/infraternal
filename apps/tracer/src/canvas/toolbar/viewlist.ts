@@ -43,7 +43,7 @@ export function createViewList(cx: Ctx): ViewList {
       if (c.view.id === state.currentView) b.setAttribute("aria-current", "true");
       b.innerHTML = `<span class="cl-viewrow-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(c.view.id)}</svg></span><span class="cl-viewrow-name"></span><span class="cl-viewrow-meta"></span><span class="cl-viewrow-keys"></span>`;
       (b.querySelector(".cl-viewrow-name") as HTMLElement).textContent = c.view.name;
-      (b.querySelector(".cl-viewrow-meta") as HTMLElement).textContent = c.view.layout === "graph" ? `${c.view.nodes.length} nodes` : `${c.wins.size} windows`;
+      (b.querySelector(".cl-viewrow-meta") as HTMLElement).textContent = c.view.layout === "graph" ? `${c.view.nodes.filter((v) => v.kind === "host").length} hosts` : `${c.wins.size} windows`;
       const keys = b.querySelector(".cl-viewrow-keys") as HTMLElement;
       for (const cap of keyCaps(viewKeys(i))) keys.append(el("kbd", "", cap));
       b.addEventListener("click", () => { close(); cx.nav.flyView(c.view.id); });

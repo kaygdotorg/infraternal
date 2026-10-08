@@ -33,7 +33,7 @@ import type { Metrics, Rect } from "../layout/geometry";
 import type { Grant, NodeModel } from "../model/types";
 import { Arrow } from "./arrows";
 import type { Cluster } from "./layout";
-import { grantLabel, type MeshLayout, type MeshSource } from "./source";
+import { grantSentence, type MeshLayout, type MeshSource } from "./source";
 
 export interface TopoArrow { grant: Grant; arrow: Arrow; label?: SVGTextElement }
 
@@ -223,7 +223,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
         c.graphSvg!.append(arrow.g);
         clusterArrows.set(e.key, arrow);
       }
-      arrow.g.dataset.tip = `${e.count} grant${e.count === 1 ? "" : "s"} from ${a.label} to ${b.label}`;
+      arrow.g.dataset.tip = `${a.label} can reach ${b.label}`;
       arrow.between(a, b, clusterHead());
     }
   };
@@ -389,19 +389,19 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
     if (kind === "loading") {
       const spin = el("div", "cl-meshstate-mark");
       spin.append(createSpinner());
-      box.append(spin, el("p", "cl-empty-title", "Loading the mesh"), el("p", "cl-empty-hint", "Asking the server for hosts and grants."));
+      box.append(spin, el("p", "cl-empty-title", "Loading the mesh"), el("p", "cl-empty-hint", "Getting your hosts and who can reach what."));
       box.setAttribute("role", "status");
     } else if (kind === "error") {
       const mark = el("div", "cl-meshstate-mark");
       mark.innerHTML = lineIcon(ICON.offline);
-      box.append(mark, el("p", "cl-empty-title", "Could not reach the mesh"), el("p", "cl-empty-hint", "Check the connection. It tries again on its own."), retry("Try again"));
+      box.append(mark, el("p", "cl-empty-title", "Could not reach the mesh"), el("p", "cl-empty-hint", "Check your connection. It will try again on its own."), retry("Try again"));
       box.setAttribute("role", "alert");
     } else if (kind === "stale") {
       const note = box as HTMLButtonElement;
       note.type = "button";
       note.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON.offline}</svg>`;
-      note.dataset.tip = "Showing the last known mesh. Select to try again.";
-      note.setAttribute("aria-label", "Showing the last known mesh. Try again");
+      note.dataset.tip = "Showing what was last known. Select to try again.";
+      note.setAttribute("aria-label", "Showing what was last known. Try again");
       note.addEventListener("click", () => source.retry(), { signal: cx.signal });
     } else {
       const mark = el("div", "cl-meshstate-mark");
@@ -442,7 +442,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
       rec.card.root.style.transform = `translate(${n.x}px,${n.y}px)`;
     }
     for (const e of mounted) {
-      e.arrow.g.dataset.tip = grantLabel(e.grant); // a rename or a move shows on the next hover
+      e.arrow.g.dataset.tip = grantSentence(e.grant); // a rename or a move shows on the next hover
       e.arrow.g.dataset.grant = e.grant.id;
       hooks.drawArrow(e);
     }

@@ -23,7 +23,7 @@ export function createTree(cx: Ctx): TreeModule {
     return {
       id: `view:${c.view.id}`,
       label: c.view.name,
-      meta: graph ? `${c.view.nodes.length} nodes` : `${c.wins.size}`,
+      meta: graph ? `${c.view.nodes.filter((v) => v.kind === "host").length} hosts` : `${c.wins.size}`,
       open: c.view.id !== "settings",
       // A big graph lists no nodes: a thousand rows would be the cost of the sidebar, and its cards are not all in the
       // DOM. The section still flies to the view, where the clusters are.

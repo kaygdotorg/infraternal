@@ -20,7 +20,7 @@ import { ICON, lineIcon } from "../views/icons";
 import { Arrow, DragArrow, anchors } from "./arrows";
 import { createGraph, type GraphController, type TopoArrow } from "./graph";
 import { createLayoutModel } from "./layout-model";
-import { grantLabel, type MeshSource } from "./source";
+import { endName, grantSentence, type MeshSource } from "./source";
 
 export interface GraphViewModule {
   /** Fills a graph view with its node cards and arrows. */
@@ -51,8 +51,8 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     const n = graphOf(c)?.node(id);
     return n ? { x: n.x, y: n.y, w: state.metrics.nodeW, h: state.metrics.nodeH } : undefined;
   };
-  /** A grant is shown by its name only: who may reach what ("ops→build-01"), never ports or ranges (D180). */
-  const grantName = grantLabel;
+  /** A grant is shown by its name only (a sentence for one nobody named), never ports or ranges (D180). */
+  const grantName = grantSentence;
   /** An arrow for a grant, not yet in the document: the graph module decides which arrows exist. */
   const makeTopoArrow = (g: Grant): TopoArrow => {
     const arrow = new Arrow({ ...(g.via ? { dashed: true } : {}), tone: "accent", editable: source.canEdit() });
@@ -62,7 +62,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     if (g.via) {
       const t = document.createElementNS(SVG_NS, "text");
       t.setAttribute("class", "cl-arrow-label");
-      t.textContent = `via ${g.via}`;
+      t.textContent = `through ${g.via}`;
       entry.label = t;
       arrow.g.append(t);
     }
@@ -212,10 +212,16 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       if (ev.type === "pointercancel" || candidate === homeId) { springBack(); at.done(); return; }
       if (candidate) {
         const next: Grant = end === "head" ? { ...g, to: candidate } : { ...g, from: candidate };
+        // What changes for the person, in the words of the cards: who reaches what now, and who will not any more.
+        const [who, was, now] = end === "head" ? [g.from, g.to, candidate] : [candidate, g.to, g.to];
+        const moveTitle = end === "head" ? `Let ${endName(who)} reach ${endName(now)} instead of ${endName(was)}?` : `Let ${endName(candidate)} reach ${endName(g.to)} instead of ${endName(g.from)}?`;
+        const moveEffect = end === "head"
+          ? `${endName(g.from)} will lose its connection to ${endName(g.to)} and gain one to ${endName(candidate)}. You can change it back any time.`
+          : `${endName(g.from)} will lose its connection to ${endName(g.to)}, and ${endName(candidate)} will gain one. You can change it back any time.`;
         const endTip = tipAt(toClient({ x: live.end().x + origin.x, y: live.end().y + origin.y }));
         mountConfirmTip(endTip.anchor, {
-          label: `Move grant ${grantName(g)}`, message: `Move grant ${grantName(g)} to ${grantLabel({ id: "", from: next.from, to: next.to })}?`,
-          confirmLabel: "Move", cancelLabel: "Cancel",
+          label: moveTitle, title: moveTitle, effect: moveEffect,
+          confirmLabel: "Change access", cancelLabel: "Cancel", named: true,
           onConfirm: () => {
             source.moveGrant(g, end === "head" ? { to: next.to } : { from: next.from });
             entry.arrow.g.dataset.tip = grantName(g);
@@ -225,7 +231,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
             pulse.set(1);
             live.dispose();
             for (const cl of views.values()) cx.view.geometry(cl);
-            cx.toast.show({ message: `Grant moved to ${grantName(g)}` });
+            cx.toast.show({ message: `${endName(g.from)} can now reach ${endName(g.to)}` });
             endTip.done();
           },
           onCancel: () => { springBack(); endTip.done(); },
@@ -235,14 +241,15 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       }
       // Dropped on empty canvas: offer to remove the grant.
       mountConfirmTip(at.anchor, {
-        label: `Remove grant ${grantName(g)}`, message: `Remove grant ${grantName(g)}?`,
-        confirmLabel: "Remove", cancelLabel: "Keep",
+        label: `Stop ${endName(g.from)} reaching ${endName(g.to)}`, title: `Stop ${endName(g.from)} reaching ${endName(g.to)}?`,
+        effect: `${endName(g.from)} will lose its connection to ${endName(g.to)}. You can allow it again any time.`,
+        confirmLabel: "Stop access", cancelLabel: "Keep it", named: true,
         onConfirm: () => {
           source.removeGrant(g);
           live.dispose();
           refreshGraph(c); // the arrow fades out; the grants listed in the graph are the source's
           for (const cl of views.values()) cx.view.geometry(cl);
-          cx.toast.show({ message: `Grant ${grantName(g)} removed` });
+          cx.toast.show({ message: `${endName(g.from)} can no longer reach ${endName(g.to)}` });
         },
         onCancel: springBack,
       });

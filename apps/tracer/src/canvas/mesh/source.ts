@@ -70,5 +70,11 @@ export interface MeshSource {
   dispose(): void;
 }
 
-/** What a grant is called on screen: its name, or (for a source without names) who may reach what. */
-export const grantLabel = (g: Grant): string => g.name ?? `${g.from.replace(/^tag:/, "")}→${g.to.replace(/^tag:/, "")}`;
+/** What a grant is called when nobody named it (the name the server keeps): who may reach what, in words. */
+export const derivedGrantName = (from: string, to: string): string => `${from.replace(/^tag:/, "")} to ${to.replace(/^tag:/, "")}`;
+/** The grant's name, or the derived one for a source without names. */
+export const grantLabel = (g: Grant): string => g.name ?? derivedGrantName(g.from, g.to);
+/** A host or tag as the person sees it on its card. */
+export const endName = (end: string): string => end;
+/** What hovering a grant says: a sentence for the ones nobody named, the person's own name for the rest. */
+export const grantSentence = (g: Grant): string => (g.auto !== false && (g.name === undefined || g.name === derivedGrantName(g.from, g.to)) ? `${endName(g.from)} can reach ${endName(g.to)}` : g.name!);
