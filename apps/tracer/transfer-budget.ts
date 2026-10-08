@@ -18,7 +18,10 @@ const limits = {
   critical: { gzip: 300 * KIB, brotli: 250 * KIB },
   // Measured when the canvas product module landed (D188): 46,738 B gzip / 40,526 B brotli. The limit is that size
   // rounded up to a whole KiB plus a 4 KiB margin, so ordinary canvas work fits and a library pulled in by accident does not.
-  deferred: { gzip: 50 * KIB, brotli: 44 * KIB },
+  // The Mesh view on the real API (#108: the API client, the automatic layout, the cluster level of detail, its states)
+  // measured 56,139 B gzip / 48,487 B brotli (+8.9 KB gzip over the line above; the critical path grew by 0.3 KB).
+  // Same rule: rounded up to a whole KiB plus 4 KiB. This is a change of a gate and the owner's to confirm (#108).
+  deferred: { gzip: 59 * KIB, brotli: 52 * KIB },
 };
 const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[] };
 const totals = { critical: { identity: 0, gzip: 0, brotli: 0 }, deferred: { identity: 0, gzip: 0, brotli: 0 } };
