@@ -184,7 +184,7 @@ test("every floating card uses the one overlay material", async ({ page }) => {
     return { popover, shared };
   });
   expect(material.popover).toEqual(material.shared);
-  expect(material.shared.filter).toContain("blur(14px)");
+  expect(material.shared.filter).toContain("blur(10px)");
 });
 
 // ---- the connection line is never a second toast ---------------------------------------
@@ -588,7 +588,7 @@ test("shortcuts: ? morphs the capsule into the list, current area first, one sho
   const palette = await panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd").allTextContents();
   expect(palette).toEqual(["Ctrl", "K"]);
   const material = await panel.evaluate((node) => { const s = getComputedStyle(node); return { filter: s.backdropFilter, bg: s.backgroundColor }; });
-  expect(material.filter).toContain("blur(14px)");
+  expect(material.filter).toContain("blur(10px)");
   // At rest nothing is left animating: no transform, no opacity on the content.
   expect(await panel.evaluate((node) => [getComputedStyle(node).transform, getComputedStyle(node.querySelector(".ui-shortcuts-body")!).opacity])).toEqual(["none", "1"]);
   await page.keyboard.press("Escape");

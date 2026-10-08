@@ -81,12 +81,26 @@ export interface OverlayMaterial {
 }
 
 /** Keeps dark glass close to its palette and computes the same alpha composite used by the contrast audit. */
-export function overlayMaterial(active: Theme): OverlayMaterial {
+/**
+ * How much of the page shows through the one floating-card material, from 1 (thickest) to 4
+ * (thinnest): the fill's opacity on a dark and on a light theme, and the blur in pixels. Level 3 is
+ * the default; `?glass=1..4` picks another so the owner can compare them side by side.
+ */
+export const GLASS_LEVELS: Record<number, { dark: number; light: number; blur: number }> = {
+  1: { dark: 0.5, light: 0.58, blur: 14 },
+  2: { dark: 0.4, light: 0.48, blur: 12 },
+  3: { dark: 0.3, light: 0.38, blur: 10 },
+  4: { dark: 0.2, light: 0.28, blur: 8 },
+};
+export const DEFAULT_GLASS = 3;
+
+export function overlayMaterial(active: Theme, level = DEFAULT_GLASS): OverlayMaterial {
   const tinted = mix(active.bg, "#ffffff", active.dark ? 0.06 : 0.6);
-  // The one floating-card material (popover, flow card, confirmation, sidebar, toast): content
-  // behind must stay recognisable, so the fill is a little over half opaque and the blur is
-  // soft (14 px in styles.css). Secondary text over the busiest terminal state stays above 4.5:1.
-  const opacity = active.dark ? 0.5 : 0.58;
+  // The one floating-card material (popover, flow card, confirmation, sidebar, toast): the page
+  // behind must visibly show through, softly blurred. Secondary text over the busiest terminal
+  // state stays above 4.5:1 (a text shadow carries it at the thin levels, never more tint).
+  const glass = GLASS_LEVELS[level] ?? GLASS_LEVELS[DEFAULT_GLASS]!;
+  const opacity = active.dark ? glass.dark : glass.light;
   const channels = (hex: string) => [1, 3, 5].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
   const rgb = (hex: string) => channels(hex).join(" ");
   const tint = channels(tinted);
@@ -109,10 +123,11 @@ export function overlayMaterial(active: Theme): OverlayMaterial {
 }
 
 /** Applies UI tokens and mesh source hues; derived surfaces stay coherent with the theme. */
-export function applyTheme(active: Theme, root: HTMLElement): void {
+export function applyTheme(active: Theme, root: HTMLElement, glassLevel = DEFAULT_GLASS): void {
   const style = root.style;
   const rgb = (hex: string) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16)).join(" ");
-  const overlay = overlayMaterial(active);
+  const overlay = overlayMaterial(active, glassLevel);
+  style.setProperty("--ui-overlay-blur", `${(GLASS_LEVELS[glassLevel] ?? GLASS_LEVELS[DEFAULT_GLASS]!).blur}px`);
   style.setProperty("--bg", active.bg);
   style.setProperty("--fg", active.fg);
   style.setProperty("--fg-2", active.fg2);

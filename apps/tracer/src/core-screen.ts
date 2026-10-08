@@ -1,6 +1,6 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
 import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
-import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
+import { applyTheme, DEFAULT_GLASS, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
@@ -222,6 +222,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   liveHost.setAttribute("aria-label", hostName);
 
   const params = new URLSearchParams(location.search);
+  // `?glass=1..4`: how much shows through the floating cards (1 thickest, 4 thinnest; default 3).
+  const glassParam = Number(params.get("glass"));
+  const glassLevel = Number.isInteger(glassParam) && glassParam >= 1 && glassParam <= 4 ? glassParam : DEFAULT_GLASS;
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
   let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "ink" : "paper");
   let background = params.get("bg") === "mesh" || params.get("bg") === "none"
@@ -267,7 +270,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ROOT.dataset.bg = background;
     stage.dataset.theme = currentThemeId;
     stage.dataset.bg = background;
-    applyTheme(active, ROOT);
+    applyTheme(active, ROOT, glassLevel);
     THEME_COLOR?.setAttribute("content", active.bg);
     client?.setTheme(terminalTheme(active, background === "mesh"));
     if (background === "mesh") return paintMesh();
