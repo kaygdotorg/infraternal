@@ -1,6 +1,23 @@
-/** Keeps opt-in local keystroke predictions in a removable overlay above the terminal renderer. */
+/**
+ * Keeps opt-in local keystroke predictions in a removable overlay above the terminal renderer.
+ *
+ * A prediction is an ordered queue of operations: a printable glyph, or an erase (the host's `\b \b` echo
+ * of DEL). Invariants that keep the predicted cursor on the cell grid and on the host's cursor:
+ *
+ * - Every operation stores the integer cell (column, row) where it lands and where the cursor is afterwards,
+ *   computed once when the key is typed from the previous operation (or, for the first one, from the host
+ *   cursor). Nothing is counted relative to the live host cursor, so an echo that the renderer has already
+ *   taken but that is not reconciled yet cannot be counted twice. The overlay turns a cell into pixels with
+ *   `column * cellWidth` from the renderer's metrics only.
+ * - Echoes are reconciled in order against the queue the moment their bytes are written to the renderer
+ *   (`hostWritten`). Reconciled operations stay drawn until the renderer has painted them (`paintedOutput`),
+ *   so no frame shows neither the prediction nor the host's glyph.
+ * - Any disagreement, and any key that cannot be placed exactly, drops the whole queue. The overlay hides and
+ *   the host cursor is the only cursor again.
+ */
 import {
   mountTerminalTextOverlay,
+  type TerminalTextOverlayCell,
   type TerminalTextOverlayCursor,
   type TerminalTextOverlayGlyph,
   type TerminalTextOverlayPosition,
@@ -11,17 +28,23 @@ const RTT_THRESHOLD_MS = 60;
 const CONFIRMATION_FRAME_BUDGET_MS = 34;
 // The high-latency browser profile varies burst RTT by ±30 ms from the ping sample.
 const PROFILE_JITTER_GUARD_MS = 30;
-const MAX_PENDING_GLYPHS = 128;
+const MAX_PENDING_OPS = 128;
 const MAX_PREDICTED_INPUT_BYTES = 8;
 const MAX_VISIBLE_ECHO_BYTES = 512;
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const encoder = new TextEncoder();
+const WARM_TEXT = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
 
-interface PredictionGlyph {
+/** One unconfirmed key: a glyph written to a cell, or an erase of the cell left of the cursor. */
+interface PredictionOp {
+  kind: "glyph" | "erase";
+  /** The glyph text; empty for an erase. */
   text: string;
+  /** The echo bytes expected from the host; empty for an erase, which is matched as `\b \b`. */
   bytes: Uint8Array;
   sequence: string;
   cells: number;
+  /** The cell a glyph is drawn in, or the cell an erase clears. */
   x: number;
   y: number;
   cursorXAfter: number;
@@ -31,14 +54,7 @@ interface PredictionGlyph {
   reportedVisible: boolean;
 }
 
-interface PredictionGlyphInput {
-  text: string;
-  bytes: Uint8Array;
-  sequence: string;
-  cells: number;
-  enteredAt: number;
-  reportedVisible: boolean;
-}
+type PredictionOpInput = Pick<PredictionOp, "kind" | "text" | "bytes" | "sequence" | "cells" | "enteredAt" | "reportedVisible">;
 
 export type PredictionPosition = TerminalTextOverlayPosition;
 
@@ -68,14 +84,18 @@ export interface PredictiveEchoOptions {
 }
 
 type VtParserState = "text" | "escape" | "csi" | "string" | "string-escape";
-type VisibleOutput = { bytes: Uint8Array; backspaces: number };
+/** Visible echo bytes of one output chunk, and the offsets in `bytes` at which a complete `\b \b` erase occurred. */
+type VisibleOutput = { bytes: Uint8Array; erases: number[] };
 
 /** A single terminal session's bounded, client-only prediction state. */
 export class PredictiveEcho {
   private readonly overlay: TerminalTextOverlay | undefined;
   private readonly measureCanvas: HTMLCanvasElement | undefined;
   private readonly measureContext: CanvasRenderingContext2D | null | undefined;
-  private readonly pending: PredictionGlyph[] = [];
+  /** Unconfirmed operations in typing order; the host has not echoed these yet. */
+  private readonly pending: PredictionOp[] = [];
+  /** Operations whose echo is written to the renderer but not painted yet; still drawn until the paint. */
+  private awaitingPaint: PredictionOp[] = [];
   private matchedPrefixLength = 0;
   private roundTripMs: number | undefined;
   private muted = false;
@@ -83,8 +103,6 @@ export class PredictiveEcho {
   private proofs: Uint8Array[] = [];
   private mispredictions = 0;
   private waitingForOutput = false;
-  private pendingBackspaces = 0;
-  private backspaceEnteredAt = 0;
   private backspaceEchoState: 0 | 1 | 2 = 0;
   private timeout = 0;
   private renderFrame = 0;
@@ -94,6 +112,16 @@ export class PredictiveEcho {
   private readonly fallbacks: Record<string, number> = {};
   private predictedLastInput = false;
   private readonly inputCosts: number[] = [];
+  private warmHandle = 0;
+  /** The overlay geometry or glyph cache is cold: set at start and by every layout change. */
+  private warmNeeded = true;
+  /**
+   * Echoes of keys that were sent without a prediction, or whose prediction was dropped, cannot arrive before
+   * this time (send time + round trip - jitter). Until then no output proves that the host cursor has caught up
+   * with everything typed, so an older key's echo must not release the wait and let a newer key be placed from
+   * a cursor that lacks it.
+   */
+  private echoExpectedAt = 0;
 
   constructor(private readonly options: PredictiveEchoOptions) {
     if (!options.optedIn) return;
@@ -112,7 +140,7 @@ export class PredictiveEcho {
       optedIn: this.options.optedIn,
       enabled,
       roundTripMs: this.roundTripMs,
-      pendingText: this.pending.map((glyph) => glyph.text).join(""),
+      pendingText: this.awaitingPaint.concat(this.pending).map((op) => op.text).join(""),
       muted: this.muted,
       mispredictions: this.mispredictions,
       reason: !this.options.optedIn ? "flag-off" : enabled ? "ready" : this.lastReason,
@@ -132,7 +160,59 @@ export class PredictiveEcho {
   setRoundTrip(milliseconds: number | undefined): void {
     this.roundTripMs = milliseconds;
     if (!this.isAboveThreshold()) this.clearPending("rtt-low");
-    else this.scheduleRender();
+    else {
+      this.scheduleRender();
+      this.scheduleWarm();
+    }
+  }
+
+  /**
+   * Runs the whole prediction path once at idle, so the first key after enabling or a resize does not pay
+   * one-off costs on the keystroke: overlay canvas geometry and resize, font setup for measuring and drawing,
+   * the host-cursor guard, and first-call compilation of the placement and drawing code.
+   */
+  private scheduleWarm(): void {
+    if (!this.overlay || this.warmHandle || !this.warmNeeded) return;
+    const idle = (window as { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
+    const run = (): void => {
+      this.warmHandle = 0;
+      this.warm();
+    };
+    this.warmHandle = idle ? idle.call(window, run, { timeout: 200 }) : window.setTimeout(run, 50);
+  }
+
+  /**
+   * Warms the overlay. With nothing queued this is a dry run of common glyphs and one erase through placement
+   * and drawing. While keys are in flight (a resize in the middle of typing) only the overlay geometry is
+   * synchronised, so the next key does not resize the canvas; the dry run follows at the next idle moment.
+   */
+  private warm(): void {
+    // Intl.Segmenter and the Unicode property classes compile on first use; that is the largest one-off cost.
+    printableGraphemes("a");
+    encoder.encode("a").slice();
+    if (!this.overlay) return;
+    const position = this.options.getPosition();
+    if (!position || position.alternate || position.viewportY !== 0 || !position.visible) return;
+    this.cellWidth("M", position);
+    if (this.pending.length > 0 || this.awaitingPaint.length > 0 || !this.isEnabled()) {
+      this.overlay.warm(position);
+      return;
+    }
+    this.warmNeeded = false;
+    const enteredAt = performance.now();
+    // Common ASCII glyphs, so the canvas rasterises them (and fills its glyph cache) now rather than on a key.
+    const inputs: PredictionOpInput[] = Array.from(WARM_TEXT, (text) => ({
+      kind: "glyph", text, bytes: encoder.encode(text), sequence: "0", cells: 1, enteredAt, reportedVisible: true,
+    }));
+    inputs.push({ kind: "erase", text: "", bytes: new Uint8Array(0), sequence: "0", cells: 1, enteredAt, reportedVisible: true });
+    const placed = this.place(position, inputs);
+    // The overlay is shown and hidden again inside this task, so no frame ever paints it.
+    if (placed) {
+      this.pending.push(...placed);
+      this.render(enteredAt, false);
+    }
+    this.pending.length = 0;
+    this.hideOverlay();
   }
 
   /** Predicts bounded printable input and safe backspaces; paste and cursor moves await host output. */
@@ -141,6 +221,8 @@ export class PredictiveEcho {
     const startedAt = performance.now();
     this.predictedLastInput = false;
     this.predictInput(data, sequence, bytes, terminalSafe);
+    // A key that was sent but not predicted has an echo in flight that the queue does not know about.
+    if (!this.predictedLastInput && this.waitingForOutput) this.expectEchoFrom(startedAt);
     this.inputCosts.push(performance.now() - startedAt);
     if (this.inputCosts.length > 256) this.inputCosts.shift();
     if (!this.predictedLastInput && printableGraphemes(data) && bytes.byteLength <= MAX_PREDICTED_INPUT_BYTES) {
@@ -159,14 +241,24 @@ export class PredictiveEcho {
       const position = this.options.getPosition();
       if (!this.isAboveThreshold() || this.waitingForOutput || this.muted || this.mispredictions >= 3
         || !position || (!this.pending.length && position.x === position.columns - 1)
-        || !this.layout(position, this.pending, [], this.pendingBackspaces + 1)) {
+        || this.pending.length + 1 > MAX_PENDING_OPS) {
         this.clearPending("editing-key");
         this.waitingForOutput = true;
         this.proofs = [];
         return;
       }
-      this.pendingBackspaces += 1;
-      this.backspaceEnteredAt ||= performance.now();
+      const erase = this.place(position, [{
+        kind: "erase", text: "", bytes: new Uint8Array(0), sequence: sequence.toString(), cells: 1,
+        enteredAt: performance.now(), reportedVisible: true,
+      }]);
+      if (!erase) {
+        this.clearPending("editing-key");
+        this.waitingForOutput = true;
+        this.proofs = [];
+        return;
+      }
+      this.pending.push(...erase);
+      this.predictedLastInput = true;
       this.lastReason = "ready";
       this.armTimeout();
       this.renderNow(performance.now());
@@ -182,10 +274,6 @@ export class PredictiveEcho {
     }
     if (this.waitingForOutput) {
       this.lastReason = "awaiting-output";
-      return;
-    }
-    if (this.pendingBackspaces > 0) {
-      this.lastReason = "awaiting-backspace-echo";
       return;
     }
     if (!this.isAboveThreshold()) {
@@ -204,7 +292,7 @@ export class PredictiveEcho {
       bytes: encoder.encode(text),
       cells: position ? this.cellWidth(text, position) : 0,
     }));
-    if (!position || predicted.some((glyph) => glyph.cells < 1) || this.pending.length + predicted.length > MAX_PENDING_GLYPHS
+    if (!position || predicted.some((glyph) => glyph.cells < 1) || this.pending.length + predicted.length > MAX_PENDING_OPS
       || (!this.pending.length && position.x === position.columns - 1)) {
       this.clearPending("line-boundary");
       this.waitingForOutput = true;
@@ -213,8 +301,9 @@ export class PredictiveEcho {
 
     const enteredAt = performance.now();
     let byteOffset = 0;
-    const additions: PredictionGlyphInput[] = predicted.map((glyph) => {
+    const additions: PredictionOpInput[] = predicted.map((glyph) => {
       const entry = {
+        kind: "glyph" as const,
         text: glyph.text,
         bytes: bytes.slice(byteOffset, byteOffset + glyph.bytes.byteLength),
         sequence: (sequence + BigInt(byteOffset)).toString(),
@@ -225,14 +314,13 @@ export class PredictiveEcho {
       byteOffset += glyph.bytes.byteLength;
       return entry;
     });
-    const layout = this.layout(position, this.pending, additions, 0);
-    if (!layout) {
+    const placed = this.place(position, additions);
+    if (!placed) {
       this.clearPending("line-boundary");
       this.waitingForOutput = true;
       return;
     }
-    const newGlyphs = layout.pendingGlyphs.slice(this.pending.length);
-    this.pending.push(...newGlyphs);
+    this.pending.push(...placed);
     this.predictedLastInput = true;
     this.lastReason = "ready";
     this.armTimeout();
@@ -241,13 +329,19 @@ export class PredictiveEcho {
     this.renderNow(performance.now());
   }
 
-  /** Reconciles only the small leading echo region after Ghostty has painted host bytes. */
-  paintedOutput(bytes: Uint8Array): void {
+  /**
+   * Reconciles the small leading echo region the moment Ghostty has been handed host bytes.
+   *
+   * The renderer's cursor already includes these bytes (the terminal state is written synchronously; only the
+   * paint is a frame later), so the queue must drop what they confirm now. Otherwise a key typed in that
+   * frame would be placed from a cursor that includes echoes the queue still counts.
+   */
+  hostWritten(bytes: Uint8Array): void {
     if (!this.options.optedIn || bytes.byteLength === 0) return;
-    if (this.waitingForOutput) this.waitingForOutput = false;
-    if (this.proofs.length === 0 && this.pending.length === 0 && this.pendingBackspaces === 0) return;
+    if (this.waitingForOutput && performance.now() >= this.echoExpectedAt) this.waitingForOutput = false;
+    if (this.proofs.length === 0 && this.pending.length === 0) return;
     const visible = this.visibleBytes(bytes);
-    if (visible.bytes.byteLength === 0 && visible.backspaces === 0) return;
+    if (visible.bytes.byteLength === 0 && visible.erases.length === 0) return;
 
     if (this.proofs.length > 0 && this.proofs.some((proof) => startsWith(visible.bytes, proof))) {
       // Unmatched proofs are not discarded here: other output (a prompt redraw) may precede the echo.
@@ -258,36 +352,66 @@ export class PredictiveEcho {
       this.lastReason = "ready";
     }
 
+    const matched = this.reconcile(visible);
+    if (matched || this.pending.length === 0) this.armTimeout();
+    // Nothing is hidden here. Reconciled operations stay drawn until `paintedOutput`; only a misprediction,
+    // which has already cleared the queue, removes them at once.
+    if (this.pending.length > 0) this.renderNow(performance.now());
+  }
+
+  /** Matches echoed text and erases against the queue, in order. Returns whether anything was confirmed. */
+  private reconcile(visible: VisibleOutput): boolean {
     let offset = 0;
     let matched = false;
-    while (offset < visible.bytes.byteLength && this.pending.length > 0) {
-      const first = this.pending[0];
-      if (!first) break;
-      const expected = first.bytes.subarray(this.matchedPrefixLength);
-      const available = visible.bytes.subarray(offset);
-      const common = commonPrefixLength(available, expected);
-      if (common === 0) {
-        this.noteMisprediction();
-        break;
-      }
-      offset += common;
-      this.matchedPrefixLength += common;
-      if (this.matchedPrefixLength < first.bytes.byteLength) {
-        if (offset < visible.bytes.byteLength) this.noteMisprediction();
-        break;
-      }
-      this.pending.shift();
+    let erase = 0;
+    const text = visible.bytes;
+    const confirm = (): void => {
+      const op = this.pending.shift();
+      if (op) this.awaitingPaint.push(op);
       this.matchedPrefixLength = 0;
       matched = true;
       this.mispredictions = 0;
+    };
+    while (this.pending.length > 0) {
+      // Text before the next erase belongs to glyphs; a glyph can be echoed across several chunks.
+      const textEnd = erase < visible.erases.length ? visible.erases[erase]! : text.byteLength;
+      while (offset < textEnd && this.pending.length > 0) {
+        const first = this.pending[0]!;
+        if (first.kind === "erase") {
+          this.noteMisprediction();
+          return matched;
+        }
+        const common = commonPrefixLength(text.subarray(offset, textEnd), first.bytes.subarray(this.matchedPrefixLength));
+        if (common === 0) {
+          this.noteMisprediction();
+          return matched;
+        }
+        offset += common;
+        this.matchedPrefixLength += common;
+        if (this.matchedPrefixLength < first.bytes.byteLength) {
+          if (offset < textEnd) this.noteMisprediction();
+          return matched;
+        }
+        confirm();
+      }
+      offset = textEnd;
+      if (erase >= visible.erases.length) break;
+      erase += 1;
+      const first = this.pending[0];
+      if (!first) break;
+      if (first.kind !== "erase" || this.matchedPrefixLength !== 0) {
+        this.noteMisprediction();
+        return matched;
+      }
+      confirm();
     }
+    return matched;
+  }
 
-    if (visible.backspaces > 0 && this.pendingBackspaces > 0) {
-      this.pendingBackspaces = Math.max(0, this.pendingBackspaces - visible.backspaces);
-      if (this.pendingBackspaces === 0) this.backspaceEnteredAt = 0;
-    }
-
-    if (matched || this.pending.length === 0 || visible.backspaces > 0) this.armTimeout();
+  /** The renderer has painted the bytes last given to `hostWritten`: drop the predictions they confirmed. */
+  paintedOutput(): void {
+    if (!this.options.optedIn || this.awaitingPaint.length === 0) return;
+    this.awaitingPaint = [];
     this.renderNow(performance.now());
   }
 
@@ -296,6 +420,7 @@ export class PredictiveEcho {
     this.parserState = "text";
     this.proofs = [];
     this.waitingForOutput = false;
+    this.echoExpectedAt = 0;
     this.clearPending("snapshot");
   }
 
@@ -308,8 +433,11 @@ export class PredictiveEcho {
   /** Drops stale overlay geometry while retaining waits caused by unconfirmed input. */
   layoutChanged(): void {
     this.overlay?.invalidate();
-    if (this.pending.length > 0 || this.pendingBackspaces > 0) {
+    this.warmNeeded = true;
+    if (this.isAboveThreshold()) this.scheduleWarm();
+    if (this.pending.length > 0 || this.awaitingPaint.length > 0) {
       this.waitingForOutput = true;
+      this.expectEchoFrom(this.pending[this.pending.length - 1]?.enteredAt ?? performance.now());
       this.lastReason = "layout-change";
       this.hideOverlay();
       return;
@@ -341,6 +469,7 @@ export class PredictiveEcho {
   dispose(): void {
     window.clearTimeout(this.timeout);
     if (this.renderFrame) cancelAnimationFrame(this.renderFrame);
+    this.warmHandle = 0;
     this.clearPending("disposed");
     this.overlay?.dispose();
   }
@@ -363,63 +492,78 @@ export class PredictiveEcho {
     return Math.max(1, Math.min(2, Math.round(measured / position.cellWidth)));
   }
 
-  /** Builds cell positions from Ghostty metrics; the final-column cursor remains there until the next glyph wraps. */
-  private layout(
-    position: PredictionPosition,
-    existing: readonly PredictionGlyph[],
-    additions: readonly PredictionGlyphInput[],
-    backspaces: number,
-  ): { glyphs: TerminalTextOverlayGlyph[]; pendingGlyphs: PredictionGlyph[]; cursor: TerminalTextOverlayCursor } | undefined {
+  /**
+   * Places new operations on integer cells after the last queued one (or at the host cursor when the queue is
+   * empty). The final-column cursor stays there, wrap pending, until the next glyph wraps. Returns undefined
+   * when the exact cell cannot be known (row start for an erase, last row for a wrap).
+   */
+  private place(position: PredictionPosition, additions: readonly PredictionOpInput[]): PredictionOp[] | undefined {
     if (position.columns < 1 || position.rows < 1 || position.x < 0 || position.x >= position.columns
       || position.y < 0 || position.y >= position.rows) return undefined;
 
     let x = position.x;
     let y = position.y;
     let wrapPending = false;
-    const glyphs: TerminalTextOverlayGlyph[] = [];
-    const pendingGlyphs = [...existing];
-    for (const glyph of existing) {
-      glyphs.push({ text: glyph.text, x: glyph.x, y: glyph.y, cells: glyph.cells });
-    }
-    const last = existing[existing.length - 1];
+    const last = this.pending[this.pending.length - 1];
     if (last) {
       x = last.cursorXAfter;
       y = last.cursorYAfter;
       wrapPending = last.wrapPendingAfter;
     }
 
-    for (const glyph of additions) {
-      if (wrapPending || x + glyph.cells > position.columns) {
+    const placed: PredictionOp[] = [];
+    for (const input of additions) {
+      if (input.kind === "erase") {
+        // The host erases the cell left of the cursor and ends on it. A row start would need the host's
+        // wrap and margin rules, so it waits for the host instead of guessing.
+        if (x === 0) return undefined;
+        x -= 1;
+        wrapPending = false;
+        placed.push({ ...input, x, y, cursorXAfter: x, cursorYAfter: y, wrapPendingAfter: false });
+        continue;
+      }
+      if (wrapPending || x + input.cells > position.columns) {
         if (y + 1 >= position.rows) return undefined;
         x = 0;
         y += 1;
         wrapPending = false;
       }
-      if (glyph.cells < 1 || x + glyph.cells > position.columns) return undefined;
-      const cursorXAfter = x + glyph.cells === position.columns ? position.columns - 1 : x + glyph.cells;
-      const wrapPendingAfter = x + glyph.cells === position.columns;
-      glyphs.push({ text: glyph.text, x, y, cells: glyph.cells });
-      const placed: PredictionGlyph = {
-        ...glyph,
-        x,
-        y,
-        cursorXAfter,
-        cursorYAfter: y,
-        wrapPendingAfter,
-      };
-      // Keep the chosen cell geometry on each pending glyph so a partial echo
-      // at the right margin does not lose Ghostty's wrap-pending state.
-      pendingGlyphs.push(placed);
+      if (input.cells < 1 || x + input.cells > position.columns) return undefined;
+      const cursorXAfter = x + input.cells === position.columns ? position.columns - 1 : x + input.cells;
+      const wrapPendingAfter = x + input.cells === position.columns;
+      // Each operation keeps its own cell geometry so a partial echo at the right margin does not lose
+      // Ghostty's wrap-pending state.
+      placed.push({ ...input, x, y, cursorXAfter, cursorYAfter: y, wrapPendingAfter });
       x = cursorXAfter;
       wrapPending = wrapPendingAfter;
     }
+    return placed;
+  }
 
-    for (let index = 0; index < backspaces; index += 1) {
-      if (wrapPending) wrapPending = false;
-      if (x === 0) return undefined;
-      x -= 1;
-    }
-    return { glyphs, pendingGlyphs, cursor: { x, y } };
+  /**
+   * What the overlay draws for the queue: predicted glyphs that no later erase removed, and the cells a
+   * pending erase clears out of text the host already confirmed (those need their old glyph covered).
+   */
+  private compose(): { glyphs: TerminalTextOverlayGlyph[]; erased: TerminalTextOverlayCell[] } {
+    const glyphs: TerminalTextOverlayGlyph[] = [];
+    const erased: TerminalTextOverlayCell[] = [];
+    const apply = (op: PredictionOp): void => {
+      if (op.kind === "glyph") {
+        glyphs.push({ text: op.text, x: op.x, y: op.y, cells: op.cells });
+        return;
+      }
+      for (let index = glyphs.length - 1; index >= 0; index -= 1) {
+        const glyph = glyphs[index]!;
+        if (glyph.y === op.y && op.x >= glyph.x && op.x < glyph.x + glyph.cells) {
+          glyphs.splice(index, 1);
+          return;
+        }
+      }
+      erased.push({ x: op.x, y: op.y });
+    };
+    for (const op of this.awaitingPaint) apply(op);
+    for (const op of this.pending) apply(op);
+    return { glyphs, erased };
   }
 
   private offerEchoProof(bytes: Uint8Array): void {
@@ -432,18 +576,17 @@ export class PredictiveEcho {
   private armTimeout(): void {
     window.clearTimeout(this.timeout);
     this.timeout = 0;
-    const first = this.pending[0];
-    const enteredAt = first?.enteredAt ?? (this.pendingBackspaces > 0 ? this.backspaceEnteredAt : 0);
+    const enteredAt = this.pending[0]?.enteredAt ?? 0;
     if (!enteredAt || this.roundTripMs === undefined) return;
     // A host that is not echoing (a password prompt) never answers; a loaded network answers late. Allow a
     // whole extra round trip before muting, so ordinary jitter on a 300 ms link never mutes prediction.
     const deadline = enteredAt + 2 * this.roundTripMs + CONFIRMATION_FRAME_BUDGET_MS + PROFILE_JITTER_GUARD_MS;
     this.timeout = window.setTimeout(() => {
       this.timeout = 0;
-      if (this.pending.length === 0 && this.pendingBackspaces === 0) return;
+      if (this.pending.length === 0) return;
       // If the echo was merely late, its own bytes prove the host is echoing again, so the next key
       // is predicted instead of falling back once to fetch a fresh proof.
-      const late = concatBytes(this.pending.map((glyph) => glyph.bytes));
+      const late = concatBytes(this.pending.map((op) => op.bytes));
       this.muted = true;
       this.lastReason = "echo-timeout";
       this.clearPending("echo-timeout");
@@ -470,13 +613,20 @@ export class PredictiveEcho {
     this.clearPending(this.lastReason);
   }
 
+  private expectEchoFrom(sentAt: number): void {
+    if (this.roundTripMs === undefined) return;
+    this.echoExpectedAt = Math.max(this.echoExpectedAt, sentAt + this.roundTripMs - PROFILE_JITTER_GUARD_MS);
+  }
+
   private clearPending(reason: string): void {
+    // Dropped predictions were sent: their echoes are still on the way.
+    const newest = this.pending[this.pending.length - 1];
+    if (newest) this.expectEchoFrom(newest.enteredAt);
     window.clearTimeout(this.timeout);
     this.timeout = 0;
     this.pending.length = 0;
+    this.awaitingPaint = [];
     this.matchedPrefixLength = 0;
-    this.pendingBackspaces = 0;
-    this.backspaceEnteredAt = 0;
     this.backspaceEchoState = 0;
     this.lastReason = reason;
     this.hideOverlay();
@@ -503,18 +653,18 @@ export class PredictiveEcho {
     if (!overlay) return;
     const position = this.options.getPosition();
     if (!position || position.alternate || position.viewportY !== 0 || !position.visible
-      || (this.pending.length === 0 && this.pendingBackspaces === 0) || !this.isEnabled()) {
+      || (this.pending.length === 0 && this.awaitingPaint.length === 0) || !this.isEnabled()) {
       this.hideOverlay();
       return;
     }
 
-    const layout = this.layout(position, this.pending, [], this.pendingBackspaces);
-    if (!layout) {
-      this.clearPending("line-boundary");
-      return;
-    }
-
-    if (!overlay.show(layout.glyphs, layout.cursor, position)) {
+    // With nothing left to confirm the host's cursor is final; otherwise the last queued operation owns it.
+    const last = this.pending[this.pending.length - 1];
+    const cursor: TerminalTextOverlayCursor = last
+      ? { x: last.cursorXAfter, y: last.cursorYAfter }
+      : { x: position.x, y: position.y };
+    const { glyphs, erased } = this.compose();
+    if (!overlay.show(glyphs, cursor, position, erased)) {
       this.cancelVisibilityFrame();
       return;
     }
@@ -524,10 +674,10 @@ export class PredictiveEcho {
       return;
     }
     this.cancelVisibilityFrame();
-    for (const glyph of this.pending) {
-      if (glyph.reportedVisible) continue;
-      glyph.reportedVisible = true;
-      this.options.onVisible(glyph.sequence, at);
+    for (const op of this.pending) {
+      if (op.reportedVisible) continue;
+      op.reportedVisible = true;
+      this.options.onVisible(op.sequence, at);
     }
   }
 
@@ -555,7 +705,7 @@ export class PredictiveEcho {
     const visible = new Uint8Array(Math.min(bytes.byteLength, MAX_VISIBLE_ECHO_BYTES));
     let length = 0;
     let scanned = 0;
-    let backspaces = 0;
+    const erases: number[] = [];
     const emit = (byte: number): void => {
       if (byte < 0x20 || byte === 0x7f || length === visible.byteLength) return;
       visible[length] = byte;
@@ -588,7 +738,7 @@ export class PredictiveEcho {
       } else if (this.backspaceEchoState === 2) {
         if (byte === 0x08) {
           this.backspaceEchoState = 0;
-          backspaces += 1;
+          erases.push(length);
         } else {
           this.backspaceEchoState = 0;
           emit(0x20);
@@ -598,7 +748,7 @@ export class PredictiveEcho {
         emit(byte);
       }
     }
-    return { bytes: visible.subarray(0, length), backspaces };
+    return { bytes: visible.subarray(0, length), erases };
   }
 }
 

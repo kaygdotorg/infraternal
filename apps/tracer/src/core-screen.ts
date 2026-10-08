@@ -237,7 +237,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const glassParam = Number(params.get("glass"));
   const glassLevel = Number.isInteger(glassParam) && glassParam >= 1 && glassParam <= 4 ? glassParam : DEFAULT_GLASS;
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
-  let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "ink" : "paper");
+  let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "mocha" : "latte");
   // The font follows the same order as the theme: URL, then the saved choice, then the default.
   // `committedFont` is what the person chose; `shownFont` is what is on screen, which differs
   // only while a palette row previews another font.
@@ -621,7 +621,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   const systemThemeChange = (): void => {
     if (!themeId(params.get("theme")) && !themeId(readLocal("tracer.theme"))) {
-      currentThemeId = systemDark.matches ? "ink" : "paper";
+      currentThemeId = systemDark.matches ? "mocha" : "latte";
       void applyLook();
     }
   };

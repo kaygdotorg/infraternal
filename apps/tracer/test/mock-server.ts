@@ -681,8 +681,14 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
 function echoBytes(target: MockSession, bytes: Uint8Array): Uint8Array | undefined {
   if (target.echoMode === "none") return undefined;
   if (target.echoMode === "normal") {
-    if (bytes.byteLength === 1 && bytes[0] === 0x7f) return new TextEncoder().encode("\b \b");
-    return bytes.slice();
+    // The input path may coalesce several keys into one frame; a host echoes every DEL as an erase.
+    if (!bytes.includes(0x7f)) return bytes.slice();
+    const echoed: number[] = [];
+    for (const byte of bytes) {
+      if (byte === 0x7f) echoed.push(0x08, 0x20, 0x08);
+      else echoed.push(byte);
+    }
+    return Uint8Array.from(echoed);
   }
   if (target.echoMode === "wrong") return new Uint8Array(bytes.byteLength).fill(0x21);
   return Uint8Array.from(bytes, (byte) => byte >= 0x20 && byte !== 0x7f ? 0x2a : byte);
