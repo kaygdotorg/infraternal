@@ -4,7 +4,7 @@
  *   bun test/work-timing.ts            # 1x CPU
  *   THROTTLE=4 N=12 bun test/work-timing.ts
  *
- * Needs the mock server on TRACER_PREVIEW (default http://localhost:4796) serving the production build.
+ * `ONLY=sidebar` runs just the operations whose label matches. Needs the mock server on TRACER_PREVIEW (default http://localhost:4796) serving the production build.
  * Each operation is repeated N times in a page with reduced motion on, so animations do not spread the
  * work over frames; the table gives, for each, the main-thread time that our own code costs (script plus
  * style plus layout, from the Chrome DevTools Performance metrics) and the whole task time including
@@ -42,9 +42,21 @@ const delta = (a: Map<string, number>, b: Map<string, number>): Sample => {
 };
 const longTasks = (): Promise<number> => page.evaluate(() => (window as unknown as { __long: number[] }).__long.filter((duration) => duration > 50).length);
 const resetLong = (): Promise<void> => page.evaluate(() => { (window as unknown as { __long: number[] }).__long.length = 0; });
+/**
+ * A click made of raw input events at a point measured beforehand: Playwright's own click runs an
+ * actionability script in the page first (hit-testing, layout reads), which would be counted as our work.
+ */
+let aim = { x: 0, y: 0 };
+const aimAt = async (selector: string, offset?: { x: number; y: number }): Promise<void> => {
+  const box = (await page.locator(selector).first().boundingBox())!;
+  aim = offset ? { x: box.x + offset.x, y: box.y + offset.y } : { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+};
+const clickAim = (): Promise<void> => page.mouse.click(aim.x, aim.y);
 const closeAll = async (): Promise<void> => { await page.keyboard.press("Escape"); await page.keyboard.press("Escape"); };
 
+const only = process.env.ONLY ? new RegExp(process.env.ONLY, "i") : undefined;
 async function measure(label: string, action: () => Promise<void>, setup?: () => Promise<void>): Promise<void> {
+  if (only && !only.test(label)) return;
   const samples: Sample[] = [];
   let long = 0;
   for (let index = 0; index < N; index++) {
@@ -92,28 +104,31 @@ await measure("font switch, warm (Enter on the row)", () => page.keyboard.press(
   results["font switch, cold (first selection; fetch excluded)"] = { samples, long: await longTasks() };
 }
 await closeAll();
-await measure("info popover: open (click pill)", () => page.locator(".ui-window-pill").nth(1).click(), closeAll);
-await measure("info popover: switch tab", () => page.locator(`.canvas-popover .ui-tab[data-tab='${tabs[tabIndex++ % 3]}']`).click(), async () => {
-  if (!(await page.locator(".canvas-popover").count())) await page.locator(".ui-window-pill").nth(1).click();
+await measure("info popover: open (click pill)", clickAim, async () => { await closeAll(); await aimAt(".ui-window:nth-child(2) .ui-window-pill"); });
+await measure("info popover: switch tab", clickAim, async () => {
+  if (!(await page.locator(".canvas-popover").count())) { await aimAt(".ui-window:nth-child(2) .ui-window-pill"); await clickAim(); await page.waitForTimeout(300); }
+  await aimAt(`.canvas-popover .ui-tab[data-tab='${tabs[tabIndex++ % 3]}']`);
 });
 await closeAll();
 await page.locator("#sidebar-toggle").click(); await page.waitForTimeout(300);
-await measure("settings/about: open (gear)", () => page.locator(".ui-sidebar-settings").click(), async () => {
+await measure("settings/about: open (gear)", clickAim, async () => {
   if (await page.locator(".ui-settings").count()) await page.keyboard.press("Escape");
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(200); await aimAt(".ui-sidebar-settings");
 });
 if (await page.locator(".ui-settings").count()) await page.keyboard.press("Escape");
 await page.locator("#sidebar-toggle").click(); await page.waitForTimeout(300);
 await measure("lock/unlock (Ctrl+Shift+L)", () => page.keyboard.press("Control+Shift+KeyL"));
-await measure("sidebar: open", () => page.locator("#sidebar-toggle").click(), async () => {
+await measure("sidebar: open", clickAim, async () => {
   if (await page.locator("#sidebar").isVisible()) await page.locator("#sidebar-toggle").click();
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(200); await aimAt("#sidebar-toggle");
 });
-await measure("sidebar: close", () => page.locator("#sidebar-toggle").click(), async () => {
+await measure("sidebar: close", clickAim, async () => {
   if (!(await page.locator("#sidebar").isVisible())) await page.locator("#sidebar-toggle").click();
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(200); await aimAt("#sidebar-toggle");
 });
-await measure("window activation (click an inactive window)", () => page.locator(".ui-window").nth(activation++ % 2 === 0 ? 1 : 0).locator(".ui-window-body").click({ position: { x: 100, y: 200 } }));
+await measure("window activation (click an inactive window)", clickAim, async () => {
+  await aimAt(`.ui-window:nth-child(${activation++ % 2 === 0 ? 2 : 1}) .ui-window-body`, { x: 100, y: 200 });
+});
 let direction = 0;
 await measure("window resize: commit (release after a drag)", () => page.mouse.up(), async () => {
   const box = (await page.locator(".ui-window").first().boundingBox())!;
