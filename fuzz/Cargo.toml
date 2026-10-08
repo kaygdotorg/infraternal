@@ -14,6 +14,7 @@ cargo-fuzz = true
 libfuzzer-sys.workspace = true
 infraternal-shim.workspace = true
 infraternal-protocol.workspace = true
+infraternal-server.workspace = true
 
 [[bin]]
 name = "shim_frame_decode"

@@ -1312,6 +1312,7 @@ name = "infraternal-fuzz"
 version = "0.1.0"
 dependencies = [
  "infraternal-protocol",
+ "infraternal-server",
  "infraternal-shim",
  "libfuzzer-sys",
 ]
