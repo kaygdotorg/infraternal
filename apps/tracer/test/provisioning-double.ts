@@ -29,7 +29,7 @@ type Step = "check" | "install" | "facts" | "connect" | "done" | "failed";
 type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install";
 const PHASES = [
   { step: "check", message: "Checking the system" },
-  { step: "install", message: "Installing the agent" },
+  { step: "install", message: "Installing the infraternal agent" },
   { step: "facts", message: "Gathering host facts" },
   { step: "connect", message: "Connecting" },
 ] as const;
