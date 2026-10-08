@@ -35,6 +35,7 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   if (m.h) { card.root.style.height = m.h <= 1 ? `calc(var(--clh) * ${m.h})` : `${m.h}px`; card.root.style.flex = "none"; }
   makeBody(cx, rec);
   wireWindow(cx, rec);
+  if (rec.binding) cx.visibility.watch(rec);
   return rec;
 }
 

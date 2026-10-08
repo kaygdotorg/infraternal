@@ -111,7 +111,7 @@ export function createSharing(cx: Ctx, adapter: SharingAdapter): SharingModule {
       }
       order.push(colEl);
     }
-    for (const [id, rec] of [...c.wins]) if (!keep.has(id)) { rec.stopResize?.(); rec.binding?.dispose(); rec.cleanup?.(); rec.card.dispose(); c.wins.delete(id); }
+    for (const [id, rec] of [...c.wins]) if (!keep.has(id)) { rec.stopResize?.(); cx.visibility.unwatch(rec); rec.binding?.dispose(); rec.cleanup?.(); rec.card.dispose(); c.wins.delete(id); }
     for (const e of colEls.values()) e.remove();
     for (const e of order) c.colsEl.append(e);
     c.view.cols = fresh.cols;

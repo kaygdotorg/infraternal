@@ -276,7 +276,7 @@ export function createViews(cx: Ctx): ViewsModule {
   }
 
   const disposeRec = (c: ViewRec): void => {
-    for (const w of c.wins.values()) { w.stopResize?.(); w.cleanup?.(); w.card.dispose(); }
+    for (const w of c.wins.values()) { w.stopResize?.(); cx.visibility.unwatch(w); w.binding?.dispose(); w.cleanup?.(); w.card.dispose(); }
     c.el.remove();
   };
 

@@ -36,6 +36,15 @@ export function createToolbar(cx: Ctx): ToolbarModule {
   lockBtn.addEventListener("click", () => cx.nav.setCanvasLock(!state.canvasLock), { signal });
   viewsBtn.addEventListener("click", () => cx.viewList.toggle(), { signal });
 
+  // The "+" beside the top pill opens a new shell window on the first host.
+  const add = stage.querySelector<HTMLButtonElement>(".tab-add");
+  if (add) {
+    add.disabled = false;
+    add.setAttribute("aria-label", "New window");
+    add.dataset.tip = "New window";
+    add.addEventListener("click", () => { const host = cx.adapters.sessions.hosts()[0]; if (host) cx.win.open(host.name); }, { signal });
+  }
+
   const splitActive = (direction: "right" | "down"): void => { const w = state.activeWin; if (w && w.model.kind === "terminal") void cx.win.split(w, direction); };
   const items: ToolbarItem[] = [
     { id: "search", label: "Search and actions", icon: ICONS.search, onSelect: openPalette },
@@ -69,5 +78,5 @@ export function createToolbar(cx: Ctx): ToolbarModule {
   };
   const offLock = cx.nav.onLockChange(update);
   update();
-  return { update, dispose() { offLock(); row.dispose(); lockBtn.remove(); viewsBtn.remove(); } };
+  return { update, dispose() { offLock(); row.dispose(); lockBtn.remove(); viewsBtn.remove(); if (add) { add.disabled = true; add.removeAttribute("data-tip"); } } };
 }

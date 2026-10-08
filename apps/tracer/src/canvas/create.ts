@@ -34,6 +34,7 @@ import { createViewList } from "./toolbar/viewlist";
 import { createFloat } from "./windows/float";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
+import { createVisibility } from "./windows/visibility";
 
 export interface CanvasOptions {
   adapters: Adapters;
@@ -89,7 +90,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   (cx as { camera: Camera }).camera = new Camera(viewport, world, {
     onTransform: (t) => backdrop?.update(t),
     onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--inv", inv); },
-    onLod: () => cx.pill.paint(),
+    onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
     onFrame: () => cx.invalidate(),
     onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); },
@@ -103,6 +104,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.win = createWindows(cx);
   cx.float = createFloat(cx);
   cx.inputLock = createInputLock(cx);
+  cx.visibility = createVisibility(cx);
   cx.pill = createPill(cx);
   cx.viewList = createViewList(cx);
   cx.tree = createTree(cx);
@@ -163,6 +165,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.sharing?.dispose();
       cx.mesh?.dispose();
       cx.float.dispose();
+      cx.visibility.dispose();
       cx.view.clear();
       cx.view.dispose();
       cx.camera.dispose();
