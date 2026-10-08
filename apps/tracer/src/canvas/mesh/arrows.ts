@@ -14,8 +14,8 @@
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
 
-export interface Pt { x: number; y: number }
-export interface Rect { x: number; y: number; w: number; h: number }
+import type { Pt, Rect } from "../layout/geometry";
+export type { Pt, Rect };
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const svgEl = <K extends keyof SVGElementTagNameMap>(tag: K, cls?: string): SVGElementTagNameMap[K] => {

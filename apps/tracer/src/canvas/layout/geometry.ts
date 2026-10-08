@@ -8,6 +8,9 @@
  */
 import type { ViewModel } from "../model/types";
 
+export interface Pt { x: number; y: number }
+export interface Rect { x: number; y: number; w: number; h: number }
+
 export const CELL = 120;
 /** Space inside a box around the content: left, top (room for the view label), right, bottom. */
 export const MARGIN = { l: 48, t: 96, r: 48, b: 48 };
