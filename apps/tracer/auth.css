@@ -164,11 +164,22 @@
 .auth-back { padding: 10px 8px; margin-left: -8px; }
 .auth-back[hidden] { display: inline; visibility: hidden; }
 .auth-back:hover { color: var(--fg); }
+/* The sign-in card hugs their content. Top and bottom padding are one value
+   (--auth-pad), measured to the ink: when the last thing is a quiet text action, its own empty inset
+   (--auth-tail, half the 44 px button's height minus its text) is taken off the bottom so the visible gap
+   under the text equals the gap above the mark. */
 #use-recovery, #recovery-card .auth-primary, #recovery-card .auth-back, #recovery-card .icon-action { min-width: 44px; min-height: 44px; }
-.auth-signin { padding: 40px 32px 36px; }
+.auth-signin { --auth-pad: 36px; --auth-tail: 15px; padding: var(--auth-pad) 32px var(--auth-pad); }
+.auth-signin:has(.auth-text-button) { padding-bottom: calc(var(--auth-pad) - var(--auth-tail)); }
 .auth-signin .auth-lede { margin-bottom: 28px; }
 .auth-login { width: 100%; height: 48px; border-radius: 12px; font-size: 15px; }
 .auth-loading { min-height: 1em; margin: 14px 0 0; text-align: center; }
+/* A line that exists only while it has something to say (the passkey wait counter, an error): the
+   row is 0fr while empty, so the card hugs its content, and eases open when text arrives. */
+.auth-note { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease); }
+.auth-note > div { min-height: 0; overflow: hidden; }
+.auth-note:has(.auth-message:not(:empty), .busy-count:not([hidden])) { grid-template-rows: 1fr; }
+@media (prefers-reduced-motion: reduce) { .auth-note { transition: none; } }
 .auth-check { position: relative; display: flex; min-height: 44px; align-items: center; gap: 10px; margin-top: 18px; color: var(--fg-2); font-size: 14px; cursor: pointer; }
 .auth-check input { width: 18px; height: 18px; accent-color: #fff; }
 [data-focus-ring="on"] .auth-check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
@@ -192,7 +203,7 @@
 [data-focus-ring="on"] .auth-screen button:focus-visible { outline: 2px solid rgb(255 255 255 / 0.55); outline-offset: 2px; }
 @media (max-width: 480px) {
   .auth-card { padding: 28px 22px 22px; border-radius: 20px; }
-  .auth-signin { padding: 30px 22px 28px; }
+  .auth-signin { --auth-pad: 28px; padding-inline: 22px; }
   .auth-card h1 { font-size: 23px; }
   .auth-words { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
