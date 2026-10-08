@@ -271,7 +271,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         this.run = review.run;
         this.jobs = review.failures.map((failure) => ({
           host: failure.host, target: targetIdFor(failure.host.id), run: review.run,
-          view: { state: "failed", attempt: 1, phase: failure.phase, message: failure.message, failure: { kind: failure.kind, message: failure.message, log_tail: [failure.evidence] }, elapsedMs: 0 },
+          view: { state: "failed", attempt: 1, phase: failure.phase, message: failure.message, failure: { kind: failure.kind, message: failure.message, log_tail: [failure.evidence] }, elapsedMs: 0, authentication: undefined },
         }));
         this.go("progress", 0);
       } else this.go(startEmpty ? "empty" : "discovery", 0);
