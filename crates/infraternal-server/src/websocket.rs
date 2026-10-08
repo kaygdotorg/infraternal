@@ -1142,10 +1142,27 @@ where
             input_json,
         } if stream_id == CONTROL_STREAM && action_id.starts_with("mesh.") => {
             let now = unix_seconds()?;
-            let value = state
-                .mesh
-                .execute(user_id, action_id, input_json, now)
-                .await;
+            // Destructive policy and inventory edits need the same fresh passkey
+            // authority as account changes [28]; an unlocked socket alone is insufficient.
+            let requires_fresh = matches!(
+                action_id,
+                "mesh.node.delete"
+                    | "mesh.tag.delete"
+                    | "mesh.tag.member.remove"
+                    | "mesh.grant.move"
+                    | "mesh.grant.delete"
+                    | "mesh.role.define"
+                    | "mesh.role.assign"
+            );
+            let value =
+                if requires_fresh && state.auth.fresh_session(session_token, now).await.is_err() {
+                    Err(MeshApiError::Denied)
+                } else {
+                    state
+                        .mesh
+                        .execute(user_id, action_id, input_json, now)
+                        .await
+                };
             if !session_is_live(state, user_id, session_token).await {
                 return Err(());
             }

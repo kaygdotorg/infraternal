@@ -98,6 +98,12 @@ subscription requires access to the requested tag. Role scopes also filter
 which changes a live subscription reveals. Permission checks are repeated for
 each operation and live invalidation.
 
+Browser node/tag/grant deletion, membership removal, grant endpoint moves, and
+role definition/assignment require a passkey verification within the existing
+five-minute fresh-session window (D28). Refusal preserves inventory, revisions
+and audit and leaves the multiplexed socket usable. Reads and observations do
+not require fresh confirmation.
+
 Every successful edit, including a liveness observation, advances the shared
 monotonic revision and records an audit row in the same SQLite transaction
 (D154 G9). Deleting a node also removes its memberships and grants that use

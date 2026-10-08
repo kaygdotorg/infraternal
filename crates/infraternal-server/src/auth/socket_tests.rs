@@ -617,3 +617,6 @@ async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
     assert_eq!(list["tags"][0]["members"][0], node_id);
     server.abort();
 }
+
+#[path = "socket_tests/fresh_delete.rs"]
+mod fresh_delete;
