@@ -113,6 +113,13 @@ export class PredictiveEcho {
   private predictedLastInput = false;
   private readonly inputCosts: number[] = [];
   private warmHandle = 0;
+  /**
+   * Echoes of keys that were sent without a prediction, or whose prediction was dropped, cannot arrive before
+   * this time (send time + round trip - jitter). Until then no output proves that the host cursor has caught up
+   * with everything typed, so an older key's echo must not release the wait and let a newer key be placed from
+   * a cursor that lacks it.
+   */
+  private echoExpectedAt = 0;
 
   constructor(private readonly options: PredictiveEchoOptions) {
     if (!options.optedIn) return;
@@ -203,6 +210,8 @@ export class PredictiveEcho {
     const startedAt = performance.now();
     this.predictedLastInput = false;
     this.predictInput(data, sequence, bytes, terminalSafe);
+    // A key that was sent but not predicted has an echo in flight that the queue does not know about.
+    if (!this.predictedLastInput && this.waitingForOutput) this.expectEchoFrom(startedAt);
     this.inputCosts.push(performance.now() - startedAt);
     if (this.inputCosts.length > 256) this.inputCosts.shift();
     if (!this.predictedLastInput && printableGraphemes(data) && bytes.byteLength <= MAX_PREDICTED_INPUT_BYTES) {
@@ -318,7 +327,7 @@ export class PredictiveEcho {
    */
   hostWritten(bytes: Uint8Array): void {
     if (!this.options.optedIn || bytes.byteLength === 0) return;
-    if (this.waitingForOutput) this.waitingForOutput = false;
+    if (this.waitingForOutput && performance.now() >= this.echoExpectedAt) this.waitingForOutput = false;
     if (this.proofs.length === 0 && this.pending.length === 0) return;
     const visible = this.visibleBytes(bytes);
     if (visible.bytes.byteLength === 0 && visible.erases.length === 0) return;
@@ -400,6 +409,7 @@ export class PredictiveEcho {
     this.parserState = "text";
     this.proofs = [];
     this.waitingForOutput = false;
+    this.echoExpectedAt = 0;
     this.clearPending("snapshot");
   }
 
@@ -415,6 +425,7 @@ export class PredictiveEcho {
     if (this.isAboveThreshold()) this.scheduleWarm();
     if (this.pending.length > 0 || this.awaitingPaint.length > 0) {
       this.waitingForOutput = true;
+      this.expectEchoFrom(this.pending[this.pending.length - 1]?.enteredAt ?? performance.now());
       this.lastReason = "layout-change";
       this.hideOverlay();
       return;
@@ -590,7 +601,15 @@ export class PredictiveEcho {
     this.clearPending(this.lastReason);
   }
 
+  private expectEchoFrom(sentAt: number): void {
+    if (this.roundTripMs === undefined) return;
+    this.echoExpectedAt = Math.max(this.echoExpectedAt, sentAt + this.roundTripMs - PROFILE_JITTER_GUARD_MS);
+  }
+
   private clearPending(reason: string): void {
+    // Dropped predictions were sent: their echoes are still on the way.
+    const newest = this.pending[this.pending.length - 1];
+    if (newest) this.expectEchoFrom(newest.enteredAt);
     window.clearTimeout(this.timeout);
     this.timeout = 0;
     this.pending.length = 0;
