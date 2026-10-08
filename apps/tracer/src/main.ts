@@ -78,6 +78,9 @@ let welcomeTimer = 0;
 let foregroundListenerInstalled = false;
 let backdropTimer = 0;
 
+/** True only in builds made with INFRATERNAL_CLUSTERS_PREVIEW=1 (see build.ts); false removes the mockup from the bundle. */
+declare const __CLUSTERS_PREVIEW__: boolean;
+
 void start();
 
 async function start(): Promise<void> {
@@ -257,7 +260,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   const proto = query.get("proto");
   const canvasMode = mockMode && (proto === "windows" || proto === "addhost");
   // Concept mockup for views on one canvas (#89): it brings its own windows and no live terminal.
-  const clustersMode = mockMode && proto === "clusters";
+  const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
   const predictiveEcho = query.get("predict") === "1";
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
