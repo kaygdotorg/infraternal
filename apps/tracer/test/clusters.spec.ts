@@ -323,7 +323,7 @@ test("toolbar: the keyboard row follows terminal focus, the canvas row follows a
     await expect.poll(row).toBe("keys");
     await expect(page.locator("#keytray")).toHaveAttribute("data-rows", "2");
     // Tap empty canvas: the canvas row.
-    await page.touchscreen.tap(200, 130);
+    await page.touchscreen.tap(359, 400);
     await expect.poll(row).toBe("canvas");
     const tray = (await page.locator("#keytray").boundingBox())!;
     expect(tray.height).toBeGreaterThanOrEqual(44);
@@ -360,7 +360,7 @@ test("toolbar: Ctrl latches (tap arms, double tap holds), snap and lock work fro
     await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
     await expect.poll(state).toBe("locked");
     // Canvas row: snap and lock.
-    await page.touchscreen.tap(200, 130);
+    await page.touchscreen.tap(359, 400);
     await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "canvas");
     await page.waitForTimeout(500);
     await page.evaluate(() => document.querySelector<HTMLElement>('[data-cv="input-lock"]')!.click());
@@ -374,4 +374,122 @@ test("toolbar: Ctrl latches (tap arms, double tap holds), snap and lock work fro
     await page.evaluate(() => document.querySelector<HTMLElement>('[data-cv="overview"]')!.click());
     await expect.poll(async () => (await probe(page, (p) => p.canvasLock())).on).toBe(false);
   } finally { await t.close(); }
+});
+
+test("toolbar: a long press edits it in place (hide with a badge, a tray brings it back, drag reorders), and the layout is the account's until this device overrides it", async ({ browser }) => {
+  const t = await touchPage(browser, 3);
+  try {
+    const { page } = t;
+    await page.touchscreen.tap(359, 400);
+    await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "canvas");
+    await page.waitForTimeout(500);
+    const tray = (await page.locator("#keytray").boundingBox())!;
+    const pt = { x: tray.x + 60, y: tray.y + 22 };
+    await t.touch("touchStart", [pt]);
+    await page.waitForTimeout(800);
+    await t.touch("touchEnd", []);
+    await expect(page.locator("#terminal-screen")).toHaveAttribute("data-toolbar-edit", "");
+    await expect(page.locator(".keyedit")).toBeVisible();
+    // The hide badge removes a control into the tray.
+    const count = await page.locator('#keyrow-canvas > button:not([hidden])').count();
+    await page.evaluate(() => document.querySelector<HTMLElement>('#keyrow-canvas [data-cv="add"] .keyx')!.click());
+    await expect(page.locator('#keyrow-canvas > button:not([hidden])')).toHaveCount(count - 1);
+    await expect(page.locator('.keyedit-add')).toHaveCount(1);
+    // It is saved as the account's layout, which the server keeps.
+    const saved = await page.evaluate(() => fetch("/__mock/account/toolbar").then((r) => r.json()));
+    expect(JSON.stringify(saved)).toContain("add");
+    await page.locator(".keyedit-add").tap();
+    await expect(page.locator('#keyrow-canvas > button:not([hidden])')).toHaveCount(count);
+    // Drag the first control to the right: the order changes.
+    const first = (await page.locator('#keyrow-canvas > button').first().boundingBox())!;
+    const idsBefore = await page.locator('#keyrow-canvas > button').evaluateAll((b) => b.map((n) => (n as HTMLElement).dataset.cv));
+    await t.touch("touchStart", [{ x: first.x + 24, y: first.y + 24 }]);
+    for (let i = 1; i <= 10; i++) await t.touch("touchMove", [{ x: first.x + 24 + i * 22, y: first.y + 24 }]);
+    await t.touch("touchEnd", []);
+    await page.waitForTimeout(700);
+    const idsAfter = await page.locator('#keyrow-canvas > button').evaluateAll((b) => b.map((n) => (n as HTMLElement).dataset.cv));
+
+    expect(idsAfter[0]).not.toBe(idsBefore[0]);
+    await page.locator(".keyedit-done").tap();
+    await expect(page.locator("#terminal-screen")).not.toHaveAttribute("data-toolbar-edit", "");
+    // Settings, Toolbar: the layout comes from the account until "Customise for this device".
+    await page.keyboard.press("Control+k");
+    await page.keyboard.type("settings: toolbar");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".ui-ts-tag")).toHaveText("Account layout");
+    await page.getByRole("button", { name: "Customise for this device" }).click();
+    await expect(page.locator(".ui-ts-tag")).toHaveText("This device");
+    await page.getByRole("button", { name: "Use account layout" }).click();
+    await expect(page.locator(".ui-ts-tag")).toHaveText("Account layout");
+  } finally { await t.close(); }
+});
+
+test("shortcuts: Settings lists the registry, a row rebinds with a conflict warning, and the new key works everywhere", async ({ page }) => {
+  await open(page, 3);
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("settings: shortcuts");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".ui-ss-row")).not.toHaveCount(0);
+  await expect(page.locator('.ui-ss-row[data-id="canvas-lock"]')).toContainText("G");
+  // A key the terminal needs is refused.
+  await page.locator('.ui-ss-row[data-id="canvas-lock"] .ui-ss-main').click();
+  await page.keyboard.press("Control+c");
+  await expect(page.locator(".ui-ss-warn")).toContainText("terminal needs");
+  await page.getByRole("button", { name: "Cancel" }).click();
+  // A key another action has can be swapped.
+  await page.locator('.ui-ss-row[data-id="canvas-lock"] .ui-ss-main').click();
+  await page.keyboard.press("Control+Shift+L");
+  await expect(page.locator(".ui-ss-warn")).toContainText("Input lock");
+  await page.getByRole("button", { name: "Swap" }).click();
+  await expect(page.locator('.ui-ss-row[data-id="input-lock"]')).toContainText("G");
+  // A free combination saves and the palette shows it.
+  await page.locator('.ui-ss-row[data-id="canvas-lock"] .ui-ss-main').click();
+  await page.keyboard.press("Control+Shift+J");
+  await expect(page.locator('.ui-ss-row[data-id="canvas-lock"]')).toContainText("J");
+  await page.keyboard.press("Escape");
+  const before = (await probe(page, (p) => p.canvasLock())).on;
+  await page.keyboard.press("Control+Shift+J");
+  await expect.poll(async () => (await probe(page, (p) => p.canvasLock())).on).toBe(!before);
+});
+
+test("the top pill: a horizontal swipe steps to the next view and the canvas lock re-engages", async ({ browser }) => {
+  const t = await touchPage(browser, 3);
+  try {
+    const { page } = t;
+    const pill = (await page.locator("#capsule").boundingBox())!;
+    await swipe(t, { x: pill.x + pill.width - 30, y: pill.y + 20 }, { x: pill.x + 40, y: pill.y + 20 }, 6);
+    await expect.poll(async () => (await probe(page, (p) => p.canvasLock())).view, { timeout: 4000 }).toBe("containers");
+    expect((await probe(page, (p) => p.canvasLock())).on).toBe(true);
+    await expect(page.locator("#capsule-host")).toHaveText("Containers", { timeout: 3000 });
+    // A short drag springs back.
+    await swipe(t, { x: pill.x + 200, y: pill.y + 20 }, { x: pill.x + 180, y: pill.y + 20 }, 4);
+    await page.waitForTimeout(700);
+    expect((await probe(page, (p) => p.canvasLock())).view).toBe("containers");
+  } finally { await t.close(); }
+});
+
+test("motion rule: the work of a view jump, a window step and a column step finishes inside one frame, and keys do not animate", async ({ page }) => {
+  await open(page, 3);
+  const costs = await page.evaluate(async () => {
+    const api = (window as unknown as { __tracerClusters: { flyView(id: string): void; camera(): { z: number; cx: number } } }).__tracerClusters;
+    const time = (run: () => void): number => { const t0 = performance.now(); run(); return performance.now() - t0; };
+    const out: Record<string, number> = {};
+    out.viewJump = time(() => api.flyView("containers"));
+    await new Promise((r) => setTimeout(r, 1400));
+    out.windowStep = time(() => document.querySelector<HTMLElement>('[data-cv="next"]')!.click());
+    await new Promise((r) => setTimeout(r, 600));
+    out.canvasLockToggle = time(() => document.querySelector<HTMLElement>('[data-cv="canvas-lock"]')!.click());
+    await new Promise((r) => setTimeout(r, 1400));
+    // A keyboard view jump uses the short flight: it has landed well inside 400 ms.
+    const before = api.camera().cx;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "3", ctrlKey: true, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 450));
+    out.keyJumpMoved = Math.abs(api.camera().cx - before);
+    return out;
+  });
+  console.log(`MOTION_COST ${JSON.stringify(costs)}`);
+  expect(costs.viewJump).toBeLessThan(16);
+  expect(costs.windowStep).toBeLessThan(16);
+  expect(costs.canvasLockToggle).toBeLessThan(16);
+  expect(costs.keyJumpMoved).toBeGreaterThan(500);
 });

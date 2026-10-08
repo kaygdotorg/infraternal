@@ -192,6 +192,8 @@
 
 /* ---- mockup scaffolding: a small tag in the top-right corner (scenes live in the palette) ---- */
 .cl-mockup { position: absolute; z-index: 6; top: calc(10px + env(safe-area-inset-top) + var(--pill-h, 38px) + 4px); right: var(--gutter); height: 22px; padding: 0 9px; color: var(--fg-3); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; cursor: pointer; }
+/* On a desktop it sits in the top row, left of the canvas controls, so it never covers a window. */
+@media (hover: hover) and (pointer: fine) { .cl-mockup { top: calc(10px + env(safe-area-inset-top) + (var(--pill-h, 38px) - 22px) / 2); right: calc(var(--gutter) + 3 * (var(--pill-h, 38px) + 10px)); } }
 
 /* The snap toggle takes the slot of the disabled "+" in the top bar's right group. */
 .cl-snap, .cl-viewsbtn { color: var(--fg-2); }
@@ -217,3 +219,4 @@
 .cl-col .ui-window-body > .terminal-host { position: absolute; inset: 0; }
 .terminal-screen[data-clusters] .capsule-rtt { display: none; }
 .terminal-screen[data-clusters] .capsule-session { color: var(--fg-3); }
+@media (max-width: 480px) { .cl-noun { display: none; } }

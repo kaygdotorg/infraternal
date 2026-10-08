@@ -9,6 +9,7 @@ import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
+import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
 import { toolbarSection } from "../../../packages/ui/src/toolbar-settings";
 import { readLocal as readPref, writeLocal as writePref } from "../../../packages/ui/src/local-pref";
 import { aboutSection, createSettingsOverlay, type SettingsSection } from "../../../packages/ui/src/settings-overlay";
@@ -221,6 +222,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const build = buildVersion();
   const canvasItems = new Map<string, ToolbarItem>();
   const settingsSections: SettingsSection[] = [aboutSection({ name: "infraternal", version: build.short, commit: build.full, built: build.built })];
+  if (options.addHostPrototype) settingsSections.unshift(shortcutsSection());
   const settings = options.addHostPrototype ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
   const sidebarFoot = options.addHostPrototype
     ? createSidebarFoot({
@@ -364,6 +366,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ...(options.addHostPrototype ? [
       { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
       // The hint carries the aliases, so "version", "build" and "commit" find it.
+      { group: "Help", glyph: "⌨", label: "Settings: Shortcuts", hint: "keys · rebind · reset", action: "settings:shortcuts" },
       ...(canvasItems.size ? [{ group: "Help", glyph: "▭", label: "Settings: Toolbar", hint: "rows · order · show · hide", action: "settings:toolbar" }] : []),
       { group: "Help", glyph: "i", label: "About infraternal", hint: "version · build · commit", action: "settings:about" },
     ] : []),
@@ -854,7 +857,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   let rowLock: "keys" | undefined;
   const autoRow = (): void => {
-    if (canvasRowEl.hidden || rowLock) return;
+    if (canvasRowEl.hidden || rowLock || editing) return;
     settleRow(isTerminalFocus(document.activeElement) ? 1 : 0);
   };
   document.addEventListener("focusin", autoRow);
@@ -862,7 +865,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let rowSwipe: { id: number; x: number; y: number; from: number; axis: "" | "x" | "y"; samples: Array<{ y: number; t: number }> } | undefined;
   keytray.addEventListener("pointerdown", (event) => {
     rowSwipeMoved = false;
-    if (canvasRowEl.hidden || !event.isPrimary) return;
+    if (canvasRowEl.hidden || !event.isPrimary || editing) return;
     rowSwipe = { id: event.pointerId, x: event.clientX, y: event.clientY, from: rowSpring.value, axis: "", samples: [{ y: event.clientY, t: event.timeStamp }] };
   }, true);
   keytray.addEventListener("pointermove", (event) => {
@@ -919,7 +922,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return out;
     } catch { return empty(); }
   };
+  // Two layers: the account's layout (shared by every device, kept by the server) and an optional
+  // override for this device. The override exists only after "Customise for this device".
+  const hasDeviceLayout = (): boolean => readPref("tracer.toolbar") !== null;
+  let onDevice = hasDeviceLayout();
   const prefs = loadPrefs();
+  const accountPrefs: Record<"canvas" | "keys", { order: string[]; hidden: string[] }> = { canvas: { order: [], hidden: [] }, keys: { order: [], hidden: [] } };
+  void fetch("/__mock/account/toolbar", { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : undefined)).then((data: { layout?: typeof accountPrefs | null } | undefined) => {
+    if (!data?.layout) return;
+    for (const id of ["canvas", "keys"] as const) if (data.layout[id]) accountPrefs[id] = data.layout[id];
+    if (!onDevice) { for (const id of ["canvas", "keys"] as const) prefs[id] = accountPrefs[id]; applyPrefs(true); }
+  }).catch(() => undefined);
+  const saveAccount = (): void => { void fetch("/__mock/account/toolbar", { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(accountPrefs) }).catch(() => undefined); };
   const rowEl = (id: RowId): HTMLElement => (id === "canvas" ? canvasRowEl : keysRowEl);
   const controlId = (b: HTMLElement): string => b.dataset.cv ?? b.id;
   const controls = (id: RowId): HTMLButtonElement[] => [...rowEl(id).querySelectorAll<HTMLButtonElement>(":scope > button:not(.dpad)")];
@@ -955,19 +969,197 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         hidden: new Set(prefs[id].hidden),
       }));
     },
+    source: (): "account" | "device" => (onDevice ? "device" : "account"),
     change(rowId: string, order: string[], hidden: string[]) {
       prefs[rowId as RowId] = { order, hidden };
-      writePref("tracer.toolbar", JSON.stringify(prefs));
+      if (onDevice) writePref("tracer.toolbar", JSON.stringify(prefs));
+      else { accountPrefs[rowId as RowId] = { order, hidden }; saveAccount(); }
       applyPrefs(true);
     },
     reset() {
-      prefs.canvas = { order: [], hidden: [] }; prefs.keys = { order: [], hidden: [] };
-      writePref("tracer.toolbar", JSON.stringify(prefs));
+      for (const id of ["canvas", "keys"] as const) { prefs[id] = { order: [], hidden: [] }; if (!onDevice) accountPrefs[id] = { order: [], hidden: [] }; }
+      if (onDevice) writePref("tracer.toolbar", JSON.stringify(prefs)); else saveAccount();
+      applyPrefs(true);
+    },
+    /** "Customise for this device": copy what is shown into an override for this device. */
+    customise() { onDevice = true; writePref("tracer.toolbar", JSON.stringify(prefs)); },
+    /** "Use account layout": drop the override. */
+    useAccount() {
+      onDevice = false;
+      try { localStorage.removeItem("tracer.toolbar"); } catch { /* storage is optional */ }
+      for (const id of ["canvas", "keys"] as const) prefs[id] = accountPrefs[id];
       applyPrefs(true);
     },
   };
   const toolbarSettings = toolbarSection(toolbarModel);
   applyPrefs(false);
+
+  // ---- long-press the toolbar: edit it in place ---------------------------------------------------------------
+  // Controls wiggle, a drag reorders them (the neighbours part, the drop bounces) within a row or across
+  // rows (drag up for the canvas row, down for the key row), a badge hides one, and a tray of hidden
+  // controls slides up with a plus on each. Done, or a tap outside, ends it. It edits the same layout as
+  // Settings, Toolbar (account layout, or this device's override).
+  let editing = false;
+  let editTray: HTMLElement | undefined;
+  const buzz = (ms = 8): void => { try { navigator.vibrate?.(ms); } catch { /* not every platform has it */ } };
+  const persistLayout = (): void => {
+    for (const id of ["canvas", "keys"] as const) {
+      const all = controls(id);
+      toolbarModel.change(id, all.map(controlId), all.map(controlId).filter((c) => prefs[id].hidden.includes(c)));
+    }
+  };
+  const labelOf = (b: HTMLElement): string => b.getAttribute("aria-label") ?? controlId(b);
+  const iconOf = (b: HTMLElement): string => b.querySelector("svg")?.innerHTML ?? '<path d="M6 12h12"/>';
+  const paintEditTray = (): void => {
+    if (!editTray) return;
+    const list = editTray.querySelector<HTMLElement>(".keyedit-list")!;
+    list.replaceChildren();
+    const hiddenControls = ([...controls("canvas"), ...controls("keys")]).filter((b) => b.hidden);
+    for (const b of hiddenControls) {
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "keyedit-add";
+      add.dataset.id = controlId(b);
+      add.setAttribute("aria-label", `Show ${labelOf(b)}`);
+      add.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${iconOf(b)}</svg><i aria-hidden="true">+</i>`;
+      add.addEventListener("click", () => { buzz(6); for (const id of ["canvas", "keys"] as const) prefs[id] = { order: prefs[id].order, hidden: prefs[id].hidden.filter((h) => h !== controlId(b)) }; persistLayout(); paintBadges(); paintEditTray(); });
+      list.append(add);
+    }
+    editTray.dataset.empty = String(hiddenControls.length === 0);
+  };
+  const paintBadges = (): void => {
+    for (const b of keytray.querySelectorAll<HTMLElement>(".keyrow > button")) {
+      b.querySelector(".keyx")?.remove();
+      if (!editing || b.hidden) continue;
+      const x = document.createElement("i");
+      x.className = "keyx";
+      x.setAttribute("role", "button");
+      x.setAttribute("aria-label", `Hide ${labelOf(b)}`);
+      x.textContent = "×";
+      b.append(x);
+    }
+    keytray.querySelectorAll<HTMLElement>(".keyrow > button:not([hidden])").forEach((b, i) => b.style.setProperty("--wiggle", `${(i % 5) * -70}ms`));
+  };
+  const endEdit = (): void => {
+    if (!editing) return;
+    editing = false;
+    stage.removeAttribute("data-toolbar-edit");
+    document.removeEventListener("pointerdown", outsideEdit, true);
+    paintBadges();
+    const tray = editTray;
+    editTray = undefined;
+    if (tray) {
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) tray.remove();
+      else new Spring(0, (v) => { tray.style.transform = `translateY(${v * 24}px)`; tray.style.opacity = String(1 - v); if (v >= 1) tray.remove(); }, { visualDuration: 0.25, bounce: 0 }).set(1);
+    }
+    buzz(6);
+  };
+  const outsideEdit = (e: PointerEvent): void => { if (!(e.target as Element).closest(".keytray, .keyedit")) endEdit(); };
+  const startEdit = (): void => {
+    if (editing || canvasRowEl.hidden) return;
+    editing = true;
+    stage.setAttribute("data-toolbar-edit", "");
+    buzz(12);
+    const tray = document.createElement("div");
+    tray.className = "keyedit ui-pill";
+    tray.innerHTML = `<div class="keyedit-list" role="group" aria-label="Hidden controls"></div><button type="button" class="keyedit-done" aria-label="Done">Done</button>`;
+    tray.querySelector(".keyedit-done")!.addEventListener("click", endEdit);
+    keybar.append(tray);
+    editTray = tray;
+    paintEditTray();
+    paintBadges();
+    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) new Spring(1, (v) => { tray.style.transform = v === 0 ? "" : `translateY(${v * 28}px)`; tray.style.opacity = String(1 - v); }, { visualDuration: 0.4, bounce: 0.2 }).set(0);
+    document.addEventListener("pointerdown", outsideEdit, true);
+  };
+  // Long press (touch) starts it.
+  let hold: { id: number; x: number; y: number; timer: number } | undefined;
+  keytray.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "touch" || editing || canvasRowEl.hidden) return;
+    hold = { id: e.pointerId, x: e.clientX, y: e.clientY, timer: window.setTimeout(() => { hold = undefined; startEdit(); }, 600) };
+  }, true);
+  for (const type of ["pointermove", "pointerup", "pointercancel"] as const) keytray.addEventListener(type, (e) => {
+    if (!hold || e.pointerId !== hold.id) return;
+    if (type !== "pointermove" || Math.hypot(e.clientX - hold.x, e.clientY - hold.y) > 8) { window.clearTimeout(hold.timer); hold = undefined; }
+  }, true);
+  // In edit mode a tap hides (the badge) instead of pressing, and a drag reorders.
+  keytray.addEventListener("click", (e) => {
+    if (!editing) return;
+    e.stopPropagation(); e.preventDefault();
+    const x = (e.target as Element).closest(".keyx");
+    const b = x?.closest<HTMLButtonElement>("button");
+    if (!b) return;
+    buzz(10);
+    const id = controlId(b);
+    for (const rid of ["canvas", "keys"] as const) if (rowEl(rid).contains(b)) prefs[rid] = { order: prefs[rid].order, hidden: [...prefs[rid].hidden.filter((h) => h !== id), id] };
+    persistLayout();
+    paintBadges();
+    paintEditTray();
+  }, true);
+  keytray.addEventListener("pointerdown", (e) => {
+    if (!editing || (e.target as Element).closest(".keyx")) return;
+    const b = (e.target as Element).closest<HTMLButtonElement>(".keyrow > button");
+    if (!b) return;
+    e.preventDefault();
+    e.stopPropagation();
+    let dragging = false;
+    const startX = e.clientX, startY = e.clientY;
+    const rect = b.getBoundingClientRect();
+    let ghost: HTMLElement | undefined;
+    const trayRect = keytray.getBoundingClientRect();
+    const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const targetRow = (y: number): RowId => (y < trayRect.top + trayRect.height / 2 - 26 ? "canvas" : y > trayRect.top + trayRect.height / 2 + 26 ? "keys" : (rowEl("canvas").contains(b) ? "canvas" : "keys"));
+    const move = (ev: PointerEvent): void => {
+      if (!dragging) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return;
+        dragging = true;
+        buzz(8);
+        ghost = b.cloneNode(true) as HTMLElement;
+        ghost.classList.add("keyghost");
+        ghost.querySelector(".keyx")?.remove();
+        ghost.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:30;pointer-events:none`;
+        document.body.append(ghost);
+        b.style.opacity = "0.25";
+      }
+      ghost!.style.transform = `translate(${ev.clientX - startX}px, ${ev.clientY - startY}px) scale(1.14)`;
+      // Row: dragging up reaches the canvas row, down the key row; the row slides to follow.
+      const want = targetRow(ev.clientY);
+      const here: RowId = rowEl("canvas").contains(b) ? "canvas" : "keys";
+      const row = rowEl(want);
+      const siblings = controls(want).filter((c) => c !== b && !c.hidden);
+      const x = ev.clientX;
+      const index = siblings.filter((c) => { const r = c.getBoundingClientRect(); return r.left + r.width / 2 < x; }).length;
+      const ref = siblings[index] ?? null;
+      const before = new Map(controls(want).map((c) => [c, c.getBoundingClientRect().left]));
+      if (want !== here) { settleRow(want === "canvas" ? 0 : 1); buzz(6); }
+      if (b.parentElement !== row || b.nextElementSibling !== ref) {
+        row.insertBefore(b, ref);
+        if (!reducedMotion) for (const [c, left] of before) {
+          if (c === b) continue;
+          const dx = left - c.getBoundingClientRect().left;
+          if (Math.abs(dx) > 1) new Spring(1, (p) => { c.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.3, bounce: 0.18 }).set(0);
+        }
+      }
+    };
+    const end = (): void => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      if (!dragging || !ghost) return;
+      const g = ghost;
+      const to = b.getBoundingClientRect();
+      const from = g.getBoundingClientRect();
+      const land = (): void => { g.remove(); b.style.opacity = ""; buzz(10); persistLayout(); paintBadges(); };
+      if (reducedMotion) { land(); return; }
+      const dx = to.left + to.width / 2 - (from.left + from.width / 2), dy = to.top + to.height / 2 - (from.top + from.height / 2);
+      const base = g.style.transform;
+      const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(base);
+      const sx = m ? Number(m[1]) : 0, sy = m ? Number(m[2]) : 0;
+      new Spring(0, (v) => { g.style.transform = `translate(${sx + dx * v}px, ${sy + dy * v}px) scale(${1.14 - 0.14 * Math.min(1, v)})`; if (v === 1) land(); }, { visualDuration: 0.34, bounce: 0.3 }).set(1);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  }, true);
 
   // Where the clipboard cannot be read (a plain-http origin), a paste target takes the system paste.
   const openPasteTarget = (): void => {

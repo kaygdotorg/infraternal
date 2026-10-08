@@ -25,7 +25,7 @@ import { createWindowCard, type WindowAction, type WindowCard } from "../../../p
 import { hostIconMarkup, type HostPlatform } from "../../../packages/ui/src/host-icons";
 import { mountConfirmTip } from "../../../packages/ui/src/tooltip";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
-import { keyCaps, registerShortcuts } from "../../../packages/ui/src/shortcuts";
+import { allShortcuts, bindShortcut, bindingOf, comboLabel, keyCaps, onBindingsChange, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
 import { createPillMorph, type PillMorph } from "../../../packages/ui/src/pill-morph";
 import { aspectFrame, aspectRange, attachWindowResize, settleResize, type ResizeFrame, type ResizeStart, type WindowResizeHost } from "../../../packages/ui/src/window-resize";
@@ -149,7 +149,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   } catch { /* the mock fixture is optional: windows then show an empty prompt */ }
 
   // ---- state ------------------------------------------------------------------------------------
-  let metrics: Metrics = metricsFor(viewport.clientWidth || innerWidth, coarse.matches);
+  let metrics: Metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches);
   let role: Role = options.role ?? "operator";
   let sceneIndex = 0;
   let omit: string[] = [];
@@ -210,6 +210,12 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     restCam();
   };
   /** Flies the camera (interruptible: a new target keeps the current velocity). */
+  /**
+   * Motion rule: a flight the user's gesture drives (a swipe, a tap, a drag) may take its time; one a key
+   * triggers (Command or Ctrl with a digit, the palette by keyboard) is the short version.
+   */
+  let flightKind: "gesture" | "key" = "gesture";
+  const keyFlight = <T,>(run: () => T): T => { flightKind = "key"; try { return run(); } finally { flightKind = "gesture"; } };
   const flyTo = (target: () => Cam, instant = false): void => {
     camTarget = target;
     hideSummary();
@@ -220,6 +226,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
       setCam(t);
       return;
     }
+    const cfg = flightKind === "key" ? { visualDuration: 0.2, bounce: 0 } : FLIGHT;
+    springCx.configure(cfg); springCy.configure(cfg); springLz.configure(cfg);
     springCx.value = cam.cx; springCy.value = cam.cy; springLz.value = Math.log(cam.z);
     springCx.set(t.cx); springCy.set(t.cy); springLz.set(Math.log(t.z));
   };
@@ -274,7 +282,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   stage.querySelector(".tabs")?.prepend(viewsBtn, canvasLockBtn);
   const stopsFor = (c: ClusterRec): { z: number; cy: number; lefts: number[]; view: number } => {
     const r = contentRect(c);
-    const z = Math.min(1, vh / (r.h + 8));
+    const z = Math.min(1, vh / r.h);
     const view = vw / z;
     let lefts: number[];
     if (r.w <= view) lefts = [Math.round(r.x + r.w / 2 - view / 2)];
@@ -301,7 +309,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     world.toggleAttribute("data-snap", canvasLock);
     viewport.toggleAttribute("data-snap", canvasLock);
     canvasLockBtn.setAttribute("aria-pressed", String(canvasLock));
-    canvasLockBtn.dataset.tip = canvasLock ? "Canvas lock on" : "Canvas lock off";
+    canvasLockBtn.dataset.tip = `${canvasLock ? "Canvas lock on" : "Canvas lock off"} (${bindingText("canvas-lock")})`;
     canvasLockBtn.setAttribute("aria-label", canvasLockBtn.dataset.tip);
     refreshTip(canvasLockBtn);
     updateToolbar();
@@ -314,9 +322,9 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     if (on && c) goStop(c, nearestStop(c, cam.cx), instant); else if (!on) flyTo(overviewCam, instant);
   };
   /** Springs a column's scroll to a window's start (the column scrolls by itself; snapping is ours to animate). */
-  const scrollColumn = (colEl: HTMLElement, top: number): void => {
+  const scrollColumn = (colEl: HTMLElement, top: number, instant = false): void => {
     const target = clamp(top, 0, colEl.scrollHeight - colEl.clientHeight);
-    if (reduced.matches) { colEl.scrollTop = target; return; }
+    if (reduced.matches || instant) { colEl.scrollTop = target; return; }
     colEl.dataset.wheel = "";
     const sp = new Spring(colEl.scrollTop, (v) => { colEl.scrollTop = v; if (v === target) delete colEl.dataset.wheel; }, { visualDuration: 0.4, bounce: 0.1 });
     sp.set(target);
@@ -348,7 +356,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     let best = 0;
     st.lefts.forEach((l, i) => { if (Math.abs(l - target) < Math.abs(st.lefts[best]! - target)) best = i; });
     goStop(c, best, instant);
-    scrollColumn(colEl, rec.card.root.offsetTop - 14);
+    scrollColumn(colEl, rec.card.root.offsetTop - 14, instant);
   };
 
   const updateCurrentView = (): void => {
@@ -370,7 +378,9 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   const rttWatch = new MutationObserver(() => { const m = /(\d+)\s*ms/.exec(stage.querySelector("#rtt")?.textContent ?? ""); capsuleConn.setRoundTrip(m ? Number(m[1]) : undefined); });
   const rttEl = stage.querySelector("#rtt");
   if (rttEl) rttWatch.observe(rttEl, { childList: true, characterData: true, subtree: true });
+  let holdCapsule = false;
   const paintCapsule = (): void => {
+    if (holdCapsule) return;
     const c = clusters.get(currentView);
     const free = !canvasLock && lod === "thumb";
     const host = stage.querySelector<HTMLElement>("#capsule-host");
@@ -381,7 +391,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     if (host) host.textContent = free ? "All views" : (c?.view.name ?? "");
     const n = !c ? 0 : c.view.layout === "graph" ? c.view.nodes.length : c.wins.size;
     const noun = !c ? "" : c.view.id === "console" ? "session" : c.view.layout === "graph" ? "node" : "window";
-    if (sess) sess.textContent = free || !c ? `· ${clusters.size} views` : `· ${n} ${noun}${n === 1 ? "" : "s"}`;
+    if (sess) sess.innerHTML = free || !c ? `· ${clusters.size}<span class="cl-noun"> views</span>` : `· ${n}<span class="cl-noun"> ${noun}${n === 1 ? "" : "s"}</span>`;
     stage.querySelector<HTMLElement>("#capsule")?.removeAttribute("data-flow");
     if (os) os.innerHTML = lineIcon(free || !c ? ICON.views : VIEW_ICON[c.view.id]);
   };
@@ -570,7 +580,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: () => updateToolbar() });
     Object.assign(rec, { model: m, card, cluster: c });
     card.root.dataset.kind = m.kind;
-    if (m.h) { card.root.style.height = `${m.h}px`; card.root.style.flex = "none"; }
+    if (m.h) { card.root.style.height = m.h <= 1 ? `calc(var(--clh) * ${m.h})` : `${m.h}px`; card.root.style.flex = "none"; }
     makeBody(rec);
     wireWindow(rec);
     return rec;
@@ -1488,7 +1498,59 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     document.addEventListener("pointerdown", (e) => { if (!panel.contains(e.target as Node) && !capsule.contains(e.target as Node)) closeViewList(); }, { capture: true, signal: sig });
     viewList.open();
   };
-  capsule.addEventListener("click", (e) => { e.preventDefault(); e.stopImmediatePropagation(); toggleViewList(); }, { capture: true, signal });
+  capsule.addEventListener("click", (e) => { e.preventDefault(); e.stopImmediatePropagation(); if (pillSwiped) { pillSwiped = false; return; } toggleViewList(); }, { capture: true, signal });
+
+  // ---- a horizontal swipe on the top pill steps to the previous or next view -------------------------------
+  // The pill's content follows the finger (rubber past the first and last view); a flick or a long
+  // enough drag commits: the old content slides out, the new one slides in from the other side, the
+  // camera springs across and the canvas lock re-engages on landing. A short drag springs back.
+  let pillSwiped = false;
+  const pillParts = (): HTMLElement[] => [...capsule.querySelectorAll<HTMLElement>("#capsule-os, .capsule-host, .capsule-session, .ui-conn")];
+  const setPillShift = (x: number, opacity = 1): void => { for (const el of pillParts()) { el.style.transform = x === 0 ? "" : `translateX(${x}px)`; el.style.opacity = opacity === 1 ? "" : String(opacity); } };
+  const pillSpring = (from: number, to: number, cfg: { visualDuration: number; bounce: number }, done?: () => void): void => {
+    const sp = new Spring(from, (v) => { setPillShift(v, 1 - Math.min(1, Math.abs(v) / (capsule.offsetWidth * 0.6))); if (v === to) done?.(); }, cfg);
+    sp.set(to);
+  };
+  capsule.style.touchAction = "none";
+  let pillDrag: { id: number; x: number; samples: Array<{ x: number; t: number }>; moved: boolean } | undefined;
+  capsule.addEventListener("pointerdown", (e) => { if (e.button === 0 && !viewList?.isOpen) pillDrag = { id: e.pointerId, x: e.clientX, samples: [{ x: e.clientX, t: e.timeStamp }], moved: false }; }, { signal });
+  capsule.addEventListener("pointermove", (e) => {
+    const d = pillDrag;
+    if (!d || e.pointerId !== d.id) return;
+    const dx = e.clientX - d.x;
+    if (!d.moved) { if (Math.abs(dx) < 8) return; d.moved = true; capsule.setPointerCapture(e.pointerId); pillSwiped = true; }
+    const ids = [...clusters.keys()], at = ids.indexOf(currentView);
+    // Rubber at the ends: no previous view before the first, no next after the last.
+    const blocked = (dx > 0 && at <= 0) || (dx < 0 && at >= ids.length - 1);
+    setPillShift(blocked ? dx * 0.25 : dx);
+    d.samples.push({ x: e.clientX, t: e.timeStamp });
+    if (d.samples.length > 5) d.samples.shift();
+  }, { signal });
+  const pillEnd = (e: PointerEvent): void => {
+    const d = pillDrag;
+    if (!d || e.pointerId !== d.id) return;
+    pillDrag = undefined;
+    if (!d.moved) return;
+    const dx = e.clientX - d.x;
+    const a = d.samples[0]!, b = d.samples[d.samples.length - 1]!;
+    const v = b.t > a.t ? (b.x - a.x) / (b.t - a.t) : 0;
+    const ids = [...clusters.keys()], at = ids.indexOf(currentView);
+    const dir = dx < 0 ? 1 : -1; // swipe left: the next view
+    const target = ids[at + dir];
+    const commits = target && (Math.abs(dx) > 56 || Math.abs(v) > 0.5) && Math.sign(v || dx) === Math.sign(dx);
+    const width = capsule.offsetWidth;
+    if (!commits) { pillSpring(dx, 0, { visualDuration: 0.4, bounce: 0.3 }); return; }
+    holdCapsule = true;
+    flyView(target as ViewId);
+    pillSpring(dx, -dir * width * 0.6, { visualDuration: 0.18, bounce: 0 }, () => {
+      holdCapsule = false;
+      paintCapsule();
+      pillSpring(dir * width * 0.6, 0, { visualDuration: 0.42, bounce: 0.22 });
+    });
+  };
+  capsule.addEventListener("pointerup", pillEnd, { signal });
+  capsule.addEventListener("pointercancel", pillEnd, { signal });
+
 
   // ---- sidebar tree and palette ----------------------------------------------------------------------------------
   const treeSections = (): BranchSection[] => [...clusters.values()].map((c) => {
@@ -1536,9 +1598,9 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     [...clusters.values()].forEach((c, i) => {
       out.push({ group: "Views", glyph: "▦", icon: VIEW_ICON[c.view.id], label: `Go to ${c.view.name}`, hint: `view · ${shortcutLabel(viewKeys(i))}`, action: `proto:view:${c.view.id}` });
     });
-    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.snap, label: "Canvas lock on", hint: `${canvasLock ? "on now · " : ""}${shortcutLabel({ mac: `⌘⇧${CANVAS_LOCK_SHORTCUT.label}`, other: `Ctrl+Shift+${CANVAS_LOCK_SHORTCUT.label}` })}`, action: "proto:canvaslock:on" });
+    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.snap, label: "Canvas lock on", hint: `${canvasLock ? "on now · " : ""}${bindingText("canvas-lock")}`, action: "proto:canvaslock:on" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free canvas · all views · Esc", action: "proto:canvaslock:off" });
-    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.lock, label: inputLock ? "Input lock off" : "Input lock on", hint: "the active window only", action: "proto:inputlock" });
+    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.lock, label: inputLock ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "proto:inputlock" });
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} ${sc.name}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
     for (const r of ["viewer", "operator", "new"] as const) out.push({ group: "Mockup", glyph: "◇", label: `Mockup: sign in as ${r === "new" ? "a new user" : `a ${r}`}`, hint: "grants", action: `proto:role:${r}` });
     // Any session by name. Keywords ride in the hint so "ssh", "terminal", "console", "vnc" and "rdp" find them.
@@ -1552,7 +1614,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   window.addEventListener("tracer:proto-action", (event) => {
     const action = (event as CustomEvent<{ action?: string }>).detail?.action ?? "";
     const [, kind, value] = action.split(":");
-    if (kind === "view" && value) flyView(value as ViewId);
+    const source = (event as CustomEvent<{ source?: string }>).detail?.source;
+    if (kind === "view" && value) { if (source === "keyboard") keyFlight(() => flyView(value as ViewId)); else flyView(value as ViewId); }
     else if (kind === "overview") setCanvasLock(false);
     else if (kind === "canvaslock") setCanvasLock(value === "on");
     else if (kind === "inputlock") toggleInputLock();
@@ -1564,26 +1627,30 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     } else if (kind === "later") toast.show({ message: "Remote desktop arrives later.", tone: "ok" });
     else if (kind === "addhost") toast.show({ message: "Add host is its own mockup (proto=addhost)." });
   }, { signal });
-  /** The canvas lock's shortcut (owner: Command+Shift+G, Ctrl+Shift+G elsewhere), wired through the registry so `?` and the palette show it. */
-  const CANVAS_LOCK_SHORTCUT: { code: string; label: string; shift?: boolean } = { code: "KeyG", label: "G", shift: true };
+  // Every rebindable shortcut lives in the registry (Settings, Shortcuts edits it); the handlers follow the binding live.
   const removeShortcuts = registerShortcuts({ id: "clusters", title: "Canvas", area: "canvas", shortcuts: [
-    { id: "canvas-lock", label: "Canvas lock", keys: { mac: `⌘⇧${CANVAS_LOCK_SHORTCUT.label}`, other: `Ctrl+Shift+${CANVAS_LOCK_SHORTCUT.label}` } },
-    { id: "overview", label: "Free canvas (all views)", keys: "Esc" },
+    { id: "canvas-lock", label: "Canvas lock", keys: "", combo: { code: "KeyG", mod: true, shift: true } },
+    { id: "input-lock", label: "Input lock", keys: "", combo: { code: "KeyL", mod: true, shift: true } },
+    { id: "next-window", label: "Next window", keys: "", combo: { code: "ArrowRight", mod: true, shift: true } },
+    { id: "previous-window", label: "Previous window", keys: "", combo: { code: "ArrowLeft", mod: true, shift: true } },
+    { id: "overview", label: "Canvas lock off (all views)", keys: "Esc" },
     { id: "pan", label: "Next window or column", keys: "Scroll" },
     { id: "views", label: "Go to view 1 to 3", keys: { mac: "⌘1–3", other: "Ctrl+1–3" } },
   ] });
+  const removeBindings = [
+    bindShortcut("canvas-lock", () => setCanvasLock(!canvasLock)),
+    bindShortcut("input-lock", () => toggleInputLock()),
+    bindShortcut("next-window", () => { if (!inputLock) stepOrder(1, true); }),
+    bindShortcut("previous-window", () => { if (!inputLock) stepOrder(-1, true); }),
+  ];
+  const bindingText = (id: string): string => { const found = allShortcuts().find((e) => e.shortcut.id === id); const c = found && bindingOf(found.shortcut); return c ? comboLabel(c) : ""; };
+  const offBindings = onBindingsChange(() => { paintCanvasLock(); });
   window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape" || e.defaultPrevented || stage.querySelector(".palette:not([hidden])") || document.querySelector(".ui-confirm-tip[data-open='true']")) return;
     if (isTypingTarget(e.target)) return;
     if (float && !float.expanding) { closeFloat(); return; }
     setCanvasLock(false);
   }, { signal });
-  window.addEventListener("keydown", (e) => {
-    const k = CANVAS_LOCK_SHORTCUT;
-    if (e.code !== k.code || !(isMacPlatform() ? e.metaKey : e.ctrlKey) || e.shiftKey !== Boolean(k.shift)) return;
-    e.preventDefault(); e.stopPropagation();
-    setCanvasLock(!canvasLock);
-  }, { signal, capture: true });
   // Every jump is the same camera spring: Command or Ctrl with 1 to 9.
   window.addEventListener("keydown", (e) => {
     const mod = isMacPlatform() ? e.metaKey : e.ctrlKey;
@@ -1592,18 +1659,19 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     if (!id) return;
     e.preventDefault(); e.stopPropagation();
     closeViewList(true);
-    flyView(id);
+    keyFlight(() => flyView(id));
   }, { signal, capture: true });
 
   // ---- the toolbar's canvas row (touch): the same actions the desktop has near the top pill ---------------------
   const flat = (): WinRec[] => { const c = clusters.get(currentView); return c ? [...c.colsEl.querySelectorAll<HTMLElement>(".ui-window")].map((n) => c.wins.get(n.dataset.windowId ?? "")).filter((w): w is WinRec => !!w) : []; };
-  const stepOrder = (dir: number): void => {
+  /** `instant` for keyboard stepping: repeated key actions never animate. */
+  const stepOrder = (dir: number, instant = false): void => {
     const list = flat();
     if (!list.length) return;
     const at = activeWin ? list.indexOf(activeWin) : -1;
     const next = list[clamp((at < 0 ? (dir > 0 ? -1 : list.length) : at) + dir, 0, list.length - 1)]!;
     setActive(next);
-    focusWindow(next, false, true);
+    focusWindow(next, instant, true);
   };
   const openPalette = (): void => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: isMacPlatform(), ctrlKey: !isMacPlatform(), bubbles: true })); };
   /** The input lock (the padlock): input goes only to the active window and swipes do not move windows. */
@@ -1746,6 +1814,13 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   };
   viewport.addEventListener("touchend", twoEnd, { capture: true, signal });
   viewport.addEventListener("touchcancel", twoEnd, { capture: true, signal });
+  // A tap on empty canvas (a gap between windows) clears the active window and gives up input focus, so the toolbar shows its canvas row.
+  viewport.addEventListener("click", (e) => {
+    if ((e.target as Element).closest(".ui-window, .cl-label, .cl-edge, button")) return;
+    setActive(undefined);
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body) active.blur();
+  }, { signal });
   // A tap on a neighbour peeking in at the edge moves there.
   viewport.addEventListener("click", (e) => {
     if (!canvasLock || inputLock) return;
@@ -1880,8 +1955,9 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   const build = (): void => {
     clear();
     grants = INITIAL_GRANTS.map((g) => ({ ...g }));
-    metrics = metricsFor(viewport.clientWidth || innerWidth, coarse.matches);
+    metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches);
     vw = viewport.clientWidth; vh = viewport.clientHeight;
+    world.style.setProperty("--clh", `${metrics.clh}px`);
     for (const v of buildViews(role, metrics, screens, omit)) clusters.set(v.id, buildCluster(v));
     world.dataset.lod = lod;
     renderTree();
@@ -1928,6 +2004,10 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     if (w === lastW && h === lastH) return;
     lastW = w; lastH = h;
     vw = w; vh = h;
+    // Views are as tall as the viewport: a resize (the keyboard, the URL bar, a rotation) refits them.
+    metrics = metricsFor(w, h, coarse.matches);
+    world.style.setProperty("--clh", `${metrics.clh}px`);
+    for (const c of clusters.values()) geometry(c);
     if (camTarget && clusters.size) setCam(camTarget()); else applyCam(true);
   });
   ro.observe(viewport);
@@ -1969,6 +2049,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
       if (float) { float.morph.close(true); dropFloat(float); }
       badge.remove();
       clear();
+      removeBindings.forEach((r) => r());
+      offBindings();
       capsuleConn.dispose();
       rttWatch.disconnect();
       mockupTag.remove();

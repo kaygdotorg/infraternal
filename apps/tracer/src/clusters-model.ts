@@ -57,9 +57,16 @@ export interface ViewModel {
 
 export interface Metrics { colW: number; clh: number; narrow: boolean; nodeW: number; nodeH: number }
 
-export const metricsFor = (width: number, coarse: boolean): Metrics => {
+/**
+ * Sizes follow the viewport so a snapped view fills it: on a phone a column is the safe-area width minus a
+ * sliver for each neighbour to peek in; on a desktop three columns fill the width; a column is always as tall
+ * as the viewport (D119: windows tile the pane).
+ */
+export const metricsFor = (width: number, height: number, coarse: boolean): Metrics => {
   const narrow = coarse || width < 720;
-  return narrow ? { colW: 340, clh: 560, narrow, nodeW: 200, nodeH: 104 } : { colW: 440, clh: 640, narrow, nodeW: 208, nodeH: 104 };
+  const colW = narrow ? Math.max(260, Math.min(520, Math.round(width - 28))) : Math.max(400, Math.min(640, Math.round((width - 24) / 3)));
+  const clh = Math.max(360, Math.round(height));
+  return { colW, clh, narrow, nodeW: narrow ? 200 : 208, nodeH: 104 };
 };
 
 /** Size of the content (the tiled columns, or the graph canvas). */
@@ -191,7 +198,7 @@ export function buildViews(role: Role, m: Metrics, screens: Map<string, { os: Ho
     // Three columns, the middle one taller than the view so it scrolls.
     const pick = (n: string) => (names.includes(n) ? [n] : []);
     const c1 = pick("build-01"), c2 = [...pick("nix-cache"), ...pick("edge-arm")], c3 = pick("studio-mac");
-    const tall = Math.round(m.clh * 0.62);
+    const tall = 0.62; // of the column's height (a ratio, so a resize keeps it)
     if (c1.length) cols.push(col("c1", c1.map((n) => hostWin(n))));
     if (c2.length) cols.push(col("c2", c2.map((n) => hostWin(n, c2.length > 1 ? tall : undefined))));
     if (c3.length) cols.push(col("c3", c3.map((n) => hostWin(n))));
@@ -199,7 +206,7 @@ export function buildViews(role: Role, m: Metrics, screens: Map<string, { os: Ho
   const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: 0, y: 0 };
   if (role !== "operator") return [console_];
 
-  const listW = m.narrow ? 320 : 400, logsW = m.narrow ? 440 : 560;
+  const listW = Math.round(m.colW * 0.9), logsW = Math.round(m.colW * 1.25);
   const containers: ViewModel = {
     id: "containers", name: "Containers", layout: "tiled", x: 0, y: 0,
     cols: [
@@ -223,8 +230,11 @@ export function buildViews(role: Role, m: Metrics, screens: Map<string, { os: Ho
     ],
   };
   // Desktop: Console top left, Containers under it, Topology to the right. Phone: one stack.
-  if (m.narrow) { containers.y = 840; topology.y = 1560; }
-  else { containers.y = 840; topology.x = 1560; }
+  // Console first; the others are placed by their real sizes (a view is as tall as the viewport).
+  const box = (v: ViewModel) => boxOf(v, m);
+  containers.y = box(console_).h;
+  if (m.narrow) topology.y = containers.y + box(containers).h;
+  else topology.x = box(console_).w + CELL;
   const out = [console_, containers, topology];
   // Console may grow wider than its default box; keep the order stable and the starts on the grid.
   return out;

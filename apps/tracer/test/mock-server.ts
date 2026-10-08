@@ -176,6 +176,16 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method === "GET" && url.pathname === "/__mock/proto/addhost") {
     return sendJson(response, 200, { hosts: addHostFixtures });
   }
+  // The account's toolbar layout (account default, shared by every device). The real server stores it per account.
+  if (url.pathname === "/__mock/account/toolbar") {
+    if (request.method === "GET") return sendJson(response, 200, { layout: accountToolbar ?? null });
+    if (request.method === "PUT") {
+      const body = await readJson(request);
+      if (body === undefined || typeof body !== "object") return sendJson(response, 400, { error: "invalid request" });
+      accountToolbar = body;
+      return sendJson(response, 200, { ok: true });
+    }
+  }
   if (request.method === "GET" && url.pathname === "/__mock/setup-token") {
     return sendJson(response, 200, { setup_token: setupToken });
   }
@@ -837,7 +847,9 @@ function makeMockOwner(): MockOwner {
   };
 }
 
+let accountToolbar: unknown;
 function resetMockState(): void {
+  accountToolbar = undefined;
   owner = undefined;
   activeAuthCookie = undefined;
   setupToken = newToken();
