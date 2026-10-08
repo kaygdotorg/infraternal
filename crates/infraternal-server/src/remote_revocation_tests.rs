@@ -330,3 +330,6 @@ fn guard_rss() -> u64 {
         .parse()
         .unwrap()
 }
+
+#[path = "remote_retirement_tests.rs"]
+mod retirement;
