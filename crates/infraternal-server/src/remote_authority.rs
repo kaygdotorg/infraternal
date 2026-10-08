@@ -95,6 +95,7 @@ impl EnrollmentStore {
         if now < 0 {
             return Err(EnrollmentError::Denied);
         }
+        let mut transaction = self.0.begin().await?;
         let changed = sqlx::query(
             "UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, ?) \
              WHERE id=? AND owner_id=? AND created_at<=?",
@@ -103,14 +104,68 @@ impl EnrollmentStore {
         .bind(host.as_bytes().as_slice())
         .bind(owner)
         .bind(now)
-        .execute(&self.0)
+        .execute(&mut *transaction)
         .await?
         .rows_affected();
         if changed != 1 {
             return Err(EnrollmentError::Denied);
         }
-        self.1.revoke(host);
-        Ok(())
+        self.commit_revocation(transaction, host).await
+    }
+
+    /// HTTP authority is rechecked in the tombstone write, including logout or
+    /// role change racing a request. Publish cancellation only after commit.
+    pub(crate) async fn revoke_for_session(
+        &self,
+        session_hash: &str,
+        host: Uuid,
+        now: i64,
+    ) -> Result<(), EnrollmentError> {
+        if now < 0 {
+            return Err(EnrollmentError::Denied);
+        }
+        let mut transaction = self.0.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, ?) \
+             WHERE id=? AND created_at<=? AND EXISTS( \
+             SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
+             WHERE s.token_hash=? AND s.user_id=remote_hosts.owner_id \
+             AND s.unlocked=1 AND s.expires>unixepoch() AND u.owner=1)",
+        )
+        .bind(now)
+        .bind(host.as_bytes().as_slice())
+        .bind(now)
+        .bind(session_hash)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(EnrollmentError::Denied);
+        }
+        self.commit_revocation(transaction, host).await
+    }
+
+    /// An abandoned request rolls back until its authorized write is prepared.
+    /// Thereafter the owned task keeps commit and publication together, even if
+    /// a deadline cancels the caller while SQLite's worker is completing COMMIT.
+    /// Process exit also retires its transports; no detached polling worker exists.
+    async fn commit_revocation(
+        &self,
+        transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
+        host: Uuid,
+    ) -> Result<(), EnrollmentError> {
+        let store = self.clone();
+        tokio::spawn(async move {
+            let committed = transaction.commit().await;
+            // Permission succeeded under the writer lock. A commit error also
+            // refuses retained authority conservatively; report storage failure.
+            store.1.revoke(host);
+            committed.map_err(EnrollmentError::Storage)
+        })
+        .await
+        .map_err(|_| {
+            EnrollmentError::Storage(sqlx::Error::Protocol("revocation finalizer failed".into()))
+        })?
     }
 }
 

@@ -1,4 +1,4 @@
-//! Serves bounded, host-bound remote enrollment over the configured HTTPS API; signer unlock remains a trusted D168 adapter, #78.
+//! Serves bounded remote enrollment and owner revocation over HTTPS; signer unlock remains a separate trusted D168 adapter, #78.
 
 use crate::{
     auth::Auth,
@@ -68,6 +68,7 @@ pub struct EnrollmentService {
 struct Api {
     auth: Auth,
     pool: SqlitePool,
+    store: EnrollmentStore,
     source: Arc<dyn CaKeySource>,
     endpoint: EnrollmentEndpoint,
     admission: Arc<Semaphore>,
@@ -79,6 +80,12 @@ struct InvitationRequest {
     host_id: Uuid,
     mode: Mode,
     execution_uid: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevocationRequest {
+    host_id: Uuid,
 }
 
 /// Canonical bounded enrollment body; adapter never forwards requested identity extensions.
@@ -113,9 +120,22 @@ pub fn router(
     source: Arc<dyn CaKeySource>,
     endpoint: EnrollmentEndpoint,
 ) -> Router {
+    let store = EnrollmentStore::new(pool.clone());
+    router_with_store(auth, pool, store, source, endpoint)
+}
+
+/// Runtime supplies the same event scope used by its admitted host transports.
+pub(crate) fn router_with_store(
+    auth: Auth,
+    pool: SqlitePool,
+    store: EnrollmentStore,
+    source: Arc<dyn CaKeySource>,
+    endpoint: EnrollmentEndpoint,
+) -> Router {
     let api = Api {
         auth,
         pool,
+        store,
         source,
         endpoint,
         admission: Arc::new(Semaphore::new(8)),
@@ -123,9 +143,32 @@ pub fn router(
     Router::new()
         .route("/remote/invitations", post(invite))
         .route("/remote/join", post(join))
+        .route("/remote/revocations", post(revoke))
         .layer(axum::extract::DefaultBodyLimit::max(8192))
         .layer(from_fn_with_state(api.clone(), admission))
         .with_state(api)
+}
+
+async fn revoke(
+    State(api): State<Api>,
+    headers: HeaderMap,
+    Json(request): Json<RevocationRequest>,
+) -> Result<StatusCode, StatusCode> {
+    if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(api.auth.origin()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let cookie =
+        crate::auth::session_cookie_from_headers(&headers).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    // A locked CA cannot prevent an authorized owner from cutting public host
+    // authority. Never call the signer or treat this owner permission as unlock.
+    api.store
+        .revoke_for_session(&crate::auth::hash(cookie), request.host_id, now()?)
+        .await
+        .map_err(|error| match error {
+            crate::enrollment::EnrollmentError::Denied => StatusCode::FORBIDDEN,
+            crate::enrollment::EnrollmentError::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
+        })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn admission(State(api): State<Api>, request: Request, next: Next) -> Response {
@@ -187,7 +230,8 @@ async fn invite(
     if uid != Some(i64::from(request.execution_uid)) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let token = EnrollmentStore::new(api.pool)
+    let token = api
+        .store
         .issue_for_session(
             &session.user_id,
             request.host_id,
@@ -221,7 +265,7 @@ async fn join(
     if B64.encode(&der) != request.csr_der {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let store = EnrollmentStore::new(api.pool);
+    let store = api.store;
     let certificate = RemoteEnrollment::new(api.source, store.clone())
         .join(request.host_id, request.mode, &request.token, &der, now()?)
         .await

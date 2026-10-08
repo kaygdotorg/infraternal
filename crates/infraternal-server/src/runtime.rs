@@ -336,13 +336,14 @@ async fn build_router_core(
         EmbeddedAgent::spawn(executable)
     };
     let hosts = crate::remote_runtime::RemoteHosts::default();
+    let enrollment_store = crate::enrollment::EnrollmentStore::new(pool.clone());
     let listeners = if let Some(remote) = remote {
         Some(
             crate::remote_runtime::RemoteListeners::start(
                 remote.enrollment.endpoint.endpoint,
                 &remote.identity,
                 &remote.roots,
-                crate::enrollment::EnrollmentStore::new(pool.clone()),
+                enrollment_store.clone(),
                 hosts.clone(),
             )
             .await
@@ -355,7 +356,13 @@ async fn build_router_core(
         service.endpoint.endpoint = listeners.local_addr().map_err(ServerError::Listener)?;
     }
     let remote_api = enrollment.map(|service| {
-        crate::remote_http::router(auth.clone(), pool.clone(), service.source, service.endpoint)
+        crate::remote_http::router_with_store(
+            auth.clone(),
+            pool.clone(),
+            enrollment_store,
+            service.source,
+            service.endpoint,
+        )
     });
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent).with_remote_hosts(hosts);
     let app = Router::new()
