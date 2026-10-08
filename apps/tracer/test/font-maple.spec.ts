@@ -46,7 +46,7 @@ for (const dpr of [1, 2, 3]) {
           if (bar[i] === accent[0] && bar[i + 1] === accent[1] && bar[i + 2] === accent[2]) barMin = Math.min(barMin, (i / 4) % Math.ceil(cellWidth));
         }
         // The measurements are only meaningful if Maple itself (not a fallback) painted the canvas.
-        const mapleLoaded = [...document.fonts].some((face) => face.family === "Maple Mono NF" && face.status === "loaded" && face.weight === "400 450");
+        const mapleLoaded = [...document.fonts].some((face) => face.family === "Maple Mono NF" && face.status === "loaded" && face.weight === "400 700" && face.style === "normal");
         return { mapleLoaded, cursorX: metrics.cursorX, renderCursorX: metrics.renderCursorX, cellWidth: metrics.cellWidth, natural: metrics.naturalCellWidth, cursorLeft, lastInk, barMin, dpr: devicePixelRatio, cellWidthPx: cellWidth };
       });
       console.log(`LINE86 ${JSON.stringify(result)}`);
@@ -113,7 +113,7 @@ test("powerline and icon glyphs draw as real glyphs, not missing-glyph boxes", a
 
 test("terminal ligatures stay off: letterSpacing disables them, and optimizeSpeed makes that deterministic", async ({ page }) => {
   await page.goto(`${baseURL}/health`);
-  await page.setContent(`<style>@font-face{font-family:Probe;src:url(${baseURL}/fonts/MapleMonoNF-Regular.latin.woff2)}</style><canvas id=c></canvas>`);
+  await page.setContent(`<style>@font-face{font-family:Probe;src:url(${baseURL}/fonts/maple-mono-nf/roman.latin.woff2)}</style><canvas id=c></canvas>`);
   await page.evaluate(() => document.fonts.load("14px Probe"));
   const diffs = await page.evaluate(() => {
     const canvas = document.getElementById("c") as HTMLCanvasElement;

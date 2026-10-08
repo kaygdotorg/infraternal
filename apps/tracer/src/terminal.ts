@@ -1,5 +1,6 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
+import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import {
@@ -18,9 +19,6 @@ const INPUT_FRAME_LIMIT = 16 * 1024;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
-/** The family declared in style.css; the fallback is metric-matched so a late face moves nothing. */
-const TERMINAL_FONT_NAME = "Maple Mono NF";
-const TERMINAL_FONT_FAMILY = `"${TERMINAL_FONT_NAME}", "Maple Mono NF Fallback", ui-monospace, monospace`;
 const TERMINAL_FONT_SIZE_DESKTOP = 14;
 const TERMINAL_FONT_SIZE_TOUCH = 13;
 const THEME_HISTORY_PROBE_ROWS = 10_000;
@@ -110,6 +108,8 @@ export interface TerminalConfig {
   hooks?: TerminalHooks;
   /** Curated theme shared by the floating controls and Ghostty. */
   theme?: ITheme;
+  /** The chosen font (registry); the default family when absent. */
+  font?: MonoFont;
   onRoundTrip?: (milliseconds: number | undefined) => void;
   onConnectionChange?: (connected: boolean) => void;
   onScroll?: (scrolled: boolean) => void;
@@ -217,6 +217,10 @@ export class TerminalClient {
   private retryTimer = 0;
   private retryAttempt = 0;
   private symbolFaceRequested = false;
+  /** The font in use and the two canvas weights drawn from it (see installFontWeights). */
+  private font: MonoFont;
+  private readonly canvasWeights = { regular: 400, bold: 700 };
+  private readonly weightMemo = new Map<string, string>();
   private outputWriteInFlight = false;
   private outputWriteLength = 0;
   private snapshotWriteInFlight = false;
@@ -250,8 +254,9 @@ export class TerminalClient {
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
   private readonly disposeTouch: () => void;
 
-  private constructor(private readonly config: TerminalConfig, terminal: Terminal) {
+  private constructor(private readonly config: TerminalConfig, terminal: Terminal, font: MonoFont) {
     this.terminal = terminal;
+    this.font = font;
     this.ghostty = terminal as unknown as GhosttyActivityControls;
     this.screen = config.screen ?? config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
@@ -304,15 +309,16 @@ export class TerminalClient {
   }
 
   /**
-   * Loads the regular Maple Mono NF face and the WASM terminal once, then opens the
-   * one-session client. Only the regular face gates the first paint, because the cell
-   * grid is measured from it; italic, bold and Nerd Font faces load afterwards.
+   * Loads the chosen font's upright faces and the WASM terminal once, then opens the
+   * one-session client. Only the upright faces gate the first paint, because the cell
+   * grid is measured from them; italic and Nerd Font faces load afterwards.
    */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
-    await document.fonts.load(`${TERMINAL_FONT_SIZE_DESKTOP}px "${TERMINAL_FONT_NAME}"`);
+    const font = config.font ?? fontById(DEFAULT_FONT_ID)!;
+    await loadFont(font);
     await init();
     const terminal = new Terminal({
-      fontFamily: TERMINAL_FONT_FAMILY,
+      fontFamily: fontStack(font),
       fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
       cursorStyle: "bar",
@@ -325,7 +331,9 @@ export class TerminalClient {
         selectionBackground: "#44485c",
       },
     });
-    const client = new TerminalClient(config, terminal);
+    const client = new TerminalClient(config, terminal, font);
+    // Weights go in before the first measurement so the grid is measured from the face it draws.
+    client.installFontWeights();
     client.remeasureFont();
     client.keepLigaturesOff();
     client.loadStyledFaces();
@@ -378,6 +386,8 @@ export class TerminalClient {
     viewportY: number;
     cursorVisible: boolean;
     fontSize: number;
+    fontFamily: string;
+    fontId: string;
     wasmMemoryBytes: number;
   } {
     const wasmTerm = this.terminal.wasmTerm;
@@ -407,6 +417,8 @@ export class TerminalClient {
       viewportY: this.terminal.viewportY,
       cursorVisible: Boolean(cursor?.visible),
       fontSize: this.terminal.options.fontSize,
+      fontFamily: this.terminal.options.fontFamily ?? "",
+      fontId: this.font.id,
       wasmMemoryBytes: memory?.buffer.byteLength ?? 0,
     };
   }
@@ -1096,19 +1108,53 @@ export class TerminalClient {
   }
 
   /**
+   * The renderer asks the canvas for plain, bold and italic text with the keywords `bold` and
+   * `italic` only, so every font would draw at weight 400 and 700 whatever its registry
+   * weights say. A canvas has no weight setting apart from that string, so the font property
+   * of this one context rewrites the weight keyword on its way in: plain text takes the
+   * font's terminal weight, bold takes its bold weight. Everything else in the string,
+   * including the family list and the size, passes through untouched, so the renderer's own
+   * measurement (cell width and font box) is made from the very face it will draw with.
+   *
+   * The rewrite is memoised per distinct string because the renderer sets the property for
+   * every run it draws; the redraw benchmark shows the cost.
+   */
+  private installFontWeights(): void {
+    const context = this.ghostty.renderer?.ctx;
+    if (!context) return;
+    const native = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "font");
+    if (!native?.get || !native.set) return;
+    const get = native.get, set = native.set;
+    const memo = this.weightMemo;
+    this.canvasWeights.regular = this.font.terminalWeight;
+    this.canvasWeights.bold = this.font.boldWeight;
+    Object.defineProperty(context, "font", {
+      configurable: true,
+      get: () => get.call(context) as string,
+      set: (value: string) => {
+        let rewritten = memo.get(value);
+        if (rewritten === undefined) {
+          const parts = /^(italic )?(bold )?(.*)$/.exec(value)!;
+          rewritten = `${parts[1] ?? ""}${parts[2] ? this.canvasWeights.bold : this.canvasWeights.regular} ${parts[3]}`;
+          memo.set(value, rewritten);
+        }
+        set.call(context, rewritten);
+      },
+    });
+  }
+
+  /**
    * Canvas text never waits for a web font: a face that is not loaded yet is drawn with
-   * the fallback and is not repainted by the browser. So every face the renderer can ask
-   * for is loaded here, and the whole screen is repainted once each arrives.
-   * Italic and bold cells are drawn one cell at a time, so they stay on the grid.
+   * the fallback and is not repainted by the browser. So the italic faces are loaded here,
+   * and the whole screen is repainted once they arrive. The upright faces already carry
+   * every weight (one variable face, or the regular and bold static faces), so bold needs
+   * no request of its own. Italic and bold cells are drawn one cell at a time, so they stay
+   * on the grid.
    */
   private loadStyledFaces(): void {
-    const size = this.terminal.options.fontSize ?? TERMINAL_FONT_SIZE_DESKTOP;
+    const font = this.font;
     const load = (): void => {
-      void Promise.all([
-        document.fonts.load(`italic ${size}px "${TERMINAL_FONT_NAME}"`),
-        document.fonts.load(`600 ${size}px "${TERMINAL_FONT_NAME}"`),
-        document.fonts.load(`italic 600 ${size}px "${TERMINAL_FONT_NAME}"`),
-      ]).then(() => this.repaintAll(), () => undefined);
+      void loadFont(font, true).then(() => { if (this.font === font) this.repaintAll(); }, () => undefined);
     };
     // Off the critical path: the first prompt must not wait behind these downloads.
     // Safari has no requestIdleCallback; the lib types claim it always exists, so widen it.
@@ -1128,7 +1174,7 @@ export class TerminalClient {
     if (bytes.indexOf(0xee) < 0 && bytes.indexOf(0xef) < 0) return;
     this.symbolFaceRequested = true;
     const size = this.terminal.options.fontSize ?? TERMINAL_FONT_SIZE_DESKTOP;
-    void document.fonts.load(`${size}px "${TERMINAL_FONT_NAME}"`, "\ue0b0\uf015\ue718")
+    void document.fonts.load(`${size}px "Nerd Symbols"`, "\ue0b0\uf015\ue718")
       .then(() => this.repaintAll(), () => undefined);
   }
 

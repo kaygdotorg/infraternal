@@ -9,6 +9,7 @@ export * from "./focus-ring";
 export * from "./faulty-terminal";
 export * from "./color";
 export * from "./themes";
+export * from "./fonts";
 export * from "./backdrop";
 export * from "./branched";
 export * from "./terminal-text-overlay";

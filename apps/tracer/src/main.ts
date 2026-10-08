@@ -4,6 +4,7 @@ import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/s
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { installFocusRing } from "../../../packages/ui/src/focus-ring";
+import { DEFAULT_FONT_ID, fontById, loadFont } from "../../../packages/ui/src/fonts";
 import { mountOnboarding } from "./onboarding";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
@@ -41,6 +42,8 @@ declare global {
         viewportY: number;
         cursorVisible: boolean;
         fontSize: number;
+        fontFamily: string;
+        fontId: string;
         wasmMemoryBytes: number;
         themeColorsMs: number;
         themeRenderMs: number;
@@ -84,7 +87,7 @@ async function start(): Promise<void> {
   installFocusRing();
   installForegroundListener();
   const fontsReady = Promise.race([
-    document.fonts.load('450 14px "Maple Mono NF"').then(() => undefined),
+    loadFont(fontById(DEFAULT_FONT_ID)!),
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
   ]).catch(() => undefined);
   try {
@@ -258,7 +261,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     const { mountCoreScreen } = await import("./core-screen");
     // The screen mounts only after its selected face is ready, preventing a one-frame
     // fallback and keeping the mobile layout stable while the font loads.
-    await document.fonts.load(uiFont === "mono" ? '450 13px "Maple Mono NF"' : '450 14px "Geist Sans"');
+    await (uiFont === "mono" ? loadFont(fontById(DEFAULT_FONT_ID)!) : document.fonts.load('450 14px "Geist Sans"'));
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,

@@ -1,88 +1,41 @@
 /** Base dark shell and full viewport terminal surface for the tracer. */
-/* Maple Mono NF, self-hosted and subset by fonts/subset.sh (SIL OFL 1.1, fonts/OFL-LICENSE.txt).
-   Each face's unicode-range must match that script. The Nerd Font symbols are their own face so
-   pages that never draw a prompt icon never fetch them; the terminal loads them on demand.
-   The browser keeps one font face per weight/style combination and picks a single combination
-   per request, so the symbols are declared once for each of the combinations above (one file,
-   fetched once).
-   Weights: the UI's body weight 450 maps to Regular, 500-550 to Medium, 600 and up to SemiBold. */
+/* Maple Mono NF, self-hosted and subset by fonts/subset.sh (SIL OFL 1.1, fonts/maple-mono-nf/OFL.txt).
+   Each face's unicode-range must match that script and LATIN_RANGE in packages/ui/src/fonts.ts.
+   One variable face per style, weight axis 400-700: the UI asks for four role weights and the
+   terminal for two more, and every one comes from the same file. Static faces would snap 450 to
+   Regular and 550 to Medium, which is why the text looked thin. */
 @font-face {
   font-family: "Maple Mono NF";
-  src: url("./fonts/MapleMonoNF-Regular.latin.woff2") format("woff2");
+  src: url("./fonts/maple-mono-nf/roman.latin.woff2") format("woff2");
   font-style: normal;
-  font-weight: 400 450;
+  font-weight: 400 700;
   font-display: swap;
   unicode-range: U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+0160-0161,U+0178,U+017D-017E,U+02C6,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-21FF,U+2212,U+2215,U+221A,U+221E,U+2248,U+2260-2265,U+2303,U+2318,U+2325-2326,U+232B,U+238B,U+23CE,U+2500-25FF,U+2713-2717,U+2800-28FF;
 }
 @font-face {
   font-family: "Maple Mono NF";
-  src: url("./fonts/MapleMonoNF-Medium.latin.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 500 550;
-  font-display: swap;
-  unicode-range: U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+0160-0161,U+0178,U+017D-017E,U+02C6,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-21FF,U+2212,U+2215,U+221A,U+221E,U+2248,U+2260-2265,U+2303,U+2318,U+2325-2326,U+232B,U+238B,U+23CE,U+2500-25FF,U+2713-2717,U+2800-28FF;
-}
-@font-face {
-  font-family: "Maple Mono NF";
-  src: url("./fonts/MapleMonoNF-SemiBold.latin.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 600 900;
-  font-display: swap;
-  unicode-range: U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+0160-0161,U+0178,U+017D-017E,U+02C6,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-21FF,U+2212,U+2215,U+221A,U+221E,U+2248,U+2260-2265,U+2303,U+2318,U+2325-2326,U+232B,U+238B,U+23CE,U+2500-25FF,U+2713-2717,U+2800-28FF;
-}
-@font-face {
-  font-family: "Maple Mono NF";
-  src: url("./fonts/MapleMonoNF-Italic.latin.woff2") format("woff2");
+  src: url("./fonts/maple-mono-nf/italic.latin.woff2") format("woff2");
   font-style: italic;
-  font-weight: 400 450;
+  font-weight: 400 700;
   font-display: swap;
   unicode-range: U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+0160-0161,U+0178,U+017D-017E,U+02C6,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-21FF,U+2212,U+2215,U+221A,U+221E,U+2248,U+2260-2265,U+2303,U+2318,U+2325-2326,U+232B,U+238B,U+23CE,U+2500-25FF,U+2713-2717,U+2800-28FF;
 }
+/* Nerd Font symbols are a face of their own, second in every font stack (fontStack in
+   packages/ui/src/fonts.ts), so prompt icons draw whichever family is chosen. The file is
+   fetched only when a private-use code point is drawn. */
 @font-face {
-  font-family: "Maple Mono NF";
-  src: url("./fonts/MapleMonoNF-SemiBoldItalic.latin.woff2") format("woff2");
-  font-style: italic;
-  font-weight: 500 900;
-  font-display: swap;
-  unicode-range: U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+0160-0161,U+0178,U+017D-017E,U+02C6,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-21FF,U+2212,U+2215,U+221A,U+221E,U+2248,U+2260-2265,U+2303,U+2318,U+2325-2326,U+232B,U+238B,U+23CE,U+2500-25FF,U+2713-2717,U+2800-28FF;
-}
-@font-face {
-  font-family: "Maple Mono NF";
-  src: url("./fonts/MapleMonoNF-symbols.woff2") format("woff2");
+  font-family: "Nerd Symbols";
+  src: url("./fonts/nerd-symbols.woff2") format("woff2");
   font-style: normal;
-  font-weight: 400 450;
+  font-weight: 100 900;
   font-display: swap;
   unicode-range: U+E000-E00A,U+E0A0-E0D7,U+E5FA-E6B7,U+E700-E7C5,U+F000-F2E0,U+F300-F381,U+F400-F532;
 }
 @font-face {
-  font-family: "Maple Mono NF";
-  src: url("./fonts/MapleMonoNF-symbols.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 500 550;
-  font-display: swap;
-  unicode-range: U+E000-E00A,U+E0A0-E0D7,U+E5FA-E6B7,U+E700-E7C5,U+F000-F2E0,U+F300-F381,U+F400-F532;
-}
-@font-face {
-  font-family: "Maple Mono NF";
-  src: url("./fonts/MapleMonoNF-symbols.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 600 900;
-  font-display: swap;
-  unicode-range: U+E000-E00A,U+E0A0-E0D7,U+E5FA-E6B7,U+E700-E7C5,U+F000-F2E0,U+F300-F381,U+F400-F532;
-}
-@font-face {
-  font-family: "Maple Mono NF";
-  src: url("./fonts/MapleMonoNF-symbols.woff2") format("woff2");
+  font-family: "Nerd Symbols";
+  src: url("./fonts/nerd-symbols.woff2") format("woff2");
   font-style: italic;
-  font-weight: 400 450;
-  font-display: swap;
-  unicode-range: U+E000-E00A,U+E0A0-E0D7,U+E5FA-E6B7,U+E700-E7C5,U+F000-F2E0,U+F300-F381,U+F400-F532;
-}
-@font-face {
-  font-family: "Maple Mono NF";
-  src: url("./fonts/MapleMonoNF-symbols.woff2") format("woff2");
-  font-style: italic;
-  font-weight: 500 900;
+  font-weight: 100 900;
   font-display: swap;
   unicode-range: U+E000-E00A,U+E0A0-E0D7,U+E5FA-E6B7,U+E700-E7C5,U+F000-F2E0,U+F300-F381,U+F400-F532;
 }
@@ -105,11 +58,15 @@
 }
 
 :root {
-  --font-maple: "Maple Mono NF", "Maple Mono NF Fallback", ui-monospace, monospace;
+  /* The default family and its weights. The font picker overwrites these five on the root
+     (applyFontVars in packages/ui/src/fonts.ts); every text role below reads the weight tokens
+     instead of a number, so one family's weights never leak into another's. */
+  --font-face: "Maple Mono NF", "Nerd Symbols", "Maple Mono NF Fallback", ui-monospace, monospace;
+  --fw-secondary: 450; --fw-body: 500; --fw-label: 550; --fw-title: 650;
   color-scheme: dark;
-  font-family: var(--font-maple);
+  font-family: var(--font-face);
   /* Auth tooltips remain monospace until the terminal explicitly selects its UI face. */
-  --font-ui: var(--font-maple);
+  --font-ui: var(--font-face);
   background: #101113;
   color: #e6e7e9;
   font-synthesis: none;
@@ -141,7 +98,7 @@ button { color: inherit; }
   padding: max(32px, env(safe-area-inset-top)) 24px max(32px, env(safe-area-inset-bottom));
   justify-content: center;
 }
-.access h1 { margin: 0; font-size: 22px; font-weight: 520; letter-spacing: -0.04em; }
+.access h1 { margin: 0; font-size: 22px; font-weight: var(--fw-label); letter-spacing: -0.04em; }
 .lead { margin: -6px 0 10px; color: #a6a8ad; font-size: 14px; line-height: 1.6; }
 .access form { display: flex; flex-direction: column; gap: 10px; }
 .access label { color: #a6a8ad; font-size: 12px; }
@@ -164,7 +121,7 @@ button { color: inherit; }
   cursor: pointer;
   font-size: 13px;
 }
-.primary { border: 1px solid #c8ceff; background: #c8ceff; color: #171820 !important; font-weight: 600; }
+.primary { border: 1px solid #c8ceff; background: #c8ceff; color: #171820 !important; font-weight: var(--fw-title); }
 .primary:disabled { opacity: 0.45; cursor: default !important; }
 .quiet { border: 1px solid #393b40; background: transparent; color: #d6d7da; }
 .message { min-height: 1.4em; margin: 0; color: #d0d2d7; font-size: 12px; line-height: 1.5; }
@@ -177,7 +134,7 @@ button { color: inherit; }
   border-radius: 9px;
   background: #191a1d;
   color: #f2f3f5;
-  font: 450 15px/1.8 var(--font-maple);
+  font: var(--fw-body) 15px/1.8 var(--font-face);
 }
 .account-copy { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; align-items: center; }
 .account-copy span { color: #a6a8ad; font-size: 12px; }
@@ -194,7 +151,7 @@ button { color: inherit; }
   overflow: hidden;
   background: var(--bg, #101113);
   color: var(--fg, #e6e7e9);
-  font: 450 var(--text-body)/1.4 var(--font-ui);
+  font: var(--fw-body) var(--text-body)/1.4 var(--font-ui);
   letter-spacing: -0.006em;
   touch-action: pan-x pan-y;
 }
@@ -266,7 +223,7 @@ button { color: inherit; }
   color: #e6e7e9;
   touch-action: pan-y;
 }
-.probe-panel h2 { margin: 0 0 10px; font-size: 13px; font-weight: 550; }
+.probe-panel h2 { margin: 0 0 10px; font-size: 13px; font-weight: var(--fw-label); }
 .probe-panel label { display: block; margin-bottom: 5px; color: #a6a8ad; font-size: 11px; }
 .probe-panel input {
   width: 100%;
@@ -321,12 +278,12 @@ button { color: inherit; }
   .access { padding-right: 20px; padding-left: 20px; }
 }
 
-.boot-error { margin: 30vh auto 0; max-width: 28rem; padding: 0 20px; text-align: center; color: #9a9aa2; font: 450 15px/1.5 var(--font-maple); }
+.boot-error { margin: 30vh auto 0; max-width: 28rem; padding: 0 20px; text-align: center; color: #9a9aa2; font: var(--fw-body) 15px/1.5 var(--font-face); }
 
 /* Core terminal shell: one padded pane card keeps the renderer ready for later splits. */
 .terminal-screen {
   --terminal-prediction-opacity: 0.74;
-  --font-mono: var(--font-maple);
+  --font-mono: var(--font-face);
   --r-sm: 8px;
   --r-md: 12px;
   --r-lg: 18px;
@@ -347,8 +304,8 @@ button { color: inherit; }
      -0.025em put glyphs on fractional advances and made mono text look uneven. */
   letter-spacing: -0.01em;
 }
-:root[data-ui-font="mono"] .capsule { font-weight: 450; letter-spacing: inherit; }
-:root[data-ui-font="mono"] .tab { font-size: var(--text-secondary); font-weight: 450; }
+:root[data-ui-font="mono"] .capsule { font-weight: var(--fw-body); letter-spacing: inherit; }
+:root[data-ui-font="mono"] .tab { font-size: var(--text-secondary); font-weight: var(--fw-body); }
 :root[data-ui-font="mono"] .palette-input input { letter-spacing: inherit; }
 :root[data-ui-font="mono"] .palette-input input::placeholder { letter-spacing: inherit; }
 .backdrop { position: fixed; z-index: 0; inset: 0; pointer-events: none; opacity: 0; transition: opacity 240ms ease-out; }
@@ -392,15 +349,15 @@ button { color: inherit; }
 .keybar button:active { transform: scale(0.97); }
 .capsule {
   justify-self: center; min-width: min(420px, 100%); padding: 0 8px 0 14px; justify-content: flex-start;
-  gap: 8px; color: var(--fg); font-weight: 500; letter-spacing: -0.005em;
+  gap: 8px; color: var(--fg); font-weight: var(--fw-label); letter-spacing: -0.005em;
 }
 .capsule-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .capsule-sep { color: var(--fg-3); }
-.capsule-session { color: var(--fg-2); font-weight: 400; white-space: nowrap; }
-.capsule-rtt { margin-left: auto; color: var(--fg-3); font: 500 var(--text-caption)/1 var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.capsule-kbd { padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui); }
+.capsule-session { color: var(--fg-2); font-weight: var(--fw-secondary); white-space: nowrap; }
+.capsule-rtt { margin-left: auto; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.capsule-kbd { padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: var(--fw-label) var(--text-caption)/1 var(--font-ui); }
 .tabs { display: flex; align-items: center; gap: 6px; }
-.tab { position: relative; min-width: 0; padding: 0 14px; gap: 6px; color: var(--fg-2); font-weight: 500; white-space: nowrap; opacity: 0.8; }
+.tab { position: relative; min-width: 0; padding: 0 14px; gap: 6px; color: var(--fg-2); font-weight: var(--fw-label); white-space: nowrap; opacity: 0.8; }
 .tab:disabled { cursor: default; }
 .tab-host { color: var(--fg-3); }
 .tab-name { color: var(--fg); }
@@ -431,7 +388,7 @@ button { color: inherit; }
 }
 /* The header row is exactly one pill tall so the travelling toggle sits on it, right-aligned. */
 .sidebar-head { display: flex; align-items: center; gap: 8px; height: var(--pill-h); margin-bottom: 4px; padding: 0 calc(var(--pill-h) + 8px) 0 8px; }
-.sidebar-title { font-weight: 600; letter-spacing: -0.01em; }
+.sidebar-title { font-weight: var(--fw-title); letter-spacing: -0.01em; }
 .bm { --bm-line: color-mix(in oklab, var(--fg) 16%, transparent); position: relative; margin-left: 4px; padding-left: 14px; }
 .bm-trunk { position: absolute; left: 0; top: -10px; bottom: -10px; width: 1.5px; }
 .bm-trunk::before {
@@ -449,8 +406,8 @@ button { color: inherit; }
 [data-focus-ring="on"] :is(.bm-head, .bm-leaf, .result):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .bm-head:disabled { opacity: 0.8; }
 .bm-sec.is-current > .bm-head { color: var(--fg); }
-.bm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-.bm-meta { margin-left: auto; color: var(--fg-3); font: 400 var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
+.bm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--fw-label); }
+.bm-meta { margin-left: auto; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
 .bm-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out); }
 .bm-sec[data-open] > .bm-fold { grid-template-rows: 1fr; }
 .bm-sec.no-motion > .bm-fold { transition: none; }
@@ -461,7 +418,7 @@ button { color: inherit; }
 .bm-lit { stroke: var(--fg); stroke-width: 1.5; stroke-dasharray: 1; stroke-dashoffset: 0; opacity: 0; }
 .bm-leaf { color: var(--fg-2); }
 .bm-leaf:disabled { opacity: 0.56; cursor: default; }
-.glyph { width: 18px; flex: none; color: var(--fg-3); font: 500 var(--text-caption)/1 var(--font-mono); }
+.glyph { width: 18px; flex: none; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
 .bm-leaf[aria-current] { color: var(--fg); }
 .bm-leaf[aria-current] .glyph { color: var(--accent); }
 
@@ -486,20 +443,20 @@ button { color: inherit; }
 .palette[data-open-kind="keyboard"] { transition: none; }
 .palette-input { display: flex; align-items: center; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--line); }
 .palette-input svg { flex: none; color: var(--fg-2); }
-.palette-input input { width: 100%; height: 56px; border: 0; outline: 0; background: transparent; color: var(--fg); font: 450 var(--text-input)/1.3 var(--font-ui); }
+.palette-input input { width: 100%; height: 56px; border: 0; outline: 0; background: transparent; color: var(--fg); font: var(--fw-body) var(--text-input)/1.3 var(--font-ui); }
 .palette-input input::placeholder { color: var(--fg-3); }
 .palette-results { max-height: min(54vh, 470px); overflow: auto; padding: 8px; overscroll-behavior: contain; }
-.group-label { padding: 8px 8px 4px; color: var(--fg-3); font: 600 var(--text-caption)/12px var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; }
+.group-label { padding: 8px 8px 4px; color: var(--fg-3); font: var(--fw-title) var(--text-caption)/12px var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; }
 .result { display: flex; align-items: center; width: 100%; min-height: calc(var(--row) + 4px); gap: 8px; padding: 0 8px; border-radius: 6px; text-align: left; }
 .result:disabled { color: var(--fg-3); cursor: default; opacity: 0.72; }
 .result[aria-selected="true"] { background: var(--accent-soft); }
-.result-icon { display: grid; place-items: center; width: 20px; flex: none; color: var(--fg-2); font: 500 var(--text-secondary)/1 var(--font-mono); }
+.result-icon { display: grid; place-items: center; width: 20px; flex: none; color: var(--fg-2); font: var(--fw-label) var(--text-secondary)/1 var(--font-mono); }
 .result-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.result-hint { margin-left: auto; color: var(--fg-3); font: 400 var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
+.result-hint { margin-left: auto; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
 .swatch { height: 14px; border-radius: 50%; }
 .palette-empty { margin: 16px 8px; color: var(--fg-2); font-size: var(--text-body); }
 .palette-foot { display: flex; align-items: center; gap: 5px; margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); color: var(--fg-3); font-size: var(--text-caption); }
-.palette-foot kbd { padding: 3px 5px; border-radius: 4px; background: var(--hover); font: 500 var(--text-caption)/1 var(--font-mono); }
+.palette-foot kbd { padding: 3px 5px; border-radius: 4px; background: var(--hover); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
 
 /* Variant A mobile tray: circular key targets over one blurred, edge-faded capsule. */
 .keyblur { display: none; position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; height: 108px; pointer-events: none; background: linear-gradient(transparent, color-mix(in oklab, var(--bg) 58%, transparent)); transition: opacity 180ms ease-out; }
@@ -516,7 +473,7 @@ button { color: inherit; }
 [data-focus-ring="on"] .keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .keybar button { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
 .keybar button svg { width: 24px; height: 24px; stroke-width: 1.75; }
-.keybar .key-word { font: 600 15px/1 var(--font-ui); letter-spacing: 0.01em; }
+.keybar .key-word { font: var(--fw-title) 15px/1 var(--font-ui); letter-spacing: 0.01em; }
 /* Armed modifiers use a soft fill; locked modifiers add a small dot as a second cue. */
 .keybar button[data-mod-state="armed"], .keybar button[data-mod-state="locked"] { background: var(--accent-soft); color: var(--accent); }
 .keybar button[data-mod-state="locked"]::after { content: ""; position: absolute; right: 8px; bottom: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--overlay); }
