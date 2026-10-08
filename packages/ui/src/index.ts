@@ -13,6 +13,7 @@ export * from "./fonts";
 export * from "./local-pref";
 export * from "./backdrop";
 export * from "./branched";
+export * from "./anchored-popover";
 export * from "./host-icons";
 export * from "./source-icons";
 export * from "./window-card";

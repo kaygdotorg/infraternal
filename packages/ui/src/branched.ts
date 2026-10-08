@@ -6,6 +6,13 @@ export interface BranchLeaf {
   glyph?: string;
   meta?: string;
   disabled?: boolean;
+  /**
+   * What the leaf is, for items that live in states (a session is open, detached or exited): drawn by CSS
+   * as the leaf's marker in place of the text glyph, so every list of such items marks them the same way.
+   */
+  state?: "open" | "detached" | "exited";
+  /** A quiet note after the label: new output (a dot), or the result of a finished command. */
+  mark?: "output" | "ok" | "fail";
 }
 
 export interface BranchSection {
@@ -26,6 +33,7 @@ export interface BranchedMenu {
   dispose(): void;
 }
 
+const MARK_NAME = { output: "new output", ok: "command finished", fail: "command failed" } as const;
 const RADIUS = 8;
 const STUB = 12;
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -92,14 +100,23 @@ function makeSection(section: BranchSection): HTMLElement {
     button.type = "button";
     button.dataset.id = leaf.id;
     button.disabled = Boolean(leaf.disabled);
-    button.setAttribute("aria-label", `${leaf.label}${leaf.meta ? `, ${leaf.meta}` : ""}`);
+    const spoken = [leaf.label, leaf.state, leaf.mark ? MARK_NAME[leaf.mark] : "", leaf.meta].filter(Boolean);
+    button.setAttribute("aria-label", spoken.join(", "));
     const glyph = el("span", "glyph");
-    glyph.textContent = leaf.glyph ?? "›_";
+    glyph.textContent = leaf.state ? "" : leaf.glyph ?? "›_";
     const label = el("span", "bm-label");
     label.textContent = leaf.label;
     const leafMeta = el("span", "bm-meta");
     leafMeta.textContent = leaf.meta ?? "";
-    button.append(glyph, label, leafMeta);
+    if (leaf.state) button.dataset.state = leaf.state;
+    button.append(glyph, label);
+    if (leaf.mark) {
+      const mark = el("span", "bm-mark");
+      mark.dataset.mark = leaf.mark;
+      mark.setAttribute("aria-hidden", "true");
+      button.append(mark);
+    }
+    button.append(leafMeta);
     row.append(button);
     list.append(row);
   }

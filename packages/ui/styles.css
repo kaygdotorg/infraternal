@@ -710,3 +710,22 @@
 /* A chip used as a toggle (a view to share, a filter): pressed is a quiet accent fill, nothing else changes. */
 .ui-chip[aria-pressed] { padding-right: 10px; cursor: pointer; }
 .ui-chip[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+
+/* Item states in a branched menu (branched.ts `state` and `mark`): a session is open (filled dot), detached
+   (hollow dot) or exited (hollow square). A mark follows on the right: new output is a quiet dot, a finished
+   command a tick or a cross, so the exit code beside it reads "✓ 0" or "✗ 1". */
+.bm-leaf[data-state] .glyph { display: grid; place-items: center; }
+.bm-leaf[data-state] .glyph::before { content: ""; box-sizing: border-box; width: 7px; height: 7px; border-radius: 50%; }
+.bm-leaf[data-state="open"] .glyph::before { background: var(--fg-2); }
+.bm-leaf[data-state="detached"] .glyph::before { box-shadow: inset 0 0 0 1.5px var(--fg-3); }
+.bm-leaf[data-state="exited"] .glyph::before { width: 6px; height: 6px; border-radius: 1.5px; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
+.bm-leaf[data-state="open"][aria-current] .glyph::before { background: var(--accent); }
+.bm-mark { flex: none; width: 12px; height: 12px; margin-left: auto; }
+.bm-mark.is-new { animation: bm-mark-in 180ms var(--ease-out, ease-out); }
+.bm-mark + .bm-meta { margin-left: 6px; }
+.bm-mark[data-mark="output"] { width: 6px; height: 6px; margin-right: 3px; border-radius: 50%; background: var(--accent); }
+.bm-mark[data-mark="ok"], .bm-mark[data-mark="fail"] { background: currentColor; -webkit-mask: var(--bm-mark-icon) center / contain no-repeat; mask: var(--bm-mark-icon) center / contain no-repeat; }
+.bm-mark[data-mark="ok"] { color: var(--ok); --bm-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E"); }
+.bm-mark[data-mark="fail"] { color: var(--danger); --bm-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M6.5 6.5l11 11M17.5 6.5l-11 11'/%3E%3C/svg%3E"); }
+@keyframes bm-mark-in { from { opacity: 0; transform: scale(0.5); } }
+@media (prefers-reduced-motion: reduce) { .bm-mark.is-new { animation: none; } }
