@@ -180,7 +180,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
 
   const params = new URLSearchParams(location.search);
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
-  let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "ink" : "paper");
+  let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "mocha" : "latte");
   let background = params.get("bg") === "mesh" || params.get("bg") === "none"
     ? params.get("bg")!
     : (readLocal("tracer.background") === "mesh" ? "mesh" : "none");
@@ -452,7 +452,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   const systemThemeChange = (): void => {
     if (!themeId(params.get("theme")) && !themeId(readLocal("tracer.theme"))) {
-      currentThemeId = systemDark.matches ? "ink" : "paper";
+      currentThemeId = systemDark.matches ? "mocha" : "latte";
       void applyLook();
     }
   };
