@@ -8,6 +8,7 @@ import { gunzipSync } from "node:zlib";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
+import { serveProvisioning } from "./provisioning-double";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 
 const HOST = "localhost";
@@ -97,6 +98,17 @@ let socketCloseCount = 0;
 
 server.on("upgrade", (request, socket, head) => {
   const path = new URL(request.url ?? "/", `http://${request.headers.host ?? `${HOST}:${PORT}`}`).pathname;
+  if (path === "/v1/bootstrap/ws") {
+    // Same admission as the real route: exact Origin (403), then the unlocked owner session (401).
+    const status = !sameOrigin(request) ? "403 Forbidden" : !isAuthenticated(request) ? "401 Unauthorized" : undefined;
+    if (status) {
+      socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      socket.destroy();
+      return;
+    }
+    webSockets.handleUpgrade(request, socket, head, (webSocket) => serveProvisioning(webSocket, request));
+    return;
+  }
   if (path !== "/v1/ws") {
     socket.destroy();
     return;
