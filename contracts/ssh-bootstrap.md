@@ -1,9 +1,9 @@
-<!-- Additive SSH bootstrap API and integration boundary for #87, D138–141/156/168/170. -->
+<!-- Additive SSH bootstrap API and integration boundary for #87, D138–141/156/168/170/181/183. -->
 # Contract: SSH bootstrap
 
 Status: proposed on #87 before implementation. The system OpenSSH adapter is
-authorized for bootstrap by the job brief; it uses the server identity in place
-(D141 H12). General host actions still use infraternal agents (D9). This does
+authorized for bootstrap by the job brief and D181. D183 supersedes the
+previous ambient local-identity fallback with a dedicated server key. General host actions still use infraternal agents (D9). This does
 not select a foundational SSH library or change frozen wire frames.
 
 ## Admission and progress
@@ -39,7 +39,9 @@ Session revocation ends the socket and cancels its work.
 
 ## SSH and installation
 
-OpenSSH reads its existing config, identity files and known_hosts directly.
+OpenSSH reads its existing addressing config and known_hosts directly. D183
+local authentication never loads the operating system's private identity files;
+it uses the dedicated server key or a supplied one-connection credential.
 Force `StrictHostKeyChecking=yes`, `UpdateHostKeys=no` and disable forwarding.
 Unknown or changed keys fail closed. Pasted private keys go to `ssh-add` on
 stdin through a private ephemeral ssh-agent socket. Passwords/passphrases go
@@ -108,7 +110,7 @@ The ordinary server's source-admission limits also apply.
 Client commands are text WebSocket messages. Unknown fields are rejected;
 identifiers are 1–128 ASCII letters, digits, dots, underscores or hyphens.
 `credential` is an opaque reference, never key/password bytes. Omitted fields
-use rootless mode, no root consent and server identity. A per-host credential
+use rootless mode, no root consent and D183 automatic authentication. A per-host credential
 reference overrides the batch reference.
 
 ```json
@@ -164,3 +166,62 @@ server SSH identity only. It rejects vault/discovery requests and enrollment
 before upload, with a human failure; it cannot produce done. Production
 installation requires #78's CA, join listener, online registry, facts and
 terminal router. A green component gate is not that end-to-end proof.
+
+## Dedicated server key and automatic authentication [181][183]
+
+The additive GET `/v1/bootstrap/ssh-key` requires one exact pinned Origin and
+one unlocked owner cookie. It returns public metadata only:
+
+```json
+{"public_key":"ssh-ed25519 <base64> infraternal-server","fingerprint":"SHA256:<base64>","locked":true}
+```
+
+Responses have `Cache-Control: no-store`. A cold lock does not hide the public
+half. Missing administrator-envelope custody returns 503, never an ambient
+system key. The configured startup adapter creates one Ed25519 identity and
+persists only its public half and administrator-wrapped ciphertext. Concurrent
+starts keep the first durable identity. Failed unwrap or a different public
+identity cannot unlock or replace it. Cold startup always starts locked.
+
+`SshKeyVault`, `AdministratorSshKeyUnlock` and `SshKeySource` mirror #78's
+`CaKeySource` custody boundary. The production adapter must recheck current
+administrator membership and fresh passkey proof, wrap for administrators and
+share the CA lock lifecycle (D168). It must never place a plaintext unwrap key
+next to ciphertext. Dev currently lacks that adapter; ordinary startup can
+retain a previously initialized public identity but cannot create/unlock one
+without configured custody. This is an explicit integration gap, not an
+automatic-unlock policy. `serve_with_provisioning` provides the configured
+startup hook; updates must carry unlocked material only in memory.
+
+Automatic authentication runs these methods in order:
+
+1. Network-only system OpenSSH with BatchMode enabled and local identities,
+   identity agents, password and keyboard-interactive authentication disabled.
+   Configured addressing and existing known_hosts still apply. A successful
+   command reports `network`; a provider is named only from trusted discovery,
+   never an SSH banner or an IP address.
+2. The dedicated unlocked server key through the scoped private ssh-agent pipe.
+3. The user's browser-unwrapped key for this one connection.
+4. A password supplied once through the scoped askpass pipe.
+
+Providers are lazy; successful earlier methods never request later secrets.
+Only authentication refusals advance the sequence. Unknown/changed host keys,
+unsupported config, unreachable targets, mesh-policy refusals and remote
+command failures stop without materializing later credentials. Exhausted
+authentication returns `failure.kind: "auth", choose_method: true` for the UI.
+No interactive prompt or system identity file is an implicit fallback.
+
+An authenticated progress event adds only public method metadata:
+
+```json
+{"authentication":{"method":"network","network":"netbird"}}
+{"authentication":{"method":"server-key"}}
+```
+
+Methods are `network`, `server-key`, `user-key` or `password`. The optional
+network provider is `netbird`, `tailscale`, `twingate` or `other`; absence means
+the provider could not be identified from trusted discovery. Existing clients
+may ignore this additive field. The completion/failure and retry shapes stay
+compatible with the existing bootstrap contract. One-line offline installation
+continues to require #78's short-lived host-bound invitation; a token never
+enters an URL or argv.
