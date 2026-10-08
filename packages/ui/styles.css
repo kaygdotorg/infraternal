@@ -311,9 +311,14 @@
 .ui-window[data-status="connecting"] .ui-window-dot { background: var(--fg-3); }
 .ui-window[data-status="none"] .ui-window-dot { display: none; }
 .ui-window[data-status="offline"] .ui-window-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
-.ui-window-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+/* The window's actions are one pill, as tall as the title pill, on every device (TASTE section 4). Its buttons keep
+   the full control height (44 px on touch) by overlapping the hairline, and the title pill gives way first. */
+.ui-window-actions {
+  display: flex; flex: none; align-items: center; gap: 0; box-sizing: border-box; height: var(--ui-control-h); margin-left: auto; padding: 0 2px;
+  border: 1px solid var(--overlay-line); border-radius: 999px;
+}
 .ui-window-action {
-  display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); border: 0; border-radius: 8px;
+  display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); margin: -1px 0; border: 0; border-radius: 999px;
   background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
 .ui-window-action:active { transform: scale(var(--ui-press-scale)); }
@@ -732,3 +737,5 @@
 .bm-leaf .ui-mark + .bm-meta { margin-left: 6px; }
 @keyframes ui-mark-in { from { opacity: 0; transform: scale(0.5); } }
 @media (prefers-reduced-motion: reduce) { .ui-mark.is-new { animation: none; } }
+/* A long leaf name gives way to its marks and notes instead of wrapping onto a second line. */
+.bm-leaf .bm-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
