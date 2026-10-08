@@ -121,6 +121,27 @@ export function installGestures(cx: Ctx): void {
     const rec = first ? [...views.values()].flatMap((cl) => [...cl.wins.values()]).find((w) => w.card.root === first) : undefined;
     if (rec) { e.stopPropagation(); e.preventDefault(); cx.win.setActive(rec); cx.nav.focusWindow(rec); }
   }, { capture: true, signal });
+  // While input is locked to a terminal, the wheel belongs to that terminal and to nothing else (D177, #113): its
+  // scrollback, or the running program (mouse reporting, alternate screen: the terminal decides). The strip and the
+  // canvas never move, on a wheel or on trackpad momentum. This runs in the capture phase, before any terminal or
+  // column sees the event. Over the locked terminal the event goes on untouched (the terminal always consumes a
+  // wheel: no native scroll, so no chaining to the strip when it reaches its top or bottom). Anywhere else on the
+  // canvas it is held back and handed to the locked terminal. The work is a few property reads and one dispatch.
+  viewport.addEventListener("wheel", (e) => {
+    const locked = cx.inputLock.state;
+    if (!locked) return;
+    const host = locked.win.card.body.querySelector<HTMLElement>(".terminal-host");
+    if (host && host.contains(e.target as Node)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!host || e.ctrlKey || e.metaKey) return;
+    const r = host.getBoundingClientRect();
+    const forwarded = new WheelEvent("wheel", {
+      deltaX: e.deltaX, deltaY: e.deltaY, deltaMode: e.deltaMode, bubbles: true, cancelable: true, composed: true,
+      clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, shiftKey: e.shiftKey,
+    });
+    host.dispatchEvent(forwarded);
+  }, { passive: false, capture: true, signal });
   viewport.addEventListener("wheel", (e) => {
     if (state.canvasLock) { if (cx.inputLock.state) { e.preventDefault(); return; } snapWheel(e); return; }
     const inCol = (e.target as Element).closest(".cl-col");
