@@ -1306,3 +1306,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Terminal size** follows the device that last sent keys or a paste,
        with about 500 ms of hysteresis; focus, scroll and viewing don't
        count.
+184. **Update source and signing (owner, 2026-10-08, backend grill round 3):**
+     server and agent releases come from a dedicated builds subdomain (the
+     exact host is still to be set up; the URL is configurable and defaults
+     to it once it exists). Every release is signed, and the server refuses
+     unsigned or wrongly signed artifacts. The release signing key's public
+     half is built into the binary and the private half never lives on a
+     server.
