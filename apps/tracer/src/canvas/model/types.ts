@@ -45,10 +45,10 @@ export interface NodeModel {
 
 /**
  * A mesh access rule, shown by name only (D180: edges reference grants by name, never the rules).
- * `id` is the stable reference; `name` is what people read (and rename). A grant whose name follows its ends
- * (`auto`) is renamed by the server when an end moves.
+ * `id` is the stable reference; `name` is what people read (and rename). `auto` means the name still says who may
+ * reach what, so the canvas renames the grant along when an end moves; a name a person chose is never touched.
  */
-export interface Grant { id: string; from: string; to: string; via?: string; name?: string; auto?: boolean }
+export interface Grant { id: string; from: string; to: string; via?: string; name?: string; auto?: boolean; /** Reaches both ways (D164: a double-headed arrow). */ both?: boolean }
 
 export interface ViewModel {
   id: ViewId;

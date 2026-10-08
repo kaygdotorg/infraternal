@@ -1,31 +1,62 @@
 /**
  * The Mesh adapter: where the Mesh view gets its nodes and grants, and where edits go.
  *
- * The canvas holds no mesh data of its own. A `MeshSource` is filled by the mesh API of #108 in the product and
- * by a test double in mockups. Without a source the Mesh view is not offered, and the reach arrows and the
- * connector on a terminal's pill do not exist.
+ * The canvas holds no mesh data of its own. A `MeshSource` is filled by the mesh API of #108 in the product
+ * (`api.ts`) and by a fake server in mockups (`mock/mesh-server.ts`, behind the same `api.ts`). Without a source the
+ * Mesh view is not offered, and the reach arrows and the connector on a terminal's pill do not exist.
  *
- * Rules the source follows (D164, D180):
+ * Rules the source follows (D164, D180, D187):
  * - A grant "A to B" lets A open connections to B; `via` names a relay. A tag stands for the hosts that carry it.
  * - Edges carry grant names only; the canvas never sees rules, ports or ranges.
  * - Graph nodes are laid out automatically by the source; nodes the person drags are pinned and saved (`pin`).
+ * - Edits are optimistic: the source applies them at once, sends them, and puts things back (and says so through
+ *   `onFailure`) when the server refuses or the socket drops. The server decides what a person may do.
+ * - The source tells the canvas what the person may do (`canView`, `canEdit`); it never decides for the server.
  */
 import type { Metrics } from "../layout/geometry";
 import type { Grant, NodeModel } from "../model/types";
+import type { Cluster } from "./layout";
+
+/**
+ * Where the data stands. `unavailable`: the server has no Mesh for this person (the view is not offered).
+ * `error`: it could not be reached (the view shows a retry; data from before stays on screen).
+ */
+export type MeshStatus = "loading" | "ready" | "error" | "unavailable";
+
+export interface MeshLayout {
+  /** Every node with its position in the graph's own coordinates. */
+  nodes: NodeModel[];
+  /** The graph's content size. */
+  size: { w: number; h: number };
+  /** Frames the far zoom draws in place of the cards; each lists the hosts it holds. */
+  clusters: Cluster[];
+}
 
 export interface MeshSource {
-  /** Nodes with positions (in the graph's own coordinates) and the graph's content size. */
-  layout(metrics: Metrics): { nodes: NodeModel[]; size: { w: number; h: number } };
-  /** The grants, in a stable order. The array is live: callers read it, never change it. */
+  /** The layout. The same arrays come back until the mesh changes, so callers may keep them. */
+  layout(metrics: Metrics): MeshLayout;
+  /** The grants, in a stable order. The array and its objects are live: callers read them, never change them. */
   grants(): readonly Grant[];
   /** Tags and the hosts that carry them. */
   tags(): Readonly<Record<string, readonly string[]>>;
+  status(): MeshStatus;
+  /** Whether the person may see the Mesh at all (D187). */
+  canView(): boolean;
   /** Whether the person may change grants (arrows get handles only then). */
   canEdit(): boolean;
+  /** Fetches again after an error. */
+  retry(): void;
   addGrant(from: string, to: string): Grant;
   moveGrant(grant: Grant, to: { from?: string; to?: string }): void;
+  renameGrant(grant: Grant, name: string): void;
   removeGrant(grant: Grant): void;
   /** A person dragged a node: remember where it stays. */
   pin(nodeId: string, x: number, y: number): void;
   onChange(listener: () => void): () => void;
+  /** An edit did not take effect; the source has already put the grant back. */
+  onFailure(listener: (message: string) => void): () => void;
+  dispose(): void;
 }
+
+/** What a grant is called on screen: its name, or (for a source without names) who may reach what. */
+export const grantLabel = (g: Grant): string => g.name ?? `${g.from.replace(/^tag:/, "")}→${g.to.replace(/^tag:/, "")}`;

@@ -15,7 +15,8 @@ import { boxOf, type Metrics } from "../layout/geometry";
 import { MemoryCanvasStore } from "../model/store";
 import type { ViewId } from "../model/types";
 import { el } from "../dom";
-import { CONTAINERS, INITIAL_GRANTS, buildViews, type Role } from "./data";
+import { CONTAINERS, buildViews, type Role } from "./data";
+import { offerMeshView } from "../mesh/offer";
 import { createMockMesh } from "./mesh";
 import { createMockSessions } from "./sessions";
 import { createMockSettings } from "./settings";
@@ -48,11 +49,12 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   });
   const cx = canvas.cx;
   const { camera, state } = cx;
+  const stopOffer = offerMeshView(cx, mesh);
   let sceneIndex = 0;
 
   // ---- building the world for a scene ---------------------------------------------------------------
   const build = (): void => {
-    world.grants = INITIAL_GRANTS.map((g) => ({ ...g }));
+    mesh.reset(); // the scene starts from its own mesh (and its grants)
     canvas.setViews((m: Metrics) => buildViews(world.role, m, mesh, world.screens, world.omit, sceneIndex === 6 && world.role === "operator"));
     cx.sharing?.reset();
   };
@@ -185,6 +187,17 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     canvasLock: () => ({ on: state.canvasLock, index: state.snapIdx, stops: (() => { const c = cx.views.get(state.currentView); return c ? cx.nav.stopsFor(c).lefts.length : 0; })(), view: state.currentView }),
     setCanvasLock: (on: boolean) => cx.nav.setCanvasLock(on),
     reachFor: () => cx.mesh?.reachFor()?.model.id,
+    /** The fake Mesh server and what the Mesh view has on screen (specs drive and read these). */
+    mesh: {
+      server: () => mesh.server,
+      status: () => mesh.status(),
+      pins: () => mesh.pins(),
+      stats: () => cx.mesh?.graphStats(),
+      reset: () => { mesh.reset(); },
+      source: () => mesh,
+      /** The saved canvas document (what a reload would restore). */
+      document: () => cx.adapters.store.load(),
+    },
     reachCount: () => cx.mesh?.reachCount() ?? 0,
   };
   (window as unknown as { __tracerClusters?: typeof probe }).__tracerClusters = probe;
@@ -197,7 +210,9 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       removeProvider();
       mockupTag.remove();
       chip?.remove();
+      stopOffer();
       canvas.dispose();
+      mesh.dispose();
       sessions.dispose();
       delete (window as unknown as { __tracerClusters?: unknown }).__tracerClusters;
     },

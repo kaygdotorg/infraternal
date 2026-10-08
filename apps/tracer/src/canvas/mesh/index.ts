@@ -25,10 +25,9 @@ import { contentSize, type Pt, type Rect } from "../layout/geometry";
 import type { Grant, NodeModel, WindowModel } from "../model/types";
 import { ICON, lineIcon } from "../views/icons";
 import { Arrow, DragArrow, anchors } from "./arrows";
+import { createGraph, type GraphController, type TopoArrow } from "./graph";
 import { reach } from "./grants";
-import type { MeshSource } from "./source";
-
-interface TopoArrow { grant: Grant; arrow: Arrow; label?: SVGTextElement }
+import { grantLabel, type MeshSource } from "./source";
 
 export interface MeshModule {
   /** Fills a graph view with its node cards and arrows. */
@@ -51,7 +50,8 @@ export interface MeshModule {
   countText(c: ViewRec): string;
   /** The grants as they are now (a copy). */
   grants(): Grant[];
-  /** A newly added grant: its arrow is added to the Mesh view with a pulse. */
+  /** What the Mesh view has on screen right now (specs and the frame-time benchmark read this). */
+  graphStats(): ({ level: string } & ReturnType<GraphController["stats"]>) | undefined;
   dispose(): void;
 }
 
@@ -76,6 +76,8 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
   const headSize = (): number => clamp(7 / cam.z, 7, 16);
 
   const updateOverlay = (): void => {
+    const mesh = views.get("mesh");
+    if (mesh) graphs.get(mesh)?.cull();
     if (reachFor && reachItems.length) {
       const src = worldRect(reachFor.card.root);
       const vp = viewport.getBoundingClientRect();
@@ -120,6 +122,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     window.setTimeout(() => { if (!reachFor) done(); }, 200);
   };
   const showReach = (rec: WinRec, pinned = false): void => {
+    if (!source.canView()) return;
     if (reachFor === rec) { reachPinned ||= pinned; return; }
     hideReach(true);
     reachFor = rec; reachPinned = pinned;
@@ -152,13 +155,13 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
 
   // ---- mesh arrows -----------------------------------------------------------------------------------
   const nodeRect = (c: ViewRec, id: string): Rect | undefined => {
-    const n = c.view.nodes.find((v) => v.id === id);
+    const n = graphOf(c)?.node(id);
     return n ? { x: n.x, y: n.y, w: state.metrics.nodeW, h: state.metrics.nodeH } : undefined;
   };
   /** A grant is shown by its name only: who may reach what ("ops→build-01"), never ports or ranges (D180). */
-  const grantName = (g: Grant): string => `${g.from.replace(/^tag:/, "")}→${g.to}`;
-  const addTopoArrow = (c: ViewRec, g: Grant, animate: boolean): void => {
-    if (!c.graphSvg) return;
+  const grantName = grantLabel;
+  /** An arrow for a grant, not yet in the document: the graph module decides which arrows exist. */
+  const makeTopoArrow = (g: Grant): TopoArrow => {
     const arrow = new Arrow({ ...(g.via ? { dashed: true } : {}), tone: "accent", editable: source.canEdit() });
     arrow.g.dataset.grant = g.id;
     arrow.g.dataset.tip = grantName(g); // hover names the grant (warm tooltip); D180: edges carry grant names only
@@ -170,22 +173,23 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
       entry.label = t;
       arrow.g.append(t);
     }
-    c.graphSvg.append(arrow.g);
-    topoOf(c).push(entry);
-    drawTopoArrow(c, entry);
-    if (animate) {
-      arrow.g.dataset.fresh = "";
-      requestAnimationFrame(() => requestAnimationFrame(() => arrow.g.removeAttribute("data-fresh")));
-      const pulse = new Spring(1.9, (v) => arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 });
-      pulse.set(1);
-    }
+    return entry;
+  };
+  /** A grant that was just made: its arrow fades in and its head pulses once. */
+  const pulseNew = (c: ViewRec, g: Grant): void => {
+    const entry = topoOf(c).find((t) => t.grant === g);
+    if (!entry) return;
+    const { arrow } = entry;
+    arrow.g.dataset.fresh = "";
+    requestAnimationFrame(() => requestAnimationFrame(() => arrow.g.removeAttribute("data-fresh")));
+    const pulse = new Spring(1.9, (v) => arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 });
+    pulse.set(1);
   };
   const drawTopoArrow = (c: ViewRec, e: TopoArrow): void => {
     const a = nodeRect(c, e.grant.from), b = nodeRect(c, e.grant.to);
     if (!a || !b) return;
     // Arrows that end on the same card fan out along its edge instead of piling onto one point.
-    const sharing = topoOf(c).filter((o) => o.grant.to === e.grant.to);
-    const lane = sharing.indexOf(e) - (sharing.length - 1) / 2;
+    const lane = graphOf(c)?.lane(e.grant) ?? 0;
     e.arrow.between(a, b, headSize(), lane * Math.max(1, (headSize() * 1.5) / 14));
     if (e.label) {
       const n = anchors(a, b);
@@ -197,14 +201,17 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
   let lastTopoZ = 0;
   const redrawMesh = (): void => {
     const c = views.get("mesh");
-    if (!c || Math.abs(cam.z - lastTopoZ) / cam.z < 0.04) return;
+    if (!c) return;
+    graphOf(c)?.rest();
+    if (Math.abs(cam.z - lastTopoZ) / cam.z < 0.04) return;
     lastTopoZ = cam.z;
-    for (const e of topoOf(c)) drawTopoArrow(c, e);
+    graphOf(c)?.redraw();
   };
 
   const makeNode = (c: ViewRec, n: NodeModel): WinRec => {
     const m: WindowModel = { id: `n-${n.id}`, kind: "node", host: n.label };
-    const card = createWindowCard({ id: m.id, title: { host: n.label }, icon: n.kind === "tag" ? lineIcon(ICON.tag) : hostIconMarkup(n.os ?? "unknown", "ui-host-mark"), status: "none", label: `${n.label} node` });
+    const status = n.kind === "tag" ? "none" : n.state === "offline" ? "offline" : n.state === "behind" ? "connecting" : "live";
+    const card = createWindowCard({ id: m.id, title: { host: n.label }, icon: n.kind === "tag" ? lineIcon(ICON.tag) : hostIconMarkup(n.os ?? "unknown", "ui-host-mark"), status, label: `${n.label} node` });
     const rec: WinRec = { model: m, card, owner: c };
     card.root.dataset.kind = "node";
     card.root.style.cssText = `position:absolute;left:0;top:0;width:${state.metrics.nodeW}px;height:${state.metrics.nodeH}px;transform:translate(${n.x}px,${n.y}px)`;
@@ -233,6 +240,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
       const size = contentSize(rec.owner.view, state.metrics);
       n.x = clamp(d.nx + (e.clientX - d.x) / cam.z, 0, size.w - state.metrics.nodeW);
       n.y = clamp(d.ny + (e.clientY - d.y) / cam.z, 0, size.h - state.metrics.nodeH);
+      n.pinned = true; // a node the person moved stays where it is (D180); the canvas document keeps it
       source.pin(n.id, n.x, n.y);
       rec.card.root.style.transform = `translate(${n.x}px, ${n.y}px)`;
       // Arrows stay attached to the card they belong to while it moves.
@@ -240,8 +248,10 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     }, { signal });
     const up = (e: PointerEvent): void => {
       if (!d || e.pointerId !== d.id) return;
+      const moved = d.nx !== n.x || d.ny !== n.y;
       d = undefined;
       delete rec.card.root.dataset.lifted;
+      if (moved) cx.store.changed();
     };
     pill.addEventListener("pointerup", up, { signal });
     pill.addEventListener("pointercancel", up, { signal });
@@ -304,7 +314,6 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     document.body.append(anchor);
     return { anchor, done: () => { window.setTimeout(() => anchor.remove(), 260); } };
   };
-  const redrawTopo = (c: ViewRec): void => { for (const e of topoOf(c)) drawTopoArrow(c, e); };
   const beginEdit = (c: ViewRec, entry: TopoArrow, end: "tail" | "head", e: PointerEvent, handle: SVGElement): void => {
     const g = entry.grant;
     const fixedId = end === "head" ? g.from : g.to;
@@ -361,13 +370,13 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
         const next: Grant = end === "head" ? { ...g, to: candidate } : { ...g, from: candidate };
         const endTip = tipAt(toClient({ x: live.end().x + origin.x, y: live.end().y + origin.y }));
         mountConfirmTip(endTip.anchor, {
-          label: `Move grant ${grantName(g)}`, message: `Move grant ${grantName(g)} to ${grantName(next)}?`,
+          label: `Move grant ${grantName(g)}`, message: `Move grant ${grantName(g)} to ${grantLabel({ id: "", from: next.from, to: next.to })}?`,
           confirmLabel: "Move", cancelLabel: "Cancel",
           onConfirm: () => {
             source.moveGrant(g, end === "head" ? { to: next.to } : { from: next.from });
             entry.arrow.g.dataset.tip = grantName(g);
             entry.arrow.g.removeAttribute("data-editing");
-            redrawTopo(c);
+            refreshGraph(c);
             const pulse = new Spring(1.9, (v) => entry.arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 });
             pulse.set(1);
             live.dispose();
@@ -386,11 +395,8 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
         confirmLabel: "Remove", cancelLabel: "Keep",
         onConfirm: () => {
           source.removeGrant(g);
-          topoOf(c).splice(topoOf(c).indexOf(entry), 1);
-          entry.arrow.g.dataset.leaving = "";
-          window.setTimeout(() => entry.arrow.remove(), 240);
           live.dispose();
-          redrawTopo(c);
+          refreshGraph(c); // the arrow fades out; the grants listed in the graph are the source's
           for (const cl of views.values()) cx.view.geometry(cl);
           cx.toast.show({ message: `Grant ${grantName(g)} removed` });
         },
@@ -427,7 +433,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
         hideReach(true);
         showReach(keep, true);
         const topo = views.get("mesh");
-        if (topo) { addTopoArrow(topo, g, true); cx.view.geometry(topo); }
+        if (topo) { refreshGraph(topo); pulseNew(topo, g); cx.view.geometry(topo); }
         for (const cl of views.values()) cx.view.geometry(cl);
         cx.toast.show({ message: `${from} can now reach ${to}`, ...(topo ? { action: { label: "Show in Mesh", onSelect: () => cx.nav.flyView("mesh") } } : {}) });
       },
@@ -435,6 +441,8 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     });
   };
 
+  /** The connectors next to terminal pills; shown while the person may change grants. */
+  const ports = new Set<HTMLButtonElement>();
   const wireTerminal = (rec: WinRec): void => {
     const pill = rec.card.pill;
     // Arrows on demand: hovering the pill (long-press on touch) shows where this window's host can reach.
@@ -455,6 +463,8 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     port.setAttribute("aria-label", "Allow access to another window");
     port.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON.port}</svg>`;
     port.style.touchAction = "none";
+    port.hidden = !source.canEdit(); // the connector exists only for people who may grant access (D187)
+    ports.add(port);
     rec.card.pill.after(port);
     rec.port = port;
     for (const t of [pill, port]) { t.addEventListener("pointerenter", enter, { signal }); t.addEventListener("pointerleave", leave, { signal }); }
@@ -463,8 +473,23 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
   };
 
   // ---- the graph view ----------------------------------------------------------------------------------
-  const topos = new WeakMap<ViewRec, TopoArrow[]>();
-  const topoOf = (c: ViewRec): TopoArrow[] => { let t = topos.get(c); if (!t) { t = []; topos.set(c, t); } return t; };
+  const graphs = new WeakMap<ViewRec, GraphController>();
+  const graphOf = (c: ViewRec): GraphController | undefined => graphs.get(c);
+  const topoOf = (c: ViewRec): TopoArrow[] => graphOf(c)?.arrows() ?? [];
+  /** Re-reads the mesh into a graph view: its nodes, its size, what is drawn, what the sidebar counts. */
+  let sized = "";
+  const refreshGraph = (c: ViewRec): void => {
+    const graph = graphOf(c);
+    if (!graph) return;
+    const layout = source.layout(state.metrics);
+    c.view.nodes = layout.nodes;
+    c.view.graph = layout.size;
+    graph.sync();
+    cx.view.geometry(c);
+    const size = `${layout.size.w}x${layout.size.h}`;
+    if (size !== sized) { sized = size; cx.view.settle(c.view.id); }
+    cx.tree.render();
+  };
   const buildGraph = (c: ViewRec): void => {
     c.colsEl.classList.add("cl-graph");
     const svg = document.createElementNS(SVG_NS, "svg");
@@ -478,15 +503,33 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
       e.stopPropagation(); e.preventDefault();
       beginEdit(c, entry, handle.dataset.end === "tail" ? "tail" : "head", e, handle);
     }, { signal });
-    for (const n of c.view.nodes) {
-      const rec = makeNode(c, n);
-      c.wins.set(rec.model.id, rec);
-      c.colsEl.append(rec.card.root);
-    }
-    for (const g of source.grants()) addTopoArrow(c, g, false);
+    const graph = createGraph(cx, c, source, {
+      makeCard: (n) => makeNode(c, n),
+      dropCard: (rec) => { rec.card.dispose(); rec.card.root.remove(); },
+      makeArrow: makeTopoArrow,
+      dropArrow: (entry, fade) => {
+        if (!fade) { entry.arrow.remove(); return; }
+        entry.arrow.g.dataset.leaving = "";
+        window.setTimeout(() => entry.arrow.remove(), 240);
+      },
+      drawArrow: (entry) => drawTopoArrow(c, entry),
+      headSize,
+    });
+    graphs.set(c, graph);
+    graph.sync();
   };
 
-  const offChange = source.onChange(() => { for (const c of views.values()) if (c.view.layout === "graph") cx.view.geometry(c); });
+  let canEdit = source.canEdit();
+  const offChange = source.onChange(() => {
+    if (source.canEdit() !== canEdit) {
+      // Handles on arrows exist only for people who may use them (D187): arrows are made again when that changes.
+      canEdit = source.canEdit();
+      for (const c of views.values()) graphOf(c)?.reset();
+    }
+    for (const c of views.values()) if (c.view.layout === "graph") refreshGraph(c);
+    for (const port of ports) port.hidden = !canEdit;
+  });
+  const offFailure = source.onFailure((message) => cx.toast.show({ message }));
   return {
     buildGraph, redraw: redrawMesh, updateOverlay, wireTerminal, showReach, hideReach,
     reachFor: () => reachFor,
@@ -496,6 +539,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     summaryRows: (c) => [["Nodes", String(c.view.nodes.length)], ["Grants", String(source.grants().length)], ["Via relay", String(source.grants().filter((g) => g.via).length)]],
     countText: (c) => `${c.view.nodes.length} nodes · ${source.grants().length} grants`,
     grants: () => source.grants().map((g) => ({ ...g })),
-    dispose() { offChange(); reachLayer.remove(); },
+    graphStats() { const c = views.get("mesh"); const g = c && graphOf(c); if (!g) return undefined; return { level: g.level(), ...g.stats() }; },
+    dispose() { offChange(); offFailure(); reachLayer.remove(); },
   };
 }

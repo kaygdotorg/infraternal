@@ -11,8 +11,11 @@ export const hostsOf = (id: string, tags: Readonly<Record<string, readonly strin
 export function reach(host: string, grants: readonly Grant[], tags: Readonly<Record<string, readonly string[]>> = {}): Array<{ host: string; via?: string }> {
   const out = new Map<string, { host: string; via?: string }>();
   for (const g of grants) {
-    if (!hostsOf(g.from, tags).includes(host)) continue;
-    for (const t of hostsOf(g.to, tags)) if (t !== host && !out.has(t)) out.set(t, { host: t, ...(g.via ? { via: g.via } : {}) });
+    // A grant that works both ways (a double-headed arrow, D164) also lets its other end reach the first.
+    for (const [a, b] of g.both ? [[g.from, g.to], [g.to, g.from]] as const : [[g.from, g.to]] as const) {
+      if (!hostsOf(a, tags).includes(host)) continue;
+      for (const t of hostsOf(b, tags)) if (t !== host && !out.has(t)) out.set(t, { host: t, ...(g.via ? { via: g.via } : {}) });
+    }
   }
   return [...out.values()];
 }
