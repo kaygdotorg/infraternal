@@ -1367,3 +1367,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Presence:** avatars on a window's pill when others have the same
        session or view open, and an "is typing" marker; no extra cursors (a
        terminal has one).
+188. **Transfer budgets: a strict critical path, a separate deferred budget (owner, 2026-10-08):**
+     the JavaScript transfer gate measures the **critical path** (everything
+     needed before the first paint of sign-in and the first screen) against
+     the existing strict budget, which serves the under-1-second first paint
+     on a mid-range phone. Code loaded after the first paint (the canvas
+     views, Mesh, toolbar editing, the droplet, settings windows) has its own
+     separate budget, so neither can grow unnoticed. Budgets change only with
+     measurements in the commit.
