@@ -83,7 +83,10 @@ names. `MeshRoleDefinition` is
 role management are global actions; node observation, rename and delete can
 use `mesh.manage_nodes` scoped to tags. A scoped node edit must cover every
 current node membership; an untagged node requires a global node-management
-role. Tag membership changes can use a tag scope. A tag endpoint's scope is
+role. Tag membership changes require `mesh.manage_tags` on the destination
+tag and every current node membership; untagged hosts require global access.
+Checks use pre-edit memberships so an editor cannot claim an out-of-scope host.
+A tag endpoint's scope is
 that tag; a node endpoint's scopes are its current memberships. A scoped grant
 role must cover each endpoint's scope group, so an untagged node endpoint
 requires a global `mesh.manage_grants` role.

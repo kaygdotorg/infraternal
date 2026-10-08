@@ -878,7 +878,15 @@ impl MeshService {
     ) -> Result<u64, MeshApiError> {
         let id = node_id(request.node_id)?;
         let mut tx = self.begin_change().await?;
-        authorize(&mut tx, actor, MANAGE_TAGS, &[vec![request.tag.clone()]]).await?;
+        let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
+        let mut requirements = require_each_scope(&scopes);
+        // An empty host scope cannot be claimed by adding the editor's own tag.
+        // Check pre-edit memberships under the writer lock, including every affected tag.
+        if requirements.is_empty() {
+            requirements.push(Vec::new());
+        }
+        requirements.push(vec![request.tag.clone()]);
+        authorize(&mut tx, actor, MANAGE_TAGS, &requirements).await?;
         let sql = if add {
             "INSERT INTO mesh_tag_members(tag_name,node_id) VALUES (?,?)"
         } else {
