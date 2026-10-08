@@ -222,3 +222,37 @@ and writes, closing both TCP and QUIC. An already-held browser attachment may
 remain for offset recovery, but it cannot forward new input through the retired
 transport. Shims keep running. This implements immediate authority retirement;
 authenticated removal notices and operator uninstall remain separate work.
+
+## Live certificate renewal [133][168]
+
+Hello bit 2 (`LIVE_RENEWAL`) enables server-driven renewal on control stream
+zero. Peers without the capability never receive these actions. Control calls
+use the existing server-assigned nonzero call-id allocator, independently of
+terminal writer ids and native stream ids. No v1 frame layout changes.
+
+At half-life the server sends `Call("transport.csr", {})`. Success returns
+`{csr_der: [u8]}` containing at most 4096 bytes of canonical signed PKCS10.
+The server signs through the live `CaKeySource` and atomically publishes public
+ledger authority using the exact admitted predecessor and unchanged host key.
+It then sends `Call("transport.certificate", {certificate_der: [u8]})` with
+at most 8192 DER bytes. Each JSON payload is bounded to 32768 bytes before
+parsing; unknown fields are refused. Success is `Result(ok=true, json={})`.
+
+The infraternal agent verifies pinned issuer/client purpose, exact retained
+host identity, same local key, seven-day lifetime and increasing expiry,
+then fsyncs and atomically replaces its private local identity file. Only
+successful publication may acknowledge. Reconnects use the acknowledged leaf;
+the local private key and active terminal streams remain unchanged. Crypto
+and filesystem publication run outside the reactor. At most one publication
+job runs per host; disconnect does not turn a failed publication into success.
+
+The server extends the retained transport's shared fingerprint/monotonic expiry
+only after the publication acknowledgement and renewed ledger admission.
+Revocation still cancels it at once. Old authority remains valid only until its
+original cap if delivery or acknowledgement fails. Every control call has a
+five-second deadline; each host has one renewal job and the server admits at
+most eight concurrent exchanges. A locked signer preserves terminal authority
+and retries once per hour within the remaining validity window. Healthy
+connections use only the half-life/expiry deadlines, never periodic heartbeats.
+Expired local identities refuse further connection attempts; arbitrary TLS
+failure never removes host state.
