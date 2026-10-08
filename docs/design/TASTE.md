@@ -45,6 +45,7 @@ Related documents: `segmented-selection.md` and `toast.md` in this folder.
 | **Enough icons.** OS marks for hosts, small status icons instead of bare coloured dots, and icons in headers, failures, consent and progress. 16 px on desktop and 18 px on touch, with a 1.5 stroke. | "it still feels too raw! there's not enough icons" | Each row and state has an icon where a native app would have one. |
 
 | **Icons over text for actions.** Where an icon is unambiguous (close, confirm, cancel, copy, share, add, settings), use an icon button with the shared warm tooltip naming the action, rather than a text button. Text buttons remain for primary flow steps whose meaning an icon can't carry (for example "Continue"). Every icon-only control has a tooltip and an accessible label. | "prefer icons over text please, icons with warm tooltips" | No icon without a tooltip. No text button where an obvious icon exists. |
+| **Desktop pills are generous.** On desktop, pills and segmented controls use roomy proportions: about a 46 px container, a 38 px selected segment, about 17 px labels at weight 500–600 with an 18 px icon, and about 18–20 px of side padding; the selected segment is a solid soft-white pill with a gentle shadow. Phones keep their sizing. | "can we have this sort of font sizing and pill sizing for desktop? looks really good and very apple like" (a Morning / Golden / Night segmented control) | 1440×900 captures of every pill group; text centred, no overflow, proportions match the reference. |
 
 ## 3. Motion
 
