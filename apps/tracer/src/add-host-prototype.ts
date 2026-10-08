@@ -29,7 +29,6 @@ import {
   mountChipInput,
   mountConfirmTip,
   mountStepStatus,
-  mountToast,
   PaneStepper,
   flashTip,
   Spring,
@@ -193,7 +192,8 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
 
   const stage = core.stage;
 
-  const toast: ToastController = mountToast(stage);
+  // The canvas owns the one shared toast (its connection messages use it too).
+  const toast: ToastController = canvas.toast;
   const added: AddHostFixture[] = [];
   let wizard: Wizard | undefined;
   let confirmTip: ConfirmTipController | undefined;
@@ -873,7 +873,6 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       wizard?.dispose();
       reviewRun?.close();
       confirmTip?.close(false);
-      toast.dispose();
       window.removeEventListener("tracer:proto-action", onProtoAction);
       sidebarButton.removeEventListener("click", openFromSidebar);
       sidebarButton.remove();

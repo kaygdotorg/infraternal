@@ -10,6 +10,8 @@ export interface ToastMessage {
   message: string;
   action?: ToastAction;
   duration?: number;
+  /** `error` drops the success tick: the message is a failure, not a confirmation. */
+  tone?: "ok" | "error";
 }
 
 export interface ToastController {
@@ -69,6 +71,7 @@ export function mountToast(parent: HTMLElement): ToastController {
       selectAction = value.action?.onSelect;
       action.textContent = value.action?.label ?? "";
       action.hidden = !value.action;
+      host.dataset.tone = value.tone ?? "ok";
       host.hidden = false;
       host.dataset.open = "false";
       requestAnimationFrame(() => { if (!host.hidden) host.dataset.open = "true"; });

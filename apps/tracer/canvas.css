@@ -41,6 +41,9 @@
 /* Window marks are filled glyphs. */
 .ui-host-mark { width: 100%; height: 100%; fill: currentColor; }
 
+/* The status line's text goes to the shared toast (canvas.ts); the line itself never shows. */
+.terminal-screen[data-canvas="on"] .connection-status { display: none; }
+
 /* ---- details popover ------------------------------------------------------------- */
 .canvas-popover {
   position: absolute; z-index: 6; display: flex; flex-direction: column; min-height: 0; overflow: hidden;

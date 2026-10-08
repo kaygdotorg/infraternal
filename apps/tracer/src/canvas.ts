@@ -26,6 +26,7 @@
 import { Spring } from "../../../packages/ui/src/spring";
 import { createWindowCard, type WindowCard } from "../../../packages/ui/src/window-card";
 import { hostIconMarkup, type HostPlatform } from "../../../packages/ui/src/host-icons";
+import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { openDetailsPopover, type DetailsPopover } from "./canvas-popover";
 import type { BranchSection, BranchedMenu } from "../../../packages/ui/src/branched";
 import type { CoreScreen } from "./core-screen";
@@ -103,6 +104,8 @@ export interface CanvasController {
   reveal(id: string, align?: "start" | "nearest"): void;
   /** Ids of every window in layout order. */
   windowIds(): string[];
+  /** The one shared toast: every transient message on the canvas uses it, in its standard place. */
+  readonly toast: ToastController;
 }
 
 interface CanvasWindow {
@@ -157,6 +160,27 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
 
   const events = new AbortController();
   const signal = events.signal;
+
+  // ---- one toast, no second status surface -----------------------------------------------
+  // The terminal client reports connection state and transient failures by writing text into
+  // the core screen's status line. On the canvas that line is hidden (canvas.css) and its text
+  // is shown through the shared toast instead, so nothing toast-like ever appears on its own.
+  const toast = mountToast(stage);
+  let relaying = false;
+  const relayStatus = (): void => {
+    const message = core.status.textContent?.trim() ?? "";
+    // "Connecting…" and the like are progress, not news: the capsule's dot already shows them.
+    if (message && !/(…|\.\.\.)$/.test(message)) {
+      relaying = true;
+      toast.show({ message, tone: /could not|failed|error|unavailable/i.test(message) ? "error" : "ok", duration: 5000 });
+    } else if (relaying) {
+      // Only take down a message this relay put up; a flow's own toast is not ours to dismiss.
+      relaying = false;
+      toast.dismiss();
+    }
+  };
+  const statusWatch = new MutationObserver(relayStatus);
+  statusWatch.observe(core.status, { childList: true, characterData: true, subtree: true });
 
   // ---- offset, springs and rest snapping ---------------------------------------------
   let x = 0, y = 0;
@@ -740,8 +764,11 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       if (target) revealWindow(target, align);
     },
     windowIds: () => windows.map((entry) => entry.id),
+    toast,
     dispose() {
       events.abort();
+      statusWatch.disconnect();
+      toast.dispose();
       resizeObserver.disconnect();
       popover?.close("keyboard");
       for (const entry of windows) entry.card.dispose();

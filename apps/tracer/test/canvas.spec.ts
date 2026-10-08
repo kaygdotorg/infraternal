@@ -186,3 +186,17 @@ test("every floating card uses the one overlay material", async ({ page }) => {
   expect(material.popover).toEqual(material.shared);
   expect(material.shared.filter).toContain("blur(14px)");
 });
+
+// ---- the connection line is never a second toast ---------------------------------------
+test("a connection failure shows in the shared toast, never as a floating status box", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.evaluate(() => { document.querySelector("#connection-status")!.textContent = "The request could not be completed. Try again."; });
+  const toast = page.locator(".ui-toast");
+  await expect(toast).toBeVisible();
+  await expect(toast).toContainText("could not be completed");
+  expect(await page.locator("#connection-status").evaluate((node) => getComputedStyle(node).display)).toBe("none");
+  // Progress text ("Connecting…") raises nothing.
+  await page.evaluate(() => { document.querySelector("#connection-status")!.textContent = "Connecting…"; });
+  await expect(toast).toContainText("could not be completed");
+});

@@ -107,6 +107,7 @@
   transition: opacity 170ms ease-out, transform 190ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 .ui-toast[hidden] { display: none !important; }
+.ui-toast[data-tone="error"] .ui-toast-marker { display: none; }
 .ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
 /* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
 .ui-toast { min-height: 44px; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 14px; }
