@@ -10,6 +10,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
 import { serveProvisioning } from "./provisioning-double";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
+import { sessionDevices, sessionHosts } from "./session-fixtures";
 
 const HOST = "localhost";
 // The browser connects to TRACER_TEST_PORT; the TCP latency proxy reaches this private upstream port.
@@ -173,6 +174,13 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   }
   if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
     return sendJson(response, 200, { hosts: prototypeHosts });
+  }
+  if (request.method === "GET" && url.pathname === "/__mock/proto/sessions") {
+    // The session inventory (D178). `?delay=<ms>` and `?fail=1` let the mockup show its slow and failed states.
+    const delay = Math.min(5000, Math.max(0, Number(url.searchParams.get("delay")) || 0));
+    if (delay) await new Promise((done) => setTimeout(done, delay));
+    if (url.searchParams.get("fail") === "1") return sendJson(response, 503, { error: "session list unavailable" });
+    return sendJson(response, 200, { hosts: sessionHosts, devices: sessionDevices });
   }
   if (request.method === "GET" && url.pathname === "/__mock/proto/addhost") {
     return sendJson(response, 200, { hosts: addHostFixtures });
@@ -617,6 +625,11 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       sendWelcome(connection);
       return;
     case "Call": {
+      // Like the server, an action it does not know is refused (the Mesh asks `mesh.list` and must be told no).
+      if (connection.welcomed && connection.session && frame.actionId.startsWith("mesh.")) {
+        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"unknown action"}') });
+        return;
+      }
       if (!connection.welcomed || frame.callId !== 1 || frame.actionId !== "ssh.session.open") {
         connection.socket.close(1002, "unexpected test-double action");
         return;

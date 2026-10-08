@@ -22,6 +22,7 @@ export function createInputLock(cx: Ctx): InputLock {
       if (lock) {
         const { win, before } = lock;
         lock = undefined;
+        cx.viewport.removeAttribute("data-input-lock");
         win.card.setLocked(false);
         cx.core.lockToolbarRow(undefined);
         // Unlocking restores the canvas lock to what it was before.
@@ -35,6 +36,7 @@ export function createInputLock(cx: Ctx): InputLock {
       // Locked while the canvas is free: the canvas snaps to that window first.
       if (!state.canvasLock) cx.nav.focusWindow(win);
       lock = { win, before };
+      cx.viewport.setAttribute("data-input-lock", "");
       win.card.setLocked(true);
       cx.core.lockToolbarRow("keys");
       // A touch screen's keyboard opens when an input is focused, and a lock button must not open it: the person
@@ -42,6 +44,6 @@ export function createInputLock(cx: Ctx): InputLock {
       if (!matchMedia("(pointer: coarse)").matches) win.binding?.focus();
       cx.toolbar.update();
     },
-    reset() { if (lock) { lock = undefined; cx.core.lockToolbarRow(undefined); } },
+    reset() { if (lock) { lock = undefined; cx.viewport.removeAttribute("data-input-lock"); cx.core.lockToolbarRow(undefined); } },
   };
 }

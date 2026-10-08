@@ -14,7 +14,7 @@ import { createWindowCard, type WindowAction } from "../../../../../packages/ui/
 import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResizeHost } from "../../../../../packages/ui/src/window-resize";
 import type { Ctx, ViewRec, WinRec } from "../context";
 import type { WindowModel } from "../model/types";
-import { ICON, iconFor } from "../views/icons";
+import { ICON, SESSION_ICON, iconFor } from "../views/icons";
 import { isTerminal, makeBody } from "../views/body";
 import { beginMove } from "./move";
 
@@ -27,14 +27,30 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
     actions.push({ id: "split-right", label: "Split right", icon: ICON.splitRight, onSelect: () => { void cx.win.split(rec, "right"); } });
     actions.push({ id: "split-down", label: "Split down", icon: ICON.splitDown, onSelect: () => { void cx.win.split(rec, "down"); } });
   }
+  // The session manager sits beside the splits when the canvas has an inventory (D127); a team layout's windows are read-only.
+  if (m.kind === "terminal" && !m.noAccess && cx.adapters.inventory) {
+    actions.push({ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: (e) => cx.sessionUi?.toggleManager(rec, e.currentTarget as HTMLElement, e.detail === 0 ? "keyboard" : "pointer") });
+  }
   if (m.kind !== "node" && m.kind !== "settings" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });
   const title = { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
-  const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" && !m.noAccess ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: () => cx.toolbar.update() });
+  const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" && !m.noAccess ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: (locked) => {
+    // The lock icon on the window is the input lock (the padlock): one lock at a time, on this window.
+    const held = cx.inputLock.state;
+    if (locked) {
+      setActive(cx, rec);
+      if (held && held.win !== rec) cx.inputLock.toggle();
+      if (!cx.inputLock.state) cx.inputLock.toggle();
+    } else if (held?.win === rec) cx.inputLock.toggle();
+    cx.toolbar.update();
+  } });
   Object.assign(rec, { model: m, card, owner: c });
   card.root.dataset.kind = m.kind;
   if (m.h) { card.root.style.height = m.h <= 1 ? `calc(var(--clh) * ${m.h})` : `${m.h}px`; card.root.style.flex = "none"; }
   makeBody(cx, rec);
   wireWindow(cx, rec);
+  // A window showing a session means that session is open (D178); the surfaces about it follow the inventory.
+  if (isTerminal(rec) && m.sessionId) cx.adapters.inventory?.attach(m.host, m.sessionId);
+  cx.sessionUi?.paint(rec);
   const unwatch = cx.memory.watch(card.root);
   const bodyCleanup = rec.cleanup;
   rec.cleanup = () => { unwatch(); bodyCleanup?.(); };
@@ -64,7 +80,7 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
   root.addEventListener("pointerdown", () => setActive(cx, rec), { signal, capture: true });
   // A tap in a terminal window types into it (the key row of the toolbar then shows).
   root.addEventListener("click", (e) => {
-    if (!isTerminal(rec) || (e.target as Element).closest(".ui-window-head, .ui-window-lock, .ui-window-resize")) return;
+    if (!isTerminal(rec) || (e.target as Element).closest(".ui-window-head, .ui-window-lock, .ui-window-resize, .cl-sx-strip, .cl-sx-badge")) return;
     rec.binding?.focus();
   }, { signal });
   // The pill moves the window; it opens nothing.

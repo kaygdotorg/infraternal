@@ -3,7 +3,7 @@
  * is a window; these functions fill a window's body. Sections that already exist as shared
  * components (Toolbar, Shortcuts, About) are filled by their own `render`; the rest live here:
  * Appearance (theme, font, background and card transparency), Devices, Account and the
- * admin-only placeholders (Users, Grants, Discovery sources).
+ * admin-only placeholders (Users, Access, Found hosts).
  *
  * Rows are the shared kinds: a tappable row with a tick for the current choice, a key/value
  * list for facts, icon buttons with the warm tooltip, and the compact confirmation for a
@@ -160,8 +160,8 @@ export function renderDevices(container: HTMLElement, api: DevicesApi): () => vo
       };
       button("Jump to its view", ICON_JUMP, () => api.jump(d.view));
       if (!d.current) button("Sign out this device", ICON_OUT, (b) => mountConfirmTip(b, {
-        label: `Sign out ${d.name}`, message: `Sign out ${d.name}?`, detail: "It will need a passkey to sign in again.",
-        confirmLabel: "Sign out", cancelLabel: "Cancel", onConfirm: () => { api.signOut(d); paint(); },
+        label: `Sign out ${d.name}`, title: `Sign out ${d.name}?`, effect: "That device will be signed out and will need your passkey to sign in again.",
+        named: true, confirmLabel: "Sign out device", cancelLabel: "Keep signed in", onConfirm: () => { api.signOut(d); paint(); },
       }));
       list.append(li);
     }

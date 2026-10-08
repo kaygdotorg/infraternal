@@ -13,9 +13,12 @@ export const SETTINGS_SECTIONS: Array<{ id: string; title: string; admin?: boole
   { id: "account", title: "Account" },
   { id: "about", title: "About" },
   { id: "users", title: "Users", admin: true },
-  { id: "grants", title: "Grants", admin: true },
-  { id: "discovery", title: "Discovery sources", admin: true },
+  { id: "grants", title: "Access", admin: true },
+  { id: "discovery", title: "Found hosts", admin: true },
 ];
+
+/** Sections the app renders itself (the rest come from a `SettingsSource`). */
+export const BUILTIN_SECTIONS = ["appearance", "toolbar", "shortcuts", "about"] as const;
 
 /** Settings is a view like the others: one window per section, tiled in columns. */
 export function buildSettingsView(admin: boolean, m: Metrics, available: readonly string[] = SETTINGS_SECTIONS.map((s) => s.id)): ViewModel {

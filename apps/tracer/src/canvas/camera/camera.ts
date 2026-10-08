@@ -20,6 +20,7 @@ import { Spring } from "../../../../../packages/ui/src/spring";
 
 export interface Cam { cx: number; cy: number; z: number }
 import type { Pt, Rect } from "../layout/geometry";
+import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
 
 /** Below about 60 % zoom, windows become read-only thumbnails (`thumb`). */
 export type Lod = "live" | "thumb";
@@ -47,11 +48,11 @@ export const clamp = (v: number, lo: number, hi: number): number => Math.max(lo,
 // test/clusters-flight.spec.ts. Pointer, touch and pill flights about 350 ms (was 1.3 s); a key's about 190 ms (was 430 ms) (the motion rule).
 const FLIGHT = { visualDuration: 0.16, bounce: 0 };
 const KEY_FLIGHT = { visualDuration: 0.08, bounce: 0 };
-/** The layout spring (the same one windows use when a layout moves, layout/flip.ts). */
-const LAYOUT_FLIGHT = { visualDuration: 0.5, bounce: 0.22 };
 const REST_DELAY = 140;
 export const MIN_ZOOM = 0.08;
 export const MAX_ZOOM = 2;
+/** Below this zoom the world is not given `will-change: transform` while it moves (see `apply`). */
+const WILL_CHANGE_MIN_ZOOM = 0.5;
 
 export class Camera {
   readonly cam: Cam = { cx: 0, cy: 0, z: 1 };
@@ -72,8 +73,10 @@ export class Camera {
   private readonly springLz: Spring;
   private restTimer = 0;
   private moving = false;
+  /** Whether `will-change: transform` is on the world right now. */
+  private hinted = false;
   private ready = false;
-  private flightKind: "gesture" | "key" | "layout" = "gesture";
+  private flightKind: "gesture" | "key" = "gesture";
 
   constructor(private readonly viewport: HTMLElement, private readonly world: HTMLElement, private readonly hooks: CameraHooks = {}) {
     world.dataset.lod = this.lod;
@@ -82,6 +85,14 @@ export class Camera {
     this.springCx = new Spring(0, (v) => { this.cam.cx = v; this.apply(); }, FLIGHT);
     this.springCy = new Spring(0, (v) => { this.cam.cy = v; this.apply(); }, FLIGHT);
     this.springLz = new Spring(0, (v) => { this.cam.z = Math.exp(v); this.apply(); }, FLIGHT);
+    this.restThresholds(1);
+  }
+
+  /** A flight ends when it is under a quarter of a device pixel (a zoom change under 0.05 %) from its target. */
+  private restThresholds(zoom: number): void {
+    restAt(this.springCx, quarterDevicePx() / zoom);
+    restAt(this.springCy, quarterDevicePx() / zoom);
+    restAt(this.springLz, SCALE_REST);
   }
 
   /** Paints the first frame, at rest. Call once the canvas around the camera exists. */
@@ -113,7 +124,12 @@ export class Camera {
     const nextBand: ZoomBand = this.band === "in" ? (cam.z < 0.76 ? "out" : "in") : (cam.z > 0.82 ? "in" : "out");
     if (nextBand !== this.band) { this.band = nextBand; world.dataset.zoom = nextBand; this.hooks.onBand?.(nextBand); }
     if (!atRest) {
-      if (!this.moving) { this.moving = true; world.style.willChange = "transform"; }
+      this.moving = true;
+      // `will-change: transform` makes the browser raster the layer at its own size (scale 1) so a move never blurs it.
+      // Zoomed far out that is the whole visible world at full size: a mesh of a thousand hosts is 7,800 px wide, and
+      // a zoom out then rasters about ten times the tiles it needs. Out there the browser rasters at the zoom instead.
+      const hint = cam.z >= WILL_CHANGE_MIN_ZOOM;
+      if (hint !== this.hinted) { this.hinted = hint; world.style.willChange = hint ? "transform" : ""; }
       window.clearTimeout(this.restTimer);
       this.restTimer = window.setTimeout(() => this.rest(), REST_DELAY);
     }
@@ -124,6 +140,7 @@ export class Camera {
   rest(): void {
     window.clearTimeout(this.restTimer);
     this.moving = false;
+    this.hinted = false;
     this.world.style.willChange = "";
     this.apply(true);
     this.hooks.onRest?.();
@@ -171,12 +188,6 @@ export class Camera {
     try { return run(); } finally { this.flightKind = "gesture"; }
   }
 
-  /** Runs a flight on the layout spring: the framing moved because the layout around it did (a docked sidebar). */
-  layoutFlight<T>(run: () => T): T {
-    this.flightKind = "layout";
-    try { return run(); } finally { this.flightKind = "gesture"; }
-  }
-
   /** Flies the camera (interruptible: a new target keeps the current velocity). */
   flyTo(target: () => Cam, instant = false): void {
     this.target = target;
@@ -188,7 +199,8 @@ export class Camera {
       this.set(t);
       return;
     }
-    const cfg = this.flightKind === "key" ? KEY_FLIGHT : this.flightKind === "layout" ? LAYOUT_FLIGHT : FLIGHT;
+    this.restThresholds(Math.max(t.z, this.cam.z));
+    const cfg = this.flightKind === "key" ? KEY_FLIGHT : FLIGHT;
     this.springCx.configure(cfg); this.springCy.configure(cfg); this.springLz.configure(cfg);
     const { cam } = this;
     this.springCx.value = cam.cx; this.springCy.value = cam.cy; this.springLz.value = Math.log(cam.z);

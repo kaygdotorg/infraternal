@@ -13,7 +13,7 @@
  */
 import type { Ctx, ViewRec } from "./context";
 import { boxOf } from "./layout/geometry";
-import { endSplit } from "./layout/droplet";
+import { endSplit } from "./layout/droplet-handle";
 import type { Backdrop } from "./backdrop";
 
 export interface Memory {

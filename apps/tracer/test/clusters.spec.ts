@@ -210,9 +210,9 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   const arrow = page.locator('.cl[data-view="mesh"] .cl-arrow[data-grant="g3"]');
   const hit = await centre('.cl[data-view="mesh"] .cl-arrow[data-grant="g3"] .cl-arrow-hit');
   await page.mouse.move(hit.x, hit.y);
-  await expect(arrow).toHaveAttribute("data-tip", "nix-cache→studio-mac");
+  await expect(arrow).toHaveAttribute("data-tip", "nix-cache can reach studio-mac");
   await expect.poll(() => arrow.locator(".cl-arrow-handle").first().evaluate((n) => getComputedStyle(n).opacity)).toBe("1");
-  await expect(page.locator(".ui-tooltip, .tip-pos").first()).toContainText("nix-cache→studio-mac");
+  await expect(page.locator(".ui-tooltip, .tip-pos").first()).toContainText("nix-cache can reach studio-mac");
   // Head to another node: nix-cache -> studio-mac becomes nix-cache -> edge-arm, after a confirmation.
   const head = await centre('.cl-arrow[data-grant="g3"] .cl-arrow-handle[data-end="head"]');
   const edge = await centre('.ui-window[data-window-id="n-edge-arm"]');
@@ -224,7 +224,7 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   await expect(page.locator('.ui-window[data-window-id="n-edge-arm"][data-drop]')).toHaveCount(1);
   await expect(page.locator('.cl-arrow[data-live][data-snapped]')).toHaveCount(1); // snapped on the new node
   await page.mouse.up();
-  await expect(page.locator(".ui-confirm-tip")).toContainText("Move grant nix-cache→studio-mac to nix-cache→edge-arm?");
+  await expect(page.locator(".ui-confirm-tip")).toContainText("Let nix-cache reach edge-arm instead of studio-mac?");
   await page.locator(".ui-confirm-yes").click();
   await expect.poll(async () => (await grantsOf()).find((g) => g.id === "g3")?.to).toBe("edge-arm");
   // Cancelling springs the arrow back and changes nothing: ci -> nix-cache, tail to studio-mac.
@@ -237,7 +237,7 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   await page.mouse.move(tail.x - 10, tail.y + 110, { steps: 5 });
   await page.mouse.move(studio.x, studio.y, { steps: 14 });
   await page.mouse.up();
-  await expect(page.locator(".ui-confirm-tip")).toContainText("Move grant ci→nix-cache to studio-mac→nix-cache?");
+  await expect(page.locator(".ui-confirm-tip")).toContainText("Let studio-mac reach nix-cache instead of tag:ci?");
   await page.locator(".ui-confirm-no").click();
   await page.waitForTimeout(500);
   expect((await grantsOf()).find((g) => g.id === "g7")).toMatchObject({ from: "tag:ci", to: "nix-cache" });
@@ -251,7 +251,7 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   await page.mouse.down();
   await page.mouse.move(head2.x + 160, head2.y - 40, { steps: 10 }); // open canvas, clear of every node's snap radius
   await page.mouse.up();
-  await expect(page.locator(".ui-confirm-tip")).toContainText("Remove grant nix-cache→edge-arm?");
+  await expect(page.locator(".ui-confirm-tip")).toContainText("Stop nix-cache reaching edge-arm?");
   await page.locator(".ui-confirm-yes").click();
   await expect.poll(async () => (await grantsOf()).length).toBe(n0 - 1);
   await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveCount(0);
@@ -842,9 +842,11 @@ test("settings is a view: a gear after a divider, one window per section, admin 
   await expect(page.locator(".ui-settings")).toHaveCount(0); // the overlay shell is gone
   // The palette goes straight to a section's window.
   await page.keyboard.press("Control+k");
-  await page.keyboard.type("settings → devices");
+  await page.keyboard.type("settings: devices");
   await page.keyboard.press("Enter");
   await expect(page.locator('.ui-window[data-window-id="s-devices"][data-active]')).toHaveCount(1, { timeout: 4000 });
+  // The sidebar is a layer over the canvas (it no longer docks), so it is closed before reaching under it.
+  await page.locator("#sidebar-toggle").click();
   // Appearance applies live: choosing a theme repaints at once.
   await page.evaluate(() => (window as unknown as { __tracerClusters: { openSettings(s: string): void } }).__tracerClusters.openSettings("appearance"));
   await page.locator('.ui-window[data-window-id="s-appearance"] .ui-sp-row[data-id="ink"]').click();
@@ -866,7 +868,12 @@ test("devices: the name edits in place, a sign-out asks first, and a device swit
   await expect(row.locator(".ui-sp-kind svg")).toHaveCount(1);
   const before = await page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device').count();
   await row.locator('[aria-label="Sign out this device"]').click();
-  await expect(page.locator(".ui-confirm-tip")).toContainText("Sign out");
+  // The confirmation says what happens in plain words, and its two buttons carry their names.
+  const tip = page.locator(".ui-confirm-tip");
+  await expect(tip.locator(".ui-confirm-tip-message")).toContainText(/^Sign out .+\?$/);
+  await expect(tip.locator(".ui-confirm-tip-detail")).toHaveText("That device will be signed out and will need your passkey to sign in again.");
+  await expect(tip.locator(".ui-confirm-yes")).toHaveText("Sign out device");
+  await expect(tip.locator(".ui-confirm-no")).toHaveText("Keep signed in");
   await page.locator(".ui-confirm-yes").click();
   await expect(page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device')).toHaveCount(before - 1);
   await page.keyboard.press("Control+k");
@@ -910,13 +917,17 @@ test("sharing: the dialog sends a view; the recipient gets their own copy named 
     const ids = views.map((v) => v.id);
     expect(ids.indexOf("settings")).toBe(ids.length - 1); // Settings stays last
     await expect(asha.locator(".ui-toast", { hasText: "kayg shared Incident" })).toHaveCount(1);
-    for (let i = 0; i < views.length; i++) for (let j = i + 1; j < views.length; j++) expect(overlap(views[i]!, views[j]!)).toBe(false);
+    // At rest, not mid-glide: Settings slides to make room for the copy, and a snapshot taken while it moves overlaps.
+    await expect.poll(async () => {
+      const now = await probe(asha, (p) => p.views());
+      return now.flatMap((a, i) => now.slice(i + 1).map((b) => overlap(a, b))).some(Boolean);
+    }, { timeout: 4000 }).toBe(false);
     // The camera flew to it, locked on.
     await expect.poll(async () => (await probe(asha, (p) => p.canvasLock())).view, { timeout: 4000 }).toBe("incident-from-kayg-sh1");
     // edge-arm is outside her grants: a calm explanation, not an error.
     const blocked = asha.locator('.ui-window[data-window-id$=":i-edge-arm"]');
     await expect(blocked).toContainText("No access");
-    await expect(blocked).toContainText("Your grants do not include edge-arm");
+    await expect(blocked).toContainText("You do not have access to edge-arm");
     await expect(asha.locator('.ui-window[data-window-id$=":i-build-01"] .terminal-host, .ui-window[data-window-id$=":i-build-01"] .canvas-preview')).toHaveCount(1);
     // It is her copy: editable (close is there).
     await expect(asha.locator('.ui-window[data-window-id$=":i-build-01"] [data-action="close"]')).toHaveCount(1);
@@ -1078,8 +1089,8 @@ test("window header actions are one pill: as tall as the title pill, on its line
     return { aTop: a.top, aH: a.height, tTop: t.top, tH: t.height, buttons, gaps, tip: [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => b.dataset.tip) };
   }, id);
   const d = await geometry(page, "w-nix-cache");
-  expect(d.buttons).toEqual(["split-right", "split-down", "close"]);
-  expect(d.tip).toEqual(["Split right", "Split down", "Close"]);
+  expect(d.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);
+  expect(d.tip).toEqual(["Split right", "Split down", "Sessions", "Close"]);
   expect(Math.abs(d.aH - d.tH)).toBeLessThan(0.5);
   expect(Math.abs(d.aTop - d.tTop)).toBeLessThan(0.5);
   expect(Math.max(...d.gaps) - Math.min(...d.gaps)).toBeLessThan(0.5); // equal spacing
@@ -1088,7 +1099,7 @@ test("window header actions are one pill: as tall as the title pill, on its line
   try {
     const p = t.page;
     const pd = await geometry(p, "w-build-01");
-    expect(pd.buttons).toEqual(["split-right", "split-down", "close"]);
+    expect(pd.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);
     expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(0.5);
     expect(Math.abs(pd.aTop - pd.tTop)).toBeLessThan(0.5);
     const hits = await p.evaluate(() => {
@@ -1100,7 +1111,7 @@ test("window header actions are one pill: as tall as the title pill, on its line
         return at(cx - 21, cy) && at(cx + 21, cy) && at(cx, cy - 21) && at(cx, cy + 21);
       });
     });
-    expect(hits).toEqual([true, true, true]);
+    expect(hits).toEqual([true, true, true, true]);
   } finally { await t.close(); }
 });
 

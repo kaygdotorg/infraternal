@@ -39,7 +39,8 @@ import type { PillModule } from "./toolbar/pill";
 import type { ViewList } from "./toolbar/viewlist";
 import type { TreeModule } from "./toolbar/tree";
 import type { ToolbarModule } from "./toolbar/row";
-import type { SettingsSource } from "./views/settings-body";
+import type { SessionUi } from "./windows/session-hooks";
+import type { SettingsSource } from "./views/settings-body.on-demand";
 
 /** One window on the canvas: its card, its model and the things that must be undone when it goes. */
 export interface WinRec {
@@ -98,6 +99,8 @@ export interface CanvasState {
 export interface Adapters {
   /** Binds terminal windows to sessions (real in the product, previews in mockups). */
   sessions: SessionService;
+  /** Lists, names and ends sessions (D178, D183); absent until the lifecycle API exists, and the manager, the markers and the final-screen strip are then not offered. */
+  inventory?: import("./sessions/inventory").SessionInventory;
   /** The canvas document's home (local storage today, the server sync of #98 later). */
   store: CanvasStore;
   /** Mesh data and edits; absent until the Mesh API exists, and the Mesh view is then not offered. */
@@ -145,6 +148,8 @@ export interface Ctx {
   win: WindowsModule;
   float: FloatModule;
   inputLock: InputLock;
+  /** The session manager, the final-screen strip and the size badge; exists only with an inventory. */
+  sessionUi?: SessionUi;
   visibility: Visibility;
   pill: PillModule;
   viewList: ViewList;

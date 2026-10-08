@@ -6,6 +6,7 @@
  * position is always the true one. Reduced motion skips the animation.
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
+import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
 
 export interface Flip {
   /** Records where the elements are now. */
@@ -43,6 +44,8 @@ export function createFlip(zoom: () => number, invalidate: () => void): Flip {
           n.style.transform = `translate(${dx * p}px, ${dy * p}px)${scale ? ` scale(${1 + (sw - 1) * p}, ${1 + (sh - 1) * p})` : ""}`;
           invalidate();
         }, cfg);
+        // Progress p moves the element by dx * p: it rests when that is under a quarter of a device pixel.
+        restAt(spring, Math.min(SCALE_REST * 4, quarterDevicePx() / Math.max(1, Math.abs(dx), Math.abs(dy)), scale ? SCALE_REST / Math.max(Math.abs(sw - 1), Math.abs(sh - 1), 0.001) : 1));
         springs.set(n, spring);
         spring.set(0);
       }

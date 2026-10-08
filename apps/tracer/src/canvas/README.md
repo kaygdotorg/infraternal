@@ -25,7 +25,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `camera/gestures.ts` | wheel, trackpad, touch and pointer on the canvas | `installGestures(cx)` |
 | `layout/geometry.ts` | cell grid, metrics, boxes, push-aside (pure) | `CELL` `metricsFor` `boxOf` `resolve` `snapToGrid` |
 | `layout/stops.ts`, `columns.ts`, `flip.ts` | stops (pure), column scroll, FLIP reflow | `stopsFor` `nearestStop`, `scrollColumn` `stepWindow`, `Flip` |
-| `layout/droplet.ts` | the droplet split (short-lived WebGL, only while it plays) | `dropletSplit` |
+| `layout/droplet.on-demand.ts`, `droplet-handle.ts` | the droplet split (short-lived WebGL, only while it plays; loaded on demand, warmed when idle) | `loadDroplet` `endSplit` |
 | `views/world.ts` | building a view, sizing it on the grid, settle, hover card, dragging a view | `ViewsModule` (`cx.view`) |
 | `views/body.ts`, `settings*.ts`, `icons.ts` | what is inside a window by kind; Settings panels; icons | `makeBody`, `SettingsSource` |
 | `windows/frame.ts`, `move.ts` | window card, activation, pill grab and move, resize | `makeWindow`, `setActive`, `beginMove` |
@@ -34,14 +34,14 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `windows/lifecycle.ts` | open, close (never ends the session), split | `WindowsModule` (`cx.win`) |
 | `windows/float.ts`, `input-lock.ts` | floating terminal; the input lock (padlock) | `FloatModule`, `InputLock` |
 | `toolbar/` | top pill + swipe, view list, tree (sidebar), canvas row + desktop buttons, shortcuts, palette | `PillModule` `ViewList` `TreeModule` `ToolbarModule` |
-| `mesh/` | Mesh view, reach arrows, grant editing | `MeshModule`, adapter `MeshSource` |
+| `mesh/` | Mesh view, reach arrows, grant editing; `api.ts` the real source over the Mesh API (`protocol.ts` is its contract), `layout.ts` the automatic graph layout, `graph.ts` what is on screen (cards near the camera, cluster frames far away), `offer.ts` when the view exists (D187) | `MeshModule`, adapter `MeshSource` |
 | `sharing/` | share dialog, received copies, team layouts | `SharingModule`, adapter `SharingAdapter` |
 | `model/` | runtime model, the **canvas document** (D180), persistence | `toDocument` `parseDocument` `columnsFromDocument`, adapter `CanvasStore`, `DocumentSync` |
 | `sessions/` | binding terminal windows to sessions | adapter `SessionService` / `SessionBinding`; `live.ts` is the product one |
 | `product.ts` | the product canvas: Console on real sessions + Settings with the sections that exist; a lazy chunk loaded after sign-in | `mountProductCanvas` |
 | `status.ts` | a terminal's status text to the one shared toast | `createStatusRelay` |
 | `backdrop.ts` | the dotted canvas behind the views | `createBackdrop` |
-| `mock/` | everything fake: scenes, roles, fake hosts, grants, devices, probe | `mountMockup` |
+| `mock/` | everything fake: scenes, roles, fake hosts, a fake Mesh server (`mesh-server.ts`: large meshes, slow, refusing, lossy), devices, probe | `mountMockup` |
 
 ## Adapters (the seams)
 
@@ -49,7 +49,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 |---|---|---|
 | `CanvasStore` (`model/store.ts`) | `LocalCanvasStore`: local storage per account | server sync of operations with revisions (#98, D183) |
 | `SessionService` (`sessions/adapter.ts`) | `live.ts`: a `TerminalClient` per window, each a stream of the one `MuxConnection` (`src/connection.ts`, D183); mockups: previews | remote hosts as #78 lands |
-| `MeshSource` (`mesh/source.ts`) | mock data; Mesh view not offered in the product | the mesh API (#108) |
+| `MeshSource` (`mesh/source.ts`) | `mesh/api.ts` over the one connection (`mesh.list`, `mesh.grant.*`, a `mesh` event topic); mockups run the same code against `mock/mesh-server.ts`; the view is offered only when the server says the person may see it | what #108 adds (access flags, node extras, deltas) |
 | `SharingAdapter` (`sharing/adapter.ts`) | mock only; product offers no sharing | instance sharing (#93, D182) |
 | `SettingsSource` (`views/settings-body.ts`) | built-in sections only | devices, account, users, grants, discovery as their APIs land |
 | `Adapters.containers`, `Adapters.addHost` | absent in the product (view and button not offered) | host API; add-host flow (#78) |
@@ -71,6 +71,7 @@ never shows mockup UI.
 
 - `bun test src/canvas` (pure parts: geometry, stops, the D180 document) and `bun test chunk-classes.test.ts`.
 - `test/clusters*.spec.ts`, `test/canvas.spec.ts`: the mockup on the test double.
+- `test/mesh.spec.ts`: the Mesh view on the real adapter against the fake server: scale and level of detail, frame times at 1,000 nodes, live updates, edits that reach the server and the ones it refuses, access, pins, states (`MESH_CAPTURES=1` writes `captures/canvas-mesh/`). `real/mesh.spec.ts`: the same view on the real binary.
 - `real/canvas.spec.ts` (`playwright.real.config.ts`, `scripts/verify integration`): the product on the real server
   binary and real PTYs: open, close (session stays alive), split, re-tile, reload, connection rotation at the
   server's 32-writer cap, frame times, memory at 393x852 DPR 3.

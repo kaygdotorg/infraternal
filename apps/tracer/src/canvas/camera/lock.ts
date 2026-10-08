@@ -13,7 +13,7 @@ import type { Ctx, ViewRec, WinRec } from "../context";
 import type { ViewId } from "../model/types";
 import { COLUMN_GAP, type Rect } from "../layout/geometry";
 import { scrollToWindow } from "../layout/columns";
-import { nearestStop as nearest, stopsFor as stops, type Stops } from "../layout/stops";
+import { isFreeView, nearestStop as nearest, stopsFor as stops, type Stops } from "../layout/stops";
 import { bounds, clamp, type Cam } from "./camera";
 
 export interface Nav {
@@ -32,7 +32,6 @@ export interface Nav {
   focusWindow(rec: WinRec, instant?: boolean, keepFree?: boolean): void;
   /** After the camera rests: the view that contains the camera centre (else the nearest) becomes the current one. */
   updateCurrentView(): void;
-  dispose(): void;
   /** Listens for lock changes (and the first paint). */
   onLockChange(listener: () => void): () => void;
 }
@@ -48,34 +47,10 @@ export function createNav(cx: Ctx): Nav {
   };
   const stopsFor = (c: ViewRec): Stops => stops(c.view, cx.view.contentRect(c), camera.vw, camera.vh);
   const nearestStop = (c: ViewRec, x: number): number => nearest(stopsFor(c), x);
-  /**
-   * How far the docked sidebar covers the canvas area, in pixels from its left edge (0 when it is not docked).
-   * The canvas area itself never moves when the sidebar docks; framing moves only if the sidebar would cover it.
-   */
-  const insetLeft = (): number => {
-    if (cx.stage.dataset.sidebar !== "docked") return 0;
-    const sidebar = cx.stage.querySelector<HTMLElement>("#sidebar");
-    if (!sidebar) return 0;
-    return Math.max(0, sidebar.offsetLeft + sidebar.offsetWidth + 12 - cx.core.panes.offsetLeft);
-  };
   const snapCam = (c: ViewRec, i: number): Cam => {
     const st = stopsFor(c);
     state.snapIdx = clamp(i, 0, st.lefts.length - 1);
-    const left = st.lefts[state.snapIdx]!;
-    let camX = left + st.view / 2;
-    // The framed content's left and right edges on screen at this stop. If the docked sidebar covers its left edge,
-    // centre it in the free area (or, when it is wider than that, start it at the sidebar's edge); otherwise the
-    // framing does not move at all.
-    const inset = insetLeft();
-    if (inset > 0) {
-      const r = cx.view.contentRect(c);
-      const L = (Math.max(r.x, left) - left) * st.z, R = (Math.min(r.x + r.w, left + st.view) - left) * st.z;
-      if (L < inset) {
-        const free = camera.vw - inset, W = R - L;
-        camX -= ((W <= free ? inset + (free - W) / 2 : inset) - L) / st.z;
-      }
-    }
-    return { cx: camX, cy: st.cy, z: st.z };
+    return { cx: st.lefts[state.snapIdx]! + st.view / 2, cy: st.cy, z: st.z };
   };
   const applyCanvasLock = (on: boolean): void => { state.canvasLock = on; paintLock(); };
   const goStop = (c: ViewRec, i: number, instant = false): void => { camera.flyTo(() => snapCam(c, i), instant); };
@@ -90,18 +65,12 @@ export function createNav(cx: Ctx): Nav {
     const c = views.get(id);
     if (!c) return;
     state.currentView = id;
-    applyCanvasLock(true);
+    // A graph too big to snap node by node opens fitted whole and free: zoom into a cluster from there.
+    applyCanvasLock(!isFreeView(c.view));
     cx.pill.paint();
     goStop(c, 0, instant);
   };
-  // Docking or undocking the sidebar re-frames the current stop on the layout spring (a no-op when nothing is covered).
-  const dockWatch = new MutationObserver(() => {
-    const c = views.get(state.currentView);
-    if (state.canvasLock && c) cx.camera.layoutFlight(() => goStop(c, state.snapIdx));
-  });
-  dockWatch.observe(cx.stage, { attributes: true, attributeFilter: ["data-sidebar"] });
   return {
-    dispose() { dockWatch.disconnect(); },
     stopsFor, nearestStop, goStop, applyCanvasLock, overviewCam, flyView,
     setCanvasLock(on, instant = false) {
       applyCanvasLock(on);

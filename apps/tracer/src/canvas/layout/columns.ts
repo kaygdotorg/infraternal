@@ -4,6 +4,7 @@
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
 import { clamp } from "../camera/camera";
+import { restPx } from "../springs";
 
 const reduced = matchMedia("(prefers-reduced-motion: reduce)");
 /** The gap above a window inside a column that a snapped scroll keeps visible. */
@@ -14,7 +15,7 @@ export function scrollColumn(colEl: HTMLElement, top: number, instant = false): 
   const target = clamp(top, 0, colEl.scrollHeight - colEl.clientHeight);
   if (reduced.matches || instant) { colEl.scrollTop = target; return; }
   colEl.dataset.wheel = "";
-  const sp = new Spring(colEl.scrollTop, (v) => { colEl.scrollTop = v; if (v === target) delete colEl.dataset.wheel; }, { visualDuration: 0.4, bounce: 0.1 });
+  const sp = restPx(new Spring(colEl.scrollTop, (v) => { colEl.scrollTop = v; if (v === target) delete colEl.dataset.wheel; }, { visualDuration: 0.4, bounce: 0.1 }));
   sp.set(target);
 }
 

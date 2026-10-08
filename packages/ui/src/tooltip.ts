@@ -75,8 +75,11 @@ const STYLE = `
 @media (hover: hover) and (pointer: fine) { .ui-confirm-tip button:not(.ui-confirm-yes):hover { background: var(--hover); color: var(--fg); } }
 .ui-confirm-tip .ui-confirm-yes { background: var(--fg); color: var(--bg); }
 .ui-confirm-tip .ui-confirm-yes svg { stroke-width: 2; }
+/* Named actions: the two buttons carry their words. */
+.ui-confirm-tip[data-named] button { width: auto; min-width: 28px; padding: 0 12px; font: 500 var(--text-secondary, 12px)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 @media (pointer: coarse) {
   .ui-confirm-tip { gap: 14px; padding: 16px; }
+  .ui-confirm-tip[data-named] button { width: auto; padding: 0 16px; }
   .ui-confirm-tip button { width: 44px; height: 44px; }
   .ui-confirm-tip button svg { width: 18px; height: 18px; }
 }
@@ -101,9 +104,22 @@ function build() {
 export interface ConfirmTipOptions {
   /** Accessible name for the small, trigger-anchored confirmation group. */
   label: string;
-  /** The question, at body size. */
-  message: string;
-  /** One secondary line explaining the consequence. */
+  /**
+   * The shape every confirmation uses (TASTE: messages say what happens, in plain words):
+   * - `title`: the question as a plain sentence about the thing, e.g. "Remove asha's access to build-01?" No arrows,
+   *   ids or enum names.
+   * - `effect`: one line on what changes for the person, e.g. "She will no longer be able to open terminals there."
+   * - `confirmLabel` and `cancelLabel`: the actions by name ("Remove access", "Keep it"), never "OK" or "Yes".
+   * - `named`: show the two actions as labelled buttons instead of the compact check and cross. Use it whenever the
+   *   action is destructive or the words carry meaning.
+   * `message` and `detail` are the earlier names of `title` and `effect` and still work.
+   */
+  title?: string;
+  effect?: string;
+  named?: boolean;
+  /** The question, at body size (the earlier name of `title`). */
+  message?: string;
+  /** One secondary line explaining the consequence (the earlier name of `effect`). */
   detail?: string;
   confirmLabel: string;
   cancelLabel: string;
@@ -138,12 +154,13 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   text.className = "ui-confirm-tip-text";
   const message = document.createElement("p");
   message.className = "ui-confirm-tip-message";
-  message.textContent = options.message;
+  message.textContent = options.title ?? options.message ?? options.label;
   text.append(message);
-  if (options.detail) {
+  const effectText = options.effect ?? options.detail;
+  if (effectText) {
     const detail = document.createElement("p");
     detail.className = "ui-confirm-tip-detail";
-    detail.textContent = options.detail;
+    detail.textContent = effectText;
     text.append(detail);
   }
 
@@ -155,13 +172,15 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   cancel.className = "ui-confirm-no";
   cancel.setAttribute("aria-label", options.cancelLabel);
   cancel.dataset.tip = options.cancelLabel;
-  cancel.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>`;
+  cancel.innerHTML = options.named ? `<span></span>` : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>`;
+  if (options.named) { cancel.querySelector("span")!.textContent = options.cancelLabel; tip.dataset.named = ""; }
   const confirm = document.createElement("button");
   confirm.type = "button";
   confirm.className = "ui-confirm-yes";
   confirm.setAttribute("aria-label", options.confirmLabel);
   confirm.dataset.tip = options.confirmLabel;
-  confirm.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4 4 9-9"/></svg>`;
+  confirm.innerHTML = options.named ? `<span></span>` : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4 4 9-9"/></svg>`;
+  if (options.named) confirm.querySelector("span")!.textContent = options.confirmLabel;
   actions.append(cancel, confirm);
   tip.append(arrow, text, actions);
   document.body.append(tip);

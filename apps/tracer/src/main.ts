@@ -284,7 +284,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   const identity = knownSession ?? await checkSession();
   const hostName = sessionHostname(identity);
   if (!hostName) {
-    renderUnavailable("The authenticated session did not include the server hostname.");
+    renderUnavailable("Could not read this server's name. Try again.");
     return;
   }
   window.clearTimeout(welcomeTimer);
