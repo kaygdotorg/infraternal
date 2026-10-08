@@ -155,6 +155,28 @@ fn now() -> io::Result<i64> {
     i64::try_from(seconds).map_err(io::Error::other)
 }
 
+// Port zero belongs to separate UDP/TCP allocation pools. Reserve TCP first
+// and retry only ephemeral UDP collisions; explicit operator ports never move.
+async fn reserve_transports(
+    address: SocketAddr,
+    config: &quinn::ServerConfig,
+    mut on_reserved: impl FnMut(SocketAddr) -> io::Result<()>,
+) -> io::Result<(quinn::Endpoint, TcpListener)> {
+    let attempts = if address.port() == 0 { 16 } else { 1 };
+    for _ in 0..attempts {
+        let tcp = TcpListener::bind(address).await?;
+        let reserved = tcp.local_addr()?;
+        on_reserved(reserved)?;
+        match quinn::Endpoint::server(config.clone(), reserved) {
+            Ok(endpoint) => return Ok((endpoint, tcp)),
+            Err(error) if address.port() == 0 && error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+        // Dropping this candidate releases its TCP reservation before retrying.
+    }
+    Err(io::ErrorKind::AddrInUse.into())
+}
+
 /// Bound both UDP and TCP to the server's chosen dial-out port. Drop aborts listener tasks.
 pub(crate) struct RemoteListeners {
     tasks: JoinSet<()>,
@@ -187,9 +209,12 @@ impl RemoteListeners {
     ) -> io::Result<Self> {
         #[cfg(test)]
         let diagnostic_hosts = hosts.clone();
-        let endpoint =
-            quinn::Endpoint::server(remote_quic::server_config(identity, roots)?, address)?;
-        let tcp = TcpListener::bind(endpoint.local_addr()?).await?;
+        let (endpoint, tcp) = reserve_transports(
+            address,
+            &remote_quic::server_config(identity, roots)?,
+            |_| Ok(()),
+        )
+        .await?;
         let tls = Arc::new(remote_tls::server_config(identity, roots)?);
         let admission = Arc::new(Semaphore::new(64));
         let mut tasks = JoinSet::new();
