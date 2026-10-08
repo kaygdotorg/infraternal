@@ -103,7 +103,7 @@
 .ah-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
 .ah-close::before { content: ""; position: absolute; inset: -8px; }
 @media (hover: hover) and (pointer: fine) { .ah-close:hover { background: var(--hover); color: var(--fg); } }
-.ah-close:active { transform: scale(0.94); }
+.ah-close:active { transform: scale(var(--ui-press-scale-small)); }
 @media (max-width: 600px) {
   .ah-float { width: 100%; border-radius: 20px; }
   .ah-scroll { padding: 28px 22px 28px; }
@@ -231,7 +231,7 @@
 .ah-icon-button .ah-icon { width: 16px; height: 16px; }
 .ah-icon-button[hidden] { display: none; }
 @media (hover: hover) and (pointer: fine) { .ah-icon-button:hover { background: var(--hover); color: var(--fg); } }
-.ah-icon-button:active { transform: scale(0.94); }
+.ah-icon-button:active { transform: scale(var(--ui-press-scale-small)); }
 @media (pointer: coarse) { .ah-icon-button { width: 44px; height: 44px; } }
 
 /* ── Details ──────────────────────────────────────────────────────────────── */
@@ -268,7 +268,7 @@
   transition: transform 140ms var(--ease-out), background-color 160ms ease;
 }
 .ah-primary .ah-icon { width: 18px; height: 18px; }
-.ah-primary:active:not(:disabled) { transform: scale(0.97); }
+.ah-primary:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
 /* Solid, not translucent: a disabled button over scrolled content must not show it through. */
 .ah-primary:disabled { background: color-mix(in oklab, var(--fg) 30%, var(--bg)); color: color-mix(in oklab, var(--bg) 85%, var(--fg)); cursor: default; }
 .ah-secondary {
@@ -284,7 +284,7 @@
   transition: color 120ms ease, transform 140ms var(--ease-out);
 }
 @media (hover: hover) and (pointer: fine) { .ah-secondary:hover { color: var(--fg); } }
-.ah-secondary:active { transform: scale(0.97); }
+.ah-secondary:active { transform: scale(var(--ui-press-scale)); }
 @media (max-width: 480px) {
   .ah-foot:has(.ah-secondary) { flex-direction: column-reverse; align-items: stretch; }
   .ah-foot:has(.ah-secondary) :is(.ah-primary, .ah-secondary) { width: 100%; margin: 0; }
@@ -318,7 +318,7 @@
 }
 .ah-sidebar-add .ah-icon { width: 16px; height: 16px; }
 @media (hover: hover) and (pointer: fine) { .ah-sidebar-add:hover { background: var(--hover); color: var(--fg); } }
-.ah-sidebar-add:active { transform: scale(0.98); }
+.ah-sidebar-add:active { transform: scale(var(--ui-press-scale-soft)); }
 /* The root offer is a second window pill: the shared pill supplies size, hairline and type. */
 .ah-root-pill { gap: 6px; padding: 0 10px 0 8px; color: var(--fg-2); }
 @media (max-width: 480px) { .ah-root-pill { width: var(--ui-control-h); justify-content: center; padding: 0; } .ah-root-pill > span { display: none; } }

@@ -3,7 +3,7 @@
 /* One type scale per platform (TASTE.md section 2). Desktop follows the macOS sizes, touch the iOS
    sizes. Every product surface (top bar, sidebar, palette, tooltip, toast, windows) uses these
    tokens rather than its own pixel values. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input stays 16 px on touch so iOS never zooms. */
-:root { --text-body: 13px; --text-secondary: 12px; --text-caption: 11px; --text-input: 13px; --row: 28px; }
+:root { --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --text-body: 13px; --text-secondary: 12px; --text-caption: 11px; --text-input: 13px; --row: 28px; }
 @media (pointer: coarse) { :root { --text-body: 16px; --text-secondary: 15px; --text-caption: 13px; --text-input: 16px; --row: 44px; } }
 
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
@@ -14,12 +14,14 @@
 .busy-count { font: 500 13px/1 "Geist Mono", ui-monospace, monospace; color: rgb(0 0 0 / 0.6); }
 .terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
 
+/* The one material's blur and saturation: surfaces and pills read these two tokens, so tuning them
+   here tunes every floating thing at once. */
+:root { --ui-overlay-blur: 14px; --ui-overlay-saturation: 160%; }
+
 /* One theme-aware glass material for every floating surface (D72, D160): popovers, sheets,
    palette, sidebar and tooltips, never in-page controls. No top-edge highlight (TASTE §1).
    Instances can tune the blur, saturation, border or shadow through custom properties. */
 .ui-overlay-surface, .ui-panel {
-  --ui-overlay-blur: 14px;
-  --ui-overlay-saturation: 160%;
   background: var(--ui-overlay-background, var(--overlay));
   border: 1px solid var(--ui-overlay-border, var(--overlay-line));
   box-shadow: var(--ui-overlay-shadow, var(--shadow));
@@ -282,7 +284,7 @@
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: pointer;
   transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
-.ui-window-pill:active { transform: scale(0.97); }
+.ui-window-pill:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-mark { display: grid; flex: none; place-items: center; width: var(--ui-icon); height: var(--ui-icon); color: var(--fg-2); }
 .ui-window-mark svg { width: 100%; height: 100%; fill: currentColor; stroke: none; }
 /* Line glyphs (a flow's mark, not a host platform) draw as the 1.5 stroke icons everywhere else. */
@@ -301,7 +303,7 @@
   display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); border: 0; border-radius: 8px;
   background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
-.ui-window-action:active { transform: scale(0.97); }
+.ui-window-action:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-window-body { position: relative; flex: 1; min-height: 0; }
 @media (hover: hover) and (pointer: fine) {
@@ -339,7 +341,7 @@
 }
 .ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
 .ui-kv-value { justify-self: end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
-.ui-kv-cell:active { transform: scale(0.98); }
+.ui-kv-cell:active { transform: scale(var(--ui-press-scale-soft)); }
 /* The highlighted run: 6 px of even padding either side (cancelled by a -6 px margin so the text
    still lines up with the row's edges), cloned across wrapped lines. */
 .ui-kv-text {
@@ -426,10 +428,10 @@
 .ui-pill {
   appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 38px);
   border: 1px solid var(--overlay-line) !important; border-radius: 999px; background: var(--overlay); box-shadow: var(--shadow);
-  -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation)); backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
   transition: transform 140ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
-.ui-pill:active:not(:disabled) { transform: scale(0.97); }
+.ui-pill:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
 .ui-pill-icon { width: var(--pill-h, 38px); padding: 0; color: var(--fg-2); }
 .ui-pill-icon svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.6; }
 @media (hover: hover) and (pointer: fine) { .ui-pill:hover:not(:disabled) { background: var(--overlay-solid); } }
@@ -515,7 +517,7 @@
 .ui-window[data-locked] .ui-window-lock { opacity: 0.9; pointer-events: auto; color: var(--accent); }
 .ui-window-lock:focus-visible { opacity: 0.8; }
 @media (hover: hover) and (pointer: fine) { .ui-window .ui-window-lock:hover { opacity: 0.8; background: var(--hover); } }
-.ui-window-lock:active { transform: scale(0.94); }
+.ui-window-lock:active { transform: scale(var(--ui-press-scale-small)); }
 .ui-window[data-locked] { border-color: color-mix(in oklab, var(--accent) 78%, var(--overlay-line)); box-shadow: var(--shadow), 0 0 0 1px color-mix(in oklab, var(--accent) 28%, transparent); }
 @media (prefers-reduced-motion: reduce) { .ui-window-lock { transition: opacity 160ms ease; } }
 .ui-window[data-status="none"] .ui-window-lock { display: none; }
@@ -539,10 +541,8 @@
 .ui-settings { position: absolute; z-index: 8; top: 50%; left: 50%; display: flex; flex-direction: column; width: min(560px, calc(100% - 24px)); max-height: min(520px, calc(100% - 24px)); margin: 0; translate: -50% -50%; border-radius: var(--r-lg, 18px); color: var(--fg); outline: none; }
 .ui-settings-head { display: flex; flex: none; align-items: center; justify-content: space-between; height: 52px; padding: 0 8px 0 18px; }
 .ui-settings-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
-.ui-settings-close { display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-2); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
-.ui-settings-close svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
-.ui-settings-close:active, .ui-settings-nav-row:active { transform: scale(0.97); }
-@media (hover: hover) and (pointer: fine) { .ui-settings-close:hover, .ui-settings-nav-row:hover { background: var(--hover); } }
+.ui-settings-nav-row:active { transform: scale(var(--ui-press-scale)); }
+@media (hover: hover) and (pointer: fine) { .ui-settings-nav-row:hover { background: var(--hover); } }
 .ui-settings-main { display: flex; min-height: 0; flex: 1; border-top: 1px solid var(--line); }
 .ui-settings-nav { display: flex; flex: none; flex-direction: column; gap: 2px; width: 150px; padding: 8px; border-right: 1px solid var(--line); }
 .ui-settings-nav-row { display: flex; align-items: center; gap: 8px; height: var(--ui-row-h, 32px); padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }

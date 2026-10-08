@@ -31,7 +31,7 @@
 import { Spring } from "../../../packages/ui/src/spring";
 import { createWindowCard, type WindowCard } from "../../../packages/ui/src/window-card";
 import { hostIconMarkup, type HostPlatform } from "../../../packages/ui/src/host-icons";
-import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
+import type { ToastController } from "../../../packages/ui/src/toast";
 import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResize, type WindowResizeHost } from "../../../packages/ui/src/window-resize";
 import { openDetailsPopover, type DetailsPopover } from "./canvas-popover";
@@ -179,7 +179,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   // The terminal client reports connection state and transient failures by writing text into
   // the core screen's status line. On the canvas that line is hidden (canvas.css) and its text
   // is shown through the shared toast instead, so nothing toast-like ever appears on its own.
-  const toast = mountToast(stage);
+  const toast = core.toast;
   let relaying = false;
   const relayStatus = (): void => {
     const message = core.status.textContent?.trim() ?? "";
@@ -957,7 +957,6 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       removeProvider();
       removeShortcuts();
       statusWatch.disconnect();
-      toast.dispose();
       resizeObserver.disconnect();
       popover?.close("keyboard");
       for (const entry of windows) { entry.resize?.dispose(); entry.card.dispose(); }

@@ -2,6 +2,7 @@
 import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
 import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
+import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
@@ -41,6 +42,8 @@ export interface CoreScreen {
   theme(): ITheme;
   bindTerminal(client: TerminalClient): void;
   /** Replaces the host/session tree (the canvas lists its windows here); returns the new tree. */
+  /** The one shared toast of the screen: every transient message (recovery, connection, flows) uses it. */
+  readonly toast: ToastController;
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
   /** Adds palette rows computed each time the palette opens (state-dependent actions); returns a remover. */
   addPaletteProvider(provider: () => PaletteEntry[]): () => void;
@@ -107,7 +110,7 @@ const SCREEN = `
       <p id="recovery-notice-time"></p><button class="ui-pill" id="recovery-cancel" type="button">Cancel recovery</button>
       <p id="recovery-cancel-error" role="alert"></p>
     </section>
-    <p class="ui-window recovery-toast" id="recovery-toast" role="status" hidden></p>` : ""}
+    ` : ""}
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
       <div id="keytray" class="keytray ui-pill" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
@@ -175,6 +178,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const probePanel = get<HTMLElement>("#probe-panel");
   const sidebar = get<HTMLElement>("#sidebar");
   const sidebarToggle = get<HTMLButtonElement>("#sidebar-toggle");
+  const toast = mountToast(stage);
   // The footer (who is signed in, settings, the build) is part of the canvas preview.
   // Settings is a shell; About is the only section so far (the build's name, version, commit, date).
   const build = buildVersion();
@@ -753,9 +757,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   }
 
   const recoveryNotice = stage.querySelector<HTMLElement>("#recovery-notice")!;
-  const recoveryToast = stage.querySelector<HTMLElement>("#recovery-toast")!;
   const cancelRecovery = stage.querySelector<HTMLButtonElement>("#recovery-cancel")!;
-  let recoveryReady: number | undefined, recoveryToastTimer = 0;
+  let recoveryReady: number | undefined;
   const cancelClick = (): void => {
     cancelRecovery.disabled = true;
     const error = stage.querySelector<HTMLElement>("#recovery-cancel-error")!;
@@ -781,6 +784,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       providers.add(provider);
       return () => { providers.delete(provider); };
     },
+    toast,
     setHostTree(sections, activeLeaf, onSelect) {
       branch.dispose();
       branch = branchedMenu(get<HTMLElement>("#tree"), sections, { active: activeLeaf, onSelect });
@@ -802,13 +806,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (readyAt !== undefined) {
         stage.querySelector<HTMLElement>("#recovery-notice-time")!.textContent = `Account recovery requested · Available ${new Date(readyAt * 1000).toLocaleString()}`;
         if (recoveryReady !== readyAt) {
-          recoveryToast.textContent = "Recovery requested. You can cancel it from this device.";
-          recoveryToast.hidden = false;
-          window.clearTimeout(recoveryToastTimer);
-          recoveryToastTimer = window.setTimeout(() => { recoveryToast.hidden = true; }, 5000);
+          toast.show({ message: "Recovery requested. You can cancel it from this device.", duration: 5000 });
         }
       } else {
-        window.clearTimeout(recoveryToastTimer); recoveryToast.hidden = true;
+        toast.dismiss();
       }
       recoveryReady = readyAt;
     },
@@ -830,7 +831,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       keyblur.classList.remove("is-away");
     },
     dispose() {
-      window.clearTimeout(recoveryToastTimer);
+      toast.dispose();
       cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
       shortcuts.dispose();
