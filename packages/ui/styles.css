@@ -470,3 +470,23 @@
 .ui-window[data-resize="touch"] .ui-window-resize[data-edge="se"]::after { bottom: 6px; right: 6px; border-width: 0 3px 3px 0; border-bottom-right-radius: 14px; }
 .ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"]::after { bottom: 6px; left: 6px; border-width: 0 0 3px 3px; border-bottom-left-radius: 14px; }
 @keyframes ui-grip-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Sidebar footer (sidebar-foot.ts): shared pills laid out in two rows, pinned under the host
+   tree. Desktop pills are 32 px, touch pills 44 px; the pills themselves are plain `.ui-pill`s. */
+.ui-sidebar-foot { --pill-h: 32px; display: grid; flex: none; gap: 8px; margin-top: auto; padding: 9px 0 0; box-shadow: 0 -1px 0 var(--line); }
+@media (pointer: coarse) { .ui-sidebar-foot { --pill-h: 44px; } }
+.ui-sidebar-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.ui-sidebar-foot .ui-pill { font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; cursor: pointer; }
+.ui-sidebar-user { min-width: 0; gap: 8px; padding: 0 12px 0 5px; cursor: default !important; pointer-events: none; }
+.ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 500; color: var(--fg); }
+.ui-sidebar-monogram {
+  display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 10px); height: calc(var(--pill-h) - 10px); border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent); font: 600 11px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+}
+@media (pointer: coarse) { .ui-sidebar-monogram { font-size: 13px; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
+.ui-sidebar-settings svg { stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-sidebar-version { min-width: 0; justify-self: start; gap: 8px; padding: 0 14px 0 10px; color: var(--ui-text-secondary); }
+.ui-sidebar-version .swap { width: 15px; height: 15px; color: var(--fg-3); }
+.ui-sidebar-version[data-done] .swap { color: var(--ok); }
+.ui-sidebar-commit { font-variant-numeric: tabular-nums; color: var(--fg); }
+.ui-sidebar-dot { color: var(--fg-3); }

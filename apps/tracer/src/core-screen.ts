@@ -2,6 +2,8 @@
 import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
 import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
+import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
+import { buildVersion } from "./build-version";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
 import { recoveryUiEnabled } from "./recovery-ui";
@@ -15,6 +17,8 @@ export interface CoreScreenOptions {
   mockMode: boolean;
   probeMode: boolean;
   addHostPrototype?: boolean;
+  /** The signed-in user's display name, shown in the sidebar footer (canvas preview only). */
+  displayName?: string;
   onRecovery?: () => void;
   onCancelRecovery?: () => Promise<void>;
 }
@@ -159,6 +163,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const probePanel = get<HTMLElement>("#probe-panel");
   const sidebar = get<HTMLElement>("#sidebar");
   const sidebarToggle = get<HTMLButtonElement>("#sidebar-toggle");
+  // The footer (who is signed in, settings, the build) is part of the canvas preview.
+  const sidebarFoot = options.addHostPrototype
+    ? createSidebarFoot({ displayName: options.displayName?.trim() || "Signed in", version: buildVersion() })
+    : undefined;
+  if (sidebarFoot) { sidebar.append(sidebarFoot.root); sidebar.dataset.foot = ""; }
   const capsule = get<HTMLButtonElement>("#capsule");
   const palette = get<HTMLElement>("#palette");
   const scrim = get<HTMLElement>("#scrim");
@@ -743,6 +752,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       window.clearTimeout(recoveryToastTimer);
       cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
+      sidebarFoot?.dispose();
       sidebarToggle.removeEventListener("click", sidebarClick);
       capsule.removeEventListener("click", capsuleClick);
       scrim.removeEventListener("click", scrimClick);

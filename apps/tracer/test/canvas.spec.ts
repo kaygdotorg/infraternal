@@ -335,3 +335,34 @@ test("touch: press and hold on a header reveals corner handles; a handle resizes
   await expect(window0).not.toHaveAttribute("data-resize", "touch");
   await context.close();
 });
+
+// ---- the sidebar footer ------------------------------------------------------------------
+test("sidebar footer: a name pill, a settings pill and a version pill that copies the commit id", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.locator("#sidebar-toggle").click();
+  await page.waitForTimeout(500); // the open spring settles before sizes are read
+  const foot = page.locator(".ui-sidebar-foot");
+  await expect(foot).toBeVisible();
+  await expect(foot.locator(".ui-sidebar-name")).not.toBeEmpty();
+  await expect(foot.locator(".ui-sidebar-settings")).toHaveAttribute("aria-label", "Settings");
+  // Pinned to the sidebar's bottom with the same side inset as the tree.
+  const geometry = await page.evaluate(() => {
+    const sidebar = document.querySelector("#sidebar")!.getBoundingClientRect();
+    const foot = document.querySelector(".ui-sidebar-foot")!.getBoundingClientRect();
+    return { gap: sidebar.bottom - foot.bottom, pill: document.querySelector(".ui-sidebar-version")!.getBoundingClientRect().height };
+  });
+  expect(geometry.gap).toBeLessThan(12);
+  expect(geometry.pill).toBe(32);
+  const version = foot.locator(".ui-sidebar-version");
+  await expect(version.locator(".ui-sidebar-commit")).toHaveText(/^[0-9a-f]{7}$|^dev$/);
+  await version.click();
+  await expect(version).toHaveAttribute("data-done", "");
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toMatch(/^[0-9a-f]{40}$/);
+  expect(copied.startsWith((await version.locator(".ui-sidebar-commit").textContent())!)).toBe(true);
+  // The shared "Copied" tooltip flashes; no focus ring after a click.
+  await expect(page.locator(".tip")).toContainText("Copied");
+  expect(await page.evaluate(() => document.documentElement.dataset.focusRing ?? "off")).toBe("off");
+});

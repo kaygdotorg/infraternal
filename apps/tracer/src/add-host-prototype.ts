@@ -847,7 +847,8 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
   sidebarButton.innerHTML = `${svg(ICON.plus)}<span>Add hosts</span>`;
   const openFromSidebar = (): void => { closeSidebarOnTouch(); openWizard(true); };
   sidebarButton.addEventListener("click", openFromSidebar);
-  sidebar?.append(sidebarButton);
+  // Above the sidebar footer, which stays pinned at the bottom.
+  sidebar?.insertBefore(sidebarButton, sidebar.querySelector(".ui-sidebar-foot"));
 
   // The top bar's "+" is a disabled session button in the product; here it opens the flow.
   const plus = stage.querySelector<HTMLButtonElement>(".tab-add");
