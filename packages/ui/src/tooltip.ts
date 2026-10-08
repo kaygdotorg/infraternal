@@ -41,7 +41,7 @@ let swallowClick = false, press0: { x: number; y: number } | null = null;
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1000; pointer-events: none; will-change: transform; }
 .tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; white-space: nowrap; overflow: hidden;
-  font: 500 var(--text-secondary, 12px)/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0;
+  font: 500 var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0;
   background: var(--tip-bg, var(--fg, #f4f4f5)); color: var(--tip-fg, var(--bg, #0a0a0a));
   box-shadow: 0 6px 20px -6px rgb(0 0 0 / 0.45); }
 .tip-label { display: block; }
@@ -49,7 +49,7 @@ const STYLE = `
 .tip-arrow { position: absolute; left: 0; width: 8px; height: 8px; margin-left: -4px; transform-origin: center;
   background: var(--tip-bg, var(--fg, #f4f4f5)); border-radius: 1.5px; }
 .tip-measure { position: fixed; visibility: hidden; white-space: nowrap; pointer-events: none;
-  font: 500 var(--text-secondary, 12px)/1.2 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
+  font: 500 var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
 `;
 

@@ -18,7 +18,7 @@
   padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
   color: var(--fg);
   background: transparent;
-  font: 450 14px/1.55 "Geist Mono", ui-monospace, monospace;
+  font: 450 14px/1.55 var(--font-maple);
   letter-spacing: -0.01em;
 }
 
@@ -46,8 +46,8 @@
 @keyframes auth-card-in { from { opacity: 0; transform: translateY(8px) scale(0.99); } }
 .auth-mark { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; font-weight: 600; line-height: 1; }
 .auth-mark svg { width: 22px; height: 22px; flex: none; }
-.auth-card h1 { margin: 0 0 10px; color: var(--fg); font: 600 21px/1.25 "Geist Mono", ui-monospace, monospace; letter-spacing: -0.03em; }
-.auth-eyebrow { margin: 0 0 6px; color: var(--fg-3); font: 500 12px/1 "Geist Mono", ui-monospace, monospace; letter-spacing: 0.02em; }
+.auth-card h1 { margin: 0 0 10px; color: var(--fg); font: 600 21px/1.25 var(--font-maple); letter-spacing: -0.03em; }
+.auth-eyebrow { margin: 0 0 6px; color: var(--fg-3); font: 500 12px/1 var(--font-maple); letter-spacing: 0.02em; }
 .auth-lede { margin: 0 0 24px; color: var(--fg-2); }
 .auth-label { display: block; margin: 0 0 8px; color: var(--fg-2); font-size: 13px; }
 .auth-input {
@@ -61,7 +61,7 @@
   outline: none;
   background: var(--field);
   color: var(--fg);
-  font: 450 16px/1 "Geist Mono", ui-monospace, monospace;
+  font: 450 16px/1 var(--font-maple);
 }
 .auth-input:focus { border-color: rgb(255 255 255 / 0.28); background: var(--field-focus); }
 .auth-mono { font-size: 16px; letter-spacing: 0.01em; }
@@ -104,7 +104,7 @@
   border-radius: 50%;
   background: transparent;
   color: var(--fg-3);
-  font: 500 11.5px/1 "Geist Mono", ui-monospace, monospace;
+  font: 500 11.5px/1 var(--font-maple);
   cursor: pointer;
 }
 .auth-dot:disabled { cursor: default; }
@@ -145,7 +145,7 @@
   border-radius: 999px;
   background: var(--fg);
   color: #000;
-  font: 600 13.5px/1 "Geist Mono", ui-monospace, monospace;
+  font: 600 13.5px/1 var(--font-maple);
   letter-spacing: -0.01em;
   cursor: pointer;
   transition: transform 140ms var(--ease), opacity 160ms ease;
@@ -158,7 +158,7 @@
   border: 0;
   background: none;
   color: var(--fg-2);
-  font: 500 13.5px/1 "Geist Mono", ui-monospace, monospace;
+  font: 500 13.5px/1 var(--font-maple);
   cursor: pointer;
 }
 .auth-back { padding: 10px 8px; margin-left: -8px; }
@@ -175,7 +175,7 @@
 .auth-check[data-pressed] { transform: scale(0.98); }
 .auth-check .tick { width: 20px; height: 20px; }
 .auth-words { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 4px 0 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: rgb(255 255 255 / 0.03); counter-reset: recovery; list-style: none; }
-.auth-words li { display: flex; min-width: 0; align-items: baseline; gap: 5px; color: var(--fg); font: 450 13px/1.9 "Geist Mono", ui-monospace, monospace; }
+.auth-words li { display: flex; min-width: 0; align-items: baseline; gap: 5px; color: var(--fg); font: 450 13px/1.9 var(--font-maple); }
 .auth-word-number { width: 19px; flex: none; color: var(--fg-3); font-size: 10.5px; text-align: right; }
 .auth-actions { display: flex; justify-content: flex-end; gap: 4px; margin: 10px -8px -4px 0; }
 .icon-action { display: inline-grid; width: 40px; height: 40px; place-items: center; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--fg-2); cursor: pointer; }
