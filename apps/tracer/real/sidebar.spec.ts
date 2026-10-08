@@ -24,7 +24,10 @@ test.beforeAll(async ({ browser }) => {
     w.__ro = 0;
     const Native = w.ResizeObserver;
     w.ResizeObserver = class extends Native {
-      constructor(callback: ResizeObserverCallback) { super((entries, observer) => { w.__ro += entries.length; callback(entries, observer); }); }
+      constructor(callback: ResizeObserverCallback) {
+        // The sidebar's own content (its tree folds open as it appears) is not the canvas: only observers outside it count.
+        super((entries, observer) => { w.__ro += entries.filter((e) => !(e.target as Element).closest("#sidebar")).length; callback(entries, observer); });
+      }
     };
   });
   page = await context.newPage();

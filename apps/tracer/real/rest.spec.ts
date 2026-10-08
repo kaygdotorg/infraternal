@@ -16,14 +16,14 @@ test.beforeAll(async ({ browser }) => {
   server = await startRealServer();
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 900 } });
   await context.addInitScript(() => {
-    const w = window as unknown as { __raf: number[]; __styles: Array<{ t: number; transform: string }> };
+    const w = window as unknown as { __raf: number[]; __styles: Array<{ t: number; transform: string; own: string; who: string }> };
     w.__raf = []; w.__styles = [];
     const native = window.requestAnimationFrame.bind(window);
     window.requestAnimationFrame = (cb: FrameRequestCallback): number => native((t) => { w.__raf.push(performance.now()); cb(t); });
     new MutationObserver((records) => {
       const t = performance.now();
       const world = document.querySelector<HTMLElement>(".cl-world");
-      for (const r of records) if (r.attributeName === "style") w.__styles.push({ t, transform: world?.style.transform ?? "" });
+      for (const r of records) if (r.attributeName === "style") { const el = r.target as HTMLElement; w.__styles.push({ t, transform: world?.style.transform ?? "", own: el.style.transform + "|" + el.style.opacity, who: `${el.tagName}.${String(el.className).split(" ")[0]}#${el.id}` }); }
     }).observe(document, { attributes: true, attributeFilter: ["style"], subtree: true });
   });
   page = await context.newPage();
@@ -44,7 +44,6 @@ test.beforeAll(async ({ browser }) => {
 });
 test.afterAll(async () => { await page?.context().close(); await server?.dispose(); });
 
-const parse = (t: string): [number, number, number] => { const m = /translate3d\((-?[\d.]+)px, (-?[\d.]+)px, 0(?:px)?\) scale\(([\d.]+)\)/.exec(t); return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 1]; };
 
 async function flight(label: string, go: () => Promise<void>): Promise<void> {
   await page.waitForTimeout(3500);
@@ -52,18 +51,27 @@ async function flight(label: string, go: () => Promise<void>): Promise<void> {
   const t0 = await page.evaluate(() => performance.now());
   await go();
   await page.waitForTimeout(6000);
-  const r = await page.evaluate(() => { const w = window as unknown as { __raf: number[]; __styles: Array<{ t: number; transform: string }> }; return { raf: [...w.__raf], styles: w.__styles.map((s) => ({ ...s })) }; });
-  const finalT = parse(r.styles.filter((s) => s.transform).at(-1)?.transform ?? "");
-  const dpr = 1;
-  const differs = (s: { transform: string }): boolean => { const [x, y, z] = parse(s.transform); return Math.abs(x - finalT[0]) >= 0.25 / dpr || Math.abs(y - finalT[1]) >= 0.25 / dpr || Math.abs(z - finalT[2]) > 0.0005; };
-  const visible = r.styles.filter((s) => s.transform && differs(s)).at(-1)?.t ?? t0;
+  const r = await page.evaluate(() => { const w = window as unknown as { __raf: number[]; __styles: Array<{ t: number; transform: string; own: string; who: string }> }; return { raf: [...w.__raf], styles: w.__styles.map((s) => ({ ...s })) }; });
+  r satisfies { raf: number[]; styles: Array<{ t: number; transform: string; own: string; who: string }> };
+  // The flight is visible until the last write that moves any element by a quarter of a pixel (or a scale or opacity by
+  // 0.0005) from where that element finally rests: the camera, a view sliding aside, a window entering.
+  const numbers = (own: string): number[] => (own.match(/-?\d*\.?\d+(?:e-?\d+)?/g) ?? []).map(Number);
+  const finalOf = new Map<string, number[]>();
+  for (const x of r.styles) finalOf.set(x.who, numbers(x.own));
+  const moved = (x: { who: string; own: string }): boolean => {
+    const a = numbers(x.own), b = finalOf.get(x.who)!;
+    return a.length !== b.length || a.some((v, i) => Math.abs(v - b[i]!) >= (Math.abs(b[i]!) <= 1.5 ? 0.0005 : 0.25));
+  };
+  const visible = r.styles.filter(moved).at(-1)?.t ?? t0;
   const lastWrite = r.styles.at(-1)?.t ?? visible;
   const lastRaf = r.raf.at(-1) ?? visible;
   const tail = Math.max(0, lastWrite - visible);
   const writesAfter = r.styles.filter((s) => s.t > visible + 600).length;
   const rafAfter = r.raf.filter((t) => t > visible + 600).length;
   console.log(`REST ${label}: flight visible for ${(visible - t0).toFixed(0)} ms; style writes continued ${tail.toFixed(0)} ms after it (last rAF ${(lastRaf - visible).toFixed(0)} ms after); from +600 ms: ${writesAfter} style writes, ${rafAfter} rAF callbacks`);
-  expect(writesAfter, `${label}: style writes after rest`).toBe(0);
+  const late: Record<string, number> = {};
+  for (const x of r.styles.filter((x) => x.t > visible + 600)) late[x.who] = (late[x.who] ?? 0) + 1;
+  expect(writesAfter, `${label}: style writes after rest, by element ${JSON.stringify(late)}`).toBe(0);
   expect(rafAfter, `${label}: rAF callbacks after rest`).toBe(0);
 }
 

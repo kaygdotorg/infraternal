@@ -20,6 +20,7 @@ import { initialFont, rememberFont } from "./font-preference";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
 import { recoveryUiEnabled } from "./recovery-ui";
+import { quarterDevicePx, restAt } from "./canvas/springs";
 
 const ROOT = document.documentElement;
 const THEME_COLOR = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
@@ -925,7 +926,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let rowSwipeMoved = false;
   const rowHeight = (): number => keysRowEl.offsetHeight || 46;
   const paintRow = (v: number): void => { rowsEl.style.transform = v === 0 ? "" : `translateY(${-v * rowHeight()}px)`; };
-  const rowSpring = new Spring(1, (v) => { if (canvasRowEl.hidden) { rowsEl.style.transform = ""; return; } paintRow(v); }, { visualDuration: 0.38, bounce: 0.12 });
+  // A row is one 46 px step: the spring rests under a quarter of a device pixel of it (canvas/springs.ts).
+  const rowSpring = restAt(new Spring(1, (v) => { if (canvasRowEl.hidden) { rowsEl.style.transform = ""; return; } paintRow(v); }, { visualDuration: 0.38, bounce: 0.12 }), quarterDevicePx() / 46);
   const settleRow = (index: number, instant = false): void => {
     rowIndex = index;
     stage.dataset.row = index === 0 ? "canvas" : "keys";
