@@ -103,6 +103,17 @@
 .cl-arrow[data-tone="quiet"] { --arrow: color-mix(in oklab, var(--accent) 80%, var(--fg)); }
 .cl-arrow-line { fill: none; stroke: var(--arrow); stroke-width: 1.5; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 .cl-arrow-head { fill: var(--arrow); stroke: none; }
+/* Editing a grant (Mesh): hover thickens the line and shows a grab handle on each end; a wide invisible line makes it easy to hit. */
+.cl-arrow-hit { fill: none; stroke: transparent; stroke-width: 16px; vector-effect: non-scaling-stroke; pointer-events: stroke; }
+.cl-arrow-handle { fill: var(--bg); stroke: var(--arrow); stroke-width: 1.5px; vector-effect: non-scaling-stroke; pointer-events: none; cursor: grab; opacity: 0; transition: opacity 140ms ease; }
+/* Only the hovered arrow's handles take the pointer, so arrows that share an end never fight over it. */
+.cl-arrow:hover .cl-arrow-handle { pointer-events: all; }
+.cl-arrow:hover .cl-arrow-handle, .cl-arrow[data-editing] .cl-arrow-handle { opacity: 1; }
+.cl-arrow:hover .cl-arrow-line { stroke-width: 2.5px; }
+.cl-arrow:hover .cl-arrow-head { filter: none; }
+.cl-arrow[data-editing] { opacity: 0.25; }
+.cl-arrow-handle:active { cursor: grabbing; }
+@media (pointer: coarse) { .cl-arrow-handle { opacity: 0.85; pointer-events: all; } }
 .cl-arrow[data-dashed] .cl-arrow-line { stroke-dasharray: 5 5; }
 .cl-arrow[data-fresh], .cl-arrow[data-leaving] { opacity: 0; }
 .cl-arrow[data-live]:not([data-snapped]) .cl-arrow-line { opacity: 0.8; }
@@ -255,3 +266,7 @@
 .cl-label-menu { display: grid; place-items: center; width: 22px; height: 22px; margin-right: -6px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--fg-3); cursor: pointer; }
 .cl-label-menu svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 @media (hover: hover) and (pointer: fine) { .cl-label-menu:hover { background: var(--hover); color: var(--fg); } }
+
+/* A Mesh node has no input to lock, so it has no lock and its title pill may use the whole header. */
+.ui-window[data-kind="node"] .ui-window-lock { display: none; }
+.ui-window[data-kind="node"] .ui-window-pill { max-width: none; }

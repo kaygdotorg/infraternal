@@ -745,6 +745,13 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
       svg.setAttribute("class", "cl-graph-arrows");
       colsEl.append(svg);
       c.graphSvg = svg;
+      svg.addEventListener("pointerdown", (e) => {
+        const handle = (e.target as Element).closest<SVGElement>(".cl-arrow-handle");
+        const entry = c.topo.find((t) => t.arrow.g === handle?.closest(".cl-arrow"));
+        if (!handle || !entry || e.button !== 0) return;
+        e.stopPropagation(); e.preventDefault();
+        beginEdit(c, entry, handle.dataset.end === "tail" ? "tail" : "head", e, handle);
+      }, { signal });
       for (const n of view.nodes) {
         const rec = makeNode(c, n);
         c.wins.set(rec.model.id, rec);
@@ -816,10 +823,13 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const n = c.view.nodes.find((v) => v.id === id);
     return n ? { x: n.x, y: n.y, w: metrics.nodeW, h: metrics.nodeH } : undefined;
   };
+  /** A grant is shown by its name only: who may reach what ("ops→build-01"), never ports or ranges (D180). */
+  const grantName = (g: Grant): string => `${g.from.replace(/^tag:/, "")}→${g.to}`;
   const addTopoArrow = (c: ClusterRec, g: Grant, animate: boolean): void => {
     if (!c.graphSvg) return;
-    const arrow = new Arrow({ ...(g.via ? { dashed: true } : {}), tone: "accent" });
+    const arrow = new Arrow({ ...(g.via ? { dashed: true } : {}), tone: "accent", editable: role === "operator" });
     arrow.g.dataset.grant = g.id;
+    arrow.g.dataset.tip = grantName(g); // hover names the grant (warm tooltip); D180: edges carry grant names only
     const entry: TopoArrow = { grant: g, arrow };
     if (g.via) {
       const t = document.createElementNS(SVG_NS, "text");
@@ -1242,6 +1252,112 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     d.arrow.arrow.g.dataset.leaving = "";
     drag = undefined;
     window.setTimeout(() => d.arrow.dispose(), 320);
+  };
+  // ---- editing a grant: grab an arrow's head or tail, unsnap it, snap it to another node or drop it on empty canvas ----------------
+  /** Where a confirmation is anchored: a point on the screen, as a 1 px element. */
+  const tipAt = (client: Pt): { anchor: HTMLElement; done(): void } => {
+    const anchor = el("div", "cl-tip-anchor");
+    anchor.style.cssText = `position:fixed;left:${client.x}px;top:${client.y}px;width:1px;height:1px;pointer-events:none`;
+    document.body.append(anchor);
+    return { anchor, done: () => { window.setTimeout(() => anchor.remove(), 260); } };
+  };
+  const redrawTopo = (c: ClusterRec): void => { for (const e of c.topo) drawTopoArrow(c, e); };
+  const beginEdit = (c: ClusterRec, entry: TopoArrow, end: "tail" | "head", e: PointerEvent, handle: SVGElement): void => {
+    const g = entry.grant;
+    const fixedId = end === "head" ? g.from : g.to;
+    const homeId = end === "head" ? g.to : g.from;
+    const fixed = nodeRect(c, fixedId), home = nodeRect(c, homeId);
+    if (!fixed || !home) return;
+    handle.setPointerCapture(e.pointerId);
+    // The graph's arrows live in the view's own coordinates; the pointer comes in world coordinates.
+    const origin = contentRect(c);
+    const toLocal = (clientX: number, clientY: number): Pt => { const w = toWorld(clientX, clientY); return { x: w.x - origin.x, y: w.y - origin.y }; };
+    const live = new DragArrow(fixed, toLocal(e.clientX, e.clientY), invalidate, end === "tail");
+    if (g.via) live.arrow.g.dataset.dashed = "";
+    c.graphSvg!.append(live.arrow.g);
+    live.snapNow(home); // the end starts attached, so pulling it off is an unsnap
+    entry.arrow.g.dataset.editing = "";
+    let candidate: string | undefined = homeId;
+    let over: HTMLElement | undefined;
+    const taken = (id: string): boolean => grants.some((o) => o !== g && (end === "head" ? o.from === g.from && o.to === id : o.to === g.to && o.from === id));
+    const move = (ev: PointerEvent): void => {
+      const w = toLocal(ev.clientX, ev.clientY);
+      live.move(w, headSize());
+      // Graph nodes take no pointer events of their own, so the node under the pointer is found by geometry.
+      let id = c.view.nodes.find((n) => { const r = nodeRect(c, n.id); return !!r && w.x >= r.x && w.x <= r.x + r.w && w.y >= r.y && w.y <= r.y + r.h; })?.id;
+      // Near its own node the end stays attached: a short pull does not unsnap it.
+      const slack = 28 / cam.z;
+      const nearHome = w.x > home.x - slack && w.x < home.x + home.w + slack && w.y > home.y - slack && w.y < home.y + home.h + slack;
+      if (nearHome && !id) id = homeId;
+      if (id === fixedId || (id && id !== homeId && taken(id))) id = undefined;
+      if (id !== candidate) {
+        over?.removeAttribute("data-drop");
+        over = id && id !== homeId ? c.wins.get(`n-${id}`)?.card.root : undefined;
+        over?.setAttribute("data-drop", "");
+        candidate = id;
+        const r = id ? nodeRect(c, id) : undefined;
+        live.setTarget(r);
+      }
+    };
+    const finish = (): void => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      over?.removeAttribute("data-drop");
+    };
+    const springBack = (): void => {
+      live.setTarget(home);
+      entry.arrow.g.removeAttribute("data-editing");
+      window.setTimeout(() => live.dispose(), 380);
+    };
+    const up = (ev: PointerEvent): void => {
+      finish();
+      const at = tipAt({ x: ev.clientX, y: ev.clientY });
+      if (ev.type === "pointercancel" || candidate === homeId) { springBack(); at.done(); return; }
+      if (candidate) {
+        const next: Grant = end === "head" ? { ...g, to: candidate } : { ...g, from: candidate };
+        const endTip = tipAt(toClient({ x: live.end().x + origin.x, y: live.end().y + origin.y }));
+        mountConfirmTip(endTip.anchor, {
+          label: `Move grant ${grantName(g)}`, message: `Move grant ${grantName(g)} to ${grantName(next)}?`,
+          confirmLabel: "Move", cancelLabel: "Cancel",
+          onConfirm: () => {
+            if (end === "head") g.to = next.to; else g.from = next.from;
+            entry.arrow.g.dataset.tip = grantName(g);
+            entry.arrow.g.removeAttribute("data-editing");
+            redrawTopo(c);
+            const pulse = new Spring(1.9, (v) => entry.arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 });
+            pulse.set(1);
+            live.dispose();
+            for (const cl of clusters.values()) geometry(cl);
+            toast.show({ message: `Grant moved to ${grantName(g)}` });
+            endTip.done();
+          },
+          onCancel: () => { springBack(); endTip.done(); },
+        });
+        at.done();
+        return;
+      }
+      // Dropped on empty canvas: offer to remove the grant.
+      mountConfirmTip(at.anchor, {
+        label: `Remove grant ${grantName(g)}`, message: `Remove grant ${grantName(g)}?`,
+        confirmLabel: "Remove", cancelLabel: "Keep",
+        onConfirm: () => {
+          grants = grants.filter((o) => o !== g);
+          c.topo.splice(c.topo.indexOf(entry), 1);
+          entry.arrow.g.dataset.leaving = "";
+          window.setTimeout(() => entry.arrow.remove(), 240);
+          live.dispose();
+          redrawTopo(c);
+          for (const cl of clusters.values()) geometry(cl);
+          toast.show({ message: `Grant ${grantName(g)} removed` });
+        },
+        onCancel: springBack,
+      });
+      at.done();
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
   };
   const askGrant = (srcRec: WinRec, dstEl: HTMLElement, d: NonNullable<typeof drag>): void => {
     const from = srcRec.model.host;
@@ -2078,7 +2194,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   const touches = new Map<number, Pt>();
   let pinch: { d0: number; z0: number; wp: Pt } | undefined;
   let pan: { id: number; x: number; y: number; cx: number; cy: number; moved: boolean; target: Element } | undefined;
-  const interactive = (t: EventTarget | null): boolean => !!(t as Element | null)?.closest?.(".ui-window, .cl-label, .cl-edge, .cl-port, .cl-empty-add");
+  const interactive = (t: EventTarget | null): boolean => !!(t as Element | null)?.closest?.(".ui-window, .cl-label, .cl-edge, .cl-port, .cl-empty-add, .cl-arrow-handle");
   const zoomAt = (cx: number, cy: number, z: number): void => {
     const r = viewport.getBoundingClientRect();
     const wp = toWorld(cx, cy);

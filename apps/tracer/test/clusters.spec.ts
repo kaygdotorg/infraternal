@@ -200,6 +200,63 @@ test("the dots sit on the gradient: the gradient shows everywhere, the dot layer
   expect(info.coversScreen).toBe(true); // behind the chrome too, not only the canvas area
 });
 
+test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to another node and asks before moving; dropping on empty canvas asks to remove", async ({ page }) => {
+  await open(page, 6);
+  await page.keyboard.press("Control+3"); // fly into Mesh
+  await page.waitForTimeout(900);
+  const grantsOf = () => probe(page, (p) => p.grants());
+  const centre = async (sel: string) => { const b = (await page.locator(sel).first().boundingBox())!; return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
+  // Hover: the arrow gets its handles and a warm tooltip with the grant's name.
+  const arrow = page.locator('.cl[data-view="mesh"] .cl-arrow[data-grant="g3"]');
+  const hit = await centre('.cl[data-view="mesh"] .cl-arrow[data-grant="g3"] .cl-arrow-hit');
+  await page.mouse.move(hit.x, hit.y);
+  await expect(arrow).toHaveAttribute("data-tip", "nix-cache→studio-mac");
+  await expect.poll(() => arrow.locator(".cl-arrow-handle").first().evaluate((n) => getComputedStyle(n).opacity)).toBe("1");
+  await expect(page.locator(".ui-tooltip, .tip-pos").first()).toContainText("nix-cache→studio-mac");
+  // Head to another node: nix-cache -> studio-mac becomes nix-cache -> edge-arm, after a confirmation.
+  const head = await centre('.cl-arrow[data-grant="g3"] .cl-arrow-handle[data-end="head"]');
+  const edge = await centre('.ui-window[data-window-id="n-edge-arm"]');
+  await page.mouse.move(head.x, head.y);
+  await page.mouse.down();
+  await page.mouse.move(head.x + 10, head.y + 110, { steps: 5 }); // well clear of its own node: the end unsnaps
+  await expect(page.locator('.cl-arrow[data-live]:not([data-snapped])')).toHaveCount(1); // unsnapped, following the pointer
+  await page.mouse.move(edge.x, edge.y, { steps: 12 });
+  await expect(page.locator('.ui-window[data-window-id="n-edge-arm"][data-drop]')).toHaveCount(1);
+  await expect(page.locator('.cl-arrow[data-live][data-snapped]')).toHaveCount(1); // snapped on the new node
+  await page.mouse.up();
+  await expect(page.locator(".ui-confirm-tip")).toContainText("Move grant nix-cache→studio-mac to nix-cache→edge-arm?");
+  await page.locator(".ui-confirm-yes").click();
+  await expect.poll(async () => (await grantsOf()).find((g) => g.id === "g3")?.to).toBe("edge-arm");
+  // Cancelling springs the arrow back and changes nothing: ci -> nix-cache, tail to studio-mac.
+  const tailPt = await centre('.cl-arrow[data-grant="g7"] .cl-arrow-hit');
+  await page.mouse.move(tailPt.x, tailPt.y);
+  const tail = await centre('.cl-arrow[data-grant="g7"] .cl-arrow-handle[data-end="tail"]');
+  const studio = await centre('.ui-window[data-window-id="n-studio-mac"]');
+  await page.mouse.move(tail.x, tail.y);
+  await page.mouse.down();
+  await page.mouse.move(tail.x - 10, tail.y + 110, { steps: 5 });
+  await page.mouse.move(studio.x, studio.y, { steps: 14 });
+  await page.mouse.up();
+  await expect(page.locator(".ui-confirm-tip")).toContainText("Move grant ci→nix-cache to studio-mac→nix-cache?");
+  await page.locator(".ui-confirm-no").click();
+  await page.waitForTimeout(500);
+  expect((await grantsOf()).find((g) => g.id === "g7")).toMatchObject({ from: "tag:ci", to: "nix-cache" });
+  await expect(page.locator(".cl-arrow[data-live]")).toHaveCount(0);
+  // Dropped on empty canvas: offers to remove the grant.
+  const n0 = (await grantsOf()).length;
+  const mid = await centre('.cl-arrow[data-grant="g3"] .cl-arrow-hit');
+  await page.mouse.move(mid.x, mid.y);
+  const head2 = await centre('.cl-arrow[data-grant="g3"] .cl-arrow-handle[data-end="head"]');
+  await page.mouse.move(head2.x, head2.y);
+  await page.mouse.down();
+  await page.mouse.move(head2.x + 10, head2.y + 220, { steps: 10 });
+  await page.mouse.up();
+  await expect(page.locator(".ui-confirm-tip")).toContainText("Remove grant nix-cache→edge-arm?");
+  await page.locator(".ui-confirm-yes").click();
+  await expect.poll(async () => (await grantsOf()).length).toBe(n0 - 1);
+  await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveCount(0);
+});
+
 test("container shell: the camera stays, the pill morphs into a floating terminal that resizes with its aspect locked and expands into Console", async ({ page }) => {
   await open(page, 4);
   const cam0 = await probe(page, (p) => p.camera());
