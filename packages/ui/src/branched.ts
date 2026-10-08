@@ -11,6 +11,8 @@ export interface BranchLeaf {
    * as the leaf's marker in place of the text glyph, so every list of such items marks them the same way.
    */
   state?: "open" | "detached" | "exited";
+  /** A caption between groups of leaves inside one section (a host's name above its sessions): not selectable, no branch. */
+  heading?: boolean;
   /** A quiet note after the label: new output (a dot), or the result of a finished command. */
   mark?: "output" | "ok" | "fail";
 }
@@ -94,6 +96,13 @@ function makeSection(section: BranchSection): HTMLElement {
   const list = el("ul", "bm-list");
   list.setAttribute("role", "group");
   for (const leaf of section.leaves) {
+    if (leaf.heading) {
+      const caption = el("li", "bm-row bm-subhead");
+      caption.setAttribute("role", "presentation");
+      caption.textContent = leaf.label;
+      list.append(caption);
+      continue;
+    }
     const row = el("li", "bm-row");
     row.setAttribute("role", "treeitem");
     const button = el("button", "bm-leaf");

@@ -3,11 +3,18 @@
  * (or a graph view's nodes). Tapping a view flies the canvas there; tapping an item makes it active and flies to
  * it. Settings sits after a divider, like a person's own corner of the app. Rendering is coalesced to one per
  * microtask because a layout change calls it from several places.
+ *
+ * With a session inventory (D178) the Console section lists its hosts, and under each host every session of it,
+ * whether or not it has a window, each marked open (filled dot), detached (hollow dot and "detached") or
+ * exited (hollow square and its exit code ✓ 0 / ✗ 1), with the activity mark of a detached one, in frecency
+ * order. Tapping an open session flies to its window; tapping a detached or exited one opens it in a new
+ * window and flies there. A closed sidebar is not rebuilt; it is brought up to date when it opens.
  */
 import type { BranchSection } from "../../../../../packages/ui/src/branched";
 import type { Ctx } from "../context";
 import type { ViewId } from "../model/types";
 import { coarse } from "../dom";
+import { byFrecency, type SessionRecord } from "../sessions/inventory";
 
 export interface TreeModule {
   /** Rebuilds the sidebar tree from the views (coalesced). */
@@ -17,7 +24,20 @@ export interface TreeModule {
 
 export function createTree(cx: Ctx): TreeModule {
   const { core, stage, signal, views, state } = cx;
-  const sections = (): BranchSection[] => [...views.values()].map((c) => {
+  const inv = cx.adapters.inventory;
+  const sessionLeaf = (host: string, s: SessionRecord): BranchSection["leaves"][number] => {
+    const mark = s.state === "exited" ? ((s.exit?.code ?? 0) !== 0 ? "fail" : "ok") : s.activity;
+    return { id: `s:${host}/${s.id}`, label: s.name, state: s.state, ...(mark ? { mark } : {}), ...(s.state === "detached" ? { meta: "detached" } : s.state === "exited" ? { meta: String(s.exit?.code ?? 0) } : {}) };
+  };
+  /** The Console view's items: each host's name, then its sessions, whether or not they have a window. */
+  const consoleLeaves = (): BranchSection["leaves"] => {
+    const allowed = new Set(cx.adapters.sessions.hosts().map((h) => h.name));
+    return inv!.hosts().filter((h) => allowed.has(h)).flatMap((host) => [
+      { id: `h:${host}`, label: host, heading: true },
+      ...[...inv!.list(host)].sort(byFrecency).map((s) => sessionLeaf(host, s)),
+    ]);
+  };
+  const viewSections = (): BranchSection[] => [...views.values()].map((c) => {
     const graph = c.view.layout === "graph";
     return {
       id: `view:${c.view.id}`,
@@ -29,25 +49,61 @@ export function createTree(cx: Ctx): TreeModule {
         : [...c.wins.values()].map((w) => ({ id: w.model.id, label: w.model.kind === "terminal" ? `${w.model.host}${w.model.session ? ` · ${w.model.session}` : ""}` : w.model.kind === "settings" ? w.model.host : (w.model.session ?? w.model.kind), glyph: w.model.kind === "terminal" ? "›_" : "▤" })),
     };
   });
+  const sections = (): BranchSection[] => {
+    const all = viewSections();
+    if (!inv || inv.status() !== "ready") return all;
+    // Console lists the sessions of its hosts, not only the ones that have a window (D178).
+    return all.map((sec) => (sec.id === "view:console" ? { ...sec, meta: `${consoleLeaves().filter((l) => !l.heading).length}`, leaves: consoleLeaves() } : sec));
+  };
+  const current = (): string => {
+    const w = state.activeWin;
+    return inv && w?.model.sessionId ? `s:${w.model.host}/${w.model.sessionId}` : w?.model.id ?? "";
+  };
   let queued = false;
+  let stale = false;
+  let marks = new Set<string>();
+  const sidebar = stage.querySelector<HTMLElement>("#sidebar");
   const render = (): void => {
     if (queued) return;
     queued = true;
     queueMicrotask(() => {
       queued = false;
-      core.setHostTree(sections(), state.activeWin?.model.id ?? "", (id) => {
+      if (signal.aborted) return;
+      // A closed sidebar costs a rebuild and a layout for nothing; it is rebuilt when it opens.
+      if (sidebar?.hidden) { stale = true; return; }
+      stale = false;
+      core.setHostTree(sections(), current(), (id) => {
+        if (id.startsWith("s:")) {
+          const [host, sid] = id.slice(2).split("/");
+          if (host && sid) cx.win.openSession(host, sid);
+          if (coarse.matches) stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click();
+          return;
+        }
         const target = [...views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === id);
         if (!target) return;
         cx.win.setActive(target);
         if (target.model.kind === "node") cx.nav.flyView("mesh"); else cx.nav.focusWindow(target);
         if (coarse.matches) stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click();
       });
+      // A mark that was not on the last tree draws in; the others stay still.
+      const now = new Set<string>();
+      for (const leaf of stage.querySelectorAll<HTMLElement>("#tree .bm-leaf")) {
+        const mark = leaf.querySelector<HTMLElement>(".ui-mark");
+        if (!mark) continue;
+        const id = `${leaf.dataset.id}:${mark.dataset.mark}`;
+        now.add(id);
+        if (marks.size && !marks.has(id)) mark.classList.add("is-new");
+      }
+      marks = now;
     });
   };
+  const shown = sidebar ? new MutationObserver(() => { if (stale && !sidebar.hidden) render(); }) : undefined;
+  if (sidebar) shown!.observe(sidebar, { attributes: true, attributeFilter: ["hidden"] });
   const tree = stage.querySelector<HTMLElement>("#tree");
   tree?.addEventListener("click", (e) => {
     const head = (e.target as Element).closest(".bm-head");
-    const id = head?.parentElement?.dataset.id?.replace(/^view:/, "") as ViewId | undefined;
+    const raw = head?.parentElement?.dataset.id ?? "";
+    const id = raw.replace(/^view:/, "") as ViewId;
     if (id && views.has(id)) cx.nav.flyView(id);
   }, { signal });
   const markDivider = (): void => { stage.querySelector('#tree .bm-sec[data-id="view:settings"]')?.classList.add("cl-divided"); };
@@ -55,5 +111,5 @@ export function createTree(cx: Ctx): TreeModule {
   if (tree) observer!.observe(tree, { childList: true });
   const sideTitle = stage.querySelector<HTMLElement>(".sidebar-title");
   if (sideTitle) sideTitle.textContent = "Views";
-  return { render, dispose() { observer?.disconnect(); } };
+  return { render, dispose() { observer?.disconnect(); shown?.disconnect(); } };
 }
