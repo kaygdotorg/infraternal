@@ -451,9 +451,11 @@ async function checkForegroundSession(): Promise<void> {
       activeUserId = undefined;
       renderAuth(false, "Your session ended. Sign in again to reconnect.");
     }
-  } catch (error: unknown) {
-    const status = document.querySelector<HTMLElement>("#connection-status");
-    if (status) status.textContent = safeMessage(error);
+  } catch {
+    // The session check is background housekeeping, not something the person asked for. When it
+    // cannot complete (the server restarting, the link dropping, a proxy answering with a page)
+    // nothing is said: the terminal's own reconnection shows state through the status icon, and
+    // the next return to the tab checks again. Only a definite "no session" (401) changes the UI.
   } finally {
     checkingResume = false;
   }

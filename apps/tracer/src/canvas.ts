@@ -183,8 +183,9 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   let relaying = false;
   const relayStatus = (): void => {
     const message = core.status.textContent?.trim() ?? "";
-    // "Connecting…" and the like are progress, not news: the capsule's dot already shows them.
-    if (message && !/(…|\.\.\.)$/.test(message)) {
+    // Routine connection states (starting, connecting, reconnecting, resuming, resumed, paused)
+    // never produce text: they belong to the status icon. Only a real failure reaches the toast.
+    if (message && !/(…|\.\.\.)$/.test(message) && !/reconnect|resum|connecting|starting|paused|approximate/i.test(message)) {
       relaying = true;
       toast.show({ message, tone: /could not|failed|error|unavailable/i.test(message) ? "error" : "ok", duration: 5000 });
     } else if (relaying) {

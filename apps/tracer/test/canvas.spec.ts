@@ -718,3 +718,51 @@ test("copyable values: the highlight hugs the text with even padding, on keys an
   // Wrapped values keep a highlight per line: the decoration is cloned across the lines.
   expect(await page.evaluate(() => getComputedStyle(document.querySelector(".ui-kv-text")!).getPropertyValue("box-decoration-break"))).toBe("clone");
 });
+
+// ---- nothing in the bottom-left corner -------------------------------------------------------
+test("a normal preview session never writes text bottom left: reload, a failing session check, state messages", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const cornerText = (): Promise<string[]> => page.evaluate(() => {
+    const found: string[] = [];
+    for (const node of document.querySelectorAll<HTMLElement>("body *")) {
+      if (node.children.length || !node.textContent?.trim()) continue;
+      const box = node.getBoundingClientRect(), style = getComputedStyle(node);
+      if (box.width === 0 || box.height === 0 || style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) continue;
+      if (node.closest(".ui-window, .sidebar, .palette")) continue; // windows own their own content
+      if (box.left < 320 && box.bottom > innerHeight - 140) found.push(node.textContent.trim());
+    }
+    return found;
+  });
+  await openCanvas(page);
+  // The very first frames after a reload: the status line's "Starting terminal…" is never drawn.
+  await page.reload();
+  for (let frame = 0; frame < 10; frame++) {
+    expect(await page.locator("#connection-status").evaluate((node) => getComputedStyle(node).display)).toBe("none");
+    await page.waitForTimeout(60);
+  }
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+  // The server goes away while the tab is in the background, then the person returns.
+  await page.route("**/auth/session", (route) => route.abort("connectionrefused"));
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(1200);
+  await page.unroute("**/auth/session");
+  // Routine connection states raise no toast and no text, in any corner.
+  for (const message of ["Connecting…", "Connection lost; resuming…", "Connection interrupted; reconnecting…", "Reconnected with an approximate screen.", "Starting terminal…"]) {
+    await page.evaluate((text) => { document.querySelector("#connection-status")!.textContent = text; }, message);
+    await page.waitForTimeout(150);
+    await expect(page.locator(".ui-toast")).toBeHidden();
+  }
+  await page.evaluate(() => { document.querySelector("#connection-status")!.textContent = ""; });
+  expect(await cornerText()).toEqual([]);
+  // The shared toast sits bottom centre and takes the theme's material (light on paper).
+  await page.evaluate(() => { document.querySelector("#connection-status")!.textContent = "The server could not open this terminal."; });
+  await expect(page.locator(".ui-toast")).toBeVisible();
+  const toast = await page.locator(".ui-toast").evaluate((node) => { const r = node.getBoundingClientRect(); return { centre: r.left + r.width / 2, bottom: innerHeight - r.bottom }; });
+  expect(Math.abs(toast.centre - 720)).toBeLessThan(4);
+  expect(toast.bottom).toBeLessThan(40);
+});

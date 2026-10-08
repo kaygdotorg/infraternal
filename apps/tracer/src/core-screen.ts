@@ -173,6 +173,9 @@ export interface PaletteEntry {
 export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): CoreScreen {
   app.innerHTML = SCREEN;
   const stage = get<HTMLElement>("#terminal-screen");
+  // The canvas preview never draws the status line, from the first frame (the canvas chunk loads a
+  // moment after the screen mounts, and the line's "Starting terminal…" must not flash meanwhile).
+  if (options.addHostPrototype) stage.dataset.preview = "";
   const terminalHost = get<HTMLElement>("#terminal-host");
   const status = get<HTMLElement>("#connection-status");
   const probePanel = get<HTMLElement>("#probe-panel");
