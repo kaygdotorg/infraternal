@@ -308,11 +308,14 @@ test("touch: press and hold on a header reveals corner handles; a handle resizes
   // No handles at rest, and a quick tap on the header does not start the mode.
   expect(await window0.evaluate((node) => getComputedStyle(node.querySelector(".ui-window-resize")!).display)).toBe("none");
   const head = (await window0.locator(".ui-window-head").boundingBox())!;
-  const holdPoint = { x: head.x + head.width - 20, y: head.y + head.height / 2, id: 1 };
+  // On the title pill: the lock icon takes the free end of the header, so a hold there would lock instead.
+  const holdPoint = { x: head.x + 60, y: head.y + head.height / 2, id: 1 };
   await touch("touchStart", [holdPoint]);
   await page.waitForTimeout(150);
   await touch("touchEnd", []);
   await expect(window0).not.toHaveAttribute("data-resize", "touch");
+  await page.keyboard.press("Escape"); // the quick tap opened the details popover
+  await expect(page.locator(".canvas-popover")).toHaveCount(0);
   // A 450 ms hold does.
   await touch("touchStart", [holdPoint]);
   await page.waitForTimeout(650);
