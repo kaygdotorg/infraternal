@@ -302,7 +302,7 @@ button { color: inherit; }
   --t-pop: 180ms;
   --t-panel: 240ms;
   --gutter: max(20px, env(safe-area-inset-left));
-  --pill-h: var(--ui-pill-h, 38px);
+  --pill-h: 38px;
   --keybar-height: 48px;
   --keybar-gap: 16px;
   --keybar-inset: 8px;
@@ -360,8 +360,8 @@ button { color: inherit; }
 .sidebar-toggle.instant { transition: none; }
 .keybar button:active { transform: scale(var(--ui-press-scale)); }
 .capsule {
-  justify-self: center; min-width: min(420px, 100%); padding: 0 8px 0 var(--ui-pill-pad-x, 14px); justify-content: flex-start;
-  gap: var(--ui-pill-gap, 8px); color: var(--fg); font-weight: var(--fw-label); letter-spacing: -0.005em;
+  justify-self: center; min-width: min(420px, 100%); padding: 0 8px 0 14px; justify-content: flex-start;
+  gap: 8px; color: var(--fg); font-weight: var(--fw-label); letter-spacing: -0.005em;
 }
 .capsule-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .capsule-sep { color: var(--fg-3); }
@@ -374,7 +374,7 @@ button { color: inherit; }
 .tab-host { color: var(--fg-3); }
 .tab-name { color: var(--fg); }
 .tab-add svg { width: 14px; height: 14px; }
-.capsule-os { display: none; flex: none; width: var(--ui-pill-icon, 16px); height: var(--ui-pill-icon, 16px); color: var(--fg-2); }
+.capsule-os { display: none; flex: none; width: 16px; height: 16px; color: var(--fg-2); }
 .capsule-os svg { width: 100%; height: 100%; fill: currentColor; stroke: none; }
 .capsule-os svg.is-line { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
 /* In the canvas preview the pill shows the host's OS mark in place of the connection dot. */

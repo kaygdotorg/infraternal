@@ -320,20 +320,20 @@
 }
 
 /* Capsule tabs (capsule-tabs.ts): flat track, one gliding capsule. */
-.ui-tabs { position: relative; display: inline-flex; gap: 2px; padding: var(--ui-tabs-inset, 3px); border-radius: 999px; background: var(--hover); box-shadow: var(--ui-tabs-hairline, none); isolation: isolate; }
+.ui-tabs { position: relative; display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--hover); isolation: isolate; }
 .ui-tabs-capsule {
-  position: absolute; z-index: -1; top: var(--ui-tabs-inset, 3px); bottom: var(--ui-tabs-inset, 3px); left: 0; border-radius: 999px;
-  background: var(--overlay-solid); box-shadow: var(--ui-tab-selected-shadow, 0 1px 2px rgb(0 0 0 / 0.14), 0 0 0 1px var(--overlay-line));
+  position: absolute; z-index: -1; top: 3px; bottom: 3px; left: 0; border-radius: 999px;
+  background: var(--overlay-solid); box-shadow: 0 1px 2px rgb(0 0 0 / 0.14), 0 0 0 1px var(--overlay-line);
 }
 .ui-tab {
-  display: inline-flex; align-items: center; justify-content: center; gap: var(--ui-pill-gap, 6px); min-width: 0; height: var(--ui-tab-h, calc(var(--ui-control-h) - 6px));
-  padding: 0 var(--ui-pill-pad-x, 12px); border: 0; border-radius: 999px; background: none; color: var(--fg-2); cursor: pointer;
-  font: var(--ui-type-button); font-size: var(--ui-pill-font-size, 13.5px); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: color 160ms ease;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; height: calc(var(--ui-control-h) - 6px);
+  padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--fg-2); cursor: pointer;
+  font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: color 160ms ease;
 }
 .ui-tab[aria-selected="true"] { color: var(--fg); }
 .ui-tabs[data-compact] .ui-tab[aria-selected="false"] > span { display: none; }
-.ui-tabs[data-compact] .ui-tab[aria-selected="false"] { padding: 0 var(--ui-pill-pad-compact, 10px); }
-.ui-tab svg { width: var(--ui-pill-icon, var(--ui-icon)); height: var(--ui-pill-icon, var(--ui-icon)); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-tabs[data-compact] .ui-tab[aria-selected="false"] { padding: 0 10px; }
+.ui-tab svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Key/value list (kv-list.ts): keys left, values right, every cell copies. */
 .ui-kv { display: flex; flex-direction: column; }
@@ -434,7 +434,7 @@
    sidebar toggle, session tabs). Instances set only their size and content layout; the material,
    hairline, shadow, radius and press feedback live here so they can never drift apart. */
 .ui-pill {
-  appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 38px); font-size: var(--ui-pill-font-size, inherit);
+  appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 38px);
   border: 1px solid var(--overlay-line) !important; border-radius: 999px; background: var(--overlay); box-shadow: var(--shadow);
   -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation)); backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
   transition: transform 140ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
@@ -492,7 +492,7 @@
 
 /* Sidebar footer (sidebar-foot.ts): the person's pill and the settings pill share one height, so
    their centres sit on one line. Pills are the shared `.ui-pill`; only layout lives here. */
-.ui-sidebar-foot { --pill-h: var(--ui-foot-h, 40px); display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding: 9px 0 0; box-shadow: 0 -1px 0 var(--line); }
+.ui-sidebar-foot { --pill-h: 40px; display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding: 9px 0 0; box-shadow: 0 -1px 0 var(--line); }
 .ui-sidebar-foot[data-variant="b"] { --pill-h: 32px; }
 @media (pointer: coarse) { .ui-sidebar-foot, .ui-sidebar-foot[data-variant="b"] { --pill-h: 44px; } }
 .ui-sidebar-foot .ui-pill { cursor: pointer; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, box-shadow 160ms ease; }
@@ -564,36 +564,4 @@
 @media (max-width: 520px) {
   .ui-settings-main { flex-direction: column; }
   .ui-settings-nav { width: auto; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--line); }
-}
-
-/* Pill sizing tokens (desktop). Every pill reads these, so one change resizes the family: the top pill,
-   `.ui-pill` buttons, the gliding tabs, the sidebar footer. The defaults are the long-standing sizes (they are
-   not set, each rule carries its own fallback). `?pills=large` (data-pills on the root) is the larger desktop
-   proportion the owner asked to compare: a 46 px pill with a 4 px inset, a 38 px selected segment, 16 px labels,
-   an 18 px icon with an 8 px gap and 18 px side padding. A deliberate desktop-only size change; phones keep
-   their sizes and the one text scale (D174). */
-@media (pointer: fine) and (min-width: 721px) {
-  :root[data-pills="large"] {
-    --ui-pill-h: 46px;
-    --ui-foot-h: 46px;
-    --ui-tabs-inset: 4px;
-    --ui-tab-h: 38px;
-    --ui-pill-font-size: 16px;
-    --ui-pill-icon: 18px;
-    --ui-pill-gap: 8px;
-    --ui-pill-pad-x: 18px;
-    --ui-pill-pad-compact: 14px;
-    --ui-tabs-hairline: inset 0 0 0 1px var(--overlay-line);
-  }
-  /* The selected segment is solid and light in every theme (near-white on paper, a soft lavender-white on ink)
-     with the dark of the theme as its label: that contrast is what makes the control read as selected. */
-  :root[data-pills="large"] .ui-tabs-capsule {
-    background: light-dark(color-mix(in oklab, white 96%, var(--fg)), color-mix(in oklab, white 90%, var(--accent)));
-    box-shadow: 0 1px 3px rgb(0 0 0 / 0.18), 0 6px 14px -6px rgb(0 0 0 / 0.3);
-  }
-  :root[data-pills="large"] .ui-tab[aria-selected="true"] { color: light-dark(var(--fg), var(--bg)); text-shadow: none; }
-  /* The popover's tabs have room for one size more. */
-  :root[data-pills="large"] .canvas-popover .ui-tabs { --ui-pill-font-size: 17px; }
-  :root[data-pills="large"] .ui-tab { font-weight: var(--fw-label); }
-  :root[data-pills="large"] .ui-tab:not([aria-selected="true"]) { color: color-mix(in oklab, var(--fg) 70%, var(--bg)); }
 }
