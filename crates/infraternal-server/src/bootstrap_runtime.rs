@@ -310,3 +310,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "key_authority_tests.rs"]
+mod key_authority_tests;

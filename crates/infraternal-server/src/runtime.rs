@@ -1091,3 +1091,7 @@ mod reviewer_admission {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "key_runtime_tests.rs"]
+mod key_runtime_tests;

@@ -15,12 +15,12 @@ async fn database() -> SqlitePool {
     pool
 }
 
-struct Vault {
+pub(super) struct Vault {
     wrapping: Secret,
     seals: AtomicUsize,
 }
 impl Vault {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             wrapping: Secret::new(rand::random::<[u8; 32]>().to_vec()),
             seals: AtomicUsize::new(0),

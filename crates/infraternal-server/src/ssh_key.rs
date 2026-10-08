@@ -279,3 +279,9 @@ impl SshKeySource for UnavailableSshKey {
 #[cfg(test)]
 #[path = "ssh_key_tests.rs"]
 mod tests;
+
+/// Reuse the authenticated-encryption fixture; it is not a production unlock policy.
+#[cfg(test)]
+pub(crate) fn test_custody() -> std::sync::Arc<impl SshKeyVault + AdministratorSshKeyUnlock> {
+    std::sync::Arc::new(tests::Vault::new())
+}
