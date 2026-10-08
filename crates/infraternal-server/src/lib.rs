@@ -9,6 +9,7 @@ mod embedded;
 pub mod enrollment;
 pub mod remote_enrollment;
 mod runtime;
+pub mod ssh_key;
 mod web_assets;
 mod websocket;
 
