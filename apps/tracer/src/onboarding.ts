@@ -59,7 +59,7 @@ function mountSetup(
       <ol class="auth-steps" id="setup-steps" aria-label="Setup progress"></ol>
       <div class="auth-viewport" id="setup-viewport"></div>
       <div class="auth-footer" id="setup-footer"></div>
-      <p class="auth-message" id="auth-error" role="alert"></p>
+      <div class="auth-note"><div><p class="auth-message" id="auth-error" role="alert"></p></div></div>
     </section>
   </section>`;
   const initialMessage = host.querySelector<HTMLElement>("#auth-error")!;

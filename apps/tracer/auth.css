@@ -74,7 +74,8 @@
 
 .auth-card {
   width: min(440px, 100%);
-  padding: 36px 32px 28px;
+  --auth-pad: 36px;
+  padding: var(--auth-pad) 32px var(--auth-pad);
   border-radius: 22px;
   animation: auth-card-in 240ms var(--ease) both;
 }
@@ -255,7 +256,7 @@
 .auth-screen button:focus { outline: none; }
 [data-focus-ring="on"] .auth-screen button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 @media (max-width: 480px) {
-  .auth-card { padding: 28px 22px 22px; border-radius: 20px; }
+  .auth-card { --auth-pad: 28px; padding: var(--auth-pad) 22px var(--auth-pad); border-radius: 20px; }
   .auth-signin { --auth-pad: 28px; padding-inline: 22px; padding-bottom: var(--auth-pad); }
   .auth-card h1 { font-size: 23px; }
   .auth-words { grid-template-columns: repeat(2, minmax(0, 1fr)); }
