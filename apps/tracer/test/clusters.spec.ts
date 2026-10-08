@@ -249,12 +249,86 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   const head2 = await centre('.cl-arrow[data-grant="g3"] .cl-arrow-handle[data-end="head"]');
   await page.mouse.move(head2.x, head2.y);
   await page.mouse.down();
-  await page.mouse.move(head2.x + 10, head2.y + 220, { steps: 10 });
+  await page.mouse.move(head2.x + 160, head2.y - 40, { steps: 10 }); // open canvas, clear of every node's snap radius
   await page.mouse.up();
   await expect(page.locator(".ui-confirm-tip")).toContainText("Remove grant nix-cache→edge-arm?");
   await page.locator(".ui-confirm-yes").click();
   await expect.poll(async () => (await grantsOf()).length).toBe(n0 - 1);
   await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveCount(0);
+});
+
+test("mesh: dragging an arrow's end shows the real arrow, snaps within the radius onto the node's edge, and lets go beyond it", async ({ page }) => {
+  await open(page, 6);
+  await page.keyboard.press("Control+3");
+  await page.waitForTimeout(900);
+  const centre = async (sel: string) => { const b = (await page.locator(sel).first().boundingBox())!; return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
+  const mid = await centre('.cl[data-view="mesh"] .cl-arrow[data-grant="g3"] .cl-arrow-hit');
+  await page.mouse.move(mid.x, mid.y);
+  await page.waitForTimeout(300);
+  const head = await centre('.cl-arrow[data-grant="g3"] .cl-arrow-handle[data-end="head"]');
+  const edge = (await page.locator('.ui-window[data-window-id="n-edge-arm"]').boundingBox())!;
+  const live = page.locator(".cl-arrow[data-live]");
+  const path = (): Promise<string> => live.locator(".cl-arrow-line").getAttribute("d").then((d) => d ?? "");
+  const lastPoint = (d: string): { x: number; y: number } => { const n = d.match(/-?[\d.]+/g)!.map(Number); return { x: n[n.length - 2]!, y: n[n.length - 1]! }; };
+  await page.mouse.move(head.x, head.y);
+  await page.mouse.down();
+  // Free: far from every node, the arrow (line and head) follows the pointer from its other node.
+  await page.mouse.move(head.x + 20, head.y + 130, { steps: 8 });
+  await expect(live).toHaveCount(1);
+  await expect(live).not.toHaveAttribute("data-snapped", "");
+  await expect(live.locator(".cl-arrow-head")).toHaveCount(1);
+  const free1 = lastPoint(await path());
+  await page.mouse.move(head.x - 20, head.y + 150, { steps: 6 });
+  const free2 = lastPoint(await path());
+  expect(Math.hypot(free2.x - free1.x, free2.y - free1.y)).toBeGreaterThan(20); // the end moves with the pointer
+  // Approaching edge-arm: outside the radius it stays free, inside it snaps and the node highlights.
+  const zoom = (await page.evaluate(() => (window as unknown as { __tracerClusters: { camera(): { z: number } } }).__tracerClusters.camera().z));
+  const outside = 32 / zoom + 24, inside = 32 / zoom - 14;
+  const px = edge.x + edge.width / 2;
+  await page.mouse.move(px, edge.y + edge.height + outside * zoom, { steps: 8 });
+  await expect(live).not.toHaveAttribute("data-snapped", "");
+  await page.mouse.move(px, edge.y + edge.height + inside * zoom, { steps: 8 });
+  await expect(live).toHaveAttribute("data-snapped", "");
+  await expect(page.locator('.ui-window[data-window-id="n-edge-arm"][data-drop]')).toHaveCount(1);
+  await page.waitForTimeout(700);
+  // Snapped, the arrow ends on the node's edge (its bottom side, the nearest), not at the pointer.
+  const end = lastPoint(await path());
+  const svgBox = (await page.locator('.cl[data-view="mesh"] .cl-graph-arrows').boundingBox())!;
+  const endScreen = { x: svgBox.x + end.x * zoom, y: svgBox.y + end.y * zoom };
+  expect(Math.abs(endScreen.y - (edge.y + edge.height))).toBeLessThan(14);
+  // Moving away unsnaps.
+  await page.mouse.move(edge.x + edge.width + 90, edge.y + edge.height / 2, { steps: 8 }); // open canvas to the right
+  await expect(live).not.toHaveAttribute("data-snapped", "");
+  await page.mouse.up();
+  await page.locator(".ui-confirm-no, .ui-confirm-yes").first().waitFor({ timeout: 3000 }).catch(() => undefined);
+});
+
+test("scrolling past the ends of a view never leaves it, and the pill always names the view on screen", async ({ page }) => {
+  test.setTimeout(120_000);
+  await open(page, 3);
+  const pillName = (): Promise<string> => page.evaluate(() => document.querySelector("#capsule-host")?.textContent ?? "");
+  const state = (): Promise<{ view: string; name: string }> => page.evaluate(() => {
+    const p = (window as unknown as { __tracerClusters: { canvasLock(): { view: string } } }).__tracerClusters;
+    return { view: p.canvasLock().view, name: document.querySelector("#capsule-host")?.textContent ?? "" };
+  });
+  const NAMES: Record<string, string> = { console: "Console", containers: "Containers", mesh: "Mesh", settings: "Settings" };
+  await page.mouse.move(640, 400);
+  for (const key of ["Control+1", "Control+2", "Control+3", "Control+4"]) {
+    await page.keyboard.press(key);
+    await page.waitForTimeout(1300);
+    const start = await state();
+    for (const dir of [1, -1]) for (let i = 0; i < 10; i++) {
+      await page.mouse.wheel(dir * 220, 0);
+      await page.waitForTimeout(260);
+      const s = await state();
+      expect(s.view, `${key} wheel ${dir}`).toBe(start.view);
+      expect(s.name, `pill after ${key}`).toBe(NAMES[s.view]);
+    }
+    await page.waitForTimeout(700);
+    const end = await state();
+    expect(end.view).toBe(start.view);
+    expect(end.name).toBe(NAMES[end.view]);
+  }
 });
 
 test("container shell: the camera stays, the pill morphs into a floating terminal that resizes with its aspect locked and expands into Console", async ({ page }) => {
