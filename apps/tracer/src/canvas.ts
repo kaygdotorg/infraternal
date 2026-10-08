@@ -27,6 +27,7 @@ import { Spring } from "../../../packages/ui/src/spring";
 import { createWindowCard, type WindowCard } from "../../../packages/ui/src/window-card";
 import { hostIconMarkup, type HostPlatform } from "../../../packages/ui/src/host-icons";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
+import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResize, type WindowResizeHost } from "../../../packages/ui/src/window-resize";
 import { openDetailsPopover, type DetailsPopover } from "./canvas-popover";
 import type { BranchSection, BranchedMenu } from "../../../packages/ui/src/branched";
 import type { CoreScreen } from "./core-screen";
@@ -117,6 +118,9 @@ interface CanvasWindow {
   live: boolean;
   preview?: HTMLElement;
   fontSize: number;
+  /** A size the user dragged this window to; windows without one follow the canvas default. */
+  size?: { width: number; height: number; top: number };
+  resize?: WindowResize;
 }
 
 const HOSTS_URL = "/__mock/proto/windows";
@@ -126,6 +130,10 @@ const PAN_THRESHOLD = 10;
 const PINCH_THRESHOLD = 24;
 const REST_DELAY = 140;
 const DECELERATION = 0.998;
+/** Smallest dragged window: about 40 columns by 10 rows of the 14 px terminal face plus its chrome. */
+const MIN_COLUMNS = 40;
+const MIN_ROWS = 10;
+const MIN_WIDTH = 260;
 
 const coarse = matchMedia("(pointer: coarse)");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
@@ -262,6 +270,22 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       height: viewport.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
     };
   };
+  // The default window width, and each window's own width (a dragged size wins).
+  let baseWidth = 0;
+  const widthOf = (entry: CanvasWindow): number => entry.size?.width ?? baseWidth;
+  const lefts = (): number[] => {
+    let left = 0;
+    return windows.map((entry) => { const at = left; left += widthOf(entry) + GAP; return at; });
+  };
+  const contentWidth = (): number => windows.reduce((sum, entry) => sum + widthOf(entry), 0) + Math.max(0, windows.length - 1) * GAP;
+  /** Writes a window's own size (or hands it back to the canvas default). One style write per window. */
+  const paintSize = (entry: CanvasWindow): void => {
+    const style = entry.card.root.style;
+    if (!entry.size) { style.width = ""; style.height = ""; style.marginTop = ""; return; }
+    style.width = `${entry.size.width}px`;
+    style.height = `${entry.size.height}px`;
+    style.marginTop = `${entry.size.top}px`;
+  };
   const layout = (): void => {
     const rect = inner();
     viewWidth = rect.width;
@@ -272,10 +296,17 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       ? Math.max(260, rect.width - 28)
       : Math.max(420, Math.min(860, (rect.width - GAP * 2) / 2.25));
     const height = rect.height;
-    layer.style.setProperty("--window-w", `${Math.round(width)}px`);
+    baseWidth = Math.round(width);
+    layer.style.setProperty("--window-w", `${baseWidth}px`);
     layer.style.setProperty("--window-h", `${Math.round(height)}px`);
-    const content = windows.length * Math.round(width) + Math.max(0, windows.length - 1) * GAP;
-    minX = Math.min(0, rect.width - content);
+    // A dragged size must still fit a smaller viewport.
+    for (const entry of windows) {
+      if (!entry.size) continue;
+      const fitted = Math.min(entry.size.height, Math.round(height));
+      entry.size = { width: Math.min(entry.size.width, Math.max(MIN_WIDTH, Math.round(rect.width))), height: fitted, top: Math.max(0, Math.min(entry.size.top, Math.round(height) - fitted)) };
+      paintSize(entry);
+    }
+    minX = Math.min(0, rect.width - contentWidth());
     minY = 0;
     x = clampX(x);
     y = clampY(y);
@@ -372,9 +403,8 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   const revealWindow = (target: CanvasWindow, align: "start" | "nearest" = "nearest"): void => {
     const rect = { width: viewWidth, height: viewHeight };
     const index = windows.indexOf(target);
-    const width = parseFloat(layer.style.getPropertyValue("--window-w")) || rect.width;
-    const left = index * (width + GAP);
-    const right = left + width;
+    const left = lefts()[index] ?? 0;
+    const right = left + widthOf(target);
     // Touch pages window by window, so a revealed window lands on its page position.
     if (coarse.matches || align === "start") { glideTo(-left, y); return; }
     if (left + x < 0) glideTo(-left, y);
@@ -390,6 +420,60 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       hostLabel: target.live ? hostName : target.host.name,
       icons,
     }, source, () => { popover = undefined; });
+  };
+
+  // ---- resizing a window (window-resize.ts owns the gestures; this owns the geometry) ----
+  // A dragged size lives on the window card itself (width, height, margin-top), so the row's
+  // flex layout shifts every neighbour and none can overlap. Each frame is one style write
+  // plus the layer's compositor transform. The live terminal is pinned to its starting pixel
+  // size while the pointer is down, so its observer stays quiet and it refits exactly once,
+  // on release, at its final size.
+  const resizeHost = (entry: CanvasWindow): WindowResizeHost => {
+    let startX = 0;
+    const terminal = core.terminalHost;
+    const unpin = (): void => { terminal.style.inset = ""; terminal.style.width = ""; terminal.style.height = ""; };
+    return {
+      begin(): ResizeStart {
+        popover?.close("pointer");
+        stopSprings();
+        activate(entry, false);
+        const font = coarse.matches ? 13 : 14;
+        const columns = coarse.matches ? 24 : MIN_COLUMNS;
+        const cell = font * 0.6, line = Math.round(font * 1.2857);
+        const header = entry.card.header.offsetHeight;
+        if (entry.live) {
+          const box = terminal.getBoundingClientRect();
+          terminal.style.inset = "0 auto auto 0";
+          terminal.style.width = `${box.width}px`;
+          terminal.style.height = `${box.height}px`;
+        }
+        startX = x;
+        const maxWidth = Math.max(MIN_WIDTH, Math.round(viewWidth));
+        return {
+          width: widthOf(entry),
+          height: entry.size?.height ?? Math.round(viewHeight),
+          top: entry.size?.top ?? 0,
+          minWidth: Math.min(maxWidth, Math.max(MIN_WIDTH, Math.ceil(columns * cell + 32))),
+          minHeight: Math.min(Math.round(viewHeight), header + MIN_ROWS * line + 28),
+          maxWidth,
+          areaHeight: Math.round(viewHeight),
+        };
+      },
+      apply(frame: ResizeFrame) {
+        entry.size = { width: snap(frame.width), height: snap(frame.height), top: snap(frame.top) };
+        paintSize(entry);
+        minX = Math.min(0, viewWidth - contentWidth());
+        // Dragging a west edge grows the window to the left: the row shifts so its right edge stays put.
+        x = startX + frame.shiftX;
+        paint();
+      },
+      end() {
+        unpin();
+        minX = Math.min(0, viewWidth - contentWidth());
+        glideTo(x, y);
+      },
+      onTouchMode() { touchPan = undefined; },
+    };
   };
 
   const attachPreview = (entry: CanvasWindow): void => {
@@ -411,6 +495,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     const entry: CanvasWindow = { id: `${host.id}:${session.id}`, host, session, card, live, fontSize: coarse.matches ? 13 : 14, ...(flow ? { flow } : {}) };
     if (live) card.body.append(core.terminalHost);
     else if (!flow) attachPreview(entry);
+    entry.resize = attachWindowResize(card, resizeHost(entry));
     card.pill.addEventListener("click", (event) => {
       activate(entry, false);
       // A window still hosting a flow has no machine to describe yet.
@@ -484,7 +569,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   viewport.addEventListener("pointerdown", (event) => {
     const target = windowOf(event.target);
     if (!target || target === active) return;
-    if ((event.target as Element).closest(".ui-window-head")) return; // the pill activates itself
+    if ((event.target as Element).closest(".ui-window-head, .ui-window-resize")) return; // the pill and the handles act for themselves
     // First touch on an inactive window: claim it so the terminal neither focuses nor
     // opens the keyboard; the release activates it if the finger did not move.
     event.preventDefault();
@@ -561,13 +646,12 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     let nextX = x + project(vx);
     const nextY = y + project(vy);
     if (snapToWindows) {
-      const width = parseFloat(layer.style.getPropertyValue("--window-w")) || 0;
-      const step = width + GAP;
-      if (step > 0) {
-        const origin = Math.round(-originX / step);
-        const wanted = Math.round(-nextX / step);
-        nextX = -Math.max(origin - 1, Math.min(origin + 1, wanted)) * step;
-      }
+      // Windows can have different widths, so snap to the nearest window's left edge.
+      const stops = lefts();
+      const nearest = (at: number): number => stops.reduce((best, stop, index) => Math.abs(stop + at) < Math.abs((stops[best] ?? 0) + at) ? index : best, 0);
+      const origin = nearest(originX);
+      const wanted = nearest(nextX);
+      nextX = -(stops[Math.max(origin - 1, Math.min(origin + 1, wanted))] ?? 0);
     }
     glideTo(nextX, nextY);
   };
@@ -617,7 +701,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       const { cx, cy, spread } = midpoint(event.touches);
       const target = windowOf(event.target);
       touchPan = { mode: "undecided", cx, cy, spread, startCx: cx, startCy: cy, samples: [{ t: event.timeStamp, x: cx, y: cy }], baseFont: target?.fontSize ?? 14, originX: x, ...(target ? { window: target } : {}) };
-    } else if (event.touches.length === 1 && !inScrollableBody(event.target) && !(event.target as Element).closest("button")) {
+    } else if (event.touches.length === 1 && !inScrollableBody(event.target) && !(event.target as Element).closest("button, .ui-window-resize")) {
       const touch = event.touches[0]!;
       touchPan = { mode: "single", cx: touch.clientX, cy: touch.clientY, spread: 0, startCx: touch.clientX, startCy: touch.clientY, samples: [{ t: event.timeStamp, x: touch.clientX, y: touch.clientY }], baseFont: 14, originX: x };
     }
@@ -729,6 +813,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       windows.splice(index, 1);
       if (popover?.windowId === entry.id) popover.close("keyboard");
       if (active === entry) { active = undefined; const next = windows[Math.max(0, index - 1)]; if (next) activate(next, false); }
+      entry.resize?.dispose();
       entry.card.dispose();
       layout();
       queueTree();
@@ -771,7 +856,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       toast.dispose();
       resizeObserver.disconnect();
       popover?.close("keyboard");
-      for (const entry of windows) entry.card.dispose();
+      for (const entry of windows) { entry.resize?.dispose(); entry.card.dispose(); }
       viewport.remove();
       delete stage.dataset.canvas;
       delete (window as unknown as { __tracerCanvas?: unknown }).__tracerCanvas;

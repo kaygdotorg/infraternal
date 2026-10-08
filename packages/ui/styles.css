@@ -275,7 +275,7 @@
   transition: border-color 180ms var(--ease-out, ease-out);
 }
 .ui-window[data-active] { border-color: color-mix(in oklab, var(--accent) 50%, var(--overlay-line)); }
-.ui-window-head { display: flex; flex: none; align-items: center; gap: 8px; padding: 8px 8px 0 8px; }
+.ui-window-head { display: flex; flex: none; align-items: center; gap: 8px; padding: 8px 8px 0 8px; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .ui-window-pill {
   display: inline-flex; align-items: center; gap: 8px; min-width: 0; height: var(--ui-control-h); padding: 0 10px 0 8px;
   border: 1px solid var(--overlay-line); border-radius: 999px; background: transparent; color: var(--fg);
@@ -431,3 +431,42 @@
 
 /* Panel: the same material for large floating surfaces such as the sidebar; only the radius differs. */
 .ui-panel { border-radius: var(--r-lg, 18px); }
+
+/* Window resize handles (window-resize.ts): invisible hit strips on the card's edges for a
+   mouse; a finger gets four corner grips only after a press-and-hold on the header. */
+.ui-window-resize { position: absolute; z-index: 5; touch-action: none; }
+.ui-window-resize[data-edge="n"], .ui-window-resize[data-edge="s"] { left: 18px; right: 18px; height: 6px; }
+.ui-window-resize[data-edge="e"], .ui-window-resize[data-edge="w"] { top: 18px; bottom: 18px; width: 6px; }
+.ui-window-resize[data-edge="n"] { top: 0; cursor: ns-resize; }
+.ui-window-resize[data-edge="s"] { bottom: 0; cursor: ns-resize; }
+.ui-window-resize[data-edge="e"] { right: 0; cursor: ew-resize; }
+.ui-window-resize[data-edge="w"] { left: 0; cursor: ew-resize; }
+.ui-window-resize[data-edge$="e"][data-edge^="n"], .ui-window-resize[data-edge$="w"][data-edge^="s"] { cursor: nesw-resize; }
+.ui-window-resize[data-edge$="w"][data-edge^="n"], .ui-window-resize[data-edge$="e"][data-edge^="s"] { cursor: nwse-resize; }
+.ui-window-resize[data-edge="ne"], .ui-window-resize[data-edge="nw"], .ui-window-resize[data-edge="se"], .ui-window-resize[data-edge="sw"] { width: 18px; height: 18px; }
+.ui-window-resize[data-edge="ne"] { top: 0; right: 0; }
+.ui-window-resize[data-edge="nw"] { top: 0; left: 0; }
+.ui-window-resize[data-edge="se"] { bottom: 0; right: 0; }
+.ui-window-resize[data-edge="sw"] { bottom: 0; left: 0; }
+@media (pointer: coarse) { .ui-window-resize { display: none; } }
+
+/* Touch mode: an accent outline and four corner brackets that hug the card's rounded corners,
+   each with a 44 px hit area. Edges stay inert so a finger cannot resize by accident. */
+.ui-window[data-resize="touch"] { border-color: var(--accent); box-shadow: var(--shadow), 0 0 0 1px var(--accent); }
+.ui-window[data-resize="touch"] .ui-window-resize { display: block; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge]:not([data-edge="ne"], [data-edge="nw"], [data-edge="se"], [data-edge="sw"]) { display: none; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="ne"], .ui-window[data-resize="touch"] .ui-window-resize[data-edge="nw"],
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="se"], .ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"] {
+  width: 44px; height: 44px; cursor: auto;
+  animation: ui-grip-in 220ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) both;
+}
+.ui-window[data-resize="touch"] .ui-window-resize::after {
+  content: ""; position: absolute; width: 22px; height: 22px; border: 0 solid var(--accent);
+  transition: transform 140ms var(--ease-out, ease-out);
+}
+.ui-window[data-resize="touch"] .ui-window-resize:active::after { transform: scale(1.12); }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="ne"]::after { top: 6px; right: 6px; border-width: 3px 3px 0 0; border-top-right-radius: 14px; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="nw"]::after { top: 6px; left: 6px; border-width: 3px 0 0 3px; border-top-left-radius: 14px; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="se"]::after { bottom: 6px; right: 6px; border-width: 0 3px 3px 0; border-bottom-right-radius: 14px; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"]::after { bottom: 6px; left: 6px; border-width: 0 0 3px 3px; border-bottom-left-radius: 14px; }
+@keyframes ui-grip-in { from { opacity: 0; } to { opacity: 1; } }
