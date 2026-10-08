@@ -13,7 +13,7 @@ import type { Ctx, ViewRec, WinRec } from "../context";
 import type { ViewId } from "../model/types";
 import { COLUMN_GAP, type Rect } from "../layout/geometry";
 import { scrollToWindow } from "../layout/columns";
-import { nearestStop as nearest, stopsFor as stops, type Stops } from "../layout/stops";
+import { isFreeView, nearestStop as nearest, stopsFor as stops, type Stops } from "../layout/stops";
 import { bounds, clamp, type Cam } from "./camera";
 
 export interface Nav {
@@ -65,7 +65,8 @@ export function createNav(cx: Ctx): Nav {
     const c = views.get(id);
     if (!c) return;
     state.currentView = id;
-    applyCanvasLock(true);
+    // A graph too big to snap node by node opens fitted whole and free: zoom into a cluster from there.
+    applyCanvasLock(!isFreeView(c.view));
     cx.pill.paint();
     goStop(c, 0, instant);
   };

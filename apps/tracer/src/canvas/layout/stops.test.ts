@@ -1,7 +1,7 @@
 /** Stops: where the camera rests while the canvas lock is on (layout/stops.ts). */
 import { expect, test } from "bun:test";
 import type { ViewModel } from "../model/types";
-import { nearestStop, stopsFor } from "./stops";
+import { FREE_GRAPH_NODES, isFreeView, nearestStop, stopsFor } from "./stops";
 
 const view = (widths: number[]): ViewModel => ({ id: "console", name: "Console", layout: "tiled", nodes: [], x: 0, y: 0, cols: widths.map((w, i) => ({ id: `c${i}`, w, wins: [] })) });
 
@@ -30,4 +30,24 @@ test("nearestStop picks the stop whose centre is closest", () => {
   const centre = (i: number): number => st.lefts[i]! + st.view / 2;
   expect(nearestStop(st, centre(0) + 10)).toBe(0);
   expect(nearestStop(st, centre(2) - 10)).toBe(2);
+});
+
+const graph = (count: number): ViewModel => ({
+  id: "mesh", name: "Mesh", layout: "graph", cols: [], x: 0, y: 0,
+  nodes: Array.from({ length: count }, (_, i) => ({ id: `n${i}`, kind: "host" as const, label: `n${i}`, x: i * 230, y: 0, detail: "", sub: "" })),
+});
+
+test("a big graph opens fitted whole, in one stop, and its canvas is free", () => {
+  const big = graph(FREE_GRAPH_NODES + 1), r = { x: 0, y: 0, w: 6000, h: 3000 };
+  expect(isFreeView(big)).toBe(true);
+  const st = stopsFor(big, r, 1440, 900);
+  expect(st.lefts).toHaveLength(1);
+  expect(st.z).toBeCloseTo(0.24, 2); // 1440 / 6000: the whole width fits
+  expect(r.w * st.z).toBeLessThanOrEqual(1440 + 1);
+});
+
+test("a small graph keeps one stop per node column", () => {
+  const small = graph(6), r = { x: 0, y: 0, w: 1500, h: 400 };
+  expect(isFreeView(small)).toBe(false);
+  expect(stopsFor(small, r, 600, 700).lefts.length).toBeGreaterThan(1);
 });

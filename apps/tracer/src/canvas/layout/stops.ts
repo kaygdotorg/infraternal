@@ -18,8 +18,13 @@ export interface Stops {
   view: number;
 }
 
+/** A graph with more nodes than this is too big to snap card by card: it opens fitted whole, with the canvas free. */
+export const FREE_GRAPH_NODES = 40;
+export const isFreeView = (view: ViewModel): boolean => view.layout === "graph" && view.nodes.length > FREE_GRAPH_NODES;
+
 export function stopsFor(view: ViewModel, r: Rect, vw: number, vh: number): Stops {
-  const z = Math.min(1, vh / r.h);
+  // A big graph has one stop, at the zoom where all of it fits; from there the person zooms into a cluster.
+  const z = isFreeView(view) ? Math.min(1, vh / r.h, vw / r.w) : Math.min(1, vh / r.h);
   const width = vw / z;
   let lefts: number[];
   if (r.w <= width) lefts = [Math.round(r.x + r.w / 2 - width / 2)];
