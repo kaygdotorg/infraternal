@@ -21,6 +21,7 @@ import { el } from "../dom";
 import { restPx } from "../springs";
 import { viewIcon } from "./icons";
 import { windowLabel } from "../windows/label";
+import { endActivity, setActivity } from "../../perf-activity";
 
 export interface ViewsModule {
   contentRect(c: ViewRec): Rect;
@@ -136,6 +137,7 @@ export function createViews(cx: Ctx): ViewsModule {
       if (!d.moved) {
         if (Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 6) return;
         d.moved = true;
+        setActivity("drag");
         hideSummary();
         camera.stop();
         c.el.dataset.lifted = "";
@@ -163,6 +165,7 @@ export function createViews(cx: Ctx): ViewsModule {
       const d = clusterDrag;
       if (!d || d.c !== c || e.pointerId !== d.id) return;
       clusterDrag = undefined;
+      endActivity("drag");
       delete c.el.dataset.lifted;
       delete ghost.dataset.on;
       if (!d.moved) { cx.nav.flyView(c.view.id); return; }

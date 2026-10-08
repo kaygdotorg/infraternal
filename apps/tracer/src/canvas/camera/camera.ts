@@ -20,6 +20,7 @@
  * on those hooks.
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
+import { endActivity, setActivity } from "../../perf-activity";
 
 export interface Cam { cx: number; cy: number; z: number }
 import type { Pt, Rect } from "../layout/geometry";
@@ -161,6 +162,7 @@ export class Camera {
     window.clearTimeout(this.restTimer);
     this.moving = false;
     this.hinted = false;
+    endActivity("pan"); endActivity("zoom"); endActivity("flight");
     this.world.style.willChange = "";
     // Which windows take the pointer follows the level of detail only once the camera rests (see clusters.css).
     if (this.world.dataset.hit !== this.lod) this.world.dataset.hit = this.lod;
@@ -213,6 +215,7 @@ export class Camera {
   /** Flies the camera (interruptible: a new target keeps the current velocity). */
   flyTo(target: () => Cam, instant = false): void {
     this.target = target;
+    setActivity("flight");
     this.hooks.onFlight?.();
     const t = target();
     if (instant) { this.set(t); return; }

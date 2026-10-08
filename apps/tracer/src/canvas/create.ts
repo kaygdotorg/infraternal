@@ -40,6 +40,7 @@ import { hideTips } from "../../../../packages/ui/src/tooltip";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
 import { createSessionHooks } from "./windows/session-hooks";
+import { setPerfProbe } from "../perf-activity";
 import { createVisibility } from "./windows/visibility";
 
 export interface CanvasOptions {
@@ -179,6 +180,13 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   document.addEventListener("visibilitychange", onHide, { signal: events.signal });
   window.addEventListener("pagehide", () => cx.store.flush(), { signal: events.signal });
 
+  // What the frame meter records when a frame drops (counts and names only; read at drop time, never per frame).
+  setPerfProbe(() => {
+    let windows = 0;
+    for (const c of cx.views.values()) windows += c.wins.size;
+    return { view: state.currentView, zoom: Math.round(cx.camera.cam.z * 1000) / 1000, lod: cx.camera.lod, band: cx.camera.band, windows, windowsInView: cx.views.get(state.currentView)?.wins.size ?? 0, canvasLock: state.canvasLock };
+  });
+
   return {
     cx,
     setViews(models) {
@@ -196,6 +204,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     flush: () => cx.store.flush(),
     dispose() {
       events.abort();
+      setPerfProbe(undefined);
       ro.disconnect();
       removePalette();
       removeShortcuts();
