@@ -11,6 +11,7 @@ import { terminalFixtures } from "./terminal-fixtures";
 import { serveProvisioning } from "./provisioning-double";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
+import { createPerfSink } from "./perf-sink";
 
 const HOST = "localhost";
 // The browser connects to TRACER_TEST_PORT; the TCP latency proxy reaches this private upstream port.
@@ -90,6 +91,7 @@ let selectedFixture: Uint8Array | undefined;
 let session = createSession();
 const traceEvents: TraceEvent[] = [];
 
+const perfSink = createPerfSink(FRONT_PORT);
 const server = createServer((request, response) => { void routeHttp(request, response); });
 const webSockets = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
 const connections = new Set<Connection>();
@@ -172,6 +174,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method === "GET" && url.pathname === "/health") {
     return sendJson(response, 200, { ok: true });
   }
+  if (url.pathname === "/__perf") return perfSink(request, response);
   if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
     return sendJson(response, 200, { hosts: prototypeHosts });
   }
