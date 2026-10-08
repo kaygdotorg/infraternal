@@ -139,6 +139,9 @@ subscriber falls behind the bounded change buffer, the server sends a fresh
 filtered `resync` snapshot. Invalid filters, denied access, missing tags and
 storage errors produce sanitized `error` events (`invalid input`, `forbidden`,
 `not found`, `conflict`, or `mesh unavailable`) and do not expose SQL details.
+A server `error` ends that subscription. Clients withdraw publication before
+notifying the view; an earlier in-flight list cannot republish inventory or
+a replacement error afterward. A new watch is required to retry.
 Reusing a `sub_id` replaces its existing Mesh filter. Closing the WebSocket
 ends its subscriptions; v1 has no separate unsubscribe frame.
 

@@ -277,22 +277,39 @@ export class MeshClient {
       }
     };
 
-    const unsubscribe = this.transport.subscribe(wireFilter, (event) => {
+    let unsubscribe: (() => void) | undefined;
+    const disconnect = (): void => {
+      const release = unsubscribe;
+      unsubscribe = undefined;
+      release?.();
+    };
+    unsubscribe = this.transport.subscribe(wireFilter, (event) => {
+      if (stopped) {
+        return;
+      }
       if (event.type === "snapshot" || event.type === "resync") {
         publish(event.snapshot, true);
       } else if (event.type === "error") {
-        if (!stopped) {
-          listener(event);
-        }
+        // The server withdraws this subscription on error. Stop before notifying
+        // the view so pending replies and reentrant delivery cannot republish it.
+        stopped = true;
+        pendingRevision = deliveredRevision;
+        disconnect();
+        listener(event);
       } else if (event.revision > deliveredRevision) {
         pendingRevision = Math.max(pendingRevision, event.revision);
         void refreshLatest();
       }
     });
 
+    // A transport may synchronously report a refusal during subscribe.
+    if (stopped) {
+      disconnect();
+    }
     return () => {
       stopped = true;
-      unsubscribe();
+      pendingRevision = deliveredRevision;
+      disconnect();
     };
   }
 }
