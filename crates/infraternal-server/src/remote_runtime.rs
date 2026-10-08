@@ -35,6 +35,18 @@ struct Host {
     authority: AuthorityGuard,
     actor: EmbeddedAgent,
     accepts: mpsc::Sender<RemoteLink>,
+    generation: Uuid,
+    retirement: Retirement,
+}
+
+/// The registry owns its one event/deadline waiter. Superseding or dropping a
+/// host aborts that waiter; neither it nor its weak map reference keeps a host
+/// alive after the runtime is dropped.
+struct Retirement(tokio::task::JoinHandle<()>);
+impl Drop for Retirement {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 impl RemoteHosts {
     pub(crate) async fn actor(&self, id: Uuid) -> Option<EmbeddedAgent> {
@@ -55,25 +67,59 @@ impl RemoteHosts {
         if !hosts.contains_key(&id) && hosts.len() >= 10_000 {
             return Err(io::ErrorKind::WouldBlock.into());
         }
-        let host = hosts.entry(id).or_insert_with(|| {
-            let (actor, accepts) = EmbeddedAgent::remote(uid);
-            Host {
-                uid,
-                authority: authority.clone(),
-                actor,
-                accepts,
+        let generation = Uuid::new_v4();
+        if let Some(host) = hosts.get_mut(&id) {
+            if host.uid != uid {
+                return Err(io::ErrorKind::PermissionDenied.into());
             }
-        });
-        if host.uid != uid {
-            return Err(io::ErrorKind::PermissionDenied.into());
+            host.accepts
+                .try_send(link.authorize(authority.clone()))
+                .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
+            // Publish only after queue admission. A rejected replacement must
+            // not alter a valid actor or cancel its existing retirement waiter.
+            host.generation = generation;
+            host.retirement = self.retirement(id, generation, authority.clone());
+            host.authority = authority;
+        } else {
+            let (actor, accepts) = EmbeddedAgent::remote(uid);
+            accepts
+                .try_send(link.authorize(authority.clone()))
+                .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
+            let retirement = self.retirement(id, generation, authority.clone());
+            hosts.insert(
+                id,
+                Host {
+                    uid,
+                    authority,
+                    actor,
+                    accepts,
+                    generation,
+                    retirement,
+                },
+            );
         }
-        host.accepts
-            .try_send(link.authorize(authority.clone()))
-            .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
-        // A rejected concurrent replacement must not change the retained actor's
-        // admission cap or hide its still-valid active transport.
-        host.authority = authority;
         Ok(())
+    }
+
+    fn retirement(&self, id: Uuid, generation: Uuid, authority: AuthorityGuard) -> Retirement {
+        let registry = Arc::downgrade(&self.0);
+        Retirement(tokio::spawn(async move {
+            // Healthy idle has only its certificate expiry deadline, never a
+            // heartbeat. Ordinary socket loss keeps the actor for offset resume.
+            authority.cancelled().await;
+            let Some(registry) = registry.upgrade() else {
+                return;
+            };
+            let mut hosts = registry.lock().await;
+            if hosts
+                .get(&id)
+                .is_some_and(|host| host.generation == generation && !host.authority.permits())
+            {
+                // Dropping accepts ends the actor and its retained browser
+                // routes. No shim or host-local identity/state is removed here.
+                hosts.remove(&id);
+            }
+        }))
     }
 }
 
