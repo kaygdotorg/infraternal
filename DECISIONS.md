@@ -1336,10 +1336,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        "no central update server" (the builds host is the project's own).
      - **Backup destinations** (extends D147): local, any infraternal host,
        S3-compatible and SFTP, plus **Proxmox Backup Server**. Every
-       destination receives only already-encrypted backups. PBS is wrapped
-       through `proxmox-backup-client` where present until native support
-       (Proxmox's own AGPL Rust client libraries) is measured and brought to
-       the owner during the Proxmox slice.
+       destination receives only already-encrypted backups. PBS gets
+       **native** support only (no CLI wrapper), built later; its library
+       choice is measured and brought to the owner when that work starts.
      - **Backup proof:** the latest backup is test-restored automatically
        every week into a scratch area and verified; failures alert the
        admins.
