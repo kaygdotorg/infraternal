@@ -11,4 +11,6 @@ export * from "./color";
 export * from "./themes";
 export * from "./backdrop";
 export * from "./branched";
+export * from "./icons";
+export * from "./status-line";
 export * from "./terminal-text-overlay";
