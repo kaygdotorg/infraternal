@@ -57,6 +57,10 @@ export function createCapsuleTabs(
   });
 
   let selected = tabs.some((tab) => tab.id === initial) ? initial : tabs[0]!.id;
+  // A compact list changes its own width when the label moves between tabs, which fires the
+  // resize observer below in the middle of the glide. Re-placing instantly then would cancel
+  // the motion (the capsule jumped), so resizes are ignored while a glide is in flight.
+  let glideUntil = 0;
   const place = (instant: boolean): void => {
     const button = buttons.find((item) => item.dataset.tab === selected);
     if (!button || !root.isConnected) return;
@@ -65,6 +69,7 @@ export function createCapsuleTabs(
     const width = Math.round(button.offsetWidth * dpr) / dpr;
     const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
     capsule.style.transition = instant || reduced ? "none" : `transform 200ms ${EASE}, width 200ms ${EASE}`;
+    glideUntil = instant || reduced ? 0 : performance.now() + 260;
     capsule.style.width = `${width}px`;
     capsule.style.transform = `translateX(${x}px)`;
   };
@@ -106,7 +111,7 @@ export function createCapsuleTabs(
   root.addEventListener("keydown", keydown);
   render(true);
   // First layout happens after mount; place the capsule without motion once it exists.
-  const observer = new ResizeObserver(() => place(true));
+  const observer = new ResizeObserver(() => { if (performance.now() >= glideUntil) place(true); });
   observer.observe(root);
 
   return {

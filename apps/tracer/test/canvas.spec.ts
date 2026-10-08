@@ -662,3 +662,37 @@ test("empty canvas (touch): a tap in the gap clears the active window", async ({
   await expect(page.locator(".ui-window[data-active]")).toHaveCount(0);
   await context.close();
 });
+
+// ---- the info popover's tabs use the shared gliding capsule -----------------------------------
+test("details popover tabs: the selected capsule glides (does not jump) and the keyboard moves it instantly", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.locator(".ui-window").first().locator(".ui-window-pill").click();
+  await expect(page.locator(".canvas-popover .ui-tabs")).toBeVisible();
+  await page.waitForTimeout(400);
+  // The only tab implementation is the shared one.
+  expect(await page.evaluate(() => document.querySelectorAll(".canvas-popover [role='tab']:not(.ui-tab)").length)).toBe(0);
+  await page.evaluate(() => {
+    const capsule = document.querySelector<HTMLElement>(".ui-tabs-capsule")!;
+    const samples: number[] = [];
+    (window as unknown as { __tabs: number[] }).__tabs = samples;
+    const t0 = performance.now();
+    const frame = (): void => {
+      samples.push(new DOMMatrix(getComputedStyle(capsule).transform).m41);
+      if (performance.now() - t0 < 450) requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  });
+  await page.locator(".canvas-popover .ui-tab[data-tab='connection']").click();
+  await page.waitForTimeout(500);
+  const samples = await page.evaluate(() => (window as unknown as { __tabs: number[] }).__tabs);
+  const start = samples[0]!, end = samples.at(-1)!;
+  expect(end).toBeGreaterThan(start + 20);
+  // At least two frames sit strictly between the start and the end: a glide, not a jump.
+  expect(samples.filter((value) => value > start + 1 && value < end - 1).length).toBeGreaterThanOrEqual(2);
+  // Arrow keys move it without animation.
+  await page.locator(".canvas-popover .ui-tab[data-tab='connection']").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator(".canvas-popover .ui-tab[data-tab='session']")).toHaveAttribute("aria-selected", "true");
+  expect(await page.locator(".ui-tabs-capsule").evaluate((node) => node.style.transition)).toBe("none");
+});
