@@ -27,7 +27,7 @@ await Promise.all([
   cp("style.css", "dist/style.css"),
   cp("auth.css", "dist/auth.css"),
   cp("../../packages/ui/styles.css", "dist/ui.css"),
-  cp("node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2", "dist/fonts/GeistMono-Variable.woff2"),
+  cp("fonts", "dist/fonts", { recursive: true, filter: (source) => !source.endsWith(".sh") }),
   cp("node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", "dist/fonts/Geist-Variable.woff2"),
 ]);
 await precompress("dist");
