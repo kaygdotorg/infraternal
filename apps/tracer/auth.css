@@ -13,9 +13,12 @@
   --edge: rgb(255 255 255 / 0.28);
   --strong: rgb(255 255 255 / 0.4);
   --ring: rgb(255 255 255 / 0.55);
-  --card: rgb(0 0 0 / 0.5);
-  --field: rgb(255 255 255 / 0.05);
-  --field-focus: rgb(255 255 255 / 0.09);
+  /* One material: the card and the fields are the same tint, the fields a touch denser. */
+  --tint-a: 0.05;
+  --halo: rgb(0 0 0 / 0.9);
+  --card: rgb(0 0 0 / var(--tint-a));
+  --field: rgb(0 0 0 / calc(var(--tint-a) + 0.14));
+  --field-focus: rgb(0 0 0 / calc(var(--tint-a) + 0.26));
   --hover: rgb(255 255 255 / 0.06);
   --wash: rgb(255 255 255 / 0.03);
   --shade: rgb(0 0 0 / 0.9);
@@ -30,9 +33,11 @@
   --edge: rgb(0 0 0 / 0.32);
   --strong: rgb(0 0 0 / 0.4);
   --ring: rgb(0 0 0 / 0.55);
-  --card: rgb(255 255 255 / 0.58);
-  --field: rgb(0 0 0 / 0.04);
-  --field-focus: rgb(0 0 0 / 0.07);
+  --tint-a: 0.1;
+  --halo: rgb(255 255 255 / 0.9);
+  --card: rgb(255 255 255 / var(--tint-a));
+  --field: rgb(255 255 255 / calc(var(--tint-a) + 0.14));
+  --field-focus: rgb(255 255 255 / calc(var(--tint-a) + 0.26));
   --hover: rgb(0 0 0 / 0.05);
   --wash: rgb(0 0 0 / 0.03);
   --shade: rgb(0 0 0 / 0.28);
@@ -74,18 +79,23 @@
   animation: auth-card-in 240ms var(--ease) both;
 }
 /* The card is the shared translucent overlay material (.ui-overlay-surface, packages/ui), tuned for
-   this page through its instance properties: a black tint on dark, a white tint on light (--card),
-   and only a small blur, so the drifting backdrop glyphs show softly through. No top-edge highlight. */
+   this page through its instance properties: a black tint on dark (0.05), a white tint on light (0.10) and a
+   4 px blur. The backdrop is low contrast, so a thin tint and a small blur are what make its drifting glyphs
+   show through. No top-edge highlight. */
 .auth-card.ui-overlay-surface {
   --ui-overlay-background: var(--card);
   --ui-overlay-border: var(--line);
   --ui-overlay-color: var(--fg);
   --ui-overlay-shadow: 0 30px 80px -30px var(--shade);
-  --ui-overlay-blur: 5px;
+  --ui-overlay-blur: 4px;
   --ui-overlay-saturation: 100%;
 }
-/* Cards that are not glass (the replace-words flow over the signed-in window) stay solid. */
+/* Cards that are not glass stay solid. */
 .auth-card:not(.ui-overlay-surface) { border: 1px solid var(--line); background: var(--card); box-shadow: 0 30px 80px -30px rgb(0 0 0 / 0.9); }
+/* Where the tint is thin a glyph can sit directly behind a letter, so the text carries a soft halo in
+   the card's own tint colour (--halo) instead of the card getting more tint. */
+.auth-card.ui-overlay-surface { text-shadow: 0 0 6px var(--halo, transparent); }
+.auth-card.ui-overlay-surface .auth-primary { text-shadow: none; }
 @keyframes auth-card-in { from { opacity: 0; transform: translateY(8px) scale(0.99); } }
 .auth-mark { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; font-weight: 600; line-height: 1; }
 .auth-mark svg { width: 22px; height: 22px; flex: none; }
