@@ -1261,3 +1261,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      `known_hosts`, keys and agent work unchanged. A built-in client (russh)
      comes later for interactive browser sessions, with its own security
      review, and falls back to the system OpenSSH wherever it lacks support.
+182. **Sharing layouts with teammates (owner, 2026-10-08, #93):** a layout (one
+     or more views, picked in the share dialog; "everything" is selecting
+     all) can be sent directly to users or groups on the instance. The
+     recipient gets a **copy** that is theirs to change, arriving as a new
+     view on their canvas (named after the sender, e.g. "Incident (from
+     kayg)"), never replacing or merging into an existing view, with a quiet
+     notification. Windows connect as the recipient through their own grants
+     ("no access" where they lack one). Admins and owners can also publish
+     **team layouts** that stay linked and update for everyone who follows
+     them (enterprise). Export and import use the same mechanism across
+     instances.
