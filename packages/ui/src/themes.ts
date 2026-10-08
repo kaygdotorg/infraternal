@@ -90,10 +90,10 @@ export interface OverlayMaterial {
  * low the tint. Level 3 is the default; `?glass=1..4` picks another so the owner can compare them.
  */
 export const GLASS_LEVELS: Record<number, { dark: number; light: number; blur: number }> = {
-  1: { dark: 0.3, light: 0.38, blur: 10 },
-  2: { dark: 0.3, light: 0.38, blur: 6 },
-  3: { dark: 0.22, light: 0.3, blur: 4 },
-  4: { dark: 0.14, light: 0.22, blur: 4 },
+  1: { dark: 0.3, light: 0.38, blur: 20 },
+  2: { dark: 0.3, light: 0.38, blur: 16 },
+  3: { dark: 0.22, light: 0.3, blur: 16 },
+  4: { dark: 0.14, light: 0.22, blur: 16 },
 };
 export const DEFAULT_GLASS = 3;
 

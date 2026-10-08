@@ -5,11 +5,20 @@ import { AuthError } from "./auth";
 import { startRecovery, replacePasskey, type RecoveryRequest } from "./recovery-auth";
 import { recoveryWords } from "./recovery-words";
 import { recoveryUiEnabled } from "./recovery-ui";
+import { swapCard } from "./auth-motion";
 import { loading } from "../../../packages/ui/src/countup";
 import { tick, springCheckbox } from "../../../packages/ui/src/tick";
 
 const dictionary = new Set(wordlist);
 const titles = ["Use your recovery key", "Recovery started", "Create a new passkey", "Save your new recovery key"];
+
+/** Words are derived with Web Crypto and the passkey needs WebAuthn; browsers hide both on plain http
+ * (anything but https or localhost). Without them no step can work, so say so instead of failing
+ * with a generic message. */
+export const SECURE_CONNECTION_MESSAGE = "Recovery needs a secure connection (https)";
+export function secureConnection(): boolean {
+  return window.isSecureContext && typeof crypto !== "undefined" && crypto.subtle !== undefined;
+}
 
 /** Reuses auth card, pane motion, stepper ticks and saved-word controls from onboarding. */
 export function mountRecovery(host: HTMLElement, back: () => void,
@@ -25,11 +34,11 @@ export function mountRecovery(host: HTMLElement, back: () => void,
   const lifecycle = new AbortController();
   let renderedStep = -1;
   let paneObserver: ResizeObserver | undefined;
-  host.innerHTML = `<section class="auth-screen" aria-label="Recover your account"><section class="auth-card" id="recovery-card">
+  swapCard(host, 1, () => { host.innerHTML = `<section class="auth-screen" aria-label="Recover your account"><section class="auth-card" id="recovery-card">
     <div class="auth-mark"><span>infraternal</span></div><ol class="auth-steps" aria-label="Recovery progress"></ol>
     <div class="auth-viewport"><div class="auth-pane"><p class="auth-eyebrow"></p><h1></h1><p class="auth-lede"></p><div class="auth-pane-body"></div></div></div>
     <div class="auth-footer"><button class="auth-back" type="button">← sign in</button><button class="auth-primary" id="recovery-next" type="button"><span></span><span class="busy-count" hidden></span></button></div>
-    <p class="auth-message" id="auth-error" role="alert"></p></section></section>`;
+    <p class="auth-message" id="auth-error" role="alert"></p></section></section>`; });
   const card = host.querySelector<HTMLElement>("#recovery-card")!;
   let body = card.querySelector<HTMLElement>(".auth-pane-body")!;
   const button = card.querySelector<HTMLButtonElement>("#recovery-next")!;
@@ -154,6 +163,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     void advance();
   });
   async function advance(): Promise<void> {
+    if ((step === 0 || step === 2) && !secureConnection()) { error.textContent = SECURE_CONNECTION_MESSAGE; return; }
     busy = true; update(); markMotion(true); error.textContent = "";
     const waiting = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
     try {

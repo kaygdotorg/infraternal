@@ -144,7 +144,7 @@ test("the wizard floats over a dimmed window that becomes the host's terminal", 
     }));
     expect(card.shadow).not.toBe("none");
     // Superseded: the flow card is the shared translucent overlay material, softly blurred (TASTE §4).
-    expect(card.backdrop).toContain("blur(4px)");
+    expect(card.backdrop).toContain("blur(16px)");
     expect(card.scrimAlpha).toContain("0.5");
     expect(card.pillShadow).not.toContain("inset");
     // While the flow owns the window, the capsule is its title once: no separator, session or dot.
