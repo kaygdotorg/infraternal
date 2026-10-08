@@ -205,7 +205,8 @@ pub async fn serve_with_enrollment(
     if let Some(tls) = config.tls {
         let tls_config = OpenSSLConfig::from_pem_file(tls.certificate, tls.private_key)
             .map_err(|_| ServerError::TlsConfiguration)?;
-        axum_server::bind_openssl(config.listen, tls_config)
+        axum_server::Server::bind(config.listen)
+            .acceptor(crate::server_tls::acceptor(tls_config))
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .map_err(ServerError::Listener)
