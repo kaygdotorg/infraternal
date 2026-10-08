@@ -232,9 +232,10 @@ test("desktop: edges and corners resize with the right cursors, neighbours shift
   expect(Math.abs(corner.height - (moved.height - 200))).toBeLessThan(2);
   // A north edge drag moves the top down and keeps the bottom where it was.
   const bottom = corner.y + corner.height;
-  await page.mouse.move(corner.x + corner.width / 2, corner.y + 2);
+  // Off-centre: the middle of the top edge belongs to the window's lock.
+  await page.mouse.move(corner.x + 60, corner.y + 2);
   await page.mouse.down();
-  await page.mouse.move(corner.x + corner.width / 2, corner.y + 82, { steps: 8 });
+  await page.mouse.move(corner.x + 60, corner.y + 82, { steps: 8 });
   await page.mouse.up();
   const north = await windowBox(page, 1);
   expect(Math.abs(north.y + north.height - bottom)).toBeLessThan(1);
