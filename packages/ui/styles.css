@@ -271,7 +271,8 @@
 
 /* Window card (window-card.ts): the pane card's surface plus a quiet header. */
 .ui-window {
-  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
+  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  /* Not clipped: the lock's shackle rises over the frame line. The body clips its own content. */
   background: color-mix(in oklab, var(--bg) 88%, transparent);
   border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); box-shadow: var(--shadow);
   transition: border-color 180ms var(--ease-out, ease-out);
@@ -305,7 +306,7 @@
 }
 .ui-window-action:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ui-window-body { position: relative; flex: 1; min-height: 0; }
+.ui-window-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 calc(var(--r-lg, 18px) - 1px) calc(var(--r-lg, 18px) - 1px); }
 @media (hover: hover) and (pointer: fine) {
   .ui-window-pill:hover { background: var(--hover); }
   .ui-window-action:hover { background: var(--hover); color: var(--fg-2); }
@@ -504,21 +505,25 @@
 @media (pointer: coarse) { .ui-sidebar-secondary { font-size: 12px; } }
 .ui-sidebar-settings svg { stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
-/* Window lock (lock-toggle.ts, window-card.ts): invisible until the pointer is near the window's
-   top edge (or the header is tapped), then 35 % strong; locked, it stays at full strength with an
-   accent tint and the window's hairline is stronger than the active window's. */
+/* Window lock (lock-toggle.ts, window-card.ts): the padlock glyph itself, no chip. It is centred on
+   the window's top frame line: the shackle rises above the line and the body hangs just below it, so
+   it looks anchored on the frame. Invisible until the pointer is near the top edge, then 35 %;
+   locked, it stays at 0.9 with an accent tint and the window's hairline is stronger. The button is a
+   44 px invisible hit area. On touch there is no frame lock: locking lives in the toolbar and the
+   palette. */
 .ui-window-lock {
-  position: absolute; z-index: 4; /* -1 px: the frame's own 1 px line, so the chip's top edge is the frame's top edge */ top: -1px; left: var(--ui-lock-x, 50%); width: var(--ui-control-h); height: var(--ui-control-h); margin-left: calc(var(--ui-control-h) / -2);
-  display: grid; place-items: center; padding: 0; border: 1px solid var(--overlay-line); border-radius: 8px; background: color-mix(in oklab, var(--bg) 92%, var(--fg)); color: var(--fg);
-  opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 160ms ease-out, color 160ms ease-out, background-color 140ms ease;
+  position: absolute; z-index: 6; top: -22px; left: var(--ui-lock-x, 50%); width: 44px; height: 44px; margin-left: -22px;
+  display: grid; place-items: center; padding: 0; border: 0; border-radius: 10px; background: none; color: var(--fg);
+  opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 160ms ease-out, color 160ms ease-out;
 }
-.ui-window-lock svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
+.ui-window-lock svg { width: 16px; height: 16px; transform: translateY(0.5px); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
 .ui-window[data-lock-near] .ui-window-lock { opacity: 0.35; pointer-events: auto; }
 .ui-window[data-locked] .ui-window-lock { opacity: 0.9; pointer-events: auto; color: var(--accent); }
 .ui-window-lock:focus-visible { opacity: 0.8; }
-@media (hover: hover) and (pointer: fine) { .ui-window .ui-window-lock:hover { opacity: 0.8; background: var(--hover); } }
-.ui-window-lock:active { transform: scale(var(--ui-press-scale-small)); }
+@media (hover: hover) and (pointer: fine) { .ui-window .ui-window-lock:hover { opacity: 0.8; } }
+.ui-window-lock:active svg { transform: translateY(0.5px) scale(var(--ui-press-scale-small)); }
 .ui-window[data-locked] { border-color: color-mix(in oklab, var(--accent) 78%, var(--overlay-line)); box-shadow: var(--shadow), 0 0 0 1px color-mix(in oklab, var(--accent) 28%, transparent); }
+@media (pointer: coarse) { .ui-window-lock { display: none; } }
 @media (prefers-reduced-motion: reduce) { .ui-window-lock { transition: opacity 160ms ease; } }
 .ui-window[data-status="none"] .ui-window-lock { display: none; }
 

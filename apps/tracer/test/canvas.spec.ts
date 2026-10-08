@@ -419,15 +419,20 @@ test("lock: the icon appears near a window's top edge, locks with a click, stays
     return { lockLeft: l.left, pillRight: p.right, size: l.width };
   });
   expect(geometry.lockLeft).toBeGreaterThanOrEqual(geometry.pillRight);
-  // On the frame: the chip's top edge is the window's top border line, and it is centred.
+  // The glyph itself sits on the frame: the shackle above the window's top line, the body below it.
   const frame = await page.evaluate(() => {
-    const l = document.querySelector(".ui-window-lock")!.getBoundingClientRect();
     const w = document.querySelector(".ui-window")!.getBoundingClientRect();
-    return { top: l.top - w.top, centre: Math.abs((l.left + l.width / 2) - (w.left + w.width / 2)) };
+    const body = document.querySelector(".ui-lock-body")!.getBoundingClientRect();
+    const shackle = document.querySelector(".ui-lock-shackle")!.getBoundingClientRect();
+    const button = document.querySelector(".ui-window-lock")!.getBoundingClientRect();
+    return { shackleBottom: shackle.bottom - w.top, shackleTop: shackle.top - w.top, bodyTop: body.top - w.top, hit: [button.width, button.height], bg: getComputedStyle(document.querySelector(".ui-window-lock")!).backgroundColor, border: getComputedStyle(document.querySelector(".ui-window-lock")!).borderTopWidth };
   });
-  expect(Math.abs(frame.top)).toBeLessThan(0.6);
-  // Centred, except when the title pill reaches past the middle: then it sits just right of the pill.
-  expect(frame.centre < 1 || geometry.lockLeft - geometry.pillRight < 10).toBe(true);
+  expect(frame.shackleTop).toBeLessThan(-3);
+  expect(Math.abs(frame.bodyTop)).toBeLessThan(1.2);
+  expect(Math.abs(frame.shackleBottom)).toBeLessThan(1.2);
+  expect(frame.hit).toEqual([44, 44]);
+  expect(frame.bg).toBe("rgba(0, 0, 0, 0)");
+  expect(frame.border).toBe("0px");
   await expect(lock).toHaveAttribute("data-tip", "Lock input");
   await lock.click();
   await expect(window0).toHaveAttribute("data-locked", "");
@@ -520,27 +525,17 @@ test("lock: on macOS, ⌘K still opens the palette while locked and offers Unloc
   await context.close();
 });
 
-test("lock (touch): a header tap shows a 44 px lock, a tap locks it, and the lock stays", async ({ browser }) => {
+test("lock (touch): there is no frame lock on a phone; the palette locks", async ({ browser }) => {
   const context = await browser.newContext({ hasTouch: true, isMobile: true, deviceScaleFactor: 3, viewport: { width: 393, height: 852 } });
   const page = await touchContext(context);
   await openCanvas(page);
-  await page.keyboard.press("Control+Shift+ArrowRight"); // bring the second window onto the screen
-  await page.waitForTimeout(700);
-  const window0 = page.locator(".ui-window").nth(1);
-  const lock = window0.locator(".ui-window-lock");
-  await expect(lock).toHaveCSS("opacity", "0");
-  await window0.locator(".ui-window-head").tap({ position: { x: 330, y: 20 } });
-  await expect(lock).toHaveCSS("opacity", "0.35");
-  const size = await lock.evaluate((node) => node.getBoundingClientRect().width);
-  expect(size).toBeGreaterThanOrEqual(44);
-  await lock.tap();
+  const window0 = page.locator(".ui-window").first();
+  expect(await window0.locator(".ui-window-lock").evaluate((node) => getComputedStyle(node).display)).toBe("none");
+  await page.keyboard.press("Control+Shift+KeyL");
   await expect(window0).toHaveAttribute("data-locked", "");
-  await page.waitForTimeout(4200); // the header reveal times out; the locked icon does not
-  await expect(lock).toHaveCSS("opacity", "0.9");
-  await lock.tap();
-  await expect(window0).not.toHaveAttribute("data-locked", "");
   await context.close();
 });
+
 
 // ---- the `?` shortcuts view ---------------------------------------------------------------
 const blurTerminal = (page: Page): Promise<void> => page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());

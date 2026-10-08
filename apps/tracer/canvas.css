@@ -9,6 +9,8 @@
   /* Windows cast shadows past the viewport edge; give them room without clipping. */
   margin: 0 calc(var(--gutter) * -1) -16px; padding: 0 var(--gutter) 16px;
   touch-action: none;
+  /* A window's lock shackle rises a few pixels over its top frame line. */
+  overflow-clip-margin: 10px;
 }
 .canvas-viewport[data-grab="ready"] { cursor: grab; }
 .canvas-viewport[data-grab="dragging"] { cursor: grabbing; }
