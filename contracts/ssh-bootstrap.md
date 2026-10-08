@@ -169,8 +169,10 @@ terminal router. A green component gate is not that end-to-end proof.
 
 ## Dedicated server key and automatic authentication [181][183]
 
-The additive GET `/v1/bootstrap/ssh-key` requires one exact pinned Origin and
-one unlocked owner cookie. It returns public metadata only:
+The additive `/v1/bootstrap/ssh-key` endpoint accepts GET and empty-body POST,
+requiring one exact pinned Origin and one unlocked owner cookie. Settings uses
+POST: same-origin browser GET omits Origin. Strict GET remains available to
+nonbrowser callers supplying Origin. It returns public metadata only:
 
 ```json
 {"public_key":"ssh-ed25519 <base64> infraternal-server","fingerprint":"SHA256:<base64>","locked":true}
