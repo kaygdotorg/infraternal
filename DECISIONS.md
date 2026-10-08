@@ -1272,3 +1272,35 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      **team layouts** that stay linked and update for everyone who follows
      them (enterprise). Export and import use the same mechanism across
      instances.
+183. **Backend for the real canvas and add-host (owner, 2026-10-08, backend
+     grill round 1, #98, #99, #100, #87):**
+     - **One connection:** a device's windows share its one WebSocket as
+       streams of the multiplexed protocol (D11).
+     - **Hidden windows:** windows off-screen, in other views or zoomed
+       out get no live bytes, only a "changed" marker. They get a snapshot
+       when shown; thumbnails refresh at about 2 Hz.
+     - **The canvas document** (D180 JSON) lives in the server's SQLite per
+       account as an operation log plus periodic snapshots, over the same
+       WebSocket. Each operation carries its base revision; the later edit
+       of a window wins, and a close beats a move or resize.
+     - **Add-host** runs from the infraternal server with the system
+       OpenSSH (D181). It detects automatically whether **network auth**
+       (NetBird, Tailscale, Twingate and similar) or **local auth** applies.
+       Local auth tries the server's own dedicated Ed25519 key first (never
+       the system's keys; locked with the CA after a cold start, D168),
+       then the user's passkey-encrypted key, then a password used once.
+       It asks the user to choose only as a last resort; a pasteable
+       one-line install command remains for unreachable hosts.
+     - **Exited sessions** keep the final screen and the last 256 KB of
+       output on the server for 7 days or until dismissed. A fast command
+       history and log search (history-style and log-indexing features)
+       comes later.
+     - **Names:** the infraternal agent derives session names from the
+       foreground command and working folder, only while active.
+     - **Command finished:** comes from shell integration markers, else
+       "output stopped and the prompt returned". Shell integration is
+       injected automatically and additively without editing the user's
+       shell files.
+     - **Terminal size** follows the device that last sent keys or a paste,
+       with about 500 ms of hysteresis; focus, scroll and viewing don't
+       count.
