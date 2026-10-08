@@ -459,10 +459,13 @@ body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge 
      material itself (fill, hairline, blur) comes from .ui-overlay-surface. */
   transition: opacity 120ms ease-out, transform 120ms var(--ease-out), display 120ms allow-discrete;
 }
-.palette:not([hidden]) { transition-duration: 180ms; }
+.palette:not([hidden]) { transition-duration: 240ms; }
 @starting-style { .palette:not([hidden]) { opacity: 0; transform: translate(-50%, -6px) scale(0.98); } }
 .palette[hidden] { display: none; opacity: 0; transform: translate(-50%, -4px) scale(0.99); }
-.palette[data-open-kind="keyboard"] { transition: none; }
+/* Animation never gets in the way: a key-triggered open is a short 180 ms fade and scale (a pointer open
+   takes 240 ms), input is never blocked while it plays (the field is focused at once), and filtering,
+   arrowing and height changes are never animated. */
+.palette[data-open-kind="keyboard"]:not([hidden]) { transition-duration: 180ms; }
 /* Desktop: the palette is centred in the viewport and sized by its results. It grows and shrinks
    symmetrically from the middle (top 50%, translated back by half its own height), is as tall as
    its content (a single result is compact), and never exceeds 50 % of the height, so it stays at
@@ -484,7 +487,7 @@ body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge 
 .result { display: flex; align-items: center; width: 100%; min-height: calc(var(--row) + 4px); gap: 8px; padding: 0 8px; border-radius: 6px; text-align: left; position: relative; isolation: isolate; }
 /* The highlight is drawn inset from the row (the row keeps its full hit area): 3 px above and below
    leave an even gap to the rows and section headers around it. */
-.result::before { content: ""; position: absolute; z-index: -1; inset: 3px 0; border-radius: 8px; background: transparent; transition: background-color 120ms ease; }
+.result::before { content: ""; position: absolute; z-index: -1; inset: 3px 0; border-radius: 8px; background: transparent; }
 .result:disabled { color: var(--fg-3); cursor: default; opacity: 0.72; }
 .result[aria-selected="true"]::before { background: var(--accent-soft); }
 .result-icon.has-svg svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -558,7 +561,8 @@ body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge 
   .bm-fold { transition: none; }
   .keybar button { transition: none; }
   .sidebar[hidden] { transform: none; }
-  .sidebar.instant, .palette[data-open-kind="keyboard"], .sidebar-toggle { transition: none; }
+  .sidebar.instant, .sidebar-toggle { transition: none; }
+  .palette { transition-duration: 0ms; }
   .keybar.is-away { transform: none; }
   .backdrop { transition: opacity 240ms ease; }
   .keybar button:active,

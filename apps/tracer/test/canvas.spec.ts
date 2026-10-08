@@ -899,3 +899,24 @@ test("palette (phone): keeps its placement under the top bar, inside the safe ar
   expect(b.y + b.height).toBeLessThanOrEqual(852);
   await context.close();
 });
+
+// ---- animation never gets in the way ----------------------------------------------------------
+test("palette: Ctrl+K then typing within 20 ms lands every character; arrow selection has no transition", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  // The open animates (a short fade), yet the field is focused at once and takes the first keystrokes.
+  await page.keyboard.press("Control+k");
+  await page.waitForTimeout(20);
+  await page.keyboard.type("thm", { delay: 0 });
+  await expect(page.locator("#palette-input")).toHaveValue("thm");
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).pointerEvents)).not.toBe("none");
+  await page.locator("#palette-input").fill("theme");
+  const before = await page.locator(".result[aria-selected='true']").getAttribute("data-action");
+  await page.keyboard.press("ArrowDown");
+  expect(await page.locator(".result[aria-selected='true']").getAttribute("data-action")).not.toBe(before);
+  const transitions = await page.evaluate(() => [...document.querySelectorAll(".result")].slice(0, 4).map((row) => getComputedStyle(row, "::before").transitionDuration));
+  expect(transitions.every((duration) => duration === "0s")).toBe(true);
+  // The key-triggered open is short (about 180 ms) and the pointer one longer.
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).transitionDuration)).toBe("0.18s");
+});
