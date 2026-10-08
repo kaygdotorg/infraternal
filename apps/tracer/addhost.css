@@ -355,8 +355,10 @@
 .ah-input { display: block; width: 100%; height: var(--ah-field-h); margin: 12px 0 0; padding: 0 14px; border: 1px solid var(--line); border-radius: 12px; outline: none; background: var(--ah-field); color: var(--fg); font: var(--fw-body) 14px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
 .ah-input::placeholder { color: var(--fg-3); opacity: 1; }
 .ah-input:focus { border-color: rgb(from var(--fg) r g b / 0.28); background: var(--ah-field-focus); }
-/* The key/value highlight reaches 6 px past its text; the revealed block clips, so it carries that room itself. */
-.ah-reveal-in { margin-inline: -8px; padding-inline: 8px; }
+/* Rows and highlights bleed 6-10 px past the text column. The step viewport clips, so it carries that room itself
+   (padding out, margin back in: the text column does not move). Revealed blocks sit back on the text column. */
+.ah-overlay .ah-pages { margin-inline: -12px; padding-inline: 12px; }
+.ah-overlay .ah-options .ah-reveal { margin-inline: 10px; }
 .ah-reveal .ah-keyblock { margin-top: 12px; }
 .ah-reveal .ah-text { margin: 0 0 4px; }
 :root[data-focus-ring="on"] .ah :is(.ah-input, .ah-link, .ah-run-toggle):focus-visible { outline: 2px solid var(--ah-ring); outline-offset: 2px; }
@@ -387,3 +389,7 @@
 .ah-stage-detail { color: var(--fg-2); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
 .ah-stage-detail:empty { display: none; }
 .ah-stage-row[data-state="failed"] .ah-stage-detail { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
+/* A hint under a key/value block sits one gap below it; the base hint style pulls up into a lede. */
+.ah-keyblock + .ah-text, .ah-install .ah-text { margin-top: 0; }
+.ah-install .ui-kv { margin-bottom: 14px; }
+.ah-empty .ah-icon { color: var(--fg-3); }
