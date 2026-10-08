@@ -1329,3 +1329,23 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        lowest measured round trip, re-checks on network changes and switches
        mid-session without losing bytes; the user can override the choice
        at any time.
+186. **Channels, backups and recording (owner, 2026-10-08, backend grill round 4):**
+     - **Both channels are public** on builds.infraternal.com: stable by
+       default, edge opt-in for anyone (labelled "may break"); Forgejo and
+       GitHub are mirrors. Supersedes D155's "no public edge channel" and
+       "no central update server" (the builds host is the project's own).
+     - **Backup destinations** (extends D147): local, any infraternal host,
+       S3-compatible and SFTP, plus **Proxmox Backup Server**. Every
+       destination receives only already-encrypted backups. PBS is wrapped
+       through `proxmox-backup-client` where present until native support
+       (Proxmox's own AGPL Rust client libraries) is measured and brought to
+       the owner during the Proxmox slice.
+     - **Backup proof:** the latest backup is test-restored automatically
+       every week into a scratch area and verified; failures alert the
+       admins.
+     - **Backup key:** a dedicated key wrapped for every admin (as D168 does
+       for the CA), not one person's recovery words.
+     - **Recording and audit mode** (D128): off by default, enabled per host
+       group or role; recorded by the infraternal agent, signed and uploaded;
+       a compact binary format with timing, replayed with the same terminal
+       renderer; kept 90 days; an enterprise feature.
