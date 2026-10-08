@@ -620,3 +620,45 @@ test("shortcuts (reduced motion): the panel crossfades without any shape travel"
   await expect(panel).toHaveCount(0);
   await context.close();
 });
+
+// ---- empty canvas ---------------------------------------------------------------------------
+test("empty canvas: a click in the gap clears the active window and its highlight; keys go to canvas navigation", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.locator(".ui-window").first().locator(".terminal-host").click();
+  await expect(page.locator(".ui-window[data-active]")).toHaveCount(1);
+  const first = (await page.locator(".ui-window").first().boundingBox())!;
+  await page.mouse.click(first.x + first.width + 6, first.y + 300); // the 12 px gap between two windows
+  await expect(page.locator(".ui-window[data-active]")).toHaveCount(0);
+  await expect(page.locator(".ui-window[aria-current]")).toHaveCount(0);
+  expect(await activeWindow(page)).toBeUndefined();
+  expect(await page.evaluate(() => document.activeElement?.closest(".terminal-host") ?? null)).toBeNull();
+  // Keys now navigate the canvas: Ctrl+Shift+→ activates a window again.
+  await page.keyboard.press("Control+Shift+ArrowRight");
+  await expect.poll(() => activeWindow(page)).toBeDefined();
+  // A drag that starts in the gap (a pan) is not a tap.
+  await page.mouse.move(first.x + first.width + 6, first.y + 300);
+  await page.keyboard.down("Space");
+  await page.mouse.down();
+  await page.mouse.move(first.x + first.width - 60, first.y + 300, { steps: 6 });
+  await page.mouse.up();
+  await page.keyboard.up("Space");
+  expect(await activeWindow(page)).toBeDefined();
+});
+
+test("empty canvas (touch): a tap in the gap clears the active window", async ({ browser }) => {
+  const context = await browser.newContext({ hasTouch: true, isMobile: true, deviceScaleFactor: 3, viewport: { width: 393, height: 852 } });
+  const page = await touchContext(context);
+  await openCanvas(page);
+  await expect(page.locator(".ui-window[data-active]")).toHaveCount(1);
+  await page.waitForTimeout(600);
+  // The next window peeks past the 12 px gap; tap the middle of the gap itself.
+  const gap = await page.evaluate(() => {
+    const [a, b] = [...document.querySelectorAll(".ui-window")].slice(0, 2).map((node) => node.getBoundingClientRect());
+    return { x: (a!.right + b!.left) / 2, y: a!.top + 300, gap: b!.left - a!.right };
+  });
+  expect(gap.gap).toBeGreaterThan(8);
+  await page.touchscreen.tap(gap.x, gap.y);
+  await expect(page.locator(".ui-window[data-active]")).toHaveCount(0);
+  await context.close();
+});

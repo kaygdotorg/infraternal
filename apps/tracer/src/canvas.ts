@@ -632,7 +632,28 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     const root = (target as Element | null)?.closest?.(".ui-window");
     return windows.find((entry) => entry.card.root === root);
   };
+  // A tap or click on empty canvas (a gap, outside every window) leaves no window active: no
+  // accent border anywhere, and keys go to canvas navigation instead of a terminal. A locked
+  // window keeps its input, so the lock is the only way to give it up.
+  let emptyTap: { id: number; x: number; y: number } | undefined;
+  const clearActive = (): void => {
+    if (locked || !active) return;
+    if (core.terminalHost.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+    active.card.setActive(false);
+    active = undefined;
+    popover?.close("pointer");
+  };
+  // Decided by the pointer's coordinates, not its target: a fingertip's hit-test snaps to the
+  // nearest window content, so a tap in a 12 px gap would otherwise read as a tap on a window.
+  const inAnyWindow = (x: number, y: number): boolean => windows.some((entry) => {
+    const box = entry.card.root.getBoundingClientRect();
+    return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+  });
   viewport.addEventListener("pointerdown", (event) => {
+    if (!inAnyWindow(event.clientX, event.clientY)) {
+      if (event.button === 0) emptyTap = { id: event.pointerId, x: event.clientX, y: event.clientY };
+      return;
+    }
     const target = windowOf(event.target);
     if (!target) return;
     // A locked window keeps the input: presses elsewhere are ignored, with a pulse on the lock.
@@ -646,6 +667,12 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     tap = { window: target, id: event.pointerId, x: event.clientX, y: event.clientY };
   }, { capture: true, signal });
   viewport.addEventListener("pointerup", (event) => {
+    if (emptyTap && emptyTap.id === event.pointerId) {
+      const moved = Math.hypot(event.clientX - emptyTap.x, event.clientY - emptyTap.y) > TAP_SLOP;
+      emptyTap = undefined;
+      if (!moved && !twoFinger && !spaceHeld) clearActive();
+      return;
+    }
     if (!tap || tap.id !== event.pointerId) return;
     const moved = Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > TAP_SLOP;
     if (!moved && !twoFinger) {
@@ -655,7 +682,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     tap = undefined;
     event.stopPropagation();
   }, { capture: true, signal });
-  viewport.addEventListener("pointercancel", () => { tap = undefined; }, { capture: true, signal });
+  viewport.addEventListener("pointercancel", () => { tap = undefined; emptyTap = undefined; }, { capture: true, signal });
   viewport.addEventListener("click", (event) => {
     if (!swallowClick) return;
     swallowClick = false;
