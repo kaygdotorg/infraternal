@@ -48,6 +48,7 @@ await Promise.all([
   cp("canvas.css", `${dist}/canvas.css`),
   cp("clusters.css", `${dist}/clusters.css`),
   cp("mesh.css", `${dist}/mesh.css`),
+  cp("sessions.css", `${dist}/sessions.css`),
   cp("addhost.css", `${dist}/addhost.css`),
   cp("../../packages/ui/styles.css", `${dist}/ui.css`),
   cp("fonts", `${dist}/fonts`, { recursive: true, filter: (source) => !source.endsWith(".sh") && !source.endsWith(".py") }),

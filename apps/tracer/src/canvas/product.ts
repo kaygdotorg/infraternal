@@ -23,6 +23,7 @@ import { createMeshApi } from "./mesh/api";
 import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
+import { createLiveInventory } from "./sessions/live-inventory";
 import { BUILTIN_SECTIONS, buildSettingsView } from "./views/settings";
 
 export interface ProductCanvasOptions {
@@ -57,12 +58,13 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
   });
   const store = new LocalCanvasStore(options.accountId);
+  const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
   const saved = await store.load();
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
   const savedMesh = saved?.views.find((v) => v.id === "mesh");
   const mesh = createMeshApi({ transport: connectionTransport(connection), pins: savedMesh?.layout.type === "graph" ? savedMesh.layout.pinned : {} });
   const canvas = createCanvas(core, {
-    adapters: { sessions, store, settings: { sections: [], render: () => undefined }, mesh },
+    adapters: { sessions, inventory, store, settings: { sections: [], render: () => undefined }, mesh },
     float: false,
     persisted: (id) => id === "console" || id === "mesh",
   });
@@ -92,6 +94,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       offMeshView();
       canvas.dispose();
       mesh.dispose();
+      inventory.dispose();
       sessions.dispose();
       connection.dispose();
     },

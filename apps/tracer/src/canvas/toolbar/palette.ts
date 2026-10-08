@@ -13,7 +13,8 @@ import type { PaletteEntry } from "../../core-screen";
 import type { Ctx } from "../context";
 import type { ViewId } from "../model/types";
 import { SETTINGS_SECTIONS } from "../views/settings";
-import { ICON, SECTION_ICON, viewIcon } from "../views/icons";
+import { ICON, SECTION_ICON, SESSION_ICON, viewIcon } from "../views/icons";
+import { byFrecency } from "../sessions/inventory";
 import { isTerminal } from "../views/body";
 import { viewKeys } from "./viewlist";
 import { bindingText } from "./shortcuts";
@@ -52,11 +53,23 @@ export function installPalette(cx: Ctx): () => void {
       out.push({ group: "Canvas", glyph: "▤", icon: ICONS.splitDown, label: "Split down", hint: `new window below · ${bindingText("split-down")}`, action: "canvas:split:down" });
     }
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.lock, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
-    // Any session by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
+    // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
     for (const host of cx.adapters.sessions.hosts()) {
       out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: "terminal · ssh · console", action: `canvas:open:${host.name}` });
     }
     for (const row of cx.adapters.containers?.rows() ?? []) out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${row.name}`, hint: "container · terminal · console", action: `canvas:ctr:${row.name}` });
+    // Every session on every host (D178), by name, with its state in the hint so "detached" or "exited" finds them.
+    const inv = cx.adapters.inventory;
+    if (inv?.status() === "ready") {
+      if (state.activeWin && isTerminal(state.activeWin)) out.push({ group: "Sessions", glyph: "▤", icon: SESSION_ICON.sessions, label: "Sessions on this host", hint: "session manager", action: "canvas:sessions" });
+      const allowed = new Set(cx.adapters.sessions.hosts().map((h) => h.name));
+      for (const host of inv.hosts().filter((h) => allowed.has(h))) {
+        for (const s of [...inv.list(host)].sort(byFrecency)) {
+          const note = s.state === "exited" ? `${(s.exit?.code ?? 0) === 0 ? "✓" : "✗"} ${s.exit?.code ?? 0}` : s.state === "detached" ? `detached${s.activity === "output" ? " · new output" : s.activity === "ok" ? " · ✓" : s.activity === "fail" ? " · ✗" : ""}` : "open";
+          out.push({ group: "Sessions", glyph: s.state === "open" ? "●" : s.state === "detached" ? "○" : "■", label: s.name, hint: `${host} · ${note}`, action: `canvas:session:${host}/${s.id}` });
+        }
+      }
+    }
     return out;
   });
   const onAction = (event: Event): void => {
@@ -72,6 +85,11 @@ export function installPalette(cx: Ctx): () => void {
     else if (kind === "canvaslock") cx.nav.setCanvasLock(value === "on");
     else if (kind === "inputlock") cx.inputLock.toggle();
     else if (kind === "open" && value) cx.win.open(value);
+    else if (kind === "session" && value) { const [host, sid] = value.split("/"); if (host && sid) cx.win.openSession(host, sid); }
+    else if (kind === "sessions") {
+      const anchor = active?.card.header.querySelector<HTMLButtonElement>("[data-action='sessions']");
+      if (active && anchor) window.setTimeout(() => cx.sessionUi?.toggleManager(active, anchor, "pointer"), 60);
+    }
     else if (kind === "ctr" && value && cx.adapters.containers) cx.win.open(cx.adapters.containers.host, value);
   };
   window.addEventListener("tracer:canvas-action", onAction, { signal });

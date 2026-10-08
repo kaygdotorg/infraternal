@@ -917,7 +917,11 @@ test("sharing: the dialog sends a view; the recipient gets their own copy named 
     const ids = views.map((v) => v.id);
     expect(ids.indexOf("settings")).toBe(ids.length - 1); // Settings stays last
     await expect(asha.locator(".ui-toast", { hasText: "kayg shared Incident" })).toHaveCount(1);
-    for (let i = 0; i < views.length; i++) for (let j = i + 1; j < views.length; j++) expect(overlap(views[i]!, views[j]!)).toBe(false);
+    // At rest, not mid-glide: Settings slides to make room for the copy, and a snapshot taken while it moves overlaps.
+    await expect.poll(async () => {
+      const now = await probe(asha, (p) => p.views());
+      return now.flatMap((a, i) => now.slice(i + 1).map((b) => overlap(a, b))).some(Boolean);
+    }, { timeout: 4000 }).toBe(false);
     // The camera flew to it, locked on.
     await expect.poll(async () => (await probe(asha, (p) => p.canvasLock())).view, { timeout: 4000 }).toBe("incident-from-kayg-sh1");
     // edge-arm is outside her grants: a calm explanation, not an error.
@@ -1085,8 +1089,8 @@ test("window header actions are one pill: as tall as the title pill, on its line
     return { aTop: a.top, aH: a.height, tTop: t.top, tH: t.height, buttons, gaps, tip: [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => b.dataset.tip) };
   }, id);
   const d = await geometry(page, "w-nix-cache");
-  expect(d.buttons).toEqual(["split-right", "split-down", "close"]);
-  expect(d.tip).toEqual(["Split right", "Split down", "Close"]);
+  expect(d.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);
+  expect(d.tip).toEqual(["Split right", "Split down", "Sessions", "Close"]);
   expect(Math.abs(d.aH - d.tH)).toBeLessThan(0.5);
   expect(Math.abs(d.aTop - d.tTop)).toBeLessThan(0.5);
   expect(Math.max(...d.gaps) - Math.min(...d.gaps)).toBeLessThan(0.5); // equal spacing
@@ -1095,7 +1099,7 @@ test("window header actions are one pill: as tall as the title pill, on its line
   try {
     const p = t.page;
     const pd = await geometry(p, "w-build-01");
-    expect(pd.buttons).toEqual(["split-right", "split-down", "close"]);
+    expect(pd.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);
     expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(0.5);
     expect(Math.abs(pd.aTop - pd.tTop)).toBeLessThan(0.5);
     const hits = await p.evaluate(() => {
@@ -1107,7 +1111,7 @@ test("window header actions are one pill: as tall as the title pill, on its line
         return at(cx - 21, cy) && at(cx + 21, cy) && at(cx, cy - 21) && at(cx, cy + 21);
       });
     });
-    expect(hits).toEqual([true, true, true]);
+    expect(hits).toEqual([true, true, true, true]);
   } finally { await t.close(); }
 });
 
