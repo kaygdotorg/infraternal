@@ -35,3 +35,4 @@ export * from "./pill-morph";
 export * from "./icons";
 export * from "./connection-indicator";
 export * from "./toolbar-settings";
+export * from "./shortcuts-settings";

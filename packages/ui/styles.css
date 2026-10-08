@@ -637,3 +637,25 @@
 .ui-ts-reset { justify-self: start; min-height: var(--ui-control-h, 30px); padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-ts-reset:active { transform: scale(var(--ui-press-scale, 0.97)); }
 @media (hover: hover) and (pointer: fine) { .ui-ts-reset:hover, .ui-ts-grip:hover { background: var(--hover); } }
+
+/* Settings, Shortcuts (shortcuts-settings.ts): the registry's rows; a row is a button that listens for the new keys. */
+.ui-shortcuts-settings { display: grid; gap: 12px; }
+.ui-ss-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.ui-ss-row { position: relative; display: flex; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--line); }
+.ui-ss-row:last-child { border-bottom: 0; }
+.ui-ss-main { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: 16px; min-height: var(--row, 28px); padding: 0; border: 0; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; }
+.ui-ss-main:disabled { cursor: default; color: var(--ui-text-secondary); }
+.ui-ss-keys { display: inline-flex; flex: none; gap: 4px; }
+.ui-ss-keys[data-capturing] { color: var(--accent); }
+.ui-ss-keys kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: var(--fw-label, 500) var(--text-caption, 11px)/1 var(--font-ui); text-align: center; }
+.ui-ss-reset { display: grid; place-items: center; width: var(--ui-control-h, 30px); height: var(--ui-control-h, 30px); margin-left: 6px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-3); cursor: pointer; }
+.ui-ss-reset svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-ss-warn { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0 8px; color: var(--warn, var(--fg-2)); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-ss-actions { display: inline-flex; gap: 6px; }
+.ui-ss-actions button { min-height: var(--ui-control-h, 30px); padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .ui-ss-reset:hover, .ui-ss-actions button:hover, .ui-ss-main:not(:disabled):hover { background: var(--hover); } }
+.ui-ts-source { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ui-ts-tag { padding: 3px 9px; border-radius: 999px; background: var(--hover); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-tag[data-device="true"] { background: var(--accent-soft); color: var(--accent); }
+.ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
+.keyedit-list::before { white-space: nowrap; }
