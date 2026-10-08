@@ -14,7 +14,7 @@
 import { Spring } from "../../../../../packages/ui/src/spring";
 import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
-import { dropletSplit } from "../layout/droplet";
+import { loadDroplet } from "../layout/droplet-handle";
 import { COLUMN_GAP } from "../layout/geometry";
 import type { ViewId, WindowModel } from "../model/types";
 import { coarse, reduced } from "../dom";
@@ -198,6 +198,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     }
     if (!coarse.matches) b.binding?.focus();
     colEl.dataset.split = "";
+    const { dropletSplit } = await loadDroplet();
     await dropletSplit(root, b.card.root, direction, c.colsEl);
     delete colEl.dataset.split;
     rec.binding?.refit();

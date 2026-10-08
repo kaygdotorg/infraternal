@@ -13,6 +13,7 @@
 import { mountToast } from "../../../../packages/ui/src/toast";
 import type { CoreScreen } from "../core-screen";
 import { createMemory } from "./memory";
+import { warmDroplet } from "./layout/droplet-handle";
 import { createBackdrop, type Backdrop } from "./backdrop";
 import { Camera } from "./camera/camera";
 import { installGestures } from "./camera/gestures";
@@ -147,6 +148,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   });
   ro.observe(viewport);
   cx.camera.start();
+  warmDroplet();
 
   // A hidden page also releases its big surfaces (memory.ts) and must not lose the last edit.
   const onHide = (): void => { if (document.hidden) cx.store.flush(); };
