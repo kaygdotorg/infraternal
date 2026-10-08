@@ -1,10 +1,12 @@
 /**
- * Which windows are live. A window is live when it is near the screen and the camera is at a live level of
- * detail; everything else (another view, far off screen, a thumbnail) is told so, and its session binding stops
+ * Which windows are live. A window is live when it is near the screen, its view is not far away and the page is
+ * shown; any other window (another view, far off screen, a hidden page) is told so, and its session binding stops
  * drawing and gives its canvas backing store back (D183, and the iOS memory rule: about one screen of pixels).
  *
- * It costs nothing while still: one IntersectionObserver (it reports changes only) and the camera's level of
- * detail hook; no per-frame work and no timers.
+ * Zoomed out, windows near the screen stay drawn: the overview shows the terminals (D119). What bounds memory
+ * there is the far-view rule in memory.ts, which parks every view more than a screen away.
+ *
+ * It costs nothing while still: one IntersectionObserver (it reports changes only); no per-frame work and no timers.
  */
 import type { Ctx, ViewRec, WinRec } from "../context";
 
@@ -26,7 +28,7 @@ export function createVisibility(cx: Ctx): Visibility {
   const farViews = new WeakSet<ViewRec>();
   let paused = false;
   const apply = (rec: WinRec): void => {
-    rec.binding?.setVisible(!paused && !farViews.has(rec.owner) && near.has(rec.card.root) && cx.camera.lod === "live");
+    rec.binding?.setVisible(!paused && !farViews.has(rec.owner) && near.has(rec.card.root));
   };
   // A margin of half a viewport keeps the neighbours that peek in at the edge alive.
   const io = new IntersectionObserver((entries) => {
@@ -41,7 +43,7 @@ export function createVisibility(cx: Ctx): Visibility {
     unwatch(rec) { io.unobserve(rec.card.root); recs.delete(rec.card.root); near.delete(rec.card.root); },
     setViewFar(view, far) { if (far) farViews.add(view); else farViews.delete(view); for (const rec of view.wins.values()) apply(rec); },
     setPaused(value) { paused = value; for (const rec of recs.values()) apply(rec); },
-    lodChanged() { for (const rec of recs.values()) apply(rec); },
+    lodChanged() { /* thumbnails stay drawn: a zoomed-out overview shows the terminals (D119); memory is bounded by the far-view rule */ },
     dispose() { io.disconnect(); recs.clear(); near.clear(); },
   };
 }
