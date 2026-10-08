@@ -54,10 +54,8 @@ export function createMockSessions(core: CoreScreen, world: MockWorld, inventory
       if (options?.from) {
         const m = options.from;
         const n = ++splits;
-        if (inventory) {
-          const rec = inventory.create(host);
-          return { ...m, id: `${m.id}-s${n}`, session: rec.name, sessionId: rec.id, splitOf: m.id, lines: rec.screen };
-        }
+        const rec = inventory?.create?.(host);
+        if (rec) return { ...m, id: `${m.id}-s${n}`, session: rec.name, sessionId: rec.id, splitOf: m.id, lines: rec.screen };
         return { ...m, id: `${m.id}-s${n}`, session: `split ${n}`, splitOf: m.id, lines: shellLines(m.user ?? "kayg", m.host, "echo ready") };
       }
       const first = inventory?.get(host, DEFAULT_SESSION[host] ?? "");

@@ -42,7 +42,12 @@ export interface DeviceInfo { id: string; name: string; kind: "laptop" | "phone"
 
 export type InventoryStatus = "loading" | "ready" | "error";
 
+/** What an inventory can do; the UI offers only these (a missing verb is not drawn, never greyed out). */
+export interface InventoryCapabilities { rename?: boolean; end?: boolean; runAgain?: boolean; dismiss?: boolean }
+
 export interface SessionInventory {
+  /** Absent means everything. The product's client-side inventory (live-inventory.ts) cannot end sessions until #100. */
+  readonly can?: InventoryCapabilities;
   status(): InventoryStatus;
   /** Asks the host again after a failure; resolves when the status has settled. */
   reload(): Promise<void>;
@@ -51,12 +56,13 @@ export interface SessionInventory {
   /** Every session of a host, in any state, unordered. */
   list(host: string): SessionRecord[];
   get(host: string, id: string): SessionRecord | undefined;
-  /** A window shows this session: it is open (an exited one stays exited, read-only) and moves up the frecency order. */
-  attach(host: string, id: string): void;
+  /** A window shows this session: it is open (an exited one stays exited, read-only) and moves up the frecency order.
+   *  A session the inventory has not heard of is registered (a window restored from the canvas document names one). */
+  attach(host: string, id: string, hint?: { name?: string }): void;
   /** The window that showed this session closed: an open session keeps running, detached. */
   detach(host: string, id: string): void;
   /** A new shell on the host (a split, no prompt). Its name follows the folder until it is renamed. */
-  create(host: string): SessionRecord;
+  create?(host: string): SessionRecord;
   /** A rename pins the name. */
   rename(host: string, id: string, name: string): void;
   /** Ends the session (explicit, after the confirmation naming what is running). */

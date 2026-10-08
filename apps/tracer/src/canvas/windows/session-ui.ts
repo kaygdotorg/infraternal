@@ -308,10 +308,10 @@ export function createSessionUi(cx: Ctx): SessionUi {
       };
       if (s.state === "exited") { add("again", "Run again", SESSION_ICON.again); add("dismiss", "Dismiss", ICON_X); }
       else {
+        const can = inventory.can;
         if (!coarse.matches && !current && !this.rec.owner.view.team) add("beside", "Open beside", SESSION_ICON.beside);
-        add("rename", "Rename", SESSION_ICON.rename);
-        // The window that shows a session ends with it; the one live terminal stays (a window needs a session).
-        add("end", "End session", SESSION_ICON.end);
+        if (can?.rename !== false) add("rename", "Rename", SESSION_ICON.rename);
+        if (can?.end !== false) add("end", "End session", SESSION_ICON.end);
       }
       li.append(main, acts);
       if (this.renaming === s.id) queueMicrotask(() => this.edit(li, host, s));

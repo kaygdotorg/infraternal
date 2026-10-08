@@ -17,7 +17,7 @@ import type { Ctx, ViewRec, WinRec } from "../context";
 import { dropletSplit } from "../layout/droplet";
 import { COLUMN_GAP } from "../layout/geometry";
 import type { ViewId, WindowModel } from "../model/types";
-import { reduced } from "../dom";
+import { coarse, reduced } from "../dom";
 import { makeWindow, setActive } from "./frame";
 import { isTerminal, makeBody } from "../views/body";
 
@@ -32,7 +32,7 @@ export interface WindowsModule {
   /** Points a terminal window at another session of its host; the old one keeps running (detached). */
   attach(rec: WinRec, sessionId: string): void;
   /** Brings a window's name and screen in line with its session in the inventory (a rename, a run again). */
-  syncSession(rec: WinRec): void;
+  syncSession(rec: WinRec, reshow?: boolean): void;
   /** Shows a session: flies to its window, or opens one (a detached or exited session) in Console. */
   openSession(host: string, sessionId: string): WinRec | undefined;
   /** Opens a shell on `host` as a window in Console (or flies to the one that is already there). */
@@ -123,6 +123,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       const colEl = root.parentElement as HTMLElement | null;
       const freed = root.offsetHeight + COLUMN_GAP;
       rec.stopResize?.();
+      cx.visibility.unwatch(rec);
       rec.binding?.dispose();
       rec.cleanup?.();
       root.remove();
@@ -192,6 +193,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       // Canvas locked: glide so the window and its new neighbour are both on screen while the droplet divides.
       if (state.canvasLock) cx.nav.focusWindow(rec);
     }
+    if (!coarse.matches) b.binding?.focus();
     colEl.dataset.split = "";
     await dropletSplit(root, b.card.root, direction, c.colsEl);
     delete colEl.dataset.split;
@@ -201,13 +203,14 @@ export function createWindows(cx: Ctx): WindowsModule {
   };
 
   /** Makes the window's model, title and body agree with its session in the inventory. */
-  const syncSession = (rec: WinRec): void => {
+  const syncSession = (rec: WinRec, force = false): void => {
     const s = isTerminal(rec) && rec.model.sessionId ? cx.adapters.inventory?.get(rec.model.host, rec.model.sessionId) : undefined;
     if (!s) return;
     const renamed = rec.model.session !== s.name;
-    const reshown = rec.model.lines !== s.screen;
+    // A session without a stored screen (the product's: the renderer is the screen) is re-shown only when asked to.
+    const reshown = force || (s.screen.length > 0 && rec.model.lines !== s.screen);
     rec.model.session = s.name;
-    rec.model.lines = s.screen;
+    if (s.screen.length) rec.model.lines = s.screen;
     if (renamed) {
       rec.card.setTitle({ host: rec.model.host, ...(rec.model.user ? { user: rec.model.user } : {}), session: s.name });
       cx.pill.paint();
@@ -232,7 +235,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     rec.model.sessionId = sessionId;
     if (previous) inv.detach(rec.model.host, previous);
     inv.attach(rec.model.host, sessionId);
-    syncSession(rec);
+    syncSession(rec, true);
     cx.sessionUi?.arrived(rec);
   };
 
@@ -270,6 +273,8 @@ export function createWindows(cx: Ctx): WindowsModule {
     else if (here) pulse(rec);
     setActive(cx, rec);
     if (here || !cx.flags.float) cx.nav.focusWindow(rec); else cx.float.open(rec);
+    // On a desktop the new shell takes the keys at once; on a phone the keyboard waits for a tap.
+    if (!coarse.matches) rec.binding?.focus();
     cx.store.changed();
     return rec;
   };

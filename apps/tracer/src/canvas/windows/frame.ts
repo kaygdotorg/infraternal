@@ -42,6 +42,7 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   // A window showing a session means that session is open (D178); the surfaces about it follow the inventory.
   if (isTerminal(rec) && m.sessionId) cx.adapters.inventory?.attach(m.host, m.sessionId);
   cx.sessionUi?.paint(rec);
+  if (rec.binding) cx.visibility.watch(rec);
   return rec;
 }
 

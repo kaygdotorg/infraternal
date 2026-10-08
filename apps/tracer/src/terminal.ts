@@ -3,20 +3,13 @@ import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
-import {
-  WebSocketFrameDecoder,
-  encodeMuxedFrameInto,
-  type WireFrame,
-} from "../../../packages/protocol/src/codec";
+import type { WireFrame } from "../../../packages/protocol/src/codec";
+import { MuxConnection, type StreamHandler } from "./connection";
 
-const CONTROL_STREAM = 0;
-const TERMINAL_STREAM = 1;
-const VERSION = 1;
 const INITIAL_CREDIT = 1024 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
 const INPUT_RESUME_GUARD = 16 * 1024;
 const INPUT_FRAME_LIMIT = 16 * 1024;
-const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
 const TERMINAL_FONT_SIZE_DESKTOP = 14;
@@ -116,18 +109,21 @@ export interface TerminalConfig {
   onInputActivity?: () => void;
   onRecoveryPending?: (readyAt: number | undefined) => void;
   traceMockServer?: boolean;
+  /**
+   * The connection this terminal's stream rides on. Terminals of one page share one (D183); without it the
+   * client makes and owns a private connection, which is how the single-terminal screen works.
+   */
+  connection?: MuxConnection;
+  /** Attach to a session that already exists on the server (a window reopened from the sidebar). */
+  attachSessionId?: string;
+  /** The host to open the new session on (a lowercase UUID); the embedded host when absent. */
+  hostId?: string;
   /** Reattach this tab's owned session using a new writer after a page reload. */
   initialSessionId?: string;
   /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
   scrollbackLimit?: number;
   /** Enables the explicit `?predict=1` opt-in; the production default remains off. */
   predictiveEcho?: boolean;
-}
-
-interface ResumeCredentials {
-  connectionId: Uint8Array;
-  resumeToken: Uint8Array;
-  deadline: number;
 }
 
 interface PendingSnapshot {
@@ -207,15 +203,13 @@ export class TerminalClient {
   private readonly inputQueue = new ByteQueue(INPUT_QUEUE_LIMIT);
   private readonly outputQueue = new ByteQueue(INITIAL_CREDIT);
   private readonly inputScratch = new Uint8Array(INPUT_FRAME_LIMIT);
-  private readonly sendScratch = new Uint8Array(SEND_BUFFER_SIZE);
   private readonly resizeObserver: ResizeObserver;
   private readonly screen: HTMLElement;
-  private socket: WebSocket | undefined;
-  private decoder: WebSocketFrameDecoder | undefined;
-  private resumeCredentials: ResumeCredentials | undefined;
+  private readonly conn: MuxConnection;
+  private readonly ownsConnection: boolean;
+  private streamId = 0;
+  private readonly offRoundTrip: () => void;
   private sessionId: Uint8Array | undefined;
-  private retryTimer = 0;
-  private retryAttempt = 0;
   private symbolFaceRequested = false;
   /** The font in use and the two canvas weights drawn from it (see installFontWeights). */
   private font: MonoFont;
@@ -234,19 +228,20 @@ export class TerminalClient {
   private attachRequested = false;
   private openCallSent = false;
   private fitQueued = false;
+  private hasAttached = false;
+  /** Bumped when the cursors restart, so a write that was in flight does not account for bytes that are gone. */
+  private cursorEpoch = 0;
+  /** Off screen: no drawing and no canvas backing store (see `setSuspended`). */
+  private suspended = false;
   private closed = false;
-  private forcedDrop = false;
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
-  private lastPingAt = -Infinity;
   private renderIdleTimer = 0;
   private rendererCursorBlinking = false;
   private predictionCursorHidden = false;
   private lastThemeColorsMs = 0;
   private lastThemeRenderMs = 0;
-  private nextPingNonce = 0n;
-  private readonly pendingPings = new Map<bigint, number>();
   private inputModifiers: InputModifiers = { ctrl: "off", alt: "off" };
   private readonly prediction: PredictiveEcho | undefined;
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
@@ -287,7 +282,7 @@ export class TerminalClient {
       this.wakeTerminal();
       const rect = config.host.getBoundingClientRect();
       this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
-      if (this.attached) this.sendFrame(TERMINAL_STREAM, { type: "Resize", ...this.lastSize });
+      if (this.attached) this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     });
     this.terminal.onData((data) => { this.wakeTerminal(); this.handleInput(data); });
     this.terminal.onScroll((offset) => {
@@ -297,14 +292,26 @@ export class TerminalClient {
       config.host.dataset.scrolled = String(offset !== 0);
       config.onScroll?.(offset !== 0);
     });
-    if (config.initialSessionId && isCanonicalUuid(config.initialSessionId)) {
+    const known = config.attachSessionId ?? config.initialSessionId;
+    if (known && isCanonicalUuid(known)) {
       // A page reload has no pending-input buffer or writer capability. Start
       // a fresh writer at zero, replay output from zero, and let server-owned
       // session authorization validate this nonsecret convenience identifier.
-      this.sessionId = uuidBytes(config.initialSessionId);
+      this.sessionId = uuidBytes(known);
     }
     this.scheduleFit();
-    this.connect();
+    this.ownsConnection = config.connection === undefined;
+    this.conn = config.connection ?? new MuxConnection({
+      ...(config.traceMockServer ? { traceMockServer: true } : {}),
+      ...(config.onRecoveryPending ? { onRecoveryPending: config.onRecoveryPending } : {}),
+      ...(config.onConnectionChange ? { onConnectionChange: config.onConnectionChange } : {}),
+    });
+    // The round trip is the connection's; every terminal on it reads it (prediction needs it, the pill shows it).
+    this.offRoundTrip = this.conn.onRoundTrip((ms) => {
+      this.prediction?.setRoundTrip(ms);
+      config.onRoundTrip?.(ms);
+    });
+    this.streamId = this.conn.openStream(this.streamHandler());
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
   }
 
@@ -524,6 +531,31 @@ export class TerminalClient {
     this.prediction?.refresh();
   }
 
+  /**
+   * Parks the terminal while its window is off screen, in another view or a thumbnail. Output keeps flowing
+   * into the terminal state (cheap, and credit keeps returning), but nothing is drawn and the canvas gives its
+   * backing store back: a phone must hold about one screen of pixels, not one per window (iOS ends a page that
+   * holds more). Resuming restores the canvas at the current grid and repaints once.
+   */
+  setSuspended(suspended: boolean): void {
+    if (suspended === this.suspended || this.closed) return;
+    this.suspended = suspended;
+    if (suspended) {
+      window.clearTimeout(this.renderIdleTimer);
+      this.pauseTerminal();
+      this.releaseSurface();
+      return;
+    }
+    this.restoreSurface();
+    this.scheduleFit();
+    this.wakeTerminal();
+  }
+
+  /** Recomputes the grid from the host's box (the window was resized). */
+  refit(): void {
+    this.scheduleFit();
+  }
+
   /** Focuses Ghostty's actual input host so the mobile keyboard can stay open. */
   focus(): void {
     this.terminal.focus();
@@ -571,8 +603,7 @@ export class TerminalClient {
 
   /** Forces a WebSocket close for the opt-in resume probe. */
   forceDrop(): void {
-    this.forcedDrop = true;
-    this.socket?.close(4000, "tracer resume probe");
+    this.conn.forceDrop();
   }
 
   dispose(): void {
@@ -583,161 +614,53 @@ export class TerminalClient {
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
     this.config.host.removeEventListener("pointermove", this.onTerminalActivity);
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
-    this.config.onConnectionChange?.(false);
-    window.clearTimeout(this.retryTimer);
-    this.stopPings();
+    if (this.attached) this.conn.streamAttached(false);
+    this.offRoundTrip();
     this.prediction?.dispose();
     this.resizeObserver.disconnect();
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
     this.inputQueue.clear();
     this.outputQueue.clear();
-    this.resumeCredentials?.connectionId.fill(0);
-    this.resumeCredentials?.resumeToken.fill(0);
     this.pendingSnapshot?.bytes.fill(0);
-    this.socket?.close(1000, "terminal closed");
+    // A shared connection only detaches this stream: the session keeps running (D178).
+    if (this.ownsConnection) this.conn.dispose(); else this.conn.closeStream(this.streamId);
     this.terminal.dispose();
   }
 
-  private connect(): void {
-    if (this.closed) return;
-    this.setStatus(this.sessionId ? "Connection lost; resuming…" : "Connecting…");
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const traceQuery = this.config.traceMockServer ? "?trace=1" : "";
-    const socket = new WebSocket(`${protocol}//${location.host}/v1/ws${traceQuery}`);
-    socket.binaryType = "arraybuffer";
-    this.socket = socket;
-    this.decoder = new WebSocketFrameDecoder();
-    this.attached = false;
-    this.attachRequested = false;
-
-    socket.onopen = () => {
-      const resumable = this.sessionId !== undefined && this.resumeCredentials !== undefined && Date.now() < this.resumeCredentials.deadline;
-      // RESUME_NEXT tells the server to wait for the adjacent Resume before issuing Welcome.
-      const hello: WireFrame = { type: "Hello", version: VERSION, caps: resumable ? 1n : 0n, clientInfo: "infraternal-tracer/0.1" };
-      let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
-      this.connectionIsResume = this.sessionId !== undefined;
-      if (resumable && this.resumeCredentials) {
-        length += encodeMuxedFrameInto(CONTROL_STREAM, {
-          type: "Resume",
-          connectionId: this.resumeCredentials.connectionId,
-          resumeToken: this.resumeCredentials.resumeToken,
-        }, this.sendScratch, length);
-      }
-      socket.send(this.sendScratch.subarray(0, length));
-      if (this.sessionId && resumable) {
-        this.attachRequested = true;
-        this.tryAttach();
-      } else if (this.sessionId) {
-        this.attachRequested = true;
-      }
-    };
-    socket.onmessage = (event: MessageEvent<ArrayBuffer>) => {
-      const receivedAt = performance.now();
-      if (!(event.data instanceof ArrayBuffer)) {
-        this.protocolFailure("server sent a non-binary frame");
-        return;
-      }
-      try {
-        const message = new Uint8Array(event.data);
-        this.decoder?.feed(message, (streamId, frame) => this.handleFrame(streamId, frame, message, receivedAt));
-      } catch {
-        this.protocolFailure("server sent an invalid wire frame");
-      }
-    };
-    socket.onerror = () => this.setStatus("Connection interrupted; reconnecting…");
-    socket.onclose = () => {
-      if (this.socket !== socket || this.closed) return;
-      this.socket = undefined;
-      this.decoder = undefined;
-      this.attached = false;
-      this.attachRequested = false;
-      this.config.onConnectionChange?.(false);
-      this.stopPings();
-      const forced = this.forcedDrop;
-      this.forcedDrop = false;
-      this.config.hooks?.onDisconnected?.(forced);
-      this.setStatus("Connection lost; resuming…");
-      this.scheduleReconnect();
-    };
-  }
-
-  private handleFrame(streamId: number, frame: WireFrame, message: Uint8Array, receivedAt: number): void {
-    if (streamId !== CONTROL_STREAM && streamId !== TERMINAL_STREAM) {
-      this.protocolFailure("server used an unexpected stream id");
-      return;
-    }
-    if (streamId === CONTROL_STREAM) {
-      this.handleControlFrame(frame);
-    } else {
-      this.handleTerminalFrame(frame, message, receivedAt);
-    }
-  }
-
-  private handleControlFrame(frame: WireFrame): void {
-    switch (frame.type) {
-      case "Hello":
-        if (frame.version !== VERSION) this.protocolFailure("server uses an unsupported wire version");
-        return;
-      case "Welcome":
-        this.sendFrame(CONTROL_STREAM, { type: "Subscribe", subId: 45, filterJson: encoder.encode(JSON.stringify({ topic: "auth.recovery" })) });
-        this.resumeCredentials?.connectionId.fill(0);
-        this.resumeCredentials?.resumeToken.fill(0);
-        this.resumeCredentials = {
-          connectionId: frame.connectionId.slice(),
-          resumeToken: frame.resumeToken.slice(),
-          deadline: Date.now() + frame.resumeWindowSeconds * 1000,
-        };
+  /** What the connection needs from this terminal's stream. */
+  private streamHandler(): StreamHandler {
+    return {
+      onSocketOpen: (resuming) => {
+        this.connectionIsResume = this.sessionId !== undefined;
+        if (this.sessionId && resuming) {
+          this.attachRequested = true;
+          this.tryAttach();
+        } else if (this.sessionId) {
+          this.attachRequested = true;
+        }
+      },
+      onWelcome: (resumed) => {
+        // A connection the server does not know starts every writer at zero, like a page reload.
+        if (!resumed && this.hasAttached) this.restartCursors();
         if (!this.sessionId) this.openSession();
         else {
           this.attachRequested = true;
           this.tryAttach();
         }
-        return;
-      case "Result":
-        if (frame.callId !== 1 || !this.openCallSent || this.sessionId) {
-          this.protocolFailure("server returned an unexpected action result");
-          return;
-        }
-        if (!frame.ok) {
-          this.setStatus("The server could not open this terminal.");
-          return;
-        }
-        try {
-          const result = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.json)) as unknown;
-          const record = asRecord(result);
-          const sessionId = requireString(record.session_id);
-          this.sessionId = uuidBytes(sessionId);
-          this.config.hooks?.onSessionCreated?.(sessionId);
-          this.attachRequested = true;
-          this.tryAttach();
-        } catch {
-          this.protocolFailure("terminal.open returned an invalid session id");
-        }
-        return;
-      case "Event":
-        if (frame.subId !== 45) return;
-        try {
-          const event = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.eventJson)) as unknown);
-          if (event.topic !== "auth.recovery") throw new Error("unexpected recovery topic");
-          const readyAt = event.pending === null ? undefined : asRecord(event.pending).ready_at;
-          if (event.pending !== null && (typeof readyAt !== "number" || !Number.isSafeInteger(readyAt) || readyAt < 0)) throw new Error("invalid recovery deadline");
-          this.config.onRecoveryPending?.(readyAt as number | undefined);
-        } catch { this.protocolFailure("server returned invalid recovery state"); }
-        return;
-      case "Ping":
-        this.sendFrame(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
-        return;
-      case "Pong":
-        this.acceptPong(frame.nonce);
-        return;
-      case "Close":
-        this.setStatus(frame.reason || "The server closed the connection.");
-        this.socket?.close();
-        return;
-      default:
-        this.protocolFailure("server sent a terminal frame on the control stream");
-    }
+      },
+      onFrame: (frame, message, receivedAt) => this.handleTerminalFrame(frame, message, receivedAt),
+      onDisconnected: (forced) => {
+        if (this.closed) return;
+        this.attached = false;
+        this.attachRequested = false;
+        this.openCallSent = false;
+        this.config.hooks?.onDisconnected?.(forced);
+        this.setStatus("Connection lost; resuming…");
+      },
+      hasSession: () => this.sessionId !== undefined,
+      onStatus: (message) => this.setStatus(message),
+    };
   }
 
   private handleTerminalFrame(frame: WireFrame, message: Uint8Array, receivedAt: number): void {
@@ -782,14 +705,15 @@ export class TerminalClient {
         return;
       }
       case "Ping":
-        this.sendFrame(TERMINAL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
+        this.sendFrame(this.streamId, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
         return;
       case "Pong":
-        this.acceptPong(frame.nonce);
+        this.conn.acceptPong(frame.nonce);
         return;
       case "Close":
         this.setStatus(frame.reason || "The terminal stream closed.");
-        this.socket?.close();
+        // On a connection of its own a closed stream restarts it; on a shared one the others keep running.
+        if (this.ownsConnection) this.conn.forceClose();
         return;
       default:
         this.protocolFailure("server sent an invalid terminal-stream frame");
@@ -798,27 +722,35 @@ export class TerminalClient {
 
   private openSession(): void {
     if (this.openCallSent || this.closed) return;
-    const hostId = new URLSearchParams(location.search).get("host");
+    const hostId = this.config.hostId ?? new URLSearchParams(location.search).get("host");
     if (hostId && !isCanonicalUuid(hostId)) {
       this.setStatus("The host query parameter must be a lowercase UUID.");
       return;
     }
     this.openCallSent = true;
-    const input = hostId ? { host_id: hostId } : {};
-    this.sendFrame(CONTROL_STREAM, {
-      type: "Call",
-      callId: 1,
-      actionId: "ssh.session.open",
-      inputJson: encoder.encode(JSON.stringify(input)),
+    this.conn.call("ssh.session.open", hostId ? { host_id: hostId } : {}).then((result) => {
+      if (this.closed || this.sessionId) return;
+      try {
+        const sessionId = requireString(result.session_id);
+        this.sessionId = uuidBytes(sessionId);
+        this.config.hooks?.onSessionCreated?.(sessionId);
+        this.attachRequested = true;
+        this.tryAttach();
+      } catch {
+        this.protocolFailure("terminal.open returned an invalid session id");
+      }
+    }, () => {
+      this.openCallSent = false;
+      if (!this.closed && this.conn.isOpen) this.setStatus("The server could not open this terminal.");
     });
   }
 
   private tryAttach(): void {
-    if (!this.attachRequested || !this.sessionId || this.attached || this.closed || !this.isSocketOpen()) return;
+    if (!this.attachRequested || !this.sessionId || this.attached || this.closed || !this.conn.isOpen) return;
     if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
     this.attachRequested = false;
     this.attached = true;
-    this.sendFrame(TERMINAL_STREAM, {
+    this.sendFrame(this.streamId, {
       type: "AttachTerm",
       sessionId: this.sessionId,
       lastOutSeq: this.lastOutSeq,
@@ -826,15 +758,30 @@ export class TerminalClient {
       lastInSeq: this.ackedInSeq,
     });
     this.creditAvailable = INITIAL_CREDIT;
-    this.sendFrame(TERMINAL_STREAM, { type: "Credit", bytes: INITIAL_CREDIT });
-    this.sendFrame(TERMINAL_STREAM, { type: "Resize", ...this.lastSize });
+    this.sendFrame(this.streamId, { type: "Credit", bytes: INITIAL_CREDIT });
+    this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     this.resendUnacknowledgedInput();
     this.setStatus("");
-    this.retryAttempt = 0;
-    this.config.onConnectionChange?.(true);
+    this.hasAttached = true;
+    this.conn.streamAttached(true, this.streamId);
     this.startPings();
     this.wakeTerminal();
     this.config.hooks?.onAttached?.(this.connectionIsResume, this);
+  }
+
+  /** Starts the stream's cursors over: its session is attached again from the beginning, as after a reload. */
+  private restartCursors(): void {
+    this.cursorEpoch += 1;
+    this.receivedOutSeq = 0n;
+    this.lastOutSeq = 0n;
+    this.nextInSeq = 0n;
+    this.ackedInSeq = 0n;
+    this.inputQueue.clear();
+    this.outputQueue.clear();
+    this.pendingSnapshot?.bytes.fill(0);
+    this.pendingSnapshot = undefined;
+    this.prediction?.resetForSnapshot();
+    this.terminal.reset();
   }
 
   private resendUnacknowledgedInput(): void {
@@ -846,7 +793,7 @@ export class TerminalClient {
         this.protocolFailure("input resume queue is inconsistent");
         return;
       }
-      this.sendFrame(TERMINAL_STREAM, {
+      this.sendFrame(this.streamId, {
         type: "Input",
         inSeq: sequence,
         bytes: this.inputScratch.subarray(0, length),
@@ -885,7 +832,7 @@ export class TerminalClient {
     if (this.attached) {
       for (let offset = 0; offset < encoded.byteLength;) {
         const length = Math.min(INPUT_FRAME_LIMIT, encoded.byteLength - offset);
-        this.sendFrame(TERMINAL_STREAM, {
+        this.sendFrame(this.streamId, {
           type: "Input",
           inSeq: firstSequence + BigInt(offset),
           bytes: encoded.subarray(offset, offset + length),
@@ -977,7 +924,9 @@ export class TerminalClient {
       this.terminal.reset();
       this.requestSymbolsIfNeeded(snapshot.bytes);
       this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
+      const epoch = this.cursorEpoch;
       this.terminal.write(snapshot.bytes, () => {
+        if (epoch !== this.cursorEpoch) { this.snapshotWriteInFlight = false; this.drainOutput(); this.tryAttach(); return; }
         const callbackAt = performance.now();
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "writeCallback", callbackAt);
         // Ghostty calls this from the rAF after its render loop draws the write; another rAF adds a full frame.
@@ -1005,7 +954,9 @@ export class TerminalClient {
       this.requestSymbolsIfNeeded(region);
       const writeSequence = this.lastOutSeq;
       this.traceRange(writeSequence, region.byteLength, "termWrite", performance.now());
+      const epoch = this.cursorEpoch;
       this.terminal.write(region, () => {
+        if (epoch !== this.cursorEpoch) { this.outputWriteLength = 0; this.outputWriteInFlight = false; this.drainOutput(); this.tryAttach(); return; }
         const callbackAt = performance.now();
         this.traceRange(writeSequence, this.outputWriteLength, "writeCallback", callbackAt);
         // The callback is ordered after Ghostty's render-loop callback in the same animation frame.
@@ -1042,7 +993,7 @@ export class TerminalClient {
       return;
     }
     this.creditAvailable += bytes;
-    if (this.attached) this.sendFrame(TERMINAL_STREAM, { type: "Credit", bytes });
+    if (this.attached) this.sendFrame(this.streamId, { type: "Credit", bytes });
   }
 
   private pauseInput(message: string): void {
@@ -1053,7 +1004,7 @@ export class TerminalClient {
   }
 
   private scheduleFit(): void {
-    if (this.fitQueued || this.closed) return;
+    if (this.fitQueued || this.closed || this.suspended) return;
     this.fitQueued = true;
     requestAnimationFrame(() => {
       this.fitQueued = false;
@@ -1457,28 +1408,9 @@ export class TerminalClient {
     this.scheduleFit();
   }
 
-  private scheduleReconnect(): void {
-    if (this.closed || this.retryTimer !== 0) return;
-    const delay = Math.min(1000, 50 * 2 ** Math.min(this.retryAttempt, 4));
-    this.retryAttempt += 1;
-    this.retryTimer = window.setTimeout(() => {
-      this.retryTimer = 0;
-      this.connect();
-    }, delay);
-  }
-
   private sendFrame(streamId: number, frame: WireFrame, traceStart?: bigint, traceLength = 0): void {
-    const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    try {
-      const length = encodeMuxedFrameInto(streamId, frame, this.sendScratch);
-      const encodedAt = performance.now();
-      if (traceStart !== undefined) this.traceRange(traceStart, traceLength, "encode", encodedAt);
-      socket.send(this.sendScratch.subarray(0, length));
-      if (traceStart !== undefined) this.traceRange(traceStart, traceLength, "wsSend", performance.now());
-    } catch {
-      this.protocolFailure("could not encode an infraternal wire frame");
-    }
+    if (traceStart === undefined) { this.conn.send(streamId, frame); return; }
+    this.conn.send(streamId, frame, (at) => this.traceRange(traceStart, traceLength, "encode", at), () => this.traceRange(traceStart, traceLength, "wsSend", performance.now()));
   }
 
   /** Maps byte-stream sequence numbers to probe key IDs without changing wire frames. */
@@ -1491,13 +1423,7 @@ export class TerminalClient {
   }
 
   private protocolFailure(message: string): void {
-    this.setStatus(`Terminal protocol error: ${message}.`);
-    // Browsers reject 1002 from script (only 1000 and 3000-4999 are allowed), so the application code 4002 carries it.
-    try { this.socket?.close(4002, "invalid tracer frame"); } catch { this.socket?.close(); }
-  }
-
-  private isSocketOpen(): boolean {
-    return this.socket?.readyState === WebSocket.OPEN;
+    this.conn.fail(message);
   }
 
   private setStatus(message: string): void {
@@ -1507,34 +1433,18 @@ export class TerminalClient {
 
   /** Samples RTT on attachment and typing; an idle terminal schedules no wakeups [81]. */
   private startPings(): void {
-    this.stopPings();
-    this.sampleRoundTrip();
+    this.prediction?.setRoundTrip(undefined);
+    this.config.onRoundTrip?.(undefined);
+    this.conn.sampleRoundTrip();
   }
 
   private sampleRoundTrip(): void {
-    const startedAt = performance.now();
-    if (!this.attached || this.closed || startedAt - this.lastPingAt < 2000) return;
-    this.lastPingAt = startedAt;
-    this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
-    const nonce = this.nextPingNonce;
-    if (this.pendingPings.size >= 8) {
-      const oldest = this.pendingPings.keys().next().value as bigint | undefined;
-      if (oldest !== undefined) this.pendingPings.delete(oldest);
-    }
-    this.pendingPings.set(nonce, startedAt);
-    this.sendFrame(CONTROL_STREAM, { type: "Ping", nonce, sentUs: BigInt(Math.round(startedAt * 1000)) });
-  }
-
-  private stopPings(): void {
-    this.lastPingAt = -Infinity;
-    this.pendingPings.clear();
-    this.prediction?.setRoundTrip(undefined);
-    this.config.onRoundTrip?.(undefined);
+    if (this.attached && !this.closed) this.conn.sampleRoundTrip();
   }
 
   /** Keeps Ghostty drawing only through active input/output and its settling window. */
   private wakeTerminal(): void {
-    if (this.closed) return;
+    if (this.closed || this.suspended) return;
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = window.setTimeout(() => this.pauseTerminal(), RENDER_IDLE_MS);
     this.rendererCursorBlinking = true;
@@ -1549,15 +1459,6 @@ export class TerminalClient {
     this.ghostty.cancelRenderLoop();
     this.rendererCursorBlinking = false;
     this.ghostty.renderer?.setCursorBlink(false);
-  }
-
-  private acceptPong(nonce: bigint): void {
-    const startedAt = this.pendingPings.get(nonce);
-    if (startedAt === undefined) return;
-    this.pendingPings.delete(nonce);
-    const milliseconds = Math.max(1, performance.now() - startedAt);
-    this.prediction?.setRoundTrip(milliseconds);
-    this.config.onRoundTrip?.(milliseconds);
   }
 }
 

@@ -34,6 +34,7 @@ import type { ViewsModule } from "./views/world";
 import type { WindowsModule } from "./windows/lifecycle";
 import type { FloatModule } from "./windows/float";
 import type { InputLock } from "./windows/input-lock";
+import type { Visibility } from "./windows/visibility";
 import type { PillModule } from "./toolbar/pill";
 import type { ViewList } from "./toolbar/viewlist";
 import type { TreeModule } from "./toolbar/tree";
@@ -149,6 +150,7 @@ export interface Ctx {
   inputLock: InputLock;
   /** The session manager, the final-screen strip and the size badge; exists only with an inventory. */
   sessionUi?: SessionUi;
+  visibility: Visibility;
   pill: PillModule;
   viewList: ViewList;
   tree: TreeModule;

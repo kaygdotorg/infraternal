@@ -1,23 +1,52 @@
-/** Gates the whole production JavaScript transfer, including deferred terminal/WASM bytes [5][41], and the font transfer (D175). */
+/**
+ * Gates the production JavaScript transfer in two budgets (D188), and the font transfer (D175).
+ *
+ * - **Critical path**: everything needed before the first paint of sign-in and of the first screen (the entries,
+ *   their static imports, the core screen, the terminal and its renderer with the WASM). Strict, and unchanged.
+ * - **Deferred**: code that loads after the first screen is up (the canvas: views, Mesh, the droplet, the toolbar's
+ *   edit mode, the settings windows). Its own budget: the size at the time of the decision plus a stated margin.
+ *
+ * Which chunk is which comes from the build graph (`chunks.json`, written by build.ts from the bundler's own
+ * metafile), never from a list of chunk names. A chunk the graph did not classify fails the gate.
+ */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { brotliCompressSync, gzipSync } from "node:zlib";
 
-const limits = { gzip: 300 * 1024, brotli: 250 * 1024 };
-const totals = { identity: 0, gzip: 0, brotli: 0 };
-for (const name of await readdir("dist", { recursive: true })) {
+const dist = process.env.TRACER_DIST ?? "dist";
+const KIB = 1024;
+const limits = {
+  critical: { gzip: 300 * KIB, brotli: 250 * KIB },
+  // Measured when the canvas product module landed (D188): 46,738 B gzip / 40,526 B brotli. The limit is that size
+  // rounded up to a whole KiB plus a 4 KiB margin, so ordinary canvas work fits and a library pulled in by accident does not.
+  // Sessions UI (manager, markers, final-screen strip, size badge, the client-side inventory) measured at 54,327 B gzip /
+  // 47,070 B brotli, 7.1 KB gzip over the canvas alone (47,175): the limit follows the same rule, 54 KiB + 4 KiB and 46 KiB + 4 KiB.
+  // The owner approves this raise (#104).
+  deferred: { gzip: 58 * KIB, brotli: 50 * KIB },
+};
+const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[] };
+const totals = { critical: { identity: 0, gzip: 0, brotli: 0 }, deferred: { identity: 0, gzip: 0, brotli: 0 } };
+for (const name of await readdir(dist, { recursive: true })) {
   if (!name.endsWith(".js")) continue;
-  const identity = (await stat(`dist/${name}`)).size;
-  const gzip = await stat(`dist/${name}.gz`).then((file) => file.size).catch(() => identity);
-  const brotli = await stat(`dist/${name}.br`).then((file) => file.size).catch(() => identity);
-  totals.identity += identity;
-  totals.gzip += gzip;
-  totals.brotli += brotli;
-  console.log(`${name}: identity=${identity} gzip=${gzip} brotli=${brotli} bytes`);
+  const klass = classes.critical.includes(name) ? "critical" : classes.deferred.includes(name) ? "deferred" : undefined;
+  if (!klass) throw new Error(`${name} is in no chunk class: chunks.json is stale, rebuild`);
+  const identity = (await stat(`${dist}/${name}`)).size;
+  const gzip = await stat(`${dist}/${name}.gz`).then((file) => file.size).catch(() => identity);
+  const brotli = await stat(`${dist}/${name}.br`).then((file) => file.size).catch(() => identity);
+  totals[klass].identity += identity;
+  totals[klass].gzip += gzip;
+  totals[klass].brotli += brotli;
+  console.log(`${klass} ${name}: identity=${identity} gzip=${gzip} brotli=${brotli} bytes`);
 }
-if (totals.identity === 0) throw new Error("no production JavaScript found");
-console.log(`JavaScript transfer: identity=${totals.identity} gzip=${totals.gzip}/${limits.gzip} brotli=${totals.brotli}/${limits.brotli} bytes`);
-if (totals.gzip > limits.gzip || totals.brotli > limits.brotli) {
-  throw new Error("production JavaScript exceeds the compressed transfer budget");
+if (totals.critical.identity === 0) throw new Error("no production JavaScript found");
+for (const klass of ["critical", "deferred"] as const) {
+  const t = totals[klass], l = limits[klass];
+  console.log(`JavaScript transfer, ${klass}: identity=${t.identity} gzip=${t.gzip}/${l.gzip} brotli=${t.brotli}/${l.brotli} bytes`);
+}
+if (totals.critical.gzip > limits.critical.gzip || totals.critical.brotli > limits.critical.brotli) {
+  throw new Error("production critical-path JavaScript exceeds the compressed transfer budget");
+}
+if (totals.deferred.gzip > limits.deferred.gzip || totals.deferred.brotli > limits.deferred.brotli) {
+  throw new Error("production deferred JavaScript exceeds its compressed transfer budget");
 }
 
 /**
@@ -48,7 +77,7 @@ const familyBudgets: Record<string, { critical?: number; total: number }> = {
   "source-code-pro": { total: 48 * KB },
 };
 const symbolsLimit = 230 * KB;
-const fontRoot = "dist/fonts";
+const fontRoot = `${dist}/fonts`;
 const fontEntries = await readdir(fontRoot, { withFileTypes: true });
 let fontFailure = "";
 const summary: string[] = [];
@@ -56,7 +85,7 @@ const sized = async (path: string): Promise<number> => {
   const bytes = await readFile(path);
   const gzip = Math.min(bytes.length, gzipSync(bytes, { level: 9 }).length);
   const brotli = Math.min(bytes.length, brotliCompressSync(bytes).length);
-  console.log(`${path.replace("dist/", "")}: identity=${bytes.length} gzip=${gzip} brotli=${brotli} bytes`);
+  console.log(`${path.replace(`${dist}/`, "")}: identity=${bytes.length} gzip=${gzip} brotli=${brotli} bytes`);
   return bytes.length;
 };
 for (const entry of fontEntries) {
