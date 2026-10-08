@@ -43,8 +43,12 @@ export interface CameraHooks {
 
 export const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
 
-const FLIGHT = { visualDuration: 0.8, bounce: 0 };
-const KEY_FLIGHT = { visualDuration: 0.2, bounce: 0 };
+// Critically damped (no overshoot, no long tail): settles within 1 px in about 1.76 x the visual duration (a little more as measured on camera centre and zoom together), in
+// test/clusters-flight.spec.ts. Pointer, touch and pill flights about 350 ms (was 1.3 s); a key's about 190 ms (was 430 ms) (the motion rule).
+const FLIGHT = { visualDuration: 0.16, bounce: 0 };
+const KEY_FLIGHT = { visualDuration: 0.08, bounce: 0 };
+/** The layout spring (the same one windows use when a layout moves, layout/flip.ts). */
+const LAYOUT_FLIGHT = { visualDuration: 0.5, bounce: 0.22 };
 const REST_DELAY = 140;
 export const MIN_ZOOM = 0.08;
 export const MAX_ZOOM = 2;
@@ -69,7 +73,7 @@ export class Camera {
   private restTimer = 0;
   private moving = false;
   private ready = false;
-  private flightKind: "gesture" | "key" = "gesture";
+  private flightKind: "gesture" | "key" | "layout" = "gesture";
 
   constructor(private readonly viewport: HTMLElement, private readonly world: HTMLElement, private readonly hooks: CameraHooks = {}) {
     world.dataset.lod = this.lod;
@@ -167,6 +171,12 @@ export class Camera {
     try { return run(); } finally { this.flightKind = "gesture"; }
   }
 
+  /** Runs a flight on the layout spring: the framing moved because the layout around it did (a docked sidebar). */
+  layoutFlight<T>(run: () => T): T {
+    this.flightKind = "layout";
+    try { return run(); } finally { this.flightKind = "gesture"; }
+  }
+
   /** Flies the camera (interruptible: a new target keeps the current velocity). */
   flyTo(target: () => Cam, instant = false): void {
     this.target = target;
@@ -178,7 +188,7 @@ export class Camera {
       this.set(t);
       return;
     }
-    const cfg = this.flightKind === "key" ? KEY_FLIGHT : FLIGHT;
+    const cfg = this.flightKind === "key" ? KEY_FLIGHT : this.flightKind === "layout" ? LAYOUT_FLIGHT : FLIGHT;
     this.springCx.configure(cfg); this.springCy.configure(cfg); this.springLz.configure(cfg);
     const { cam } = this;
     this.springCx.value = cam.cx; this.springCy.value = cam.cy; this.springLz.value = Math.log(cam.z);

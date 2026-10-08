@@ -1,6 +1,6 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
 import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
-import { applyTheme, DEFAULT_GLASS, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
+import { applyTheme, DEFAULT_CARD, DEFAULT_WINDOW, LEVEL_NAMES, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { Spring } from "../../../packages/ui/src/spring";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
@@ -89,10 +89,10 @@ export interface CoreScreen {
   setCanvasRow(items: ToolbarItem[]): ToolbarRow;
   /** Holds the toolbar on the key row (an input lock), or releases it with `undefined`. */
   lockToolbarRow(row: "keys" | undefined): void;
-  /** Runs a palette action (`theme:ink`, `font:geist-mono`, `glass:2`, `bg:mesh`) as a click on its row would. */
+  /** Runs a palette action (`theme:ink`, `font:geist-mono`, `card:2`, `bg:mesh`) as a click on its row would. */
   act(action: string): void;
   /** The appearance choices in force, and the sections of Settings that live in core (for the Settings view). */
-  appearance(): { theme: string; font: string; glass: number; background: string };
+  appearance(): { theme: string; font: string; card: number; windows: number; background: string };
   settingsPanels: { toolbar: SettingsSection; shortcuts: SettingsSection; about: SettingsSection };
   /** The row that shows now. */
   toolbarRow(): "canvas" | "keys";
@@ -289,11 +289,15 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   liveHost.setAttribute("aria-label", hostName);
 
   const params = new URLSearchParams(location.search);
-  // `?glass=1..4`: how much shows through the floating cards (1 thickest, 4 thinnest; default 3).
-  const glassParam = Number(params.get("glass"));
-  const savedGlass = Number(readLocal("tracer.glass"));
-  const validGlass = (n: number): boolean => Number.isInteger(n) && n >= 1 && n <= 4;
-  let glassLevel = validGlass(glassParam) ? glassParam : validGlass(savedGlass) ? savedGlass : DEFAULT_GLASS;
+  // `?card=1..4` and `?windows=1..4`: Solid, Tinted, Clear, Frosted, for the floating cards (default Tinted) and for
+  // windows (default Solid). The saved choice comes next.
+  const validLevel = (n: number): boolean => Number.isInteger(n) && n >= 1 && n <= 4;
+  const levelFrom = (param: string, saved: string, fallback: number): number => {
+    const q = Number(params.get(param)), v = Number(readLocal(saved));
+    return validLevel(q) ? q : validLevel(v) ? v : fallback;
+  };
+  let cardLevel = levelFrom("card", "tracer.card", DEFAULT_CARD);
+  let windowLevel = levelFrom("windows", "tracer.windows", DEFAULT_WINDOW);
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
   let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "mocha" : "latte");
   // The font follows the same order as the theme: URL, then the saved choice, then the default.
@@ -302,9 +306,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let committedFont = initialFont();
   let shownFont = committedFont;
   let fontRequest = 0;
-  let background = params.get("bg") === "mesh" || params.get("bg") === "none"
-    ? params.get("bg")!
-    : (readLocal("tracer.background") === "mesh" ? "mesh" : "none");
+  // Plain (`none`): one solid colour with subtle dots. Soft (the default): the theme's gentle gradient. Mesh: the full
+  // theme mesh. The dots sit on all three.
+  const validBackground = (v: string | null): v is "none" | "soft" | "mesh" => v === "none" || v === "soft" || v === "mesh";
+  let background: string = validBackground(params.get("bg")) ? params.get("bg")! : validBackground(readLocal("tracer.background")) ? readLocal("tracer.background")! : "soft";
+  /** The terminal paints no background of its own where a window shows the canvas through it (and over the mesh). */
+  const translucentTerminal = (): boolean => background === "mesh" || windowLevel > 1;
   /** Every terminal on the screen (they share the look), and the one that takes the keys. */
   const clients = new Set<TerminalClient>();
   let client: TerminalClient | undefined;
@@ -347,13 +354,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ROOT.dataset.bg = background;
     stage.dataset.theme = currentThemeId;
     stage.dataset.bg = background;
-    applyTheme(active, ROOT, glassLevel);
+    applyTheme(active, ROOT, cardLevel, windowLevel);
     window.dispatchEvent(new CustomEvent("tracer:appearance"));
     THEME_COLOR?.setAttribute("content", active.bg);
     // The terminal's own recolour (every retained row is redrawn) is the heaviest part of a theme
     // switch. It runs in its own task, right after the tokens above, so the interface answers at once
     // and no single task is long (work stays under the 50 ms long-task line at 4x CPU).
-    const terminal = terminalTheme(active, background === "mesh");
+    const terminal = terminalTheme(active, translucentTerminal());
     window.setTimeout(() => { for (const c of clients) c.setTheme(terminal); }, 0);
     if (background === "mesh") return paintMesh();
     releaseMesh();
@@ -399,8 +406,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ...FONTS.map((font) => ({
       group: "Font", glyph: "Aa", label: font.label, hint: font.hint, action: `font:${font.id}`, previewFont: font,
     })),
-    { group: "Background", glyph: "▦", label: "Mesh from the theme", hint: "one still · no idle work", action: "bg:mesh" },
-    { group: "Background", glyph: "□", label: "None", hint: "solid theme color", action: "bg:none" },
+    { group: "Background", glyph: "□", label: "Background: Plain", hint: "one solid colour · subtle dots", action: "bg:none" },
+    { group: "Background", glyph: "▦", label: "Background: Soft", hint: "a gentle gradient · dots", action: "bg:soft" },
+    { group: "Background", glyph: "▦", label: "Background: Mesh", hint: "the theme's mesh · dots", action: "bg:mesh" },
+    ...LEVEL_NAMES.map((name, i) => ({ group: "Transparency", glyph: "◫", label: `Card transparency: ${name}`, hint: "popovers, palette, sidebar", action: `card:${i + 1}` })),
+    ...LEVEL_NAMES.map((name, i) => ({ group: "Transparency", glyph: "◫", label: `Window transparency: ${name}`, hint: "terminals and window cards", action: `windows:${i + 1}` })),
     ...(options.addHostEntry ? [
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
@@ -791,15 +801,16 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   const isTerminalFocus = (element: Element | null): element is HTMLElement =>
     element instanceof HTMLElement && element.closest(".terminal-host") !== null;
+  /**
+   * After a toolbar tap, a terminal that had input focus when the finger went down gets it back (D129: the keyboard
+   * stays up). A terminal that did not have focus is never given it: that would summon the on-screen keyboard from
+   * a button that has nothing to type into.
+   */
   const restoreTerminalFocus = (): void => {
-    if (isTerminalFocus(document.activeElement)) {
-      terminalFocusTarget = null;
-      return;
-    }
-    if (terminalFocusTarget?.isConnected) terminalFocusTarget.focus({ preventScroll: true });
-    else if (client) client.focus();
-    else terminalHost.focus({ preventScroll: true });
+    const target = terminalFocusTarget;
     terminalFocusTarget = null;
+    if (!target || isTerminalFocus(document.activeElement)) return;
+    if (target.isConnected) target.focus({ preventScroll: true });
   };
   const rememberTerminalFocus = (): void => {
     const active = document.activeElement;
@@ -889,8 +900,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       const item = canvasItems.get(button.dataset.cv);
       if (item && !item.disabled) item.onSelect();
     }
+    // A key activated from the keyboard (F6 into the tray, Enter) hands the focus back to the terminal it came from.
+    if (event.detail === 0 && !terminalFocusTarget && keytray.contains(document.activeElement)) client?.focus();
     restoreTerminalFocus();
   };
+  // The tray never takes or moves focus: some browsers move it on the compatibility mouse events that follow a touch,
+  // so those are cancelled too (the terminal keeps its input focus and the keyboard stays up; nothing else gains one).
+  keybar.addEventListener("mousedown", (event) => event.preventDefault());
   keybar.addEventListener("pointerdown", keybarPointerDown);
   keybar.addEventListener("pointercancel", keybarPointerCancel);
   keybar.addEventListener("click", keybarClick);
@@ -918,16 +934,35 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     rowSpring.set(index, instant);
   };
   let rowLock: "keys" | undefined;
-  const autoRow = (): void => {
-    if (canvasRowEl.hidden || rowLock || editing) return;
-    settleRow(isTerminalFocus(document.activeElement) ? 1 : 0);
+  // The key row exists only while a terminal has input focus (or an input lock holds it): without one there is
+  // nothing to type into, so the toolbar is the canvas row alone, with no second row, no dots and no swipe. When a
+  // terminal takes focus the key row slides in with the canvas row one snap swipe away; when focus leaves, it slides
+  // away and is taken out of the layout. Without a canvas row (no canvas) the key row is simply always there.
+  let keysHideTimer = 0;
+  const showKeys = (show: boolean): void => {
+    window.clearTimeout(keysHideTimer);
+    if (show) { keysRowEl.hidden = false; keytray.dataset.rows = "2"; return; }
+    keysHideTimer = window.setTimeout(() => { if (!canvasRowEl.hidden) { keysRowEl.hidden = true; keytray.dataset.rows = "1"; } }, 420);
   };
+  const autoRow = (): void => {
+    if (canvasRowEl.hidden || editing) return;
+    const wanted = Boolean(rowLock) || isTerminalFocus(document.activeElement) || keytray.contains(document.activeElement);
+    showKeys(wanted);
+    settleRow(wanted ? 1 : 0);
+  };
+  // The canvas cancels the default focus change of a press (it pans on it), so a press on the canvas that is not in a
+  // terminal ends the terminal's input focus itself: the keyboard goes down and the key row slides away.
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element) || !isTerminalFocus(document.activeElement)) return;
+    if (target.closest(".cl-viewport") && !target.closest(".terminal-host")) (document.activeElement as HTMLElement).blur();
+  }, true);
   document.addEventListener("focusin", autoRow);
   document.addEventListener("focusout", () => requestAnimationFrame(autoRow));
   let rowSwipe: { id: number; x: number; y: number; from: number; axis: "" | "x" | "y"; samples: Array<{ y: number; t: number }> } | undefined;
   keytray.addEventListener("pointerdown", (event) => {
     rowSwipeMoved = false;
-    if (canvasRowEl.hidden || !event.isPrimary || editing) return;
+    if (canvasRowEl.hidden || keysRowEl.hidden || !event.isPrimary || editing) return;
     rowSwipe = { id: event.pointerId, x: event.clientX, y: event.clientY, from: rowSpring.value, axis: "", samples: [{ y: event.clientY, t: event.timeStamp }] };
   }, true);
   keytray.addEventListener("pointermove", (event) => {
@@ -1260,14 +1295,19 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       showFont(committedFont);
       window.dispatchEvent(new CustomEvent("tracer:appearance"));
       return false;
-    } else if (kind === "glass" && validGlass(Number(value))) {
-      glassLevel = Number(value);
-      writeLocal("tracer.glass", value!);
+    } else if (kind === "card" && validLevel(Number(value))) {
+      cardLevel = Number(value);
+      writeLocal("tracer.card", value!);
       swapLook();
       return true;
-    } else if (kind === "bg" && (value === "mesh" || value === "none")) {
-      background = value;
-      writeLocal("tracer.background", value);
+    } else if (kind === "windows" && validLevel(Number(value))) {
+      windowLevel = Number(value);
+      writeLocal("tracer.windows", value!);
+      swapLook();
+      return true;
+    } else if (kind === "bg" && validBackground(value ?? null)) {
+      background = value!;
+      writeLocal("tracer.background", value!);
       swapLook();
       return true;
     } else if (kind === "settings") {
@@ -1306,7 +1346,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     terminalHost,
     status,
     probePanel,
-    theme: () => terminalTheme(THEMES[currentThemeId]!, background === "mesh"),
+    theme: () => terminalTheme(THEMES[currentThemeId]!, translucentTerminal()),
     font: () => committedFont,
     bindTerminal(value) {
       api.registerTerminal(value);
@@ -1315,7 +1355,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     registerTerminal(value) {
       clients.add(value);
       value.setFont(shownFont);
-      value.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
+      value.setTheme(terminalTheme(THEMES[currentThemeId]!, translucentTerminal()));
       return () => { clients.delete(value); if (client === value) client = undefined; };
     },
     releaseSurface() { for (const c of clients) c.releaseSurface(); },
@@ -1330,10 +1370,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     toast,
     act(action) { runAction(action, "pointer"); },
-    appearance: () => ({ theme: currentThemeId, font: committedFont.id, glass: glassLevel, background }),
+    appearance: () => ({ theme: currentThemeId, font: committedFont.id, card: cardLevel, windows: windowLevel, background }),
     settingsPanels: { get toolbar() { return toolbarSettings; }, shortcuts: shortcutsPanel, about: aboutPanel },
     toolbarRow: () => (rowIndex === 0 ? "canvas" : "keys"),
-    lockToolbarRow(row) { rowLock = row; if (row) settleRow(1); else autoRow(); },
+    lockToolbarRow(row) { rowLock = row; autoRow(); },
     setCanvasRow(items) {
       canvasItems.clear();
       canvasRowEl.replaceChildren();
@@ -1364,13 +1404,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (items.length && !options.settingsView && !settingsSections.includes(toolbarSettings)) settingsSections.unshift(toolbarSettings);
       rebuildStaticEntries();
       canvasRowEl.hidden = items.length === 0;
-      keytray.dataset.rows = items.length ? "2" : "1";
-      autoRow();
+      keysRowEl.hidden = items.length > 0 && !isTerminalFocus(document.activeElement);
+      keytray.dataset.rows = items.length && !keysRowEl.hidden ? "2" : "1";
       if (!items.length) settleRow(1, true);
-      else if (!isTerminalFocus(document.activeElement)) settleRow(0, true);
+      else settleRow(keysRowEl.hidden ? 0 : 1, true);
       return {
         update(id, patch) { const cur = canvasItems.get(id); if (!cur) return; Object.assign(cur, patch); paint(id); },
-        dispose() { const at = settingsSections.indexOf(toolbarSettings); if (at >= 0) settingsSections.splice(at, 1); canvasItems.clear(); rebuildStaticEntries(); canvasRowEl.replaceChildren(); canvasRowEl.hidden = true; keytray.dataset.rows = "1"; settleRow(1, true); },
+        dispose() { const at = settingsSections.indexOf(toolbarSettings); if (at >= 0) settingsSections.splice(at, 1); canvasItems.clear(); rebuildStaticEntries(); canvasRowEl.replaceChildren(); canvasRowEl.hidden = true; keysRowEl.hidden = false; keytray.dataset.rows = "1"; settleRow(1, true); },
       };
     },
     setHostTree(sections, activeLeaf, onSelect) {

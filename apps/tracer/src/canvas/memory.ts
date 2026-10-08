@@ -19,6 +19,8 @@ import type { Backdrop } from "./backdrop";
 export interface Memory {
   /** Culls views by the camera's visible area; cheap enough for every frame. */
   cull(): void;
+  /** Marks a window `data-onscreen` while it intersects the canvas (Frosted windows blur only those). Returns the stop. */
+  watch(window: HTMLElement): () => void;
   dispose(): void;
 }
 
@@ -65,5 +67,14 @@ export function createMemory(cx: Ctx, backdrop: Backdrop | undefined): Memory {
   window.addEventListener("pagehide", hide, { signal });
   window.addEventListener("pageshow", show, { signal });
 
-  return { cull, dispose() { /* listeners end with the canvas signal */ } };
+  // Frosted windows blur what is behind them, and only while they are on screen: an observer flips an attribute when a
+  // window crosses the canvas edge (never per frame).
+  const onscreen = new IntersectionObserver((entries) => { for (const e of entries) (e.target as HTMLElement).toggleAttribute("data-onscreen", e.isIntersecting); }, { root: cx.viewport });
+  signal.addEventListener("abort", () => onscreen.disconnect());
+
+  return {
+    cull,
+    watch(window) { onscreen.observe(window); return () => onscreen.unobserve(window); },
+    dispose() { onscreen.disconnect(); },
+  };
 }

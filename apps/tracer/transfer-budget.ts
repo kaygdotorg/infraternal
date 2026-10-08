@@ -18,10 +18,7 @@ const limits = {
   critical: { gzip: 300 * KIB, brotli: 250 * KIB },
   // Measured when the canvas product module landed (D188): 46,738 B gzip / 40,526 B brotli. The limit is that size
   // rounded up to a whole KiB plus a 4 KiB margin, so ordinary canvas work fits and a library pulled in by accident does not.
-  // Sessions UI (manager, markers, final-screen strip, size badge, the client-side inventory) measured at 54,327 B gzip /
-  // 47,070 B brotli, 7.1 KB gzip over the canvas alone (47,175): the limit follows the same rule, 54 KiB + 4 KiB and 46 KiB + 4 KiB.
-  // The owner approves this raise (#104).
-  deferred: { gzip: 58 * KIB, brotli: 50 * KIB },
+  deferred: { gzip: 50 * KIB, brotli: 44 * KIB },
 };
 const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[] };
 const totals = { critical: { identity: 0, gzip: 0, brotli: 0 }, deferred: { identity: 0, gzip: 0, brotli: 0 } };

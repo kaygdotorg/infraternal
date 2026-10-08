@@ -46,7 +46,13 @@ export function installGestures(cx: Ctx): void {
     const dir = Math.sign(total);
     if (wheelG.axis === "x") {
       const c = views.get(state.currentView);
-      if (c) cx.nav.goStop(c, state.snapIdx + dir);
+      if (c) {
+        // Within the current view only: past the first or last window the camera rubber-bands and comes back. It
+        // never crosses into another view (that is the pill swipe, the number keys, the switcher and the sidebar).
+        const last = cx.nav.stopsFor(c).lefts.length - 1, next = state.snapIdx + dir;
+        if (next < 0 || next > last) camera.drive({ cx: cam.cx + dir * 36 / cam.z });
+        cx.nav.goStop(c, next);
+      }
     } else {
       const colEl = (e.target as Element).closest<HTMLElement>(".cl-col");
       if (colEl) stepWindow(colEl, dir);

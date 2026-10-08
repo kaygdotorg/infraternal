@@ -23,6 +23,7 @@ import { installSessionScenes } from "./session-scenes";
 import { createMockSettings } from "./settings";
 import { createMockSharing } from "./shares";
 import { createMockWorld } from "./world";
+import { mountTransparencyCompare } from "./transparency";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
 
@@ -132,6 +133,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const removeProvider = core.addPaletteProvider(() => {
     const out: PaletteEntry[] = [...sessionScenes.entries()];
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
+    out.push({ group: "Mockup", glyph: "◇", label: "Mockup: transparency", hint: "all card and window levels side by side", action: "proto:transparency" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: view as asha", hint: "receives shared layouts", action: "proto:role:asha" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: view as kayg", hint: "the owner", action: "proto:role:operator" });
@@ -144,7 +146,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     const [prefix, kind, value] = action.split(":");
     if (prefix !== "proto") return;
     if (kind === "sessions-scene" && value) { void sessionScenes.run(Number(value)); return; }
-    if (kind === "devicechip") showContinueChip();
+    if (kind === "transparency") mountTransparencyCompare(core);
+    else if (kind === "devicechip") showContinueChip();
     else if (kind === "scene" && value) goScene(Number(value) - 1);
     else if (kind === "role" && value) { world.role = value as Role; world.forcedRole = true; goScene(4); window.setTimeout(showContinueChip, 900); }
     else if (kind === "later") core.toast.show({ message: "Remote desktop arrives later.", tone: "ok" });

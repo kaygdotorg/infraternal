@@ -128,8 +128,19 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     lastW = w; lastH = h;
     cx.camera.resized();
     backdrop?.measure();
+    const previousColW = state.metrics.colW;
     state.metrics = metricsFor(w, h, coarse.matches);
     world.style.setProperty("--clh", `${state.metrics.clh}px`);
+    // A column the person never resized follows the viewport (a rotation or a window resize changes the default
+    // width); a stale width would leave the window wider than the screen and the framing off to a side.
+    for (const c of cx.views.values()) {
+      if (c.view.layout !== "tiled") continue;
+      for (const colEl of c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")) {
+        if (colEl.dataset.user || colEl.dataset.w !== String(previousColW)) continue;
+        colEl.dataset.w = String(state.metrics.colW);
+        colEl.style.setProperty("--w", `${state.metrics.colW}px`);
+      }
+    }
     for (const c of cx.views.values()) cx.view.geometry(c);
     for (const c of cx.views.values()) for (const rec of c.wins.values()) rec.binding?.refit();
     if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true);
@@ -162,6 +173,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       ro.disconnect();
       removePalette();
       removeShortcuts();
+      cx.nav.dispose();
       cx.store.dispose();
       cx.toolbar.dispose();
       cx.tree.dispose();
