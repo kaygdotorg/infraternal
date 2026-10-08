@@ -1139,3 +1139,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      text sizes follow the sign-in card on every platform (no larger phone
      text scale); touch devices get 44 px targets through padding and row
      height only. Supersedes the separate touch text scale in TASTE.md.
+175. **Maple Mono NF is the default font (owner, 2026-10-08):** the UI and the
+     terminal use Maple Mono NF (SIL OFL 1.1, AGPL-compatible) instead of
+     Geist Mono, for its cursive italics, ligatures and Nerd Font glyphs
+     (which fix powerline symbols in prompts). Fonts are subsetted and
+     self-hosted as woff2 to keep load time low; ligatures are on in the UI,
+     and in the terminal only where they keep every glyph on its cell
+     (measured, with cursor-alignment tests).
