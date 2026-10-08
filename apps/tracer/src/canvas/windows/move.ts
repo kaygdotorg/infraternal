@@ -9,6 +9,7 @@
 import { Spring } from "../../../../../packages/ui/src/spring";
 import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
+import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
 
 export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x: number; y: number }): void {
   const { camera, state, flip } = cx;
@@ -33,6 +34,7 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
     let dx = 0, dy = 0;
     const applyMoveTransform = (): void => { root.style.transform = `translate(${dx}px, ${dy}px) scale(${root.style.getPropertyValue("--lift") || 1})`; cx.invalidate(); };
     const lift = new Spring(1, (s) => { root.style.setProperty("--lift", String(s)); applyMoveTransform(); }, { visualDuration: 0.3, bounce: 0.3 });
+    restAt(lift, SCALE_REST);
     lift.set(1.025);
     const target = { col: colEl as HTMLElement | undefined, index: 0, fresh: false };
     const place = (clientX: number, clientY: number): void => {
@@ -100,6 +102,7 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
         cx.tree.render();
         cx.store.changed();
       }, { visualDuration: 0.42, bounce: 0.3 });
+      restAt(land, Math.min(SCALE_REST, quarterDevicePx() / Math.max(1, Math.abs(gx), Math.abs(gy))));
       land.set(0);
     };
     // Re-parenting the card into the lift layer drops its pointer capture, so the gesture listens on the window.

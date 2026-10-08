@@ -15,6 +15,7 @@
 import { Spring } from "../../../../../packages/ui/src/spring";
 
 import type { Pt, Rect } from "../layout/geometry";
+import { SCALE_REST, restAt } from "../springs";
 export type { Pt, Rect };
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -130,6 +131,7 @@ export class DragArrow {
     this.pointer = start;
     this.snap = new Spring(0, () => this.render(), { visualDuration: 0.34, bounce: 0.38 });
     this.pulse = new Spring(1, (v) => { this.arrow.setPulse(v); }, { visualDuration: 0.3, bounce: 0.45 });
+    restAt(this.snap, SCALE_REST); restAt(this.pulse, SCALE_REST);
     this.render();
     this.arrow.g.dataset.live = "";
   }

@@ -27,6 +27,7 @@ import { ICON, lineIcon } from "../views/icons";
 import { Arrow, DragArrow, anchors } from "./arrows";
 import { reach } from "./grants";
 import type { MeshSource } from "./source";
+import { SCALE_REST, restAt } from "../springs";
 
 interface TopoArrow { grant: Grant; arrow: Arrow; label?: SVGTextElement }
 
@@ -176,7 +177,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     if (animate) {
       arrow.g.dataset.fresh = "";
       requestAnimationFrame(() => requestAnimationFrame(() => arrow.g.removeAttribute("data-fresh")));
-      const pulse = new Spring(1.9, (v) => arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 });
+      const pulse = restAt(new Spring(1.9, (v) => arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 }), SCALE_REST);
       pulse.set(1);
     }
   };
@@ -368,7 +369,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
             entry.arrow.g.dataset.tip = grantName(g);
             entry.arrow.g.removeAttribute("data-editing");
             redrawTopo(c);
-            const pulse = new Spring(1.9, (v) => entry.arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 });
+            const pulse = restAt(new Spring(1.9, (v) => entry.arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 }), SCALE_REST);
             pulse.set(1);
             live.dispose();
             for (const cl of views.values()) cx.view.geometry(cl);
