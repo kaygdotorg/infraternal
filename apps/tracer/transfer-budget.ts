@@ -3,6 +3,8 @@
  *
  * - **Critical path**: everything needed before the first paint of sign-in and of the first screen (the entries,
  *   their static imports, the core screen, the terminal and its renderer with the WASM). Strict, and unchanged.
+ * - **On demand**: code that loads only when the person takes an action (the add-host wizard, the share studio,
+ *   a Settings window): modules named `*.on-demand.ts` and what only they reach. Its own budget.
  * - **Deferred**: code that loads after the first screen is up (the canvas: views, Mesh, the droplet, the toolbar's
  *   edit mode, the settings windows). Its own budget: the size at the time of the decision plus a stated margin.
  *
@@ -18,17 +20,23 @@ const limits = {
   critical: { gzip: 300 * KIB, brotli: 250 * KIB },
   // Measured when the canvas product module landed (D188): 46,738 B gzip / 40,526 B brotli. The limit is that size
   // rounded up to a whole KiB plus a 4 KiB margin, so ordinary canvas work fits and a library pulled in by accident does not.
-  // The Mesh view on the real API (#108: the API client, the automatic layout, the cluster level of detail, its states)
-  // measured 56,139 B gzip / 48,487 B brotli (+8.9 KB gzip over the line above; the critical path grew by 0.3 KB).
-  // Same rule: rounded up to a whole KiB plus 4 KiB. This is a change of a gate and the owner's to confirm (#108).
-  deferred: { gzip: 59 * KIB, brotli: 52 * KIB },
+  deferred: { gzip: 50 * KIB, brotli: 44 * KIB },
+  // On demand (D188): the Settings window panels measure 2,136 B gzip / 1,863 B brotli. The limit is that rounded up to
+  // a whole KiB plus an 8 KiB margin, which also leaves room for the add-host wizard (about 15.6 KB identity, roughly
+  // 6 KiB compressed) to mount on demand without a budget change.
+  onDemand: { gzip: 11 * KIB, brotli: 10 * KIB },
 };
-const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[] };
-const totals = { critical: { identity: 0, gzip: 0, brotli: 0 }, deferred: { identity: 0, gzip: 0, brotli: 0 } };
+const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[]; onDemand: string[] };
+const totals = { critical: { identity: 0, gzip: 0, brotli: 0 }, deferred: { identity: 0, gzip: 0, brotli: 0 }, onDemand: { identity: 0, gzip: 0, brotli: 0 } };
 for (const name of await readdir(dist, { recursive: true })) {
   if (!name.endsWith(".js")) continue;
-  const klass = classes.critical.includes(name) ? "critical" : classes.deferred.includes(name) ? "deferred" : undefined;
+  const klass = classes.critical.includes(name) ? "critical" : classes.deferred.includes(name) ? "deferred" : classes.onDemand.includes(name) ? "onDemand" : undefined;
   if (!klass) throw new Error(`${name} is in no chunk class: chunks.json is stale, rebuild`);
+  // The server gives a year-long immutable cache only to `chunk-<8 alphanumerics>.js` (web_assets.rs). Every split
+  // chunk must have such a content-hashed name, or a returning visit would revalidate (or miss) it. The entries
+  // (the app and the two workers) are named for their role and revalidate with a conditional request.
+  const entry = name === "main.js" || name.endsWith(".worker.js");
+  if (!entry && !/^chunk-[0-9a-z]{8}\.js$/.test(name)) throw new Error(`${name} has no content-hashed chunk name`);
   const identity = (await stat(`${dist}/${name}`)).size;
   const gzip = await stat(`${dist}/${name}.gz`).then((file) => file.size).catch(() => identity);
   const brotli = await stat(`${dist}/${name}.br`).then((file) => file.size).catch(() => identity);
@@ -38,12 +46,15 @@ for (const name of await readdir(dist, { recursive: true })) {
   console.log(`${klass} ${name}: identity=${identity} gzip=${gzip} brotli=${brotli} bytes`);
 }
 if (totals.critical.identity === 0) throw new Error("no production JavaScript found");
-for (const klass of ["critical", "deferred"] as const) {
+for (const klass of ["critical", "deferred", "onDemand"] as const) {
   const t = totals[klass], l = limits[klass];
   console.log(`JavaScript transfer, ${klass}: identity=${t.identity} gzip=${t.gzip}/${l.gzip} brotli=${t.brotli}/${l.brotli} bytes`);
 }
 if (totals.critical.gzip > limits.critical.gzip || totals.critical.brotli > limits.critical.brotli) {
   throw new Error("production critical-path JavaScript exceeds the compressed transfer budget");
+}
+if (totals.onDemand.gzip > limits.onDemand.gzip || totals.onDemand.brotli > limits.onDemand.brotli) {
+  throw new Error("production on-demand JavaScript exceeds its compressed transfer budget");
 }
 if (totals.deferred.gzip > limits.deferred.gzip || totals.deferred.brotli > limits.deferred.brotli) {
   throw new Error("production deferred JavaScript exceeds its compressed transfer budget");

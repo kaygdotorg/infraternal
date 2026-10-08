@@ -23,8 +23,7 @@ import { createMeshApi } from "./mesh/api";
 import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
-import { BUILTIN_SECTIONS } from "./views/settings-body";
-import { buildSettingsView } from "./views/settings";
+import { BUILTIN_SECTIONS, buildSettingsView } from "./views/settings";
 
 export interface ProductCanvasOptions {
   /** The embedded host's name and the person's login. */
