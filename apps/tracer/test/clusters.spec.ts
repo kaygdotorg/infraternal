@@ -842,7 +842,7 @@ test("settings is a view: a gear after a divider, one window per section, admin 
   await expect(page.locator(".ui-settings")).toHaveCount(0); // the overlay shell is gone
   // The palette goes straight to a section's window.
   await page.keyboard.press("Control+k");
-  await page.keyboard.type("settings → devices");
+  await page.keyboard.type("settings: devices");
   await page.keyboard.press("Enter");
   await expect(page.locator('.ui-window[data-window-id="s-devices"][data-active]')).toHaveCount(1, { timeout: 4000 });
   // The sidebar is a layer over the canvas (it no longer docks), so it is closed before reaching under it.
