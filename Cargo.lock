@@ -1356,6 +1356,7 @@ dependencies = [
  "futures-util",
  "hkdf",
  "http-body-util",
+ "infraternal-mesh",
  "infraternal-protocol",
  "nix",
  "openssl",

@@ -29,6 +29,7 @@ tracing-subscriber.workspace = true
 futures-util.workspace = true
 nix.workspace = true
 infraternal-protocol.workspace = true
+infraternal-mesh = { version = "0.1.0", path = "../infraternal-mesh" }
 url.workspace = true
 uuid.workspace = true
 webauthn-rs.workspace = true
