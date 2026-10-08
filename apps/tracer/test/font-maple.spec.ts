@@ -45,9 +45,12 @@ for (const dpr of [1, 2, 3]) {
         for (let i = 0; i < bar.length; i += 4) {
           if (bar[i] === accent[0] && bar[i + 1] === accent[1] && bar[i + 2] === accent[2]) barMin = Math.min(barMin, (i / 4) % Math.ceil(cellWidth));
         }
-        return { cursorX: metrics.cursorX, renderCursorX: metrics.renderCursorX, cellWidth: metrics.cellWidth, natural: metrics.naturalCellWidth, cursorLeft, lastInk, barMin, dpr: devicePixelRatio, cellWidthPx: cellWidth };
+        // The measurements are only meaningful if Maple itself (not a fallback) painted the canvas.
+        const mapleLoaded = [...document.fonts].some((face) => face.family === "Maple Mono NF" && face.status === "loaded" && face.weight === "400 450");
+        return { mapleLoaded, cursorX: metrics.cursorX, renderCursorX: metrics.renderCursorX, cellWidth: metrics.cellWidth, natural: metrics.naturalCellWidth, cursorLeft, lastInk, barMin, dpr: devicePixelRatio, cellWidthPx: cellWidth };
       });
       console.log(`LINE86 ${JSON.stringify(result)}`);
+      expect(result.mapleLoaded).toBe(true);
       expect(result.cursorX).toBe(86);
       expect(result.renderCursorX).toBe(86);
       // The cursor bar starts exactly at the cell edge, and the last glyph's ink ends inside the cell before it.
