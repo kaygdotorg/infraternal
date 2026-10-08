@@ -270,3 +270,9 @@
 /* A Mesh node has no input to lock, so it has no lock and its title pill may use the whole header. */
 .ui-window[data-kind="node"] .ui-window-lock { display: none; }
 .ui-window[data-kind="node"] .ui-window-pill { max-width: none; }
+
+/* The canvas never gives up width to the docked sidebar: the camera moves the framing only if the sidebar would
+   cover it (camera/lock.ts), so docking does not resize the area or refit a terminal. */
+@media (hover: hover) and (pointer: fine) and (min-width: 1024px) {
+  .terminal-screen[data-clusters][data-sidebar="docked"] .panes { left: var(--gutter); }
+}
