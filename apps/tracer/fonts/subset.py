@@ -96,11 +96,25 @@ def main() -> None:
     # id: (roman source, italic source or None, pins for roman, pins for italic, rename)
     families = {
         "maple-mono-nf": ("maple/MapleMono[wght].ttf", "maple/MapleMono-Italic[wght].ttf", {}, {}, None),
+        "geist-mono": ("geist/GeistMono-Variable.ttf", "geist/GeistMono-Italic[wght].ttf", {}, {}, None),
+        "jetbrains-mono": ("jb/fonts/variable/JetBrainsMono[wght].ttf", "jb/fonts/variable/JetBrainsMono-Italic[wght].ttf", {}, {}, None),
+        "monaspace-neon": ("mona/Variable Fonts/Monaspace Neon/Monaspace Neon Var.ttf", "mona/Variable Fonts/Monaspace Neon/Monaspace Neon Var.ttf",
+                           {"wdth": 100, "slnt": 0}, {"wdth": 100, "slnt": -11}, "IFR Web 1"),
+        "ibm-plex-mono": ("plex/fonts/complete/ttf/IBM Plex Mono Var-Roman.ttf", "plex/fonts/complete/ttf/IBM Plex Mono Var-Italic.ttf", {}, {}, "IFR Web 2"),
+        "cascadia-code": ("cascadia/ttf/CascadiaCode.ttf", "cascadia/ttf/CascadiaCodeItalic.ttf", {}, {}, "IFR Web 3"),
+        "fira-code": ("fira/variable_ttf/FiraCode-VF.ttf", None, {}, {}, None),
+        "source-code-pro": ("scp/VF/SourceCodeVF-Upright.ttf", "scp/VF/SourceCodeVF-Italic.ttf", {}, {}, "IFR Web 4"),
     }
     for family, (roman, italic, roman_pins, italic_pins, rename) in families.items():
         variable(root / roman, out / family / "roman.latin.woff2", roman_pins, rename)
         if italic:
             variable(root / italic, out / family / "italic.latin.woff2", italic_pins, rename)
+    # Commit Mono ships two static weights only; the registry maps 400-600 to the regular
+    # face and 700 to the bold face.
+    base = root / "cm/CommitMono-1.143/ttfautohint"
+    for weight in (400, 700):
+        static(base / f"CommitMono-{weight}-Regular.ttf", out / "commit-mono" / f"roman-{weight}.latin.woff2", None)
+        static(base / f"CommitMono-{weight}-Italic.ttf", out / "commit-mono" / f"italic-{weight}.latin.woff2", None)
 
 
 if __name__ == "__main__":

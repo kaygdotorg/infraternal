@@ -36,6 +36,16 @@ if (totals.gzip > limits.gzip || totals.brotli > limits.brotli) {
 const KB = 1024;
 const familyBudgets: Record<string, { critical?: number; total: number }> = {
   "maple-mono-nf": { critical: 50 * KB, total: 104 * KB },
+  // Sizes measured at subset time (identity bytes): roman + italic, rounded up to the next KB
+  // plus a small allowance. Commit Mono has four static faces, so its total covers all four.
+  "geist-mono": { total: 44 * KB },
+  "jetbrains-mono": { total: 74 * KB },
+  "commit-mono": { total: 74 * KB },
+  "monaspace-neon": { total: 86 * KB },
+  "ibm-plex-mono": { total: 44 * KB },
+  "cascadia-code": { total: 86 * KB },
+  "fira-code": { total: 40 * KB },
+  "source-code-pro": { total: 48 * KB },
 };
 const symbolsLimit = 230 * KB;
 const fontRoot = "dist/fonts";

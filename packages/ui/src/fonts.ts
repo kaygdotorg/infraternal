@@ -65,15 +65,46 @@ const variable = (id: string): FontFaceSource[] => [
   { file: `${id}/italic.latin.woff2`, style: "italic", weight: "400 700" },
 ];
 
+/** Static faces: a family that ships only a regular and a bold weight. */
+const staticPair = (id: string): FontFaceSource[] => [
+  { file: `${id}/roman-400.latin.woff2`, style: "normal", weight: "400" },
+  { file: `${id}/roman-700.latin.woff2`, style: "normal", weight: "700" },
+  { file: `${id}/italic-400.latin.woff2`, style: "italic", weight: "400" },
+  { file: `${id}/italic-700.latin.woff2`, style: "italic", weight: "700" },
+];
+
 /**
- * Weights, by family. Values come from the ink measurements in the weight commit message:
- * the target is the ink per glyph of Geist Mono at 450 (21.2 px at 14 px), nudged up a
- * step where a family's thin hairlines read lighter than its coverage says.
+ * The curated fonts (D87), default first, then in the order the palette lists them.
+ *
+ * Weights come from ink measurements: ink per glyph at 14 px (canvas text, mean of DPR 1 and
+ * 2), against Geist Mono at 450, the text the owner approved (21.2). Each family takes the
+ * weight whose ink is closest, nudged up one step where hairlines read lighter than coverage
+ * says (Maple Mono) and held at 450 where a heavier regular would leave bold less than a
+ * clear step above it (JetBrains Mono, 500 would put 700 only 13% heavier). Source Code Pro is
+ * capped at 550 so label and title weights keep room below its heaviest face.
  */
 export const FONTS: readonly MonoFont[] = [
-  { id: "maple-mono-nf", label: "Maple Mono NF", family: "Maple Mono NF", hint: "default · cursive italics",
+  { id: "maple-mono-nf", label: "Maple Mono NF", family: "Maple Mono NF", hint: "default",
     bodyWeight: 500, terminalWeight: 500, boldWeight: 700, range: [400, 700], declared: true,
     metricFallback: "Maple Mono NF Fallback", faces: variable("maple-mono-nf") },
+  { id: "geist-mono", label: "Geist Mono", family: "Geist Mono", hint: "",
+    bodyWeight: 450, terminalWeight: 450, boldWeight: 700, range: [400, 700], faces: variable("geist-mono") },
+  { id: "jetbrains-mono", label: "JetBrains Mono", family: "JetBrains Mono", hint: "",
+    bodyWeight: 450, terminalWeight: 450, boldWeight: 700, range: [400, 700], faces: variable("jetbrains-mono") },
+  { id: "commit-mono", label: "Commit Mono", family: "Commit Mono", hint: "",
+    bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], discrete: [400, 700], faces: staticPair("commit-mono") },
+  { id: "monaspace-neon", label: "Monaspace Neon", family: "Monaspace Neon", hint: "",
+    bodyWeight: 450, terminalWeight: 450, boldWeight: 700, range: [400, 700], faces: variable("monaspace-neon") },
+  { id: "ibm-plex-mono", label: "IBM Plex Mono", family: "IBM Plex Mono", hint: "",
+    bodyWeight: 450, terminalWeight: 450, boldWeight: 700, range: [400, 700], faces: variable("ibm-plex-mono") },
+  { id: "cascadia-code", label: "Cascadia Code", family: "Cascadia Code", hint: "",
+    bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], faces: variable("cascadia-code") },
+  { id: "fira-code", label: "Fira Code", family: "Fira Code", hint: "",
+    bodyWeight: 450, terminalWeight: 450, boldWeight: 700, range: [400, 700],
+    // Upstream has no italic design; the browser slants the upright face.
+    faces: [{ file: "fira-code/roman.latin.woff2", style: "normal", weight: "400 700" }] },
+  { id: "source-code-pro", label: "Source Code Pro", family: "Source Code Pro", hint: "",
+    bodyWeight: 550, terminalWeight: 550, boldWeight: 700, range: [400, 700], faces: variable("source-code-pro") },
 ];
 
 export const DEFAULT_FONT_ID = "maple-mono-nf";
