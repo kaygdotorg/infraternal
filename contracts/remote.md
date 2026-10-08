@@ -158,3 +158,33 @@ returns `{certificate_der, execution_uid}` only after commit. Admission and
 signer errors expose no secret or detailed crypto diagnostics. The join
 command verifies returned uid and certificate/key correspondence before
 publishing local identity. This API never unlocks a cold CA [168].
+
+## Normal CLI activation (partial D168 adapter)
+
+`infraternal server --remote-listen <IP:port>` explicitly activates the remote
+enrollment router, QUIC listener and TCP/TLS fallback. Both transports use the
+same advertised address; wildcard IPs and port zero are refused. Without the
+option, ordinary server startup retains its existing behavior. Service install
+preserves the remote options.
+
+`--remote-ca-dir <absolute-directory>` overrides the standard
+`$XDG_DATA_HOME/infraternal/ca/` (or `~/.local/share/infraternal/ca/`). Its
+retained public trust anchor is `issuer.pem`; this path is recorded on #34.
+The directory is owned by the running uid and 0700. Trust and TLS files are
+owned regular files, 0600, at most 8192 bytes, opened without following a final
+symlink. Missing, unsafe or invalid trust fails startup without generating a CA.
+
+The current adapter supports standalone HTTPS with its server leaf/key supplied
+by `--tls-cert`/`--tls-key`. The leaf must chain to the retained issuer, match its
+key and authenticate the public-origin hostname/IP. That issuer pins both join
+HTTPS and remote mTLS. Reverse-proxy deployments and a separate public HTTPS
+trust chain require a later adapter; they currently fail closed.
+
+Normal cold startup loads public trust and the server leaf key only. Its CA
+signer remains locked; enrolled hosts can reconnect and retain sessions while
+join refuses signing without consuming the invitation. It never reads a CA
+private key or takes an unlock secret in argv. `MemoryCaSource` already exposes
+the administrator-policy and process-only handoff interfaces. Production
+encrypted envelopes, administrator passkey unlock/notifications and automatic
+update IPC are still unimplemented; this activation does not satisfy those
+remaining D168 requirements or live renewal/revocation.

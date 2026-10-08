@@ -1,0 +1,14 @@
+Running as unit: run-p3517314-i11905061.scope; invocation ID: b02ae5fa67e2451e96460ec9b4e894c1
+[WebServer] $ bun run build.ts
+[WebServer] built main.js, chunk-0gjma2ke.js, chunk-566673p4.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-3ebxam7d.js, chunk-5hf4zvs5.js, chunk-9wsp24kx.js, chunk-axbkkqp1.js, chunk-rm4ea43p.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4702
+[WebServer] latency proxy listening on http://localhost:4701; upstream port=4702
+
+Running 1 test using 1 worker
+
+(node:3517502) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+MOBILE_SCROLL rows=368 drag=14 momentum=35 font=13->24 pan=90 document=0 controls=fixed
+  ✓  1 test/mobile-scroll.spec.ts:6:1 › touch scroll belongs to the terminal and keeps the mobile controls fixed (7.9s)
+
+  1 passed (11.9s)
