@@ -13,6 +13,7 @@
  *   unexplained     none of the above
  * A CPU profile of the whole run (Chrome DevTools protocol, 50 us sampling) is cut into the time windows of the
  * slow keys, and the top self-time functions inside them are printed, next to the same for all keys.
+ * `TRACER_PREDICT_PROFILE=0` skips the profile (sampling slows and deoptimises the page, which inflates the first keys).
  * Build with `TRACER_BUILD_READABLE=1` to keep function names in the profile. `TRACER_PREDICT_BENCH_OUT` names a JSON file for the raw per-key records.
  */
 import { writeFileSync } from "node:fs";
@@ -20,6 +21,7 @@ import { expect, test } from "playwright/test";
 
 const keyCount = Number(process.env.TRACER_PREDICT_KEYS ?? "0");
 const SLOW_MS = 2;
+const profiling = process.env.TRACER_PREDICT_PROFILE !== "0";
 
 interface KeyRecord {
   index: number;
@@ -61,9 +63,11 @@ test(`predictive echo cost per key over ${keyCount} keys`, async ({ page, contex
     }).observe({ type: "longtask", buffered: true });
   });
   const cdp = await context.newCDPSession(page);
-  await cdp.send("Profiler.enable");
-  await cdp.send("Profiler.setSamplingInterval", { interval: 50 });
-  await cdp.send("Profiler.start");
+  if (profiling) {
+    await cdp.send("Profiler.enable");
+    await cdp.send("Profiler.setSamplingInterval", { interval: 50 });
+    await cdp.send("Profiler.start");
+  }
   const profileStartedAt = await page.evaluate(() => performance.now());
 
   // Keys: runs of 28 letters, then a burst of 3-6 DELs and a retype, so rows stay short.
@@ -112,7 +116,9 @@ test(`predictive echo cost per key over ${keyCount} keys`, async ({ page, contex
     records.push(...part);
   }
 
-  const profile = (await cdp.send("Profiler.stop")).profile;
+  const profile = profiling
+    ? (await cdp.send("Profiler.stop")).profile
+    : { nodes: [], startTime: 0, endTime: 0, samples: [], timeDeltas: [] };
   const longtasks = await page.evaluate(() => (window as unknown as { __longtasks: Array<[number, number]> }).__longtasks);
   expect(records).toHaveLength(keyCount);
 
