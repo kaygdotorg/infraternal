@@ -103,7 +103,11 @@ pub async fn execute_bounded(
                 tokio::try_join!(bounded(stdout, stdout_limit), bounded(stderr, 8192))?;
             Ok::<_, Failure>((stdout, stderr))
         };
-        let (write, read, status) = tokio::join!(write, read, child.wait());
+        // Retain the unreaped leader identity while inherited pipes are pending.
+        // A descendant can leave the group but keep a pipe open; reaping first
+        // would let cancellation signal a subsequently reused group id.
+        let (write, read) = tokio::join!(write, read);
+        let status = child.wait().await;
         let status =
             status.map_err(|_| Failure::install("The SSH helper did not exit cleanly."))?;
         let (stdout, stderr) = read?;

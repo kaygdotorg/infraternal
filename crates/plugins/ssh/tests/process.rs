@@ -101,3 +101,51 @@ async fn oversized_remote_output_is_bounded_and_active_timeout_is_enforced() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn group_identity_is_retained_until_inherited_pipes_finish() {
+    let path = common::scratch().join(format!("ssh-pipe-owner-{}", uuid::Uuid::new_v4().simple()));
+    let script = format!(
+        "import os, subprocess, time; child=subprocess.Popen(['/bin/sleep','60'],start_new_session=True); open({},'w').write(str(os.getpid())+' '+str(child.pid)); time.sleep(.05); os._exit(0)",
+        shell_quote(path.to_str().unwrap())
+    );
+    let running = tokio::spawn(async move {
+        let mut command = Command::new("/usr/bin/python3");
+        command.args(["-c", &script]);
+        execute(&mut command, Input::Empty, Duration::from_secs(3)).await
+    });
+    let ids = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let ids: Vec<u32> = std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .split_whitespace()
+                .filter_map(|id| id.parse().ok())
+                .collect();
+            if ids.len() == 2 {
+                break ids;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let escape_cleanup = Descendant {
+        pid: ids[1],
+        birth: birth(ids[1]),
+    };
+    let leader_birth = birth(ids[0]);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !running.is_finished(),
+        "the fixture must keep its inherited pipe open"
+    );
+    let retained = leader_birth.is_some() && birth(ids[0]) == leader_birth;
+    running.abort();
+    let _ = running.await;
+    drop(escape_cleanup);
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        retained,
+        "the cancellation group id was released while owned I/O remained pending"
+    );
+}
