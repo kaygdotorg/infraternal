@@ -297,7 +297,7 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
     const last = lastIncident;
     if (last) {
       const top = last.loaf[0]?.scripts.reduce<Script | undefined>((best, s) => (!best || s.ms > best.ms ? s : best), undefined);
-      lines.push(`last: ${last.activity} ${Math.round(last.worstMs)} ms${last.drops > 1 ? ` x${last.drops}` : ""}`);
+      lines.push(`last ${last.activity} ${Math.round(last.worstMs)}ms${last.drops > 1 ? ` x${last.drops}` : ""}`);
       if (top) lines.push(`${top.fn || top.inv || top.type} ${top.src.split("/").pop() ?? ""}`.slice(0, 30));
       else if (last.animations.count) lines.push(`${last.animations.count} animations`);
     }
@@ -369,23 +369,24 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
   };
 }
 
-/** Plain on purpose: a dev instrument. Tokens and the caption type of the product, faint, in the pane's corner. */
+/** Plain on purpose: a dev instrument. Tokens and the caption type of the product, faint, in the pane's bottom-right
+    corner (nothing may sit bottom-left, TASTE; on desktop it rests above the mock badge, in the free band beside the windows). */
 const HUD_CSS = `
-.perf-hud { position: absolute; z-index: 3; left: calc(var(--gutter, 12px) + env(safe-area-inset-left)); bottom: calc(10px + env(safe-area-inset-bottom)); width: 176px; height: 84px; contain: strict; pointer-events: none; color: var(--fg-2); font: var(--fw-label, 550) var(--text-caption, 11px)/1.35 var(--font-mono, monospace); font-variant-numeric: tabular-nums; }
-.perf-hud-row { position: absolute; left: 0; bottom: 0; display: flex; align-items: center; gap: 8px; height: 22px; padding: 0 6px; margin: 0; border: 0; border-radius: 6px; outline: none; background: transparent; color: inherit; font: inherit; cursor: pointer; pointer-events: auto; opacity: 0.7; -webkit-tap-highlight-color: transparent; }
+.perf-hud { position: absolute; z-index: 3; right: calc(var(--gutter, 12px) + env(safe-area-inset-right)); bottom: calc(52px + env(safe-area-inset-bottom)); width: 176px; height: 84px; contain: strict; pointer-events: none; color: var(--fg-2); font: var(--fw-label, 550) var(--text-caption, 11px)/1.35 var(--font-mono, monospace); font-variant-numeric: tabular-nums; }
+.perf-hud-row { position: absolute; right: 0; bottom: 0; display: flex; align-items: center; gap: 8px; height: 22px; padding: 0 6px; margin: 0; border: 0; border-radius: 6px; outline: none; background: transparent; color: inherit; font: inherit; cursor: pointer; pointer-events: auto; opacity: 0.7; -webkit-tap-highlight-color: transparent; }
 .perf-hud-fps { min-width: 3ch; text-align: right; }
 .perf-hud-spark { width: ${SPARK_W}px; height: ${SPARK_H}px; display: block; }
-.perf-hud-detail { position: absolute; left: 0; bottom: 24px; width: 164px; box-sizing: border-box; padding: 4px 6px; border-radius: 6px; background: color-mix(in oklab, var(--bg) 78%, transparent); white-space: pre; overflow: hidden; text-overflow: ellipsis; opacity: 0; transform: translateY(4px); transition: opacity 160ms ease-out, transform 200ms cubic-bezier(0.32, 0.72, 0, 1); }
+.perf-hud-detail { position: absolute; right: 0; bottom: 24px; width: 164px; box-sizing: border-box; padding: 4px 6px; border-radius: 6px; background: color-mix(in oklab, var(--bg) 78%, transparent); white-space: pre; overflow: hidden; text-overflow: ellipsis; opacity: 0; transform: translateY(4px); transition: opacity 160ms ease-out, transform 200ms cubic-bezier(0.32, 0.72, 0, 1); }
 .perf-hud[data-open] .perf-hud-detail { opacity: 0.7; transform: none; }
 .perf-hud[data-state="slow"] .perf-hud-fps { color: var(--warn); }
 .perf-hud-row:hover { opacity: 1; }
-/* Touch: the only free strip is the 16 px gap between the windows and the key bar, so the readout sits in it (one
+/* Touch: the only free strip is the 16 px gap between the windows and the key bar, so the readout sits in it, at the right (one
    14 px line) and its 44 px target reaches up over the window's bottom edge; the open detail is drawn over the window. */
 @media (pointer: coarse) {
-  .perf-hud { bottom: calc(var(--keybar-inset, 8px) + var(--keybar-height, 48px) + env(safe-area-inset-bottom) + 1px); height: 98px; }
+  .perf-hud { bottom: calc(var(--keybar-inset, 8px) + var(--keybar-height, 48px) + env(safe-area-inset-bottom) + 1px); height: 134px; }
   .perf-hud-row { height: 14px; padding: 0 14px 0 6px; }
   .perf-hud-row::before { content: ""; position: absolute; inset: -30px 0 0 0; }
-  .perf-hud-detail { bottom: 18px; }
+  .perf-hud-detail { bottom: 54px; } /* above the mock badge, which sits just over the strip */
 }
 @media (prefers-reduced-motion: reduce) { .perf-hud-detail { transition: opacity 120ms linear; transform: none; } }
 `;
