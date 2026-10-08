@@ -30,7 +30,7 @@ export interface Nav {
   flyView(id: ViewId, instant?: boolean): void;
   /** Flies to a window: snapped to its column's stop, with the column scrolled to the window. */
   focusWindow(rec: WinRec, instant?: boolean, keepFree?: boolean): void;
-  /** After the camera rests: the view nearest the centre becomes the current one. */
+  /** After the camera rests: the view that contains the camera centre (else the nearest) becomes the current one. */
   updateCurrentView(): void;
   /** Listens for lock changes (and the first paint). */
   onLockChange(listener: () => void): () => void;
@@ -99,10 +99,14 @@ export function createNav(cx: Ctx): Nav {
       scrollToWindow(colEl, rec.card.root, instant);
     },
     updateCurrentView() {
+      // The view actually framed: the one whose frame contains the camera centre; between views (free panning) the
+      // one whose frame is nearest. Distance to a frame's centre is wrong for a wide view (Settings' last window is
+      // nearer to its neighbour's centre than to its own), so it is never used.
       let best: ViewRec | undefined, bestD = Infinity;
       for (const c of views.values()) {
         const f = cx.view.frameOf(c);
-        const d = Math.hypot(f.x + f.w / 2 - cam.cx, f.y + f.h / 2 - cam.cy);
+        const dx = Math.max(f.x - cam.cx, 0, cam.cx - (f.x + f.w)), dy = Math.max(f.y - cam.cy, 0, cam.cy - (f.y + f.h));
+        const d = Math.hypot(dx, dy);
         if (d < bestD) { best = c; bestD = d; }
       }
       if (best && best.view.id !== state.currentView) { state.currentView = best.view.id; cx.pill.paint(); }
