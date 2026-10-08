@@ -18,6 +18,7 @@ test("the first screen is critical, the canvas product module and what only it u
   });
   expect(result.critical).toEqual(["core.js", "main.js", "shared.js", "terminal.js", "worker.js"]);
   expect(result.deferred).toEqual(["canvas.js", "product.js"]);
+  expect(result.onDemand).toEqual([]);
 });
 
 test("a chunk that both sides use stays critical", () => {
@@ -29,4 +30,17 @@ test("a chunk that both sides use stays critical", () => {
   });
   expect(result.critical).toContain("both.js");
   expect(result.deferred).toEqual(["only.js", "product.js"]);
+});
+
+test("code only an action loads is on demand, even when the lazy canvas is what loads it", () => {
+  const result = classifyChunks({
+    "./main.js": out([["./product.js", "dynamic-import"]], ["src/main.ts"], "src/main.ts"),
+    "./product.js": out([["./wizard.js", "dynamic-import"], ["./canvasonly.js", "import-statement"], ["./both.js", "import-statement"]], ["src/canvas/product.ts"]),
+    "./canvasonly.js": out([]),
+    "./wizard.js": out([["./wizardonly.js", "import-statement"], ["./both.js", "import-statement"]], ["src/add-host.on-demand.ts"]),
+    "./wizardonly.js": out([]), "./both.js": out([]),
+  });
+  expect(result.critical).toEqual(["main.js"]);
+  expect(result.deferred).toEqual(["both.js", "canvasonly.js", "product.js"]);
+  expect(result.onDemand).toEqual(["wizard.js", "wizardonly.js"]);
 });
