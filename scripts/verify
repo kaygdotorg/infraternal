@@ -72,6 +72,25 @@ verify_latency() {
     return "$failed"
 }
 
+# Browser specs against the real server binary and a production build of the tracer (no test double): the canvas
+# on real sessions (apps/tracer/real). INFRATERNAL_BIN overrides the binary that is built here.
+verify_integration() {
+    local repo_dir="$(cd -- "${script_dir}/.." && pwd)"
+    local target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
+    export CARGO_TARGET_DIR="$target_dir"
+    if [[ -z "${INFRATERNAL_BIN:-}" ]]; then
+        cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl || return 1
+        export INFRATERNAL_BIN="$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/infraternal"
+    fi
+    (
+        cd -- "$repo_dir/apps/tracer"
+        bun install --frozen-lockfile
+        bun run check
+        bun run build
+        bun x playwright test -c playwright.real.config.ts
+    )
+}
+
 if [[ $# -ne 1 ]]; then
     printf 'usage: scripts/verify {fast|nightly|integration|browser|latency|bench}\n' >&2
     exit 2
@@ -107,7 +126,10 @@ case "$1" in
     latency)
         verify_latency
         ;;
-    integration|bench)
+    integration)
+        verify_integration
+        ;;
+    bench)
         printf '%s: not yet implemented\n' "$1"
         ;;
     *)

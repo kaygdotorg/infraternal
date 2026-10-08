@@ -58,7 +58,7 @@
   padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
   color: var(--fg);
   background: transparent;
-  font: 450 14px/1.55 var(--font-maple);
+  font: var(--fw-body) 14px/1.55 var(--font-face);
   letter-spacing: -0.01em;
 }
 
@@ -98,10 +98,10 @@
 .auth-card.ui-overlay-surface { text-shadow: 0 0 6px var(--halo, transparent); }
 .auth-card.ui-overlay-surface .auth-primary { text-shadow: none; }
 @keyframes auth-card-in { from { opacity: 0; transform: translateY(8px) scale(0.99); } }
-.auth-mark { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; font-weight: 600; line-height: 1; }
+.auth-mark { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; font-weight: var(--fw-title); line-height: 1; }
 .auth-mark svg { width: 22px; height: 22px; flex: none; }
-.auth-card h1 { margin: 0 0 10px; color: var(--fg); font: 600 21px/1.25 var(--font-maple); letter-spacing: -0.03em; }
-.auth-eyebrow { margin: 0 0 6px; color: var(--fg-3); font: 500 12px/1 var(--font-maple); letter-spacing: 0.02em; }
+.auth-card h1 { margin: 0 0 10px; color: var(--fg); font: var(--fw-title) 21px/1.25 var(--font-face); letter-spacing: -0.03em; }
+.auth-eyebrow { margin: 0 0 6px; color: var(--fg-3); font: var(--fw-label) 12px/1 var(--font-face); letter-spacing: 0.02em; }
 .auth-lede { margin: 0 0 24px; color: var(--fg-2); }
 .auth-label { display: block; margin: 0 0 8px; color: var(--fg-2); font-size: 13px; }
 .auth-input {
@@ -115,7 +115,7 @@
   outline: none;
   background: var(--field);
   color: var(--fg);
-  font: 450 16px/1 var(--font-maple);
+  font: var(--fw-body) 16px/1 var(--font-face);
 }
 .auth-input:focus { border-color: var(--edge); background: var(--field-focus); }
 .auth-mono { font-size: 16px; letter-spacing: 0.01em; }
@@ -138,7 +138,7 @@
 .auth-word-inputs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; list-style: none; margin: 0; padding: 0; }
 .auth-word-inputs li { display: flex; align-items: center; min-width: 0; border: 1px solid var(--line); border-radius: 9px; background: var(--field); }
 .auth-word-inputs li > span { flex: none; width: 22px; text-align: center; color: var(--fg-3); font-size: 10px; }
-.auth-word-inputs input { min-width: 0; width: 100%; height: 44px; padding: 0 4px 0 0; border: 0; border-radius: 9px; outline: none; color: var(--fg); background: transparent; font: 450 16px/1 "Geist Mono", monospace; }
+.auth-word-inputs input { min-width: 0; width: 100%; height: 44px; padding: 0 4px 0 0; border: 0; border-radius: 9px; outline: none; color: var(--fg); background: transparent; font: var(--fw-body) 16px/1 var(--font-face); }
 .auth-word-inputs li:focus-within { border-color: var(--fg-2); background: var(--field-focus); }
 .auth-word-inputs li:has([aria-invalid="true"]) { border-color: var(--fg); }
 .auth-error-line { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--hover); color: var(--fg); font-size: 13.5px; }
@@ -158,7 +158,7 @@
   border-radius: 50%;
   background: transparent;
   color: var(--fg-3);
-  font: 500 11.5px/1 var(--font-maple);
+  font: var(--fw-label) 11.5px/1 var(--font-face);
   cursor: pointer;
 }
 .auth-dot:disabled { cursor: default; }
@@ -199,12 +199,12 @@
   border-radius: 999px;
   background: var(--fg);
   color: var(--on-fg);
-  font: 600 13.5px/1 var(--font-maple);
+  font: var(--fw-title) 13.5px/1 var(--font-face);
   letter-spacing: -0.01em;
   cursor: pointer;
   transition: transform 140ms var(--ease), opacity 160ms ease;
 }
-.auth-primary:active { transform: scale(0.98); }
+.auth-primary:active { transform: scale(var(--ui-press-scale-soft)); }
 .auth-primary[disabled] { transform: none; opacity: 0.35; cursor: default; }
 .auth-primary svg { width: 18px; height: 18px; flex: none; }
 .auth-footer .auth-primary { min-width: 140px; }
@@ -212,7 +212,7 @@
   border: 0;
   background: none;
   color: var(--fg-2);
-  font: 500 13.5px/1 var(--font-maple);
+  font: var(--fw-label) 13.5px/1 var(--font-face);
   cursor: pointer;
 }
 .auth-back { padding: 10px 8px; margin-left: -8px; }
@@ -242,8 +242,8 @@
 [data-focus-ring="on"] .auth-check input:focus-visible + .tick { outline: 2px solid var(--ring); outline-offset: 2px; }
 .auth-check[data-pressed] { transform: scale(0.98); }
 .auth-check .tick { width: 20px; height: 20px; }
-.auth-words { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 4px 0 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--wash); counter-reset: recovery; list-style: none; }
-.auth-words li { display: flex; min-width: 0; align-items: baseline; gap: 5px; color: var(--fg); font: 450 13px/1.9 var(--font-maple); }
+.auth-words { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 4px 0 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: rgb(255 255 255 / 0.03); counter-reset: recovery; list-style: none; }
+.auth-words li { display: flex; min-width: 0; align-items: baseline; gap: 5px; color: var(--fg); font: var(--fw-body) 13px/1.9 var(--font-face); }
 .auth-word-number { width: 19px; flex: none; color: var(--fg-3); font-size: 10.5px; text-align: right; }
 .auth-actions { display: flex; justify-content: flex-end; gap: 4px; margin: 10px -8px -4px 0; }
 .icon-action { display: inline-grid; width: 40px; height: 40px; place-items: center; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--fg-2); cursor: pointer; }
@@ -251,7 +251,7 @@
 .auth-recovery-message { min-height: 1em; margin: 2px 0 0; color: var(--fg-3); font-size: 11px; }
 .auth-welcome { text-align: center; }
 .welcome-copy { max-width: 100%; text-align: center; }
-.welcome-copy h1 { margin: 0 0 14px; font-size: clamp(20px, 6vw, 64px); font-weight: 700; letter-spacing: -0.04em; line-height: 1.05; }
+.welcome-copy h1 { margin: 0 0 14px; font-size: clamp(20px, 6vw, 64px); font-weight: var(--fw-title); letter-spacing: -0.04em; line-height: 1.05; }
 .welcome-copy p { margin: 0; color: var(--fg-2); animation: auth-welcome-caption 240ms 900ms var(--ease) both; }
 .auth-welcome[data-no-motion] .welcome-copy p { animation: none; }
 @keyframes auth-welcome-caption { from { opacity: 0; transform: translateX(10px); } }

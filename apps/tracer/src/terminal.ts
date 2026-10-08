@@ -1,26 +1,17 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
+import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
-import {
-  WebSocketFrameDecoder,
-  encodeMuxedFrameInto,
-  type WireFrame,
-} from "../../../packages/protocol/src/codec";
+import type { WireFrame } from "../../../packages/protocol/src/codec";
+import { MuxConnection, type StreamHandler } from "./connection";
 
-const CONTROL_STREAM = 0;
-const TERMINAL_STREAM = 1;
-const VERSION = 1;
 const INITIAL_CREDIT = 1024 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
 const INPUT_RESUME_GUARD = 16 * 1024;
 const INPUT_FRAME_LIMIT = 16 * 1024;
-const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
-/** The family declared in style.css; the fallback is metric-matched so a late face moves nothing. */
-const TERMINAL_FONT_NAME = "Maple Mono NF";
-const TERMINAL_FONT_FAMILY = `"${TERMINAL_FONT_NAME}", "Maple Mono NF Fallback", ui-monospace, monospace`;
 const TERMINAL_FONT_SIZE_DESKTOP = 14;
 const TERMINAL_FONT_SIZE_TOUCH = 13;
 const THEME_HISTORY_PROBE_ROWS = 10_000;
@@ -110,24 +101,29 @@ export interface TerminalConfig {
   hooks?: TerminalHooks;
   /** Curated theme shared by the floating controls and Ghostty. */
   theme?: ITheme;
+  /** The chosen font (registry); the default family when absent. */
+  font?: MonoFont;
   onRoundTrip?: (milliseconds: number | undefined) => void;
   onConnectionChange?: (connected: boolean) => void;
   onScroll?: (scrolled: boolean) => void;
   onInputActivity?: () => void;
   onRecoveryPending?: (readyAt: number | undefined) => void;
   traceMockServer?: boolean;
+  /**
+   * The connection this terminal's stream rides on. Terminals of one page share one (D183); without it the
+   * client makes and owns a private connection, which is how the single-terminal screen works.
+   */
+  connection?: MuxConnection;
+  /** Attach to a session that already exists on the server (a window reopened from the sidebar). */
+  attachSessionId?: string;
+  /** The host to open the new session on (a lowercase UUID); the embedded host when absent. */
+  hostId?: string;
   /** Reattach this tab's owned session using a new writer after a page reload. */
   initialSessionId?: string;
   /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
   scrollbackLimit?: number;
   /** Enables the explicit `?predict=1` opt-in; the production default remains off. */
   predictiveEcho?: boolean;
-}
-
-interface ResumeCredentials {
-  connectionId: Uint8Array;
-  resumeToken: Uint8Array;
-  deadline: number;
 }
 
 interface PendingSnapshot {
@@ -207,16 +203,18 @@ export class TerminalClient {
   private readonly inputQueue = new ByteQueue(INPUT_QUEUE_LIMIT);
   private readonly outputQueue = new ByteQueue(INITIAL_CREDIT);
   private readonly inputScratch = new Uint8Array(INPUT_FRAME_LIMIT);
-  private readonly sendScratch = new Uint8Array(SEND_BUFFER_SIZE);
   private readonly resizeObserver: ResizeObserver;
   private readonly screen: HTMLElement;
-  private socket: WebSocket | undefined;
-  private decoder: WebSocketFrameDecoder | undefined;
-  private resumeCredentials: ResumeCredentials | undefined;
+  private readonly conn: MuxConnection;
+  private readonly ownsConnection: boolean;
+  private streamId = 0;
+  private readonly offRoundTrip: () => void;
   private sessionId: Uint8Array | undefined;
-  private retryTimer = 0;
-  private retryAttempt = 0;
   private symbolFaceRequested = false;
+  /** The font in use and the two canvas weights drawn from it (see installFontWeights). */
+  private font: MonoFont;
+  private readonly canvasWeights = { regular: 400, bold: 700 };
+  private readonly weightMemo = new Map<string, string>();
   private outputWriteInFlight = false;
   private outputWriteLength = 0;
   private snapshotWriteInFlight = false;
@@ -230,19 +228,20 @@ export class TerminalClient {
   private attachRequested = false;
   private openCallSent = false;
   private fitQueued = false;
+  private hasAttached = false;
+  /** Bumped when the cursors restart, so a write that was in flight does not account for bytes that are gone. */
+  private cursorEpoch = 0;
+  /** Off screen: no drawing and no canvas backing store (see `setSuspended`). */
+  private suspended = false;
   private closed = false;
-  private forcedDrop = false;
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
-  private lastPingAt = -Infinity;
   private renderIdleTimer = 0;
   private rendererCursorBlinking = false;
   private predictionCursorHidden = false;
   private lastThemeColorsMs = 0;
   private lastThemeRenderMs = 0;
-  private nextPingNonce = 0n;
-  private readonly pendingPings = new Map<bigint, number>();
   private inputModifiers: InputModifiers = { ctrl: "off", alt: "off" };
   private readonly prediction: PredictiveEcho | undefined;
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
@@ -250,8 +249,9 @@ export class TerminalClient {
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
   private readonly disposeTouch: () => void;
 
-  private constructor(private readonly config: TerminalConfig, terminal: Terminal) {
+  private constructor(private readonly config: TerminalConfig, terminal: Terminal, font: MonoFont) {
     this.terminal = terminal;
+    this.font = font;
     this.ghostty = terminal as unknown as GhosttyActivityControls;
     this.screen = config.screen ?? config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
@@ -282,7 +282,7 @@ export class TerminalClient {
       this.wakeTerminal();
       const rect = config.host.getBoundingClientRect();
       this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
-      if (this.attached) this.sendFrame(TERMINAL_STREAM, { type: "Resize", ...this.lastSize });
+      if (this.attached) this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     });
     this.terminal.onData((data) => { this.wakeTerminal(); this.handleInput(data); });
     this.terminal.onScroll((offset) => {
@@ -292,27 +292,40 @@ export class TerminalClient {
       config.host.dataset.scrolled = String(offset !== 0);
       config.onScroll?.(offset !== 0);
     });
-    if (config.initialSessionId && isCanonicalUuid(config.initialSessionId)) {
+    const known = config.attachSessionId ?? config.initialSessionId;
+    if (known && isCanonicalUuid(known)) {
       // A page reload has no pending-input buffer or writer capability. Start
       // a fresh writer at zero, replay output from zero, and let server-owned
       // session authorization validate this nonsecret convenience identifier.
-      this.sessionId = uuidBytes(config.initialSessionId);
+      this.sessionId = uuidBytes(known);
     }
     this.scheduleFit();
-    this.connect();
+    this.ownsConnection = config.connection === undefined;
+    this.conn = config.connection ?? new MuxConnection({
+      ...(config.traceMockServer ? { traceMockServer: true } : {}),
+      ...(config.onRecoveryPending ? { onRecoveryPending: config.onRecoveryPending } : {}),
+      ...(config.onConnectionChange ? { onConnectionChange: config.onConnectionChange } : {}),
+    });
+    // The round trip is the connection's; every terminal on it reads it (prediction needs it, the pill shows it).
+    this.offRoundTrip = this.conn.onRoundTrip((ms) => {
+      this.prediction?.setRoundTrip(ms);
+      config.onRoundTrip?.(ms);
+    });
+    this.streamId = this.conn.openStream(this.streamHandler());
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
   }
 
   /**
-   * Loads the regular Maple Mono NF face and the WASM terminal once, then opens the
-   * one-session client. Only the regular face gates the first paint, because the cell
-   * grid is measured from it; italic, bold and Nerd Font faces load afterwards.
+   * Loads the chosen font's upright faces and the WASM terminal once, then opens the
+   * one-session client. Only the upright faces gate the first paint, because the cell
+   * grid is measured from them; italic and Nerd Font faces load afterwards.
    */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
-    await document.fonts.load(`${TERMINAL_FONT_SIZE_DESKTOP}px "${TERMINAL_FONT_NAME}"`);
+    const font = config.font ?? fontById(DEFAULT_FONT_ID)!;
+    await loadFont(font);
     await init();
     const terminal = new Terminal({
-      fontFamily: TERMINAL_FONT_FAMILY,
+      fontFamily: fontStack(font),
       fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
       cursorStyle: "bar",
@@ -325,7 +338,9 @@ export class TerminalClient {
         selectionBackground: "#44485c",
       },
     });
-    const client = new TerminalClient(config, terminal);
+    const client = new TerminalClient(config, terminal, font);
+    // Weights go in before the first measurement so the grid is measured from the face it draws.
+    client.installFontWeights();
     client.remeasureFont();
     client.keepLigaturesOff();
     client.loadStyledFaces();
@@ -378,6 +393,8 @@ export class TerminalClient {
     viewportY: number;
     cursorVisible: boolean;
     fontSize: number;
+    fontFamily: string;
+    fontId: string;
     wasmMemoryBytes: number;
   } {
     const wasmTerm = this.terminal.wasmTerm;
@@ -407,6 +424,8 @@ export class TerminalClient {
       viewportY: this.terminal.viewportY,
       cursorVisible: Boolean(cursor?.visible),
       fontSize: this.terminal.options.fontSize,
+      fontFamily: this.terminal.options.fontFamily ?? "",
+      fontId: this.font.id,
       wasmMemoryBytes: memory?.buffer.byteLength ?? 0,
     };
   }
@@ -512,6 +531,31 @@ export class TerminalClient {
     this.prediction?.refresh();
   }
 
+  /**
+   * Parks the terminal while its window is off screen, in another view or a thumbnail. Output keeps flowing
+   * into the terminal state (cheap, and credit keeps returning), but nothing is drawn and the canvas gives its
+   * backing store back: a phone must hold about one screen of pixels, not one per window (iOS ends a page that
+   * holds more). Resuming restores the canvas at the current grid and repaints once.
+   */
+  setSuspended(suspended: boolean): void {
+    if (suspended === this.suspended || this.closed) return;
+    this.suspended = suspended;
+    if (suspended) {
+      window.clearTimeout(this.renderIdleTimer);
+      this.pauseTerminal();
+      this.releaseSurface();
+      return;
+    }
+    this.restoreSurface();
+    this.scheduleFit();
+    this.wakeTerminal();
+  }
+
+  /** Recomputes the grid from the host's box (the window was resized). */
+  refit(): void {
+    this.scheduleFit();
+  }
+
   /** Focuses Ghostty's actual input host so the mobile keyboard can stay open. */
   focus(): void {
     this.terminal.focus();
@@ -559,8 +603,7 @@ export class TerminalClient {
 
   /** Forces a WebSocket close for the opt-in resume probe. */
   forceDrop(): void {
-    this.forcedDrop = true;
-    this.socket?.close(4000, "tracer resume probe");
+    this.conn.forceDrop();
   }
 
   dispose(): void {
@@ -571,161 +614,53 @@ export class TerminalClient {
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
     this.config.host.removeEventListener("pointermove", this.onTerminalActivity);
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
-    this.config.onConnectionChange?.(false);
-    window.clearTimeout(this.retryTimer);
-    this.stopPings();
+    if (this.attached) this.conn.streamAttached(false);
+    this.offRoundTrip();
     this.prediction?.dispose();
     this.resizeObserver.disconnect();
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
     this.inputQueue.clear();
     this.outputQueue.clear();
-    this.resumeCredentials?.connectionId.fill(0);
-    this.resumeCredentials?.resumeToken.fill(0);
     this.pendingSnapshot?.bytes.fill(0);
-    this.socket?.close(1000, "terminal closed");
+    // A shared connection only detaches this stream: the session keeps running (D178).
+    if (this.ownsConnection) this.conn.dispose(); else this.conn.closeStream(this.streamId);
     this.terminal.dispose();
   }
 
-  private connect(): void {
-    if (this.closed) return;
-    this.setStatus(this.sessionId ? "Connection lost; resuming…" : "Connecting…");
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const traceQuery = this.config.traceMockServer ? "?trace=1" : "";
-    const socket = new WebSocket(`${protocol}//${location.host}/v1/ws${traceQuery}`);
-    socket.binaryType = "arraybuffer";
-    this.socket = socket;
-    this.decoder = new WebSocketFrameDecoder();
-    this.attached = false;
-    this.attachRequested = false;
-
-    socket.onopen = () => {
-      const resumable = this.sessionId !== undefined && this.resumeCredentials !== undefined && Date.now() < this.resumeCredentials.deadline;
-      // RESUME_NEXT tells the server to wait for the adjacent Resume before issuing Welcome.
-      const hello: WireFrame = { type: "Hello", version: VERSION, caps: resumable ? 1n : 0n, clientInfo: "infraternal-tracer/0.1" };
-      let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
-      this.connectionIsResume = this.sessionId !== undefined;
-      if (resumable && this.resumeCredentials) {
-        length += encodeMuxedFrameInto(CONTROL_STREAM, {
-          type: "Resume",
-          connectionId: this.resumeCredentials.connectionId,
-          resumeToken: this.resumeCredentials.resumeToken,
-        }, this.sendScratch, length);
-      }
-      socket.send(this.sendScratch.subarray(0, length));
-      if (this.sessionId && resumable) {
-        this.attachRequested = true;
-        this.tryAttach();
-      } else if (this.sessionId) {
-        this.attachRequested = true;
-      }
-    };
-    socket.onmessage = (event: MessageEvent<ArrayBuffer>) => {
-      const receivedAt = performance.now();
-      if (!(event.data instanceof ArrayBuffer)) {
-        this.protocolFailure("server sent a non-binary frame");
-        return;
-      }
-      try {
-        const message = new Uint8Array(event.data);
-        this.decoder?.feed(message, (streamId, frame) => this.handleFrame(streamId, frame, message, receivedAt));
-      } catch {
-        this.protocolFailure("server sent an invalid wire frame");
-      }
-    };
-    socket.onerror = () => this.setStatus("Connection interrupted; reconnecting…");
-    socket.onclose = () => {
-      if (this.socket !== socket || this.closed) return;
-      this.socket = undefined;
-      this.decoder = undefined;
-      this.attached = false;
-      this.attachRequested = false;
-      this.config.onConnectionChange?.(false);
-      this.stopPings();
-      const forced = this.forcedDrop;
-      this.forcedDrop = false;
-      this.config.hooks?.onDisconnected?.(forced);
-      this.setStatus("Connection lost; resuming…");
-      this.scheduleReconnect();
-    };
-  }
-
-  private handleFrame(streamId: number, frame: WireFrame, message: Uint8Array, receivedAt: number): void {
-    if (streamId !== CONTROL_STREAM && streamId !== TERMINAL_STREAM) {
-      this.protocolFailure("server used an unexpected stream id");
-      return;
-    }
-    if (streamId === CONTROL_STREAM) {
-      this.handleControlFrame(frame);
-    } else {
-      this.handleTerminalFrame(frame, message, receivedAt);
-    }
-  }
-
-  private handleControlFrame(frame: WireFrame): void {
-    switch (frame.type) {
-      case "Hello":
-        if (frame.version !== VERSION) this.protocolFailure("server uses an unsupported wire version");
-        return;
-      case "Welcome":
-        this.sendFrame(CONTROL_STREAM, { type: "Subscribe", subId: 45, filterJson: encoder.encode(JSON.stringify({ topic: "auth.recovery" })) });
-        this.resumeCredentials?.connectionId.fill(0);
-        this.resumeCredentials?.resumeToken.fill(0);
-        this.resumeCredentials = {
-          connectionId: frame.connectionId.slice(),
-          resumeToken: frame.resumeToken.slice(),
-          deadline: Date.now() + frame.resumeWindowSeconds * 1000,
-        };
+  /** What the connection needs from this terminal's stream. */
+  private streamHandler(): StreamHandler {
+    return {
+      onSocketOpen: (resuming) => {
+        this.connectionIsResume = this.sessionId !== undefined;
+        if (this.sessionId && resuming) {
+          this.attachRequested = true;
+          this.tryAttach();
+        } else if (this.sessionId) {
+          this.attachRequested = true;
+        }
+      },
+      onWelcome: (resumed) => {
+        // A connection the server does not know starts every writer at zero, like a page reload.
+        if (!resumed && this.hasAttached) this.restartCursors();
         if (!this.sessionId) this.openSession();
         else {
           this.attachRequested = true;
           this.tryAttach();
         }
-        return;
-      case "Result":
-        if (frame.callId !== 1 || !this.openCallSent || this.sessionId) {
-          this.protocolFailure("server returned an unexpected action result");
-          return;
-        }
-        if (!frame.ok) {
-          this.setStatus("The server could not open this terminal.");
-          return;
-        }
-        try {
-          const result = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.json)) as unknown;
-          const record = asRecord(result);
-          const sessionId = requireString(record.session_id);
-          this.sessionId = uuidBytes(sessionId);
-          this.config.hooks?.onSessionCreated?.(sessionId);
-          this.attachRequested = true;
-          this.tryAttach();
-        } catch {
-          this.protocolFailure("terminal.open returned an invalid session id");
-        }
-        return;
-      case "Event":
-        if (frame.subId !== 45) return;
-        try {
-          const event = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.eventJson)) as unknown);
-          if (event.topic !== "auth.recovery") throw new Error("unexpected recovery topic");
-          const readyAt = event.pending === null ? undefined : asRecord(event.pending).ready_at;
-          if (event.pending !== null && (typeof readyAt !== "number" || !Number.isSafeInteger(readyAt) || readyAt < 0)) throw new Error("invalid recovery deadline");
-          this.config.onRecoveryPending?.(readyAt as number | undefined);
-        } catch { this.protocolFailure("server returned invalid recovery state"); }
-        return;
-      case "Ping":
-        this.sendFrame(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
-        return;
-      case "Pong":
-        this.acceptPong(frame.nonce);
-        return;
-      case "Close":
-        this.setStatus(frame.reason || "The server closed the connection.");
-        this.socket?.close();
-        return;
-      default:
-        this.protocolFailure("server sent a terminal frame on the control stream");
-    }
+      },
+      onFrame: (frame, message, receivedAt) => this.handleTerminalFrame(frame, message, receivedAt),
+      onDisconnected: (forced) => {
+        if (this.closed) return;
+        this.attached = false;
+        this.attachRequested = false;
+        this.openCallSent = false;
+        this.config.hooks?.onDisconnected?.(forced);
+        this.setStatus("Connection lost; resuming…");
+      },
+      hasSession: () => this.sessionId !== undefined,
+      onStatus: (message) => this.setStatus(message),
+    };
   }
 
   private handleTerminalFrame(frame: WireFrame, message: Uint8Array, receivedAt: number): void {
@@ -770,14 +705,15 @@ export class TerminalClient {
         return;
       }
       case "Ping":
-        this.sendFrame(TERMINAL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
+        this.sendFrame(this.streamId, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
         return;
       case "Pong":
-        this.acceptPong(frame.nonce);
+        this.conn.acceptPong(frame.nonce);
         return;
       case "Close":
         this.setStatus(frame.reason || "The terminal stream closed.");
-        this.socket?.close();
+        // On a connection of its own a closed stream restarts it; on a shared one the others keep running.
+        if (this.ownsConnection) this.conn.forceClose();
         return;
       default:
         this.protocolFailure("server sent an invalid terminal-stream frame");
@@ -786,27 +722,35 @@ export class TerminalClient {
 
   private openSession(): void {
     if (this.openCallSent || this.closed) return;
-    const hostId = new URLSearchParams(location.search).get("host");
+    const hostId = this.config.hostId ?? new URLSearchParams(location.search).get("host");
     if (hostId && !isCanonicalUuid(hostId)) {
       this.setStatus("The host query parameter must be a lowercase UUID.");
       return;
     }
     this.openCallSent = true;
-    const input = hostId ? { host_id: hostId } : {};
-    this.sendFrame(CONTROL_STREAM, {
-      type: "Call",
-      callId: 1,
-      actionId: "ssh.session.open",
-      inputJson: encoder.encode(JSON.stringify(input)),
+    this.conn.call("ssh.session.open", hostId ? { host_id: hostId } : {}).then((result) => {
+      if (this.closed || this.sessionId) return;
+      try {
+        const sessionId = requireString(result.session_id);
+        this.sessionId = uuidBytes(sessionId);
+        this.config.hooks?.onSessionCreated?.(sessionId);
+        this.attachRequested = true;
+        this.tryAttach();
+      } catch {
+        this.protocolFailure("terminal.open returned an invalid session id");
+      }
+    }, () => {
+      this.openCallSent = false;
+      if (!this.closed && this.conn.isOpen) this.setStatus("The server could not open this terminal.");
     });
   }
 
   private tryAttach(): void {
-    if (!this.attachRequested || !this.sessionId || this.attached || this.closed || !this.isSocketOpen()) return;
+    if (!this.attachRequested || !this.sessionId || this.attached || this.closed || !this.conn.isOpen) return;
     if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
     this.attachRequested = false;
     this.attached = true;
-    this.sendFrame(TERMINAL_STREAM, {
+    this.sendFrame(this.streamId, {
       type: "AttachTerm",
       sessionId: this.sessionId,
       lastOutSeq: this.lastOutSeq,
@@ -814,15 +758,30 @@ export class TerminalClient {
       lastInSeq: this.ackedInSeq,
     });
     this.creditAvailable = INITIAL_CREDIT;
-    this.sendFrame(TERMINAL_STREAM, { type: "Credit", bytes: INITIAL_CREDIT });
-    this.sendFrame(TERMINAL_STREAM, { type: "Resize", ...this.lastSize });
+    this.sendFrame(this.streamId, { type: "Credit", bytes: INITIAL_CREDIT });
+    this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     this.resendUnacknowledgedInput();
     this.setStatus("");
-    this.retryAttempt = 0;
-    this.config.onConnectionChange?.(true);
+    this.hasAttached = true;
+    this.conn.streamAttached(true, this.streamId);
     this.startPings();
     this.wakeTerminal();
     this.config.hooks?.onAttached?.(this.connectionIsResume, this);
+  }
+
+  /** Starts the stream's cursors over: its session is attached again from the beginning, as after a reload. */
+  private restartCursors(): void {
+    this.cursorEpoch += 1;
+    this.receivedOutSeq = 0n;
+    this.lastOutSeq = 0n;
+    this.nextInSeq = 0n;
+    this.ackedInSeq = 0n;
+    this.inputQueue.clear();
+    this.outputQueue.clear();
+    this.pendingSnapshot?.bytes.fill(0);
+    this.pendingSnapshot = undefined;
+    this.prediction?.resetForSnapshot();
+    this.terminal.reset();
   }
 
   private resendUnacknowledgedInput(): void {
@@ -834,7 +793,7 @@ export class TerminalClient {
         this.protocolFailure("input resume queue is inconsistent");
         return;
       }
-      this.sendFrame(TERMINAL_STREAM, {
+      this.sendFrame(this.streamId, {
         type: "Input",
         inSeq: sequence,
         bytes: this.inputScratch.subarray(0, length),
@@ -873,7 +832,7 @@ export class TerminalClient {
     if (this.attached) {
       for (let offset = 0; offset < encoded.byteLength;) {
         const length = Math.min(INPUT_FRAME_LIMIT, encoded.byteLength - offset);
-        this.sendFrame(TERMINAL_STREAM, {
+        this.sendFrame(this.streamId, {
           type: "Input",
           inSeq: firstSequence + BigInt(offset),
           bytes: encoded.subarray(offset, offset + length),
@@ -965,7 +924,9 @@ export class TerminalClient {
       this.terminal.reset();
       this.requestSymbolsIfNeeded(snapshot.bytes);
       this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
+      const epoch = this.cursorEpoch;
       this.terminal.write(snapshot.bytes, () => {
+        if (epoch !== this.cursorEpoch) { this.snapshotWriteInFlight = false; this.drainOutput(); this.tryAttach(); return; }
         const callbackAt = performance.now();
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "writeCallback", callbackAt);
         // Ghostty calls this from the rAF after its render loop draws the write; another rAF adds a full frame.
@@ -993,7 +954,9 @@ export class TerminalClient {
       this.requestSymbolsIfNeeded(region);
       const writeSequence = this.lastOutSeq;
       this.traceRange(writeSequence, region.byteLength, "termWrite", performance.now());
+      const epoch = this.cursorEpoch;
       this.terminal.write(region, () => {
+        if (epoch !== this.cursorEpoch) { this.outputWriteLength = 0; this.outputWriteInFlight = false; this.drainOutput(); this.tryAttach(); return; }
         const callbackAt = performance.now();
         this.traceRange(writeSequence, this.outputWriteLength, "writeCallback", callbackAt);
         // The callback is ordered after Ghostty's render-loop callback in the same animation frame.
@@ -1030,7 +993,7 @@ export class TerminalClient {
       return;
     }
     this.creditAvailable += bytes;
-    if (this.attached) this.sendFrame(TERMINAL_STREAM, { type: "Credit", bytes });
+    if (this.attached) this.sendFrame(this.streamId, { type: "Credit", bytes });
   }
 
   private pauseInput(message: string): void {
@@ -1041,7 +1004,7 @@ export class TerminalClient {
   }
 
   private scheduleFit(): void {
-    if (this.fitQueued || this.closed) return;
+    if (this.fitQueued || this.closed || this.suspended) return;
     this.fitQueued = true;
     requestAnimationFrame(() => {
       this.fitQueued = false;
@@ -1099,19 +1062,91 @@ export class TerminalClient {
   }
 
   /**
+   * The renderer asks the canvas for plain, bold and italic text with the keywords `bold` and
+   * `italic` only, so every font would draw at weight 400 and 700 whatever its registry
+   * weights say. A canvas has no weight setting apart from that string, so the font property
+   * of this one context rewrites the weight keyword on its way in: plain text takes the
+   * font's terminal weight, bold takes its bold weight. Everything else in the string,
+   * including the family list and the size, passes through untouched, so the renderer's own
+   * measurement (cell width and font box) is made from the very face it will draw with.
+   *
+   * The rewrite is memoised per distinct string because the renderer sets the property for
+   * every run it draws; the redraw benchmark shows the cost.
+   */
+  private installFontWeights(): void {
+    const context = this.ghostty.renderer?.ctx;
+    if (!context) return;
+    const native = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "font");
+    if (!native?.get || !native.set) return;
+    const get = native.get, set = native.set;
+    const memo = this.weightMemo;
+    this.canvasWeights.regular = this.font.terminalWeight;
+    this.canvasWeights.bold = this.font.boldWeight;
+    this.applyGlyphPlacement();
+    Object.defineProperty(context, "font", {
+      configurable: true,
+      get: () => get.call(context) as string,
+      set: (value: string) => {
+        let rewritten = memo.get(value);
+        if (rewritten === undefined) {
+          const parts = /^(italic )?(bold )?(.*)$/.exec(value)!;
+          rewritten = `${parts[1] ?? ""}${parts[2] ? this.canvasWeights.bold : this.canvasWeights.regular} ${parts[3]}`;
+          memo.set(value, rewritten);
+        }
+        set.call(context, rewritten);
+      },
+    });
+  }
+
+  /**
+   * Switches the terminal to another font without reopening the session: the whole font
+   * changes (family and weights) and the grid is measured again from the new font box.
+   * The caller loads the font's faces first (`loadFont`), because canvas text never waits for a
+   * face and would draw the fallback.
+   *
+   * Setting the family makes the renderer re-measure its cells (device-pixel advance and the
+   * font's ascent plus descent) and resize its canvas; `scheduleFit` then recomputes columns
+   * and rows for the new cell size, which also tells the host. The cursor, drawn from those
+   * cells, moves with them: no stored pixel position survives the change.
+   */
+  setFont(font: MonoFont): void {
+    if (font === this.font || this.closed) return;
+    this.font = font;
+    this.canvasWeights.regular = font.terminalWeight;
+    this.canvasWeights.bold = font.boldWeight;
+    this.weightMemo.clear();
+    this.applyGlyphPlacement();
+    this.terminal.options.fontFamily = fontStack(font);
+    this.scheduleFit();
+    this.wakeTerminal();
+    this.loadStyledFaces();
+  }
+
+  /**
+   * Chooses between the renderer's two ways of putting text on the grid (see `placeGlyphs` in
+   * the registry). The renderer stretches a run with canvas letter spacing when the context
+   * has it, and otherwise draws one glyph per cell. Hiding the property on this context for
+   * the fonts that need exact placement selects the second way without touching the renderer.
+   */
+  private applyGlyphPlacement(): void {
+    const context = this.ghostty.renderer?.ctx;
+    if (!context) return;
+    if (this.font.placeGlyphs) Object.defineProperty(context, "letterSpacing", { value: undefined, writable: true, configurable: true });
+    else delete (context as { letterSpacing?: string }).letterSpacing;
+  }
+
+  /**
    * Canvas text never waits for a web font: a face that is not loaded yet is drawn with
-   * the fallback and is not repainted by the browser. So every face the renderer can ask
-   * for is loaded here, and the whole screen is repainted once each arrives.
-   * Italic and bold cells are drawn one cell at a time, so they stay on the grid.
+   * the fallback and is not repainted by the browser. So the italic faces are loaded here,
+   * and the whole screen is repainted once they arrive. The upright faces already carry
+   * every weight (one variable face, or the regular and bold static faces), so bold needs
+   * no request of its own. Italic and bold cells are drawn one cell at a time, so they stay
+   * on the grid.
    */
   private loadStyledFaces(): void {
-    const size = this.terminal.options.fontSize ?? TERMINAL_FONT_SIZE_DESKTOP;
+    const font = this.font;
     const load = (): void => {
-      void Promise.all([
-        document.fonts.load(`italic ${size}px "${TERMINAL_FONT_NAME}"`),
-        document.fonts.load(`600 ${size}px "${TERMINAL_FONT_NAME}"`),
-        document.fonts.load(`italic 600 ${size}px "${TERMINAL_FONT_NAME}"`),
-      ]).then(() => this.repaintAll(), () => undefined);
+      void loadFont(font, true).then(() => { if (this.font === font) this.repaintAll(); }, () => undefined);
     };
     // Off the critical path: the first prompt must not wait behind these downloads.
     // Safari has no requestIdleCallback; the lib types claim it always exists, so widen it.
@@ -1131,9 +1166,49 @@ export class TerminalClient {
     if (bytes.indexOf(0xee) < 0 && bytes.indexOf(0xef) < 0) return;
     this.symbolFaceRequested = true;
     const size = this.terminal.options.fontSize ?? TERMINAL_FONT_SIZE_DESKTOP;
-    void document.fonts.load(`${size}px "${TERMINAL_FONT_NAME}"`, "\ue0b0\uf015\ue718")
+    void document.fonts.load(`${size}px "Nerd Symbols"`, "\ue0b0\uf015\ue718")
       .then(() => this.repaintAll(), () => undefined);
   }
+
+  /**
+   * Frees the canvas's backing store while the terminal cannot be seen (a hidden page, a locked phone, a
+   * view far from the screen): a 0 x 0 canvas holds no pixels. The terminal's state is untouched, so
+   * `restoreSurface` re-renders everything from it.
+   */
+  releaseSurface(): void {
+    const canvas = this.config.host.querySelector<HTMLCanvasElement>("canvas");
+    if (!canvas || this.surfaceReleased) return;
+    this.surfaceReleased = true;
+    // The renderer would size the canvas again on its next frame (a blinking cursor is enough), so its drawing
+    // calls are silenced until the surface is restored.
+    const renderer = this.ghostty.renderer as unknown as Record<string, unknown> | undefined;
+    if (renderer) {
+      this.silenced = {};
+      for (const name of ["render", "renderLine", "renderCursor", "resize"]) {
+        const original = renderer[name];
+        if (typeof original !== "function") continue;
+        this.silenced[name] = original;
+        renderer[name] = () => undefined;
+      }
+    }
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+
+  /** Gives the canvas its size back and draws the whole screen again from the terminal state. */
+  restoreSurface(): void {
+    const renderer = this.ghostty.renderer;
+    if (!renderer || !this.surfaceReleased || this.closed) return;
+    this.surfaceReleased = false;
+    const target = renderer as unknown as Record<string, unknown>;
+    for (const [name, original] of Object.entries(this.silenced ?? {})) target[name] = original;
+    this.silenced = undefined;
+    renderer.resize(this.terminal.cols, this.terminal.rows);
+    this.repaintAll();
+  }
+
+  private surfaceReleased = false;
+  private silenced: Record<string, unknown> | undefined;
 
   private repaintAll(): void {
     const renderer = this.ghostty.renderer;
@@ -1333,28 +1408,9 @@ export class TerminalClient {
     this.scheduleFit();
   }
 
-  private scheduleReconnect(): void {
-    if (this.closed || this.retryTimer !== 0) return;
-    const delay = Math.min(1000, 50 * 2 ** Math.min(this.retryAttempt, 4));
-    this.retryAttempt += 1;
-    this.retryTimer = window.setTimeout(() => {
-      this.retryTimer = 0;
-      this.connect();
-    }, delay);
-  }
-
   private sendFrame(streamId: number, frame: WireFrame, traceStart?: bigint, traceLength = 0): void {
-    const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    try {
-      const length = encodeMuxedFrameInto(streamId, frame, this.sendScratch);
-      const encodedAt = performance.now();
-      if (traceStart !== undefined) this.traceRange(traceStart, traceLength, "encode", encodedAt);
-      socket.send(this.sendScratch.subarray(0, length));
-      if (traceStart !== undefined) this.traceRange(traceStart, traceLength, "wsSend", performance.now());
-    } catch {
-      this.protocolFailure("could not encode an infraternal wire frame");
-    }
+    if (traceStart === undefined) { this.conn.send(streamId, frame); return; }
+    this.conn.send(streamId, frame, (at) => this.traceRange(traceStart, traceLength, "encode", at), () => this.traceRange(traceStart, traceLength, "wsSend", performance.now()));
   }
 
   /** Maps byte-stream sequence numbers to probe key IDs without changing wire frames. */
@@ -1367,12 +1423,7 @@ export class TerminalClient {
   }
 
   private protocolFailure(message: string): void {
-    this.setStatus(`Terminal protocol error: ${message}.`);
-    this.socket?.close(1002, "invalid tracer frame");
-  }
-
-  private isSocketOpen(): boolean {
-    return this.socket?.readyState === WebSocket.OPEN;
+    this.conn.fail(message);
   }
 
   private setStatus(message: string): void {
@@ -1382,34 +1433,18 @@ export class TerminalClient {
 
   /** Samples RTT on attachment and typing; an idle terminal schedules no wakeups [81]. */
   private startPings(): void {
-    this.stopPings();
-    this.sampleRoundTrip();
+    this.prediction?.setRoundTrip(undefined);
+    this.config.onRoundTrip?.(undefined);
+    this.conn.sampleRoundTrip();
   }
 
   private sampleRoundTrip(): void {
-    const startedAt = performance.now();
-    if (!this.attached || this.closed || startedAt - this.lastPingAt < 2000) return;
-    this.lastPingAt = startedAt;
-    this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
-    const nonce = this.nextPingNonce;
-    if (this.pendingPings.size >= 8) {
-      const oldest = this.pendingPings.keys().next().value as bigint | undefined;
-      if (oldest !== undefined) this.pendingPings.delete(oldest);
-    }
-    this.pendingPings.set(nonce, startedAt);
-    this.sendFrame(CONTROL_STREAM, { type: "Ping", nonce, sentUs: BigInt(Math.round(startedAt * 1000)) });
-  }
-
-  private stopPings(): void {
-    this.lastPingAt = -Infinity;
-    this.pendingPings.clear();
-    this.prediction?.setRoundTrip(undefined);
-    this.config.onRoundTrip?.(undefined);
+    if (this.attached && !this.closed) this.conn.sampleRoundTrip();
   }
 
   /** Keeps Ghostty drawing only through active input/output and its settling window. */
   private wakeTerminal(): void {
-    if (this.closed) return;
+    if (this.closed || this.suspended) return;
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = window.setTimeout(() => this.pauseTerminal(), RENDER_IDLE_MS);
     this.rendererCursorBlinking = true;
@@ -1424,15 +1459,6 @@ export class TerminalClient {
     this.ghostty.cancelRenderLoop();
     this.rendererCursorBlinking = false;
     this.ghostty.renderer?.setCursorBlink(false);
-  }
-
-  private acceptPong(nonce: bigint): void {
-    const startedAt = this.pendingPings.get(nonce);
-    if (startedAt === undefined) return;
-    this.pendingPings.delete(nonce);
-    const milliseconds = Math.max(1, performance.now() - startedAt);
-    this.prediction?.setRoundTrip(milliseconds);
-    this.config.onRoundTrip?.(milliseconds);
   }
 }
 
