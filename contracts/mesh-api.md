@@ -16,10 +16,10 @@ uses `Result { ok: true }` with the listed JSON value. A failure uses
 | Action ID | Input | Success value | Required action |
 |-----------|-------|---------------|-----------------|
 | `mesh.list` | `MeshFilter` | `MeshSnapshot` | Any assigned Mesh management action grants view access, subject to its tag scopes. |
-| `mesh.node.enroll` | `{"name":string,"public_key":[u8;32]}` | `{"node_id":u64,"revision":u64}` | `mesh.manage_nodes` |
-| `mesh.node.observe` | `{"node_id":u64,"last_rtt_us"?:u64\|null}` | `{"revision":u64}` | `mesh.manage_nodes` |
-| `mesh.node.rename` | `{"node_id":u64,"name":string}` | `{"revision":u64}` | `mesh.manage_nodes` |
-| `mesh.node.delete` | `{"node_id":u64}` | `{"revision":u64}` | `mesh.manage_nodes` |
+| `mesh.node.enroll` | `{"name":string,"public_key":[u8;32]}` | `{"node_id":u64,"revision":u64}` | Global `mesh.manage_nodes` |
+| `mesh.node.observe` | `{"node_id":u64,"last_rtt_us"?:u64\|null}` | `{"revision":u64}` | `mesh.manage_nodes` covering every current node tag |
+| `mesh.node.rename` | `{"node_id":u64,"name":string}` | `{"revision":u64}` | `mesh.manage_nodes` covering every current node tag |
+| `mesh.node.delete` | `{"node_id":u64}` | `{"revision":u64}` | `mesh.manage_nodes` covering every current node tag |
 | `mesh.tag.create` | `{"name":string}` | `{"revision":u64}` | `mesh.manage_tags` |
 | `mesh.tag.rename` | `{"name":string,"new_name":string}` | `{"revision":u64}` | `mesh.manage_tags` |
 | `mesh.tag.delete` | `{"name":string}` | `{"revision":u64}` | `mesh.manage_tags` |
@@ -79,12 +79,14 @@ The only assignable Mesh role actions are `mesh.manage_nodes`,
 nonempty `actions` array and optional nonempty `scopes` array of existing tag
 names. `MeshRoleDefinition` is
 `{"name":string,"actions":string[],"scopes"?:string[]}`. A role granting
-`mesh.manage_roles` is global and cannot have tag scopes. `mesh.manage_nodes`
-and role management are global actions; tag membership changes can use a tag
-scope. A tag endpoint's scope is that tag; a node endpoint's scopes are its
-current memberships. A scoped grant role must cover each endpoint's scope
-group, so an untagged node endpoint requires a global `mesh.manage_grants`
-role.
+`mesh.manage_roles` is global and cannot have tag scopes. Node enrollment and
+role management are global actions; node observation, rename and delete can
+use `mesh.manage_nodes` scoped to tags. A scoped node edit must cover every
+current node membership; an untagged node requires a global node-management
+role. Tag membership changes can use a tag scope. A tag endpoint's scope is
+that tag; a node endpoint's scopes are its current memberships. A scoped grant
+role must cover each endpoint's scope group, so an untagged node endpoint
+requires a global `mesh.manage_grants` role.
 
 Owners bypass role checks. Other users need an assigned role. Any assigned
 Mesh management action grants inventory view access, narrowed by its scopes;

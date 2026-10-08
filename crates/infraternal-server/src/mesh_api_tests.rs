@@ -397,6 +397,69 @@ async fn scoped_grant_role_filters_inventory_and_cannot_cross_tags() {
     )
     .await
     .unwrap();
+    call(
+        service,
+        OWNER,
+        "mesh.role.define",
+        json!({"name":"prod-nodes","actions":["mesh.manage_nodes"],"scopes":["prod"]}),
+        NOW,
+    )
+    .await
+    .unwrap();
+    call(
+        service,
+        OWNER,
+        "mesh.role.assign",
+        json!({"user_id":MEMBER,"role":"prod-nodes"}),
+        NOW,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        call(
+            service,
+            MEMBER,
+            "mesh.node.rename",
+            json!({"node_id":prod_node,"name":"prod-db-scoped"}),
+            NOW,
+        )
+        .await
+        .is_ok()
+    );
+    assert_eq!(
+        call(
+            service,
+            MEMBER,
+            "mesh.node.rename",
+            json!({"node_id":dev_node,"name":"dev-db-scoped"}),
+            NOW,
+        )
+        .await,
+        Err(MeshApiError::Denied),
+    );
+    assert!(
+        call(
+            service,
+            MEMBER,
+            "mesh.node.observe",
+            json!({"node_id":prod_node,"last_rtt_us":2150}),
+            NOW,
+        )
+        .await
+        .is_ok()
+    );
+    assert_eq!(
+        call(
+            service,
+            MEMBER,
+            "mesh.node.observe",
+            json!({"node_id":dev_node,"last_rtt_us":3250}),
+            NOW,
+        )
+        .await,
+        Err(MeshApiError::Denied),
+    );
 
     let snapshot = service
         .list(MEMBER, MeshFilter::default(), NOW)
@@ -470,6 +533,53 @@ async fn scoped_grant_role_filters_inventory_and_cannot_cross_tags() {
         .await
         .unwrap();
     assert_eq!(before_denied, audits);
+
+    let multi_tag_node = enroll(service, "multi-tag-db", 5).await;
+    for tag in ["prod", "dev"] {
+        call(
+            service,
+            OWNER,
+            "mesh.tag.member.add",
+            json!({"tag":tag,"node_id":multi_tag_node}),
+            NOW,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        call(
+            service,
+            MEMBER,
+            "mesh.node.rename",
+            json!({"node_id":multi_tag_node,"name":"multi-tag-renamed"}),
+            NOW,
+        )
+        .await,
+        Err(MeshApiError::Denied),
+    );
+    assert_eq!(
+        call(
+            service,
+            MEMBER,
+            "mesh.node.delete",
+            json!({"node_id":multi_tag_node}),
+            NOW,
+        )
+        .await,
+        Err(MeshApiError::Denied),
+    );
+    let untagged_node = enroll(service, "untagged-db", 6).await;
+    assert_eq!(
+        call(
+            service,
+            MEMBER,
+            "mesh.node.rename",
+            json!({"node_id":untagged_node,"name":"untagged-renamed"}),
+            NOW,
+        )
+        .await,
+        Err(MeshApiError::Denied),
+    );
     fixture.cleanup().await;
 }
 

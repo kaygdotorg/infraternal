@@ -662,7 +662,8 @@ impl MeshService {
         let id = node_id(request.node_id)?;
         let mut tx = self.begin_change().await?;
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
-        authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
+        let scope_requirements = require_each_scope(&scopes);
+        authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
         let changed = sqlx::query("UPDATE mesh_nodes SET last_seen=?,last_rtt_us=? WHERE id=?")
             .bind(now)
             .bind(
@@ -701,7 +702,8 @@ impl MeshService {
         let id = node_id(request.node_id)?;
         let mut tx = self.begin_change().await?;
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
-        authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
+        let scope_requirements = require_each_scope(&scopes);
+        authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
         let changed = sqlx::query("UPDATE mesh_nodes SET name=? WHERE id=?")
             .bind(&request.name)
             .bind(id)
@@ -733,7 +735,8 @@ impl MeshService {
         let id = node_id(request.node_id)?;
         let mut tx = self.begin_change().await?;
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
-        authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
+        let scope_requirements = require_each_scope(&scopes);
+        authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
         let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM mesh_grants WHERE (from_kind='node' AND from_value=?) OR (to_kind='node' AND to_value=?)")
             .bind(id.to_string()).bind(id.to_string()).fetch_one(&mut *tx).await.map_err(map_sql_error)?;
         sqlx::query("DELETE FROM mesh_grants WHERE (from_kind='node' AND from_value=?) OR (to_kind='node' AND to_value=?)")
@@ -1297,6 +1300,11 @@ async fn authorize(
     } else {
         Err(MeshApiError::Denied)
     }
+}
+
+/// Require a scoped node editor to hold access to every tag the edit can affect.
+fn require_each_scope(scopes: &[String]) -> Vec<Vec<String>> {
+    scopes.iter().map(|scope| vec![scope.clone()]).collect()
 }
 
 async fn endpoint_scopes(
