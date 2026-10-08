@@ -5,6 +5,9 @@ import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { installFocusRing } from "../../../packages/ui/src/focus-ring";
 import { mountOnboarding } from "./onboarding";
+import { BRAND_MARK } from "./auth-marks";
+import { loading } from "../../../packages/ui/src/countup";
+import { releaseAuthScheme, useAuthScheme } from "./auth-scheme";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
@@ -142,18 +145,35 @@ function installForegroundListener(): void {
   });
 }
 
+/** Applies the sign-in scheme (light or dark); the backdrop follows later scheme changes live. */
+const authLight = (): boolean => useAuthScheme((light) => backdrop?.setLight(light));
+
+/**
+ * The access card for a server that cannot be reached. It is the sign-in card with different words:
+ * the same mark, title, lede and full-width primary, through the sign-in card's own classes, so the
+ * mark, the lede-to-action gap and the padding cannot drift from it. The explanation is the lede (it is
+ * what the person reads next); pressing "Try again" shows the shared wait counter on the button.
+ */
 function renderUnavailable(message: string): void {
+  authLight();
   document.documentElement.removeAttribute("data-ui-font");
-  app.innerHTML = `<section class="auth-screen"><section class="auth-card auth-signin">
-    <div class="auth-mark">infraternal</div><h1>Could not reach the server</h1>
-    <p id="status-error" class="auth-message" role="alert"></p>
-    <button id="retry-status" class="auth-primary" type="button">Try again</button></section></section>`;
+  app.innerHTML = `<section class="auth-screen" aria-label="Server unavailable"><section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="unavailable-title">
+    <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
+    <h1 id="unavailable-title">Could not reach the server</h1>
+    <p id="status-error" class="auth-lede" role="alert"></p>
+    <button id="retry-status" class="auth-primary auth-login" type="button"><span>Try again</span><span class="busy-count" hidden></span></button></section></section>`;
   mustGet<HTMLElement>("#status-error").textContent = message;
-  mustGet<HTMLButtonElement>("#retry-status").addEventListener("click", () => { void refreshAuth(); }, { once: true });
+  const retry = mustGet<HTMLButtonElement>("#retry-status");
+  retry.addEventListener("click", () => {
+    retry.disabled = true;
+    loading(retry.querySelector<HTMLElement>(".busy-count")!, 400);
+    void refreshAuth();
+  }, { once: true });
   scheduleBackdrop();
 }
 
 function renderAuth(setupRequired: boolean, message = ""): void {
+  authLight();
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
     saveBrowserId("tracer.user-id", userId);
@@ -165,6 +185,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
 }
 
 function showWelcome(displayName: string, instant = false): void {
+  authLight();
   document.documentElement.removeAttribute("data-ui-font");
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
@@ -193,7 +214,7 @@ function startBackdrop(): void {
   canvas.style.opacity = "1";
   canvas.style.transition = "none";
   backdrop?.destroy();
-  backdrop = mountFaultyTerminal(canvas);
+  backdrop = mountFaultyTerminal(canvas, authLight());
 }
 
 function scheduleBackdrop(): void {
@@ -242,6 +263,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   welcomeEffect?.destroy();
   welcomeEffect = undefined;
   stopBackdrop(instant);
+  // The app paints its own theme; the sign-in scheme lets go once the backdrop has faded out.
+  window.setTimeout(() => { if (!app.querySelector(".auth-screen")) releaseAuthScheme(); }, instant ? 0 : 260);
   currentTerminal?.dispose();
   coreScreen?.dispose();
   performanceProbe?.dispose();
