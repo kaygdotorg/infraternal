@@ -140,6 +140,7 @@ export function applyTheme(active: Theme, root: HTMLElement, glassLevel = DEFAUL
   style.setProperty("--accent-soft", `rgb(${rgb(active.accent)} / 0.16)`);
   style.setProperty("--accent-fg", active.dark ? active.bg : "#ffffff");
   style.setProperty("--ok", active.ok);
+  style.setProperty("--warn", active.ansi[3]); // the theme's amber: slow links, approximate screens
   style.setProperty("--danger", active.ansi[1]);
   style.setProperty("--overlay", overlay.overlay);
   style.setProperty("--ui-overlay-halo", overlay.halo);
