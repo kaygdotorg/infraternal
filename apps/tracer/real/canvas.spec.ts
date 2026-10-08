@@ -22,6 +22,7 @@ test.beforeAll(async ({ browser }) => {
   // One signed-in page for the whole file: the tests continue where the last one stopped.
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 900 } });
   page = await context.newPage();
+  await enrol(page);
 });
 test.afterAll(async () => { await page?.context().close(); await server?.dispose(); });
 
@@ -81,8 +82,6 @@ async function type(page: Page, window: number, command: string): Promise<void> 
 }
 
 test("signing in shows the canvas with a Console view and one real shell", async () => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await enrol(page);
   await expect(page.locator('.cl[data-view="console"]')).toBeVisible();
   await expect(windows(page)).toHaveCount(1);
   await expect(page.locator("#terminal-host")).toHaveCount(1);
@@ -144,13 +143,16 @@ test("a page that opens and closes more than 32 windows keeps working: the conne
     await page.locator(".tab-add").click();
     await expect(windows(page)).toHaveCount(keep + 1);
     await expect.poll(() => live().at(-1)?.attached.size ?? 0, { timeout: 15_000 }).toBeGreaterThan(0);
-    await windows(page).last().locator('[data-action="close"]').click({ force: true });
-    await expect(windows(page)).toHaveCount(keep);
+    // Clicked from the page: the new window is still flying into view, and a pointer click would aim at where it was.
+    await windows(page).last().locator('[data-action="close"]').evaluate((b) => (b as HTMLElement).click());
+    await expect(windows(page), `closing window ${i}`).toHaveCount(keep);
   }
   expect(server.bridges.length).toBeGreaterThan(sockets); // rotated at least once
   // A window opened after the rotation still gets a real shell.
   await page.locator(".tab-add").click();
   await expect(windows(page)).toHaveCount(keep + 1);
+  // The terminal starts after the window exists (font and renderer load); the keys go to it once it has focus.
+  await expect(windows(page).last().locator(".terminal-host")).toBeFocused({ timeout: 15_000 });
   await page.keyboard.type("echo after-rotation-$((5*5))\n", { delay: 5 });
   await expect.poll(() => [...(live().at(-1)?.output.values() ?? [])].join(""), { timeout: 20_000 }).toContain("after-rotation-25");
 });
