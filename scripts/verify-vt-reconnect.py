@@ -109,10 +109,8 @@ def run_case(binary, name, fixture):
         client.send(1, 0x14, struct.pack('<I', 1024 * 1024))
         while not any(event.get('type') == 'terminal.snapshot_unavailable' for event in client.events):
             client.process()
+        client.ping(123, 456)
         assert not client.snapshots, 'legacy peer must not receive approximation'
-        client.send(0, 0x08, struct.pack('<QQ', 123, 456))
-        stream, kind, _ = client.read()
-        assert (stream, kind) == (0, 0x09), 'legacy Snapshot rejection must leave daemon live'
         print(f'reconnect {name}: legacy limitation parks live stream; Ping PASS', flush=True)
         release(hold)
         client.input(b"printf '\\033cLIVE_%s\\n' RESET\n")

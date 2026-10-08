@@ -177,8 +177,31 @@ class Binary:
         self.entered += len(data)
         return seq
 
-    def process(self, credit=True):
-        stream, kind, body = self.read()
+    def ping(self, nonce, sent_us):
+        """Wait for the correlated control reply within the original socket budget."""
+        expected = struct.pack('<QQ', nonce, sent_us)
+        self.send(0, 0x08, expected)
+        timeout = self.sock.gettimeout()
+        assert timeout is not None, 'control probe requires a bounded socket'
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, 'control reply exceeded the socket budget'
+                self.sock.settimeout(remaining)
+                frame = self.read()
+                if frame[:2] == (0, 0x09):
+                    assert frame[2] == expected, 'Pong did not match the request'
+                    return
+                # Retry handshakes can publish Ack or recovery metadata before
+                # a later Ping. Preserve their cursor/event validation and reject
+                # Close, rather than assuming Pong is the very next mux frame.
+                self.process(frame=frame)
+        finally:
+            self.sock.settimeout(timeout)
+
+    def process(self, credit=True, frame=None):
+        stream, kind, body = self.read() if frame is None else frame
         assert stream == 1, (stream, kind)
         if kind == 0x11:
             seq = struct.unpack('<Q', body[:8])[0]
