@@ -71,6 +71,8 @@ function mix(left: string, right: string, amount: number): string {
 
 export interface OverlayMaterial {
   overlay: string;
+  /** The tint at 0.9: a soft halo behind text on the material, so contrast comes from the halo and not from more tint. */
+  halo: string;
   /** Large floating panels (the sidebar): thinner than pills so content visibly blurs through. */
   overlayPanel: string;
   overlaySolid: string;
@@ -83,14 +85,15 @@ export interface OverlayMaterial {
 /** Keeps dark glass close to its palette and computes the same alpha composite used by the contrast audit. */
 /**
  * How much of the page shows through the one floating-card material, from 1 (thickest) to 4
- * (thinnest): the fill's opacity on a dark and on a light theme, and the blur in pixels. Level 3 is
- * the default; `?glass=1..4` picks another so the owner can compare them side by side.
+ * (thinnest): the fill's opacity on a dark and on a light theme, and the blur in pixels. Transparency
+ * comes from a low tint with a small blur: a big blur erases what is behind and reads as opaque however
+ * low the tint. Level 3 is the default; `?glass=1..4` picks another so the owner can compare them.
  */
 export const GLASS_LEVELS: Record<number, { dark: number; light: number; blur: number }> = {
-  1: { dark: 0.5, light: 0.58, blur: 14 },
-  2: { dark: 0.4, light: 0.48, blur: 12 },
-  3: { dark: 0.3, light: 0.38, blur: 10 },
-  4: { dark: 0.2, light: 0.28, blur: 8 },
+  1: { dark: 0.3, light: 0.38, blur: 10 },
+  2: { dark: 0.3, light: 0.38, blur: 6 },
+  3: { dark: 0.22, light: 0.3, blur: 4 },
+  4: { dark: 0.14, light: 0.22, blur: 4 },
 };
 export const DEFAULT_GLASS = 3;
 
@@ -109,6 +112,7 @@ export function overlayMaterial(active: Theme, level = DEFAULT_GLASS): OverlayMa
 
   return {
     overlay: `rgb(${rgb(tinted)} / ${opacity})`,
+    halo: `rgb(${rgb(tinted)} / 1)`,
     overlayPanel: `rgb(${rgb(tinted)} / ${opacity})`,
     overlaySolid: mix(active.bg, "#ffffff", active.dark ? 0.07 : 0.7),
     overlayLine: `rgb(${rgb(active.fg)} / 0.09)`,
@@ -138,6 +142,7 @@ export function applyTheme(active: Theme, root: HTMLElement, glassLevel = DEFAUL
   style.setProperty("--ok", active.ok);
   style.setProperty("--danger", active.ansi[1]);
   style.setProperty("--overlay", overlay.overlay);
+  style.setProperty("--ui-overlay-halo", overlay.halo);
   style.setProperty("--overlay-panel", overlay.overlayPanel);
   style.setProperty("--overlay-solid", overlay.overlaySolid);
   style.setProperty("--overlay-line", overlay.overlayLine);

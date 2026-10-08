@@ -16,7 +16,7 @@
 
 /* The one material's blur and saturation: surfaces and pills read these two tokens, so tuning them
    here tunes every floating thing at once. */
-:root { --ui-overlay-blur: 14px; --ui-overlay-saturation: 160%; }
+:root { --ui-overlay-blur: 4px; --ui-overlay-saturation: 160%; }
 
 /* One theme-aware glass material for every floating surface (D72, D160): popovers, sheets,
    palette, sidebar and tooltips, never in-page controls. No top-edge highlight (TASTE §1).
@@ -26,9 +26,16 @@
   border: 1px solid var(--ui-overlay-border, var(--overlay-line));
   box-shadow: var(--ui-overlay-shadow, var(--shadow));
   color: var(--ui-overlay-color, var(--fg));
+  /* A soft halo in the tint colour keeps text legible over a dense terminal without adding tint. */
+  text-shadow: 0 0 1px var(--ui-overlay-halo, transparent), 0 0 2px var(--ui-overlay-halo, transparent), 0 0 3px var(--ui-overlay-halo, transparent), 0 0 4px var(--ui-overlay-halo, transparent), 0 0 6px var(--ui-overlay-halo, transparent), 0 0 10px var(--ui-overlay-halo, transparent);
   -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
   backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
 }
+/* On the thin material secondary text is a step stronger than on a page (contrast over a busy terminal comes
+   from text colour and the halo, never from more tint). */
+.ui-overlay-surface, .ui-panel { --ui-text-secondary: color-mix(in oklab, var(--fg) 80%, var(--bg)); }
+/* Form controls reset text-shadow in the browser's own styles; they take the halo too. */
+.ui-overlay-surface :is(button, input, textarea, select) { text-shadow: inherit; }
 .ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
 .ui-button {
   min-height: var(--ui-button-height, 44px);
