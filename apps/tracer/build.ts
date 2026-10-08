@@ -13,7 +13,8 @@ const build = await Bun.build({
   entrypoints: ["src/main.ts", "../../packages/ui/src/backdrop.worker.ts", "../../packages/ui/src/faulty-terminal.worker.ts"],
   outdir: "dist",
   naming: { entry: "[name].js" },
-  minify: true,
+  // TRACER_BUILD_READABLE=1 keeps function names, so a CPU profile of the per-key bench can be read.
+  minify: process.env.TRACER_BUILD_READABLE !== "1",
   target: "browser",
   splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
   define: { __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode) },
