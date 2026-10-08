@@ -8,7 +8,7 @@ import { gunzipSync } from "node:zlib";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
-import { serveProvisioning } from "./provisioning-double";
+import { handleBootstrapHttp, serveProvisioning } from "./provisioning-double";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 
 const HOST = "localhost";
@@ -171,6 +171,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method === "GET" && url.pathname === "/health") {
     return sendJson(response, 200, { ok: true });
   }
+  if (await handleBootstrapHttp(request, response, url.pathname, sameOrigin(request) || request.method === "GET" ? isAuthenticated(request) : false)) return;
   if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
     return sendJson(response, 200, { hosts: prototypeHosts });
   }

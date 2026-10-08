@@ -322,7 +322,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
       canvas: canvasMode || clustersMode,
-      addHostEntry: canvasMode || clustersMode,
+      // The clusters canvas registers its own "Add hosts" row with the wizard (canvas/addhost).
+      addHostEntry: canvasMode,
       ...(clustersMode ? { settingsView: true } : {}),
       ...(identity?.display_name ? { displayName: identity.display_name } : {}),
       ...(identity?.username ? { username: identity.username } : {}),

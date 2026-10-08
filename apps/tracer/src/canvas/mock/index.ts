@@ -15,6 +15,9 @@ import { boxOf, type Metrics } from "../layout/geometry";
 import { MemoryCanvasStore } from "../model/store";
 import type { ViewId } from "../model/types";
 import { el } from "../dom";
+import { createAddHost } from "../addhost";
+import type { EnrolledHost } from "../addhost/service";
+import { createMockProvisioning } from "./addhost-service";
 import { CONTAINERS, INITIAL_GRANTS, buildViews, type Role } from "./data";
 import { createMockMesh } from "./mesh";
 import { createMockSessions } from "./sessions";
@@ -37,13 +40,26 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const events = new AbortController();
   const signal = events.signal;
 
+  // The add-host wizard runs on the real adapter against the test double. A host that finishes enrolling gets a
+  // shell window in Console, which is also how the sidebar inventory learns of it (the tree lists windows).
+  const addHost = createAddHost(core, {
+    service: createMockProvisioning({ savedKey: new URLSearchParams(location.search).get("savedkey") === "1" }),
+    sink: { enrolled: (hosts) => enrol(hosts) },
+  });
+  function enrol(hosts: EnrolledHost[]): void {
+    for (const host of hosts) {
+      if (!world.screens.has(host.name)) world.screens.set(host.name, { os: host.os, user: host.user ?? "kayg", screen: [`${host.user ?? "kayg"}@${host.name}:~$ `] });
+      canvas.cx.win.open(host.name);
+    }
+  }
+
   const canvas: CanvasController = createCanvas(core, {
     float: true,
     dots: new URLSearchParams(location.search).get("dots") !== "0",
     adapters: {
       sessions, mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
-      addHost: () => core.toast.show({ message: "Add host is its own mockup (proto=addhost)." }),
+      addHost: () => addHost.open(),
     },
   });
   const cx = canvas.cx;
@@ -141,7 +157,6 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     else if (kind === "scene" && value) goScene(Number(value) - 1);
     else if (kind === "role" && value) { world.role = value as Role; world.forcedRole = true; goScene(4); window.setTimeout(showContinueChip, 900); }
     else if (kind === "later") core.toast.show({ message: "Remote desktop arrives later.", tone: "ok" });
-    else if (kind === "addhost") core.toast.show({ message: "Add host is its own mockup (proto=addhost)." });
   }, { signal });
 
   // ---- live-looking content -------------------------------------------------------------------------
@@ -197,6 +212,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       removeProvider();
       mockupTag.remove();
       chip?.remove();
+      addHost.dispose();
       canvas.dispose();
       sessions.dispose();
       delete (window as unknown as { __tracerClusters?: unknown }).__tracerClusters;
