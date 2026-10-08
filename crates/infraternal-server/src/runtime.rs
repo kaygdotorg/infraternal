@@ -188,8 +188,17 @@ pub(crate) async fn serve_with_bootstrap(
     config: ServerConfig,
     factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
 ) -> Result<(), ServerError> {
+    serve_with_key_setup(config, factory, None).await
+}
+
+pub(crate) async fn serve_with_key_setup(
+    config: ServerConfig,
+    factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
+    key_setup: Option<crate::bootstrap_runtime::KeyInitialization>,
+) -> Result<(), ServerError> {
     init_logging();
-    let (app, setup_token) = build_router_with_bootstrap(config.clone(), None, factory).await?;
+    let (app, setup_token) =
+        build_router_with_key_setup(config.clone(), None, factory, key_setup).await?;
     if let Some(token) = setup_token {
         start_setup_token_socket(&config.data_dir, token)?;
     }
@@ -247,10 +256,20 @@ async fn build_router(
     build_router_with_bootstrap(config, supplied_agent, None).await
 }
 
+#[cfg(test)]
 async fn build_router_with_bootstrap(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
     factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
+) -> Result<(Router, Option<String>), ServerError> {
+    build_router_with_key_setup(config, supplied_agent, factory, None).await
+}
+
+async fn build_router_with_key_setup(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+    factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
+    key_setup: Option<crate::bootstrap_runtime::KeyInitialization>,
 ) -> Result<(Router, Option<String>), ServerError> {
     validate_config(&config)?;
     if let Some(web_root) = &config.web_root
@@ -298,17 +317,45 @@ async fn build_router_with_bootstrap(
     // A single runner owns concurrency across all sockets. The factory receives
     // this live Auth (including revocation state) and this migrated database,
     // never a second authenticator or enrollment store [23][138][168].
-    let bootstrap = match factory {
-        Some(factory) => factory(auth.clone(), pool.clone()),
-        None => crate::bootstrap_runtime::default_runner(&config.data_dir)?,
-    };
+    let (bootstrap, ssh_key): (_, Arc<dyn crate::ssh_key::SshKeySource>) =
+        if let Some(setup) = key_setup {
+            let key = Arc::new(
+                crate::ssh_key::StoredSshKey::initialize(&pool, setup.vault.as_ref())
+                    .await
+                    .map_err(|_| ServerError::InvalidConfiguration)?,
+            );
+            (
+                (setup.factory)(auth.clone(), pool.clone(), key.clone()),
+                key,
+            )
+        } else {
+            let key: Arc<dyn crate::ssh_key::SshKeySource> =
+                match crate::ssh_key::StoredSshKey::cold_start(&pool)
+                    .await
+                    .map_err(|_| ServerError::InvalidConfiguration)?
+                {
+                    Some(key) => Arc::new(key),
+                    None => Arc::new(crate::ssh_key::UnavailableSshKey),
+                };
+            let bootstrap = match factory {
+                Some(factory) => factory(auth.clone(), pool.clone()),
+                None => crate::bootstrap_runtime::default_runner(
+                    &config.data_dir,
+                    auth.clone(),
+                    key.clone(),
+                )?,
+            };
+            (bootstrap, key)
+        };
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent);
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
         .merge(auth::router(auth.clone()))
         .merge(websocket::router(ws_state))
-        .merge(crate::bootstrap_api::router(auth, bootstrap));
+        .merge(crate::bootstrap_api::router_with_ssh_key(
+            auth, bootstrap, ssh_key,
+        ));
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
     } else {

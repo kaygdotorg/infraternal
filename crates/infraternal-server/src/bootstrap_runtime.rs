@@ -1,15 +1,20 @@
 //! Provides a fail-closed default until #78 supplies production enrollment, discovery/vault and remote readiness adapters.
 
-use crate::{ServerConfig, ServerError, auth::Auth};
+use crate::{
+    ServerConfig, ServerError,
+    auth::Auth,
+    ssh_key::{SshKeySource, SshKeyVault, StoredSshKey},
+};
 use sqlx::SqlitePool;
 
 use infraternal_plugin_ssh::{
+    auth_order::{AuthProvider, AutoAuth, NetworkProvider},
     bootstrap::{Authority, Backend, Bootstrap, Resolved},
     install::{BinaryPaths, JoinMaterial},
-    model::{Destination, Failure, FailureKind, MeshEvidence, Target, TargetAddress},
+    model::{Destination, Failure, MeshEvidence, Target, TargetAddress},
     openssh::OpenSsh,
     probe::Check,
-    transport::{Credentials, Operation},
+    transport::{Credentials, Operation, Secret},
 };
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -27,11 +32,39 @@ pub async fn serve_with_bootstrap(
     crate::runtime::serve_with_bootstrap(config, Some(factory)).await
 }
 
+/// Trusted administrator-envelope custody is injected by the same integration
+/// boundary as #78's CA source. Server startup generates once and stays locked.
+/// Ordinary owner/browser login never unwraps either signing identity.
+pub struct KeyInitialization {
+    /// Wrap for current administrators through their existing custody adapter.
+    pub vault: Arc<dyn SshKeyVault>,
+    /// Retain this exact source so administrator unlock, Settings and SSH share a lock.
+    pub factory: KeyBootstrapFactory,
+}
+
+/// Shares one cold-locked source between Settings, administrator unlock and SSH.
+pub type KeyBootstrapFactory =
+    Box<dyn FnOnce(Auth, SqlitePool, Arc<StoredSshKey>) -> Bootstrap + Send>;
+
+/// Initialize dedicated encrypted SSH custody and serve with the trusted remote runtime.
+/// # Errors
+/// Refuses unavailable administrator envelopes and existing sanitized startup errors.
+pub async fn serve_with_provisioning(
+    config: ServerConfig,
+    setup: KeyInitialization,
+) -> Result<(), ServerError> {
+    crate::runtime::serve_with_key_setup(config, None, Some(setup)).await
+}
+
 /// Manual server-identity checks work now; missing trusted integration never permits mutation.
-pub(crate) fn default_runner(data_dir: &Path) -> Result<Bootstrap, ServerError> {
+pub(crate) fn default_runner(
+    data_dir: &Path,
+    auth: Auth,
+    key: Arc<dyn SshKeySource>,
+) -> Result<Bootstrap, ServerError> {
     let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
     Ok(Bootstrap::new(
-        Arc::new(OpenSsh {
+        Arc::new(AutoAuth::new(Arc::new(OpenSsh {
             ssh: "ssh".into(),
             ssh_agent: "ssh-agent".into(),
             ssh_add: "ssh-add".into(),
@@ -40,8 +73,11 @@ pub(crate) fn default_runner(data_dir: &Path) -> Result<Bootstrap, ServerError> 
             askpass_binary: executable.clone(),
             scratch: data_dir.join("ssh"),
             command_timeout: Duration::from_secs(30),
+        }))),
+        Arc::new(PendingRemoteRuntime {
+            auth: Some(auth),
+            key,
         }),
-        Arc::new(PendingRemoteRuntime),
         BinaryPaths {
             x86_64: std::env::var_os("INFRATERNAL_BOOTSTRAP_X86_64_BINARY").map_or_else(
                 || executable.with_file_name("infraternal-x86_64-musl"),
@@ -55,21 +91,18 @@ pub(crate) fn default_runner(data_dir: &Path) -> Result<Bootstrap, ServerError> 
     ))
 }
 
-struct PendingRemoteRuntime;
+struct PendingRemoteRuntime {
+    auth: Option<Auth>,
+    key: Arc<dyn SshKeySource>,
+}
 impl Backend for PendingRemoteRuntime {
     fn resolve<'a>(
         &'a self,
-        _: &'a Authority,
+        authority: &'a Authority,
         target: &'a Target,
-        credential: Option<&'a str>,
+        _: Option<&'a str>,
     ) -> Operation<'a, Resolved> {
         Box::pin(async move {
-            if credential.is_some() {
-                return Err(Failure::new(
-                    FailureKind::Auth,
-                    "The unlocked SSH credential vault is unavailable in this build.",
-                ));
-            }
             let TargetAddress::Manual(address) = &target.address else {
                 return Err(Failure::unsupported(
                     "Host discovery is unavailable in this build. Use an SSH address.",
@@ -77,7 +110,17 @@ impl Backend for PendingRemoteRuntime {
             };
             Ok(Resolved {
                 destination: Destination::parse(address)?,
-                credentials: Credentials::Network,
+                // Vault selectors are not resolved ahead of earlier methods.
+                // Until a browser unlock/vault adapter is present, later inputs
+                // are absent and exhaustion yields the typed choose-method result.
+                credentials: Credentials::Automatic(Arc::new(ServerAuthentication {
+                    auth: self.auth.clone(),
+                    key: self.key.clone(),
+                    owner: authority.owner.clone(),
+                    session: authority
+                        .session()
+                        .map(|session| Secret::new(session.expose().to_vec())),
+                })),
                 mesh: MeshEvidence::default(),
             })
         })
@@ -104,6 +147,60 @@ impl Backend for PendingRemoteRuntime {
         not_ready()
     }
 }
+/// The exact queued browser capability is checked immediately before exporting
+/// signing material; Settings access and owner status never unlock a cold key.
+struct ServerAuthentication {
+    auth: Option<Auth>,
+    key: Arc<dyn SshKeySource>,
+    owner: String,
+    session: Option<Secret>,
+}
+impl AuthProvider for ServerAuthentication {
+    fn network(&self) -> Option<NetworkProvider> {
+        None
+    }
+    fn server_key(&self) -> Operation<'_, Option<Credentials>> {
+        Box::pin(async move {
+            let (Some(auth), Some(session)) = (&self.auth, &self.session) else {
+                return Ok(None);
+            };
+            let token = std::str::from_utf8(session.expose())
+                .map_err(|_| Failure::unsupported("The bootstrap session is unavailable."))?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|time| i64::try_from(time.as_secs()).ok())
+                .ok_or_else(|| Failure::install("The server clock is unavailable."))?;
+            if !auth
+                .bootstrap_owner(token, now)
+                .await
+                .is_ok_and(|owner| owner == self.owner)
+            {
+                // Revoked authority stops all fallback, rather than admitting a
+                // later browser key/password after a permission failure.
+                return Err(Failure::unsupported(
+                    "The bootstrap session is no longer authorized.",
+                ));
+            }
+            self.key
+                .load()
+                .ok()
+                .map(|key| {
+                    key.credentials().map_err(|_| {
+                        Failure::install("The dedicated server SSH key is unavailable.")
+                    })
+                })
+                .transpose()
+        })
+    }
+    fn user_key(&self) -> Operation<'_, Option<Credentials>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn password(&self) -> Operation<'_, Option<Credentials>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
 fn not_ready<'a>() -> Operation<'a, ()> {
     Box::pin(async {
         Err(Failure::install(
@@ -117,7 +214,7 @@ mod tests {
     //! Checks the unavailable integration against a transport that permits only the read-only sniff.
     use super::*;
     use infraternal_plugin_ssh::{
-        model::{InstallMode, Step},
+        model::{FailureKind, InstallMode, Step},
         probe::CHECK_SCRIPT,
         transport::{CommandOutput, Input, SshSession, SshTransport},
     };
@@ -152,8 +249,11 @@ mod tests {
     #[tokio::test]
     async fn pending_integration_refuses_enrollment_vault_and_discovery() {
         let runner = Bootstrap::new(
-            Arc::new(CheckOnly),
-            Arc::new(PendingRemoteRuntime),
+            Arc::new(AutoAuth::new(Arc::new(CheckOnly))),
+            Arc::new(PendingRemoteRuntime {
+                auth: None,
+                key: Arc::new(crate::ssh_key::UnavailableSshKey),
+            }),
             BinaryPaths {
                 x86_64: "must-not-read".into(),
                 aarch64: "must-not-read".into(),
@@ -168,7 +268,7 @@ mod tests {
             (
                 TargetAddress::Manual("user@fixture".into()),
                 Some("vault".into()),
-                FailureKind::Auth,
+                FailureKind::Install,
             ),
             (
                 TargetAddress::Discovered("inventory".into()),
