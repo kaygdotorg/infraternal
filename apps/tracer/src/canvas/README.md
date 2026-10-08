@@ -56,7 +56,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `ProvisioningService` (`addhost/service.ts`) | `real.ts`: `/v1/bootstrap/ws` and `/v1/bootstrap/ssh-key` of contracts/ssh-bootstrap.md, plus the endpoints proposed on #87; mockups: the same adapter against the test double | one service, no change |
 | `AddHostSink` (`addhost/service.ts`) | mockups: opens a Console window for each enrolled host (`cx.win.open`), which is how the sidebar tree learns of it | the sessions service adds the host to `hosts()` and calls `onChange`, then `cx.win.open(host)` |
 | `Adapters.containers` | absent in the product (view not offered) | host API |
-| `Adapters.addHost` | `createAddHost(...).open` in mockups; the product mounts it the same way once it passes a `ProvisioningService` and a sink | add-host flow (#78, #87) |
+| `Adapters.addHost` | `createAddHost(...).open` in mockups. Not in the product yet: mounting it in `product.ts` (real service, empty sink) adds 15.6 KB gzip to the deferred budget (62,812 of 51,200), which is the owner's call (D188) | add-host flow (#78, #87) |
 
 A feature whose adapter is missing is **not offered at all** (no view, no button, no palette row). The product
 never shows mockup UI.
