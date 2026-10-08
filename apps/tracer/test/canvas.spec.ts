@@ -419,10 +419,20 @@ test("lock: the icon appears near a window's top edge, locks with a click, stays
     return { lockLeft: l.left, pillRight: p.right, size: l.width };
   });
   expect(geometry.lockLeft).toBeGreaterThanOrEqual(geometry.pillRight);
+  // On the frame: the chip's top edge is the window's top border line, and it is centred.
+  const frame = await page.evaluate(() => {
+    const l = document.querySelector(".ui-window-lock")!.getBoundingClientRect();
+    const w = document.querySelector(".ui-window")!.getBoundingClientRect();
+    return { top: l.top - w.top, centre: Math.abs((l.left + l.width / 2) - (w.left + w.width / 2)) };
+  });
+  expect(Math.abs(frame.top)).toBeLessThan(0.6);
+  // Centred, except when the title pill reaches past the middle: then it sits just right of the pill.
+  expect(frame.centre < 1 || geometry.lockLeft - geometry.pillRight < 10).toBe(true);
+  await expect(lock).toHaveAttribute("data-tip", "Lock input");
   await lock.click();
   await expect(window0).toHaveAttribute("data-locked", "");
   await expect(lock).toHaveAttribute("aria-pressed", "true");
-  await expect(lock).toHaveAttribute("data-tip", /^Locked: input stays in this window · .*Ctrl\+Shift\+L to unlock$/);
+  await expect(lock).toHaveAttribute("data-tip", "Unlock input");
   // Persistent: it stays visible with the pointer far away.
   await page.mouse.move(box.x + box.width / 2, box.y + 500);
   await expect(lock).toHaveCSS("opacity", "0.9");
@@ -498,7 +508,7 @@ test("lock: on macOS, ⌘K still opens the palette while locked and offers Unloc
   await openCanvas(page);
   await page.keyboard.press("Control+Shift+KeyL");
   await expect(page.locator(".ui-window").first()).toHaveAttribute("data-locked", "");
-  await expect(page.locator(".ui-window-lock").first()).toHaveAttribute("data-tip", /⌘K or Ctrl\+Shift\+L to unlock/);
+  await expect(page.locator(".ui-window-lock").first()).toHaveAttribute("data-tip", "Unlock input");
   // Ctrl+K belongs to the terminal on a Mac too (kill-line); ⌘K is the palette.
   await page.keyboard.press("Control+k");
   await expect(page.locator("#palette")).toBeHidden();

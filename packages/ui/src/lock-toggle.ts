@@ -12,13 +12,13 @@
  *   it starts lifted and tilted, drops and snaps shut. Unlocking plays it in reverse from
  *   wherever it is (interruptible, velocity kept). Reduced motion: no shackle travel, a short
  *   crossfade of the whole icon instead.
- * - The warm tooltip names the action and, once locked, how to leave.
+ * - It sits on the window's frame: its top edge is the frame's top line, centred (styles.css).
+ * - The warm tooltip is short and literal: "Lock input" / "Unlock input".
  *
  *   const lock = createLockToggle({ onToggle: (next, source) => … });
  *   card.append(lock.root); lock.setLocked(true);
  */
 import { Spring } from "./spring";
-import { isMacPlatform } from "./platform";
 
 export type LockSource = "pointer" | "keyboard";
 
@@ -42,9 +42,10 @@ const SHACKLE = '<path class="ui-lock-shackle" d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"
 const PIVOT_X = 8.5, PIVOT_Y = 11;
 const LIFT = 3, TILT = 22;
 
+/** Short and literal; the chord that leaves the lock is in the shortcuts view and the palette. */
 export const lockLabel = (locked: boolean): string => locked
-  ? `Locked: input stays in this window · ${isMacPlatform() ? "⌘K or Ctrl+Shift+L" : "Ctrl+Shift+L"} to unlock`
-  : "Lock to this window";
+  ? "Unlock input"
+  : "Lock input";
 
 export function createLockToggle(options: LockToggleOptions): LockToggle {
   const root = document.createElement("button");
