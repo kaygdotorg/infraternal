@@ -43,6 +43,9 @@ use tokio_tungstenite::{
 use tower::ServiceExt;
 
 pub(super) static SERIAL: Mutex<()> = Mutex::const_new(());
+#[path = "socket_clock.rs"]
+mod socket_clock;
+use socket_clock::FrozenSocketTime;
 const NOW: i64 = 1_800_000_000;
 const ORIGIN: &str = "https://auth.example.test";
 
@@ -1713,6 +1716,25 @@ where
             Message::Text(_) => panic!("server sent a text websocket message"),
         }
     }
+}
+
+/// Observe authority loss, rather than treating any completed read as a Close.
+async fn assert_socket_closed<S>(socket: &mut S)
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let next = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match socket.next().await {
+                // RFC Pong is transport housekeeping, never authority-bearing output.
+                Some(Ok(Message::Pong(_))) => {}
+                next => break next,
+            }
+        }
+    })
+    .await
+    .expect("socket must close");
+    assert!(matches!(next, None | Some(Ok(Message::Close(_)) | Err(_))));
 }
 
 async fn read_partial_terminal<S>(socket: &mut S) -> (Vec<u8>, bool)
