@@ -559,3 +559,34 @@ test("droplet split: a goo layer exists only while it runs, the gap pulls past i
   // Both windows are plain frames again, with their content, at rest.
   await expect(page.locator('.ui-window[data-goo]')).toHaveCount(0);
 });
+
+test("closing re-tiles: the remaining window of a column takes the whole column (bottom closed, then top closed)", async ({ page }) => {
+  for (const [closeId, keepId] of [["w-edge-arm", "w-nix-cache"], ["w-nix-cache", "w-edge-arm"]] as const) {
+    await open(page, 3);
+    const colH = await page.locator(`.ui-window[data-window-id="${keepId}"]`).evaluate((n) => (n.parentElement as HTMLElement).clientHeight - 28);
+    const half = await page.locator(`.ui-window[data-window-id="${keepId}"]`).evaluate((n) => n.getBoundingClientRect().height);
+    expect(half).toBeLessThan(colH * 0.75); // the pair is stacked, one is not the whole column
+    await page.locator(`.ui-window[data-window-id="${closeId}"] [data-action="close"]`).click();
+    await expect(page.locator(`.ui-window[data-window-id="${closeId}"]`)).toHaveCount(0);
+    await expect.poll(() => page.locator(`.ui-window[data-window-id="${keepId}"]`).evaluate((n) => Math.abs(n.getBoundingClientRect().height - ((n.parentElement as HTMLElement).clientHeight - 28))), { timeout: 4000 }).toBeLessThan(2);
+    // No leftover inline height, and no transform left behind once it has settled.
+    await expect.poll(() => page.locator(`.ui-window[data-window-id="${keepId}"]`).evaluate((n) => (n as HTMLElement).style.transform)).toBe("");
+  }
+});
+
+test("closing the last window of a column removes the column, its neighbours close the gap, and the canvas lock re-snaps", async ({ page }) => {
+  await open(page, 3);
+  const stopsBefore = (await probe(page, (p) => p.canvasLock())).stops;
+  const colCount = await page.locator('.cl[data-view="console"] .cl-col').count();
+  const rightBefore = (await page.locator('.ui-window[data-window-id="w-nix-cache"]').boundingBox())!.x;
+  await page.locator('.ui-window[data-window-id="w-build-01"] [data-action="close"]').click();
+  await expect(page.locator('.cl[data-view="console"] .cl-col')).toHaveCount(colCount - 1);
+  // The column to its right slides left into the gap, on the camera's re-snapped stop.
+  await expect.poll(async () => (await page.locator('.ui-window[data-window-id="w-nix-cache"]').boundingBox())!.x, { timeout: 4000 }).toBeLessThan(rightBefore - 100);
+  const after = await probe(page, (p) => p.canvasLock());
+  expect(after.on).toBe(true);
+  expect(after.stops).toBeLessThanOrEqual(stopsBefore);
+  // A column with one window has it fill the column.
+  const fills = await page.locator('.cl[data-view="console"] .cl-col').evaluateAll((cols) => cols.map((c) => { const wins = [...c.querySelectorAll<HTMLElement>(":scope > .ui-window")]; if (wins.length > 1) return 0; /* a stacked pair scrolls by design */ const used = wins.reduce((s, w) => s + w.getBoundingClientRect().height, 0) + (wins.length - 1) * 12; return Math.abs(used - ((c as HTMLElement).clientHeight - 28)); }));
+  for (const f of fills) expect(f).toBeLessThan(2);
+});

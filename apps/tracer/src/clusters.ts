@@ -1228,15 +1228,30 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     const finish = (): void => {
       const before = flipMeasure(flipTargets(c));
       c.wins.delete(rec.model.id);
-      const colEl = root.parentElement;
+      const colEl = root.parentElement as HTMLElement | null;
+      const freed = root.offsetHeight + COLUMN_GAP;
       rec.stopResize?.();
       root.remove();
-      if (colEl && !colEl.children.length) colEl.remove();
+      // The structure re-tiles: what remains in the column takes the freed height, an emptied column goes
+      // and its neighbours close the gap. Everything animates as one move (a FLIP on the same spring as
+      // every other layout move); the terminal refits once, at the new size.
+      if (colEl) {
+        const rest = [...colEl.querySelectorAll<HTMLElement>(":scope > .ui-window")];
+        if (!rest.length) colEl.remove();
+        else if (rest.length === 1) { rest[0]!.style.height = ""; rest[0]!.style.flex = ""; }
+        else {
+          const total = rest.reduce((sum, w) => sum + w.offsetHeight, 0) + (rest.length - 1) * COLUMN_GAP;
+          const k = (total + freed) / total;
+          for (const w of rest) { w.style.height = `${Math.round(w.offsetHeight * k)}px`; w.style.flex = "none"; }
+        }
+      }
       geometry(c);
       paintEmpty(c);
       settle(c.view.id);
       flipPlay(before, true);
       renderTree();
+      // The view's stops changed: the camera re-snaps (canvas lock) to the nearest one that still exists.
+      if (canvasLock && currentView === c.view.id && clusters.has(c.view.id)) goStop(c, nearestStop(c, cam.cx));
     };
     if (reduced.matches) { finish(); return; }
     root.style.pointerEvents = "none";
