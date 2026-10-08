@@ -1,3 +1,4 @@
+<!-- Public plugin, action, event and stream contract [3,15,16,29]. -->
 # Contract: plugins and actions
 
 Status: draft for #10. Implements DECISIONS 3, 15, 16 and 29.
@@ -114,6 +115,13 @@ event bus on the server fans events out to:
 - notifications (ntfy, gotify; later the APNs relay).
 
 The UI never polls. Live counts in the sidebar tree come from events.
+
+The core Mesh inventory is not a plugin, but its live view uses the same
+control-stream `Subscribe`/`Event` frames. Subscribe with
+`{"topic":"mesh","tag"?:string}` to receive an initial filtered snapshot,
+revision invalidations, and a resync snapshot if the bounded change buffer
+overflows. Authorization is checked for each viewer. The event shapes and
+tag-filter behavior are specified in [contracts/mesh-api.md](mesh-api.md).
 
 ## 6. Streams
 
