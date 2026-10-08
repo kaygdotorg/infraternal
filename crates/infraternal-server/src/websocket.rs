@@ -1,7 +1,10 @@
 //! Authenticates browser sockets, resumes connections, and relays user-owned terminal streams [19][41][50].
 
-use crate::auth::Auth;
 use crate::embedded::{AttachmentHandle, EmbeddedAgent, TerminalOutput, TerminalSize};
+use crate::{
+    auth::Auth,
+    mesh_api::{MeshApiError, MeshChange, MeshFilter, MeshService},
+};
 use axum::{
     Router,
     extract::{
@@ -19,7 +22,7 @@ use infraternal_protocol::{
 };
 use rand::random;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use std::{
@@ -62,6 +65,7 @@ const MAX_CREDIT: u64 = 8 * 1024 * 1024;
 pub(crate) struct WebSocketState {
     auth: Auth,
     pool: SqlitePool,
+    mesh: MeshService,
     agent: EmbeddedAgent,
     #[cfg(test)]
     handshake_timeout: Duration,
@@ -76,9 +80,11 @@ pub(crate) struct WebSocketState {
 impl WebSocketState {
     /// Create bounded socket admission around the configured auth and agent services.
     pub(crate) fn new(auth: Auth, pool: SqlitePool, agent: EmbeddedAgent) -> Self {
+        let mesh = MeshService::new(pool.clone());
         Self {
             auth,
             pool,
+            mesh,
             agent,
             #[cfg(test)]
             handshake_timeout: HANDSHAKE_TIMEOUT,
@@ -206,6 +212,8 @@ async fn run_socket(
     let mut recovery_events = state.auth.recovery_events();
     let mut recovery_subscribed = false;
     let mut recovery_snapshot = RecoverySnapshot::Unread;
+    let mut mesh_updates = state.mesh.subscribe();
+    let mut mesh_subscriptions = HashMap::<u32, MeshFilter>::new();
     let mut revocations = state.auth.revocation_events();
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
@@ -287,6 +295,19 @@ async fn run_socket(
                     send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
                 ).await.is_err() { break; }
             }
+            change = mesh_updates.recv(), if !mesh_subscriptions.is_empty() => {
+                let outcome = match change {
+                    Ok(change) => while_authorized(&state, &user_id, &session_token, true,
+                        send_mesh_change(&state, &user_id, &change, &mut mesh_subscriptions, &mut sink, &mut encode)
+                    ).await,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => while_authorized(
+                        &state, &user_id, &session_token, true,
+                        send_mesh_resync(&state, &user_id, &mut mesh_subscriptions, &mut sink, &mut encode)
+                    ).await,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
+                };
+                if outcome.is_err() { loop_result = Err(()); break; }
+            }
             changed = revocations.changed() => {
                 if changed.is_err() { break; }
                 let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
@@ -340,6 +361,7 @@ async fn run_socket(
                             &user_id,
                             &session_token,
                             &connection_id,
+                            &mut mesh_subscriptions,
                             &mut attachments,
                             &output_tx,
                             &mut sink,
@@ -470,6 +492,120 @@ where
     )
     .await?;
     *last = RecoverySnapshot::Read(pending);
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MeshSubscribeFilter {
+    topic: String,
+    #[serde(default)]
+    tag: Option<String>,
+}
+
+fn mesh_error_event(error: MeshApiError) -> Value {
+    let message = match error {
+        MeshApiError::InvalidInput => "invalid input",
+        MeshApiError::Denied => "forbidden",
+        MeshApiError::NotFound => "not found",
+        MeshApiError::Conflict => "conflict",
+        MeshApiError::Storage => "mesh unavailable",
+    };
+    json!({"type":"error","error":message})
+}
+
+async fn send_mesh_event<K>(
+    sink: &mut K,
+    sub_id: u32,
+    event: &Value,
+    encode: &mut Vec<u8>,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let event_json = serde_json::to_vec(event).map_err(|_| ())?;
+    send_frame(
+        sink,
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id,
+            event_json: &event_json,
+        },
+        encode,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_mesh_change<K>(
+    state: &WebSocketState,
+    user_id: &str,
+    change: &MeshChange,
+    subscriptions: &mut HashMap<u32, MeshFilter>,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let current: Vec<_> = subscriptions
+        .iter()
+        .map(|(sub_id, filter)| (*sub_id, filter.clone()))
+        .collect();
+    for (sub_id, filter) in current {
+        match state.mesh.can_view_change(user_id, &filter, change).await {
+            Ok(true) => {
+                send_mesh_event(
+                    sink,
+                    sub_id,
+                    &json!({"type":"changed","revision":change.revision}),
+                    encode,
+                )
+                .await?;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                subscriptions.remove(&sub_id);
+                send_mesh_event(sink, sub_id, &mesh_error_event(error), encode).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_mesh_resync<K>(
+    state: &WebSocketState,
+    user_id: &str,
+    subscriptions: &mut HashMap<u32, MeshFilter>,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let current: Vec<_> = subscriptions
+        .iter()
+        .map(|(sub_id, filter)| (*sub_id, filter.clone()))
+        .collect();
+    let now = unix_seconds()?;
+    for (sub_id, filter) in current {
+        match state.mesh.list(user_id, filter, now).await {
+            Ok(snapshot) => {
+                send_mesh_event(
+                    sink,
+                    sub_id,
+                    &json!({"type":"resync","snapshot":snapshot}),
+                    encode,
+                )
+                .await?;
+            }
+            Err(error) => {
+                subscriptions.remove(&sub_id);
+                send_mesh_event(sink, sub_id, &mesh_error_event(error), encode).await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -874,6 +1010,7 @@ async fn handle_client_frame<K>(
     user_id: &str,
     session_token: &str,
     connection_id: &[u8; 16],
+    mesh_subscriptions: &mut HashMap<u32, MeshFilter>,
     attachments: &mut HashMap<u32, ClientAttachment>,
     output_tx: &mpsc::Sender<(u32, TerminalOutput)>,
     sink: &mut K,
@@ -895,6 +1032,43 @@ where
                 encode,
             )
             .await
+        }
+        Frame::Subscribe {
+            sub_id,
+            filter_json,
+        } if stream_id == CONTROL_STREAM => {
+            mesh_subscriptions.remove(&sub_id);
+            match serde_json::from_slice::<MeshSubscribeFilter>(filter_json) {
+                Ok(request) if request.topic == "mesh" => {
+                    let filter = MeshFilter { tag: request.tag };
+                    let now = unix_seconds()?;
+                    match state.mesh.list(user_id, filter.clone(), now).await {
+                        Ok(snapshot) => {
+                            mesh_subscriptions.insert(sub_id, filter);
+                            send_mesh_event(
+                                sink,
+                                sub_id,
+                                &json!({"type":"snapshot","snapshot":snapshot}),
+                                encode,
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            send_mesh_event(sink, sub_id, &mesh_error_event(error), encode).await
+                        }
+                    }
+                }
+                _ => {
+                    mesh_subscriptions.remove(&sub_id);
+                    send_mesh_event(
+                        sink,
+                        sub_id,
+                        &mesh_error_event(MeshApiError::InvalidInput),
+                        encode,
+                    )
+                    .await
+                }
+            }
         }
         Frame::Call {
             call_id,
@@ -955,6 +1129,49 @@ where
                             call_id,
                             ok: false,
                             json: br#"{"error":"terminal unavailable"}"#,
+                        },
+                        encode,
+                    )
+                    .await
+                }
+            }
+        }
+        Frame::Call {
+            call_id,
+            action_id,
+            input_json,
+        } if stream_id == CONTROL_STREAM && action_id.starts_with("mesh.") => {
+            let now = unix_seconds()?;
+            let value = state
+                .mesh
+                .execute(user_id, action_id, input_json, now)
+                .await;
+            if !session_is_live(state, user_id, session_token).await {
+                return Err(());
+            }
+            match value {
+                Ok(value) => {
+                    let json = serde_json::to_vec(&value).map_err(|_| ())?;
+                    send_frame(
+                        sink,
+                        CONTROL_STREAM,
+                        &Frame::Result {
+                            call_id,
+                            ok: true,
+                            json: &json,
+                        },
+                        encode,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    send_frame(
+                        sink,
+                        CONTROL_STREAM,
+                        &Frame::Result {
+                            call_id,
+                            ok: false,
+                            json: error.wire_error(),
                         },
                         encode,
                     )

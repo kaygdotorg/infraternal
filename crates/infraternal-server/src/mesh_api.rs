@@ -19,6 +19,15 @@ const ROLE_ACTIONS: [&str; 5] = [VIEW, MANAGE_NODES, MANAGE_TAGS, MANAGE_GRANTS,
 const NODE_LIVE_SECONDS: i64 = 30;
 const CHANGE_BUFFER: usize = 256;
 
+/// A committed inventory change with the tag scopes needed to filter live invalidations.
+#[derive(Clone, Debug)]
+pub struct MeshChange {
+    /// Monotonic database revision.
+    pub revision: i64,
+    /// `None` means instance-wide; an empty set is visible only to unscoped roles.
+    pub scopes: Option<BTreeSet<String>>,
+}
+
 /// A node combines mesh-core identity with control-plane liveness observations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MeshNode {
@@ -424,7 +433,7 @@ fn node_id(id: u64) -> Result<i64, MeshApiError> {
 #[derive(Clone)]
 pub struct MeshService {
     pool: SqlitePool,
-    updates: broadcast::Sender<i64>,
+    updates: broadcast::Sender<MeshChange>,
 }
 
 impl MeshService {
@@ -437,8 +446,51 @@ impl MeshService {
 
     /// Subscribe to post-commit revision invalidations; a lagging reader should reload its filtered list.
     #[must_use]
-    pub fn subscribe(&self) -> broadcast::Receiver<i64> {
+    pub fn subscribe(&self) -> broadcast::Receiver<MeshChange> {
         self.updates.subscribe()
+    }
+
+    /// Check whether a committed change intersects the caller's current Mesh view permissions.
+    ///
+    /// # Errors
+    /// Returns an authorization or storage error if the caller can no longer hold this view.
+    pub async fn can_view_change(
+        &self,
+        actor: &str,
+        filter: &MeshFilter,
+        change: &MeshChange,
+    ) -> Result<bool, MeshApiError> {
+        let mut tx = self.pool.begin().await.map_err(map_sql_error)?;
+        if let Some(tag) = &filter.tag {
+            validate_name(tag)?;
+            if sqlx::query("SELECT 1 FROM mesh_tags WHERE name=?")
+                .bind(tag)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sql_error)?
+                .is_none()
+            {
+                return Err(MeshApiError::NotFound);
+            }
+        }
+        let access = view_access(&mut tx, actor).await?;
+        if let Some(tag) = &filter.tag
+            && !access.all
+            && !access.tags.contains(tag)
+        {
+            return Err(MeshApiError::Denied);
+        }
+        let Some(changed_tags) = &change.scopes else {
+            return Ok(true);
+        };
+        if access.all {
+            return Ok(true);
+        }
+        if let Some(tag) = &filter.tag {
+            Ok(changed_tags.contains(tag))
+        } else {
+            Ok(access.tags.iter().any(|tag| changed_tags.contains(tag)))
+        }
     }
 
     /// Execute a validated action for an authenticated account.
@@ -593,6 +645,7 @@ impl MeshService {
                 &request.name,
                 now,
                 json!({"node_id":id,"name":request.name}),
+                None,
             )
             .await?;
         Ok((
@@ -609,6 +662,7 @@ impl MeshService {
     ) -> Result<u64, MeshApiError> {
         let id = node_id(request.node_id)?;
         let mut tx = self.begin_change().await?;
+        let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
         authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
         let changed = sqlx::query("UPDATE mesh_nodes SET last_seen=?,last_rtt_us=? WHERE id=?")
             .bind(now)
@@ -634,6 +688,7 @@ impl MeshService {
             &id.to_string(),
             now,
             json!({"node_id":id,"last_rtt_us":request.last_rtt_us}),
+            Some(scopes.into_iter().collect()),
         )
         .await
     }
@@ -646,6 +701,7 @@ impl MeshService {
     ) -> Result<u64, MeshApiError> {
         let id = node_id(request.node_id)?;
         let mut tx = self.begin_change().await?;
+        let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
         authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
         let changed = sqlx::query("UPDATE mesh_nodes SET name=? WHERE id=?")
             .bind(&request.name)
@@ -664,6 +720,7 @@ impl MeshService {
             &id.to_string(),
             now,
             json!({"node_id":id,"name":request.name}),
+            Some(scopes.into_iter().collect()),
         )
         .await
     }
@@ -676,6 +733,7 @@ impl MeshService {
     ) -> Result<u64, MeshApiError> {
         let id = node_id(request.node_id)?;
         let mut tx = self.begin_change().await?;
+        let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
         authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
         let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM mesh_grants WHERE (from_kind='node' AND from_value=?) OR (to_kind='node' AND to_value=?)")
             .bind(id.to_string()).bind(id.to_string()).fetch_one(&mut *tx).await.map_err(map_sql_error)?;
@@ -698,6 +756,7 @@ impl MeshService {
                 &id.to_string(),
                 now,
                 json!({"node_id":id,"dependent_grants":grants}),
+                Some(scopes.into_iter().collect()),
             )
             .await?;
         Ok(revision)
@@ -724,6 +783,7 @@ impl MeshService {
             &request.name,
             now,
             json!({"name":request.name}),
+            None,
         )
         .await
     }
@@ -765,6 +825,10 @@ impl MeshService {
             &request.name,
             now,
             json!({"name":request.name,"new_name":request.new_name}),
+            Some(BTreeSet::from([
+                request.name.clone(),
+                request.new_name.clone(),
+            ])),
         )
         .await
     }
@@ -798,6 +862,7 @@ impl MeshService {
             &request.name,
             now,
             json!({"name":request.name}),
+            None,
         )
         .await
     }
@@ -838,8 +903,16 @@ impl MeshService {
                 json!({"tag":request.tag,"node_id":id}),
             )
         };
-        self.finish_change(tx, actor, action, &request.tag, now, detail)
-            .await
+        self.finish_change(
+            tx,
+            actor,
+            action,
+            &request.tag,
+            now,
+            detail,
+            Some(BTreeSet::from([request.tag.clone()])),
+        )
+        .await
     }
 
     async fn create_grant(
@@ -860,6 +933,7 @@ impl MeshService {
         let scopes = endpoint_scopes(&mut tx, &arrow.from).await?;
         let mut endpoint_requirements = vec![scopes];
         endpoint_requirements.push(endpoint_scopes(&mut tx, &arrow.to).await?);
+        let changed_scopes = endpoint_requirements.iter().flatten().cloned().collect();
         authorize(&mut tx, actor, MANAGE_GRANTS, &endpoint_requirements).await?;
         let (from_kind, from_value) = endpoint_fields(&arrow.from)?;
         let (to_kind, to_value) = endpoint_fields(&arrow.to)?;
@@ -876,6 +950,7 @@ impl MeshService {
                 &request.name,
                 now,
                 json!({"name":request.name,"grant_id":id}),
+                Some(changed_scopes),
             )
             .await?;
         Ok((
@@ -903,6 +978,7 @@ impl MeshService {
             EndpointSide::To => &current.arrow.from,
         };
         requirements.push(endpoint_scopes(&mut tx, other).await?);
+        let changed_scopes = requirements.iter().flatten().cloned().collect();
         authorize(&mut tx, actor, MANAGE_GRANTS, &requirements).await?;
         let (kind, value) = endpoint_fields(&request.endpoint)?;
         let column = match request.side {
@@ -928,6 +1004,7 @@ impl MeshService {
             &request.name,
             now,
             json!({"name":request.name,"side":column}),
+            Some(changed_scopes),
         )
         .await
     }
@@ -944,6 +1021,7 @@ impl MeshService {
             endpoint_scopes(&mut tx, &current.arrow.from).await?,
             endpoint_scopes(&mut tx, &current.arrow.to).await?,
         ];
+        let changed_scopes = requirements.iter().flatten().cloned().collect();
         authorize(&mut tx, actor, MANAGE_GRANTS, &requirements).await?;
         let changed = sqlx::query("DELETE FROM mesh_grants WHERE name=?")
             .bind(&request.name)
@@ -961,6 +1039,7 @@ impl MeshService {
             &request.name,
             now,
             json!({"name":request.name}),
+            Some(changed_scopes),
         )
         .await
     }
@@ -977,6 +1056,7 @@ impl MeshService {
             endpoint_scopes(&mut tx, &current.arrow.from).await?,
             endpoint_scopes(&mut tx, &current.arrow.to).await?,
         ];
+        let changed_scopes = requirements.iter().flatten().cloned().collect();
         authorize(&mut tx, actor, MANAGE_GRANTS, &requirements).await?;
         let changed = sqlx::query("UPDATE mesh_grants SET name=? WHERE name=?")
             .bind(&request.new_name)
@@ -995,6 +1075,7 @@ impl MeshService {
             &request.name,
             now,
             json!({"name":request.name,"new_name":request.new_name}),
+            Some(changed_scopes),
         )
         .await
     }
@@ -1064,6 +1145,7 @@ impl MeshService {
             &request.name,
             now,
             json!({"name":request.name,"actions":request.actions}),
+            None,
         )
         .await
     }
@@ -1089,6 +1171,7 @@ impl MeshService {
             &request.user_id,
             now,
             json!({"user_id":request.user_id,"role":request.role}),
+            None,
         )
         .await
     }
@@ -1103,6 +1186,7 @@ impl MeshService {
         Ok(tx)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn finish_change(
         &self,
         mut tx: Transaction<'static, Sqlite>,
@@ -1111,6 +1195,7 @@ impl MeshService {
         resource: &str,
         now: i64,
         detail: Value,
+        scopes: Option<BTreeSet<String>>,
     ) -> Result<u64, MeshApiError> {
         let revision: i64 = sqlx::query_scalar(
             "UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 RETURNING revision",
@@ -1123,7 +1208,7 @@ impl MeshService {
             .bind(actor).bind(action).bind(resource).bind(revision).bind(now).bind(detail)
             .execute(&mut *tx).await.map_err(map_sql_error)?;
         tx.commit().await.map_err(map_sql_error)?;
-        let _ = self.updates.send(revision);
+        let _ = self.updates.send(MeshChange { revision, scopes });
         u64::try_from(revision).map_err(|_| MeshApiError::Storage)
     }
 }
