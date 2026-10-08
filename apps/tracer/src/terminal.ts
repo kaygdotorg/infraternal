@@ -1,4 +1,5 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
+import { plainCloseReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
@@ -711,7 +712,7 @@ export class TerminalClient {
         this.conn.acceptPong(frame.nonce);
         return;
       case "Close":
-        this.setStatus(frame.reason || "The terminal session ended.");
+        this.setStatus(plainCloseReason(frame.reason));
         // On a connection of its own a closed stream restarts it; on a shared one the others keep running.
         if (this.ownsConnection) this.conn.forceClose();
         return;

@@ -30,6 +30,7 @@
  *   const ind = createConnectionIndicator({ announce: true });
  *   host.append(ind.root);
  *   ind.set("reconnecting");      ind.setRoundTrip(182);
+ *   ind.set("offline", "Your passkey session ended.");   // the reason is a plain sentence of its own, shown after "Offline."
  */
 import { peekTip, refreshTip } from "./tooltip";
 
@@ -72,7 +73,7 @@ export function connectionSentence(state: ConnectionIndicatorState, rtt?: number
     case "reconnecting": return "Connection lost — resuming without losing anything";
     case "resumed": return "Back online. You are exactly where you left off.";
     case "approximate": return "Back online. The screen was rebuilt from the latest state; a little scrollback may be approximate.";
-    case "offline": return detail ? `Offline — ${detail}` : "Offline. This machine can't be reached right now.";
+    case "offline": return detail ? `Offline. ${detail}` : "Offline. This machine can't be reached right now.";
   }
 }
 

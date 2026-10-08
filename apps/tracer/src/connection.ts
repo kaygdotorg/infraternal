@@ -16,6 +16,7 @@
  * Round trips: pings are sampled on attachment and on typing, at most one per 2 s, and only while a stream is
  * attached; an idle connection schedules no wakeups [81].
  */
+import { plainCloseReason } from "./close-reasons";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
@@ -327,7 +328,7 @@ export class MuxConnection {
         this.acceptPong(frame.nonce);
         return;
       case "Close":
-        this.status(frame.reason || "The server closed the connection.");
+        this.status(plainCloseReason(frame.reason, "The server closed the connection."));
         this.socket?.close();
         return;
       default:
