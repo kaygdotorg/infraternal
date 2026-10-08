@@ -50,6 +50,8 @@ async function openPredictingTerminal(
     .toBeGreaterThan(60);
   await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
   expect(await page.evaluate(() => window.devicePixelRatio)).toBe(dpr);
+  // A person's first key comes well after the idle warm-up of the prediction path.
+  await page.waitForTimeout(500);
 }
 
 interface RunResult {
@@ -60,8 +62,8 @@ interface RunResult {
   model: { x: number; y: number; text: string[] };
   fallbacks: number;
   mispredictions: number;
-  /** Work per key, 95th percentile; the very first key of a page also pays one-off JIT and font costs. */
-  p95InputCostMs: number;
+  /** Work per key, worst key: the budget holds for every key, the first one included. */
+  maxInputCostMs: number;
   settled: boolean;
 }
 
@@ -154,13 +156,15 @@ function runKeys(page: Page, keys: string[], gapMs: number): Promise<RunResult> 
       model: { x, y, text: cells.map((row) => row.join("").trimEnd()).slice(0, y + 1) },
       fallbacks: Object.values(state.fallbacks).reduce((total, count) => total + count, 0),
       mispredictions: state.mispredictions,
-      p95InputCostMs: [...state.inputCostMs].sort((a, b) => a - b)[Math.floor((state.inputCostMs.length - 1) * 0.95)] ?? 0,
+      maxInputCostMs: Math.max(0, ...state.inputCostMs),
       settled,
     };
   }, { keys, gapMs });
 }
 
 const BS = "\x7f";
+/** The per-key prediction budget (keystroke_prediction_cpu). */
+const KEY_COST_BUDGET_MS = 2;
 
 test(`backspace mixed with typing keeps the predicted cursor on exact cells at DPR ${dpr}`, async ({ page, context }) => {
   test.setTimeout(120_000);
@@ -183,7 +187,7 @@ test(`backspace mixed with typing keeps the predicted cursor on exact cells at D
   expect(second.hostCursor).toEqual({ x: second.model.x, y: second.model.y });
   const screen = await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "");
   expect(screen.split("\n").slice(0, second.model.text.length).map((row) => row.trimEnd())).toEqual(second.model.text);
-  expect(second.p95InputCostMs).toBeLessThan(1);
+  expect(second.maxInputCostMs).toBeLessThan(KEY_COST_BUDGET_MS);
 });
 
 test(`rapid backspaces with no gap land on the host cursor at DPR ${dpr}`, async ({ page, context }) => {
@@ -311,4 +315,20 @@ test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}
   expect(distance(edges.left, edges.lastInside)).toBeLessThan(30);
   expect(distance(edges.left, edges.beforeLeft)).toBeGreaterThan(80);
   expect(distance(edges.left, edges.afterRight)).toBeGreaterThan(80);
+});
+
+test(`the first predicted key stays within the per-key budget at DPR ${dpr}`, async ({ page, context }) => {
+  test.setTimeout(120_000);
+  await openPredictingTerminal(page, context);
+  const costs = await page.evaluate(async () => {
+    const d = window.__tracerTestDouble!;
+    for (const ch of "firstkeys") {
+      d.injectInput(ch);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    return d.predictiveEcho()!.inputCostMs;
+  });
+  console.log(`first-key cost ${costs[0]!.toFixed(2)} ms; rest max ${Math.max(...costs.slice(1)).toFixed(2)} ms`);
+  expect(costs.length).toBe(9);
+  expect(Math.max(...costs)).toBeLessThan(KEY_COST_BUDGET_MS);
 });

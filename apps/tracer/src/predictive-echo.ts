@@ -33,6 +33,7 @@ const MAX_PREDICTED_INPUT_BYTES = 8;
 const MAX_VISIBLE_ECHO_BYTES = 512;
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const encoder = new TextEncoder();
+const WARM_TEXT = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
 
 /** One unconfirmed key: a glyph written to a cell, or an erase of the cell left of the cursor. */
 interface PredictionOp {
@@ -111,6 +112,7 @@ export class PredictiveEcho {
   private readonly fallbacks: Record<string, number> = {};
   private predictedLastInput = false;
   private readonly inputCosts: number[] = [];
+  private warmHandle = 0;
 
   constructor(private readonly options: PredictiveEchoOptions) {
     if (!options.optedIn) return;
@@ -149,7 +151,50 @@ export class PredictiveEcho {
   setRoundTrip(milliseconds: number | undefined): void {
     this.roundTripMs = milliseconds;
     if (!this.isAboveThreshold()) this.clearPending("rtt-low");
-    else this.scheduleRender();
+    else {
+      this.scheduleRender();
+      this.scheduleWarm();
+    }
+  }
+
+  /**
+   * Runs the whole prediction path once at idle, so the first key after enabling or a resize does not pay
+   * one-off costs on the keystroke: overlay canvas geometry and resize, font setup for measuring and drawing,
+   * the host-cursor guard, and first-call compilation of the placement and drawing code.
+   */
+  private scheduleWarm(): void {
+    if (!this.overlay || this.warmHandle) return;
+    const idle = (window as { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
+    const run = (): void => {
+      this.warmHandle = 0;
+      this.warm();
+    };
+    this.warmHandle = idle ? idle.call(window, run, { timeout: 200 }) : window.setTimeout(run, 50);
+  }
+
+  /** A dry run of common glyphs and one erase through placement and drawing; nothing is sent or left on screen. */
+  private warm(): void {
+    // Intl.Segmenter and the Unicode property classes compile on first use; that is the largest one-off cost.
+    printableGraphemes("a");
+    encoder.encode("a").slice();
+    if (!this.overlay || this.pending.length > 0 || this.awaitingPaint.length > 0 || !this.isEnabled()) return;
+    const position = this.options.getPosition();
+    if (!position || position.alternate || position.viewportY !== 0 || !position.visible) return;
+    this.cellWidth("M", position);
+    const enteredAt = performance.now();
+    // Common ASCII glyphs, so the canvas rasterises them (and fills its glyph cache) now rather than on a key.
+    const inputs: PredictionOpInput[] = Array.from(WARM_TEXT, (text) => ({
+      kind: "glyph", text, bytes: encoder.encode(text), sequence: "0", cells: 1, enteredAt, reportedVisible: true,
+    }));
+    inputs.push({ kind: "erase", text: "", bytes: new Uint8Array(0), sequence: "0", cells: 1, enteredAt, reportedVisible: true });
+    const placed = this.place(position, inputs);
+    // The overlay is shown and hidden again inside this task, so no frame ever paints it.
+    if (placed) {
+      this.pending.push(...placed);
+      this.render(enteredAt, false);
+    }
+    this.pending.length = 0;
+    this.hideOverlay();
   }
 
   /** Predicts bounded printable input and safe backspaces; paste and cursor moves await host output. */
@@ -367,6 +412,7 @@ export class PredictiveEcho {
   /** Drops stale overlay geometry while retaining waits caused by unconfirmed input. */
   layoutChanged(): void {
     this.overlay?.invalidate();
+    if (this.isAboveThreshold()) this.scheduleWarm();
     if (this.pending.length > 0 || this.awaitingPaint.length > 0) {
       this.waitingForOutput = true;
       this.lastReason = "layout-change";
@@ -400,6 +446,7 @@ export class PredictiveEcho {
   dispose(): void {
     window.clearTimeout(this.timeout);
     if (this.renderFrame) cancelAnimationFrame(this.renderFrame);
+    this.warmHandle = 0;
     this.clearPending("disposed");
     this.overlay?.dispose();
   }
