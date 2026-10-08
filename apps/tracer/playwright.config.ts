@@ -38,7 +38,7 @@ export default defineConfig({
   },
   webServer: {
     command: "bun run build && python3 ../../scripts/latency_proxy.py serve-tracer",
-    env: { TRACER_TEST_PORT: String(port) },
+    env: { TRACER_TEST_PORT: String(port), INFRATERNAL_CLUSTERS_PREVIEW: "1" },
     url: `${origin}/health`,
     reuseExistingServer: false,
     timeout: 120_000,

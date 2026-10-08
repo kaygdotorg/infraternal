@@ -3,7 +3,7 @@
 /* One type scale per platform (TASTE.md section 2). Desktop follows the macOS sizes, touch the iOS
    sizes. Every product surface (top bar, sidebar, palette, tooltip, toast, windows) uses these
    tokens rather than its own pixel values. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input stays 16 px on touch so iOS never zooms. */
-:root { --text-body: 13px; --text-secondary: 12px; --text-caption: 11px; --text-input: 13px; --row: 28px; }
+:root { --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --text-body: 13px; --text-secondary: 12px; --text-caption: 11px; --text-input: 13px; --row: 28px; }
 @media (pointer: coarse) { :root { --text-body: 16px; --text-secondary: 15px; --text-caption: 13px; --text-input: 16px; --row: 44px; } }
 
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
@@ -11,30 +11,159 @@
 :focus-visible { outline: none; }
 [data-focus-ring="on"] :focus-visible { outline: 2px solid var(--focus-ring, var(--accent, #7a9cff)); outline-offset: 2px; }
 .countup { font-variant-numeric: tabular-nums; }
-.busy-count { font: 500 13px/1 var(--font-maple, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
+.busy-count { font: var(--fw-label, 500) 13px/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
 /* Icons (icons.ts) follow the product's icon scale: 16 px on desktop, 18 px on touch, 1.5 stroke. */
 .ui-icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 @media (pointer: coarse) { .ui-icon { width: 18px; height: 18px; } }
 .terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
 
+/* The one material's blur and saturation: surfaces and pills read these two tokens, so tuning them
+   here tunes every floating thing at once. */
+:root { --ui-overlay-blur: 16px; --ui-overlay-saturation: 160%; }
+
 /* One theme-aware glass material for every floating surface (D72, D160): popovers, sheets,
    palette, sidebar and tooltips, never in-page controls. No top-edge highlight (TASTE §1).
    Instances can tune the blur, saturation, border or shadow through custom properties. */
 .ui-overlay-surface, .ui-panel {
-  --ui-overlay-blur: 14px;
-  --ui-overlay-saturation: 160%;
   background: var(--ui-overlay-background, var(--overlay));
   border: 1px solid var(--ui-overlay-border, var(--overlay-line));
   box-shadow: var(--ui-overlay-shadow, var(--shadow));
   color: var(--ui-overlay-color, var(--fg));
+  /* A soft halo in the tint colour keeps text legible over a dense terminal without adding tint. */
+  text-shadow: 0 0 1px var(--ui-overlay-halo, transparent), 0 0 2px var(--ui-overlay-halo, transparent), 0 0 3px var(--ui-overlay-halo, transparent), 0 0 4px var(--ui-overlay-halo, transparent), 0 0 6px var(--ui-overlay-halo, transparent), 0 0 10px var(--ui-overlay-halo, transparent);
   -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
   backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
 }
+/* On the thin material secondary text is a step stronger than on a page (contrast over a busy terminal comes
+   from text colour and the halo, never from more tint). */
+.ui-overlay-surface, .ui-panel { --ui-text-secondary: color-mix(in oklab, var(--fg) 80%, var(--bg)); }
+/* Form controls reset text-shadow in the browser's own styles; they take the halo too. */
+.ui-overlay-surface :is(button, input, textarea, select) { text-shadow: inherit; }
 .ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
+.ui-button {
+  min-height: var(--ui-button-height, 44px);
+  padding: var(--ui-button-padding, 0 12px);
+  border-radius: var(--ui-button-radius, 8px);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.ui-source-icon { display: block; width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+/* One native switch keeps pointer, keyboard, and assistive-technology state aligned. */
+.ui-switch {
+  position: relative;
+  display: inline-block;
+  width: 48px;
+  height: 46px;
+  flex: none;
+  margin: 0;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.ui-switch::before, .ui-switch::after {
+  position: absolute;
+  top: 50%;
+  content: "";
+  transform: translateY(-50%);
+}
+.ui-switch::before {
+  left: 1px;
+  width: 46px;
+  height: 26px;
+  border: 1px solid var(--overlay-line);
+  border-radius: 999px;
+  background: var(--overlay-solid);
+  transition: background 180ms ease-out, border-color 180ms ease-out;
+}
+.ui-switch::after {
+  left: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--fg-2);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.18);
+  transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1), background 180ms ease-out;
+}
+.ui-switch:checked::before { border-color: var(--accent); background: var(--accent); }
+.ui-switch:checked::after { transform: translate(20px, -50%); background: var(--bg); }
+.ui-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ui-switch:disabled { cursor: default; opacity: 0.5; }
+
+/* The shared toast can carry a safe, contextual action without cloning overlay material. */
+.ui-toast {
+  position: fixed;
+  z-index: 900;
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  left: max(12px, env(safe-area-inset-left));
+  display: flex;
+  width: max-content;
+  max-width: min(520px, calc(100% - 24px));
+  min-height: 54px;
+  align-items: center;
+  gap: 12px;
+  margin-inline: auto;
+  padding: 7px 9px 7px 12px;
+  border-radius: 15px;
+  opacity: 1;
+  /* No transform at rest: settled toast text stays on the pixel grid. */
+  transform: none;
+  transform-origin: center bottom;
+  transition: opacity 170ms ease-out, transform 190ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.ui-toast[hidden] { display: none !important; }
+.ui-toast[data-tone="error"] .ui-toast-marker { display: none; }
+.ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
+/* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
+.ui-toast { min-height: 44px; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 14px; }
+.ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
+.ui-toast-marker { display: grid; width: 22px; height: 22px; flex: none; place-items: center; }
+.ui-toast-marker .tick { width: 20px; height: 20px; }
+.ui-toast-marker .tick-fill { background: var(--ok); }
+.ui-toast-marker .tick svg { width: 14px; height: 14px; stroke: var(--bg); }
+.ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
+.ui-toast-marker .tick { width: 18px; height: 18px; }
+@media (pointer: coarse) {
+  .ui-toast { min-height: 54px; gap: 12px; padding: 7px 9px 7px 12px; border-radius: 15px; }
+  .ui-toast-action { min-height: 44px; padding: 0 10px; }
+  .ui-toast-marker .tick { width: 20px; height: 20px; }
+}
+
+@media (pointer: coarse) {
+  .terminal-screen .ui-toast {
+    bottom: calc(var(--keybar-inset, 0px) + var(--keybar-height, 0px) + var(--keybar-gap, 0px) + 10px + env(safe-area-inset-bottom));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-switch::before, .ui-switch::after { transition: none; }
+  .ui-spinner { animation: none; }
+  .ui-toast { transition: opacity 150ms ease; transform: none; }
+  .ui-toast[data-open="false"] { transform: none; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .ui-overlay-surface {
+    --ui-overlay-background: color-mix(in srgb, var(--overlay) 55%, var(--bg));
+    --ui-overlay-blur: 0px;
+    --ui-overlay-saturation: 100%;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+@media (prefers-contrast: more) {
+  .ui-overlay-surface { --ui-overlay-border: color-mix(in srgb, var(--fg) 72%, transparent); }
+}
 
 /* One spring drives the fill, tick draw-on and label treatment. */
 .tick { position: relative; display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px;
-  border-radius: 6px; box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.35); color: #000; will-change: transform; }
+  border-radius: 6px; box-shadow: inset 0 0 0 var(--ui-tick-border-width, 1.5px) var(--ui-tick-border-color, rgb(255 255 255 / 0.35)); color: #000; will-change: transform; }
 .tick-fill { position: absolute; inset: 0; border-radius: inherit; background: var(--fg); transform: scale(0); will-change: transform; }
 .tick svg { position: relative; width: 78%; height: 78%; overflow: visible; }
 .tick path { fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; }
@@ -42,6 +171,54 @@
 .check { position: relative; transition: transform 140ms var(--ease); }
 .check[data-pressed] { transform: scale(0.98); }
 [data-focus-ring="on"] .check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
+
+/* One reusable spinner mark; hosts tune size and color through instance variables. */
+.ui-spinner {
+  display: inline-block;
+  width: var(--ui-spinner-size, 16px);
+  height: var(--ui-spinner-size, 16px);
+  flex: none;
+  border: var(--ui-spinner-border-width, 1.5px) solid color-mix(in oklab, var(--ui-spinner-color, var(--accent)) 30%, transparent);
+  border-top-color: var(--ui-spinner-color, var(--accent));
+  border-radius: 50%;
+  animation: ui-spinner-turn 720ms linear infinite;
+}
+.ui-spinner[hidden] { display: none !important; }
+@keyframes ui-spinner-turn { to { transform: rotate(1turn); } }
+
+/* A quiet, non-interactive step mark composes shared spinner and tick behavior. */
+.ui-step-status {
+  --ui-step-status-size: 20px;
+  display: inline-grid;
+  width: var(--ui-step-status-size);
+  height: var(--ui-step-status-size);
+  flex: none;
+  place-items: center;
+  color: var(--fg-3);
+}
+.ui-step-status > .ui-step-status-pending,
+.ui-step-status > .ui-step-status-tick,
+.ui-step-status > .ui-step-status-failed,
+.ui-step-status > .ui-spinner { grid-area: 1 / 1; }
+.ui-step-status-pending {
+  width: var(--ui-step-status-dot-size, 7px);
+  height: var(--ui-step-status-dot-size, 7px);
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+.ui-step-status-tick { display: none; width: 18px; height: 18px; color: var(--bg); }
+.ui-step-status-tick .tick-fill { background: var(--ok); }
+.ui-step-status-tick .tick path { stroke: var(--bg); }
+.ui-step-status-failed { display: none; width: 15px; height: 15px; fill: none; stroke: var(--danger); stroke-width: 1.8; stroke-linecap: round; }
+.ui-step-status[data-state="running"] .ui-step-status-pending,
+.ui-step-status[data-state="running"] .ui-step-status-tick,
+.ui-step-status[data-state="running"] .ui-step-status-failed,
+.ui-step-status[data-state="done"] .ui-step-status-pending,
+.ui-step-status[data-state="done"] .ui-step-status-failed,
+.ui-step-status[data-state="failed"] .ui-step-status-pending,
+.ui-step-status[data-state="failed"] .ui-step-status-tick { display: none; }
+.ui-step-status[data-state="done"] .ui-step-status-tick { display: grid; }
+.ui-step-status[data-state="failed"] .ui-step-status-failed { display: block; }
 
 /* Glitch text is monochrome and settles after its welcome interval. */
 .glitch { position: relative; display: inline-block; white-space: nowrap; }
@@ -74,35 +251,462 @@
   .swap .is-done path { stroke-dashoffset: 0; transition: none; }
 }
 
+/* ---------------------------------------------------------------------------------------
+   Type roles, taken from the sign-in card's computed values (the owner's benchmark,
+   docs/design/TASTE.md §2): the same on desktop and touch. Only row and control heights
+   follow the platform (macOS scale on desktop, 44 px targets on touch).
+     name    600 14px/1     -0.01em  (auth-mark)
+     body    450 14px/1.55  -0.01em  (auth-lede)
+     label   450 13px/1.55  -0.01em  (auth-label)
+     button  500 13.5px/1            (auth-back, auth-text-button)
+     eyebrow 500 12px/1     +0.02em  (auth-eyebrow)
+   --------------------------------------------------------------------------------------- */
+:root {
+  --ui-type-name: 600 14px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-body: 450 14px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-label: 450 13px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-button: 500 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-eyebrow: 500 12px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-tracking: -0.01em;
+  /* Secondary text matches the sign-in card's secondary (rgb 161 161 170 on ink) and
+     adapts to every theme, instead of the dimmer --fg-2. */
+  --ui-text-secondary: color-mix(in oklab, var(--fg) 70%, var(--bg));
+  --ui-row-h: 32px;
+  --ui-control-h: 30px;
+  --ui-icon: 16px;
+}
+@media (pointer: coarse) {
+  :root { --ui-row-h: 44px; --ui-control-h: 44px; --ui-icon: 18px; }
+}
+
+/* Window card (window-card.ts): the pane card's surface plus a quiet header. */
+.ui-window {
+  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  /* Not clipped: the lock's shackle rises over the frame line. The body clips its own content. */
+  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); box-shadow: var(--shadow);
+  transition: border-color 180ms var(--ease-out, ease-out);
+}
+.ui-window[data-active] { border-color: color-mix(in oklab, var(--accent) 50%, var(--overlay-line)); }
+.ui-window-head { display: flex; flex: none; align-items: center; gap: 8px; padding: 8px 8px 0 8px; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.ui-window-pill {
+  display: inline-flex; align-items: center; gap: 8px; min-width: 0; height: var(--ui-control-h); padding: 0 10px 0 8px;
+  border: 1px solid var(--overlay-line); border-radius: 999px; background: transparent; color: var(--fg);
+  font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: pointer;
+  /* The lock owns the exact centre of the frame line: the pill never reaches past half the header minus the lock's hit area. */
+  max-width: calc(50% - 26px); line-height: 1.4; /* room for descenders: the title clips its overflow */
+  transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
+}
+.ui-window-pill:active { transform: scale(var(--ui-press-scale)); }
+.ui-window-mark { display: grid; flex: none; place-items: center; width: var(--ui-icon); height: var(--ui-icon); color: var(--fg-2); }
+.ui-window-mark svg { width: 100%; height: 100%; fill: currentColor; stroke: none; }
+/* Line glyphs (a flow's mark, not a host platform) draw as the 1.5 stroke icons everywhere else. */
+.ui-window-mark svg.is-line { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-window-title { display: inline-flex; min-width: 0; overflow: hidden; }
+.ui-window-user { color: var(--ui-text-secondary); font-weight: var(--fw-secondary); }
+.ui-window-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ui-window-session { color: var(--fg-3); font-weight: var(--fw-secondary); }
+.ui-window-session::before { content: "·"; margin-right: 8px; color: var(--fg-3); }
+.ui-window-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--ok); }
+.ui-window[data-status="connecting"] .ui-window-dot { background: var(--fg-3); }
+.ui-window[data-status="none"] .ui-window-dot { display: none; }
+.ui-window[data-status="offline"] .ui-window-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
+.ui-window-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.ui-window-action {
+  display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); border: 0; border-radius: 8px;
+  background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
+}
+.ui-window-action:active { transform: scale(var(--ui-press-scale)); }
+.ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-window-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 calc(var(--r-lg, 18px) - 1px) calc(var(--r-lg, 18px) - 1px); }
+@media (hover: hover) and (pointer: fine) {
+  .ui-window-pill:hover { background: var(--hover); }
+  .ui-window-action:hover { background: var(--hover); color: var(--fg-2); }
+}
+
+/* Capsule tabs (capsule-tabs.ts): flat track, one gliding capsule. */
+.ui-tabs { position: relative; display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--hover); isolation: isolate; }
+.ui-tabs-capsule {
+  position: absolute; z-index: -1; top: 3px; bottom: 3px; left: 0; border-radius: 999px;
+  background: var(--overlay-solid); box-shadow: 0 1px 2px rgb(0 0 0 / 0.14), 0 0 0 1px var(--overlay-line);
+}
+.ui-tab {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; height: calc(var(--ui-control-h) - 6px);
+  padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--fg-2); cursor: pointer;
+  font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: color 160ms ease;
+}
+.ui-tab[aria-selected="true"] { color: var(--fg); }
+.ui-tabs[data-compact] .ui-tab[aria-selected="false"] > span { display: none; }
+.ui-tabs[data-compact] .ui-tab[aria-selected="false"] { padding: 0 10px; }
+.ui-tab svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Key/value list (kv-list.ts): keys left, values right, every cell copies. */
+.ui-kv { display: flex; flex-direction: column; }
+.ui-kv-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 16px; align-items: baseline;
+  min-height: var(--ui-row-h); padding: 4px 0; border-bottom: 1px solid var(--line);
+}
+.ui-kv-row:last-child { border-bottom: 0; }
+.ui-kv-cell {
+  display: block; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
+  transition: transform 140ms var(--ease-out, ease-out);
+  -webkit-user-select: text; user-select: text; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
+.ui-kv-value { justify-self: end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
+.ui-kv-cell:active { transform: scale(var(--ui-press-scale-soft)); }
+/* The highlighted run: 6 px of even padding either side (cancelled by a -6 px margin so the text
+   still lines up with the row's edges), cloned across wrapped lines. */
+.ui-kv-text {
+  display: inline; margin: 0 -6px; padding: 3px 6px; border-radius: 6px; overflow-wrap: anywhere; transition: background-color 120ms ease;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+/* The tick takes no room until a copy happens, so the highlight never carries empty space. */
+.ui-kv-text .ui-inline-tick { width: 0; height: 12px; margin-right: 0; overflow: hidden; vertical-align: -1px; transition: width 150ms var(--ease-out, ease-out), margin 150ms var(--ease-out, ease-out); }
+
+.ui-kv-cell[data-done] .ui-kv-text .ui-inline-tick { width: 12px; }
+.ui-kv-key[data-done] .ui-kv-text .ui-inline-tick { margin-left: 6px; }
+.ui-kv-value[data-done] .ui-kv-text .ui-inline-tick { margin-right: 6px; }
+.ui-kv-meter { grid-column: 1 / -1; position: relative; height: 3px; margin: 4px 0 2px; overflow: hidden; border-radius: 2px; background: var(--line); }
+.ui-kv-meter::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--accent); transform: scaleX(var(--meter, 0)); transform-origin: left; }
+@media (hover: hover) and (pointer: fine) {
+  .ui-kv-cell:hover .ui-kv-text { background: var(--hover); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-window-pill:active, .ui-window-action:active { transform: none; }
+}
+
+/* DECISION 120 icon slot for branched-menu hosts. */
+.bm-icon { display: grid; place-items: center; width: 16px; height: 16px; flex: none; color: var(--fg-2); }
+.bm-icon svg { display: block; width: 15px; height: 15px; fill: currentColor; stroke: none; }
+
+/* Shared step transitions (pane-stepper.ts): leaving panes stack over the incoming one. */
+.ui-pane-viewport { position: relative; }
+.ui-pane-viewport.is-moving { overflow: hidden; }
+.ui-pane.is-leaving { position: absolute; top: 0; right: 0; left: 0; pointer-events: none; }
+
+/* Chip field (chip-input.ts): chips wrap inside a field that grows with a spring. */
+.ui-chip-field {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgb(from var(--fg) r g b / 0.05);
+  cursor: text;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+.ui-chip-field:focus-within { border-color: rgb(from var(--fg) r g b / 0.28); background: rgb(from var(--fg) r g b / 0.09); }
+.ui-chip-flow { display: flex; min-height: 46px; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px 6px var(--ui-chip-field-inset, 14px); }
+.ui-chip-text {
+  min-width: 8ch;
+  height: 32px;
+  flex: 1 1 8ch;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: var(--fw-body) 16px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  letter-spacing: 0.01em;
+}
+/* With chips present the input needs room for a few characters only; it grows on its own row
+   when it has to wrap, so no blank line is left under the chips. */
+.ui-chip-flow:has(.ui-chip) .ui-chip-text { min-width: 4ch; flex-basis: 4ch; }
+.ui-chip-text::placeholder { color: var(--fg-3); opacity: 1; }
+.ui-chip {
+  display: inline-flex;
+  max-width: 100%;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 10px;
+  border-radius: 999px;
+  background: rgb(from var(--fg) r g b / 0.08);
+  color: var(--fg);
+  font: var(--fw-label) 13px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  letter-spacing: -0.01em;
+  transform-origin: left center;
+  transition: background-color 120ms ease;
+}
+.ui-chip > svg:first-child { width: 14px; height: 14px; flex: none; fill: currentColor; color: var(--fg-2); }
+.ui-chip > svg.is-line:first-child { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-chip-remove { display: grid; width: 22px; height: 22px; flex: none; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-3); cursor: pointer; }
+.ui-chip-remove svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+@media (hover: hover) and (pointer: fine) { .ui-chip-remove:hover { background: rgb(from var(--fg) r g b / 0.1); color: var(--fg); } }
+.ui-chip[data-armed] { background: rgb(from var(--fg) r g b / 0.2); }
+@media (pointer: coarse) { .ui-chip { height: 34px; font-size: 15px; } .ui-chip-remove { width: 28px; height: 28px; } }
 /* Pill: the one container for floating capsule controls (the top-bar capsule, icon buttons, the
    sidebar toggle, session tabs). Instances set only their size and content layout; the material,
    hairline, shadow, radius and press feedback live here so they can never drift apart. */
 .ui-pill {
   appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 38px);
   border: 1px solid var(--overlay-line) !important; border-radius: 999px; background: var(--overlay); box-shadow: var(--shadow);
-  -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation)); backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
   transition: transform 140ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
-.ui-pill:active:not(:disabled) { transform: scale(0.97); }
+.ui-pill:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
 .ui-pill-icon { width: var(--pill-h, 38px); padding: 0; color: var(--fg-2); }
 .ui-pill-icon svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.6; }
 @media (hover: hover) and (pointer: fine) { .ui-pill:hover:not(:disabled) { background: var(--overlay-solid); } }
 @media (prefers-reduced-motion: reduce) { .ui-pill:active:not(:disabled) { transform: none; } }
 
-/* Window: the one card that holds a terminal or a flow on the canvas. */
-.ui-window {
-  position: relative; min-width: 0; min-height: 0; overflow: hidden;
-  background: color-mix(in oklab, var(--bg) 88%, transparent);
-  border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); box-shadow: var(--shadow);
-}
+/* Window: see the window card block above; terminals draw into a block canvas. */
 .ui-window canvas { display: block; }
 
-/* Panel: the material for large floating surfaces such as the sidebar. Thinner than a pill and
-   blurred harder, so whatever sits behind it (the backdrop, a terminal) reads through as soft
-   shapes. A hairline edge and an outer shadow only: no inner highlight. It sits on its own
-   compositing layer so the blur is recomputed only when what's behind it changes. */
-.ui-panel {
-  border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); background: var(--overlay-panel, var(--overlay)); box-shadow: var(--shadow);
-  -webkit-backdrop-filter: blur(20px) saturate(1.6); backdrop-filter: blur(20px) saturate(1.6);
+/* Panel: the same material for large floating surfaces such as the sidebar; only the radius differs. */
+.ui-panel { border-radius: var(--r-lg, 18px); }
+
+/* Window resize handles (window-resize.ts): invisible hit strips on the card's edges for a
+   mouse; a finger gets four corner grips only after a press-and-hold on the header. */
+.ui-window-resize { position: absolute; z-index: 5; touch-action: none; }
+.ui-window-resize[data-edge="n"], .ui-window-resize[data-edge="s"] { left: 18px; right: 18px; height: 6px; }
+.ui-window-resize[data-edge="e"], .ui-window-resize[data-edge="w"] { top: 18px; bottom: 18px; width: 6px; }
+.ui-window-resize[data-edge="n"] { top: 0; cursor: ns-resize; }
+.ui-window-resize[data-edge="s"] { bottom: 0; cursor: ns-resize; }
+.ui-window-resize[data-edge="e"] { right: 0; cursor: ew-resize; }
+.ui-window-resize[data-edge="w"] { left: 0; cursor: ew-resize; }
+.ui-window-resize[data-edge$="e"][data-edge^="n"], .ui-window-resize[data-edge$="w"][data-edge^="s"] { cursor: nesw-resize; }
+.ui-window-resize[data-edge$="w"][data-edge^="n"], .ui-window-resize[data-edge$="e"][data-edge^="s"] { cursor: nwse-resize; }
+.ui-window-resize[data-edge="ne"], .ui-window-resize[data-edge="nw"], .ui-window-resize[data-edge="se"], .ui-window-resize[data-edge="sw"] { width: 18px; height: 18px; }
+.ui-window-resize[data-edge="ne"] { top: 0; right: 0; }
+.ui-window-resize[data-edge="nw"] { top: 0; left: 0; }
+.ui-window-resize[data-edge="se"] { bottom: 0; right: 0; }
+.ui-window-resize[data-edge="sw"] { bottom: 0; left: 0; }
+@media (pointer: coarse) { .ui-window-resize { display: none; } }
+
+/* Touch mode: an accent outline and four corner brackets that hug the card's rounded corners,
+   each with a 44 px hit area. Edges stay inert so a finger cannot resize by accident. */
+.ui-window[data-resize="touch"] { border-color: var(--accent); box-shadow: var(--shadow), 0 0 0 1px var(--accent); }
+.ui-window[data-resize="touch"] .ui-window-resize { display: block; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge]:not([data-edge="ne"], [data-edge="nw"], [data-edge="se"], [data-edge="sw"]) { display: none; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="ne"], .ui-window[data-resize="touch"] .ui-window-resize[data-edge="nw"],
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="se"], .ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"] {
+  width: 44px; height: 44px; cursor: auto;
+  animation: ui-grip-in 220ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) both;
 }
-@media (prefers-reduced-transparency: reduce) { .ui-panel { background: var(--overlay-solid); -webkit-backdrop-filter: none; backdrop-filter: none; } }
+.ui-window[data-resize="touch"] .ui-window-resize::after {
+  content: ""; position: absolute; width: 22px; height: 22px; border: 0 solid var(--accent);
+  transition: transform 140ms var(--ease-out, ease-out);
+}
+.ui-window[data-resize="touch"] .ui-window-resize:active::after { transform: scale(1.12); }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="ne"]::after { top: 6px; right: 6px; border-width: 3px 3px 0 0; border-top-right-radius: 14px; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="nw"]::after { top: 6px; left: 6px; border-width: 3px 0 0 3px; border-top-left-radius: 14px; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="se"]::after { bottom: 6px; right: 6px; border-width: 0 3px 3px 0; border-bottom-right-radius: 14px; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"]::after { bottom: 6px; left: 6px; border-width: 0 0 3px 3px; border-bottom-left-radius: 14px; }
+@keyframes ui-grip-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Sidebar footer (sidebar-foot.ts): the person's pill and the settings pill share one height, so
+   their centres sit on one line. Pills are the shared `.ui-pill`; only layout lives here. */
+.ui-sidebar-foot { --pill-h: 40px; display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding: 9px 0 0; box-shadow: 0 -1px 0 var(--line); }
+.ui-sidebar-foot[data-variant="b"] { --pill-h: 32px; }
+@media (pointer: coarse) { .ui-sidebar-foot, .ui-sidebar-foot[data-variant="b"] { --pill-h: 44px; } }
+.ui-sidebar-foot .ui-pill { cursor: pointer; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, box-shadow 160ms ease; }
+@media (hover: hover) and (pointer: fine) { .ui-sidebar-foot .ui-pill:hover:not(:active) { box-shadow: var(--shadow), 0 2px 8px -2px rgb(0 0 0 / 0.18); } }
+.ui-sidebar-user { flex: 0 1 auto; min-width: 0; max-width: calc(100% - var(--pill-h) - 8px); justify-content: flex-start; gap: 10px; padding: 0 14px 0 5px; text-align: left; }
+.ui-sidebar-foot[data-variant="b"] .ui-sidebar-user { padding-right: 12px; }
+.ui-sidebar-avatar {
+  display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 10px); height: calc(var(--pill-h) - 10px); border-radius: 50%; color: #fff;
+  background: linear-gradient(145deg, oklch(from var(--accent) calc(l + 0.06) c calc(h + var(--ui-avatar-hue, 0))), oklch(from var(--accent) calc(l - 0.12) c calc(h + var(--ui-avatar-hue, 0) + 28)));
+  font: 600 12px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
+}
+.ui-sidebar-foot[data-variant="b"] .ui-sidebar-avatar { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--accent) 40%, transparent); }
+@media (pointer: coarse) { .ui-sidebar-avatar { font-size: 14px; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
+.ui-sidebar-names { display: grid; min-width: 0; gap: 3px; }
+.ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: var(--fw-label); }
+.ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: 11px; }
+@media (pointer: coarse) { .ui-sidebar-secondary { font-size: 12px; } }
+.ui-sidebar-settings svg { stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Window lock (lock-toggle.ts, window-card.ts): the padlock glyph itself, no chip. It is centred on
+   the window's top frame line: the shackle rises above the line and the body hangs just below it, so
+   it looks anchored on the frame. Invisible until the pointer is near the top edge, then 35 %;
+   locked, it stays at 0.9 with an accent tint and the window's hairline is stronger. The button is a
+   44 px invisible hit area. On touch there is no frame lock: locking lives in the toolbar and the
+   palette. */
+.ui-window-lock {
+  position: absolute; z-index: 6; top: -22px; left: 50%; width: 44px; height: 44px; margin-left: -22px;
+  display: grid; place-items: center; padding: 0; border: 0; border-radius: 10px; background: none; color: var(--fg);
+  opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 160ms ease-out, color 160ms ease-out;
+}
+.ui-window-lock svg { width: 16px; height: 16px; transform: translateY(0.5px); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
+.ui-window[data-lock-near] .ui-window-lock { opacity: 0.35; pointer-events: auto; }
+.ui-window[data-locked] .ui-window-lock { opacity: 0.9; pointer-events: auto; color: var(--accent); }
+.ui-window-lock:focus-visible { opacity: 0.8; }
+@media (hover: hover) and (pointer: fine) { .ui-window .ui-window-lock:hover { opacity: 0.8; } }
+.ui-window-lock:active svg { transform: translateY(0.5px) scale(var(--ui-press-scale-small)); }
+.ui-window[data-locked] { border-color: color-mix(in oklab, var(--accent) 78%, var(--overlay-line)); box-shadow: var(--shadow), 0 0 0 1px color-mix(in oklab, var(--accent) 28%, transparent); }
+@media (pointer: coarse) { .ui-window-lock { display: none; } }
+@media (prefers-reduced-motion: reduce) { .ui-window-lock { transition: opacity 160ms ease; } }
+.ui-window[data-status="none"] .ui-window-lock { display: none; }
+
+/* Shortcuts view (shortcuts-view.ts): the capsule's morph target. The material is the shared
+   overlay surface; only the layout lives here. */
+.ui-shortcuts { position: absolute; z-index: 7; display: flex; flex-direction: column; min-height: 0; border-radius: var(--r-lg, 18px); color: var(--fg); outline: none; }
+.ui-shortcuts-head { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; height: var(--pill-h, 38px); padding: 0 8px 0 14px; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.ui-shortcuts-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 4px 14px 14px; scrollbar-width: thin; }
+.ui-shortcuts-section + .ui-shortcuts-section { margin-top: 12px; }
+.ui-shortcuts-title { margin: 0; padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-shortcuts-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.ui-shortcuts-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: var(--row, 28px); border-bottom: 1px solid var(--line); }
+.ui-shortcuts-row:last-child { border-bottom: 0; }
+.ui-shortcuts-label { min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-shortcuts-keys { display: inline-flex; flex: none; gap: 4px; }
+.ui-shortcuts kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
+@media (pointer: coarse) { .ui-shortcuts-label { font-size: var(--text-body); } .ui-shortcuts-head { padding-right: 14px; } }
+
+/* Settings overlay (settings-overlay.ts): one centred card in the shared overlay material. */
+.ui-settings { position: absolute; z-index: 8; top: 50%; left: 50%; display: flex; flex-direction: column; width: min(560px, calc(100% - 24px)); max-height: min(520px, calc(100% - 24px)); margin: 0; translate: -50% -50%; border-radius: var(--r-lg, 18px); color: var(--fg); outline: none; }
+.ui-settings-head { display: flex; flex: none; align-items: center; justify-content: space-between; height: 52px; padding: 0 8px 0 18px; }
+.ui-settings-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.ui-settings-nav-row:active { transform: scale(var(--ui-press-scale)); }
+@media (hover: hover) and (pointer: fine) { .ui-settings-nav-row:hover { background: var(--hover); } }
+.ui-settings-main { display: flex; min-height: 0; flex: 1; border-top: 1px solid var(--line); }
+.ui-settings-nav { display: flex; flex: none; flex-direction: column; gap: 2px; width: 150px; padding: 8px; border-right: 1px solid var(--line); }
+.ui-settings-nav-row { display: flex; align-items: center; gap: 8px; height: var(--ui-row-h, 32px); padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-settings-nav-row[aria-current="true"] { background: var(--hover); color: var(--fg); }
+.ui-settings-nav-row svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-settings-pane { min-width: 0; flex: 1; overflow: auto; padding: 6px 18px 14px; overscroll-behavior: contain; }
+@media (max-width: 520px) {
+  .ui-settings-main { flex-direction: column; }
+  .ui-settings-nav { width: auto; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
+/* ---- connection indicator (src/connection-indicator.ts) ------------------------------------
+   One 16 px box; each glyph is its own layer. The shown glyph is chosen by transitions on
+   opacity and transform only, so a state change retargets from the current frame. Looping
+   animations are paused (never removed) when hidden, so they cannot jump. */
+.ui-conn { position: relative; display: inline-block; flex: none; width: var(--ui-conn-size, 16px); height: var(--ui-conn-size, 16px); vertical-align: middle; cursor: default; -webkit-tap-highlight-color: transparent; }
+.ui-conn[hidden] { display: none; }
+@media (pointer: coarse) { .ui-conn::after { content: ""; position: absolute; inset: -8px; } }
+.ui-conn-g { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transform: scale(0.6); pointer-events: none;
+  transition: opacity 160ms ease-out, transform 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.ui-conn-g svg, .ui-conn-pulse, .ui-conn-spin { grid-area: 1 / 1; width: 100%; height: 100%; overflow: visible; fill: none; }
+/* Glyph parts opt in to a stroke; an inherited page-wide svg stroke must not outline the filled ones. */
+.ui-conn-g svg { stroke: none; }
+.ui-conn-g svg * { stroke: none; }
+.ui-conn[data-state="connected"] .ui-conn-g-connected,
+.ui-conn[data-state="slow"] .ui-conn-g-slow,
+.ui-conn[data-state="connecting"] .ui-conn-g-reconnecting,
+.ui-conn[data-state="reconnecting"] .ui-conn-g-reconnecting,
+.ui-conn[data-state="resumed"] .ui-conn-g-resumed,
+.ui-conn[data-state="approximate"] .ui-conn-g-approximate,
+.ui-conn[data-state="offline"] .ui-conn-g-offline { opacity: 1; transform: none; }
+
+.ui-conn-g-connected .core { fill: var(--ok); }
+.ui-conn-g-connected .halo { fill: color-mix(in oklab, var(--ok) 20%, transparent); }
+.ui-conn-g-slow .core { fill: var(--warn); }
+.ui-conn-g-slow .halo { fill: color-mix(in oklab, var(--warn) 22%, transparent); }
+.ui-conn .ui-conn-g-slow .ring { stroke: var(--warn); stroke-width: 1.2; }
+.ui-conn-pulse { position: absolute; inset: 0; transform-origin: 50% 50%; opacity: 0; animation: ui-conn-pulse 1700ms cubic-bezier(0.23, 1, 0.32, 1) infinite; animation-play-state: paused; }
+.ui-conn[data-state="slow"] .ui-conn-pulse { animation-play-state: running; }
+@keyframes ui-conn-pulse { 0% { opacity: 0.7; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.1); } }
+
+.ui-conn .ui-conn-g-reconnecting .track { stroke: var(--fg-3); stroke-width: 1.4; opacity: 0.4; }
+.ui-conn .ui-conn-g-reconnecting .arc { stroke: var(--fg-2); stroke-width: 1.7; stroke-linecap: round; stroke-dasharray: 28 72; }
+.ui-conn-spin { position: absolute; inset: 0; animation: ui-conn-turn 900ms linear infinite; animation-play-state: paused; }
+.ui-conn[data-state="reconnecting"] .ui-conn-spin, .ui-conn[data-state="connecting"] .ui-conn-spin { animation-play-state: running; }
+@keyframes ui-conn-turn { to { transform: rotate(1turn); } }
+
+.ui-conn-g-resumed .disc { fill: color-mix(in oklab, var(--ok) 22%, transparent); }
+.ui-conn .ui-conn-g-resumed .tick { stroke: var(--ok); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* The tick arrives with a little overshoot, because something just happened. */
+.ui-conn[data-state="resumed"] .ui-conn-g-resumed { transition-timing-function: ease-out, cubic-bezier(0.34, 1.4, 0.64, 1); }
+
+.ui-conn .ui-conn-g-approximate .frame { stroke: var(--fg-2); stroke-width: 1.4; }
+.ui-conn-g-approximate .fill { fill: var(--fg-2); opacity: 0.55; }
+.ui-conn .ui-conn-g-approximate .foot { stroke: var(--fg-2); stroke-width: 1.4; stroke-linecap: round; }
+
+.ui-conn .ui-conn-g-offline .ring { stroke: var(--fg-2); stroke-width: 1.4; opacity: 0.8; }
+.ui-conn .ui-conn-g-offline .slash { stroke: var(--fg-2); stroke-width: 1.4; stroke-linecap: round; opacity: 0.8; }
+
+/* Reduced motion: glyphs cross-fade; nothing moves or loops. The reconnecting arc stays as a static mark. */
+@media (prefers-reduced-motion: reduce) {
+  .ui-conn-g { transform: none; transition: opacity 200ms ease; }
+  .ui-conn-pulse, .ui-conn-spin { animation: none; }
+  .ui-conn-pulse { display: none; }
+}
+
+/* Settings, Toolbar (toolbar-settings.ts): rows of controls with a grip, an icon, a name and a switch. */
+.ui-toolbar-settings { display: grid; gap: 14px; }
+.ui-ts-title { margin: 0; padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.ui-ts-item { position: relative; display: flex; align-items: center; gap: 10px; min-height: var(--ui-row-h, 32px); border-bottom: 1px solid var(--line); background: transparent; }
+.ui-ts-item:last-child { border-bottom: 0; }
+.ui-ts-item[data-dragging] { z-index: 2; background: var(--overlay-solid); border-radius: 10px; box-shadow: var(--shadow); }
+.ui-ts-grip { display: grid; flex: none; place-items: center; width: var(--ui-control-h, 30px); height: var(--ui-control-h, 30px); padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-3); cursor: grab; touch-action: none; }
+.ui-ts-grip svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-linecap: round; }
+.ui-ts-item[data-dragging] .ui-ts-grip { cursor: grabbing; }
+.ui-ts-icon { display: grid; flex: none; color: var(--fg-2); }
+.ui-ts-icon svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-ts-label { flex: 1; min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-ts-reset { justify-self: start; min-height: var(--ui-control-h, 30px); padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-ts-reset:active { transform: scale(var(--ui-press-scale, 0.97)); }
+@media (hover: hover) and (pointer: fine) { .ui-ts-reset:hover, .ui-ts-grip:hover { background: var(--hover); } }
+
+/* Settings, Shortcuts (shortcuts-settings.ts): the registry's rows; a row is a button that listens for the new keys. */
+.ui-shortcuts-settings { display: grid; gap: 12px; }
+.ui-ss-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.ui-ss-row { position: relative; display: flex; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--line); }
+.ui-ss-row:last-child { border-bottom: 0; }
+.ui-ss-main { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: 16px; min-height: var(--row, 28px); padding: 0; border: 0; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; }
+.ui-ss-main:disabled { cursor: default; color: var(--ui-text-secondary); }
+.ui-ss-keys { display: inline-flex; flex: none; gap: 4px; }
+.ui-ss-keys[data-capturing] { color: var(--accent); }
+.ui-ss-keys kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: var(--fw-label, 500) var(--text-caption, 11px)/1 var(--font-ui); text-align: center; }
+.ui-ss-reset { display: grid; place-items: center; width: var(--ui-control-h, 30px); height: var(--ui-control-h, 30px); margin-left: 6px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-3); cursor: pointer; }
+.ui-ss-reset svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-ss-warn { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0 8px; color: var(--warn, var(--fg-2)); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-ss-actions { display: inline-flex; gap: 6px; }
+.ui-ss-actions button { min-height: var(--ui-control-h, 30px); padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .ui-ss-reset:hover, .ui-ss-actions button:hover, .ui-ss-main:not(:disabled):hover { background: var(--hover); } }
+.ui-ts-source { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ui-ts-tag { padding: 3px 9px; border-radius: 999px; background: var(--hover); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-tag[data-device="true"] { background: var(--accent-soft); color: var(--accent); }
+.ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
+.keyedit-list::before { white-space: nowrap; }
+
+/* Canvas backdrop (canvas-backdrop.ts): the gradient is fixed to the screen and visible everywhere; the dots are light marks on it and move with the camera. */
+.ui-canvas-backdrop {
+  --ui-dot-size: 1.4px; --ui-dot-gap: 22px; --ui-dot-opacity: var(--dot-opacity, 0.35); --ui-gradient-opacity: var(--gradient-opacity, 0.5);
+  --ui-dot-color: var(--dot-color, color-mix(in oklab, var(--mesh-3) 40%, white));
+  position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
+}
+.ui-canvas-backdrop-fill { position: absolute; inset: 0; opacity: var(--ui-gradient-opacity); background: var(--ui-dot-fill, linear-gradient(115deg, var(--mesh-1), var(--mesh-2) 35%, var(--mesh-3) 70%, var(--mesh-4))); }
+.ui-canvas-backdrop-layer[hidden] { display: none; }
+.ui-canvas-backdrop-layer {
+  position: absolute; left: 0; top: 0; will-change: transform, opacity;
+  background-image: radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--ui-dot-color) calc(var(--ui-dot-opacity) * 100%), transparent) calc(var(--ui-dot-size) / 2), transparent calc(var(--ui-dot-size) / 2 + 0.7px));
+}
+
+/* Settings windows (settings-panels.ts): choice rows with a tick, device rows, headings; every colour, size and radius is a token. */
+.ui-sp { display: grid; gap: 14px; }
+.ui-sp-list { display: grid; gap: 2px; }
+.ui-sp-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: var(--ui-row-h, 32px); padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-sp-row:active { transform: scale(var(--ui-press-scale, 0.97)); }
+@media (hover: hover) and (pointer: fine) { .ui-sp-row:hover { background: var(--hover); } }
+.ui-sp-swatch { position: relative; flex: none; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--overlay-line); }
+.ui-sp-swatch::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--dot); }
+.ui-sp-label { flex: 1; min-width: 0; }
+.ui-sp-hint { color: var(--ui-text-secondary); }
+.ui-sp-tick { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 180ms var(--ease-out, ease-out); }
+.ui-sp-row[data-current] .ui-sp-tick { opacity: 1; transform: none; }
+.ui-sp-devices { display: grid; margin: 0; padding: 0; list-style: none; }
+.ui-sp-device { display: flex; align-items: center; gap: 10px; min-height: 52px; border-bottom: 1px solid var(--line); }
+.ui-sp-device:last-child { border-bottom: 0; }
+.ui-sp-kind { position: relative; display: grid; flex: none; place-items: center; width: 28px; height: 28px; color: var(--fg-2); }
+.ui-sp-kind svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-sp-dot { position: absolute; right: 1px; bottom: 1px; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); }
+.ui-sp-dot[data-online="false"] { background: var(--fg-3); }
+.ui-sp-names { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.ui-sp-name-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.ui-sp-name { min-width: 0; max-width: 100%; padding: 0 2px; margin: 0 -2px; border: 0; border-radius: 6px; background: none; outline: none; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); }
+.ui-sp-name:focus { background: var(--hover); }
+.ui-sp-here { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 12px); white-space: nowrap; }
+.ui-sp-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 12px); letter-spacing: var(--ui-tracking); }
+.ui-sp-actions { display: flex; flex: none; gap: 2px; }
+.ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
+.keyedit-list::before { white-space: nowrap; }
+
+/* A chip used as a toggle (a view to share, a filter): pressed is a quiet accent fill, nothing else changes. */
+.ui-chip[aria-pressed] { padding-right: 10px; cursor: pointer; }
+.ui-chip[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }

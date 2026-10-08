@@ -12,7 +12,7 @@
  * starts drawing 50 ms after the icon transition. Going back is quicker than coming in.
  */
 import { TICK_PATH } from "./tick";
-import { refreshTip } from "./tooltip";
+import { flashTip, refreshTip } from "./tooltip";
 
 // Long enough to register, short enough to be gone before the next glance (owner:
 // 1.4 s was too long).
@@ -29,10 +29,21 @@ const TICK_ICON = `<svg class="is-done" viewBox="0 0 24 24" aria-hidden="true"><
 /** The whole content of an icon-only action button: its icon, with the tick behind it. */
 export const swapIcon = (paths: string) => `<span class="swap"><svg class="is-idle" viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>${TICK_ICON}</span>`;
 
+/** An inline tick for text that copies (no idle glyph): it morphs in with the same motion as `swapIcon`. */
+export const inlineTick = (): string => `<span class="swap ui-inline-tick" aria-hidden="true">${TICK_ICON}</span>`;
+
+let tickTemplate: HTMLTemplateElement | undefined;
+/** The same inline tick as a node, cloned from one parsed template (a list of cells would otherwise parse the markup per cell). */
+export const inlineTickNode = (): Node => {
+  if (!tickTemplate) { tickTemplate = document.createElement("template"); tickTemplate.innerHTML = inlineTick(); }
+  return tickTemplate.content.firstChild!.cloneNode(true);
+};
+
 const timers = new WeakMap<HTMLElement, number>();
 
 /** Plays the icon → tick → icon swap; keyboard activations expose the result instantly. */
 export function confirmAction(button: HTMLElement, doneLabel: string, instant = false): void {
+  // Text cells have no label of their own: the empty idle label restores to "no attribute".
   const idle = button.dataset.idleLabel ??= button.getAttribute("aria-label") ?? "";
   clearTimeout(timers.get(button));
   button.toggleAttribute("data-instant", instant);
@@ -42,19 +53,68 @@ export function confirmAction(button: HTMLElement, doneLabel: string, instant = 
   timers.set(button, window.setTimeout(() => {
     delete button.dataset.done;
     button.removeAttribute("data-instant");
-    button.setAttribute("aria-label", idle);
+    if (idle) button.setAttribute("aria-label", idle); else button.removeAttribute("aria-label");
     refreshTip(button);
   }, HOLD));
 }
 
-/** Copies `text` and confirms after acceptance; keyboard activation is immediate. */
-export async function copyFeedback(button: HTMLElement, text: string, instant = false): Promise<boolean> {
-  try {
-    if (!navigator.clipboard) return false;
-    await navigator.clipboard.writeText(text);
-    confirmAction(button, "Copied", instant);
-    return true;
-  } catch {
-    return false;
+/**
+ * Puts `text` on the clipboard. The async API exists only in secure contexts (https or
+ * localhost): on a plain-http LAN origin `navigator.clipboard` is undefined, so a hidden textarea
+ * and `execCommand("copy")` is the fallback. It is taken synchronously when the async API is
+ * missing, so it still runs inside the user's gesture, and also after a rejected async write.
+ */
+export async function writeClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through to the legacy path */ }
   }
+  return legacyCopy(text);
+}
+
+function legacyCopy(text: string): boolean {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.setAttribute("aria-hidden", "true");
+  // Off-screen but selectable; 16 px keeps iOS from zooming. Restores the focus it borrowed.
+  area.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;pointer-events:none";
+  const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const selection = document.getSelection();
+  const saved = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+  document.body.append(area);
+  area.focus({ preventScroll: true });
+  area.select();
+  area.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  area.remove();
+  if (saved && selection) { selection.removeAllRanges(); selection.addRange(saved); }
+  previous?.focus({ preventScroll: true });
+  return ok;
+}
+
+/**
+ * Copies `text` and confirms; keyboard activation is immediate. This is the one copy gesture of
+ * the product (sign-in, recovery, key/value cells, About). Elements that have no tooltip of their
+ * own (a text cell) pass `tip: true` to show the shared "Copied" tooltip too. If both clipboard
+ * paths fail the same slot says "Couldn't copy" instead of ticking.
+ */
+export async function copyFeedback(button: HTMLElement, text: string, instant = false, tip = false): Promise<boolean> {
+  if (await writeClipboard(text)) {
+    confirmAction(button, "Copied", instant);
+    if (tip) flashTip(button, "Copied", HOLD);
+    return true;
+  }
+  flashTip(button, "Couldn't copy", HOLD);
+  return false;
+}
+
+/**
+ * Reads the clipboard. Like writing, the async API exists only in secure contexts; on a plain-http
+ * origin it is missing and a page cannot read the clipboard at all, so this returns `undefined` and
+ * the caller offers a paste target instead (the system paste menu fills it).
+ */
+export async function readClipboard(): Promise<string | undefined> {
+  if (!navigator.clipboard?.readText) return undefined;
+  try { return await navigator.clipboard.readText(); } catch { return undefined; }
 }

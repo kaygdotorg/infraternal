@@ -121,6 +121,8 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
       configurable: true,
       value: { writeText: async () => { throw new Error("clipboard unavailable"); }, readText: async () => "" },
     });
+    // The shared copy helper falls back to execCommand; both paths must fail for "unavailable".
+    document.execCommand = () => false;
   });
   await copyButton.click();
   expect(await copyButton.getAttribute("data-done")).toBeNull();
