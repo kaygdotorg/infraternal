@@ -160,6 +160,133 @@ fn retained_trust(directory: &Directory, fixture: &Fixture) -> PathBuf {
     ca
 }
 
+/// Exercise the normal CLI's shared HTTP/listener revocation scope while the CA
+/// remains locked. Removing authority must leave the existing rootless shims alive.
+async fn revoke_live_host(
+    fixture: &Fixture,
+    browser: &mut Browser,
+    host: uuid::Uuid,
+    state: &Path,
+    input_acked: u64,
+) {
+    let shims = remaining_shims(state);
+    assert_eq!(shims, 2);
+    let stream = tls(fixture.address, &fixture.root).await;
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+            .await
+            .unwrap();
+    let connection = tokio::spawn(connection);
+    let started = Instant::now();
+    let response = sender
+        .send_request(
+            hyper::Request::builder()
+                .method("POST")
+                .uri("/remote/revocations")
+                .header("host", "localhost:4701")
+                .header("origin", "https://localhost:4701")
+                .header("cookie", format!("__Host-infraternal={}", fixture.cookie))
+                .header("content-type", "application/json")
+                .body(http_body_util::Full::new(bytes::Bytes::from(
+                    serde_json::to_vec(&serde_json::json!({"host_id":host})).unwrap(),
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), hyper::StatusCode::NO_CONTENT);
+    let committed_us = started.elapsed().as_micros();
+    connection.abort();
+    send(
+        browser,
+        1,
+        &Frame::Input {
+            in_seq: input_acked,
+            bytes: b"printf 'REVOKE_%s\\n' REFUSED\n",
+        },
+    )
+    .await;
+    let input = serde_json::json!({"host_id":host}).to_string();
+    send(
+        browser,
+        0,
+        &Frame::Call {
+            call_id: 2,
+            action_id: "ssh.session.open",
+            input_json: input.as_bytes(),
+        },
+    )
+    .await;
+    let mut refused = false;
+    while !refused {
+        let wire = next(browser).await;
+        let decoded = decode_muxed_frame(&wire).unwrap();
+        match decoded.frame {
+            Frame::Result { call_id: 2, ok, .. } => {
+                assert!(!ok, "revoked host admitted another terminal");
+                refused = true;
+            }
+            Frame::Ack { in_seq_acked } if decoded.stream_id == 1 => {
+                assert!(
+                    in_seq_acked <= input_acked,
+                    "revoked host accepted more input"
+                );
+            }
+            _ => {}
+        }
+    }
+    let refused_us = started.elapsed().as_micros().saturating_sub(committed_us);
+    assert_revoked_attachment_quiet(browser, input_acked).await;
+    assert_eq!(remaining_shims(state), shims);
+    println!(
+        "remote_revocation normal_cli=true signing_locked=true http_commit_us={committed_us} commit_to_browser_refusal_us={refused_us} shims_alive={shims} new_session_refused=true retained_attachment_probe_ms=300 additional_input_acked=0"
+    );
+}
+
+/// Retained browser attachments survive loss for offset recovery; a revoked
+/// host must not accept input or execute its marker during this bounded probe.
+async fn assert_revoked_attachment_quiet(browser: &mut Browser, input_acked: u64) {
+    let quiet = tokio::time::timeout(Duration::from_millis(300), async {
+        let mut output = Vec::new();
+        loop {
+            let wire = next(browser).await;
+            let decoded = decode_muxed_frame(&wire).unwrap();
+            match decoded.frame {
+                Frame::Ack { in_seq_acked } if decoded.stream_id == 1 => {
+                    assert!(
+                        in_seq_acked <= input_acked,
+                        "revoked host accepted more input"
+                    );
+                }
+                Frame::Output { bytes, .. } if decoded.stream_id == 1 => {
+                    output.extend_from_slice(bytes);
+                    assert!(!output.windows(14).any(|window| window == b"REVOKE_REFUSED"));
+                    if output.len() > 13 {
+                        output.drain(..output.len() - 13);
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(quiet.is_err());
+}
+
+/// Readiness must precede HTTPS/WebSocket use of the replacement CLI.
+async fn wait_cli_listener(address: SocketAddr, started: Instant) {
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "normal CLI did not listen"
+        );
+        if tokio::net::TcpStream::connect(address).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 #[ignore = "normal CLI cold-start proof requires static INFRATERNAL_REMOTE_TEST_BINARY and exclusive 4701/7443"]
 async fn normal_cli_cold_start_keeps_enrolled_remote_terminal_while_signing_locked() {
@@ -199,19 +326,7 @@ async fn normal_cli_cold_start_keeps_enrolled_remote_terminal_while_signing_lock
     release_fixture(&mut fixture, endpoint).await;
     let started = Instant::now();
     let server = cold_cli(&binary, &directory, &ca);
-    loop {
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "normal CLI did not listen"
-        );
-        if tokio::net::TcpStream::connect(fixture.address)
-            .await
-            .is_ok()
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_cli_listener(fixture.address, started).await;
     let mut browser = browser(
         fixture.address,
         &fixture.root,
@@ -255,6 +370,14 @@ async fn normal_cli_cold_start_keeps_enrolled_remote_terminal_while_signing_lock
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
     locked_join(&fixture).await;
+    revoke_live_host(
+        &fixture,
+        &mut browser,
+        host,
+        &directory.0.join("s"),
+        command.len().try_into().unwrap(),
+    )
+    .await;
     drop(browser);
     drop(child);
     drop(server);

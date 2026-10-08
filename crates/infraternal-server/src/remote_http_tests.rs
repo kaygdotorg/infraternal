@@ -317,3 +317,6 @@ async fn enrollment_api_at_1000_hosts() {
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
+
+#[path = "remote_revocation_http_tests.rs"]
+mod revocation;

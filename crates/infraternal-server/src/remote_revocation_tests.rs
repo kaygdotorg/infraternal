@@ -1,17 +1,11 @@
 //! Real TCP/mTLS regressions for event-driven revocation and current attachment authority [134], #78.
 
 use super::*;
-async fn review_admitted_tcp() -> (
-    EnrollmentStore,
-    sqlx::SqlitePool,
-    Uuid,
-    [u8; 32],
-    RemoteListeners,
-    EmbeddedAgent,
-    tokio::task::JoinHandle<()>,
-    tokio::sync::oneshot::Receiver<Vec<u8>>,
-) {
-    let (server, host, root, _) = identities();
+
+async fn admitted_store(
+    host: &Identity,
+    root: &X509,
+) -> (EnrollmentStore, sqlx::SqlitePool, Uuid, [u8; 32]) {
     let fingerprint = openssl::sha::sha256(&host.certificate.to_der().unwrap());
     let (store, pool, host_id) = crate::enrollment::authority::tests::enrolled().await;
     let instant = now().unwrap();
@@ -35,6 +29,21 @@ async fn review_admitted_tcp() -> (
         )
         .await
         .unwrap();
+    (store, pool, host_id, fingerprint)
+}
+
+async fn admitted_tcp() -> (
+    EnrollmentStore,
+    sqlx::SqlitePool,
+    Uuid,
+    [u8; 32],
+    RemoteListeners,
+    EmbeddedAgent,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<Vec<u8>>,
+) {
+    let (server, host, root, _) = identities();
+    let (store, pool, host_id, fingerprint) = admitted_store(&host, &root).await;
     let hosts = RemoteHosts::default();
     let listeners = RemoteListeners::start(
         "127.0.0.1:0".parse().unwrap(),
@@ -92,9 +101,8 @@ async fn review_admitted_tcp() -> (
 }
 
 #[tokio::test]
-async fn review_revocation_must_cancel_input_on_existing_tls_transport() {
-    let (store, _pool, host, fingerprint, _listeners, actor, peer, observed) =
-        review_admitted_tcp().await;
+async fn revocation_must_cancel_input_on_existing_tls_transport() {
+    let (store, _pool, host, fingerprint, _listeners, actor, peer, observed) = admitted_tcp().await;
     let session = tokio::time::timeout(
         Duration::from_secs(2),
         actor.open(crate::embedded::TerminalSize {
@@ -135,9 +143,9 @@ async fn review_revocation_must_cancel_input_on_existing_tls_transport() {
 }
 
 #[tokio::test]
-async fn review_expired_identity_must_refuse_new_attachment_on_existing_transport() {
+async fn expired_identity_must_refuse_new_attachment_on_existing_transport() {
     let (store, pool, _host, fingerprint, _listeners, actor, peer, _observed) =
-        review_admitted_tcp().await;
+        admitted_tcp().await;
     let session = tokio::time::timeout(
         Duration::from_secs(2),
         actor.open(crate::embedded::TerminalSize {
@@ -164,6 +172,64 @@ async fn review_expired_identity_must_refuse_new_attachment_on_existing_transpor
         attachment.is_err(),
         "expired ledger identity retained terminal attachment authority"
     );
+}
+
+/// An idle QUIC peer must be cancelled without waiting for terminal activity or
+/// its transport heartbeat. The same ledger event closes all native streams.
+#[tokio::test]
+async fn revocation_closes_admitted_idle_quic_connection() {
+    use infraternal_agent::remote_native::NativeChannel;
+    let (server, host, root, _) = identities();
+    let (store, _pool, id, _fingerprint) = admitted_store(&host, &root).await;
+    let hosts = RemoteHosts::default();
+    let listeners = RemoteListeners::start(
+        "127.0.0.1:0".parse().unwrap(),
+        &server,
+        std::slice::from_ref(&root),
+        store.clone(),
+        hosts.clone(),
+    )
+    .await
+    .unwrap();
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(remote_quic::client_config(&host, &[root]).unwrap());
+    let connection = endpoint
+        .connect(listeners.local_addr().unwrap(), "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let (send, receive) = connection.open_bi().await.unwrap();
+    let control = NativeChannel::control(send, receive).unwrap();
+    let mut transmit = Transmit::default();
+    transmit
+        .send(
+            &control,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: remote_quic::REMOTE_WRITER_BINDING,
+                client_info: "test",
+            },
+        )
+        .await
+        .unwrap();
+    Receive::default().next(&control).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while hosts.actor(id).await.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    store.revoke("owner", id, now().unwrap()).await.unwrap();
+    assert!(hosts.actor(id).await.is_none());
+    let closed = tokio::time::timeout(Duration::from_millis(300), connection.closed())
+        .await
+        .expect("revoked idle QUIC connection waited for transport activity");
+    assert!(matches!(
+        closed,
+        quinn::ConnectionError::ApplicationClosed(_)
+    ));
 }
 
 /// Exercise the actual expiry wait with a short public-ledger fixture, without
