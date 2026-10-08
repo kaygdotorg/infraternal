@@ -36,3 +36,4 @@ export * from "./icons";
 export * from "./connection-indicator";
 export * from "./toolbar-settings";
 export * from "./shortcuts-settings";
+export * from "./canvas-backdrop";

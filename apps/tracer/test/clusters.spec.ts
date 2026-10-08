@@ -493,3 +493,26 @@ test("motion rule: the work of a view jump, a window step and a column step fini
   expect(costs.canvasLockToggle).toBeLessThan(16);
   expect(costs.keyJumpMoved).toBeGreaterThan(500);
 });
+
+test("canvas backdrop: the dots move exactly with the windows, one layer fades to every second dot below 50 percent, and idle costs nothing", async ({ page }) => {
+  await open(page, 1);
+  const api = "__tracerClusters";
+  const dotAt = async (): Promise<{ wx: number; level0: number; level1: number }> => page.evaluate((name) => {
+    const cam = (window as unknown as Record<string, { camera(): { tx: number; ty: number; z: number } }>)[name]!.camera();
+    const layer = (k: number): HTMLElement => document.querySelector<HTMLElement>(`.ui-canvas-backdrop-layer[data-level="${k}"]`)!;
+    // Screen x of the first dot of layer 0 in the layer's own coordinates: from its transform.
+    const m = /translate3d\(([-\d.e]+)px/.exec(layer(0).style.transform);
+    return { wx: m ? Number(m[1]) - cam.tx : 0, level0: Number(layer(0).style.opacity), level1: Number(layer(1).style.opacity) };
+  }, api);
+  await page.evaluate((name) => (window as unknown as Record<string, { setCamera(x: number, y: number, z: number): void }>)[name]!.setCamera(2000, 1000, 1), api);
+  const a = await dotAt();
+  await page.evaluate((name) => (window as unknown as Record<string, { setCamera(x: number, y: number, z: number): void }>)[name]!.setCamera(2037, 1000, 1), api);
+  const b = await dotAt();
+  // The layer hops by whole spacings only, so its offset from the world origin stays a multiple of the gap.
+  expect(Math.abs(((b.wx - a.wx) % 22 + 22) % 22)).toBeLessThan(0.01);
+  expect(a.level0).toBe(1);
+  await page.evaluate((name) => (window as unknown as Record<string, { setCamera(x: number, y: number, z: number): void }>)[name]!.setCamera(2000, 1000, 0.25), api);
+  const far = await dotAt();
+  expect(far.level0).toBe(0);
+  expect(far.level1).toBe(1);
+});

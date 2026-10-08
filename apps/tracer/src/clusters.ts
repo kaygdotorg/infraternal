@@ -41,6 +41,7 @@ import { dropletSplit } from "./clusters-split";
 import { isTypingTarget } from "../../../packages/ui/src/shortcuts-view";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { ICONS, iconSvg } from "../../../packages/ui/src/icons";
+import { createCanvasBackdrop } from "../../../packages/ui/src/canvas-backdrop";
 import { createConnectionIndicator } from "../../../packages/ui/src/connection-indicator";
 import type { ToolbarRow } from "./core-screen";
 
@@ -126,6 +127,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
   const viewport = el("div", "cl-viewport");
   viewport.setAttribute("aria-label", "Canvas of views");
   const world = el("div", "cl-world");
+  const dotsOn = new URLSearchParams(location.search).get("dots") !== "0";
+  const backdrop = dotsOn ? createCanvasBackdrop(viewport) : undefined;
   const overlay = document.createElementNS(SVG_NS, "svg");
   overlay.setAttribute("class", "cl-overlay");
   overlay.setAttribute("aria-hidden", "true");
@@ -178,6 +181,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     // At rest the translation lands on whole device pixels, so text is as crisp as it can be.
     if (atRest) { tx = snapPx(tx); ty = snapPx(ty); }
     world.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${cam.z})`;
+    backdrop?.update(tx, ty, cam.z, vw, vh);
     world.style.setProperty("--z", String(cam.z));
     world.style.setProperty("--inv", String(clamp(1 / cam.z, 1, 3.2)));
     const nextLod = lod === "live" ? (cam.z < 0.58 ? "thumb" : "live") : (cam.z > 0.62 ? "live" : "thumb");
@@ -2021,6 +2025,8 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
     scene: () => sceneIndex + 1,
     setScene: (n: number) => goScene(n - 1),
     camera: () => ({ ...cam, lod, zoomBand, tx, ty }),
+    setCamera: (cx: number, cy: number, z: number) => { applyCanvasLock(false); setCam({ cx, cy, z }); },
+    flyCamera: (cx: number, cy: number, z: number) => { applyCanvasLock(false); flyTo(() => ({ cx, cy, z })); },
     views: () => [...clusters.values()].map((c) => ({ id: c.view.id, name: c.view.name, x: c.x, y: c.y, w: boxOf(c.view, metrics).w, h: boxOf(c.view, metrics).h, windows: [...c.wins.keys()] })),
     grants: () => grants.map((g) => ({ ...g })),
     flyView: (id: ViewId) => flyView(id),
@@ -2049,6 +2055,7 @@ export async function mountClusters(core: CoreScreen, options: ClustersOptions =
       if (float) { float.morph.close(true); dropFloat(float); }
       badge.remove();
       clear();
+      backdrop?.dispose();
       removeBindings.forEach((r) => r());
       offBindings();
       capsuleConn.dispose();
