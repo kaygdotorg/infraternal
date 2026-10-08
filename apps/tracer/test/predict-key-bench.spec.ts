@@ -46,6 +46,8 @@ test(`predictive echo cost per key over ${keyCount} keys`, async ({ page, contex
   // Self-contained: the test double needs nothing but these two calls (a fresh owner and its auth cookie, which the
   // page shares through the browser context) and the page URL. No other spec has to run first.
   const problems: string[] = [];
+  // A prebuilt dist that lacks ui.css or the fonts shows here as 404s, and the page then says it cannot reach the server.
+  page.on("response", (response) => { if (response.status() >= 400) problems.push(`HTTP ${response.status()} ${response.url()}`); });
   page.on("console", (message) => { if (message.type() === "error") problems.push(`console: ${message.text()}`); });
   page.on("pageerror", (error) => problems.push(`page error: ${error.message}`));
   const reset = await context.request.post("/__mock/reset");
