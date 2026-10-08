@@ -489,6 +489,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
     const size = `${layout.size.w}x${layout.size.h}`;
     if (size !== sized) { sized = size; cx.view.settle(c.view.id); }
     cx.tree.render();
+    cx.pill.paint(); // the top pill counts the nodes
   };
   const buildGraph = (c: ViewRec): void => {
     c.colsEl.classList.add("cl-graph");

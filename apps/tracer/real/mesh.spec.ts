@@ -10,7 +10,10 @@
  *
  * `INFRATERNAL_BIN` is the server binary, built from a scratch merge of mesh-api; the merge is never committed.
  */
+import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
+import { WebSocket } from "ws";
+import { WebSocketFrameDecoder, encodeMuxedFrame, type WireFrame } from "../../../packages/protocol/src/codec";
 import { startRealServer, type RealServer } from "./server";
 
 test.describe.configure({ mode: "serial" });
@@ -38,6 +41,8 @@ test.beforeAll(async ({ browser }) => {
   await page.locator(".auth-check").click();
   await page.getByRole("button", { name: "Open infraternal" }).click();
   await page.locator(".cl-viewport").waitFor();
+  // The canvas asks for the mesh as soon as the connection is up; which block runs depends on the answer.
+  await expect.poll(() => controls().some((c) => c.dir === "down" && c.type === "Result" && controls().some((u) => u.dir === "up" && u.detail === "mesh.list" && u.callId === c.callId)), { timeout: 20_000 }).toBe(true);
 });
 test.afterAll(async () => { await page?.context().close(); await server?.dispose(); });
 
@@ -70,13 +75,48 @@ test.describe("a server that does not serve the Mesh (yet)", () => {
   });
 });
 
+/** Runs one action on a second socket of the signed-in account (the way a CLI or another tab would) and returns its answer. */
+async function act(action: string, input: Record<string, unknown>): Promise<{ ok: boolean; body: Record<string, unknown> }> {
+  const cookie = (await page.context().cookies()).map((c) => `${c.name}=${c.value}`).join("; ");
+  const socket = new WebSocket(server.backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: server.origin, Cookie: cookie } });
+  const decoder = new WebSocketFrameDecoder();
+  const answer = new Promise<{ ok: boolean; body: Record<string, unknown> }>((resolve, reject) => {
+    socket.on("message", (data) => decoder.feed(new Uint8Array(Buffer.from(data as Buffer)), (_s: number, f: WireFrame) => {
+      if (f.type === "Hello") socket.send(encodeMuxedFrame(0, { type: "Hello", version: 1, caps: 0n, clientInfo: "mesh-real-act" }));
+      if (f.type === "Welcome") socket.send(encodeMuxedFrame(0, { type: "Call", callId: 1, actionId: action, inputJson: new TextEncoder().encode(JSON.stringify(input)) }));
+      if (f.type === "Result") resolve({ ok: f.ok, body: JSON.parse(new TextDecoder().decode(f.json)) as Record<string, unknown> });
+    }));
+    socket.on("error", reject);
+    setTimeout(() => reject(new Error("no answer")), 15_000);
+  });
+  try { return await answer; } finally { socket.terminate(); }
+}
+
 test.describe("a server that serves the Mesh", () => {
-  test("the owner gets the Mesh view with the enrolled hosts, subscribes, and may edit grants", async () => {
+  test("the owner gets the Mesh view, empty at first, and hosts enrolled elsewhere appear live", async () => {
     test.skip(!meshServed(), "this binary does not serve the Mesh API yet (branch mesh-api, #108)");
     await expect(page.locator('.cl[data-view="mesh"]')).toBeVisible();
     expect(controls().filter((c) => c.type === "Subscribe").map((c) => c.detail)).toContain("mesh");
     await page.keyboard.press("Control+2");
-    await page.waitForTimeout(1200);
-    await expect(page.locator('.cl[data-view="mesh"] .ui-window[data-kind="node"]').first()).toBeVisible();
+    await expect(page.locator(".cl-meshstate")).toContainText("No hosts in the mesh yet");
+    for (const [i, name] of ["alpha", "bravo"].entries()) {
+      const r = await act("mesh.node.enroll", { name, public_key: Array.from({ length: 32 }, (_, k) => (k + i + 1) % 255 + 1) });
+      expect(r.ok).toBe(true);
+    }
+    await expect(page.locator('.cl[data-view="mesh"] .ui-window[data-window-id="n-alpha"]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.cl[data-view="mesh"] .ui-window[data-window-id="n-bravo"]')).toBeVisible();
+    await expect(page.locator(".cl-meshstate")).toHaveCount(0);
+  });
+
+  test("a grant made elsewhere draws an arrow named for it; today's server sends no access flags, so nothing is editable", async () => {
+    test.skip(!meshServed(), "this binary does not serve the Mesh API yet");
+    const nodes = ((await act("mesh.list", {})).body.nodes as Array<{ node: { id: number; host: string } }>).map((n) => n.node);
+    const id = (h: string) => nodes.find((n) => n.host === h)!.id;
+    const made = await act("mesh.grant.create", { name: "alpha-to-bravo", from: { Node: id("alpha") }, to: { Node: id("bravo") }, both_ways: false });
+    expect(made.ok).toBe(true);
+    const arrow = page.locator('.cl[data-view="mesh"] .cl-arrow[data-tip="alpha-to-bravo"]');
+    await expect(arrow).toHaveCount(1, { timeout: 15_000 });
+    expect(await page.locator(".cl-arrow-handle").count()).toBe(0); // least privilege until the server sends `access`
+    await page.screenshot({ path: resolve(import.meta.dirname, "../captures/canvas-mesh/real-server-ink-1440x900.png") });
   });
 });
