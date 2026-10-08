@@ -17,6 +17,7 @@ import { SVG_NS, coarse, el } from "../dom";
 import { contentSize, type Pt, type Rect } from "../layout/geometry";
 import type { Grant, NodeModel, WindowModel } from "../model/types";
 import { ICON, lineIcon } from "../views/icons";
+import { SCALE_REST, restAt } from "../springs";
 import { Arrow, DragArrow, anchors } from "./arrows";
 import { createGraph, type GraphController, type TopoArrow } from "./graph";
 import { createLayoutModel } from "./layout-model";
@@ -75,7 +76,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     const { arrow } = entry;
     arrow.g.dataset.fresh = "";
     requestAnimationFrame(() => requestAnimationFrame(() => arrow.g.removeAttribute("data-fresh")));
-    const pulse = new Spring(1.9, (v) => arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 });
+    const pulse = restAt(new Spring(1.9, (v) => arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 }), SCALE_REST);
     pulse.set(1);
   };
   const drawTopoArrow = (c: ViewRec, e: TopoArrow): void => {
@@ -232,7 +233,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
             entry.arrow.g.dataset.tip = grantName(g);
             entry.arrow.g.removeAttribute("data-editing");
             refreshGraph(c);
-            const pulse = new Spring(1.9, (v) => entry.arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 });
+            const pulse = restAt(new Spring(1.9, (v) => entry.arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 }), SCALE_REST);
             pulse.set(1);
             live.dispose();
             for (const cl of views.values()) cx.view.geometry(cl);

@@ -20,6 +20,7 @@ import type { ViewId, WindowModel } from "../model/types";
 import { coarse, reduced } from "../dom";
 import { makeWindow, setActive } from "./frame";
 import { isTerminal, makeBody } from "../views/body";
+import { SCALE_REST, restAt } from "../springs";
 
 export interface WindowsModule {
   make(c: ViewRec, m: WindowModel): WinRec;
@@ -58,6 +59,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       root.style.opacity = String(clamp(1 - p * 1.4, 0, 1));
       cx.invalidate();
     }, { visualDuration: 0.5, bounce: 0.28 });
+    restAt(spring, SCALE_REST);
     spring.set(0);
   };
 
@@ -157,6 +159,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       root.style.opacity = String(1 - p);
       if (p >= 1) finish();
     }, { visualDuration: 0.22, bounce: 0 });
+    restAt(spring, SCALE_REST);
     spring.set(1);
   };
 

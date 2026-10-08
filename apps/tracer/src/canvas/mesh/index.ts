@@ -31,6 +31,7 @@ import { Arrow, DragArrow, anchors } from "./arrows";
 import type { GraphViewModule } from "./graph-view";
 import { reach } from "./grants";
 import type { MeshSource } from "./source";
+import { SCALE_REST, restAt } from "../springs";
 
 export interface MeshModule {
   /** Fills a graph view with its node cards and arrows. */

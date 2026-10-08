@@ -18,6 +18,7 @@ import type { Ctx, ViewRec } from "../context";
 import { MARGIN, boxOf, contentSize, resolve, snapToGrid, type Box, type Rect } from "../layout/geometry";
 import type { ColumnModel, ViewId, ViewModel, WindowModel } from "../model/types";
 import { el } from "../dom";
+import { restPx } from "../springs";
 import { viewIcon } from "./icons";
 
 export interface ViewsModule {
@@ -112,8 +113,8 @@ export function createViews(cx: Ctx): ViewsModule {
   const ghost = el("div", "cl-ghost");
   let ghostX: Spring, ghostY: Spring;
   const paintGhost = (): void => { if (ghostX && ghostY) ghost.style.transform = `translate(${ghostX.value}px, ${ghostY.value}px)`; };
-  ghostX = new Spring(0, () => paintGhost(), { visualDuration: 0.3, bounce: 0.12 });
-  ghostY = new Spring(0, () => paintGhost(), { visualDuration: 0.3, bounce: 0.12 });
+  ghostX = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.3, bounce: 0.12 }));
+  ghostY = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.3, bounce: 0.12 }));
   world.append(ghost);
 
   const wireView = (c: ViewRec): void => {
@@ -200,8 +201,8 @@ export function createViews(cx: Ctx): ViewsModule {
     };
     const place = (): void => { root.style.transform = `translate(${c.x}px, ${c.y}px)`; cx.invalidate(); cx.memory?.cull(); };
     const POS = { visualDuration: 0.5, bounce: 0.2 };
-    c.sx = new Spring(view.x, (v) => { c.x = v; place(); }, POS);
-    c.sy = new Spring(view.y, (v) => { c.y = v; place(); }, POS);
+    c.sx = restPx(new Spring(view.x, (v) => { c.x = v; place(); }, POS));
+    c.sy = restPx(new Spring(view.y, (v) => { c.y = v; place(); }, POS));
     if (view.layout === "tiled") {
       for (const col of view.cols) {
         const colEl = newCol(col);

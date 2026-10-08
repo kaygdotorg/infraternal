@@ -20,6 +20,7 @@ import { Spring } from "../../../../../packages/ui/src/spring";
 
 export interface Cam { cx: number; cy: number; z: number }
 import type { Pt, Rect } from "../layout/geometry";
+import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
 
 /** Below about 60 % zoom, windows become read-only thumbnails (`thumb`). */
 export type Lod = "live" | "thumb";
@@ -84,6 +85,14 @@ export class Camera {
     this.springCx = new Spring(0, (v) => { this.cam.cx = v; this.apply(); }, FLIGHT);
     this.springCy = new Spring(0, (v) => { this.cam.cy = v; this.apply(); }, FLIGHT);
     this.springLz = new Spring(0, (v) => { this.cam.z = Math.exp(v); this.apply(); }, FLIGHT);
+    this.restThresholds(1);
+  }
+
+  /** A flight ends when it is under a quarter of a device pixel (a zoom change under 0.05 %) from its target. */
+  private restThresholds(zoom: number): void {
+    restAt(this.springCx, quarterDevicePx() / zoom);
+    restAt(this.springCy, quarterDevicePx() / zoom);
+    restAt(this.springLz, SCALE_REST);
   }
 
   /** Paints the first frame, at rest. Call once the canvas around the camera exists. */
@@ -190,6 +199,7 @@ export class Camera {
       this.set(t);
       return;
     }
+    this.restThresholds(Math.max(t.z, this.cam.z));
     const cfg = this.flightKind === "key" ? KEY_FLIGHT : FLIGHT;
     this.springCx.configure(cfg); this.springCy.configure(cfg); this.springLz.configure(cfg);
     const { cam } = this;
