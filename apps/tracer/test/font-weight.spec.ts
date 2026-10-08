@@ -44,7 +44,7 @@ for (const font of FONTS) {
           };
           const regularInk = ink(0);
           const boldInk = ink(1);
-          const loaded = [...document.fonts].some((face) => face.family === family && face.status === "loaded");
+          const loaded = [...document.fonts].some((face) => face.family.replaceAll('"', "") === family && face.status === "loaded");
           return {
             loaded,
             canvasFont: context.font,
@@ -63,7 +63,8 @@ for (const font of FONTS) {
         expect(result.rendererFamily).toContain(font.family);
         expect(result.tokens).toEqual([weights.secondary, weights.body, weights.label, weights.title].map(String));
         // The canvas context holds the normalised font string of the last text it drew.
-        expect(result.canvasFont).toContain(`${font.terminalWeight}`);
+        // Weight 400 serialises as "normal", i.e. no weight keyword at all.
+        expect(/^(?:(\d{3}) )?[\d.]+px /.exec(result.canvasFont)?.[1] ?? "400").toBe(String(font.terminalWeight));
         expect(result.regularInk).toBeGreaterThan(0);
         // Bold is clearly bolder than regular: at least 12 % more ink on the same glyphs.
         expect(result.ratio).toBeGreaterThan(1.12);

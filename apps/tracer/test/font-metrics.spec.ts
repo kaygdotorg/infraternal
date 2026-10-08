@@ -1,13 +1,19 @@
-/** Proves the Maple Mono NF switch (D175): cursor alignment, prompt glyphs, and the ligature finding. */
+/**
+ * Proves every curated font keeps the terminal exact (D87, D175, #90): the cursor sits on its cell
+ * after an 86-cell line at DPR 1 and 2 (3 for the default), prompt glyphs draw from the shared
+ * symbols face, redraw time is measured, and terminal ligatures stay off for every font.
+ */
+import { cpus, loadavg } from "node:os";
 import { expect, test } from "playwright/test";
+import { DEFAULT_FONT_ID, FONTS } from "../../../packages/ui/src/fonts";
 
 const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
 const baseURL = `http://localhost:${port}`;
 // 86 cells: ligature-prone operators first, then a final wide "M" so the cursor must sit right after it.
 const line86 = `${"=> -> != === <= >= ".repeat(5)}`.slice(0, 85) + "M";
 
-for (const dpr of [1, 2, 3]) {
-  test(`86-character line keeps the cursor on its cell at DPR ${dpr}`, async ({ browser }, testInfo) => {
+for (const font of FONTS) for (const dpr of font.id === DEFAULT_FONT_ID ? [1, 2, 3] : [1, 2]) {
+  test(`${font.label}: 86-character line keeps the cursor on its cell at DPR ${dpr}`, async ({ browser }, testInfo) => {
     test.setTimeout(120_000);
     expect(line86).toHaveLength(86);
     const context = await browser.newContext({ baseURL, viewport: { width: 1920, height: 1080 }, deviceScaleFactor: dpr });
@@ -15,16 +21,16 @@ for (const dpr of [1, 2, 3]) {
       await context.request.post("/__mock/reset");
       await context.request.post("/__mock/open-terminal");
       const page = await context.newPage();
-      await page.goto("/?mock=1&theme=paper&bg=none");
+      await page.goto(`/?mock=1&theme=paper&bg=none&font=${font.id}`);
       await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
       const response = await context.request.post("/__mock/text-output", { data: { text: line86 } });
       const { bytes } = await response.json() as { bytes: number };
       await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence)).toBe(String(bytes));
       await page.evaluate(() => window.__tracerTestDouble?.freezeCursorForTest());
       await page.waitForTimeout(50);
-      await page.screenshot({ path: testInfo.outputPath(`line86-dpr${dpr}.png`) });
+      await page.screenshot({ path: testInfo.outputPath(`line86-${font.id}-dpr${dpr}.png`) });
 
-      const result = await page.evaluate(() => {
+      const result = await page.evaluate((family) => {
         const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas")!;
         const context = canvas.getContext("2d", { willReadFrequently: true })!;
         const metrics = window.__tracerTestDouble!.rendererMetrics()!;
@@ -46,10 +52,15 @@ for (const dpr of [1, 2, 3]) {
           if (bar[i] === accent[0] && bar[i + 1] === accent[1] && bar[i + 2] === accent[2]) barMin = Math.min(barMin, (i / 4) % Math.ceil(cellWidth));
         }
         // The measurements are only meaningful if Maple itself (not a fallback) painted the canvas.
-        const mapleLoaded = [...document.fonts].some((face) => face.family === "Maple Mono NF" && face.status === "loaded" && face.weight === "400 700" && face.style === "normal");
+        const mapleLoaded = [...document.fonts].some((face) => face.family.replaceAll('"', "") === family && face.status === "loaded" && face.style === "normal")
+          && window.__tracerTestDouble!.rendererMetrics()!.fontFamily.startsWith(`"${family}"`)
+          && getComputedStyle(document.documentElement).fontFamily.startsWith(`"${family}"`);
         return { mapleLoaded, cursorX: metrics.cursorX, renderCursorX: metrics.renderCursorX, cellWidth: metrics.cellWidth, natural: metrics.naturalCellWidth, cursorLeft, lastInk, barMin, dpr: devicePixelRatio, cellWidthPx: cellWidth };
-      });
-      console.log(`LINE86 ${JSON.stringify(result)}`);
+      }, font.family);
+      const bench = await page.evaluate(() => window.__tracerTestDouble?.benchmarkFullRedraw(30));
+      const sorted = bench!.slice().sort((a, b) => a - b);
+      console.log(`FONT_BENCH ${JSON.stringify({ font: font.id, dpr, redrawP50Ms: sorted[14], redrawP95Ms: sorted[28], load: loadavg().map((n) => +n.toFixed(2)), cores: cpus().length })}`);
+      console.log(`LINE86 ${JSON.stringify({ font: font.id, ...result })}`);
       expect(result.mapleLoaded).toBe(true);
       expect(result.cursorX).toBe(86);
       expect(result.renderCursorX).toBe(86);
@@ -111,32 +122,34 @@ test("powerline and icon glyphs draw as real glyphs, not missing-glyph boxes", a
   }
 });
 
-test("terminal ligatures stay off: letterSpacing disables them, and optimizeSpeed makes that deterministic", async ({ page }) => {
-  await page.goto(`${baseURL}/health`);
-  await page.setContent(`<style>@font-face{font-family:Probe;src:url(${baseURL}/fonts/maple-mono-nf/roman.latin.woff2)}</style><canvas id=c></canvas>`);
-  await page.evaluate(() => document.fonts.load("14px Probe"));
-  const diffs = await page.evaluate(() => {
-    const canvas = document.getElementById("c") as HTMLCanvasElement;
-    canvas.width = 400; canvas.height = 40;
-    const context = canvas.getContext("2d", { willReadFrequently: true })!;
-    context.font = "14px Probe";
-    const text = "=> -> != === <=";
-    const draw = (rendering: CanvasTextRendering, spacing: string): Uint8ClampedArray => {
-      context.clearRect(0, 0, 400, 40);
-      context.textRendering = rendering;
-      context.letterSpacing = spacing;
-      context.fillText(text, 0, 20);
-      return context.getImageData(0, 0, 400, 40).data.slice();
-    };
-    const differs = (a: Uint8ClampedArray, b: Uint8ClampedArray): number => { let n = 0; for (let i = 3; i < a.length; i += 4) if (Math.abs(a[i]! - b[i]!) > 40) n += 1; return n; };
-    const natural = draw("auto", "0px");
-    const spaced = draw("auto", "0.001px");
-    const speed = draw("optimizeSpeed", "0px");
-    return { autoVsSpaced: differs(natural, spaced), speedVsSpaced: differs(speed, spaced), autoVsSpeed: differs(natural, speed) };
+for (const font of FONTS) {
+  test(`${font.label}: terminal ligatures stay off, optimizeSpeed makes that deterministic`, async ({ page }) => {
+    const file = font.faces[0]!.file;
+    await page.goto(`${baseURL}/health`);
+    await page.setContent(`<style>@font-face{font-family:Probe;font-weight:400 700;src:url(${baseURL}/fonts/${file})}</style><canvas id=c></canvas>`);
+    await page.evaluate(() => document.fonts.load("14px Probe"));
+    const diffs = await page.evaluate(() => {
+      const canvas = document.getElementById("c") as HTMLCanvasElement;
+      canvas.width = 400; canvas.height = 40;
+      const context = canvas.getContext("2d", { willReadFrequently: true })!;
+      context.font = "14px Probe";
+      const text = "=> -> != === <= >= www";
+      const draw = (rendering: CanvasTextRendering, spacing: string): Uint8ClampedArray => {
+        context.clearRect(0, 0, 400, 40);
+        context.textRendering = rendering;
+        context.letterSpacing = spacing;
+        context.fillText(text, 0, 20);
+        return context.getImageData(0, 0, 400, 40).data.slice();
+      };
+      const differs = (a: Uint8ClampedArray, b: Uint8ClampedArray): number => { let n = 0; for (let i = 3; i < a.length; i += 4) if (Math.abs(a[i]! - b[i]!) > 40) n += 1; return n; };
+      const natural = draw("auto", "0px");
+      const spaced = draw("auto", "0.001px");
+      const speed = draw("optimizeSpeed", "0px");
+      return { autoVsSpaced: differs(natural, spaced), speedVsSpaced: differs(speed, spaced) };
+    });
+    console.log(`LIGATURE_PROBE ${JSON.stringify({ font: font.id, ...diffs })}`);
+    // optimizeSpeed draws exactly what spaced text draws for every font, so no display can show a
+    // ligature the next one does not. (Fonts without code ligatures show no difference at all.)
+    expect(diffs.speedVsSpaced).toBe(0);
   });
-  console.log(`LIGATURE_PROBE ${JSON.stringify(diffs)}`);
-  // Natural spacing draws ligatures; any non-zero spacing (what the grid needs on most displays) does not.
-  expect(diffs.autoVsSpaced).toBeGreaterThan(0);
-  // optimizeSpeed draws exactly what spaced text draws, so it removes the display-dependent behaviour.
-  expect(diffs.speedVsSpaced).toBe(0);
-});
+}
