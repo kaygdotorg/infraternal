@@ -363,3 +363,134 @@ async fn control_frames_do_not_cancel_bootstrap_or_starve_progress() {
     assert_eq!(backend.0.load(Ordering::SeqCst), 1);
     serving.abort();
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn settings_public_key_requires_exact_origin_and_live_unlocked_owner() {
+    use crate::ssh_key::{PublicSshKey, SshKeyError, SshKeyMaterial, SshKeySource};
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    struct PublicOnly;
+    impl SshKeySource for PublicOnly {
+        fn public_key(&self) -> Result<PublicSshKey, SshKeyError> {
+            Ok(PublicSshKey {
+                public_key: "ssh-ed25519 fixture-public-only".into(),
+                fingerprint: "SHA256:fixture-public-only".into(),
+                locked: true,
+            })
+        }
+        fn load(&self) -> Result<SshKeyMaterial, SshKeyError> {
+            panic!("public API loaded private material")
+        }
+    }
+    let (auth, _, cookie, _, _, serving, pool, api) = fixture(false).await;
+    let app = router_with_ssh_key(auth.clone(), api.runner.clone(), Arc::new(PublicOnly));
+    let request = |origin: &str, cookie: Option<&str>| {
+        let mut builder = Request::builder()
+            .uri("/v1/bootstrap/ssh-key")
+            .header(header::ORIGIN, origin);
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        builder.body(Body::empty()).unwrap()
+    };
+    for (origin, capability, status) in [
+        (ORIGIN, None, StatusCode::UNAUTHORIZED),
+        (
+            "https://foreign.example.test",
+            Some(cookie.as_str()),
+            StatusCode::FORBIDDEN,
+        ),
+        (ORIGIN, Some(cookie.as_str()), StatusCode::OK),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(origin, capability))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        if status == StatusCode::OK {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["locked"], true);
+            assert_eq!(value.as_object().unwrap().len(), 3);
+            assert_eq!(value["public_key"], "ssh-ed25519 fixture-public-only");
+        }
+    }
+    let mut duplicate = request(ORIGIN, Some(&cookie));
+    duplicate
+        .headers_mut()
+        .append(header::ORIGIN, ORIGIN.parse().unwrap());
+    assert_eq!(
+        app.clone().oneshot(duplicate).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut duplicate = request(ORIGIN, Some(&cookie));
+    duplicate
+        .headers_mut()
+        .append(header::COOKIE, cookie.parse().unwrap());
+    assert_eq!(
+        app.clone().oneshot(duplicate).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let mut browser_request = request(ORIGIN, Some(&cookie));
+    *browser_request.method_mut() = axum::http::Method::POST;
+    assert_eq!(
+        app.clone().oneshot(browser_request).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let unavailable = router(auth.clone(), api.runner.clone());
+    assert_eq!(
+        unavailable
+            .oneshot(request(ORIGIN, Some(&cookie)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    sqlx::query("UPDATE sessions SET unlocked=0")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(ORIGIN, Some(&cookie)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    sqlx::query("UPDATE sessions SET unlocked=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET owner=0")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(ORIGIN, Some(&cookie)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    sqlx::query("UPDATE users SET owner=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    auth.logout(cookie.split_once('=').unwrap().1)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.oneshot(request(ORIGIN, Some(&cookie)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    serving.abort();
+}
