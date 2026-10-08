@@ -52,18 +52,52 @@ export function confirmAction(button: HTMLElement, doneLabel: string, instant = 
 }
 
 /**
- * Copies `text` and confirms after acceptance; keyboard activation is immediate. This is the one
- * copy gesture of the product (sign-in, recovery, key/value cells, About). Elements that have no
- * tooltip of their own (a text cell) pass `tip: true` to show the shared "Copied" tooltip too.
+ * Puts `text` on the clipboard. The async API exists only in secure contexts (https or
+ * localhost): on a plain-http LAN origin `navigator.clipboard` is undefined, so a hidden textarea
+ * and `execCommand("copy")` is the fallback. It is taken synchronously when the async API is
+ * missing, so it still runs inside the user's gesture, and also after a rejected async write.
+ */
+export async function writeClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through to the legacy path */ }
+  }
+  return legacyCopy(text);
+}
+
+function legacyCopy(text: string): boolean {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.setAttribute("aria-hidden", "true");
+  // Off-screen but selectable; 16 px keeps iOS from zooming. Restores the focus it borrowed.
+  area.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;pointer-events:none";
+  const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const selection = document.getSelection();
+  const saved = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+  document.body.append(area);
+  area.focus({ preventScroll: true });
+  area.select();
+  area.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  area.remove();
+  if (saved && selection) { selection.removeAllRanges(); selection.addRange(saved); }
+  previous?.focus({ preventScroll: true });
+  return ok;
+}
+
+/**
+ * Copies `text` and confirms; keyboard activation is immediate. This is the one copy gesture of
+ * the product (sign-in, recovery, key/value cells, About). Elements that have no tooltip of their
+ * own (a text cell) pass `tip: true` to show the shared "Copied" tooltip too. If both clipboard
+ * paths fail the same slot says "Couldn't copy" instead of ticking.
  */
 export async function copyFeedback(button: HTMLElement, text: string, instant = false, tip = false): Promise<boolean> {
-  try {
-    if (!navigator.clipboard) return false;
-    await navigator.clipboard.writeText(text);
+  if (await writeClipboard(text)) {
     confirmAction(button, "Copied", instant);
     if (tip) flashTip(button, "Copied", HOLD);
     return true;
-  } catch {
-    return false;
   }
+  flashTip(button, "Couldn't copy", HOLD);
+  return false;
 }

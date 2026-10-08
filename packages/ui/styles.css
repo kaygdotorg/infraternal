@@ -335,7 +335,7 @@
 }
 .ui-kv-row:last-child { border-bottom: 0; }
 .ui-kv-cell {
-  display: block; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: copy; text-align: left; font: inherit;
+  display: block; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
   transition: transform 140ms var(--ease-out, ease-out);
   -webkit-user-select: text; user-select: text; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
 }

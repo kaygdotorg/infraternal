@@ -3,7 +3,7 @@
  * trackpad and two-finger panning, crisp resting offset, copyable key/value cells and the
  * live terminal's cursor staying on its text inside a window card.
  */
-import { expect, test, type BrowserContext, type Page } from "playwright/test";
+import { chromium, expect, test, type BrowserContext, type Page } from "playwright/test";
 
 type CanvasOffset = { x: number; y: number; minX: number; moving: boolean; transform: string };
 
@@ -765,4 +765,46 @@ test("a normal preview session never writes text bottom left: reload, a failing 
   const toast = await page.locator(".ui-toast").evaluate((node) => { const r = node.getBoundingClientRect(); return { centre: r.left + r.width / 2, bottom: innerHeight - r.bottom }; });
   expect(Math.abs(toast.centre - 720)).toBeLessThan(4);
   expect(toast.bottom).toBeLessThan(40);
+});
+
+// ---- copying from an insecure origin ---------------------------------------------------------
+test("copy works from a plain-http, non-localhost origin: no async clipboard, the fallback copies and the feedback plays", async () => {
+  // `insecure.test` resolves to the loopback proxy, but the browser treats it as a non-secure
+  // origin (as the LAN address of the preview is), so `navigator.clipboard` is undefined there.
+  const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
+  const browser = await chromium.launch({ args: [`--host-resolver-rules=MAP insecure.test 127.0.0.1`] });
+  try {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    await page.goto(`http://insecure.test:${port}/?mock=1&proto=windows&bg=none`);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __tracerCanvas?: { windows(): string[] } }).__tracerCanvas?.windows().length ?? 0), { timeout: 30_000 }).toBeGreaterThan(2);
+    expect(await page.evaluate(() => ({ secure: isSecureContext, clipboard: typeof navigator.clipboard }))).toEqual({ secure: false, clipboard: "undefined" });
+    // Record what execCommand("copy") is asked to copy, then let it succeed.
+    await page.evaluate(() => {
+      const copied: string[] = [];
+      (window as unknown as { __copied: string[] }).__copied = copied;
+      document.execCommand = (command: string): boolean => {
+        if (command === "copy") copied.push((document.activeElement as HTMLTextAreaElement).value);
+        return true;
+      };
+    });
+    await page.locator(".ui-window").first().locator(".ui-window-pill").click();
+    const value = page.locator(".canvas-popover .ui-kv-value").first();
+    await value.click();
+    await expect(value).toHaveAttribute("data-done", "");
+    expect(await page.evaluate(() => (window as unknown as { __copied: string[] }).__copied)).toEqual(["6.8.0-58-generic"]);
+    // The tick morphs in (opacity rises) and the shared "Copied" tooltip shows.
+    await expect(value.locator(".ui-inline-tick .is-done")).toHaveCSS("opacity", "1");
+    await expect(page.locator(".tip")).toContainText("Copied");
+    // The cursor over a copyable value is the pointer, never the green plus of `copy`.
+    expect(await value.evaluate((node) => getComputedStyle(node).cursor)).toBe("pointer");
+    // If both paths fail, the same slot says so.
+    await page.evaluate(() => { document.execCommand = () => false; });
+    const key = page.locator(".canvas-popover .ui-kv-key").first();
+    await key.click();
+    await expect(page.locator(".tip")).toContainText("Couldn't copy");
+    await expect(key).not.toHaveAttribute("data-done", "");
+  } finally {
+    await browser.close();
+  }
 });
