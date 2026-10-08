@@ -335,7 +335,9 @@ async fn build_router_core(
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
         EmbeddedAgent::spawn(executable)
     };
-    let hosts = crate::remote_runtime::RemoteHosts::default();
+    let hosts = crate::remote_runtime::RemoteHosts::from_source(
+        enrollment.as_ref().map(|service| service.source.clone()),
+    );
     let enrollment_store = crate::enrollment::EnrollmentStore::new(pool.clone());
     let listeners = if let Some(remote) = remote {
         Some(

@@ -187,10 +187,6 @@ impl EmbeddedAgent {
     }
 
     /// A bounded control call shares the existing id allocator and reply dispatcher.
-    #[expect(
-        dead_code,
-        reason = "renewal scheduler wiring follows in its own module commit"
-    )]
     pub(crate) async fn control_call(
         &self,
         action: &'static str,

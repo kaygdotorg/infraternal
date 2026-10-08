@@ -29,7 +29,10 @@ pub struct RemoteService {
 
 /// One durable host actor survives transport replacement; every new peer is readmitted.
 #[derive(Clone, Default)]
-pub(crate) struct RemoteHosts(Arc<Mutex<HashMap<Uuid, Host>>>);
+pub(crate) struct RemoteHosts(
+    Arc<Mutex<HashMap<Uuid, Host>>>,
+    Option<Arc<dyn crate::ca::CaKeySource>>,
+);
 struct Host {
     uid: u32,
     authority: AuthorityGuard,
@@ -49,6 +52,9 @@ impl Drop for Retirement {
     }
 }
 impl RemoteHosts {
+    pub(crate) fn from_source(source: Option<Arc<dyn crate::ca::CaKeySource>>) -> Self {
+        Self(Arc::default(), source)
+    }
     pub(crate) async fn actor(&self, id: Uuid) -> Option<EmbeddedAgent> {
         self.0
             .lock()
@@ -78,14 +84,15 @@ impl RemoteHosts {
             // Publish only after queue admission. A rejected replacement must
             // not alter a valid actor or cancel its existing retirement waiter.
             host.generation = generation;
-            host.retirement = self.retirement(id, generation, authority.clone());
+            host.retirement =
+                self.retirement(id, generation, authority.clone(), host.actor.clone());
             host.authority = authority;
         } else {
             let (actor, accepts) = EmbeddedAgent::remote(uid);
             accepts
                 .try_send(link.authorize(authority.clone()))
                 .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
-            let retirement = self.retirement(id, generation, authority.clone());
+            let retirement = self.retirement(id, generation, authority.clone(), actor.clone());
             hosts.insert(
                 id,
                 Host {
@@ -101,12 +108,27 @@ impl RemoteHosts {
         Ok(())
     }
 
-    fn retirement(&self, id: Uuid, generation: Uuid, authority: AuthorityGuard) -> Retirement {
+    fn retirement(
+        &self,
+        id: Uuid,
+        generation: Uuid,
+        authority: AuthorityGuard,
+        actor: EmbeddedAgent,
+    ) -> Retirement {
         let registry = Arc::downgrade(&self.0);
+        let source = self.1.clone();
         Retirement(tokio::spawn(async move {
             // Healthy idle has only its certificate expiry deadline, never a
             // heartbeat. Ordinary socket loss keeps the actor for offset resume.
-            authority.cancelled().await;
+            if let Some(source) = source {
+                tokio::select! {
+                    biased;
+                    () = authority.cancelled() => {},
+                    () = crate::remote_renewal::run(&authority, &actor, source) => {},
+                }
+            } else {
+                authority.cancelled().await;
+            }
             let Some(registry) = registry.upgrade() else {
                 return;
             };

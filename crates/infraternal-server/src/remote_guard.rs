@@ -76,13 +76,18 @@ impl Revocations {
     }
 }
 
-/// Exact admitted public identity plus a monotonic, non-extending expiry cap.
+/// Exact acknowledged public identity; only durable host Ack may advance its monotonic expiry cap.
 #[derive(Clone)]
 pub(crate) struct AuthorityGuard {
     store: EnrollmentStore,
-    fingerprint: [u8; 32],
     pub(crate) identity: HostAuthority,
     signal: Arc<Revocation>,
+    certificate: Arc<watch::Sender<Admission>>,
+}
+#[derive(Clone)]
+struct Admission {
+    fingerprint: [u8; 32],
+    identity: HostAuthority,
     expires: Instant,
 }
 impl AuthorityGuard {
@@ -122,15 +127,21 @@ impl AuthorityGuard {
             .min(initial_deadline);
         Ok(Self {
             store,
-            fingerprint,
+            certificate: Arc::new(
+                watch::channel(Admission {
+                    fingerprint,
+                    identity: identity.clone(),
+                    expires,
+                })
+                .0,
+            ),
             identity,
             signal,
-            expires,
         })
     }
 
     pub(crate) fn permits(&self) -> bool {
-        !*self.signal.changed.borrow() && Instant::now() < self.expires
+        !*self.signal.changed.borrow() && Instant::now() < self.certificate.borrow().expires
     }
 
     /// A frame holds this permit until its write completes or cancellation
@@ -148,14 +159,52 @@ impl AuthorityGuard {
 
     pub(crate) async fn cancelled(&self) {
         let mut changed = self.signal.changed.subscribe();
+        let mut certificate = self.certificate.subscribe();
+        loop {
+            let expires = certificate.borrow_and_update().expires;
+            if !self.permits() {
+                return;
+            }
+            tokio::select! {
+                biased;
+                _ = changed.changed() => return,
+                _ = certificate.changed() => {},
+                () = tokio::time::sleep_until(expires) => {
+                    if !self.permits() { return; }
+                },
+            }
+        }
+    }
+
+    pub(crate) fn store(&self) -> EnrollmentStore {
+        self.store.clone()
+    }
+    pub(crate) fn predecessor(&self) -> [u8; 32] {
+        self.certificate.borrow().fingerprint
+    }
+    pub(crate) fn renewal_deadline(&self) -> Instant {
+        // Issued leaves have exactly seven days; half-life is three and a half.
+        self.certificate
+            .borrow()
+            .expires
+            .checked_sub(Duration::from_hours(84))
+            .unwrap_or_else(Instant::now)
+    }
+    pub(crate) async fn acknowledge(&self, fingerprint: [u8; 32]) -> io::Result<()> {
         if !self.permits() {
-            return;
+            return Err(denied());
         }
-        tokio::select! {
-            biased;
-            _ = changed.changed() => {},
-            () = tokio::time::sleep_until(self.expires) => {},
+        let fresh = Self::admit(self.store.clone(), fingerprint).await?;
+        if fresh.identity.host != self.identity.host
+            || fresh.identity.mode != self.identity.mode
+            || fresh.identity.execution_uid != self.identity.execution_uid
+            || !self.permits()
+        {
+            return Err(denied());
         }
+        let admission = fresh.certificate.borrow().clone();
+        self.certificate.send_replace(admission);
+        Ok(())
     }
 
     /// New operations recheck the public ledger; streaming bytes use only the
@@ -168,14 +217,15 @@ impl AuthorityGuard {
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?;
         let now = i64::try_from(now.as_secs()).map_err(io::Error::other)?;
+        let admitted = self.certificate.borrow().clone();
         let live = tokio::time::timeout(
             Duration::from_secs(5),
-            self.store.admit(&self.fingerprint, now),
+            self.store.admit(&admitted.fingerprint, now),
         )
         .await
         .map_err(|_| denied())?
         .map_err(|_| denied())?;
-        if live != self.identity || !self.permits() {
+        if live != admitted.identity || !self.permits() {
             return Err(denied());
         }
         Ok(())

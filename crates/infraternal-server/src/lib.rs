@@ -11,6 +11,7 @@ pub mod remote_enrollment;
 mod remote_guard;
 pub mod remote_http;
 mod remote_link;
+mod remote_renewal;
 mod remote_runtime;
 mod remote_startup;
 mod runtime;
