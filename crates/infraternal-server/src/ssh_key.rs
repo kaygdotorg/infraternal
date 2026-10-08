@@ -242,3 +242,7 @@ impl SshKeySource for UnavailableSshKey {
         Err(SshKeyError)
     }
 }
+
+#[cfg(test)]
+#[path = "ssh_key_tests.rs"]
+mod tests;
