@@ -1,0 +1,7 @@
+# Role: Raw measured benchmark rows for handshake-300ms-quinn. SPDX-License-Identifier: AGPL-3.0-only
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+quinn-rustls-ring,handshake-1rtt,fresh-mtls,1,315592,315592,315592,315592,1895,1895.000,0.000,0.000000
+quinn-rustls-ring,handshake-1rtt,fresh-mtls,1,315418,315418,315418,315418,2538,2538.000,0.000,0.000000
+quinn-rustls-ring,handshake-1rtt,fresh-mtls,1,311723,311723,311723,311723,2352,2352.000,0.000,0.000000
+quinn-rustls-ring,handshake-1rtt,fresh-mtls,1,277245,277245,277245,277245,2249,2249.000,0.000,0.000000
+quinn-rustls-ring,handshake-1rtt,fresh-mtls,1,293289,293289,293289,293289,2416,2416.000,0.000,0.000000

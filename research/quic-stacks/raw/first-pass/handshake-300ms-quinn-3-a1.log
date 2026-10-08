@@ -1,0 +1,9 @@
+# Role: Raw command output for handshake-300ms-quinn repetition 3 attempt 1. SPDX-License-Identifier: AGPL-3.0-only
+qdisc netem 803a: root refcnt 2 limit 1000 delay 150ms  15ms seed 8334024071656283074
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+Error: "aborted by peer: the application or application protocol caused the connection to be closed during the handshake"
+qdisc netem 803a: root refcnt 2 limit 1000 delay 150ms  15ms seed 8334024071656283074
+ Sent 2808 bytes 4 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 2790b 3p requeues 0

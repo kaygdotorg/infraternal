@@ -1,0 +1,9 @@
+# Role: Raw command output for throughput-300ms-loss1-quinn-1 repetition 5 attempt 1. SPDX-License-Identifier: AGPL-3.0-only
+qdisc netem 8072: root refcnt 2 limit 1000 delay 150ms  15ms loss 1% seed 4309381557069563815
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+quinn-rustls-ring,stream-throughput,1-bidi-stream,1048576,1929768,1929768,1929768,1929768,40053,0.038,0.518,4.774690
+qdisc netem 8072: root refcnt 2 limit 1000 delay 150ms  15ms loss 1% seed 4309381557069563815
+ Sent 1323612 bytes 1068 pkt (dropped 2, overlimits 0 requeues 0)
+ backlog 63471b 19p requeues 0

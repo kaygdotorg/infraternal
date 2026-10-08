@@ -1,0 +1,5 @@
+# Role: File sizes of static musl release/LTO baseline and candidate probes. SPDX-License-Identifier: AGPL-3.0-only
+candidate,bytes
+size-baseline,5190400
+size-quinn,6987368
+size-openssl-native,5192096

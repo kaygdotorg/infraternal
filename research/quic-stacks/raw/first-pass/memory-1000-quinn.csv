@@ -1,0 +1,7 @@
+# Role: Raw measured benchmark rows for memory-1000-quinn. SPDX-License-Identifier: AGPL-3.0-only
+stack,connections,baseline_rss_bytes,idle_rss_bytes,active_rss_bytes,idle_bytes_per_connection,stream_bytes_per_connection
+quinn-rustls-ring,1000,2789376,46796800,49455104,44007,2658
+quinn-rustls-ring,1000,2805760,46772224,49446912,43966,2674
+quinn-rustls-ring,1000,2805760,46776320,47439872,43970,663
+quinn-rustls-ring,1000,2805760,46768128,49426432,43962,2658
+quinn-rustls-ring,1000,2793472,46776320,47431680,43982,655
