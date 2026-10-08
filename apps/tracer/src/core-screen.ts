@@ -278,7 +278,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     stage.dataset.bg = background;
     applyTheme(active, ROOT, glassLevel);
     THEME_COLOR?.setAttribute("content", active.bg);
-    client?.setTheme(terminalTheme(active, background === "mesh"));
+    // The terminal's own recolour (every retained row is redrawn) is the heaviest part of a theme
+    // switch. It runs in its own task, right after the tokens above, so the interface answers at once
+    // and no single task is long (work stays under the 50 ms long-task line at 4x CPU).
+    const terminal = terminalTheme(active, background === "mesh");
+    window.setTimeout(() => client?.setTheme(terminal), 0);
     if (background === "mesh") return paintMesh();
     releaseMesh();
     return Promise.resolve();
@@ -309,7 +313,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (request !== fontRequest) return;
       shownFont = font;
       applyFontVars(font, ROOT);
-      client?.setFont(font);
+      // The terminal re-measures its cells and redraws in its own task, after the interface has the new face.
+      window.setTimeout(() => client?.setFont(font), 0);
     }, () => undefined);
   };
 
@@ -652,6 +657,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const result = target.closest<HTMLButtonElement>(".result");
     const index = result ? visibleOptions.indexOf(result) : -1;
     if (index >= 0 && index !== selected) selectPaletteOption(index);
+  });
+  // Hover intent: the face of a font row is fetched and decoded as soon as the pointer rests on it
+  // (the long part of a cold font switch is the fetch and decode, not the apply), so choosing it is warm.
+  paletteResults.addEventListener("pointerover", (event) => {
+    const row = (event.target as Element | null)?.closest<HTMLElement>(".result[data-action^='font:']");
+    const font = row ? fontById(row.dataset.action!.slice(5)) : undefined;
+    if (font) void loadFont(font).catch(() => undefined);
   });
   paletteResults.addEventListener("click", (event) => {
     const target = event.target;
