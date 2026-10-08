@@ -1348,3 +1348,22 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        group or role; recorded by the infraternal agent, signed and uploaded;
        a compact binary format with timing, replayed with the same terminal
        renderer; kept 90 days; an enterprise feature.
+187. **Several people on one instance (owner, 2026-10-08, backend grill round 5; refines D154):**
+     - **Visibility:** owners and admins see every session; everyone else sees
+       only their own. Joining a colleague's session goes through explicit
+       sharing (#96).
+     - **Joining:** shared sessions use the share's permission (view or
+       edit). An admin looking in uninvited is view-only, and typing needs the
+       session owner's approval. Every join is shown to the session owner and
+       audited (D154 G9).
+     - **Views follow grants:** a view appears when the person holds any grant
+       whose role includes that view's actions on at least one host. Settings
+       is always present; admin windows appear only for admins. There is no
+       separate view permission.
+     - **Granular roles:** permissions such as "publish team layouts" (D182)
+       are actions inside roles. Roles are granular, and custom roles are
+       easy to make (start from a built-in role, tick actions), keeping the
+       system simple (D154 G4).
+     - **Presence:** avatars on a window's pill when others have the same
+       session or view open, and an "is typing" marker; no extra cursors (a
+       terminal has one).
