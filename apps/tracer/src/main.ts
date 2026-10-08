@@ -296,6 +296,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   currentTerminal?.dispose();
   canvasPrototype?.dispose();
   canvasPrototype = undefined;
+  productCanvas?.dispose();
+  productCanvas = undefined;
   coreScreen?.dispose();
   performanceProbe?.dispose();
   currentTerminal = undefined;
@@ -311,6 +313,9 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
   const predictiveEcho = query.get("predict") === "1";
+  // The canvas is the product screen. The test double's plain page and the latency probe keep the single
+  // terminal screen: the terminal specs and the probe drive that one terminal.
+  const useCanvas = !mockMode && !probeMode;
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
   try {
@@ -321,10 +326,10 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
-      canvas: canvasMode || clustersMode,
-      // The clusters canvas registers its own "Add hosts" row with the wizard (canvas/addhost).
+      canvas: canvasMode || clustersMode || useCanvas,
+      // The clusters canvas and the product canvas register their own "Add hosts" row with the wizard (canvas/addhost).
       addHostEntry: canvasMode,
-      ...(clustersMode ? { settingsView: true } : {}),
+      ...(clustersMode || useCanvas ? { settingsView: true } : {}),
       ...(identity?.display_name ? { displayName: identity.display_name } : {}),
       ...(identity?.username ? { username: identity.username } : {}),
       ...(query.get("footer") === "b" ? { footerVariant: "b" as const } : {}),
@@ -363,6 +368,23 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     try { addHost = await mountAddHostPrototype(screen, canvas, query.get("empty") === "1", proto === "addhost" || query.get("wizard") === "1"); }
     catch (error: unknown) { canvas.dispose(); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
     canvasPrototype = { dispose() { addHost?.dispose(); canvas.dispose(); } };
+  }
+  if (useCanvas) {
+    screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
+    try {
+      const { mountProductCanvas } = await import("./canvas/product");
+      productCanvas = await mountProductCanvas(screen, {
+        host: { name: hostName, ...(identity?.username ? { user: identity.username } : {}) },
+        accountId: activeUserId ?? "account",
+        predictiveEcho,
+        onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen.setRecoveryPending(readyAt); },
+      });
+    } catch (error: unknown) {
+      console.error("canvas failed to start", error);
+      screen.dispose();
+      renderUnavailable(safeMessage(error));
+    }
+    return;
   }
   if (probeMode) performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
   const probeHooks = performanceProbe?.hooks();
@@ -459,6 +481,7 @@ async function showRecovery(): Promise<void> {
   if (!recoveryUiEnabled()) return;
   const { mountRecovery } = await import("./recovery");
   currentTerminal?.dispose(); currentTerminal = undefined;
+  productCanvas?.dispose(); productCanvas = undefined;
   coreScreen?.dispose(); coreScreen = undefined;
   performanceProbe?.dispose(); performanceProbe = undefined;
   delete window.__tracerTestDouble;
@@ -503,6 +526,8 @@ function probeCount(value: string | null): number {
 
 let recoveryNoticeGeneration = 0;
 let canvasPrototype: { dispose(): void } | undefined;
+/** The product canvas: Console on real sessions (a lazy chunk, loaded after sign-in). */
+let productCanvas: { dispose(): void } | undefined;
 
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
@@ -516,6 +541,8 @@ async function checkForegroundSession(): Promise<void> {
     if (!session) {
       currentTerminal?.dispose();
       currentTerminal = undefined;
+      productCanvas?.dispose();
+      productCanvas = undefined;
       performanceProbe?.dispose();
       performanceProbe = undefined;
       coreScreen?.dispose();

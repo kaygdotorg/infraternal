@@ -23,7 +23,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     return;
   }
   if (m.kind === "terminal") {
-    const binding = cx.adapters.sessions.bind(m, { view: rec.owner.view.id });
+    const binding = cx.adapters.sessions.bind(m, { view: rec.owner.view.id, changed: () => cx.store.changed() });
     rec.binding = binding;
     binding.mount(body);
     return;

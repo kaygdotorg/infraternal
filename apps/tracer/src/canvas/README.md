@@ -29,6 +29,8 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `views/world.ts` | building a view, sizing it on the grid, settle, hover card, dragging a view | `ViewsModule` (`cx.view`) |
 | `views/body.ts`, `settings*.ts`, `icons.ts` | what is inside a window by kind; Settings panels; icons | `makeBody`, `SettingsSource` |
 | `windows/frame.ts`, `move.ts` | window card, activation, pill grab and move, resize | `makeWindow`, `setActive`, `beginMove` |
+| `windows/visibility.ts` | which windows are live: near the screen, live level of detail, view not far, page not hidden; tells each binding `setVisible` (the only caller) | `Visibility` |
+| `memory.ts` | views far from the camera are not painted; a hidden page releases big surfaces | `Memory` (reports far views and a paused page to `visibility`) |
 | `windows/lifecycle.ts` | open, close (never ends the session), split | `WindowsModule` (`cx.win`) |
 | `windows/float.ts`, `input-lock.ts` | floating terminal; the input lock (padlock) | `FloatModule`, `InputLock` |
 | `toolbar/` | top pill + swipe, view list, tree (sidebar), canvas row + desktop buttons, shortcuts, palette | `PillModule` `ViewList` `TreeModule` `ToolbarModule` |
@@ -36,6 +38,8 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `sharing/` | share dialog, received copies, team layouts | `SharingModule`, adapter `SharingAdapter` |
 | `model/` | runtime model, the **canvas document** (D180), persistence | `toDocument` `parseDocument` `columnsFromDocument`, adapter `CanvasStore`, `DocumentSync` |
 | `sessions/` | binding terminal windows to sessions | adapter `SessionService` / `SessionBinding`; `live.ts` is the product one |
+| `product.ts` | the product canvas: Console on real sessions + Settings with the sections that exist; a lazy chunk loaded after sign-in | `mountProductCanvas` |
+| `status.ts` | a terminal's status text to the one shared toast | `createStatusRelay` |
 | `addhost/` | the add-host wizard: detect-first sign-in (D183), progress from provisioning events, host key and credential pages | `createAddHost`, adapter `ProvisioningService`, hook `AddHostSink`, `FlowHost` |
 | `backdrop.ts` | the dotted canvas behind the views | `createBackdrop` |
 | `mock/` | everything fake: scenes, roles, fake hosts, grants, devices, probe | `mountMockup` |
@@ -45,7 +49,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | Adapter | Today | Tomorrow |
 |---|---|---|
 | `CanvasStore` (`model/store.ts`) | `LocalCanvasStore`: local storage per account | server sync of operations with revisions (#98, D183) |
-| `SessionService` (`sessions/adapter.ts`) | `live.ts`: terminal streams on the one WebSocket (D183); mockups: previews | remote hosts as #78 lands |
+| `SessionService` (`sessions/adapter.ts`) | `live.ts`: a `TerminalClient` per window, each a stream of the one `MuxConnection` (`src/connection.ts`, D183); mockups: previews | remote hosts as #78 lands |
 | `MeshSource` (`mesh/source.ts`) | mock data; Mesh view not offered in the product | the mesh API (#108) |
 | `SharingAdapter` (`sharing/adapter.ts`) | mock only; product offers no sharing | instance sharing (#93, D182) |
 | `SettingsSource` (`views/settings-body.ts`) | built-in sections only | devices, account, users, grants, discovery as their APIs land |
@@ -66,6 +70,14 @@ never shows mockup UI.
 - Memory (iOS kills a page that holds too much): the backdrop is viewport-sized tiles; windows off screen or in
   another view hold no canvas backing store (`SessionBinding.setVisible(false)`); at most one GL context exists,
   only during the droplet animation; big surfaces are released on `pagehide` and while hidden.
+
+## Tests
+
+- `bun test src/canvas` (pure parts: geometry, stops, the D180 document) and `bun test chunk-classes.test.ts`.
+- `test/clusters*.spec.ts`, `test/canvas.spec.ts`: the mockup on the test double.
+- `real/canvas.spec.ts` (`playwright.real.config.ts`, `scripts/verify integration`): the product on the real server
+  binary and real PTYs: open, close (session stays alive), split, re-tile, reload, connection rotation at the
+  server's 32-writer cap, frame times, memory at 393x852 DPR 3.
 
 ## Data
 

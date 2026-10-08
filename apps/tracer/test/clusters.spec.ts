@@ -182,7 +182,7 @@ test("the dots sit on the gradient: the gradient shows everywhere, the dot layer
   const info = await page.evaluate(() => {
     const fill = document.querySelector<HTMLElement>(".ui-canvas-backdrop-fill")!;
     const layers = [...document.querySelectorAll<HTMLElement>(".ui-canvas-backdrop-layer")];
-    const shown = layers.find((l) => l.dataset.on === "1")!;
+    const shown = layers.find((l) => !l.hidden)!;
     const cs = getComputedStyle(shown);
     const stage = document.querySelector<HTMLElement>("#terminal-screen")!.getBoundingClientRect();
     const root = document.querySelector<HTMLElement>(".ui-canvas-backdrop")!.getBoundingClientRect();
@@ -645,27 +645,41 @@ test("motion rule: the work of a view jump, a window step and a column step fini
   expect(costs.keyJumpMoved).toBeGreaterThan(500);
 });
 
-test("canvas backdrop: the dots move exactly with the windows, one layer fades to every second dot below 50 percent, and idle costs nothing", async ({ page }) => {
+test("canvas backdrop: the dots stay on world multiples, a layer is about one screen at any zoom, and at most two exist while one fades into the next", async ({ page }) => {
   await open(page, 1);
   const api = "__tracerClusters";
-  const dotAt = async (): Promise<{ wx: number; level0: number; level1: number }> => page.evaluate((name) => {
-    const cam = (window as unknown as Record<string, { camera(): { tx: number; ty: number; z: number } }>)[name]!.camera();
-    const layer = (k: number): HTMLElement => document.querySelector<HTMLElement>(`.ui-canvas-backdrop-layer[data-level="${k}"]`)!;
-    // Screen x of the first dot of layer 0 in the layer's own coordinates: from its transform.
-    const m = /translate3d\(([-\d.e]+)px/.exec(layer(0).style.transform);
-    return { wx: m ? Number(m[1]) - cam.tx : 0, level0: Number(layer(0).style.opacity), level1: Number(layer(1).style.opacity) };
-  }, api);
-  await page.evaluate((name) => (window as unknown as Record<string, { setCamera(x: number, y: number, z: number): void }>)[name]!.setCamera(2000, 1000, 1), api);
-  const a = await dotAt();
-  await page.evaluate((name) => (window as unknown as Record<string, { setCamera(x: number, y: number, z: number): void }>)[name]!.setCamera(2037, 1000, 1), api);
-  const b = await dotAt();
-  // The layer hops by whole spacings only, so its offset from the world origin stays a multiple of the gap.
-  expect(Math.abs(((b.wx - a.wx) % 22 + 22) % 22)).toBeLessThan(0.01);
-  expect(a.level0).toBe(1);
-  await page.evaluate((name) => (window as unknown as Record<string, { setCamera(x: number, y: number, z: number): void }>)[name]!.setCamera(2000, 1000, 0.25), api);
-  const far = await dotAt();
-  expect(far.level0).toBe(0);
-  expect(far.level1).toBe(1);
+  const setCam = (x: number, y: number, z: number): Promise<void> => page.evaluate(([name, a, b, c]) => (window as unknown as Record<string, { setCamera(x: number, y: number, z: number): void }>)[name as string]!.setCamera(a as number, b as number, c as number), [api, x, y, z] as const);
+  const read = (): Promise<{ shown: Array<{ k: number; opacity: number; w: number; h: number; dotX: number; spacing: number }>; tx: number; z: number; vw: number; vh: number }> => page.evaluate(() => {
+    const cam = (window as unknown as Record<string, { camera(): { tx: number; ty: number; z: number } }>).__tracerClusters!.camera();
+    const stage = document.querySelector<HTMLElement>(".ui-canvas-backdrop")!.getBoundingClientRect();
+    const shown = [...document.querySelectorAll<HTMLElement>(".ui-canvas-backdrop-layer")].filter((l) => !l.hidden).map((l) => {
+      const spacing = Number.parseFloat(l.style.backgroundSize);
+      const m = /translate3d\(([-\d.e]+)px/.exec(l.style.transform);
+      return { k: Number(l.dataset.level), opacity: Number(l.style.opacity), w: l.offsetWidth, h: l.offsetHeight, dotX: (m ? Number(m[1]) : 0) + spacing / 2, spacing };
+    });
+    const origin = document.querySelector<HTMLElement>(".cl-viewport")!.getBoundingClientRect().left - stage.left; // the canvas area's offset inside the backdrop
+    return { shown, tx: cam.tx + origin, z: cam.z, vw: stage.width, vh: stage.height };
+  });
+  for (const [x, z] of [[2000, 1], [2037, 1], [2000, 0.6], [2000, 0.25], [9000, 0.08]] as const) {
+    await setCam(x, 1000, z);
+    const r = await read();
+    expect(r.shown.length, `layers at z=${z}`).toBeLessThanOrEqual(2);
+    for (const l of r.shown) {
+      // One screen plus a tile of margin on each side: never the world, whatever the zoom.
+      expect(l.w).toBeLessThanOrEqual(r.vw + 2 * l.spacing + 1);
+      expect(l.h).toBeLessThanOrEqual(r.vh + 2 * l.spacing + 1);
+      // A dot sits at a world multiple of this level's gap: (screen x - camera origin) / zoom is a multiple of gap * 2^k.
+      const step = 22 * 2 ** l.k;
+      const world = (l.dotX - r.tx) / r.z;
+      const off = ((world / step) % 1 + 1) % 1;
+      expect(Math.min(off, 1 - off) * step, `dot phase at z=${z} level ${l.k}`).toBeLessThan(0.05);
+    }
+  }
+  await setCam(2000, 1000, 1);
+  expect((await read()).shown.map((l) => l.k)).toEqual([0]);
+  await setCam(2000, 1000, 0.25);
+  const far = (await read()).shown;
+  expect(far.map((l) => l.k).sort()).toEqual([1]); // only the sparser one: the denser has faded away and holds nothing
 });
 
 test("toolbar: the row stack follows the finger one to one (swipe up moves it up and reveals the key row)", async ({ browser }) => {

@@ -17,7 +17,7 @@ import type { Ctx, ViewRec, WinRec } from "../context";
 import { dropletSplit } from "../layout/droplet";
 import { COLUMN_GAP } from "../layout/geometry";
 import type { ViewId, WindowModel } from "../model/types";
-import { reduced } from "../dom";
+import { coarse, reduced } from "../dom";
 import { makeWindow, setActive } from "./frame";
 import { isTerminal } from "../views/body";
 
@@ -84,6 +84,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       const colEl = root.parentElement as HTMLElement | null;
       const freed = root.offsetHeight + COLUMN_GAP;
       rec.stopResize?.();
+      cx.visibility.unwatch(rec);
       rec.binding?.dispose();
       rec.cleanup?.();
       root.remove();
@@ -148,6 +149,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       // Canvas locked: glide so the window and its new neighbour are both on screen while the droplet divides.
       if (state.canvasLock) cx.nav.focusWindow(rec);
     }
+    if (!coarse.matches) b.binding?.focus();
     colEl.dataset.split = "";
     await dropletSplit(root, b.card.root, direction, c.colsEl);
     delete colEl.dataset.split;
@@ -175,6 +177,8 @@ export function createWindows(cx: Ctx): WindowsModule {
     else if (here) pulse(rec);
     setActive(cx, rec);
     if (here || !cx.flags.float) cx.nav.focusWindow(rec); else cx.float.open(rec);
+    // On a desktop the new shell takes the keys at once; on a phone the keyboard waits for a tap.
+    if (!coarse.matches) rec.binding?.focus();
     cx.store.changed();
     return rec;
   };

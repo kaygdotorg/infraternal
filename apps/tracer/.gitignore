@@ -2,3 +2,4 @@
 test-results/
 playwright-report/
 __pycache__/
+test-results-real/

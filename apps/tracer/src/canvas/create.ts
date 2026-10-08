@@ -12,6 +12,7 @@
  */
 import { mountToast } from "../../../../packages/ui/src/toast";
 import type { CoreScreen } from "../core-screen";
+import { createMemory } from "./memory";
 import { createBackdrop, type Backdrop } from "./backdrop";
 import { Camera } from "./camera/camera";
 import { installGestures } from "./camera/gestures";
@@ -34,6 +35,7 @@ import { createViewList } from "./toolbar/viewlist";
 import { createFloat } from "./windows/float";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
+import { createVisibility } from "./windows/visibility";
 
 export interface CanvasOptions {
   adapters: Adapters;
@@ -89,20 +91,22 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   (cx as { camera: Camera }).camera = new Camera(viewport, world, {
     onTransform: (t) => backdrop?.update(t),
     onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--inv", inv); },
-    onLod: () => cx.pill.paint(),
+    onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
-    onFrame: () => cx.invalidate(),
+    onFrame: () => { cx.invalidate(); cx.memory.cull(); },
     onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); },
     onFlight: () => cx.view.hideSummary(),
   });
   (cx as { flip: Ctx["flip"] }).flip = createFlip(() => cx.camera.cam.z, () => cx.invalidate());
 
+  cx.memory = createMemory(cx, backdrop);
   cx.store = createDocumentSync(cx, options.persisted);
   cx.nav = createNav(cx);
   cx.view = createViews(cx);
   cx.win = createWindows(cx);
   cx.float = createFloat(cx);
   cx.inputLock = createInputLock(cx);
+  cx.visibility = createVisibility(cx);
   cx.pill = createPill(cx);
   cx.viewList = createViewList(cx);
   cx.tree = createTree(cx);
@@ -131,7 +135,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   ro.observe(viewport);
   cx.camera.start();
 
-  // Hidden pages release nothing large (see backdrop.ts) but must not lose the last edit.
+  // A hidden page also releases its big surfaces (memory.ts) and must not lose the last edit.
   const onHide = (): void => { if (document.hidden) cx.store.flush(); };
   document.addEventListener("visibilitychange", onHide, { signal: events.signal });
   window.addEventListener("pagehide", () => cx.store.flush(), { signal: events.signal });
@@ -163,6 +167,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.sharing?.dispose();
       cx.mesh?.dispose();
       cx.float.dispose();
+      cx.visibility.dispose();
       cx.view.clear();
       cx.view.dispose();
       cx.camera.dispose();

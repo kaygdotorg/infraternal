@@ -4,9 +4,9 @@
  * behind the chrome, not just the canvas area, so it needs the canvas area's offset inside the stage (measured on
  * mount and on every resize, never per frame).
  *
- * Memory: the layers are viewport-sized tiles that hop by whole spacings, never a surface the size of the world,
- * and there is no canvas element at all (`createCanvasBackdrop` draws with CSS tiles). A page hidden or frozen
- * releases nothing here because there is nothing large to release.
+ * Memory: at most two layers exist, each about one screen (a tile size that follows the zoom, an offset that is
+ * the camera modulo one tile), never a surface the size of the world, and there is no canvas element at all
+ * (`createCanvasBackdrop` draws with CSS tiles). A hidden page releases them (see memory.ts).
  */
 import { createCanvasBackdrop, type CanvasBackdrop } from "../../../../packages/ui/src/canvas-backdrop";
 
@@ -15,6 +15,8 @@ export interface Backdrop {
   measure(): void;
   /** Places the dots for the camera transform (canvas-area pixels). */
   update(t: { tx: number; ty: number; z: number; vw: number; vh: number }): void;
+  /** Frees every dot layer's surface (a hidden page); the next `update` brings them back. */
+  release(): void;
   dispose(): void;
 }
 
@@ -28,6 +30,7 @@ export function createBackdrop(stage: HTMLElement, viewport: HTMLElement): Backd
   return {
     measure,
     update: ({ tx, ty, z, vw, vh }) => layer.update(tx + box.x, ty + box.y, z, box.w || vw, box.h || vh),
+    release: () => layer.release(),
     dispose: () => layer.dispose(),
   };
 }

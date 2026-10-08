@@ -672,8 +672,9 @@
   position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
 }
 .ui-canvas-backdrop-fill { position: absolute; inset: 0; opacity: var(--ui-gradient-opacity); background: var(--ui-dot-fill, linear-gradient(115deg, var(--mesh-1), var(--mesh-2) 35%, var(--mesh-3) 70%, var(--mesh-4))); }
+.ui-canvas-backdrop-layer[hidden] { display: none; }
 .ui-canvas-backdrop-layer {
-  position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform, opacity;
+  position: absolute; left: 0; top: 0; will-change: transform, opacity;
   background-image: radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--ui-dot-color) calc(var(--ui-dot-opacity) * 100%), transparent) calc(var(--ui-dot-size) / 2), transparent calc(var(--ui-dot-size) / 2 + 0.7px));
 }
 
