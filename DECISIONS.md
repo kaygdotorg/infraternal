@@ -1291,6 +1291,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        then the user's passkey-encrypted key, then a password used once.
        It asks the user to choose only as a last resort; a pasteable
        one-line install command remains for unreachable hosts.
+       The server's key is created automatically on first start and its
+       public half is shown in Settings, ready to copy into hosts.
      - **Exited sessions** keep the final screen and the last 256 KB of
        output on the server for 7 days or until dismissed. A fast command
        history and log search (history-style and log-indexing features)
