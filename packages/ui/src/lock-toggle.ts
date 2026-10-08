@@ -12,6 +12,8 @@
  *   it starts lifted and tilted, drops and snaps shut. Unlocking plays it in reverse from
  *   wherever it is (interruptible, velocity kept). Reduced motion: no shackle travel, a short
  *   crossfade of the whole icon instead.
+ * - Its position is pure CSS (`left: 50%` of the card): nothing measures or nudges it, so hover, focus, resize,
+ *   fonts and a long title cannot move it. The title pill yields instead (max-width in styles.css).
  * - It is the glyph itself, centred on the window's top frame line: the shackle rises above the line,
  *   the body hangs below it (styles.css). The button is a 44 px invisible hit area.
  * - The warm tooltip is short and literal: "Lock input" / "Unlock input".
@@ -111,24 +113,12 @@ let listening = false;
 let frame = 0;
 let pointer: { x: number; y: number } | undefined;
 
-/** Re-centres the lock on its window, clear of the title pill. Call when the title or width changes. */
-export const placeLock = (root: HTMLElement): void => {
-  // Centre of the window; nudged right when the title pill would cover it.
-  const pill = root.querySelector<HTMLElement>(".ui-window-pill");
-  const box = root.getBoundingClientRect();
-  const half = (root.querySelector<HTMLElement>(".ui-window-lock")?.offsetWidth ?? 28) / 2;
-  const centre = box.width / 2;
-  const clear = pill ? pill.getBoundingClientRect().right - box.left + 8 + half : 0;
-  root.style.setProperty("--ui-lock-x", `${Math.round(Math.max(centre, clear))}px`);
-};
-
 const sweep = (): void => {
   frame = 0;
   for (const entry of tracked) {
     const box = entry.root.getBoundingClientRect();
     const near = !!pointer && pointer.x >= box.left && pointer.x <= box.right && pointer.y >= box.top - 16 && pointer.y <= box.top + NEAR;
     if (near !== entry.root.hasAttribute("data-lock-near")) {
-      if (near) placeLock(entry.root);
       entry.root.toggleAttribute("data-lock-near", near);
     }
   }

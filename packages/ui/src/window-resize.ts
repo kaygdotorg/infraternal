@@ -23,6 +23,7 @@
  *   resize.dispose();
  */
 import type { WindowCard } from "./window-card";
+import { Spring } from "./spring";
 
 export type ResizeEdge = "n" | "e" | "s" | "w" | "ne" | "nw" | "se" | "sw";
 
@@ -48,6 +49,30 @@ export interface ResizeFrame {
 }
 
 export interface WindowResizeHost {
+  /**
+   * Locks width / height to this ratio. A gesture then moves the window by one measure (the
+   * scale), not by two independent sizes. Needs `centered` or the default left/top anchoring.
+   */
+  aspect?: number;
+  /**
+   * The window is anchored at its top centre and grows symmetrically: an east or west edge
+   * follows the pointer 1:1, so the width changes by twice the pointer's travel. North edges
+   * do nothing (the top is fixed).
+   */
+  centered?: boolean;
+  /**
+   * Past the minimum or maximum the size resists like rubber instead of stopping, and on release
+   * it springs back to the limit with a soft bounce. Release always springs to rest (a slight
+   * settle); with `snap` it rests on the nearest snap point.
+   */
+  rubber?: boolean;
+  /**
+   * Whether the touch press-and-hold also starts on the header's pill (default true). A host that
+   * gives the pill its own long-press says false: the hold then starts only on the rest of the header.
+   */
+  holdOnPill?: boolean;
+  /** Where a released size rests, within the limits (for example a default size it clings to). */
+  snap?(frame: ResizeFrame): ResizeFrame;
   begin(): ResizeStart;
   /** Called at most once per animation frame while dragging; make one layout write. */
   apply(frame: ResizeFrame): void;
@@ -62,6 +87,50 @@ export interface WindowResize {
   readonly touchMode: boolean;
   exitTouchMode(): void;
   dispose(): void;
+}
+
+
+/** Rubber-band resistance: past a limit the overshoot is damped and never exceeds `range` * 0.55. */
+const damp = (over: number, range: number): number => (over * range * 0.55) / (range + 0.55 * Math.abs(over)) ;
+
+/** The scale range an aspect-locked window may rest in: width and height limits together. */
+export function aspectRange(start: ResizeStart, aspect: number): { min: number; max: number } {
+  const maxHeight = start.areaHeight - start.top;
+  return {
+    min: Math.max(start.minWidth / start.width, start.minHeight / start.height),
+    max: Math.min(start.maxWidth / start.width, maxHeight / start.height, start.maxWidth / aspect / start.height),
+  };
+}
+
+/**
+ * The frame for scale `k` of the start size, aspect locked. With `rubber`, a scale beyond the range
+ * resists like rubber (shown past the limit, never past a fraction of it); without, it is clamped.
+ */
+export function aspectFrame(start: ResizeStart, aspect: number, k: number, rubber: boolean): ResizeFrame {
+  const range = aspectRange(start, aspect);
+  let scale = k;
+  if (k > range.max) scale = rubber ? range.max + damp(k - range.max, 0.5) : range.max;
+  else if (k < range.min) scale = rubber ? range.min - damp(range.min - k, 0.5) : range.min;
+  const width = start.width * scale;
+  return { width, height: width / aspect, top: start.top, shiftX: 0 };
+}
+
+/**
+ * Springs from the frame a gesture ended on to its resting frame (the limit, a snap point, or
+ * where it was let go), with a slight settle, calling `apply` each tick and `done` once at rest.
+ * Interruptible by the next gesture through the returned cancel.
+ */
+export function settleResize(apply: (frame: ResizeFrame) => void, from: ResizeFrame, to: ResizeFrame, done: () => void): () => void {
+  if (Math.abs(from.width - to.width) < 0.5 && Math.abs(from.height - to.height) < 0.5) { apply(to); done(); return () => undefined; }
+  let cancelled = false;
+  const spring = new Spring(0, (p) => {
+    if (cancelled) return;
+    const l = (a: number, b: number): number => a + (b - a) * p;
+    if (p === 1) { apply(to); done(); return; }
+    apply({ width: l(from.width, to.width), height: l(from.height, to.height), top: l(from.top, to.top), shiftX: l(from.shiftX, to.shiftX) });
+  }, { visualDuration: 0.42, bounce: 0.28 });
+  spring.set(1);
+  return () => { cancelled = true; spring.set(spring.value, true); };
 }
 
 const EDGES: ResizeEdge[] = ["n", "e", "s", "w", "ne", "nw", "se", "sw"];
@@ -101,10 +170,27 @@ export function attachWindowResize(card: WindowCard, host: WindowResizeHost): Wi
     root.dataset.resizing = edge;
     let latest = { x: originX, y: originY };
     let queued = 0;
+    let latestFrame: ResizeFrame = { width: start.width, height: start.height, top: start.top, shiftX: 0 };
+    // Aspect-locked, centred and rubber-band gestures: one scale, from how far the edge moved.
+    const shaped = (dx: number, dy: number): ResizeFrame => {
+      const side = edge.includes("e") ? 1 : edge.includes("w") ? -1 : 0;
+      const down = edge.includes("s") ? 1 : 0;
+      const sx = side ? (start.width + side * dx * (host.centered ? 2 : 1)) / start.width : 1;
+      const sy = down ? (start.height + dy) / start.height : 1;
+      if (host.aspect) {
+        // One measure: whichever axis the pointer has moved further along drives the scale.
+        const k = !side ? sy : !down ? sx : Math.abs(sx - 1) > Math.abs(sy - 1) ? sx : sy;
+        return aspectFrame(start, host.aspect, k, !!host.rubber);
+      }
+      const width = clamp(start.width * sx, start.minWidth, start.maxWidth);
+      const height = clamp(start.height * sy, start.minHeight, start.areaHeight - start.top);
+      return { width, height, top: start.top, shiftX: 0 };
+    };
     const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
     const flush = (): void => {
       queued = 0;
       const dx = latest.x - originX, dy = latest.y - originY;
+      if (host.aspect || host.centered || host.rubber) { latestFrame = shaped(dx, dy); host.apply(latestFrame); return; }
       let width = start.width, height = start.height, top = start.top;
       if (edge.includes("e")) width = clamp(start.width + dx, start.minWidth, start.maxWidth);
       if (edge.includes("w")) width = clamp(start.width - dx, start.minWidth, start.maxWidth);
@@ -127,7 +213,18 @@ export function attachWindowResize(card: WindowCard, host: WindowResizeHost): Wi
       handle.removeEventListener("pointercancel", finish);
       if (queued) { cancelAnimationFrame(queued); flush(); }
       delete root.dataset.resizing;
-      host.end();
+      if (!(host.aspect || host.centered || host.rubber)) { host.end(); return; }
+      // Release: spring from where the pointer left it to where the window rests.
+      let rest = latestFrame;
+      if (host.aspect) {
+        const range = aspectRange(start, host.aspect);
+        rest = aspectFrame(start, host.aspect, Math.min(range.max, Math.max(range.min, latestFrame.width / start.width)), false);
+      } else {
+        rest = { ...latestFrame, width: clamp(latestFrame.width, start.minWidth, start.maxWidth), height: clamp(latestFrame.height, start.minHeight, start.areaHeight - start.top) };
+      }
+      if (host.snap) rest = host.snap(rest);
+      if (reduced.matches) { host.apply(rest); host.end(); return; }
+      settleResize((frame) => host.apply(frame), latestFrame, rest, () => host.end());
     };
     handle.addEventListener("pointermove", move);
     handle.addEventListener("pointerup", finish);
@@ -155,6 +252,7 @@ export function attachWindowResize(card: WindowCard, host: WindowResizeHost): Wi
   let swallowClick = false;
   card.header.addEventListener("pointerdown", (event) => {
     if (event.pointerType !== "touch" || touchMode || hold) return;
+    if (host.holdOnPill === false && (event.target as Element).closest(".ui-window-pill, .cl-port")) return;
     const press = { id: event.pointerId, x: event.clientX, y: event.clientY, timer: 0, cue: undefined as Animation | undefined };
     // The window leans in a little while the finger rests, so the hold reads as deliberate;
     // it settles back when the handles appear. Composited transform only, no fill.

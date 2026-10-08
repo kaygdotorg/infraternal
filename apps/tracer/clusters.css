@@ -1,0 +1,272 @@
+/* Clusters concept mockup (src/clusters.ts, issue #89). Everything here is scoped to
+   `.terminal-screen[data-clusters]` or to `cl-` classes; surfaces, pills, window cards,
+   tooltips and the toast come from packages/ui and are not restyled. */
+
+.cl-viewport { position: absolute; inset: 0; overflow: hidden; overflow: clip; touch-action: none; -webkit-user-select: none; user-select: none; }
+.cl-viewport[data-panning] { cursor: grabbing; }
+.cl-world { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; }
+.cl-overlay { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; z-index: 12; }
+
+/* ---- a view ---------------------------------------------------------------------------- */
+.cl { position: absolute; left: 0; top: 0; pointer-events: none; }
+.cl[data-lifted] { z-index: 8; }
+.cl[data-lifted] .cl-region { box-shadow: var(--shadow); }
+.cl-region {
+  position: absolute; border-radius: 28px; border: 1px solid var(--overlay-line);
+  background: color-mix(in oklab, var(--fg) 3%, transparent);
+  opacity: 0; pointer-events: none; transition: opacity 220ms var(--ease-out, ease-out);
+}
+.cl-world[data-zoom="out"] .cl-region { opacity: 1; pointer-events: auto; cursor: pointer; }
+
+/* The label keeps a readable size at any zoom: --inv is 1 / zoom (clamped), applied with the
+   individual `scale` and `translate` properties so the pill's own press transform stays free. */
+.cl-label {
+  --pill-h: 30px; position: absolute; z-index: 2; pointer-events: auto; gap: 8px; padding: 0 12px 0 10px;
+  color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: grab; touch-action: none;
+  transform-origin: 0 0; scale: var(--inv, 1); translate: 0 calc(var(--inv, 1) * -40px);
+}
+.cl-label-icon { display: grid; place-items: center; color: var(--fg-2); }
+.cl-label-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-label-meta { color: var(--ui-text-secondary); font-weight: 450; }
+.cl-world[data-zoom="in"] .cl-label-meta { display: none; }
+.cl-world[data-zoom="in"] .cl-label { opacity: 0.8; }
+@media (pointer: coarse) { .cl-label { --pill-h: 30px; } }
+
+.cl-content { position: absolute; pointer-events: none; }
+.cl-cols { position: relative; display: flex; gap: 12px; width: 100%; height: 100%; }
+.cl-lift { position: absolute; inset: 0; z-index: 6; pointer-events: none; overflow: visible; }
+
+/* A column: windows stack and the stack scrolls on its own. The padding and negative margin give
+   window shadows room inside the scroller without changing the layout. */
+.cl-col {
+  position: relative; flex: none; box-sizing: border-box; width: calc(var(--w) + 28px); height: calc(100% + 28px); margin: -14px; padding: 14px;
+  display: flex; flex-direction: column; gap: 12px; overflow-x: clip; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none;
+  pointer-events: none; touch-action: pan-y;
+}
+.cl-col::-webkit-scrollbar { display: none; }
+.cl-col > .ui-window { flex: 1 1 0; min-height: 160px; pointer-events: auto; }
+.cl-col > .ui-window[style*="height"] { flex: none; }
+.cl-world[data-lod="thumb"] .ui-window { pointer-events: none; }
+.cl-world[data-lod="thumb"] .ui-window-actions, .cl-world[data-lod="thumb"] .ui-window-lock, .cl-world[data-lod="thumb"] .cl-port { opacity: 0 !important; }
+.ui-window-actions { transition: opacity 160ms ease; }
+.ui-window.is-lifted { z-index: 20; pointer-events: none; box-shadow: var(--overlay-shadow-large, var(--shadow)); }
+.ui-window[data-kind="node"] { cursor: default; }
+.ui-window-pill[data-grab] { cursor: grab; touch-action: none; }
+.ui-window-pill[data-grab]:active { cursor: grabbing; }
+.ui-window[data-drop] { border-color: var(--accent); }
+
+/* The soft outline of where a dragged window will land. */
+.cl-slot {
+  flex: none; box-sizing: border-box; border-radius: var(--r-lg, 18px);
+  border: 1px solid color-mix(in oklab, var(--accent) 40%, transparent); background: color-mix(in oklab, var(--accent) 6%, transparent);
+}
+.cl-ghost {
+  position: absolute; left: 0; top: 0; z-index: 0; border-radius: 28px; pointer-events: none; opacity: 0; transition: opacity 160ms ease;
+  border: 1.5px dashed color-mix(in oklab, var(--accent) 55%, transparent); background: color-mix(in oklab, var(--accent) 5%, transparent);
+}
+.cl-ghost[data-on] { opacity: 1; }
+
+/* ---- window bodies by kind --------------------------------------------------------------- */
+.cl-preview { overscroll-behavior: auto; touch-action: pan-y; overflow: hidden; }
+.cl-cursor {
+  display: inline-block; width: 0.6em; height: 1.15em; margin-left: 1px; vertical-align: text-bottom; background: var(--fg); opacity: 0.75;
+  animation: cl-blink 1.1s steps(1) infinite;
+}
+@keyframes cl-blink { 50% { opacity: 0; } }
+.cl-logs { color: var(--fg-2); }
+.cl-log-time { color: var(--fg-3); }
+.cl-log-src { color: var(--accent); }
+
+.cl-list { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 2px; padding: 6px 8px 12px; overflow: auto; scrollbar-width: none; }
+.cl-row {
+  display: grid; grid-template-columns: 10px auto minmax(0, 1fr) auto; align-items: center; gap: 10px; flex: none; height: var(--ui-row-h, 32px); padding: 0 10px;
+  border: 0; border-radius: 8px; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer;
+  transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
+}
+.cl-row:active { transform: scale(0.98); }
+@media (hover: hover) and (pointer: fine) { .cl-row:hover { background: var(--hover); } }
+.cl-state { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.cl-row[data-state="restarting"] .cl-state { background: var(--danger, var(--fg-3)); }
+.cl-row[data-state="exited"] .cl-state { background: transparent; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
+.cl-name { font-weight: 500; }
+.cl-image { min-width: 0; overflow: hidden; color: var(--ui-text-secondary); text-overflow: ellipsis; white-space: nowrap; }
+.cl-cpu { color: var(--fg-3); font-variant-numeric: tabular-nums; }
+
+.cl-node-meta { display: grid; gap: 1px; padding: 4px 14px 10px; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-node-detail { color: var(--fg); }
+.cl-node-sub { color: var(--ui-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cl-graph-arrows { position: absolute; left: 0; top: 0; z-index: 1; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.cl-world[data-lod="thumb"] .cl-node-meta { opacity: 1; }
+
+/* ---- arrows ------------------------------------------------------------------------------ */
+.cl-arrow { --arrow: var(--accent); transition: opacity 200ms ease; }
+.cl-arrow[data-tone="quiet"] { --arrow: color-mix(in oklab, var(--accent) 80%, var(--fg)); }
+.cl-arrow-line { fill: none; stroke: var(--arrow); stroke-width: 1.5; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.cl-arrow-head { fill: var(--arrow); stroke: none; }
+/* Editing a grant (Mesh): hover thickens the line and shows a grab handle on each end; a wide invisible line makes it easy to hit. */
+.cl-arrow-hit { fill: none; stroke: transparent; stroke-width: 16px; vector-effect: non-scaling-stroke; pointer-events: stroke; }
+.cl-arrow-handle { fill: var(--bg); stroke: var(--arrow); stroke-width: 1.5px; vector-effect: non-scaling-stroke; pointer-events: none; cursor: grab; opacity: 0; transition: opacity 140ms ease; }
+/* Only the hovered arrow's handles take the pointer, so arrows that share an end never fight over it. */
+.cl-arrow:hover .cl-arrow-handle { pointer-events: all; }
+.cl-arrow:hover .cl-arrow-handle, .cl-arrow[data-editing] .cl-arrow-handle { opacity: 1; }
+.cl-arrow:hover .cl-arrow-line { stroke-width: 2.5px; }
+.cl-arrow:hover .cl-arrow-head { filter: none; }
+.cl-arrow[data-editing] { opacity: 0.25; }
+.cl-arrow-handle:active { cursor: grabbing; }
+@media (pointer: coarse) { .cl-arrow-handle { opacity: 0.85; pointer-events: all; } }
+.cl-arrow[data-dashed] .cl-arrow-line { stroke-dasharray: 5 5; }
+.cl-arrow[data-fresh], .cl-arrow[data-leaving] { opacity: 0; }
+.cl-arrow[data-live]:not([data-snapped]) .cl-arrow-line { opacity: 0.8; }
+.cl-arrow-label { fill: var(--ui-text-secondary); font: 450 12px var(--font-ui, "Geist Mono", ui-monospace, monospace); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+/* On-demand arrows: faint, and they fade in one after another. */
+.cl-reach .cl-arrow { opacity: 0.55; transition: opacity 240ms ease calc(var(--i, 0) * 50ms); }
+.cl-reach[data-open="false"] .cl-arrow { opacity: 0; transition-delay: 0ms; }
+
+/* The connector next to a pill: shown while arrows are, drag it onto another terminal. */
+.cl-port {
+  position: relative; display: grid; flex: none; place-items: center; width: 24px; height: 24px; margin-left: -2px; padding: 0;
+  border: 1px solid color-mix(in oklab, var(--accent) 70%, transparent); border-radius: 50%; background: var(--accent-soft); color: var(--accent);
+  opacity: 0; transform: scale(0.6); pointer-events: none; cursor: crosshair; touch-action: none;
+  transition: opacity 150ms ease, transform 220ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+.cl-port svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-window[data-reach] .cl-port { opacity: 1; transform: none; pointer-events: auto; }
+.cl-port:active { transform: scale(0.94); }
+@media (pointer: coarse) { .cl-port { width: 32px; height: 32px; } .cl-port::after { content: ""; position: absolute; inset: -6px; } }
+
+.cl-edges { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
+.cl-edge { --pill-h: 30px; position: absolute; left: 0; top: 0; display: none; gap: 6px; padding: 0 12px 0 8px; pointer-events: auto; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); cursor: pointer; }
+.cl-edge[data-on] { display: inline-flex; }
+.cl-edge-arrow { display: grid; place-items: center; width: 16px; height: 16px; color: var(--accent); }
+.cl-edge-arrow svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---- hover summary (desktop, zoomed out) ------------------------------------------------- */
+.cl-summary {
+  position: fixed; z-index: 1001; min-width: 220px; max-width: 300px; padding: 12px 14px 8px; border-radius: 14px; pointer-events: none;
+  opacity: 0; transform: scale(0.96); transition: opacity 150ms ease-out, transform 180ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+.cl-summary[hidden] { display: none; }
+.cl-summary[data-open="true"] { opacity: 1; transform: none; }
+.cl-summary-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.cl-summary-icon { display: grid; color: var(--fg-2); }
+.cl-summary-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-summary-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: var(--row, 28px); border-top: 1px solid var(--line); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-summary-k { color: var(--fg); }
+.cl-summary-v { color: var(--ui-text-secondary); }
+
+/* ---- empty view -------------------------------------------------------------------------- */
+.cl-empty {
+  position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 6px; padding: 24px; text-align: center; pointer-events: none;
+  border: 1.5px dashed var(--overlay-line); border-radius: var(--r-lg, 18px);
+}
+.cl-empty > * { pointer-events: auto; margin: 0; }
+.cl-empty-slot { display: none; }
+.cl-empty-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.cl-empty-hint { color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-empty-add { --pill-h: var(--ui-control-h, 30px); gap: 6px; margin-top: 10px !important; padding: 0 14px 0 10px; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; }
+.cl-empty-add svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+
+
+/* ---- pill morphs: the floating terminal and the view list ---------------------------------------- */
+.cl-float { position: absolute; z-index: 9; display: block; overflow: hidden; border-radius: var(--r-lg, 18px); color: var(--fg); }
+.cl-float .ui-window { height: 100%; border: 0; border-radius: 0; background: none; box-shadow: none; }
+.cl-viewlist { position: absolute; z-index: 9; display: flex; flex-direction: column; padding: 6px; border-radius: var(--r-lg, 18px); }
+.cl-viewlist-rows { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.cl-viewrow {
+  display: flex; align-items: center; gap: 10px; width: 100%; height: var(--ui-row-h, 32px); padding: 0 10px; border: 0; border-radius: 10px; background: none;
+  color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer;
+  transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
+}
+.cl-viewrow:active { transform: scale(0.98); }
+@media (hover: hover) and (pointer: fine) { .cl-viewrow:hover { background: var(--hover); } }
+.cl-viewrow[aria-current="true"] { background: var(--hover); }
+.cl-viewrow-icon { display: grid; flex: none; color: var(--fg-2); }
+.cl-viewrow-icon svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-viewrow-name { flex: 1; min-width: 0; font-weight: 500; }
+.cl-viewrow-meta { color: var(--ui-text-secondary); }
+.cl-viewrow-keys { display: inline-flex; gap: 4px; }
+.cl-viewrow-keys kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption, 11px)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
+.cl-viewrow-search { margin-top: 4px; border-radius: 0 0 10px 10px; box-shadow: 0 -1px 0 var(--line); }
+.cl-viewrow-search .cl-viewrow-name { font-weight: 450; color: var(--ui-text-secondary); }
+.cl-badge {
+  position: absolute; z-index: 9; translate: -50% 0; padding: 6px 12px; border-radius: 999px; pointer-events: none; white-space: nowrap;
+  font: var(--ui-type-label); letter-spacing: var(--ui-tracking); opacity: 0; transform: translateY(-4px) scale(0.96);
+  transition: opacity 180ms ease, transform 220ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+.cl-badge[hidden] { display: none; }
+.cl-badge[data-open="true"] { opacity: 1; transform: none; }
+
+/* ---- mockup scaffolding: a small tag in the top-right corner (scenes live in the palette) ---- */
+.cl-mockup { position: absolute; z-index: 6; top: calc(10px + env(safe-area-inset-top) + var(--pill-h, 38px) + 4px); right: var(--gutter); height: 22px; padding: 0 9px; color: var(--fg-3); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; cursor: pointer; }
+/* On a desktop it sits in the top row, left of the canvas controls, so it never covers a window. */
+@media (hover: hover) and (pointer: fine) { .cl-mockup { top: calc(10px + env(safe-area-inset-top) + (var(--pill-h, 38px) - 22px) / 2); right: calc(var(--gutter) + 3 * (var(--pill-h, 38px) + 10px)); } }
+
+/* The snap toggle takes the slot of the disabled "+" in the top bar's right group. */
+.cl-snap, .cl-viewsbtn { color: var(--fg-2); }
+.cl-viewsbtn svg, .cl-snap svg { stroke-width: 1.6; }
+/* On touch the toolbar has these (canvas row), and its row replaces the frame lock. */
+@media (pointer: coarse) { .cl-snap, .cl-viewsbtn { display: none; } .terminal-screen[data-clusters] .ui-window-lock { display: none; } }
+.cl-snap[aria-pressed="true"] { color: var(--accent); }
+.cl-snap svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); }
+.cl-world[data-snap] .cl-label, .cl-world[data-snap] .cl-region { opacity: 0; pointer-events: none; }
+.cl-viewport[data-snap] { touch-action: pan-x pan-y; }
+/* Canvas lock on: columns do not scroll by hand; windows step (wheel, two fingers, toolbar) and one finger scrolls the terminal. */
+.cl-world[data-snap] .cl-col { overflow-y: hidden; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cl-cursor { animation: none; }
+  .cl-region, .cl-port, .cl-badge, .cl-summary { transition: opacity 120ms ease; transform: none; }
+}
+
+/* On a phone the host matters more than the user, as on the product canvas: drop `user@` in the pill. */
+@media (max-width: 480px) { .cl-viewport .ui-window-user, .cl-float .ui-window-user { display: none; } }
+
+.cl-holder { position: absolute; left: -9999px; top: 0; width: 440px; height: 560px; visibility: hidden; pointer-events: none; }
+.cl-col .ui-window-body > .terminal-host { position: absolute; inset: 0; }
+.terminal-screen[data-clusters] .capsule-rtt { display: none; }
+.terminal-screen[data-clusters] .capsule-session { color: var(--fg-3); }
+@media (max-width: 480px) { .cl-noun { display: none; } }
+
+/* During a split the two frames are drawn by the goo layer (clusters-split.ts); the windows keep only their contents. */
+.ui-window[data-goo] { transition: none; background: transparent; border-color: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+.cl-goo { z-index: 0; }
+
+/* Settings view: a section's content fills its window (the shared settings pane, scrolled by itself). */
+.cl-col .ui-window-body > .ui-settings-pane { position: absolute; inset: 0; }
+.bm-sec.cl-divided { margin-top: 8px; padding-top: 8px; box-shadow: 0 -1px 0 var(--line); }
+.cl-viewlist-rows > li.cl-divided { margin-top: 4px; padding-top: 4px; box-shadow: 0 -1px 0 var(--line); }
+
+/* The one-time "Continue from <device>?" chip: the shared pill, centred under the top pill, fades on its own. */
+.cl-continue { position: absolute; z-index: 9; left: 50%; top: calc(env(safe-area-inset-top) + 10px + var(--pill-h, 38px) + 10px); translate: -50% 0; gap: 4px; padding: 0 4px 0 14px; white-space: nowrap; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); opacity: 0; transform: translateY(-6px) scale(0.97); transition: opacity 200ms ease, transform 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.cl-continue[data-open="true"] { opacity: 1; transform: none; }
+.cl-continue-text { padding-right: 6px; }
+@media (prefers-reduced-motion: reduce) { .cl-continue { transform: none; } }
+
+/* ---- sharing (clusters-share.ts): the dialog is the shared overlay material; chips, switch and pill are the shared ones ---- */
+.cl-share { position: absolute; z-index: 9; display: flex; flex-direction: column; border-radius: var(--r-lg, 18px); color: var(--fg); }
+.cl-share-head { display: flex; align-items: center; height: var(--pill-h, 38px); padding: 0 14px; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.cl-share-body { display: grid; gap: 6px; padding: 0 14px 4px; }
+.cl-share-label { margin: 6px 0 0; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.cl-share-views { display: flex; flex-wrap: wrap; gap: 6px; }
+.cl-share-publish { display: flex; align-items: center; justify-content: space-between; min-height: var(--ui-row-h, 32px); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-share-note { margin: 4px 0 0; color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 12px); letter-spacing: var(--ui-tracking); }
+.cl-share-foot { display: flex; justify-content: flex-end; padding: 6px 10px 10px; }
+.cl-share-send { --pill-h: var(--ui-control-h, 30px); color: var(--accent); }
+.cl-share-send:disabled { color: var(--fg-3); opacity: 0.6; }
+.cl-unlink { position: absolute; z-index: 9; left: 50%; top: calc(env(safe-area-inset-top) + 10px + var(--pill-h, 38px) + 10px); translate: -50% 0; gap: 8px; padding: 0 14px 0 10px; white-space: nowrap; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); cursor: pointer; opacity: 0; transform: translateY(-6px) scale(0.97); transition: opacity 200ms ease, transform 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.cl-unlink[data-open="true"] { opacity: 1; transform: none; }
+.cl-unlink[hidden] { display: none; }
+.cl-unlink svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-team { margin-left: 6px; }
+.cl-noaccess { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 6px; padding: 24px; text-align: center; }
+.cl-noaccess-title { margin: 0; color: var(--fg-2); font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.cl-noaccess-hint { margin: 0; max-width: 28ch; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-noaccess svg { width: 22px; height: 22px; fill: none; stroke: var(--fg-3); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-world[data-snap] .cl-label-menu { display: none; }
+.cl-label-menu { display: grid; place-items: center; width: 22px; height: 22px; margin-right: -6px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--fg-3); cursor: pointer; }
+.cl-label-menu svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+@media (hover: hover) and (pointer: fine) { .cl-label-menu:hover { background: var(--hover); color: var(--fg); } }
+
+/* A Mesh node has no input to lock, so it has no lock and its title pill may use the whole header. */
+.ui-window[data-kind="node"] .ui-window-lock { display: none; }
+.ui-window[data-kind="node"] .ui-window-pill { max-width: none; }

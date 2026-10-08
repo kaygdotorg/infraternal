@@ -19,7 +19,7 @@
  *   card.lock            → the lock toggle, for nudges
  *   card.dispose()
  */
-import { createLockToggle, placeLock, trackLockReveal, type LockSource, type LockToggle } from "./lock-toggle";
+import { createLockToggle, trackLockReveal, type LockSource, type LockToggle } from "./lock-toggle";
 
 /** `none` hides the dot: a window that is not a connection yet (a flow in progress). */
 export type WindowStatus = "live" | "connecting" | "offline" | "none";
@@ -93,6 +93,7 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     button.className = "ui-window-action";
     button.dataset.action = action.id;
     button.setAttribute("aria-label", action.label);
+    button.dataset.tip = action.label; // the warm tooltip names the control
     button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${action.icon}</svg>`;
     const handler = (event: MouseEvent): void => action.onSelect(event);
     button.addEventListener("click", handler);
@@ -111,7 +112,6 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
   const setLocked = (next: boolean, instant = false): void => {
     if (next === lock.locked) return;
     root.toggleAttribute("data-locked", next);
-    placeLock(root);
     lock.setLocked(next, instant);
   };
 

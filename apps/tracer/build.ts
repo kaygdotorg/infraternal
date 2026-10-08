@@ -9,6 +9,9 @@ const recoveryUiMode = process.env.INFRATERNAL_RECOVERY_UI ?? "off";
 if (!["off", "preview", "1"].includes(recoveryUiMode)) {
   throw new Error("INFRATERNAL_RECOVERY_UI must be off, preview, or 1");
 }
+// The clusters concept mockup (#89) is preview-only (D162): the production bundle leaves it out
+// unless the build asks for it, so it never counts against the transfer budget or ships.
+const clustersPreview = process.env.INFRATERNAL_CLUSTERS_PREVIEW === "1";
 // The commit the bundle was built from, shown (and copied) from Settings, About. A tree
 // without git history reports nothing, and the UI then says "dev".
 const commit = Bun.spawnSync(["git", "rev-parse", "HEAD"], { stderr: "ignore" }).stdout.toString().trim();
@@ -20,8 +23,15 @@ const build = await Bun.build({
   minify: process.env.TRACER_NO_MINIFY === undefined && process.env.TRACER_BUILD_READABLE !== "1",
   target: "browser",
   splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
-  define: { __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode), __BUILD_DATE__: JSON.stringify(new Date().toISOString()), __BUILD_COMMIT__: JSON.stringify(/^[0-9a-f]{40}$/.test(commit) ? commit : "") },
-  plugins: [browserFileLoader],
+  define: { __CLUSTERS_PREVIEW__: JSON.stringify(clustersPreview), __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode), __BUILD_DATE__: JSON.stringify(new Date().toISOString()), __BUILD_COMMIT__: JSON.stringify(/^[0-9a-f]{40}$/.test(commit) ? commit : "") },
+  plugins: clustersPreview ? [browserFileLoader] : [browserFileLoader, {
+    // Without the preview flag the mockup resolves to an empty module (its call is unreachable: the define is false).
+    name: "leave-out-clusters-preview",
+    setup(builder) {
+      builder.onResolve({ filter: /^\.\/clusters$/ }, () => ({ path: "clusters-left-out", namespace: "left-out" }));
+      builder.onLoad({ filter: /.*/, namespace: "left-out" }, () => ({ contents: "export const mountClusters = undefined;", loader: "js" }));
+    },
+  }],
 });
 if (!build.success) {
   throw new Error(build.logs.map((log) => log.message).join("\n"));
@@ -31,6 +41,7 @@ await Promise.all([
   cp("style.css", "dist/style.css"),
   cp("auth.css", "dist/auth.css"),
   cp("canvas.css", "dist/canvas.css"),
+  cp("clusters.css", "dist/clusters.css"),
   cp("addhost.css", "dist/addhost.css"),
   cp("../../packages/ui/styles.css", "dist/ui.css"),
   cp("fonts", "dist/fonts", { recursive: true, filter: (source) => !source.endsWith(".sh") && !source.endsWith(".py") }),

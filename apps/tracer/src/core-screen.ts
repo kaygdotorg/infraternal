@@ -2,12 +2,17 @@
 import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
 import { applyTheme, DEFAULT_GLASS, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
+import { Spring } from "../../../packages/ui/src/spring";
+import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
-import { aboutSection, createSettingsOverlay } from "../../../packages/ui/src/settings-overlay";
+import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
+import { toolbarSection } from "../../../packages/ui/src/toolbar-settings";
+import { readLocal as readPref, writeLocal as writePref } from "../../../packages/ui/src/local-pref";
+import { aboutSection, createSettingsOverlay, type SettingsSection } from "../../../packages/ui/src/settings-overlay";
 import { buildVersion } from "./build-version";
 import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
@@ -25,6 +30,8 @@ export interface CoreScreenOptions {
   mockMode: boolean;
   probeMode: boolean;
   addHostPrototype?: boolean;
+  /** Settings is a view on the canvas, not an overlay: every way of opening it dispatches `proto:settings:<section>`. */
+  settingsView?: boolean;
   /** The signed-in user's display name, shown in the sidebar footer (canvas preview only). */
   displayName?: string;
   /** The signed-in username, shown as the footer's quiet second line. */
@@ -33,6 +40,21 @@ export interface CoreScreenOptions {
   footerVariant?: "a" | "b";
   onRecovery?: () => void;
   onCancelRecovery?: () => Promise<void>;
+}
+
+/** One key of the canvas row: an icon button with a warm tooltip (its label). */
+export interface ToolbarItem {
+  id: string;
+  label: string;
+  /** Inner SVG markup on the shared 24 px grid (packages/ui icons). */
+  icon: string;
+  onSelect(): void;
+  pressed?: boolean;
+  disabled?: boolean;
+}
+export interface ToolbarRow {
+  update(id: string, patch: Partial<Pick<ToolbarItem, "pressed" | "disabled" | "label" | "icon">>): void;
+  dispose(): void;
 }
 
 export interface CoreScreen {
@@ -49,6 +71,20 @@ export interface CoreScreen {
   /** Replaces the host/session tree (the canvas lists its windows here); returns the new tree. */
   /** The one shared toast of the screen: every transient message (recovery, connection, flows) uses it. */
   readonly toast: ToastController;
+  /**
+   * The key tray has two rows, one visible at a time: the keyboard row (always) and a canvas row
+   * (when a canvas gives it items). Returns a controller to update item state and remove the row.
+   */
+  setCanvasRow(items: ToolbarItem[]): ToolbarRow;
+  /** Holds the toolbar on the key row (an input lock), or releases it with `undefined`. */
+  lockToolbarRow(row: "keys" | undefined): void;
+  /** Runs a palette action (`theme:ink`, `font:geist-mono`, `glass:2`, `bg:mesh`) as a click on its row would. */
+  act(action: string): void;
+  /** The appearance choices in force, and the sections of Settings that live in core (for the Settings view). */
+  appearance(): { theme: string; font: string; glass: number; background: string };
+  settingsPanels: { toolbar: SettingsSection; shortcuts: SettingsSection; about: SettingsSection };
+  /** The row that shows now. */
+  toolbarRow(): "canvas" | "keys";
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
   /** Adds palette rows computed each time the palette opens (state-dependent actions); returns a remover. */
   addPaletteProvider(provider: () => PaletteEntry[]): () => void;
@@ -120,6 +156,9 @@ const SCREEN = `
     <div class="keyblur" aria-hidden="true"></div>
     <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
       <div id="keytray" class="keytray ui-pill" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
+        <div class="keyrows" id="keyrows">
+          <div class="keyrow" id="keyrow-canvas" data-row="canvas" role="group" aria-label="Canvas" hidden></div>
+          <div class="keyrow" id="keyrow-keys" data-row="keys" role="group" aria-label="Terminal keys">
         <button id="key-escape" type="button" tabindex="-1" data-key="esc" aria-label="Escape" class="key-word">esc</button>
         <button id="key-tab" type="button" tabindex="-1" data-key="tab" aria-label="Tab">${SVG.tab}</button>
         <button id="key-control" type="button" tabindex="-1" data-mod="ctrl" data-mod-state="off" aria-pressed="false" aria-label="Control">${SVG.ctrl}</button>
@@ -134,6 +173,9 @@ const SCREEN = `
         <button id="key-dash" type="button" tabindex="-1" data-text="-" aria-label="Dash">${SVG.dash}</button>
         <button id="key-paste" type="button" tabindex="-1" data-paste aria-label="Paste">${SVG.paste}</button>
         <button id="key-dpad" type="button" tabindex="-1" class="dpad" data-tip-off aria-label="Arrow keys: drag to move" hidden></button>
+          </div>
+        </div>
+        <span class="keydots" aria-hidden="true"><i></i><i></i></span>
       </div>
     </aside>
     <p id="connection-status" class="connection-status" role="status">Starting terminal…</p>
@@ -196,15 +238,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // The footer (who is signed in, settings, the build) is part of the canvas preview.
   // Settings is a shell; About is the only section so far (the build's name, version, commit, date).
   const build = buildVersion();
-  const settings = options.addHostPrototype
-    ? createSettingsOverlay({ stage, sections: [aboutSection({ name: "infraternal", version: build.short, commit: build.full, built: build.built })] })
-    : undefined;
+  const canvasItems = new Map<string, ToolbarItem>();
+  const settingsSections: SettingsSection[] = [aboutSection({ name: "infraternal", version: build.short, commit: build.full, built: build.built })];
+  const shortcutsPanel = shortcutsSection();
+  if (options.addHostPrototype && !options.settingsView) settingsSections.unshift(shortcutsPanel);
+  const aboutPanel = settingsSections[0]!;
+  const settings = options.addHostPrototype && !options.settingsView ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
   const sidebarFoot = options.addHostPrototype
     ? createSidebarFoot({
       displayName: options.displayName?.trim() || "Signed in",
       ...(options.username ? { secondary: options.username } : {}),
       ...(options.footerVariant ? { variant: options.footerVariant } : {}),
-      onOpen: (source) => settings?.open("about", source),
+      onOpen: (source) => { if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action: "proto:settings:appearance", source } })); else settings?.open("about", source); },
     })
     : undefined;
   if (sidebarFoot) { sidebar.append(sidebarFoot.root); sidebar.dataset.foot = ""; }
@@ -235,7 +280,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const params = new URLSearchParams(location.search);
   // `?glass=1..4`: how much shows through the floating cards (1 thickest, 4 thinnest; default 3).
   const glassParam = Number(params.get("glass"));
-  const glassLevel = Number.isInteger(glassParam) && glassParam >= 1 && glassParam <= 4 ? glassParam : DEFAULT_GLASS;
+  const savedGlass = Number(readLocal("tracer.glass"));
+  const validGlass = (n: number): boolean => Number.isInteger(n) && n >= 1 && n <= 4;
+  let glassLevel = validGlass(glassParam) ? glassParam : validGlass(savedGlass) ? savedGlass : DEFAULT_GLASS;
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
   let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "mocha" : "latte");
   // The font follows the same order as the theme: URL, then the saved choice, then the default.
@@ -288,6 +335,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     stage.dataset.theme = currentThemeId;
     stage.dataset.bg = background;
     applyTheme(active, ROOT, glassLevel);
+    window.dispatchEvent(new CustomEvent("tracer:appearance"));
     THEME_COLOR?.setAttribute("content", active.bg);
     // The terminal's own recolour (every retained row is redrawn) is the heaviest part of a theme
     // switch. It runs in its own task, right after the tokens above, so the interface answers at once
@@ -346,6 +394,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ...(options.addHostPrototype ? [
       { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
       // The hint carries the aliases, so "version", "build" and "commit" find it.
+      { group: "Help", glyph: "⌨", label: "Settings: Shortcuts", hint: "keys · rebind · reset", action: "settings:shortcuts" },
+      ...(canvasItems.size ? [{ group: "Help", glyph: "▭", label: "Settings: Toolbar", hint: "rows · order · show · hide", action: "settings:toolbar" }] : []),
       { group: "Help", glyph: "i", label: "About infraternal", hint: "version · build · commit", action: "settings:about" },
     ] : []),
     ...(recoveryUiEnabled() && options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
@@ -359,7 +409,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const paletteGroupIds = new Map<string, string>();
   // The fixed rows are built, indexed and given their DOM rows once; only the rows a provider computes from
   // state (Lock or Unlock) are new at each open, so opening the palette re-attaches rows instead of rebuilding them.
-  const staticEntries = baseEntries();
+  let staticEntries = baseEntries();
   const indexEntry = (entry: PaletteEntry, index: number): void => {
     paletteSearchText.set(entry, `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase());
     // Normalize IDs once so typing never sanitizes every matching result.
@@ -367,6 +417,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (!paletteGroupIds.has(entry.group)) paletteGroupIds.set(entry.group, `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`);
   };
   staticEntries.forEach(indexEntry);
+  /** The fixed rows that depend on state (the toolbar's row appears once a canvas row is registered) are rebuilt when it changes. */
+  const rebuildStaticEntries = (): void => {
+    for (const entry of staticEntries) { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); }
+    staticEntries = baseEntries();
+    staticEntries.forEach(indexEntry);
+  };
   let contextual: PaletteEntry[] = [];
   const refreshEntries = (): void => {
     for (const entry of contextual) { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); }
@@ -798,6 +854,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     try { client?.injectInput(data); } catch { /* connection state is announced in the status line */ }
   };
   const keybarClick = (event: MouseEvent): void => {
+    if (rowSwipeMoved) { rowSwipeMoved = false; return; }
     const target = event.target;
     if (!(target instanceof Element)) return;
     const button = target.closest<HTMLButtonElement>("button");
@@ -811,10 +868,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else if (text) {
       injectKey(text);
     } else if ("paste" in button.dataset) {
-      void navigator.clipboard?.readText().then((value) => {
-        if (!value) return;
-        injectKey(value);
-      }).catch(() => undefined);
+      void readClipboard().then((value) => {
+        if (value) injectKey(value);
+        else if (value === undefined) openPasteTarget();
+      });
+    } else if (button.dataset.cv) {
+      const item = canvasItems.get(button.dataset.cv);
+      if (item && !item.disabled) item.onSelect();
     }
     restoreTerminalFocus();
   };
@@ -822,6 +882,353 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   keybar.addEventListener("pointercancel", keybarPointerCancel);
   keybar.addEventListener("click", keybarClick);
   keytray.addEventListener("keydown", keybarKeydown);
+
+  // ---- two rows, one visible at a time ------------------------------------------------------
+  // The canvas row (top) and the keyboard row (below) share this one tray. A vertical swipe slides
+  // between them on a spring; a horizontal swipe scrolls the row when it overflows (native, with
+  // momentum and the edge fade). The keyboard row shows while a terminal has input focus, the
+  // canvas row otherwise; a manual swipe stands until the next focus change.
+  const rowsEl = get<HTMLElement>("#keyrows");
+  const canvasRowEl = get<HTMLElement>("#keyrow-canvas");
+  const keysRowEl = get<HTMLElement>("#keyrow-keys");
+  let rowIndex = 1; // 0 canvas, 1 keys
+  let rowSwipeMoved = false;
+  const rowHeight = (): number => keysRowEl.offsetHeight || 46;
+  const paintRow = (v: number): void => { rowsEl.style.transform = v === 0 ? "" : `translateY(${-v * rowHeight()}px)`; };
+  const rowSpring = new Spring(1, (v) => { if (canvasRowEl.hidden) { rowsEl.style.transform = ""; return; } paintRow(v); }, { visualDuration: 0.38, bounce: 0.12 });
+  const settleRow = (index: number, instant = false): void => {
+    rowIndex = index;
+    stage.dataset.row = index === 0 ? "canvas" : "keys";
+    keytray.querySelectorAll<HTMLElement>(".keydots i").forEach((dot, i) => dot.toggleAttribute("data-on", i === index));
+    canvasRowEl.inert = index !== 0;
+    keysRowEl.inert = index !== 1;
+    rowSpring.set(index, instant);
+  };
+  let rowLock: "keys" | undefined;
+  const autoRow = (): void => {
+    if (canvasRowEl.hidden || rowLock || editing) return;
+    settleRow(isTerminalFocus(document.activeElement) ? 1 : 0);
+  };
+  document.addEventListener("focusin", autoRow);
+  document.addEventListener("focusout", () => requestAnimationFrame(autoRow));
+  let rowSwipe: { id: number; x: number; y: number; from: number; axis: "" | "x" | "y"; samples: Array<{ y: number; t: number }> } | undefined;
+  keytray.addEventListener("pointerdown", (event) => {
+    rowSwipeMoved = false;
+    if (canvasRowEl.hidden || !event.isPrimary || editing) return;
+    rowSwipe = { id: event.pointerId, x: event.clientX, y: event.clientY, from: rowSpring.value, axis: "", samples: [{ y: event.clientY, t: event.timeStamp }] };
+  }, true);
+  keytray.addEventListener("pointermove", (event) => {
+    const sw = rowSwipe;
+    if (!sw || event.pointerId !== sw.id) return;
+    if (!sw.axis) {
+      const dx = event.clientX - sw.x, dy = event.clientY - sw.y;
+      if (Math.hypot(dx, dy) < 8) return;
+      sw.axis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
+      if (sw.axis === "y") { keytray.setPointerCapture(event.pointerId); rowSwipeMoved = true; }
+    }
+    if (sw.axis !== "y") return;
+    // Follows the finger one to one, with rubber past either row.
+    // The stack follows the finger one to one: dragging up moves it up and reveals the row below (the key
+    // row); dragging down reveals the row above (the canvas row).
+    let v = sw.from - (event.clientY - sw.y) / rowHeight();
+    if (v < 0) v = v * 0.25; else if (v > 1) v = 1 + (v - 1) * 0.25;
+    rowSpring.value = v;
+    paintRow(v);
+    sw.samples.push({ y: event.clientY, t: event.timeStamp });
+    if (sw.samples.length > 5) sw.samples.shift();
+  });
+  const endRowSwipe = (event: PointerEvent): void => {
+    const sw = rowSwipe;
+    if (!sw || event.pointerId !== sw.id) return;
+    rowSwipe = undefined;
+    if (sw.axis !== "y") return;
+    const a = sw.samples[0]!, b = sw.samples[sw.samples.length - 1]!;
+    const vel = b.t > a.t ? (b.y - a.y) / (b.t - a.t) : 0; // px/ms, finger direction (up is negative)
+    const projected = rowSpring.value - (vel * 120) / rowHeight();
+    settleRow(projected > 0.5 ? 1 : 0);
+  };
+  keytray.addEventListener("pointerup", endRowSwipe);
+  keytray.addEventListener("pointercancel", endRowSwipe);
+  keytray.addEventListener("dblclick", (e) => e.preventDefault());
+  keytray.addEventListener("click", (event) => {
+    if (stage.dataset.scrolled !== "true" || stage.hasAttribute("data-toolbar-open")) return;
+    stage.setAttribute("data-toolbar-open", "");
+    event.stopPropagation();
+    event.preventDefault();
+  }, true);
+
+  // ---- the toolbar is customisable (Settings, Toolbar): order and visibility per row, stored locally -----------
+  type RowId = "canvas" | "keys";
+  interface RowPref { order: string[]; hidden: string[] }
+  const loadPrefs = (): Record<RowId, RowPref> => {
+    const empty = (): Record<RowId, RowPref> => ({ canvas: { order: [], hidden: [] }, keys: { order: [], hidden: [] } });
+    try {
+      const raw = JSON.parse(readPref("tracer.toolbar") ?? "null") as Partial<Record<RowId, Partial<RowPref>>> | null;
+      const out = empty();
+      for (const id of ["canvas", "keys"] as const) {
+        const r = raw?.[id];
+        if (r) out[id] = { order: Array.isArray(r.order) ? r.order.filter((x): x is string => typeof x === "string") : [], hidden: Array.isArray(r.hidden) ? r.hidden.filter((x): x is string => typeof x === "string") : [] };
+      }
+      return out;
+    } catch { return empty(); }
+  };
+  // Two layers: the account's layout (shared by every device, kept by the server) and an optional
+  // override for this device. The override exists only after "Customise for this device".
+  const hasDeviceLayout = (): boolean => readPref("tracer.toolbar") !== null;
+  let onDevice = hasDeviceLayout();
+  const prefs = loadPrefs();
+  const accountPrefs: Record<"canvas" | "keys", { order: string[]; hidden: string[] }> = { canvas: { order: [], hidden: [] }, keys: { order: [], hidden: [] } };
+  void fetch("/__mock/account/toolbar", { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : undefined)).then((data: { layout?: typeof accountPrefs | null } | undefined) => {
+    if (!data?.layout) return;
+    for (const id of ["canvas", "keys"] as const) if (data.layout[id]) accountPrefs[id] = data.layout[id];
+    if (!onDevice) { for (const id of ["canvas", "keys"] as const) prefs[id] = accountPrefs[id]; applyPrefs(true); }
+  }).catch(() => undefined);
+  const saveAccount = (): void => { void fetch("/__mock/account/toolbar", { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(accountPrefs) }).catch(() => undefined); };
+  const rowEl = (id: RowId): HTMLElement => (id === "canvas" ? canvasRowEl : keysRowEl);
+  const controlId = (b: HTMLElement): string => b.dataset.cv ?? b.id;
+  const controls = (id: RowId): HTMLButtonElement[] => [...rowEl(id).querySelectorAll<HTMLButtonElement>(":scope > button:not(.dpad)")];
+  const defaults: Record<RowId, string[]> = { canvas: [], keys: controls("keys").map(controlId) };
+  const applyPrefs = (animate: boolean): void => {
+    const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    for (const id of ["canvas", "keys"] as const) {
+      const row = rowEl(id);
+      const list = controls(id);
+      const before = new Map(list.map((b) => [b, b.hidden ? undefined : b.getBoundingClientRect().left]));
+      const pref = prefs[id];
+      const rank = (b: HTMLElement): number => { const at = pref.order.indexOf(controlId(b)); return at < 0 ? 1000 + defaults[id].indexOf(controlId(b)) : at; };
+      for (const b of [...list].sort((a, c) => rank(a) - rank(c))) row.append(b);
+      for (const b of list) b.hidden = pref.hidden.includes(controlId(b));
+      if (!animate || reducedMotion) continue;
+      for (const b of list) {
+        const was = before.get(b);
+        if (b.hidden) continue;
+        const now = b.getBoundingClientRect().left;
+        const dx = was === undefined ? 0 : was - now;
+        if (was === undefined) { new Spring(1, (p) => { b.style.opacity = p === 0 ? "" : String(1 - p); b.style.transform = p === 0 ? "" : `scale(${1 - 0.4 * p})`; }, { visualDuration: 0.3, bounce: 0.2 }).set(0); continue; }
+        if (Math.abs(dx) < 1) continue;
+        new Spring(1, (p) => { b.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.36, bounce: 0.18 }).set(0);
+      }
+    }
+  };
+  const toolbarModel = {
+    rows() {
+      return (["canvas", "keys"] as const).map((id) => ({
+        id,
+        title: id === "canvas" ? "Canvas row" : "Key row",
+        controls: controls(id).map((b) => ({ id: controlId(b), label: b.getAttribute("aria-label") ?? controlId(b), icon: b.querySelector("svg")?.innerHTML ?? '<path d="M6 12h12"/>' })),
+        hidden: new Set(prefs[id].hidden),
+      }));
+    },
+    source: (): "account" | "device" => (onDevice ? "device" : "account"),
+    change(rowId: string, order: string[], hidden: string[]) {
+      prefs[rowId as RowId] = { order, hidden };
+      if (onDevice) writePref("tracer.toolbar", JSON.stringify(prefs));
+      else { accountPrefs[rowId as RowId] = { order, hidden }; saveAccount(); }
+      applyPrefs(true);
+    },
+    reset() {
+      for (const id of ["canvas", "keys"] as const) { prefs[id] = { order: [], hidden: [] }; if (!onDevice) accountPrefs[id] = { order: [], hidden: [] }; }
+      if (onDevice) writePref("tracer.toolbar", JSON.stringify(prefs)); else saveAccount();
+      applyPrefs(true);
+    },
+    /** "Customise for this device": copy what is shown into an override for this device. */
+    customise() { onDevice = true; writePref("tracer.toolbar", JSON.stringify(prefs)); },
+    /** "Use account layout": drop the override. */
+    useAccount() {
+      onDevice = false;
+      try { localStorage.removeItem("tracer.toolbar"); } catch { /* storage is optional */ }
+      for (const id of ["canvas", "keys"] as const) prefs[id] = accountPrefs[id];
+      applyPrefs(true);
+    },
+  };
+  const toolbarSettings = toolbarSection(toolbarModel);
+  applyPrefs(false);
+
+  // ---- long-press the toolbar: edit it in place ---------------------------------------------------------------
+  // Controls wiggle, a drag reorders them (the neighbours part, the drop bounces) within a row or across
+  // rows (drag up for the canvas row, down for the key row), a badge hides one, and a tray of hidden
+  // controls slides up with a plus on each. Done, or a tap outside, ends it. It edits the same layout as
+  // Settings, Toolbar (account layout, or this device's override).
+  let editing = false;
+  let editTray: HTMLElement | undefined;
+  const buzz = (ms = 8): void => { try { navigator.vibrate?.(ms); } catch { /* not every platform has it */ } };
+  const persistLayout = (): void => {
+    for (const id of ["canvas", "keys"] as const) {
+      const all = controls(id);
+      toolbarModel.change(id, all.map(controlId), all.map(controlId).filter((c) => prefs[id].hidden.includes(c)));
+    }
+  };
+  const labelOf = (b: HTMLElement): string => b.getAttribute("aria-label") ?? controlId(b);
+  const iconOf = (b: HTMLElement): string => b.querySelector("svg")?.innerHTML ?? '<path d="M6 12h12"/>';
+  const paintEditTray = (): void => {
+    if (!editTray) return;
+    const list = editTray.querySelector<HTMLElement>(".keyedit-list")!;
+    list.replaceChildren();
+    const hiddenControls = ([...controls("canvas"), ...controls("keys")]).filter((b) => b.hidden);
+    for (const b of hiddenControls) {
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "keyedit-add";
+      add.dataset.id = controlId(b);
+      add.setAttribute("aria-label", `Show ${labelOf(b)}`);
+      add.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${iconOf(b)}</svg><i aria-hidden="true">+</i>`;
+      add.addEventListener("click", () => { buzz(6); for (const id of ["canvas", "keys"] as const) prefs[id] = { order: prefs[id].order, hidden: prefs[id].hidden.filter((h) => h !== controlId(b)) }; persistLayout(); paintBadges(); paintEditTray(); });
+      list.append(add);
+    }
+    editTray.dataset.empty = String(hiddenControls.length === 0);
+  };
+  const paintBadges = (): void => {
+    for (const b of keytray.querySelectorAll<HTMLElement>(".keyrow > button")) {
+      b.querySelector(".keyx")?.remove();
+      if (!editing || b.hidden) continue;
+      const x = document.createElement("i");
+      x.className = "keyx";
+      x.setAttribute("role", "button");
+      x.setAttribute("aria-label", `Hide ${labelOf(b)}`);
+      x.textContent = "×";
+      b.append(x);
+    }
+    keytray.querySelectorAll<HTMLElement>(".keyrow > button:not([hidden])").forEach((b, i) => b.style.setProperty("--wiggle", `${(i % 5) * -70}ms`));
+  };
+  const endEdit = (): void => {
+    if (!editing) return;
+    editing = false;
+    stage.removeAttribute("data-toolbar-edit");
+    document.removeEventListener("pointerdown", outsideEdit, true);
+    paintBadges();
+    const tray = editTray;
+    editTray = undefined;
+    if (tray) {
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) tray.remove();
+      else new Spring(0, (v) => { tray.style.transform = `translateY(${v * 24}px)`; tray.style.opacity = String(1 - v); if (v >= 1) tray.remove(); }, { visualDuration: 0.25, bounce: 0 }).set(1);
+    }
+    buzz(6);
+  };
+  const outsideEdit = (e: PointerEvent): void => { if (!(e.target as Element).closest(".keytray, .keyedit")) endEdit(); };
+  const startEdit = (): void => {
+    if (editing || canvasRowEl.hidden) return;
+    editing = true;
+    stage.setAttribute("data-toolbar-edit", "");
+    buzz(12);
+    const tray = document.createElement("div");
+    tray.className = "keyedit ui-pill";
+    tray.innerHTML = `<div class="keyedit-list" role="group" aria-label="Hidden controls"></div><button type="button" class="keyedit-done" aria-label="Done">Done</button>`;
+    tray.querySelector(".keyedit-done")!.addEventListener("click", endEdit);
+    keybar.append(tray);
+    editTray = tray;
+    paintEditTray();
+    paintBadges();
+    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) new Spring(1, (v) => { tray.style.transform = v === 0 ? "" : `translateY(${v * 28}px)`; tray.style.opacity = String(1 - v); }, { visualDuration: 0.4, bounce: 0.2 }).set(0);
+    document.addEventListener("pointerdown", outsideEdit, true);
+  };
+  // Long press (touch) starts it.
+  let hold: { id: number; x: number; y: number; timer: number } | undefined;
+  keytray.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "touch" || editing || canvasRowEl.hidden) return;
+    hold = { id: e.pointerId, x: e.clientX, y: e.clientY, timer: window.setTimeout(() => { hold = undefined; startEdit(); }, 600) };
+  }, true);
+  for (const type of ["pointermove", "pointerup", "pointercancel"] as const) keytray.addEventListener(type, (e) => {
+    if (!hold || e.pointerId !== hold.id) return;
+    if (type !== "pointermove" || Math.hypot(e.clientX - hold.x, e.clientY - hold.y) > 8) { window.clearTimeout(hold.timer); hold = undefined; }
+  }, true);
+  // In edit mode a tap hides (the badge) instead of pressing, and a drag reorders.
+  keytray.addEventListener("click", (e) => {
+    if (!editing) return;
+    e.stopPropagation(); e.preventDefault();
+    const x = (e.target as Element).closest(".keyx");
+    const b = x?.closest<HTMLButtonElement>("button");
+    if (!b) return;
+    buzz(10);
+    const id = controlId(b);
+    for (const rid of ["canvas", "keys"] as const) if (rowEl(rid).contains(b)) prefs[rid] = { order: prefs[rid].order, hidden: [...prefs[rid].hidden.filter((h) => h !== id), id] };
+    persistLayout();
+    paintBadges();
+    paintEditTray();
+  }, true);
+  keytray.addEventListener("pointerdown", (e) => {
+    if (!editing || (e.target as Element).closest(".keyx")) return;
+    const b = (e.target as Element).closest<HTMLButtonElement>(".keyrow > button");
+    if (!b) return;
+    e.preventDefault();
+    e.stopPropagation();
+    let dragging = false;
+    const startX = e.clientX, startY = e.clientY;
+    const rect = b.getBoundingClientRect();
+    let ghost: HTMLElement | undefined;
+    const trayRect = keytray.getBoundingClientRect();
+    const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const targetRow = (y: number): RowId => (y < trayRect.top + trayRect.height / 2 - 26 ? "canvas" : y > trayRect.top + trayRect.height / 2 + 26 ? "keys" : (rowEl("canvas").contains(b) ? "canvas" : "keys"));
+    const move = (ev: PointerEvent): void => {
+      if (!dragging) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return;
+        dragging = true;
+        buzz(8);
+        ghost = b.cloneNode(true) as HTMLElement;
+        ghost.classList.add("keyghost");
+        ghost.querySelector(".keyx")?.remove();
+        ghost.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:30;pointer-events:none`;
+        document.body.append(ghost);
+        b.style.opacity = "0.25";
+      }
+      ghost!.style.transform = `translate(${ev.clientX - startX}px, ${ev.clientY - startY}px) scale(1.14)`;
+      // Row: dragging up reaches the canvas row, down the key row; the row slides to follow.
+      const want = targetRow(ev.clientY);
+      const here: RowId = rowEl("canvas").contains(b) ? "canvas" : "keys";
+      const row = rowEl(want);
+      const siblings = controls(want).filter((c) => c !== b && !c.hidden);
+      const x = ev.clientX;
+      const index = siblings.filter((c) => { const r = c.getBoundingClientRect(); return r.left + r.width / 2 < x; }).length;
+      const ref = siblings[index] ?? null;
+      const before = new Map(controls(want).map((c) => [c, c.getBoundingClientRect().left]));
+      if (want !== here) { settleRow(want === "canvas" ? 0 : 1); buzz(6); }
+      if (b.parentElement !== row || b.nextElementSibling !== ref) {
+        row.insertBefore(b, ref);
+        if (!reducedMotion) for (const [c, left] of before) {
+          if (c === b) continue;
+          const dx = left - c.getBoundingClientRect().left;
+          if (Math.abs(dx) > 1) new Spring(1, (p) => { c.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.3, bounce: 0.18 }).set(0);
+        }
+      }
+    };
+    const end = (): void => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      if (!dragging || !ghost) return;
+      const g = ghost;
+      const to = b.getBoundingClientRect();
+      const from = g.getBoundingClientRect();
+      const land = (): void => { g.remove(); b.style.opacity = ""; buzz(10); persistLayout(); paintBadges(); };
+      if (reducedMotion) { land(); return; }
+      const dx = to.left + to.width / 2 - (from.left + from.width / 2), dy = to.top + to.height / 2 - (from.top + from.height / 2);
+      const base = g.style.transform;
+      const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(base);
+      const sx = m ? Number(m[1]) : 0, sy = m ? Number(m[2]) : 0;
+      new Spring(0, (v) => { g.style.transform = `translate(${sx + dx * v}px, ${sy + dy * v}px) scale(${1.14 - 0.14 * Math.min(1, v)})`; if (v === 1) land(); }, { visualDuration: 0.34, bounce: 0.3 }).set(1);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  }, true);
+
+  // Where the clipboard cannot be read (a plain-http origin), a paste target takes the system paste.
+  const openPasteTarget = (): void => {
+    stage.querySelector(".paste-target")?.remove();
+    const box = document.createElement("div");
+    box.className = "paste-target ui-overlay-surface";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "Paste here";
+    input.setAttribute("aria-label", "Paste into the terminal");
+    box.append(input);
+    stage.append(box);
+    const done = (): void => { box.remove(); document.removeEventListener("pointerdown", outside, true); };
+    const outside = (e: PointerEvent): void => { if (!box.contains(e.target as Node)) done(); };
+    input.addEventListener("paste", (e) => { const text = e.clipboardData?.getData("text"); e.preventDefault(); if (text) injectKey(text); done(); restoreTerminalFocus(); });
+    input.addEventListener("keydown", (e) => { if (e.key === "Escape") done(); });
+    document.addEventListener("pointerdown", outside, true);
+    input.focus();
+  };
 
   /** Runs a palette action; returns true when the action closed the palette itself. */
   function runAction(action: string, source: "keyboard" | "pointer"): boolean {
@@ -838,7 +1245,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       committedFont = fontById(value)!;
       rememberFont(committedFont);
       showFont(committedFont);
+      window.dispatchEvent(new CustomEvent("tracer:appearance"));
       return false;
+    } else if (kind === "glass" && validGlass(Number(value))) {
+      glassLevel = Number(value);
+      writeLocal("tracer.glass", value!);
+      swapLook();
+      return true;
     } else if (kind === "bg" && (value === "mesh" || value === "none")) {
       background = value;
       writeLocal("tracer.background", value);
@@ -846,7 +1259,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return true;
     } else if (kind === "settings") {
       setPalette(false, source);
-      settings?.open(value ?? "about", source);
+      if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:proto-action", { detail: { action: `proto:settings:${value ?? "appearance"}`, source } }));
+      else settings?.open(value ?? "about", source);
       return true;
     } else if (kind === "shortcuts") {
       // After the palette has gone, so the morph starts from the settled pill.
@@ -892,6 +1306,50 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return () => { providers.delete(provider); };
     },
     toast,
+    act(action) { runAction(action, "pointer"); },
+    appearance: () => ({ theme: currentThemeId, font: committedFont.id, glass: glassLevel, background }),
+    settingsPanels: { get toolbar() { return toolbarSettings; }, shortcuts: shortcutsPanel, about: aboutPanel },
+    toolbarRow: () => (rowIndex === 0 ? "canvas" : "keys"),
+    lockToolbarRow(row) { rowLock = row; if (row) settleRow(1); else autoRow(); },
+    setCanvasRow(items) {
+      canvasItems.clear();
+      canvasRowEl.replaceChildren();
+      for (const item of items) {
+        canvasItems.set(item.id, { ...item });
+        const button = document.createElement("button");
+        button.type = "button";
+        button.tabIndex = -1;
+        button.dataset.cv = item.id;
+        button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${item.icon}</svg>`;
+        canvasRowEl.append(button);
+      }
+      const paint = (id: string): void => {
+        const item = canvasItems.get(id);
+        const button = canvasRowEl.querySelector<HTMLButtonElement>(`[data-cv="${id}"]`);
+        if (!item || !button) return;
+        button.setAttribute("aria-label", item.label);
+        button.setAttribute("aria-pressed", String(Boolean(item.pressed)));
+        button.dataset.pressed = String(Boolean(item.pressed));
+        button.toggleAttribute("data-disabled", Boolean(item.disabled));
+        button.setAttribute("aria-disabled", String(Boolean(item.disabled)));
+        button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${item.icon}</svg>`;
+        refreshTip(button);
+      };
+      for (const item of items) paint(item.id);
+      defaults.canvas = items.map((i) => i.id);
+      applyPrefs(false);
+      if (items.length && !options.settingsView && !settingsSections.includes(toolbarSettings)) settingsSections.unshift(toolbarSettings);
+      rebuildStaticEntries();
+      canvasRowEl.hidden = items.length === 0;
+      keytray.dataset.rows = items.length ? "2" : "1";
+      autoRow();
+      if (!items.length) settleRow(1, true);
+      else if (!isTerminalFocus(document.activeElement)) settleRow(0, true);
+      return {
+        update(id, patch) { const cur = canvasItems.get(id); if (!cur) return; Object.assign(cur, patch); paint(id); },
+        dispose() { const at = settingsSections.indexOf(toolbarSettings); if (at >= 0) settingsSections.splice(at, 1); canvasItems.clear(); rebuildStaticEntries(); canvasRowEl.replaceChildren(); canvasRowEl.hidden = true; keytray.dataset.rows = "1"; settleRow(1, true); },
+      };
+    },
     setHostTree(sections, activeLeaf, onSelect) {
       branch.dispose();
       branch = branchedMenu(get<HTMLElement>("#tree"), sections, { active: activeLeaf, onSelect });
@@ -922,6 +1380,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     setScrolled(scrolled) {
       // Scrollback belongs to the card; mobile input controls stay in place [#44].
+      // While the history is scrolled back the toolbar shrinks to a slim strip; the bottom or a tap brings it back.
+      if (stage.dataset.scrolled !== String(scrolled)) stage.removeAttribute("data-toolbar-open");
       stage.dataset.scrolled = String(scrolled);
     },
     onInputActivity() {

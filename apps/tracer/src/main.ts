@@ -85,6 +85,9 @@ let welcomeTimer = 0;
 let foregroundListenerInstalled = false;
 let backdropTimer = 0;
 
+/** True only in builds made with INFRATERNAL_CLUSTERS_PREVIEW=1 (see build.ts); false removes the mockup from the bundle. */
+declare const __CLUSTERS_PREVIEW__: boolean;
+
 void start();
 
 async function start(): Promise<void> {
@@ -153,6 +156,21 @@ function installForegroundListener(): void {
   });
 }
 
+/**
+ * A mockup preview (`?mock=1&proto=...`) re-creates its mock session by loading the page again: the
+ * test double hands the session cookie out on that load. After the double restarts, a tab that
+ * was open lands here instead of on a dead "Could not reach the server".
+ */
+const previewProto = (): boolean => { const q = new URLSearchParams(location.search); return q.get("mock") === "1" && !!q.get("proto"); };
+let healTimer = 0;
+function healPreview(): void {
+  if (!previewProto()) return;
+  window.clearInterval(healTimer);
+  healTimer = window.setInterval(() => {
+    void fetch("/health", { cache: "no-store" }).then((r) => { if (r.ok) location.reload(); }).catch(() => undefined);
+  }, 2000);
+}
+
 /** Applies the sign-in scheme (light or dark); the backdrop follows later scheme changes live. */
 const authLight = (): boolean => useAuthScheme((light) => backdrop?.setLight(light));
 
@@ -173,10 +191,12 @@ function renderUnavailable(message: string): void {
   mustGet<HTMLElement>("#status-error").textContent = message;
   const retry = mustGet<HTMLButtonElement>("#retry-status");
   retry.addEventListener("click", () => {
+    if (previewProto()) { location.reload(); return; }
     retry.disabled = true;
     loading(retry.querySelector<HTMLElement>(".busy-count")!, 400);
     void refreshAuth();
   }, { once: true });
+  healPreview();
   scheduleBackdrop();
 }
 
@@ -287,6 +307,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
   const proto = query.get("proto");
   const canvasMode = mockMode && (proto === "windows" || proto === "addhost");
+  // Concept mockup for views on one canvas (#89): it brings its own windows and no live terminal.
+  const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
   const predictiveEcho = query.get("predict") === "1";
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
@@ -299,7 +321,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
-      addHostPrototype: canvasMode,
+      addHostPrototype: canvasMode || clustersMode,
+      ...(clustersMode ? { settingsView: true } : {}),
       ...(identity?.display_name ? { displayName: identity.display_name } : {}),
       ...(identity?.username ? { username: identity.username } : {}),
       ...(query.get("footer") === "b" ? { footerVariant: "b" as const } : {}),
@@ -314,6 +337,20 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     return;
   }
   coreScreen = screen;
+  if (clustersMode) {
+    const { mountClusters } = await import("./clusters");
+    const scene = Number(query.get("scene"));
+    const roleParam = query.get("role");
+    let clusters: Awaited<ReturnType<typeof mountClusters>>;
+    try {
+      clusters = await mountClusters(screen, {
+      ...(scene ? { scene } : {}),
+      ...(roleParam === "viewer" || roleParam === "operator" || roleParam === "new" || roleParam === "asha" ? { role: roleParam } : {}),
+    });
+    } catch (error: unknown) { console.error("clusters mockup failed", error); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
+    canvasPrototype = clusters;
+    // The flow carries on: the live terminal opens into the build-01 window the mockup hosts it in.
+  }
   if (canvasMode) {
     // Gated mockup (D162): the window canvas and the add-host flow on it, built against the
     // test double only. The canvas mounts first; the flow hangs its windows on the canvas.
@@ -436,7 +473,7 @@ async function showRecovery(): Promise<void> {
 function uiFontPreference(): UiFont {
   // The canvas mockup is monospace throughout (owner rule, docs/design/TASTE.md §2).
   const proto = new URLSearchParams(location.search).get("proto");
-  if (proto === "windows" || proto === "addhost") return "mono";
+  if (proto === "windows" || proto === "addhost" || proto === "clusters") return "mono";
   const requested = new URLSearchParams(location.search).get("ui");
   if (requested === "sans" || requested === "mono") {
     try { window.localStorage.setItem("tracer.ui-font", requested); } catch { /* The URL remains the preference without storage. */ }
@@ -473,6 +510,7 @@ async function checkForegroundSession(): Promise<void> {
     const session = await checkSession();
     // A delayed HTTP snapshot must not overwrite a newer WebSocket state event.
     if (session && noticeGeneration === recoveryNoticeGeneration) coreScreen?.setRecoveryPending(session.recovery_pending?.ready_at);
+    if (!session && previewProto()) { location.reload(); return; }
     if (!session) {
       currentTerminal?.dispose();
       currentTerminal = undefined;

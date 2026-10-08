@@ -43,13 +43,13 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
-.tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; white-space: nowrap; overflow: hidden;
+.tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; max-width: 280px; overflow: hidden;
   font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
 .tip-label { display: block; }
 .tip-label.is-leaving { position: absolute; left: 10px; top: 6px; }
 .tip-arrow { position: absolute; left: 0; width: 8px; height: 8px; margin-left: -4px; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
-.tip-measure { position: fixed; visibility: hidden; white-space: nowrap; pointer-events: none;
+.tip-measure { position: fixed; visibility: hidden; width: max-content; max-width: 260px; pointer-events: none;
   font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
 .ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(340px, calc(100vw - 24px)); gap: 12px; padding: 14px 14px 12px;
@@ -362,6 +362,18 @@ export function flashTip(el: HTMLElement, text: string, duration = 900): void {
     temporaryTips.delete(el);
   }, Math.max(0, duration));
   temporaryTips.set(el, { previous: normalTip, timer });
+}
+
+/**
+ * Peeks the tooltip of `el` for `duration` ms without a hover (a tap on a mark whose tap does nothing
+ * else). A live label that changes while it is up is followed (refreshTip), and a newer tooltip is
+ * never closed by it.
+ */
+export function peekTip(el: HTMLElement, duration = 2600): void {
+  show(el, shown ? "instant" : "pop");
+  const mine = current;
+  window.clearTimeout(closeTimer);
+  closeTimer = window.setTimeout(() => { if (shown && current === mine) hide(); }, duration);
 }
 
 /** Installs the page-wide tooltip group. Call once; works for elements added later. */

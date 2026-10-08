@@ -108,3 +108,13 @@ export async function copyFeedback(button: HTMLElement, text: string, instant = 
   flashTip(button, "Couldn't copy", HOLD);
   return false;
 }
+
+/**
+ * Reads the clipboard. Like writing, the async API exists only in secure contexts; on a plain-http
+ * origin it is missing and a page cannot read the clipboard at all, so this returns `undefined` and
+ * the caller offers a paste target instead (the system paste menu fills it).
+ */
+export async function readClipboard(): Promise<string | undefined> {
+  if (!navigator.clipboard?.readText) return undefined;
+  try { return await navigator.clipboard.readText(); } catch { return undefined; }
+}

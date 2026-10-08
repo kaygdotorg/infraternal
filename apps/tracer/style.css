@@ -504,12 +504,25 @@ button { color: inherit; }
 .keyblur { display: none; position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; height: 108px; pointer-events: none; background: linear-gradient(transparent, color-mix(in oklab, var(--bg) 58%, transparent)); transition: opacity 180ms ease-out; }
 .keybar { display: none; position: absolute; z-index: 7; left: 0; right: 0; bottom: calc(8px + env(safe-area-inset-bottom)); padding: 0 12px; transition: transform 240ms var(--ease-drawer), opacity 180ms ease-out; }
 .keytray {
-  display: flex; width: max-content; max-width: 100%; gap: 2px; margin: 0 auto; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity;
-  --ui-pill-height: var(--keybar-height); height: var(--keybar-height); padding: 1px 7px; border-radius: var(--r-pill);
-  scrollbar-width: none;
+  position: relative; display: block; width: max-content; max-width: 100%; margin: 0 auto; overflow: hidden; overflow: clip; /* clip, not hidden: a hidden box can be scrolled by focus */
+  --ui-pill-height: var(--keybar-height); padding: 0; border-radius: var(--r-pill);
+}
+/* Two rows (canvas above, keyboard below) share the tray; only the keyboard row exists without a canvas row. */
+.keybar .keytray { display: block; height: var(--keybar-height); }
+.keyrows { display: grid; grid-auto-rows: calc(var(--keybar-height) - 2px); will-change: transform; }
+.keyrow {
+  display: flex; align-items: center; gap: 2px; min-width: 0; padding: 0 7px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none;
+  touch-action: pan-x;
   -webkit-mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 22px), transparent);
   mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 22px), transparent);
 }
+.keyrow[hidden] { display: none; }
+.keydots { position: absolute; z-index: 1; top: 0; right: 7px; bottom: 0; display: none; flex-direction: column; justify-content: center; gap: 4px; pointer-events: none; }
+.keytray[data-rows="2"] .keydots { display: flex; }
+.keydots i { width: 4px; height: 4px; border-radius: 50%; background: var(--fg-3); opacity: 0.5; transition: opacity 160ms ease, background-color 160ms ease; }
+.keydots i[data-on] { background: var(--fg); opacity: 0.9; }
+.keytray[data-rows="2"] .keyrow { padding-right: 16px; }
+.keyrow::-webkit-scrollbar { display: none; }
 /* `safe`: when the keys are wider than the tray, plain centring pushes the first ones out of reach to the
    left of the scroll origin (esc and tab could not be scrolled to or tapped on a phone). */
 .keytray.ui-pill { justify-content: safe center; }
@@ -521,6 +534,8 @@ button { color: inherit; }
 /* Armed modifiers use a soft fill; locked modifiers add a small dot as a second cue. */
 .keybar button[data-mod-state="armed"], .keybar button[data-mod-state="locked"] { background: var(--accent-soft); color: var(--accent); }
 .keybar button[data-mod-state="locked"]::after { content: ""; position: absolute; right: 8px; bottom: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--overlay); }
+.keybar button[data-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.keybar button[data-disabled] { opacity: 0.35; }
 .keybar button[data-instant] { transition: none; }
 .keybar .dpad[hidden] { display: none !important; }
 .keybar.is-away { transform: translateY(calc(100% + 16px)); opacity: 0; pointer-events: none; transition-duration: 180ms, 140ms; }
@@ -579,3 +594,32 @@ button { color: inherit; }
 .recovery-notice .ui-pill { min-width: 44px; padding: 0 14px; }
 .recovery-notice[hidden] { display: none; }
 
+
+/* Paste target for origins where the clipboard cannot be read: one field above the tray, same material. */
+.paste-target { position: absolute; z-index: 9; left: var(--gutter); right: var(--gutter); bottom: calc(var(--keybar-inset) + var(--keybar-height) + var(--keybar-gap) + env(safe-area-inset-bottom) + 8px); padding: 6px; border-radius: 14px; }
+.paste-target input { width: 100%; min-height: 44px; padding: 0 12px; border: 0; border-radius: 10px; background: var(--hover); color: var(--fg); font: var(--fw-body) 16px/1 var(--font-ui); outline: none; }
+
+/* Hidden controls leave their row (Settings, Toolbar). */
+.keyrow > button[hidden] { display: none !important; }
+/* While the terminal history is scrolled back the toolbar shrinks to a slim strip; a tap or the bottom restores it. */
+.terminal-screen[data-scrolled="true"]:not([data-toolbar-open]) .keytray { transform: translateY(calc(var(--keybar-height) - 16px)); }
+.terminal-screen[data-scrolled="true"]:not([data-toolbar-open]) .keyrows { opacity: 0.25; }
+.keytray { transition: transform 280ms var(--ease-drawer, cubic-bezier(0.23, 1, 0.32, 1)); }
+.keyrows { transition: opacity 180ms ease; }
+@media (prefers-reduced-motion: reduce) { .keytray { transition: none; } }
+
+/* Editing the toolbar in place (long press): a gentle wiggle, a hide badge on each control, and a tray of hidden ones. */
+@keyframes keywiggle { 0% { rotate: -1.6deg; } 50% { rotate: 1.6deg; } 100% { rotate: -1.6deg; } }
+.terminal-screen[data-toolbar-edit] .keyrow > button { animation: keywiggle 260ms ease-in-out infinite; animation-delay: var(--wiggle, 0ms); touch-action: none; }
+.keyrow > button .keyx { position: absolute; left: 2px; top: 2px; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--overlay-solid); border: 1px solid var(--overlay-line); color: var(--fg); font: var(--fw-label) 14px/1 var(--font-ui); font-style: normal; }
+.keyghost { display: grid; place-items: center; border-radius: 50%; background: var(--overlay-solid); box-shadow: var(--overlay-shadow-large, var(--shadow)); color: var(--fg); }
+.keyghost svg { width: 24px; height: 24px; stroke-width: 1.75; }
+.keyedit { position: absolute; z-index: 8; left: 50%; translate: -50% 0; bottom: calc(var(--keybar-inset) + var(--keybar-height) + env(safe-area-inset-bottom) + 14px); --pill-h: 52px; display: flex; z-index: 9; align-items: center; gap: 4px; max-width: calc(100% - 24px); padding: 0 6px 0 8px; }
+.keyedit-list { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.keyedit[data-empty="true"] .keyedit-list::before { content: "Nothing hidden"; padding: 0 10px; color: var(--fg-3); font: var(--ui-type-label); white-space: nowrap; }
+.keyedit-add { position: relative; flex: none; display: grid; place-items: center; width: 44px; height: 44px; border: 0; border-radius: 50%; background: none; color: var(--fg); }
+.keyedit-add svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.keyedit-add i { position: absolute; right: 3px; top: 3px; display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--accent); color: var(--accent-fg); font: var(--fw-label) 13px/1 var(--font-ui); font-style: normal; }
+.keyedit-done { flex: none; min-height: 40px; padding: 0 14px; border: 0; border-radius: 999px; background: var(--hover); color: var(--fg); font: var(--ui-type-button); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .terminal-screen[data-toolbar-edit] .keyrow > button { animation: none; outline: 1px dashed var(--overlay-line); } }
+.terminal-screen[data-toolbar-edit] .test-double-badge { opacity: 0; }

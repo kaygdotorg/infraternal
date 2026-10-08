@@ -293,6 +293,8 @@
   display: inline-flex; align-items: center; gap: 8px; min-width: 0; height: var(--ui-control-h); padding: 0 10px 0 8px;
   border: 1px solid var(--overlay-line); border-radius: 999px; background: transparent; color: var(--fg);
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: pointer;
+  /* The lock owns the exact centre of the frame line: the pill never reaches past half the header minus the lock's hit area. */
+  max-width: calc(50% - 26px); line-height: 1.4; /* room for descenders: the title clips its overflow */
   transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
 .ui-window-pill:active { transform: scale(var(--ui-press-scale)); }
@@ -522,7 +524,7 @@
    44 px invisible hit area. On touch there is no frame lock: locking lives in the toolbar and the
    palette. */
 .ui-window-lock {
-  position: absolute; z-index: 6; top: -22px; left: var(--ui-lock-x, 50%); width: 44px; height: 44px; margin-left: -22px;
+  position: absolute; z-index: 6; top: -22px; left: 50%; width: 44px; height: 44px; margin-left: -22px;
   display: grid; place-items: center; padding: 0; border: 0; border-radius: 10px; background: none; color: var(--fg);
   opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 160ms ease-out, color 160ms ease-out;
 }
@@ -568,3 +570,142 @@
   .ui-settings-main { flex-direction: column; }
   .ui-settings-nav { width: auto; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--line); }
 }
+
+/* ---- connection indicator (src/connection-indicator.ts) ------------------------------------
+   One 16 px box; each glyph is its own layer. The shown glyph is chosen by transitions on
+   opacity and transform only, so a state change retargets from the current frame. Looping
+   animations are paused (never removed) when hidden, so they cannot jump. */
+.ui-conn { position: relative; display: inline-block; flex: none; width: var(--ui-conn-size, 16px); height: var(--ui-conn-size, 16px); vertical-align: middle; cursor: default; -webkit-tap-highlight-color: transparent; }
+.ui-conn[hidden] { display: none; }
+@media (pointer: coarse) { .ui-conn::after { content: ""; position: absolute; inset: -8px; } }
+.ui-conn-g { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transform: scale(0.6); pointer-events: none;
+  transition: opacity 160ms ease-out, transform 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.ui-conn-g svg, .ui-conn-pulse, .ui-conn-spin { grid-area: 1 / 1; width: 100%; height: 100%; overflow: visible; fill: none; }
+/* Glyph parts opt in to a stroke; an inherited page-wide svg stroke must not outline the filled ones. */
+.ui-conn-g svg { stroke: none; }
+.ui-conn-g svg * { stroke: none; }
+.ui-conn[data-state="connected"] .ui-conn-g-connected,
+.ui-conn[data-state="slow"] .ui-conn-g-slow,
+.ui-conn[data-state="connecting"] .ui-conn-g-reconnecting,
+.ui-conn[data-state="reconnecting"] .ui-conn-g-reconnecting,
+.ui-conn[data-state="resumed"] .ui-conn-g-resumed,
+.ui-conn[data-state="approximate"] .ui-conn-g-approximate,
+.ui-conn[data-state="offline"] .ui-conn-g-offline { opacity: 1; transform: none; }
+
+.ui-conn-g-connected .core { fill: var(--ok); }
+.ui-conn-g-connected .halo { fill: color-mix(in oklab, var(--ok) 20%, transparent); }
+.ui-conn-g-slow .core { fill: var(--warn); }
+.ui-conn-g-slow .halo { fill: color-mix(in oklab, var(--warn) 22%, transparent); }
+.ui-conn .ui-conn-g-slow .ring { stroke: var(--warn); stroke-width: 1.2; }
+.ui-conn-pulse { position: absolute; inset: 0; transform-origin: 50% 50%; opacity: 0; animation: ui-conn-pulse 1700ms cubic-bezier(0.23, 1, 0.32, 1) infinite; animation-play-state: paused; }
+.ui-conn[data-state="slow"] .ui-conn-pulse { animation-play-state: running; }
+@keyframes ui-conn-pulse { 0% { opacity: 0.7; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.1); } }
+
+.ui-conn .ui-conn-g-reconnecting .track { stroke: var(--fg-3); stroke-width: 1.4; opacity: 0.4; }
+.ui-conn .ui-conn-g-reconnecting .arc { stroke: var(--fg-2); stroke-width: 1.7; stroke-linecap: round; stroke-dasharray: 28 72; }
+.ui-conn-spin { position: absolute; inset: 0; animation: ui-conn-turn 900ms linear infinite; animation-play-state: paused; }
+.ui-conn[data-state="reconnecting"] .ui-conn-spin, .ui-conn[data-state="connecting"] .ui-conn-spin { animation-play-state: running; }
+@keyframes ui-conn-turn { to { transform: rotate(1turn); } }
+
+.ui-conn-g-resumed .disc { fill: color-mix(in oklab, var(--ok) 22%, transparent); }
+.ui-conn .ui-conn-g-resumed .tick { stroke: var(--ok); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* The tick arrives with a little overshoot, because something just happened. */
+.ui-conn[data-state="resumed"] .ui-conn-g-resumed { transition-timing-function: ease-out, cubic-bezier(0.34, 1.4, 0.64, 1); }
+
+.ui-conn .ui-conn-g-approximate .frame { stroke: var(--fg-2); stroke-width: 1.4; }
+.ui-conn-g-approximate .fill { fill: var(--fg-2); opacity: 0.55; }
+.ui-conn .ui-conn-g-approximate .foot { stroke: var(--fg-2); stroke-width: 1.4; stroke-linecap: round; }
+
+.ui-conn .ui-conn-g-offline .ring { stroke: var(--fg-2); stroke-width: 1.4; opacity: 0.8; }
+.ui-conn .ui-conn-g-offline .slash { stroke: var(--fg-2); stroke-width: 1.4; stroke-linecap: round; opacity: 0.8; }
+
+/* Reduced motion: glyphs cross-fade; nothing moves or loops. The reconnecting arc stays as a static mark. */
+@media (prefers-reduced-motion: reduce) {
+  .ui-conn-g { transform: none; transition: opacity 200ms ease; }
+  .ui-conn-pulse, .ui-conn-spin { animation: none; }
+  .ui-conn-pulse { display: none; }
+}
+
+/* Settings, Toolbar (toolbar-settings.ts): rows of controls with a grip, an icon, a name and a switch. */
+.ui-toolbar-settings { display: grid; gap: 14px; }
+.ui-ts-title { margin: 0; padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.ui-ts-item { position: relative; display: flex; align-items: center; gap: 10px; min-height: var(--ui-row-h, 32px); border-bottom: 1px solid var(--line); background: transparent; }
+.ui-ts-item:last-child { border-bottom: 0; }
+.ui-ts-item[data-dragging] { z-index: 2; background: var(--overlay-solid); border-radius: 10px; box-shadow: var(--shadow); }
+.ui-ts-grip { display: grid; flex: none; place-items: center; width: var(--ui-control-h, 30px); height: var(--ui-control-h, 30px); padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-3); cursor: grab; touch-action: none; }
+.ui-ts-grip svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-linecap: round; }
+.ui-ts-item[data-dragging] .ui-ts-grip { cursor: grabbing; }
+.ui-ts-icon { display: grid; flex: none; color: var(--fg-2); }
+.ui-ts-icon svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-ts-label { flex: 1; min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-ts-reset { justify-self: start; min-height: var(--ui-control-h, 30px); padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-ts-reset:active { transform: scale(var(--ui-press-scale, 0.97)); }
+@media (hover: hover) and (pointer: fine) { .ui-ts-reset:hover, .ui-ts-grip:hover { background: var(--hover); } }
+
+/* Settings, Shortcuts (shortcuts-settings.ts): the registry's rows; a row is a button that listens for the new keys. */
+.ui-shortcuts-settings { display: grid; gap: 12px; }
+.ui-ss-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.ui-ss-row { position: relative; display: flex; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--line); }
+.ui-ss-row:last-child { border-bottom: 0; }
+.ui-ss-main { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: 16px; min-height: var(--row, 28px); padding: 0; border: 0; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; }
+.ui-ss-main:disabled { cursor: default; color: var(--ui-text-secondary); }
+.ui-ss-keys { display: inline-flex; flex: none; gap: 4px; }
+.ui-ss-keys[data-capturing] { color: var(--accent); }
+.ui-ss-keys kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: var(--fw-label, 500) var(--text-caption, 11px)/1 var(--font-ui); text-align: center; }
+.ui-ss-reset { display: grid; place-items: center; width: var(--ui-control-h, 30px); height: var(--ui-control-h, 30px); margin-left: 6px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-3); cursor: pointer; }
+.ui-ss-reset svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-ss-warn { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0 8px; color: var(--warn, var(--fg-2)); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-ss-actions { display: inline-flex; gap: 6px; }
+.ui-ss-actions button { min-height: var(--ui-control-h, 30px); padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .ui-ss-reset:hover, .ui-ss-actions button:hover, .ui-ss-main:not(:disabled):hover { background: var(--hover); } }
+.ui-ts-source { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ui-ts-tag { padding: 3px 9px; border-radius: 999px; background: var(--hover); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-tag[data-device="true"] { background: var(--accent-soft); color: var(--accent); }
+.ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
+.keyedit-list::before { white-space: nowrap; }
+
+/* Canvas backdrop (canvas-backdrop.ts): the gradient is fixed to the screen and visible everywhere; the dots are light marks on it and move with the camera. */
+.ui-canvas-backdrop {
+  --ui-dot-size: 1.4px; --ui-dot-gap: 22px; --ui-dot-opacity: var(--dot-opacity, 0.35); --ui-gradient-opacity: var(--gradient-opacity, 0.5);
+  --ui-dot-color: var(--dot-color, color-mix(in oklab, var(--mesh-3) 40%, white));
+  position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
+}
+.ui-canvas-backdrop-fill { position: absolute; inset: 0; opacity: var(--ui-gradient-opacity); background: var(--ui-dot-fill, linear-gradient(115deg, var(--mesh-1), var(--mesh-2) 35%, var(--mesh-3) 70%, var(--mesh-4))); }
+.ui-canvas-backdrop-layer {
+  position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform, opacity;
+  background-image: radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--ui-dot-color) calc(var(--ui-dot-opacity) * 100%), transparent) calc(var(--ui-dot-size) / 2), transparent calc(var(--ui-dot-size) / 2 + 0.7px));
+}
+
+/* Settings windows (settings-panels.ts): choice rows with a tick, device rows, headings; every colour, size and radius is a token. */
+.ui-sp { display: grid; gap: 14px; }
+.ui-sp-list { display: grid; gap: 2px; }
+.ui-sp-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: var(--ui-row-h, 32px); padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-sp-row:active { transform: scale(var(--ui-press-scale, 0.97)); }
+@media (hover: hover) and (pointer: fine) { .ui-sp-row:hover { background: var(--hover); } }
+.ui-sp-swatch { position: relative; flex: none; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--overlay-line); }
+.ui-sp-swatch::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--dot); }
+.ui-sp-label { flex: 1; min-width: 0; }
+.ui-sp-hint { color: var(--ui-text-secondary); }
+.ui-sp-tick { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 180ms var(--ease-out, ease-out); }
+.ui-sp-row[data-current] .ui-sp-tick { opacity: 1; transform: none; }
+.ui-sp-devices { display: grid; margin: 0; padding: 0; list-style: none; }
+.ui-sp-device { display: flex; align-items: center; gap: 10px; min-height: 52px; border-bottom: 1px solid var(--line); }
+.ui-sp-device:last-child { border-bottom: 0; }
+.ui-sp-kind { position: relative; display: grid; flex: none; place-items: center; width: 28px; height: 28px; color: var(--fg-2); }
+.ui-sp-kind svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-sp-dot { position: absolute; right: 1px; bottom: 1px; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); }
+.ui-sp-dot[data-online="false"] { background: var(--fg-3); }
+.ui-sp-names { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.ui-sp-name-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.ui-sp-name { min-width: 0; max-width: 100%; padding: 0 2px; margin: 0 -2px; border: 0; border-radius: 6px; background: none; outline: none; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); }
+.ui-sp-name:focus { background: var(--hover); }
+.ui-sp-here { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 12px); white-space: nowrap; }
+.ui-sp-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 12px); letter-spacing: var(--ui-tracking); }
+.ui-sp-actions { display: flex; flex: none; gap: 2px; }
+.ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
+.keyedit-list::before { white-space: nowrap; }
+
+/* A chip used as a toggle (a view to share, a filter): pressed is a quiet accent fill, nothing else changes. */
+.ui-chip[aria-pressed] { padding-right: 10px; cursor: pointer; }
+.ui-chip[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
