@@ -167,3 +167,110 @@ async fn review_expired_identity_must_refuse_new_attachment_on_existing_transpor
         "expired ledger identity retained terminal attachment authority"
     );
 }
+// Fence the real post-COMMIT/pre-notification window with a test-only pause, #78.
+#[tokio::test]
+async fn committed_tombstone_cannot_forward_input_before_finalizer_returns() {
+    let (store, pool, host, _, _listeners, actor, peer, observed) = review_admitted_tcp().await;
+    let session = actor
+        .open(crate::embedded::TerminalSize {
+            cols: 80,
+            rows: 24,
+            px_w: 0,
+            px_h: 0,
+        })
+        .await
+        .unwrap();
+    let attachment = actor.attach(session, 0, 0, 42).await.unwrap();
+    let (handle, mut output) = attachment.split();
+    assert!(matches!(
+        output.recv().await,
+        Some(crate::embedded::TerminalOutput::Ack { .. })
+    ));
+    let pause = std::sync::Arc::new(crate::remote_guard::PublicationPause::default());
+    *store.1.publication_pause.lock().unwrap() = Some(pause.clone());
+    let finalizer = tokio::spawn(async move { store.revoke("owner", host, now().unwrap()).await });
+    tokio::time::timeout(Duration::from_secs(2), pause.committed.notified())
+        .await
+        .unwrap();
+    let tombstoned: bool =
+        sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(tombstoned);
+    let mut wire = Vec::new();
+    infraternal_protocol::encode_muxed_frame_into(
+        1,
+        &Frame::Input {
+            in_seq: 0,
+            bytes: b"after-durable-tombstone",
+        },
+        &mut wire,
+    )
+    .unwrap();
+    let _ = handle.send_frame(bytes::Bytes::from(wire)).await;
+    let received = tokio::time::timeout(Duration::from_millis(300), observed).await;
+    pause.release.notify_one();
+    finalizer.await.unwrap().unwrap();
+    peer.abort();
+    assert!(
+        !matches!(received, Ok(Ok(_))),
+        "input passed after SQLite COMMIT while cancellation publication was pending"
+    );
+}
+// A mechanism microbenchmark, separate from real transport/fleet acceptance.
+#[tokio::test]
+#[ignore = "write-fence CPU diagnostic; run release alone, not whole-transport evidence"]
+async fn admitted_frame_write_fence_cost() {
+    const FRAMES: u128 = 1_000_000;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    sqlx::query("UPDATE remote_certificates SET not_before=?,not_after=?")
+        .bind(now)
+        .bind(now + 604_800)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let guard = crate::remote_guard::AuthorityGuard::admit(store, [1; 32])
+        .await
+        .unwrap();
+    let mut reference = Vec::new();
+    let mut fenced = Vec::new();
+    for _ in 0..11 {
+        let before = Instant::now();
+        for _ in 0..FRAMES {
+            std::hint::black_box(guard.permits());
+        }
+        reference.push(before.elapsed().as_nanos() / FRAMES);
+        let before = Instant::now();
+        for _ in 0..FRAMES {
+            drop(std::hint::black_box(guard.write_permit().await.unwrap()));
+        }
+        fenced.push(before.elapsed().as_nanos() / FRAMES);
+    }
+    reference.sort_unstable();
+    fenced.sort_unstable();
+    let added = std::mem::size_of::<crate::remote_guard::Revocation>()
+        - std::mem::size_of::<tokio::sync::watch::Sender<bool>>()
+        + std::mem::size_of::<tokio::sync::RwLock<()>>()
+        + 2 * std::mem::size_of::<usize>();
+    println!(
+        "write_fence_micro rounds=11 frames_per_round={FRAMES} reference_p50_ns={} fenced_p50_ns={} fenced_p99_ns={} added_struct_bytes_per_host={added} added_struct_bytes_at1000={} allocator_and_transport_rss_excluded=true machine={} load={}",
+        reference[5],
+        fenced[5],
+        fenced[10],
+        added * 1000,
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap()
+            .trim(),
+        std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+    );
+}
