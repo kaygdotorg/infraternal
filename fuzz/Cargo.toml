@@ -62,3 +62,10 @@ unsafe_code = "forbid"
 pedantic = { level = "deny", priority = -1 }
 unwrap_used = "allow"
 expect_used = "allow"
+
+[[bin]]
+name = "ssh_check_decode"
+path = "fuzz_targets/ssh_check_decode.rs"
+test = false
+doc = false
+bench = false
