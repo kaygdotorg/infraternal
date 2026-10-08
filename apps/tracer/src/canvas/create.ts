@@ -12,6 +12,7 @@
  */
 import { mountToast } from "../../../../packages/ui/src/toast";
 import type { CoreScreen } from "../core-screen";
+import { createMemory } from "./memory";
 import { createBackdrop, type Backdrop } from "./backdrop";
 import { Camera } from "./camera/camera";
 import { installGestures } from "./camera/gestures";
@@ -92,12 +93,13 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--inv", inv); },
     onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
-    onFrame: () => cx.invalidate(),
+    onFrame: () => { cx.invalidate(); cx.memory.cull(); },
     onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); },
     onFlight: () => cx.view.hideSummary(),
   });
   (cx as { flip: Ctx["flip"] }).flip = createFlip(() => cx.camera.cam.z, () => cx.invalidate());
 
+  cx.memory = createMemory(cx, backdrop);
   cx.store = createDocumentSync(cx, options.persisted);
   cx.nav = createNav(cx);
   cx.view = createViews(cx);
@@ -133,7 +135,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   ro.observe(viewport);
   cx.camera.start();
 
-  // Hidden pages release nothing large (see backdrop.ts) but must not lose the last edit.
+  // A hidden page also releases its big surfaces (memory.ts) and must not lose the last edit.
   const onHide = (): void => { if (document.hidden) cx.store.flush(); };
   document.addEventListener("visibilitychange", onHide, { signal: events.signal });
   window.addEventListener("pagehide", () => cx.store.flush(), { signal: events.signal });

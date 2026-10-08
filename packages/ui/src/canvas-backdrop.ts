@@ -9,10 +9,9 @@
  * camera only ever writes `transform` and `opacity` on a layer: no background-position animation, no canvas
  * redraw, nothing runs while the camera is still (`update` is called by the camera, never by a timer).
  *
- * World space: a layer is placed at a multiple of its own spacing near the visible area, so a dot always sits
- * on a world coordinate that is a multiple of the spacing. Panning moves the dots exactly with the windows;
- * when the view crosses a cell the layer hops by one whole spacing, which is invisible because the pattern
- * repeats.
+ * Memory: a layer is one viewport (plus a tile of margin), never world sized. Its tile size is the dots' screen
+ * spacing and its offset is the camera modulo one tile, so panning is a translate and the dots stay on world
+ * multiples. At most two layers exist during a crossfade; the others are `hidden` and hold no surface.
  *
  * Level of detail: layer k has spacing `gap * 2^k`. Below 50 % zoom the next, sparser layer fades in while the
  * denser one fades out: the grid thins to every second dot with a crossfade and never becomes noise.
@@ -27,6 +26,8 @@ export interface CanvasBackdrop {
   readonly root: HTMLElement;
   /** Places the dots for a camera: `tx`, `ty` are the world origin on screen, `z` the zoom. */
   update(tx: number, ty: number, z: number, viewWidth: number, viewHeight: number): void;
+  /** Frees every layer's surface (a hidden page holds nothing); the next `update` brings them back. */
+  release(): void;
   dispose(): void;
 }
 
@@ -41,45 +42,38 @@ export function createCanvasBackdrop(parent: HTMLElement): CanvasBackdrop {
     const layer = document.createElement("div");
     layer.className = "ui-canvas-backdrop-layer";
     layer.dataset.level = String(k);
-    layer.style.opacity = "0";
-    layer.style.visibility = "hidden";
+    layer.hidden = true;
     root.append(layer);
     return layer;
   });
   parent.prepend(root);
 
   let gap = 22;
-  let sized = "";
-  const measure = (viewWidth: number, viewHeight: number): void => {
-    gap = Number.parseFloat(getComputedStyle(root).getPropertyValue("--ui-dot-gap")) || 22;
-    // Layer k is on screen from zoom 2^-(k+2) up, so it must cover (view / zoom) world pixels there:
-    // the same number of cells for every level.
-    const cells = Math.ceil((4 * Math.max(viewWidth, viewHeight)) / gap) + 4;
-    layers.forEach((layer, k) => {
-      const spacing = gap * 2 ** k;
-      layer.style.width = layer.style.height = `${cells * spacing}px`;
-      layer.style.backgroundSize = `${spacing}px ${spacing}px`;
-    });
-  };
-
+  let measured = false;
   const update = (tx: number, ty: number, z: number, viewWidth: number, viewHeight: number): void => {
-    const key = `${Math.round(viewWidth)}x${Math.round(viewHeight)}`;
-    if (key !== sized) { sized = key; measure(viewWidth, viewHeight); }
+    if (!measured) { measured = true; gap = Number.parseFloat(getComputedStyle(root).getPropertyValue("--ui-dot-gap")) || 22; }
     const level = Math.min(LEVELS - 1, Math.max(0, -Math.log2(z) - 1));
     const lo = Math.floor(level), hi = Math.min(LEVELS - 1, lo + 1), f = level - lo;
-    const wx = -tx / z, wy = -ty / z;
     layers.forEach((layer, k) => {
       // The denser layer fades out as the sparser one fades in (their shared dots keep the same strength).
       const weight = k === lo ? 1 - f : k === hi ? f : 0;
-      const shown = layer.dataset.on === "1";
-      if (weight === 0) { if (shown) { layer.style.opacity = "0"; layer.style.visibility = "hidden"; layer.dataset.on = "0"; } return; }
-      if (!shown) { layer.style.visibility = ""; layer.dataset.on = "1"; }
+      if (weight === 0) { if (!layer.hidden) layer.hidden = true; return; }
+      if (layer.hidden) layer.hidden = false;
       layer.style.opacity = String(weight);
-      const spacing = gap * 2 ** k;
-      // One cell of margin on each side; the layer hops by whole spacings, so the dots never slip.
-      const ox = (Math.floor(wx / spacing) - 1) * spacing, oy = (Math.floor(wy / spacing) - 1) * spacing;
-      layer.style.transform = `translate3d(${tx + ox * z}px, ${ty + oy * z}px, 0) scale(${z})`;
+      // Screen spacing of this level's dots. The layer is one screen (plus one tile of margin on each side), never
+      // the world: its tile size follows the zoom and its offset is the camera modulo one tile, so memory stays at
+      // about one viewport at any zoom and any world size. Dots sit at the tile centres, on world multiples of
+      // `gap * 2^k`, so they move exactly with the windows.
+      const spacing = gap * 2 ** k * z;
+      const ox = ((((tx - spacing / 2) % spacing) + spacing) % spacing) - spacing;
+      const oy = ((((ty - spacing / 2) % spacing) + spacing) % spacing) - spacing;
+      const w = `${Math.ceil(viewWidth + 2 * spacing)}px`, h = `${Math.ceil(viewHeight + 2 * spacing)}px`;
+      if (layer.style.width !== w) layer.style.width = w;
+      if (layer.style.height !== h) layer.style.height = h;
+      layer.style.backgroundSize = `${spacing}px ${spacing}px`;
+      layer.style.transform = `translate3d(${ox}px, ${oy}px, 0)`;
     });
   };
-  return { root, update, dispose() { root.remove(); } };
+  const release = (): void => { for (const layer of layers) { layer.hidden = true; layer.style.willChange = "auto"; } };
+  return { root, update, release, dispose() { root.remove(); } };
 }
