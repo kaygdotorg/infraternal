@@ -13,8 +13,8 @@ export const SETTINGS_SECTIONS: Array<{ id: string; title: string; admin?: boole
   { id: "account", title: "Account" },
   { id: "about", title: "About" },
   { id: "users", title: "Users", admin: true },
-  { id: "grants", title: "Grants", admin: true },
-  { id: "discovery", title: "Discovery sources", admin: true },
+  { id: "grants", title: "Access", admin: true },
+  { id: "discovery", title: "Found hosts", admin: true },
 ];
 
 /** Settings is a view like the others: one window per section, tiled in columns. */

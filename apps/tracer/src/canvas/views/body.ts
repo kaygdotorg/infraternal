@@ -18,7 +18,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
   if (m.noAccess) {
     const box = el("div", "cl-noaccess");
     box.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/></svg><p class="cl-noaccess-title">No access</p><p class="cl-noaccess-hint"></p>';
-    (box.querySelector(".cl-noaccess-hint") as HTMLElement).textContent = `Your grants do not include ${m.host}. Ask ${rec.owner.view.from ?? "an admin"} or an admin for access.`;
+    (box.querySelector(".cl-noaccess-hint") as HTMLElement).textContent = `You do not have access to ${m.host}. Ask ${rec.owner.view.from ?? "an admin"} or an admin for access.`;
     body.append(box);
     return;
   }

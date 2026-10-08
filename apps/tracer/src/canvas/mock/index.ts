@@ -92,7 +92,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       enter() { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("console", true); } },
     { name: "Open from a container", hint: "Click a container: the top pill morphs into a floating terminal; the camera stays here. Expand it to fly into Console, or close it. The terminal has Split; the list does not.",
       enter() { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("containers", true); } },
-    { name: "Access by grants", hint: "The views a person sees come from their grants. Palette: Mockup, sign in as viewer, operator or new user.",
+    { name: "Who sees what", hint: "The views a person sees come from the access they have. Palette: Mockup, sign in as viewer, operator or new user.",
       enter() { world.omit = []; if (world.role === "operator" && !world.forcedRole) world.role = "viewer"; build(); if (world.role === "operator") { free(); overview(true); } else cx.nav.flyView("console", true); } },
     { name: "Structure", hint: "Drag a window by its pill: the others reflow and it lands with a bounce. Drag a view by its label: it snaps to the grid and pushes a neighbour aside. Snap is off here.",
       enter() {

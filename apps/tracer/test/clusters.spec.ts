@@ -921,7 +921,7 @@ test("sharing: the dialog sends a view; the recipient gets their own copy named 
     // edge-arm is outside her grants: a calm explanation, not an error.
     const blocked = asha.locator('.ui-window[data-window-id$=":i-edge-arm"]');
     await expect(blocked).toContainText("No access");
-    await expect(blocked).toContainText("Your grants do not include edge-arm");
+    await expect(blocked).toContainText("You do not have access to edge-arm");
     await expect(asha.locator('.ui-window[data-window-id$=":i-build-01"] .terminal-host, .ui-window[data-window-id$=":i-build-01"] .canvas-preview')).toHaveCount(1);
     // It is her copy: editable (close is there).
     await expect(asha.locator('.ui-window[data-window-id$=":i-build-01"] [data-action="close"]')).toHaveCount(1);

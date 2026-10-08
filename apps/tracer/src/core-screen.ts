@@ -142,7 +142,7 @@ const SCREEN = `
         <span class="capsule-os" id="capsule-os" aria-hidden="true"></span>
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
-        <span class="capsule-session">SSH shell</span><span class="capsule-rtt" id="rtt" aria-label="Round trip">··</span>
+        <span class="capsule-session">SSH shell</span><span class="capsule-rtt" id="rtt" aria-label="Connection delay">··</span>
         <kbd class="capsule-kbd">⌘K</kbd>
       </button>
       <nav class="tabs" aria-label="Other sessions">
@@ -1420,7 +1420,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     setRoundTrip(milliseconds) {
       rtt.textContent = milliseconds === undefined ? "··" : `${Math.round(milliseconds)} ms`;
-      rtt.setAttribute("aria-label", milliseconds === undefined ? "Round trip unavailable" : `Round trip ${Math.round(milliseconds)} milliseconds`);
+      rtt.setAttribute("aria-label", milliseconds === undefined ? "Connection delay unavailable" : `Connection delay ${Math.round(milliseconds)} milliseconds`);
     },
     setConnection(connected) {
       dot.classList.toggle("live", connected);

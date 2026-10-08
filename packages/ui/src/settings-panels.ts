@@ -3,7 +3,7 @@
  * is a window; these functions fill a window's body. Sections that already exist as shared
  * components (Toolbar, Shortcuts, About) are filled by their own `render`; the rest live here:
  * Appearance (theme, font, background and card transparency), Devices, Account and the
- * admin-only placeholders (Users, Grants, Discovery sources).
+ * admin-only placeholders (Users, Access, Found hosts).
  *
  * Rows are the shared kinds: a tappable row with a tick for the current choice, a key/value
  * list for facts, icon buttons with the warm tooltip, and the compact confirmation for a
