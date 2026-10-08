@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, test } from "bun:test";
 import { foldEvent, pendingTarget, type BootstrapEvent, type FailureKind } from "../../provisioning-client";
-import { authLabel, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, stagesOf } from "./model";
+import { authLabel, failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, stagesOf } from "./model";
 
 const event = (step: BootstrapEvent["step"], extra: Partial<BootstrapEvent> = {}): BootstrapEvent => ({ sequence: 1, target: "h", attempt: 1, step, message: `${step} message`, elapsed_ms: 1, log_tail: [], ...extra });
 const fold = (...events: BootstrapEvent[]) => events.reduce(foldEvent, pendingTarget());
@@ -31,11 +31,12 @@ describe("stagesOf", () => {
     expect(states(auth, event("done"))).toEqual(["done", "done", "done", "done", "done"]);
   });
 
-  test("an auth failure before sign-in fails detect and shows the server's text", () => {
+  test("an auth failure before sign-in fails detect and says it in plain words, not the server's", () => {
     const failure = { kind: "auth" as const, message: "No sign-in method was accepted.", log_tail: [], choose_method: true };
     const stages = stagesOf(fold(event("check"), event("failed", { message: failure.message, failure })));
     expect(stages.map((stage) => stage.state)).toEqual(["failed", "pending", "pending", "pending", "pending"]);
-    expect(stages[0]!.detail).toBe("No sign-in method was accepted.");
+    expect(stages[0]!.detail).toBe("Couldn't sign in to this host");
+    expect(JSON.stringify(stages)).not.toContain("No sign-in method was accepted");
   });
 
   test("an unsupported host fails the system check, after sign-in", () => {
@@ -80,7 +81,7 @@ describe("guideFor", () => {
   });
 
   test("mesh-policy words say possible, not certain", () => {
-    expect(guideFor("pve01", { kind: "mesh-policy", message: "m", log_tail: [] }).happened).toContain("can be a mesh access policy");
+    expect(guideFor("pve01", { kind: "mesh-policy", message: "m", log_tail: [] }).happened).toContain("A network access rule may be blocking it");
   });
 });
 
@@ -124,5 +125,20 @@ Host bad name!
   });
   test("a hostname that is an option is dropped", () => {
     expect(parseSshConfig("Host x\n  HostName -oProxyCommand=evil")).toEqual([]);
+  });
+});
+
+describe("plain words", () => {
+  test("an unknown or missing failure gets the generic sentence, never the server's text", () => {
+    const generic = "Something went wrong while setting up this host. Try again.";
+    expect(failureLine(undefined)).toBe(generic);
+    expect(failureLine({ kind: "teapot" as never, message: "HTTP 418 ssh_exit_255", log_tail: [] })).toBe(generic);
+    expect(guideFor("h", undefined).happened).not.toMatch(/ssh|HTTP|exit/i);
+  });
+  test("no headline carries an arrow, an id or an API noun", () => {
+    for (const kind of ["unreachable", "mesh-policy", "host-key", "auth", "unsupported", "install"] as const) {
+      const guide = guideFor("web", { kind, message: "m", log_tail: [] });
+      for (const text of [guide.title, guide.happened, guide.next, failureLine({ kind, message: "m", log_tail: [] })]) expect(text).not.toMatch(/→|·|\bSSH\b|TCP|mesh policy|enum|\bAPI\b/);
+    }
   });
 });

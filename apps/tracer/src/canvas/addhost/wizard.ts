@@ -30,7 +30,7 @@ import { foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../pr
 import type { BootstrapEvent, StartTarget, TargetView } from "../../provisioning-client";
 import type { FlowHost, FlowSurface } from "./flow-host";
 import { ICON, escapeHtml, svg } from "./icons";
-import { guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, stagesOf, STAGES } from "./model";
+import { failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, RUNNING_TEXT, stagesOf, STAGES } from "./model";
 import type { Guide } from "./model";
 import { ServiceError } from "./service";
 import type { AddHostSink, DiscoveredHost, EnrolledHost, InstallCommand, ProvisioningService, SavedKey, ServerKey } from "./service";
@@ -69,9 +69,9 @@ export function platformOf(name: string | undefined): HostPlatform {
 
 function statusOf(host: DiscoveredHost): { label: string; tone: "ok" | "warn" | "off" | "none"; icon: string } {
   if (host.alreadyAdded) return { label: "Added", tone: "none", icon: ICON.added };
-  if (host.reach === "ready") return { label: "SSH ready", tone: "ok", icon: ICON.ready };
-  if (host.reach === "mesh-policy") return { label: "Blocked", tone: "warn", icon: ICON.blocked };
-  if (host.reach === "unreachable") return { label: "No answer", tone: "off", icon: ICON.silent };
+  if (host.reach === "ready") return { label: "Reached the host", tone: "ok", icon: ICON.ready };
+  if (host.reach === "mesh-policy") return { label: "Your network rules block this host", tone: "warn", icon: ICON.blocked };
+  if (host.reach === "unreachable") return { label: "This host isn't answering", tone: "off", icon: ICON.silent };
   return { label: "", tone: "none", icon: ICON.pending };
 }
 
@@ -261,7 +261,7 @@ export class Wizard {
   private rowOf(entry: Entry, added: boolean): string {
     const host = entry.discovered;
     const typed = this.typed.includes(entry);
-    const status = typed || !host ? { label: "Checked when you continue", tone: "none" as const, icon: ICON.pending } : statusOf(host);
+    const status = typed || !host ? { label: "We'll check it when you continue", tone: "none" as const, icon: ICON.pending } : statusOf(host);
     const sources = (host?.sources ?? []).map((source) => `<span class="ah-src" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
     const checked = this.selected.some((item) => item.id === entry.id);
     const mark = typed || !host ? svg(ICON.typed, "ah-os-mark is-line") : hostIconMarkup(entry.os, "ah-os-mark");
@@ -282,7 +282,7 @@ export class Wizard {
 
   private renderDiscovery(page: HTMLElement): void {
     page.innerHTML = `<h1 class="ah-title">Add hosts</h1>
-      <p class="ah-lede">Pick a host, type <span class="ah-code">user@host</span>, or paste an SSH config. Nothing logs in until you continue.</p>
+      <p class="ah-lede">Pick a host, type <span class="ah-code">user@host</span>, or paste your SSH config. We won't sign in to anything until you continue.</p>
       <div class="ah-field">${svg(ICON.servers, "ah-field-icon")}</div>
       <div class="ah-list" role="group" aria-label="Hosts"></div>`;
     this.chips = mountChipInput(page.querySelector<HTMLElement>(".ah-field")!, {
@@ -348,16 +348,16 @@ export class Wizard {
     let note = "";
     if (this.discovery.state === "loading") note = `<p class="ah-note ah-loading" role="status"><span class="ah-spin"></span><span>Looking for hosts…</span></p>`;
     else if (this.discovery.state === "failed") note = `<p class="ah-note ah-load-error" role="alert">${svg(ICON.warning)}<span>${escapeHtml(this.discovery.message)}</span><button class="ah-link" type="button" data-ah="reload">Try again</button></p>`;
-    else if (!rows.length) note = `<p class="ah-note ah-empty">${svg(ICON.servers)}<span>No hosts found yet. Type <span class="ah-code">user@host</span> above, or paste an SSH config.</span></p>`;
+    else if (!rows.length) note = `<p class="ah-note ah-empty">${svg(ICON.servers)}<span>No hosts found yet. Type one above, or paste your SSH config.</span></p>`;
     list.innerHTML = `<label class="ah-row ah-candidate" hidden>
         <span class="ah-check check"><input type="checkbox" data-candidate aria-label="Add the typed host" /></span>
         ${svg(ICON.plus, "ah-os-mark is-line")}
         <span class="ah-main"><span class="ah-name">Add <span class="ah-manual-target"></span></span>
-          <span class="ah-meta"><span>Not discovered · checked when you continue</span></span></span>
+          <span class="ah-meta"><span>Not in the list. We'll check it when you continue.</span></span></span>
       </label>
       ${rows.map(({ entry, added }) => this.rowOf(entry, added)).join("")}
       ${note}
-      <p class="ah-none" hidden>No discovered host matches.</p>`;
+      <p class="ah-none" hidden>No host matches.</p>`;
     const spin = list.querySelector<HTMLElement>(".ah-spin");
     if (spin) spin.replaceWith(createSpinner());
     this.ticks = new Map();
@@ -409,7 +409,7 @@ export class Wizard {
     if (!looksLikeSshConfig(text)) return;
     const found = parseSshConfig(text);
     event.preventDefault();
-    if (!found.length) { this.deps.toast.show({ message: "No hosts found in that SSH config." }); return; }
+    if (!found.length) { this.deps.toast.show({ message: "Couldn't find any hosts in that SSH config." }); return; }
     for (const spec of found) {
       const chip = this.resolve(spec, true);
       if (chip) this.chips.add(chip);
@@ -432,7 +432,7 @@ export class Wizard {
     const subject = roots.length === 1 ? roots[0]!.label : `${roots.length} hosts`;
     const names = roots.length <= 3 ? roots.map((entry) => entry.label).join(", ") : `${roots.slice(0, 2).map((entry) => entry.label).join(", ")} and ${roots.length - 2} more`;
     page.innerHTML = `${this.hero(ICON.shield)}<h1 class="ah-title">Install as root on ${escapeHtml(subject)}?</h1>
-      <p class="ah-lede">${escapeHtml(names)} ${roots.length > 1 ? "allow" : "allows"} passwordless sudo. That alone is not permission.</p>
+      <p class="ah-lede">${escapeHtml(names)} ${roots.length > 1 ? "allow" : "allows"} admin commands without a password. That alone doesn't mean you want root.</p>
       <p class="ah-text">A root infraternal agent can manage packages, services and containers, and can read every file on the host. You can also install as a user now and switch to root later.</p>
       <label class="ah-consent check"><input type="checkbox" data-consent /><span>I trust infraternal with root on ${escapeHtml(subject)}</span></label>`;
     for (const input of page.querySelectorAll<HTMLInputElement>(".ah-consent input")) springCheckbox(input);
@@ -503,7 +503,11 @@ export class Wizard {
     job.view = foldEvent(job.view, event);
     this.paint(job);
     this.summarise();
-    if (job.view.state === "done" && was !== "done") this.deps.sink.enrolled([this.enrolledOf(job)]);
+    if (job.view.state === "done" && was !== "done") {
+      this.deps.sink.enrolled([this.enrolledOf(job)]);
+      // A new host window takes the camera; the wizard stays where the person is looking while it still has work to show.
+      if (this.jobs.some((item) => item.view.state === "pending" || item.view.state === "running" || item.view.state === "failed")) this.surface.reveal?.();
+    }
     if (job.view.state === "done" || job.view.state === "failed") this.settle();
   }
 
@@ -511,7 +515,8 @@ export class Wizard {
   private onCommandError(run: ProvisioningRun, message: string): void {
     for (const job of this.jobs) {
       if (job.run !== run || job.view.state !== "pending") continue;
-      job.view = { ...job.view, state: "failed", message, failure: { kind: "unsupported", message, log_tail: [] } };
+      // The server's words are kept for the details; the person reads a plain sentence.
+      job.view = { ...job.view, state: "failed", message, failure: undefined };
       this.paint(job);
     }
     this.summarise();
@@ -526,7 +531,7 @@ export class Wizard {
       if (job.run !== run) continue;
       job.run = undefined;
       if (job.view.state === "pending" || job.view.state === "running") {
-        const message = "The connection to the server ended, so the install was cancelled and rolled back.";
+        const message = "The connection to the server ended, so the install stopped and its changes were undone.";
         job.view = { ...job.view, state: "failed", message, failure: { kind: "install", message, log_tail: [] } };
         this.paint(job);
         changed = true;
@@ -612,7 +617,7 @@ export class Wizard {
     row.dataset.state = state;
     const active = stages.find((stage) => stage.state === "running" || stage.state === "failed");
     // The server's own text for the latest event; a host with no event yet is queued.
-    row.querySelector<HTMLElement>(".ah-job-step")!.textContent = state === "pending" ? "Waiting" : state === "done" ? "Ready" : (active?.detail || job.view.message);
+    row.querySelector<HTMLElement>(".ah-job-step")!.textContent = state === "pending" ? "Waiting" : state === "done" ? "Ready" : state === "failed" ? failureLine(job.view.failure) : RUNNING_TEXT[active?.id ?? "detect"];
     stages.forEach((stage, index) => {
       const stageRow = row.querySelector<HTMLElement>(`[data-stage="${stage.id}"]`)!;
       stageRow.dataset.state = stage.state;
@@ -623,7 +628,10 @@ export class Wizard {
     row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed";
     // "Fix" opens the page that can mend this failure; plain retries and dead ends have only the retry button.
     const fix = state === "failed" ? guideFor(job.entry.label, job.view.failure).fix : "none";
-    row.querySelector<HTMLElement>(".ah-job-fix")!.hidden = fix === "none" || fix === "retry";
+    const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
+    fixButton.hidden = fix === "none" || fix === "retry";
+    // The button names what it opens.
+    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : "Install from the host";
     this.marks.get(job.target)?.set(state);
     // A failure opens its steps so the reason sits next to the step that failed.
     if (state === "failed" && !row.dataset.touched) { row.dataset.open = "true"; row.querySelector(".ah-run-toggle")?.setAttribute("aria-expanded", "true"); }
@@ -637,7 +645,7 @@ export class Wizard {
     const running = this.jobs.length - done - failed;
     summary.textContent = this.jobs.length === 1
       ? (running ? "Working out how to sign in, then installing." : done ? "Ready. The host is in your sidebar." : "This host needs attention.")
-      : `${done} of ${this.jobs.length} ready${failed ? ` · ${failed} need attention` : ""}${running ? "" : "."}`;
+      : `${done} of ${this.jobs.length} ready${failed ? `, ${failed} ${failed === 1 ? "needs" : "need"} attention` : ""}${running ? "" : "."}`;
   }
 
   /** When nothing is running: a lone failure gets its own page; a clean batch closes itself. */
@@ -700,12 +708,12 @@ export class Wizard {
     page.innerHTML = `${this.hero(ICON.key)}<h1 class="ah-title">Sign in to ${name}</h1>
       <p class="ah-lede">${escapeHtml(guideFor(job.entry.label, job.view.failure).happened)} Choose how to sign in.</p>
       <div class="ah-options" role="radiogroup" aria-label="How to sign in">
-        ${this.serverKey ? option("server", "Add this server's key to the host", "Then try again. Nothing is typed here.") + reveal("server", `<div class="ah-keyblock" data-kv="server"></div><p class="ah-text">Add this line to <span class="ah-code">~/.ssh/authorized_keys</span> on ${name}, then choose Try again.${this.serverKey.locked ? " The server's key is locked until an administrator unlocks it with a passkey." : ""}</p>`) : ""}
+        ${this.serverKey ? option("server", "Use this server's key", "SSH public key in ~/.ssh/authorized_keys. Add it to the host, then try again.") + reveal("server", `<div class="ah-keyblock" data-kv="server"></div><p class="ah-text">Add this line to <span class="ah-code">~/.ssh/authorized_keys</span> on ${name}, then choose Try again.${this.serverKey.locked ? " The server's key is locked until an administrator unlocks it with a passkey." : ""}</p>`) : ""}
         ${this.savedKey ? option("saved", `Use ${escapeHtml(this.savedKey.label)}`, "Unlocked with your passkey, used for this one connection.") : ""}
-        ${option("key", "Paste a private key", "Sent once for this connection. Not stored.")}
+        ${option("key", "Use a key from your computer", "SSH private key. Sent once for this connection, not stored.")}
         ${reveal("key", `<textarea class="ah-secret" data-secret="key" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Private key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" tabindex="-1"></textarea>
           <input class="ah-input" data-secret="passphrase" type="password" autocomplete="off" aria-label="Key passphrase, if it has one" placeholder="Passphrase, if the key has one" tabindex="-1" />`)}
-        ${option("password", "Type a password", "Sent once for this connection. Not stored.")}
+        ${option("password", "Sign in with a password", "SSH password authentication. Sent once for this connection, not stored.")}
         ${reveal("password", `<input class="ah-input" data-secret="password" type="password" autocomplete="off" aria-label="Password for ${name}" placeholder="Password" tabindex="-1" />`)}
       </div>
       <button class="ah-link ah-alt" type="button" data-ah="install">Or install from the host instead</button>`;
@@ -856,7 +864,7 @@ export class Wizard {
       if (!done.length) return;
       const failed = this.jobs.length - done.length;
       this.deps.toast.show({
-        message: failed ? `${done.length} ${done.length === 1 ? "host" : "hosts"} ready · ${failed} didn't finish` : done.length > 1 ? `${done.length} hosts are ready` : `${done[0]!.entry.label} is ready`,
+        message: failed ? `${done.length} ${done.length === 1 ? "host is" : "hosts are"} ready. ${failed} didn't finish.` : done.length > 1 ? `${done.length} hosts are ready` : `${done[0]!.entry.label} is ready`,
       });
     });
   }
@@ -865,7 +873,7 @@ export class Wizard {
     const running = this.jobs.some((job) => job.view.state === "pending" || job.view.state === "running");
     if (!running) { this.dismiss(); return; }
     // Closing mid-install cancels it and rolls it back, so ask first.
-    this.setFoot(`<span class="ah-count">Closing cancels the install and rolls it back.</span><button class="ah-secondary" type="button" data-ah="keep">Keep going</button><button class="ah-primary" type="button" data-ah="cancel-install">Cancel install</button>`);
+    this.setFoot(`<span class="ah-count">If you close this now, the install stops and its changes on the host are undone.</span><button class="ah-secondary" type="button" data-ah="keep">Keep installing</button><button class="ah-primary" type="button" data-ah="cancel-install">Stop installing</button>`);
   }
 
   private dismiss(after?: () => void): void {

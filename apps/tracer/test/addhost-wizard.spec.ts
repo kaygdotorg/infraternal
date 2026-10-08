@@ -110,7 +110,7 @@ test("all automatic methods refused: asked to choose, and a password is sent onc
   await openWizard(page);
   await addTyped(page, "kayg@needs-key.lab");
   await expect(page.getByRole("heading", { name: /Sign in to needs-key.lab/ })).toBeVisible({ timeout: 15_000 });
-  await page.getByText("Type a password").click();
+  await page.getByText("Sign in with a password").click();
   const secret = "correct horse battery staple";
   await page.locator("[data-secret='password']").fill(secret);
   await inWizard(page, "Sign in").click();
@@ -127,7 +127,7 @@ test("a pasted private key signs in as the user's key", async ({ page }) => {
   await openWizard(page);
   await addTyped(page, "needs-key.lab");
   await expect(page.getByRole("heading", { name: /Sign in to needs-key.lab/ })).toBeVisible({ timeout: 15_000 });
-  await page.getByText("Paste a private key").click();
+  await page.getByText("Use a key from your computer").click();
   await inWizard(page, "Sign in").click();
   await expect(page.locator(".ah-error")).toHaveText("Paste the private key first.");
   await page.locator("[data-secret='key']").fill("not-a-real-key-for-the-double");
@@ -164,7 +164,7 @@ test("the server key is shown to copy; adding it and trying again signs in", asy
   await expect(page.getByRole("heading", { name: /Sign in to needs-key.lab/ })).toBeVisible({ timeout: 15_000 });
   const key = page.locator("[data-kv='server'] .ui-kv-value").first();
   await expect(key).toContainText("ssh-ed25519 AAAA");
-  await expect(page.getByText("authorized_keys")).toBeVisible();
+  await expect(page.locator(".ah-code", { hasText: "authorized_keys" })).toBeVisible();
   await key.click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/^ssh-ed25519 AAAA\S+ infraternal-server$/);
   await inWizard(page, "Try again").click();
@@ -184,7 +184,7 @@ test("no server key to show: the choice is paste or password only", async ({ pag
   await openWizard(page);
   await addTyped(page, "needs-key.lab");
   await expect(page.getByRole("heading", { name: /Sign in to needs-key.lab/ })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("Add this server's key to the host")).toHaveCount(0);
+  await expect(page.getByText("Use this server's key")).toHaveCount(0);
   await expect(page.locator("input[name='ah-method']:checked")).toHaveValue("key");
 });
 
@@ -207,7 +207,7 @@ test("a host that does not answer: what happened, Retry, and the one-line instal
   await openWizard(page);
   await page.locator(".ah-row[data-host='archive-01']").click();
   await inWizard(page, "Continue").click();
-  await expect(page.getByRole("heading", { name: "archive-01 didn't answer" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("heading", { name: "archive-01 isn't answering" })).toBeVisible({ timeout: 15_000 });
   await page.getByText("Details").click();
   await expect(page.locator(".ah-details pre")).toContainText("The server said: No SSH answer on port 22");
   await inWizard(page, "Install from the host").click();
@@ -223,22 +223,22 @@ test("a mesh policy block says possible, not certain", async ({ page }) => {
   await openWizard(page);
   await page.locator(".ah-row[data-host='pve01']").click();
   await inWizard(page, "Continue").click();
-  await expect(page.getByRole("heading", { name: "Blocked, possibly by the mesh policy" })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("can be a mesh access policy")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "This server can't connect to pve01" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("A network access rule may be blocking it")).toBeVisible();
 });
 
 test("an unsupported host cannot be retried; an install failure can", async ({ page }) => {
   await open(page);
   await openWizard(page);
   await addTyped(page, "unsupported.lab");
-  await expect(page.getByRole("heading", { name: "unsupported.lab isn't supported yet" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("heading", { name: "unsupported.lab can't run the infraternal agent yet" })).toBeVisible({ timeout: 15_000 });
   await expect(inWizard(page, "Retry")).toHaveCount(0);
   await inWizard(page, "Back").click();
   await inWizard(page, "Back").click();
-  await page.locator(".ui-chip-remove").click();
+  await page.locator(".ui-chip-remove").click({ force: true });
   await addTyped(page, "broken.lab");
-  await expect(page.getByRole("heading", { name: "broken.lab could not be set up" })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("rolled back").first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Setting up broken.lab didn't finish" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("undone").first()).toBeVisible();
   await inWizard(page, "Retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
@@ -259,7 +259,7 @@ test("empty, loading and error states of discovery", async ({ page }) => {
 
   await config(page, { discovery: "error" });
   await openWizard(page);
-  await expect(page.locator(".ah-load-error")).toContainText("couldn't");
+  await expect(page.locator(".ah-load-error")).toContainText(/couldn't/i);
   await config(page, { discovery: "ok" });
   await inWizard(page, "Try again").click();
   await expect(page.locator(".ah-row[data-host='o2']")).toBeVisible();
@@ -296,11 +296,11 @@ test("closing mid-install asks first, and cancelling ends the run", async ({ pag
   await inWizard(page, "Continue").click();
   await expect(page.locator(".ah-run[data-state='running']")).toBeVisible({ timeout: 10_000 });
   await page.keyboard.press("Escape");
-  await expect(page.getByText("Closing cancels the install and rolls it back.")).toBeVisible();
-  await inWizard(page, "Keep going").click();
+  await expect(page.getByText("If you close this now, the install stops and its changes on the host are undone.")).toBeVisible();
+  await inWizard(page, "Keep installing").click();
   await expect(wizard(page)).toBeVisible();
   await page.locator(".ah-close").click();
-  await inWizard(page, "Cancel install").click();
+  await inWizard(page, "Stop installing").click();
   await expect(wizard(page)).toHaveCount(0);
   expect(await consoleWindows(page)).not.toContain("w-web-01");
 });

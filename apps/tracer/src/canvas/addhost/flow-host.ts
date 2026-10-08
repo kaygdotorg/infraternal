@@ -15,6 +15,8 @@ export interface FlowSurface {
   remove(): void;
   /** Tells the wizard the surface went away on its own (the person closed its window). */
   onGone?(callback: () => void): void;
+  /** Brings the surface back into view (opening a host window moves the camera away from it). */
+  reveal?(): void;
 }
 
 export interface FlowHost {

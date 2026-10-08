@@ -396,3 +396,8 @@
 .cl-flow { position: relative; display: block; overflow: hidden; }
 .ah-surface .ah-pages { margin-inline: -12px; padding-inline: 12px; }
 .ah-surface .ah-options .ah-reveal { margin-inline: 10px; }
+/* On a phone the action that fixes a host sits on its own line under the name, so a long label never squeezes the name. */
+@media (max-width: 600px) {
+  .ah-run-head { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .ah-run-head .ah-job-fix { grid-column: 1 / -1; grid-row: 2; justify-self: start; margin-left: calc(var(--ah-icon) + 12px); }
+}

@@ -277,7 +277,7 @@ test("failures say what happened, what to do, and offer Retry with details", asy
   try {
     await page.locator(".ah-row[data-host='pve01']").click();
     await page.locator("[data-ah='continue']").click();
-    await expect(page.locator(".ah-page:not(.is-leaving) .ah-title")).toHaveText("Blocked by the mesh policy");
+    await expect(page.locator(".ah-page:not(.is-leaving) .ah-title")).toHaveText("This server can't connect to pve01");
     await expect(page.locator("[data-ah='retry']")).toBeVisible();
     await page.locator(".ah-details summary").click();
     await expect(page.locator(".ah-details pre")).toBeVisible();

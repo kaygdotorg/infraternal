@@ -22,6 +22,7 @@ export function createWindowFlowHost(cxOf: () => Ctx, fallback: FlowHost): FlowH
         body: rec.card.body,
         remove() { if (closed) return; closed = true; cx.win.close(rec); },
         onGone(callback) { gone = callback; },
+        reveal() { if (!closed) cx.nav.focusWindow(rec); },
       };
     },
   };

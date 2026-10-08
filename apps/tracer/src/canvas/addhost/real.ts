@@ -83,7 +83,7 @@ function refusal(response: Response, what: string): ServiceError {
   if (response.status === 404 || response.status === 405 || response.status === 501) return new ServiceError(`This server can't ${what} yet.`, "unavailable");
   if (response.status === 401 || response.status === 403) return new ServiceError("Unlock with your passkey, then try again.");
   if (response.status === 429) return new ServiceError("Too many attempts. Wait a moment and try again.");
-  return new ServiceError(`The server couldn't ${what} (${response.status}).`, response.status === 503 ? "unavailable" : "refused");
+  return new ServiceError(`Couldn't ${what}. Try again.`, response.status === 503 ? "unavailable" : "refused");
 }
 
 export function createRealProvisioning(): ProvisioningService {
@@ -117,7 +117,7 @@ export function createRealProvisioning(): ProvisioningService {
       if (!response.ok) throw refusal(response, "take a one-time sign-in");
       const reply = await jsonOf(response);
       if (reply === undefined) throw new ServiceError("This server can't take a one-time sign-in yet.", "unavailable");
-      if (!isRecord(reply) || typeof reply.reference !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(reply.reference)) throw new ServiceError("The server's answer was not understood.");
+      if (!isRecord(reply) || typeof reply.reference !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(reply.reference)) throw new ServiceError("Something went wrong. Try again.");
       return reply.reference;
     },
 

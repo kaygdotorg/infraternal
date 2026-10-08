@@ -15,12 +15,34 @@ export type StageId = "detect" | "connect" | "install" | "enrol" | "session";
 export type StageState = "pending" | "running" | "done" | "failed";
 
 export const STAGES: ReadonlyArray<{ id: StageId; label: string }> = [
-  { id: "detect", label: "Detect how to sign in" },
-  { id: "connect", label: "Connect and check the system" },
+  { id: "detect", label: "Find a way to sign in" },
+  { id: "connect", label: "Connect and check the host" },
   { id: "install", label: "Install the infraternal agent" },
-  { id: "enrol", label: "Enrol the host" },
-  { id: "session", label: "Open the first session" },
+  { id: "enrol", label: "Let the host join" },
+  { id: "session", label: "Open a terminal on the host" },
 ];
+
+/** What is happening in each stage, in the words the person sees. The server's own text is never the headline. */
+export const RUNNING_TEXT: Record<StageId, string> = {
+  detect: "Finding a way to sign in",
+  connect: "Checking the host",
+  install: "Installing on the host",
+  enrol: "Waiting for the host to join",
+  session: "Opening a terminal on the host",
+};
+
+/** One plain sentence for a failure. An unknown or missing failure gets the generic one; the raw text stays in the details. */
+export function failureLine(failure: FailureDetail | undefined): string {
+  switch (failure?.kind) {
+    case "unreachable": return "Couldn't reach this host";
+    case "mesh-policy": return "This server can't connect to this host";
+    case "host-key": return "This host's key needs your OK";
+    case "auth": return "Couldn't sign in to this host";
+    case "unsupported": return "This host can't run the infraternal agent yet";
+    case "install": return "Setting up this host didn't finish";
+    default: return "Something went wrong while setting up this host. Try again.";
+  }
+}
 
 export interface StageView { id: StageId; label: string; state: StageState; detail: string }
 
@@ -61,7 +83,7 @@ export function stagesOf(view: TargetView): StageView[] {
     if (stage.id === "detect" && view.authentication && state === "done") detail = `Signed in with ${authLabel(view.authentication)}`;
     // A running stage's text is the server's latest message, which the host's header line already shows;
     // repeating it under the stage name would say everything twice.
-    else if (index === at && view.state === "failed") detail = view.failure?.message ?? view.message;
+    else if (index === at && view.state === "failed") detail = failureLine(view.failure);
     return { id: stage.id, label: stage.label, state, detail };
   });
 }
@@ -73,48 +95,55 @@ export interface Guide { title: string; happened: string; next: string; fix: Fix
 
 /** Plain-language account of a failed host. `name` is what the person typed or picked. */
 export function guideFor(name: string, failure: FailureDetail | undefined): Guide {
-  const kind = failure?.kind ?? "install";
-  if (kind === "unreachable") return {
-    title: `${name} didn't answer`,
-    happened: `Nothing answered over SSH at ${name}.`,
-    next: "Check that the host is on and reachable from this server, then retry. If it can't be reached from here, install from the host instead.",
-    fix: "install-command",
-  };
-  if (kind === "mesh-policy") return {
-    title: "Blocked, possibly by the mesh policy",
-    happened: `${name} is a mesh peer that answers elsewhere on the mesh, but SSH from this server looks blocked. That can be a mesh access policy.`,
-    next: "Ask a mesh admin to allow SSH (TCP 22) from this server, then retry.",
-    fix: "retry",
-  };
-  if (kind === "host-key") return {
-    title: `${name} has a key this server doesn't trust`,
-    happened: `${name} answered with an SSH host key that isn't in this server's known hosts.`,
-    next: "Compare the fingerprint with the one on the host before you trust it.",
-    fix: failure?.fingerprints?.length ? "host-key" : "retry",
-  };
-  if (kind === "auth") return failure?.choose_method ? {
-    title: `${name} didn't accept any sign-in`,
-    happened: "Network access, this server's key and your saved key were all tried or unavailable.",
-    next: "Choose how to sign in this once, or add this server's key to the host.",
-    fix: "choose-method",
-  } : {
-    title: `${name} refused the sign-in`,
-    happened: `${name} answered but refused the way this server signed in.`,
-    next: "Retry, or choose another way to sign in.",
-    fix: "choose-method",
-  };
-  if (kind === "unsupported") return {
-    title: `${name} isn't supported yet`,
-    happened: `${name} doesn't have what the infraternal agent needs.`,
-    next: "Use a Linux host (x86_64 or aarch64) with systemd, then add it again.",
-    fix: "none",
-  };
-  return {
-    title: `${name} could not be set up`,
-    happened: `The installation on ${name} didn't finish, and it was rolled back.`,
-    next: "Read the details, then retry.",
-    fix: "retry",
-  };
+  switch (failure?.kind) {
+    case "unreachable": return {
+      title: `${name} isn't answering`,
+      happened: `We couldn't reach ${name} to sign in.`,
+      next: "Check that it is turned on and on the network, then try again. If this server can't reach it, install from the host instead.",
+      fix: "install-command",
+    };
+    case "mesh-policy": return {
+      title: `This server can't connect to ${name}`,
+      happened: `${name} is on your network, but this server can't open a connection to it. A network access rule may be blocking it.`,
+      next: "Ask whoever manages your network to let this server connect to it, then try again.",
+      fix: "retry",
+    };
+    case "host-key": return {
+      title: `${name} needs your OK`,
+      happened: `${name} showed a security key this server hasn't seen before.`,
+      next: "Compare the fingerprint with the one on the host before you trust it.",
+      fix: failure.fingerprints?.length ? "host-key" : "retry",
+    };
+    case "auth": return failure.choose_method ? {
+      title: `Couldn't sign in to ${name}`,
+      happened: "Your network access, this server's key and your saved key didn't get in.",
+      next: "Choose another way to sign in, or give this server's key to the host.",
+      fix: "choose-method",
+    } : {
+      title: `${name} turned the sign-in down`,
+      happened: `${name} answered but wouldn't accept how this server signed in.`,
+      next: "Try again, or choose another way to sign in.",
+      fix: "choose-method",
+    };
+    case "unsupported": return {
+      title: `${name} can't run the infraternal agent yet`,
+      happened: "This host is missing something the infraternal agent needs.",
+      next: "Use a Linux host (Intel, AMD or ARM) with systemd, then add it again.",
+      fix: "none",
+    };
+    case "install": return {
+      title: `Setting up ${name} didn't finish`,
+      happened: "Changes on the host were undone, so nothing is left half done.",
+      next: "Open the details, then try again.",
+      fix: "retry",
+    };
+    default: return {
+      title: `Something went wrong with ${name}`,
+      happened: "Something went wrong while setting up this host.",
+      next: "Try again.",
+      fix: "retry",
+    };
+  }
 }
 
 export interface ParsedTarget { user: string | undefined; host: string; port: number | undefined }
