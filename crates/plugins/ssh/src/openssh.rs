@@ -1,7 +1,8 @@
-//! Runs bounded OpenSSH children with strict host keys and in-place server identity [141 H12].
+//! Runs bounded OpenSSH children with strict host trust and isolated D183 credential policy [141 H12].
 
 use crate::process::{execute, execute_bounded};
 use crate::{
+    config::PublicSshConfiguration,
     credentials::{CredentialConfig, CredentialSession},
     model::{Destination, Failure, FailureKind, MeshEvidence},
     transport::{
@@ -34,7 +35,12 @@ impl SshTransport for OpenSsh {
             // Outer strict checking is not inherited by arbitrary proxy hops.
             // Refuse those configurations before materializing credentials or
             // contacting a host; a future adapter must enforce every hop.
-            effective_destination(&self.ssh, &destination).await?;
+            let configuration = effective_destination(&self.ssh, &destination).await?;
+            if !configuration.validate_trust_paths() {
+                return Err(Failure::unsupported(
+                    "The SSH public trust paths are ambiguous or inaccessible.",
+                ));
+            }
             let credentials = CredentialSession::prepare(
                 &CredentialConfig {
                     ssh_agent: self.ssh_agent.clone(),
@@ -49,7 +55,7 @@ impl SshTransport for OpenSsh {
                 ssh: self.ssh.clone(),
                 keyscan: self.ssh_keyscan.clone(),
                 keygen: self.ssh_keygen.clone(),
-                destination,
+                configuration,
                 credentials,
                 mesh,
                 timeout: self.command_timeout,
@@ -62,7 +68,7 @@ struct Session {
     ssh: PathBuf,
     keyscan: PathBuf,
     keygen: PathBuf,
-    destination: Destination,
+    configuration: PublicSshConfiguration,
     credentials: CredentialSession,
     mesh: MeshEvidence,
     timeout: Duration,
@@ -70,9 +76,7 @@ struct Session {
 
 impl Session {
     async fn observed_fingerprints(&self) -> Vec<String> {
-        let Ok(destination) = effective_destination(&self.ssh, &self.destination).await else {
-            return Vec::new();
-        };
+        let destination = &self.configuration.destination;
         // Keyscan is an unauthenticated observation, never an admission path or
         // known_hosts update. Configuration aliases/proxies may not be scannable.
         let mut scan = Command::new(&self.keyscan);
@@ -111,6 +115,10 @@ impl Session {
     }
     fn command(&self) -> Command {
         let mut command = Command::new(&self.ssh);
+        // OpenSSH uses the first scalar option: credential policy must precede
+        // retained public authentication preferences and transport configuration.
+        self.credentials.configure(&mut command);
+        self.configuration.configure(&mut command);
         // Command-line precedence forces these over config: host keys cannot be accepted or rewritten;
         // forwarding/control sockets from server config must not outlive bootstrap.
         command.args([
@@ -152,12 +160,12 @@ impl Session {
             "-o",
             "LogLevel=ERROR",
         ]);
-        self.credentials.configure(&mut command);
-        command.arg("-l").arg(self.destination.user());
-        if let Some(port) = self.destination.port() {
+        let destination = &self.configuration.destination;
+        command.arg("-l").arg(destination.user());
+        if let Some(port) = destination.port() {
             command.arg("-p").arg(port.to_string());
         }
-        command.arg("--").arg(self.destination.host());
+        command.arg("--").arg(destination.host());
         command
     }
 }
@@ -165,7 +173,7 @@ impl Session {
 async fn effective_destination(
     ssh: &std::path::Path,
     destination: &Destination,
-) -> Result<Destination, Failure> {
+) -> Result<PublicSshConfiguration, Failure> {
     let mut configuration = Command::new(ssh);
     configuration
         .args(["-G", "-o", "ForkAfterAuthentication=no", "-l"])
@@ -186,7 +194,7 @@ async fn effective_destination(
             "The SSH configuration cannot be used for bootstrap.",
         ));
     }
-    scan_destination(destination, &configuration.stdout).ok_or_else(|| {
+    PublicSshConfiguration::parse(destination, &configuration.stdout).ok_or_else(|| {
         Failure::unsupported(
             "SSH proxies or invalid effective addresses are unsupported by bootstrap.",
         )

@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod bootstrap;
+pub mod config;
 pub mod credentials;
 pub mod install;
 pub mod model;
