@@ -1,0 +1,209 @@
+//! Proves the retained host key and validates atomic certificate publication on the authenticated control stream [133][168], #78.
+
+use crate::remote_tls::Identity;
+use openssl::{
+    asn1::Asn1Time,
+    hash::MessageDigest,
+    x509::{X509, X509NameBuilder, X509Req, X509StoreContext, store::X509StoreBuilder},
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    io,
+    sync::{Arc, RwLock},
+};
+
+/// Additive Hello capability: only peers with this bit receive renewal actions.
+pub const LIVE_RENEWAL: u64 = 1 << 2;
+/// Bound before decoding JSON as well as after decoding the DER field.
+pub const MAX_RENEWAL_JSON: usize = 32_768;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CsrProof {
+    pub csr_der: Vec<u8>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateUpdate {
+    pub certificate_der: Vec<u8>,
+}
+
+/// Decode bounded proof JSON; accepted bytes still require PKCS10 verification.
+/// # Errors
+/// Oversized JSON/DER, malformed fields or unknown fields.
+pub fn decode_proof(input: &[u8]) -> io::Result<CsrProof> {
+    if input.len() > MAX_RENEWAL_JSON {
+        return Err(denied());
+    }
+    let proof: CsrProof = serde_json::from_slice(input).map_err(|_| denied())?;
+    if proof.csr_der.len() > 4096 {
+        return Err(denied());
+    }
+    Ok(proof)
+}
+
+/// Decode bounded public identity JSON; this grants no certificate authority.
+/// # Errors
+/// Oversized JSON/DER, malformed fields or unknown fields.
+pub fn decode_certificate(input: &[u8]) -> io::Result<CertificateUpdate> {
+    if input.len() > MAX_RENEWAL_JSON {
+        return Err(denied());
+    }
+    let update: CertificateUpdate = serde_json::from_slice(input).map_err(|_| denied())?;
+    if update.certificate_der.len() > 8192 {
+        return Err(denied());
+    }
+    Ok(update)
+}
+
+/// Installation adapter durably publishes public identity before success is acknowledged.
+pub trait CertificatePublisher: Send + Sync {
+    /// Fsync and atomically replace the installation's certificate.
+    /// # Errors
+    /// Unsafe paths, invalid metadata, serialization or publication failure.
+    fn publish(&self, certificate: &X509) -> io::Result<()>;
+}
+
+/// One process owns the current leaf; reconnects read the acknowledged replacement.
+#[derive(Clone)]
+pub struct RenewalIdentity {
+    identity: Arc<RwLock<Identity>>,
+    roots: Vec<X509>,
+    publisher: Arc<dyn CertificatePublisher>,
+}
+impl RenewalIdentity {
+    /// Retain the host key, public pins and the installation publication adapter.
+    #[must_use]
+    pub fn new(
+        identity: &Identity,
+        roots: &[X509],
+        publisher: Arc<dyn CertificatePublisher>,
+    ) -> Self {
+        Self {
+            identity: Arc::new(RwLock::new(Identity {
+                certificate: identity.certificate.clone(),
+                key: identity.key.clone(),
+            })),
+            roots: roots.to_vec(),
+            publisher,
+        }
+    }
+    /// Snapshot the current acknowledged leaf without exposing the key to the peer.
+    /// # Errors
+    /// Refuses poisoned identity state.
+    pub fn current(&self) -> io::Result<Identity> {
+        let identity = self.identity.read().map_err(|_| denied())?;
+        Ok(Identity {
+            certificate: identity.certificate.clone(),
+            key: identity.key.clone(),
+        })
+    }
+    /// Only the pinned server can invoke these two control actions.
+    /// # Errors
+    /// Malformed/oversized input, altered host/key, invalid issuer/purpose/validity or failed publication.
+    pub fn action(&self, action: &str, input: &[u8]) -> io::Result<Vec<u8>> {
+        if input.len() > MAX_RENEWAL_JSON {
+            return Err(denied());
+        }
+        match action {
+            "transport.csr" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Empty {}
+                serde_json::from_slice::<Empty>(input).map_err(|_| denied())?;
+                let identity = self.identity.read().map_err(|_| denied())?;
+                let mut request = X509Req::builder().map_err(|_| denied())?;
+                request
+                    .set_subject_name(&X509NameBuilder::new().map_err(|_| denied())?.build())
+                    .map_err(|_| denied())?;
+                request.set_pubkey(&identity.key).map_err(|_| denied())?;
+                request
+                    .sign(&identity.key, MessageDigest::null())
+                    .map_err(|_| denied())?;
+                serde_json::to_vec(&CsrProof {
+                    csr_der: request.build().to_der().map_err(|_| denied())?,
+                })
+                .map_err(|_| denied())
+            }
+            "transport.certificate" => {
+                let update = decode_certificate(input)?;
+                let certificate = X509::from_der(&update.certificate_der).map_err(|_| denied())?;
+                if certificate.to_der().map_err(|_| denied())? != update.certificate_der {
+                    return Err(denied());
+                }
+                let mut identity = self.identity.write().map_err(|_| denied())?;
+                validate(&certificate, &identity, &self.roots)?;
+                // Validation and publication serialize with reconnect snapshots.
+                // A failed fsync/rename leaves process authority unchanged.
+                self.publisher.publish(&certificate)?;
+                identity.certificate = certificate;
+                Ok(b"{}".to_vec())
+            }
+            _ => Err(denied()),
+        }
+    }
+}
+
+fn validate(certificate: &X509, identity: &Identity, roots: &[X509]) -> io::Result<()> {
+    let mut trust = X509StoreBuilder::new().map_err(|_| denied())?;
+    for issuer in roots {
+        trust.add_cert(issuer.clone()).map_err(|_| denied())?;
+    }
+    trust
+        .set_purpose(openssl::x509::X509PurposeId::SSL_CLIENT)
+        .map_err(|_| denied())?;
+    let chain = openssl::stack::Stack::new().map_err(|_| denied())?;
+    if !X509StoreContext::new()
+        .map_err(|_| denied())?
+        .init(
+            &trust.build(),
+            certificate,
+            &chain,
+            openssl::x509::X509StoreContextRef::verify_cert,
+        )
+        .map_err(|_| denied())?
+        || !certificate
+            .public_key()
+            .map_err(|_| denied())?
+            .public_eq(&identity.key)
+        || host_uri(certificate)? != host_uri(&identity.certificate)?
+        || certificate
+            .not_before()
+            .diff(certificate.not_after())
+            .map_err(|_| denied())?
+            .days
+            != 7
+        || certificate
+            .not_before()
+            .diff(certificate.not_after())
+            .map_err(|_| denied())?
+            .secs
+            != 0
+        || certificate.not_after() <= identity.certificate.not_after()
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+fn host_uri(certificate: &X509) -> io::Result<String> {
+    let names = certificate.subject_alt_names().ok_or_else(denied)?;
+    if names.len() != 1 {
+        return Err(denied());
+    }
+    names[0].uri().map(str::to_owned).ok_or_else(denied)
+}
+/// Refuse an expired local identity before another dial attempt, rather than retrying it forever.
+/// # Errors
+/// Invalid clock/certificate or expired identity.
+pub fn require_current(identity: &Identity) -> io::Result<()> {
+    let now = Asn1Time::days_from_now(0).map_err(|_| denied())?;
+    if identity.certificate.not_after() <= now.as_ref()
+        || identity.certificate.not_before() > now.as_ref()
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+fn denied() -> io::Error {
+    io::ErrorKind::PermissionDenied.into()
+}

@@ -6,6 +6,7 @@ pub mod relay;
 pub mod remote_client;
 pub mod remote_native;
 pub mod remote_quic;
+pub mod remote_renewal;
 pub mod remote_tls;
 pub mod sessions;
 pub mod transport;
