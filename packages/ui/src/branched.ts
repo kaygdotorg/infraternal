@@ -132,50 +132,69 @@ export function branchedMenu(
   let active = opts.active;
   let disposed = false;
 
-  const branch = (list: HTMLElement, row: HTMLElement): string => {
-    const x = Number.parseFloat(getComputedStyle(list).getPropertyValue("--bm-x")) || 0;
-    const center = row.offsetTop + row.offsetHeight / 2;
-    return `M ${x} 0 V ${center - RADIUS} Q ${x} ${center} ${x + RADIUS} ${center} H ${x + RADIUS + STUB}`;
-  };
+  const drawOn = new WeakMap<SVGPathElement, Animation>();
+  const pathFor = (x: number, center: number): string =>
+    `M ${x} 0 V ${center - RADIUS} Q ${x} ${center} ${x + RADIUS} ${center} H ${x + RADIUS + STUB}`;
 
+  /**
+   * Two passes, so the browser lays out once: every measurement first (widths, heights, row offsets,
+   * the branch's x), then every write (svg sizes, paths, classes, the marker). Interleaving a write
+   * before the next section's reads forced a layout per section and per leaf.
+   */
   function layout(animate: boolean): void {
     if (disposed) return;
-    for (const section of host.querySelectorAll<HTMLElement>(".bm-sec")) {
+    let branchX: number | undefined;
+    const sections = [...host.querySelectorAll<HTMLElement>(".bm-sec")].map((section) => {
       const list = section.querySelector<HTMLElement>("ul")!;
+      const leaves = [...list.querySelectorAll<HTMLElement>(".bm-leaf")];
+      branchX ??= Number.parseFloat(getComputedStyle(list).getPropertyValue("--bm-x")) || 0;
+      const x = branchX;
+      return {
+        section, list, leaves, x, width: list.offsetWidth, height: list.offsetHeight,
+        centers: leaves.map((leaf) => leaf.parentElement!.offsetTop + leaf.parentElement!.offsetHeight / 2),
+      };
+    });
+    const heads = host.querySelectorAll<HTMLElement>(".bm-sec .bm-head");
+    const headMetrics = [...heads].map((head) => ({ head, top: head.offsetTop, height: head.offsetHeight }));
+    const markerHeight = marker.offsetHeight;
+
+    for (const { section, leaves, x, width, height, centers } of sections) {
       const svg = section.querySelector<SVGSVGElement>(".bm-branches")!;
       const dim = svg.querySelector<SVGGElement>(".bm-dim")!;
       const lit = svg.querySelector<SVGPathElement>(".bm-lit")!;
-      svg.setAttribute("width", String(list.offsetWidth));
-      svg.setAttribute("height", String(list.offsetHeight));
-      dim.replaceChildren(...[...list.querySelectorAll<HTMLElement>(".bm-leaf")].map((leaf) => {
+      svg.setAttribute("width", String(width));
+      svg.setAttribute("height", String(height));
+      dim.replaceChildren(...centers.map((center) => {
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        path.setAttribute("d", branch(list, leaf.parentElement!));
+        path.setAttribute("d", pathFor(x, center));
         return path;
       }));
-      const leaves = [...list.querySelectorAll<HTMLElement>(".bm-leaf")];
-      const mine = leaves.find((leaf) => leaf.dataset.id === active);
+      const mineIndex = leaves.findIndex((leaf) => leaf.dataset.id === active);
       lit.style.transition = animate && !reduced() ? `opacity 150ms ${EASE}` : "none";
-      if (animate) lit.getAnimations().forEach((animation) => animation.cancel());
-      if (mine) {
-        lit.setAttribute("d", branch(list, mine.parentElement!));
+      // Cancelling by handle: `getAnimations()` flushes style for the whole document.
+      if (animate) { drawOn.get(lit)?.cancel(); drawOn.delete(lit); }
+      if (mineIndex >= 0) {
+        lit.setAttribute("d", pathFor(x, centers[mineIndex]!));
         // The owner approved paint-based draw-on for this small, rarely changed tree.
-        if (animate && !reduced()) lit.animate(
+        if (animate && !reduced()) drawOn.set(lit, lit.animate(
           [{ strokeDashoffset: 1 }, { strokeDashoffset: 0 }],
           { duration: 300, easing: EASE, fill: "both" },
-        );
+        ));
         lit.style.opacity = "1";
       } else {
         lit.style.opacity = "0";
       }
-      for (const leaf of leaves) leaf.toggleAttribute("aria-current", leaf.dataset.id === active);
-      section.classList.toggle("is-current", Boolean(mine));
+      leaves.forEach((leaf, index) => leaf.toggleAttribute("aria-current", leaf.dataset.id === active));
+      section.classList.toggle("is-current", mineIndex >= 0);
     }
 
-    const currentHead = host.querySelector<HTMLElement>(".bm-sec.is-current .bm-head");
+    // The current section changed above; its head is the marker's row (positions were read before).
+    const current = sections.find(({ section }) => section.classList.contains("is-current"));
+    const currentHead = current ? headMetrics.find(({ head }) => head.parentElement === current.section) : undefined;
     marker.style.opacity = currentHead ? "1" : "0";
     if (currentHead) {
       marker.style.transition = animate && !reduced() ? `transform 280ms ${EASE}` : "none";
-      marker.style.transform = `translateY(${Math.round(currentHead.offsetTop + (currentHead.offsetHeight - marker.offsetHeight) / 2)}px)`;
+      marker.style.transform = `translateY(${Math.round(currentHead.top + (currentHead.height - markerHeight) / 2)}px)`;
     }
   }
 
