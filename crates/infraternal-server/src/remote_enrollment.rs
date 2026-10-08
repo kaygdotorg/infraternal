@@ -19,7 +19,7 @@ pub struct RemoteEnrollment<S: CaKeySource + ?Sized> {
     store: EnrollmentStore,
 }
 
-impl<S: CaKeySource + ?Sized> RemoteEnrollment<S> {
+impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
     /// Use the configured signing source and already-migrated public authority.
     #[must_use]
     pub fn new(source: Arc<S>, store: EnrollmentStore) -> Self {
@@ -72,11 +72,20 @@ impl<S: CaKeySource + ?Sized> RemoteEnrollment<S> {
             .admit(predecessor, now)
             .await
             .map_err(|_| RemoteEnrollmentError)?;
-        let csr = ValidatedCsr::parse(csr_der).map_err(|_| RemoteEnrollmentError)?;
-        let certificate = self
-            .signer()?
-            .sign_host(identity.host, &csr, now)
-            .map_err(|_| RemoteEnrollmentError)?;
+        if csr_der.len() > 4096 {
+            return Err(RemoteEnrollmentError);
+        }
+        let source = self.source.clone();
+        let csr_der = csr_der.to_vec();
+        let certificate = tokio::task::spawn_blocking(move || {
+            let csr = ValidatedCsr::parse(&csr_der).map_err(|_| RemoteEnrollmentError)?;
+            CertificateAuthority::from_source(source.as_ref())
+                .map_err(|_| RemoteEnrollmentError)?
+                .sign_host(identity.host, &csr, now)
+                .map_err(|_| RemoteEnrollmentError)
+        })
+        .await
+        .map_err(|_| RemoteEnrollmentError)??;
         // The atomic write rechecks authority and key equality after signing;
         // a revocation between admission and publication cannot return authority.
         self.store
