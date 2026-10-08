@@ -21,12 +21,15 @@ const limits = {
   // Measured when the canvas product module landed (D188): 46,738 B gzip / 40,526 B brotli. The limit is that size
   // rounded up to a whole KiB plus a 4 KiB margin, so ordinary canvas work fits and a library pulled in by accident does not.
   deferred: { gzip: 50 * KIB, brotli: 44 * KIB },
-  // On demand (D188): the Settings window panels measure 2,136 B gzip / 1,863 B brotli. The limit is that rounded up to
-  // a whole KiB plus an 8 KiB margin, which also leaves room for the add-host wizard (about 15.6 KB identity, roughly
-  // 6 KiB compressed) to mount on demand without a budget change.
-  onDemand: { gzip: 11 * KIB, brotli: 10 * KIB },
+  // On demand (D188): the limit is per chunk, not for the class. A module named `*.on-demand.ts` costs nothing until the
+  // person asks for it (the Mesh view, the session manager, a Settings window, the add-host wizard), so adding another
+  // such feature must not take budget from the others; what the gate guards is that no single one grows without
+  // thought. 20 KiB gzip / 18 KiB brotli each (the largest, Mesh, is about 8.5 KB gzip today). The class total is
+  // reported, not limited.
+  onDemand: { gzip: 20 * KIB, brotli: 18 * KIB },
 };
 const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[]; onDemand: string[] };
+const onDemandChunks = new Map<string, { gzip: number; brotli: number }>();
 const totals = { critical: { identity: 0, gzip: 0, brotli: 0 }, deferred: { identity: 0, gzip: 0, brotli: 0 }, onDemand: { identity: 0, gzip: 0, brotli: 0 } };
 for (const name of await readdir(dist, { recursive: true })) {
   if (!name.endsWith(".js")) continue;
@@ -40,6 +43,7 @@ for (const name of await readdir(dist, { recursive: true })) {
   const identity = (await stat(`${dist}/${name}`)).size;
   const gzip = await stat(`${dist}/${name}.gz`).then((file) => file.size).catch(() => identity);
   const brotli = await stat(`${dist}/${name}.br`).then((file) => file.size).catch(() => identity);
+  if (klass === "onDemand") onDemandChunks.set(name, { gzip, brotli });
   totals[klass].identity += identity;
   totals[klass].gzip += gzip;
   totals[klass].brotli += brotli;
@@ -53,8 +57,11 @@ for (const klass of ["critical", "deferred", "onDemand"] as const) {
 if (totals.critical.gzip > limits.critical.gzip || totals.critical.brotli > limits.critical.brotli) {
   throw new Error("production critical-path JavaScript exceeds the compressed transfer budget");
 }
-if (totals.onDemand.gzip > limits.onDemand.gzip || totals.onDemand.brotli > limits.onDemand.brotli) {
-  throw new Error("production on-demand JavaScript exceeds its compressed transfer budget");
+const biggest = { name: "", gzip: 0, brotli: 0 };
+for (const [name, size] of onDemandChunks) if (size.gzip > biggest.gzip) Object.assign(biggest, { name, ...size });
+console.log(`JavaScript transfer, onDemand largest chunk ${biggest.name}: gzip=${biggest.gzip}/${limits.onDemand.gzip} brotli=${biggest.brotli}/${limits.onDemand.brotli} bytes (class total gzip=${totals.onDemand.gzip} brotli=${totals.onDemand.brotli}, not limited)`);
+for (const [name, size] of onDemandChunks) {
+  if (size.gzip > limits.onDemand.gzip || size.brotli > limits.onDemand.brotli) throw new Error(`on-demand chunk ${name} exceeds its compressed transfer budget`);
 }
 if (totals.deferred.gzip > limits.deferred.gzip || totals.deferred.brotli > limits.deferred.brotli) {
   throw new Error("production deferred JavaScript exceeds its compressed transfer budget");
