@@ -37,6 +37,8 @@ infraternal-agent = { path = "../infraternal-agent", version = "0.1.0" }
 quinn.workspace = true
 
 [dev-dependencies]
+hyper.workspace = true
+hyper-util.workspace = true
 tokio-openssl.workspace = true
 aes-gcm.workspace = true
 hkdf.workspace = true

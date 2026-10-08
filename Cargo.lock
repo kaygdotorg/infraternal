@@ -1399,6 +1399,8 @@ dependencies = [
  "futures-util",
  "hkdf",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "infraternal-agent",
  "infraternal-protocol",
  "nix",
