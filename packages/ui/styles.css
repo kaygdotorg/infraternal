@@ -490,3 +490,21 @@
 .ui-sidebar-version[data-done] .swap { color: var(--ok); }
 .ui-sidebar-commit { font-variant-numeric: tabular-nums; color: var(--fg); }
 .ui-sidebar-dot { color: var(--fg-3); }
+
+/* Window lock (lock-toggle.ts, window-card.ts): invisible until the pointer is near the window's
+   top edge (or the header is tapped), then 35 % strong; locked, it stays at full strength with an
+   accent tint and the window's hairline is stronger than the active window's. */
+.ui-window-lock {
+  position: absolute; z-index: 4; top: 8px; left: var(--ui-lock-x, 50%); width: var(--ui-control-h); height: var(--ui-control-h); margin-left: calc(var(--ui-control-h) / -2);
+  display: grid; place-items: center; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg);
+  opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 160ms ease-out, color 160ms ease-out, background-color 140ms ease;
+}
+.ui-window-lock svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
+.ui-window[data-lock-near] .ui-window-lock { opacity: 0.35; pointer-events: auto; }
+.ui-window[data-locked] .ui-window-lock { opacity: 0.9; pointer-events: auto; color: var(--accent); }
+.ui-window-lock:focus-visible { opacity: 0.8; }
+@media (hover: hover) and (pointer: fine) { .ui-window .ui-window-lock:hover { opacity: 0.8; background: var(--hover); } }
+.ui-window-lock:active { transform: scale(0.94); }
+.ui-window[data-locked] { border-color: color-mix(in oklab, var(--accent) 78%, var(--overlay-line)); box-shadow: var(--shadow), 0 0 0 1px color-mix(in oklab, var(--accent) 28%, transparent); }
+@media (prefers-reduced-motion: reduce) { .ui-window-lock { transition: opacity 160ms ease; } }
+.ui-window[data-status="none"] .ui-window-lock { display: none; }

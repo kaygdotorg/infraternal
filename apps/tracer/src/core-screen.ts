@@ -2,6 +2,7 @@
 import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
 import { applyTheme, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
+import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
 import { buildVersion } from "./build-version";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
@@ -34,6 +35,8 @@ export interface CoreScreen {
   bindTerminal(client: TerminalClient): void;
   /** Replaces the host/session tree (the canvas lists its windows here); returns the new tree. */
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
+  /** Adds palette rows computed each time the palette opens (state-dependent actions); returns a remover. */
+  addPaletteProvider(provider: () => PaletteEntry[]): () => void;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
   setRecoveryPending(readyAt: number | undefined): void;
@@ -145,9 +148,11 @@ function themeId(value: string | null): string | undefined {
   return value && Object.hasOwn(THEMES, value) ? value : undefined;
 }
 
-interface PaletteEntry {
+export interface PaletteEntry {
   group: string;
   glyph: string;
+  /** Inline SVG (24 grid, stroked) shown instead of the text glyph. */
+  icon?: string;
   label: string;
   hint: string;
   action?: string;
@@ -258,7 +263,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
 
 
-  const entries: PaletteEntry[] = [
+  const baseEntries = (): PaletteEntry[] => [
     { group: "Sessions", glyph: "›_", label: "SSH shell", hint: hostName, action: "session:current" },
     { group: "Hosts", glyph: "●", label: hostName, hint: "current", action: "host:current" },
     ...Object.entries(THEMES).map(([id, theme]) => ({
@@ -271,19 +276,28 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ] : []),
     ...(recoveryUiEnabled() && options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
   ];
-  const paletteSearchText = new Map(entries.map((entry) => [
-    entry,
-    `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase(),
-  ]));
-  // Normalize IDs once so typing never sanitizes every matching result.
-  const paletteOptionIds = new Map(entries.map((entry, index) => [
-    entry,
-    `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`,
-  ]));
-  const paletteGroupIds = new Map([...new Set(entries.map((entry) => entry.group))].map((group) => [
-    group,
-    `palette-group-${group.toLocaleLowerCase().replaceAll(" ", "-")}`,
-  ]));
+  // Rows can come from providers (the canvas offers Lock or Unlock by state), so the list and its
+  // lookup tables are rebuilt each time the palette opens; typing only filters them.
+  const providers = new Set<() => PaletteEntry[]>();
+  const entries: PaletteEntry[] = [];
+  const paletteSearchText = new Map<PaletteEntry, string>();
+  const paletteOptionIds = new Map<PaletteEntry, string>();
+  const paletteGroupIds = new Map<string, string>();
+  const refreshEntries = (): void => {
+    entries.length = 0;
+    // Context first: a provider's rows (actions on the current window) lead the list.
+    entries.push(...[...providers].flatMap((provider) => provider()), ...baseEntries());
+    paletteSearchText.clear();
+    paletteOptionIds.clear();
+    paletteGroupIds.clear();
+    entries.forEach((entry, index) => {
+      paletteSearchText.set(entry, `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase());
+      // Normalize IDs once so typing never sanitizes every matching result.
+      paletteOptionIds.set(entry, `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`);
+      if (!paletteGroupIds.has(entry.group)) paletteGroupIds.set(entry.group, `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`);
+    });
+  };
+  refreshEntries();
   let visibleEntries: PaletteEntry[] = [];
   let visibleOptions: HTMLButtonElement[] = [];
   let selected = 0;
@@ -352,7 +366,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       result.dataset.action = entry.action ?? "";
       const icon = document.createElement("span");
       icon.className = "result-icon";
-      icon.textContent = entry.glyph;
+      if (entry.icon) { icon.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${entry.icon}</svg>`; icon.classList.add("has-svg"); }
+      else icon.textContent = entry.glyph;
       if (entry.swatch) {
         icon.classList.add("swatch");
         icon.style.backgroundColor = entry.swatch.bg;
@@ -422,6 +437,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     // The source of the last open or close decides its motion: keyboard is instant, pointer animates.
     palette.dataset.openKind = source;
     if (open) {
+      refreshEntries();
       selected = 0;
       paletteInput.value = "";
       paletteResults.scrollTop = 0;
@@ -448,6 +464,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return;
     }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      // A locked window owns every key. Terminals never receive ⌘K, so it still opens the palette
+      // on macOS; Ctrl+K belongs to the terminal (kill-line, clear) and goes through.
+      if (stage.hasAttribute("data-locked") && !(isMacPlatform() && event.metaKey)) return;
       event.preventDefault();
       event.stopPropagation();
       setPalette(palette.hidden, "keyboard");
@@ -699,6 +718,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       client = value;
       client.setTheme(terminalTheme(THEMES[currentThemeId]!, background === "mesh"));
       for (const name of MODIFIER_KEYS) client.setInputModifier(name, modifiers[name]);
+    },
+    addPaletteProvider(provider) {
+      providers.add(provider);
+      return () => { providers.delete(provider); };
     },
     setHostTree(sections, activeLeaf, onSelect) {
       branch.dispose();

@@ -366,3 +366,134 @@ test("sidebar footer: a name pill, a settings pill and a version pill that copie
   await expect(page.locator(".tip")).toContainText("Copied");
   expect(await page.evaluate(() => document.documentElement.dataset.focusRing ?? "off")).toBe("off");
 });
+
+// ---- the window lock ----------------------------------------------------------------------
+test("lock: the icon appears near a window's top edge, locks with a click, stays, and unlocks with Ctrl+Shift+L", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  const window0 = page.locator(".ui-window").first();
+  const lock = window0.locator(".ui-window-lock");
+  const box = (await window0.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 400);
+  await expect(lock).toHaveCSS("opacity", "0");
+  await page.mouse.move(box.x + box.width / 2, box.y + 30);
+  await expect(lock).toHaveCSS("opacity", "0.35");
+  // Never covered by the title pill.
+  const geometry = await page.evaluate(() => {
+    const l = document.querySelector(".ui-window-lock")!.getBoundingClientRect();
+    const p = document.querySelector(".ui-window-pill")!.getBoundingClientRect();
+    return { lockLeft: l.left, pillRight: p.right, size: l.width };
+  });
+  expect(geometry.lockLeft).toBeGreaterThanOrEqual(geometry.pillRight);
+  await lock.click();
+  await expect(window0).toHaveAttribute("data-locked", "");
+  await expect(lock).toHaveAttribute("aria-pressed", "true");
+  await expect(lock).toHaveAttribute("data-tip", /^Locked: input stays in this window · .*Ctrl\+Shift\+L to unlock$/);
+  // Persistent: it stays visible with the pointer far away.
+  await page.mouse.move(box.x + box.width / 2, box.y + 500);
+  await expect(lock).toHaveCSS("opacity", "0.9");
+  // The shackle has closed: its transform settles to none.
+  await expect.poll(() => lock.locator(".ui-lock-shackle").evaluate((node) => getComputedStyle(node).transform)).toMatch(/^(none|matrix\(1, 0, 0, 1, 0, 0\))$/);
+  await page.keyboard.press("Control+Shift+KeyL");
+  await expect(window0).not.toHaveAttribute("data-locked", "");
+  await expect(lock.locator(".ui-lock-shackle")).toHaveCSS("transform", /matrix/);
+});
+
+test("lock: wheel and canvas gestures inside the locked window never pan; outside it still does; other windows are ignored", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  const window0 = page.locator(".ui-window").first();
+  await page.keyboard.press("Control+Shift+KeyL");
+  await expect(window0).toHaveAttribute("data-locked", "");
+  const box = (await window0.boundingBox())!;
+  await page.mouse.move(box.x + 200, box.y + 300);
+  for (let index = 0; index < 8; index++) await page.mouse.wheel(60, 0);
+  await page.waitForTimeout(400);
+  expect((await offset(page)).x).toBe(0);
+  // A middle-button drag that starts inside the window is ignored too.
+  await page.mouse.move(box.x + 200, box.y + 300);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(box.x + 20, box.y + 300, { steps: 6 });
+  await page.mouse.up({ button: "middle" });
+  expect((await offset(page)).x).toBe(0);
+  // Over another window the canvas still pans.
+  const second = (await page.locator(".ui-window").nth(1).boundingBox())!;
+  await page.mouse.move(second.x + 200, second.y + 300);
+  for (let index = 0; index < 8; index++) await page.mouse.wheel(60, 0);
+  await expect.poll(async () => (await offset(page)).x).toBeLessThan(-100);
+  // A click on another window does not take the input: the locked window stays the active one.
+  const other = page.locator(".ui-window").nth(1);
+  const otherBox = (await other.boundingBox())!;
+  await page.mouse.click(otherBox.x + 100, otherBox.y + 200);
+  expect(await activeWindow(page)).toMatch(/^live:/);
+  await expect(window0).toHaveAttribute("data-locked", "");
+});
+
+test("lock: Ctrl+K reaches the terminal on Linux and Windows while locked, and opens the palette when unlocked", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.evaluate(() => {
+    (window as unknown as { __keys: string[] }).__keys = [];
+    document.querySelector(".terminal-host")!.addEventListener("keydown", (event) => {
+      const key = event as KeyboardEvent;
+      if (key.ctrlKey && key.key.toLowerCase() === "k") (window as unknown as { __keys: string[] }).__keys.push("ctrl+k");
+    }, true);
+  });
+  await page.keyboard.press("Control+Shift+KeyL");
+  await expect(page.locator(".ui-window").first()).toHaveAttribute("data-locked", "");
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#palette")).toBeHidden();
+  expect(await page.evaluate(() => (window as unknown as { __keys: string[] }).__keys)).toEqual(["ctrl+k"]);
+  await page.keyboard.press("Control+Shift+KeyL");
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#palette")).toBeVisible();
+  // The palette offers the action that fits the state, with the shortcut shown.
+  await expect(page.locator(".result[data-action='proto:lock'] .result-label")).toHaveText("Lock window");
+  await expect(page.locator(".result[data-action='proto:lock'] .result-hint")).toHaveText("Ctrl+Shift+L");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".ui-window").first()).toHaveAttribute("data-locked", "");
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press("Meta+k"); // not a macOS page: ⌘K does not open the palette while locked
+  await expect(page.locator("#palette")).toBeHidden();
+});
+
+test("lock: on macOS, ⌘K still opens the palette while locked and offers Unlock window", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await context.addInitScript(() => Object.defineProperty(navigator, "platform", { get: () => "MacIntel" }));
+  const page = await context.newPage();
+  await openCanvas(page);
+  await page.keyboard.press("Control+Shift+KeyL");
+  await expect(page.locator(".ui-window").first()).toHaveAttribute("data-locked", "");
+  await expect(page.locator(".ui-window-lock").first()).toHaveAttribute("data-tip", /⌘K or Ctrl\+Shift\+L to unlock/);
+  // Ctrl+K belongs to the terminal on a Mac too (kill-line); ⌘K is the palette.
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#palette")).toBeHidden();
+  await page.keyboard.press("Meta+k");
+  await expect(page.locator("#palette")).toBeVisible();
+  await expect(page.locator(".result[data-action='proto:unlock'] .result-label")).toHaveText("Unlock window");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".ui-window").first()).not.toHaveAttribute("data-locked", "");
+  await context.close();
+});
+
+test("lock (touch): a header tap shows a 44 px lock, a tap locks it, and the lock stays", async ({ browser }) => {
+  const context = await browser.newContext({ hasTouch: true, isMobile: true, deviceScaleFactor: 3, viewport: { width: 393, height: 852 } });
+  const page = await touchContext(context);
+  await openCanvas(page);
+  await page.keyboard.press("Control+Shift+ArrowRight"); // bring the second window onto the screen
+  await page.waitForTimeout(700);
+  const window0 = page.locator(".ui-window").nth(1);
+  const lock = window0.locator(".ui-window-lock");
+  await expect(lock).toHaveCSS("opacity", "0");
+  await window0.locator(".ui-window-head").tap({ position: { x: 330, y: 20 } });
+  await expect(lock).toHaveCSS("opacity", "0.35");
+  const size = await lock.evaluate((node) => node.getBoundingClientRect().width);
+  expect(size).toBeGreaterThanOrEqual(44);
+  await lock.tap();
+  await expect(window0).toHaveAttribute("data-locked", "");
+  await page.waitForTimeout(4200); // the header reveal times out; the locked icon does not
+  await expect(lock).toHaveCSS("opacity", "0.9");
+  await lock.tap();
+  await expect(window0).not.toHaveAttribute("data-locked", "");
+  await context.close();
+});

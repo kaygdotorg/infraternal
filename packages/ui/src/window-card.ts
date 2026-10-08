@@ -14,8 +14,12 @@
  *   card.pill     → the title pill button (anchor popovers to it)
  *   card.setActive(active)   → accent hairline, `aria-current`
  *   card.setTitle(title) / card.setStatus(status) / card.setIcon(svgMarkup)
+ *   card.locked / card.setLocked(locked, instant?)  → the window lock (lock-toggle.ts): the persistent
+ *        state lives here (`data-locked`, a stronger hairline); the consumer decides what it means
+ *   card.lock            → the lock toggle, for nudges
  *   card.dispose()
  */
+import { createLockToggle, placeLock, trackLockReveal, type LockSource, type LockToggle } from "./lock-toggle";
 
 /** `none` hides the dot: a window that is not a connection yet (a flow in progress). */
 export type WindowStatus = "live" | "connecting" | "offline" | "none";
@@ -40,6 +44,8 @@ export interface WindowCardOptions {
   status?: WindowStatus;
   actions?: WindowAction[];
   label?: string; // accessible name of the whole window
+  /** Runs after the user (or `setLocked`) changes the lock; the card has already updated itself. */
+  onLockChange?(locked: boolean, source: LockSource): void;
 }
 
 export interface WindowCard {
@@ -47,6 +53,9 @@ export interface WindowCard {
   readonly header: HTMLElement;
   readonly pill: HTMLButtonElement;
   readonly body: HTMLElement;
+  readonly lock: LockToggle;
+  readonly locked: boolean;
+  setLocked(locked: boolean, instant?: boolean): void;
   setActive(active: boolean): void;
   setTitle(title: WindowTitle): void;
   setStatus(status: WindowStatus): void;
@@ -94,7 +103,17 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
 
   const body = document.createElement("div");
   body.className = "ui-window-body";
-  root.append(header, body);
+  const lock = createLockToggle({
+    onToggle(next, source) { setLocked(next, source === "keyboard"); options.onLockChange?.(next, source); },
+  });
+  root.append(header, body, lock.root);
+  const stopReveal = trackLockReveal(root, lock);
+  const setLocked = (next: boolean, instant = false): void => {
+    if (next === lock.locked) return;
+    root.toggleAttribute("data-locked", next);
+    placeLock(root);
+    lock.setLocked(next, instant);
+  };
 
   let title = options.title;
   let status: WindowStatus = options.status ?? "live";
@@ -127,6 +146,9 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     header,
     pill,
     body,
+    lock,
+    get locked() { return lock.locked; },
+    setLocked,
     setActive(active) {
       root.toggleAttribute("data-active", active);
       if (active) root.setAttribute("aria-current", "true");
@@ -136,6 +158,8 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     setStatus,
     setIcon,
     dispose() {
+      stopReveal();
+      lock.dispose();
       for (const [button, handler] of handlers) button.removeEventListener("click", handler);
       root.remove();
     },

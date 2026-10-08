@@ -412,6 +412,7 @@ body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge 
 .result { display: flex; align-items: center; width: 100%; min-height: calc(var(--row) + 4px); gap: 8px; padding: 0 8px; border-radius: 6px; text-align: left; }
 .result:disabled { color: var(--fg-3); cursor: default; opacity: 0.72; }
 .result[aria-selected="true"] { background: var(--accent-soft); }
+.result-icon.has-svg svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .result-icon { display: grid; place-items: center; width: 20px; flex: none; color: var(--fg-2); font: 500 var(--text-secondary)/1 var(--font-mono); }
 .result-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-hint { margin-left: auto; color: var(--fg-3); font: 400 var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }

@@ -18,6 +18,11 @@
  * without focusing input, so no iPhone keyboard appears; a second tap types. The header
  * pill opens the details popover (machine, connection, session).
  *
+ * Lock (D160): a window can be locked. Locked, every key goes to its terminal (except ⌘K on
+ * macOS and the cross-platform chord Ctrl+Shift+L), canvas gestures that start inside it are
+ * ignored, and presses on other windows are ignored too, with a tiny pulse on the lock so the
+ * reason is visible without any text. The rest of the canvas keeps working.
+ *
  * Flows (D160): the add-host flow gets windows from this canvas (`openFlowWindow`), mounts
  * its card in the window body, and when it succeeds turns the same window into the host's
  * terminal window (`becomeHost`). New windows are placed by the canvas's own layout (one
@@ -190,6 +195,58 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   const statusWatch = new MutationObserver(relayStatus);
   statusWatch.observe(core.status, { childList: true, characterData: true, subtree: true });
 
+  // ---- window lock ------------------------------------------------------------------------
+  let locked: CanvasWindow | undefined;
+  const insideLocked = (target: EventTarget | null): boolean => !!locked && locked.card.root.contains(target as Node | null);
+  /** True (after a pulse on the lock) when a locked window means `entry` must not take input. */
+  const lockedAgainst = (entry: CanvasWindow | undefined): boolean => {
+    if (!locked || !entry || entry === locked) return false;
+    locked.card.lock.nudge();
+    return true;
+  };
+  const setLock = (entry: CanvasWindow, next: boolean, instant: boolean): void => {
+    if (next) {
+      if (locked && locked !== entry) { const previous = locked; locked = undefined; previous.card.setLocked(false, true); }
+      locked = entry;
+      stage.toggleAttribute("data-locked", true);
+      entry.card.setLocked(true, instant);
+      activate(entry, false);
+      // Input goes to this window's terminal now (a phone keeps its keyboard closed until a tap).
+      if (entry.live && !coarse.matches) core.terminalHost.focus({ preventScroll: true });
+    } else if (locked === entry) {
+      locked = undefined;
+      stage.toggleAttribute("data-locked", false);
+      entry.card.setLocked(false, instant);
+    }
+  };
+  const toggleActiveLock = (instant: boolean): void => {
+    if (active && !active.flow) setLock(active, locked !== active, instant);
+  };
+  // The cross-platform chord. It is taken before any terminal sees the key.
+  window.addEventListener("keydown", (event) => {
+    if (!(event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.code === "KeyL")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    toggleActiveLock(true);
+  }, { capture: true, signal });
+  const LOCK_ICON = '<rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/>';
+  const UNLOCK_ICON = '<rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V7.5a3.5 3.5 0 0 1 6.6-1.6"/>';
+  const removeProvider = core.addPaletteProvider(() => {
+    if (!active || active.flow) return [];
+    const isLocked = locked === active;
+    return [{
+      group: "Actions", glyph: "", icon: isLocked ? UNLOCK_ICON : LOCK_ICON,
+      label: isLocked ? "Unlock window" : "Lock window",
+      hint: "Ctrl+Shift+L",
+      action: isLocked ? "proto:unlock" : "proto:lock",
+    }];
+  });
+  window.addEventListener("tracer:proto-action", (event) => {
+    const detail = (event as CustomEvent<{ action?: string; source?: string }>).detail;
+    if (detail?.action === "proto:lock" && active && !active.flow) setLock(active, true, detail.source === "keyboard");
+    else if (detail?.action === "proto:unlock" && locked) setLock(locked, false, detail.source === "keyboard");
+  }, { signal });
+
   // ---- offset, springs and rest snapping ---------------------------------------------
   let x = 0, y = 0;
   let minX = 0, minY = 0;
@@ -355,7 +412,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     });
     tree = core.setHostTree(sections, active && !active.flow ? active.id : "", (id) => {
       const target = windows.find((entry) => entry.id === id);
-      if (!target) return;
+      if (!target || lockedAgainst(target)) return;
       activate(target, false);
       // The canvas's own pan brings it into view; on a phone the sheet gets out of the way.
       revealWindow(target);
@@ -491,12 +548,14 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       title: { host: live ? hostName : host.name, ...(host.user ? { user: host.user } : {}), ...(flow ? {} : { session: session.name }) },
       icon: hostIconMarkup(host.os, "ui-host-mark"),
       status: flow ? "none" : host.status === "live" ? "live" : "connecting",
+      onLockChange: (next, source) => { if (!flow || locked === entry) setLock(entry, next, source === "keyboard"); },
     });
     const entry: CanvasWindow = { id: `${host.id}:${session.id}`, host, session, card, live, fontSize: coarse.matches ? 13 : 14, ...(flow ? { flow } : {}) };
     if (live) card.body.append(core.terminalHost);
     else if (!flow) attachPreview(entry);
     entry.resize = attachWindowResize(card, resizeHost(entry));
     card.pill.addEventListener("click", (event) => {
+      if (lockedAgainst(entry)) return;
       activate(entry, false);
       // A window still hosting a flow has no machine to describe yet.
       if (!entry.flow) togglePopover(entry, event.detail === 0 ? "keyboard" : "pointer");
@@ -568,7 +627,10 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   };
   viewport.addEventListener("pointerdown", (event) => {
     const target = windowOf(event.target);
-    if (!target || target === active) return;
+    if (!target) return;
+    // A locked window keeps the input: presses elsewhere are ignored, with a pulse on the lock.
+    if (lockedAgainst(target) && !(event.target as Element).closest(".ui-window-head")) { event.preventDefault(); event.stopPropagation(); return; }
+    if (target === active) return;
     if ((event.target as Element).closest(".ui-window-head, .ui-window-resize")) return; // the pill and the handles act for themselves
     // First touch on an inactive window: claim it so the terminal neither focuses nor
     // opens the keyboard; the release activates it if the finger did not move.
@@ -603,6 +665,8 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   };
   viewport.addEventListener("wheel", (event) => {
     if (event.ctrlKey) return; // browser zoom / trackpad pinch stays with the browser
+    // Inside a locked window the wheel is the terminal's alone: it never pans (or later zooms) the canvas.
+    if (insideLocked(event.target)) return;
     const horizontal = event.shiftKey ? event.deltaY || event.deltaX : event.deltaX;
     const vertical = event.shiftKey ? 0 : event.deltaY;
     const overBody = inScrollableBody(event.target);
@@ -623,7 +687,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   // ---- Space+drag and middle-drag -----------------------------------------------------
   let spaceHeld = false;
   window.addEventListener("keydown", (event) => {
-    if (event.code !== "Space" || event.repeat) return;
+    if (event.code !== "Space" || event.repeat || locked) return;
     const typing = (event.target as Element | null)?.closest?.("input, textarea, [contenteditable], .terminal-host");
     if (!typing) { spaceHeld = true; viewport.dataset.grab = "ready"; }
   }, { signal });
@@ -659,6 +723,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     if (event.pointerType === "touch") return;
     const middle = event.button === 1;
     if (!middle && !(spaceHeld && event.button === 0)) return;
+    if (insideLocked(event.target)) return;
     event.preventDefault();
     event.stopPropagation();
     viewport.setPointerCapture(event.pointerId);
@@ -694,6 +759,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     return { cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2, spread: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) };
   };
   viewport.addEventListener("touchstart", (event) => {
+    if (insideLocked(event.target)) return; // canvas gestures that start in a locked window are ignored
     stopSprings();
     if (event.touches.length === 2) {
       twoFinger = true;
@@ -762,7 +828,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
 
   // ---- keyboard: move between windows -------------------------------------------------
   window.addEventListener("keydown", (event) => {
-    if (!(event.ctrlKey && event.shiftKey) || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+    if (!(event.ctrlKey && event.shiftKey) || (event.key !== "ArrowLeft" && event.key !== "ArrowRight") || locked) return;
     const index = active ? windows.indexOf(active) : 0;
     const next = windows[Math.max(0, Math.min(windows.length - 1, index + (event.key === "ArrowRight" ? 1 : -1)))];
     if (!next) return;
@@ -821,6 +887,8 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
   });
   const controller: CanvasController = {
     openFlowWindow(spec) {
+      // A flow is something the person asked for: it ends a lock rather than being refused by it.
+      if (locked) setLock(locked, false, true);
       const host = hostFromFixture(`new-${++serial}`, spec.title);
       const entry = addWindow(host, { ...shellSession(host), id: "flow", name: "Add hosts" }, false, undefined, true);
       entry.card.setIcon(spec.icon);
@@ -852,6 +920,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     toast,
     dispose() {
       events.abort();
+      removeProvider();
       statusWatch.disconnect();
       toast.dispose();
       resizeObserver.disconnect();

@@ -24,3 +24,5 @@ export * from "./pane-stepper";
 export * from "./chip-input";
 export * from "./terminal-text-overlay";
 export * from "./sidebar-foot";
+export * from "./platform";
+export * from "./lock-toggle";
