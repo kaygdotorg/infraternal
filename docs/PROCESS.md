@@ -128,10 +128,12 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Baseline | Maximum |
   | --- | ---: | ---: |
-  | `x86_64-unknown-linux-musl` | 16,142,672 bytes | 16,404,816 bytes |
-  | `aarch64-unknown-linux-musl` | 13,555,672 bytes | 13,817,816 bytes |
+  | `x86_64-unknown-linux-musl` | 18,982,128 bytes | 19,244,272 bytes |
+  | `aarch64-unknown-linux-musl` | 15,934,232 bytes | 16,196,376 bytes |
 
-  The baseline is the #57 measurement on the Debian 13, 8-vCPU build guest.
+  The baseline is the #78 remote-transport measurement on the Debian 13,
+  8-vCPU build guest. Its per-crate comparison and rejected crypto-provider
+  reuse experiment are in `docs/verification/remote-agents-run7-size.md`.
   An intentional size increase needs target-specific measurements and a
   rationale on its issue before the baseline is changed.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
