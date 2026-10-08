@@ -1448,7 +1448,8 @@ export class TerminalClient {
 
   private protocolFailure(message: string): void {
     this.setStatus(`Terminal protocol error: ${message}.`);
-    this.socket?.close(1002, "invalid tracer frame");
+    // Browsers reject 1002 from script (only 1000 and 3000-4999 are allowed), so the application code 4002 carries it.
+    try { this.socket?.close(4002, "invalid tracer frame"); } catch { this.socket?.close(); }
   }
 
   private isSocketOpen(): boolean {
