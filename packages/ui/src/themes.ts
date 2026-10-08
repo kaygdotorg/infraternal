@@ -84,25 +84,38 @@ export interface OverlayMaterial {
 
 /** Keeps dark glass close to its palette and computes the same alpha composite used by the contrast audit. */
 /**
- * How much of the page shows through the one floating-card material, from 1 (thickest) to 4
- * (thinnest): the fill's opacity on a dark and on a light theme, and the blur in pixels. Transparency
- * comes from a low tint with a small blur: a big blur erases what is behind and reads as opaque however
- * low the tint. Level 3 is the default; `?glass=1..4` picks another so the owner can compare them.
+ * How much of what is behind shows through, in four named levels, for the two kinds of surface (the owner's
+ * approved values). Cards are the floating material (popovers, palette, sidebar, pills, toasts); windows are the
+ * terminal and other window cards. `dark` and `light` are the fill's opacity on a dark and on a light theme;
+ * `blur` is the backdrop blur in CSS pixels. Only Frosted blurs windows (many large blurred windows cost frames
+ * and memory), and only the windows on screen (see canvas/memory.ts). Solid paints no transparency and no blur at
+ * all. Levels apply through one token write (`applyTheme`); nothing runs per frame.
  */
-export const GLASS_LEVELS: Record<number, { dark: number; light: number; blur: number }> = {
-  1: { dark: 0.3, light: 0.38, blur: 20 },
-  2: { dark: 0.3, light: 0.38, blur: 16 },
-  3: { dark: 0.22, light: 0.3, blur: 16 },
-  4: { dark: 0.14, light: 0.22, blur: 16 },
+export const LEVEL_NAMES = ["Solid", "Tinted", "Clear", "Frosted"] as const;
+export interface Level { dark: number; light: number; blur: number }
+export const CARD_LEVELS: Record<number, Level> = {
+  1: { dark: 1, light: 1, blur: 0 },
+  2: { dark: 0.7, light: 0.78, blur: 8 },
+  3: { dark: 0.4, light: 0.5, blur: 24 },
+  4: { dark: 0.2, light: 0.3, blur: 32 },
 };
-export const DEFAULT_GLASS = 3;
+export const WINDOW_LEVELS: Record<number, Level> = {
+  1: { dark: 1, light: 1, blur: 0 },
+  2: { dark: 0.85, light: 0.9, blur: 0 },
+  3: { dark: 0.65, light: 0.75, blur: 0 },
+  4: { dark: 0.45, light: 0.55, blur: 24 },
+};
+/** Cards default to Tinted, windows to Solid. */
+export const DEFAULT_CARD = 2;
+export const DEFAULT_WINDOW = 1;
+export const levelName = (level: number): string => LEVEL_NAMES[level - 1] ?? LEVEL_NAMES[0];
 
-export function overlayMaterial(active: Theme, level = DEFAULT_GLASS): OverlayMaterial {
+export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMaterial {
   const tinted = mix(active.bg, "#ffffff", active.dark ? 0.06 : 0.6);
   // The one floating-card material (popover, flow card, confirmation, sidebar, toast): the page
   // behind must visibly show through, softly blurred. Secondary text over the busiest terminal
   // state stays above 4.5:1 (a text shadow carries it at the thin levels, never more tint).
-  const glass = GLASS_LEVELS[level] ?? GLASS_LEVELS[DEFAULT_GLASS]!;
+  const glass = CARD_LEVELS[level] ?? CARD_LEVELS[DEFAULT_CARD]!;
   const opacity = active.dark ? glass.dark : glass.light;
   const channels = (hex: string) => [1, 3, 5].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
   const rgb = (hex: string) => channels(hex).join(" ");
@@ -127,11 +140,19 @@ export function overlayMaterial(active: Theme, level = DEFAULT_GLASS): OverlayMa
 }
 
 /** Applies UI tokens and mesh source hues; derived surfaces stay coherent with the theme. */
-export function applyTheme(active: Theme, root: HTMLElement, glassLevel = DEFAULT_GLASS): void {
+export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT_CARD, windowLevel = DEFAULT_WINDOW): void {
   const style = root.style;
   const rgb = (hex: string) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16)).join(" ");
-  const overlay = overlayMaterial(active, glassLevel);
-  style.setProperty("--ui-overlay-blur", `${(GLASS_LEVELS[glassLevel] ?? GLASS_LEVELS[DEFAULT_GLASS]!).blur}px`);
+  const overlay = overlayMaterial(active, cardLevel);
+  const card = CARD_LEVELS[cardLevel] ?? CARD_LEVELS[DEFAULT_CARD]!;
+  const win = WINDOW_LEVELS[windowLevel] ?? WINDOW_LEVELS[DEFAULT_WINDOW]!;
+  style.setProperty("--ui-overlay-blur", `${card.blur}px`);
+  // Windows: a translucent fill (no blur except at Frosted). The data attributes let CSS skip the filter and the
+  // alpha entirely at Solid, so the default paints exactly what an opaque card paints.
+  style.setProperty("--ui-window-fill", `${Math.round((active.dark ? win.dark : win.light) * 100)}%`);
+  style.setProperty("--ui-window-blur", `${win.blur}px`);
+  root.dataset.card = levelName(cardLevel).toLowerCase();
+  root.dataset.windowLevel = levelName(windowLevel).toLowerCase();
   style.setProperty("--bg", active.bg);
   style.setProperty("--fg", active.fg);
   style.setProperty("--fg-2", active.fg2);
