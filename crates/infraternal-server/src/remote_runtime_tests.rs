@@ -282,3 +282,6 @@ pub(crate) fn server_material() -> (Identity, crate::ca::CaMaterial) {
 
 #[path = "remote_revocation_tests.rs"]
 mod revocation;
+
+#[path = "remote_review_tests.rs"]
+mod independent_review;
