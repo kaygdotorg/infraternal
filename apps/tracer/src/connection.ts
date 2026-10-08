@@ -95,6 +95,7 @@ export class MuxConnection {
   private readonly pendingPings = new Map<bigint, number>();
   private readonly subscriptions = new Map<number, Subscription>();
   private readonly welcomeListeners = new Set<() => void>();
+  private readonly attachListeners = new Set<() => void>();
   private nextSubscription = FIRST_FEATURE_SUBSCRIPTION;
   private readonly sendScratch = new Uint8Array(SEND_BUFFER_SIZE);
   private nextStream = 1;
@@ -188,6 +189,17 @@ export class MuxConnection {
     return () => { this.welcomeListeners.delete(listener); };
   }
 
+  /**
+   * Runs `listener` once a terminal stream is attached (now, if one is), and again after every reattach following a
+   * reconnect. Work that is not the terminal's (the Mesh) starts here, so the terminal never waits for it: it is
+   * the person's shell that must come up first, and a feature's failure never delays it.
+   */
+  onTerminalAttached(listener: () => void): () => void {
+    this.attachListeners.add(listener);
+    if (this.isWelcomed && this.attachedCount > 0) listener();
+    return () => { this.attachListeners.delete(listener); };
+  }
+
   /** Sends one subscription's filter (first connect and each reconnect) and lets its owner resync. */
   private openSubscription(subId: number): void {
     const sub = this.subscriptions.get(subId);
@@ -200,7 +212,7 @@ export class MuxConnection {
   streamAttached(attached: boolean, streamId?: number): void {
     if (attached && streamId !== undefined) this.writersUsed.add(streamId);
     this.attachedCount = Math.max(0, this.attachedCount + (attached ? 1 : -1));
-    if (attached) this.config.onConnectionChange?.(true);
+    if (attached) { this.config.onConnectionChange?.(true); for (const l of [...this.attachListeners]) l(); }
   }
 
   onRoundTrip(listener: (ms: number | undefined) => void): () => void {

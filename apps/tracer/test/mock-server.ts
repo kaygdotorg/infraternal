@@ -625,6 +625,11 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       sendWelcome(connection);
       return;
     case "Call": {
+      // Like the server, an action it does not know is refused (the Mesh asks `mesh.list` and must be told no).
+      if (connection.welcomed && connection.session && frame.actionId.startsWith("mesh.")) {
+        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"unknown action"}') });
+        return;
+      }
       if (!connection.welcomed || frame.callId !== 1 || frame.actionId !== "ssh.session.open") {
         connection.socket.close(1002, "unexpected test-double action");
         return;

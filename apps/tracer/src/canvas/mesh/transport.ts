@@ -7,7 +7,8 @@ export function connectionTransport(connection: MuxConnection): MeshTransport {
     // A frame sent while the socket is down is dropped and its call would wait for the next drop; failing at once
     // lets the source say "could not reach the server" and retry when the connection is back.
     call: (action, input) => (connection.isWelcomed ? connection.call(action, input) : Promise.reject(new Error("not connected"))),
-    onReady: (listener) => connection.onWelcome(listener),
+    // The Mesh asks only once a terminal is attached: the shell comes first and a Mesh failure never delays it.
+    onReady: (listener) => connection.onTerminalAttached(listener),
     subscribe: (topic, onEvent, onOpen) => connection.subscribe({ topic }, onEvent, onOpen),
   };
 }
