@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Role: Links Rust musl objects with the target sysroot's bundled LLD.
+# SPDX-License-Identifier: AGPL-3.0-only
+set -euo pipefail
+rustc_bin=$(command -v rustc)
+sysroot=$("$rustc_bin" --print sysroot)
+linker="$sysroot/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+link_args=()
+while (($#)); do
+  arg=$1
+  shift
+  case "$arg" in
+    -Wl,*)
+      IFS=, read -r -a forwarded <<< "${arg#-Wl,}"
+      link_args+=("${forwarded[@]}")
+      ;;
+    -m64|-nostartfiles|-nodefaultlibs)
+      ;;
+    *)
+      link_args+=("$arg")
+      ;;
+  esac
+done
+exec "$linker" -flavor gnu "${link_args[@]}"

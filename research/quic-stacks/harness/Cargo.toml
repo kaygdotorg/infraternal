@@ -1,0 +1,44 @@
+# Role: Standalone, feature-gated QUIC comparison harness for static musl builds.
+# SPDX-License-Identifier: AGPL-3.0-only
+
+[package]
+name = "quic-stack-bench"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[features]
+default = []
+baseline = []
+quinn-stack = ["common", "dep:quinn", "dep:rustls", "dep:tokio"]
+openssl-native = ["common"]
+common = ["dep:rcgen"]
+measure = ["baseline", "quinn-stack", "openssl-native", "dep:libc"]
+size-baseline = []
+size-quinn = ["size-baseline", "dep:quinn", "dep:rustls", "dep:tokio"]
+size-openssl-native = ["size-baseline"]
+
+[dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }
+openssl-src = "=300.6.1"
+rcgen = { version = "0.14.10", default-features = false, features = ["ring"], optional = true }
+quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time", "io-util"], optional = true }
+libc = { version = "0.2", optional = true }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[[bin]]
+name = "quic-stack-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "size-probe"
+path = "src/bin/size_probe.rs"
+required-features = ["size-baseline"]
