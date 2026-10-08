@@ -16,8 +16,10 @@ import { MemoryCanvasStore } from "../model/store";
 import type { ViewId } from "../model/types";
 import { el } from "../dom";
 import { CONTAINERS, INITIAL_GRANTS, buildViews, type Role } from "./data";
+import { DEFAULT_SESSION, createMockInventory } from "./inventory";
 import { createMockMesh } from "./mesh";
 import { createMockSessions } from "./sessions";
+import { installSessionScenes } from "./session-scenes";
 import { createMockSettings } from "./settings";
 import { createMockSharing } from "./shares";
 import { createMockWorld } from "./world";
@@ -32,7 +34,8 @@ interface Scene { name: string; hint: string; enter(): void }
 export async function mountMockup(core: CoreScreen, options: MockupOptions = {}): Promise<MockupController> {
   const stage = core.stage;
   const world = await createMockWorld(options.role ?? "operator", Boolean(options.role));
-  const sessions = createMockSessions(core, world);
+  const inventory = await createMockInventory(world);
+  const sessions = createMockSessions(core, world, inventory);
   const mesh = createMockMesh(world);
   const events = new AbortController();
   const signal = events.signal;
@@ -41,7 +44,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     float: true,
     dots: new URLSearchParams(location.search).get("dots") !== "0",
     adapters: {
-      sessions, mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
+      sessions, inventory, mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       addHost: () => core.toast.show({ message: "Add host is its own mockup (proto=addhost)." }),
     },
@@ -53,7 +56,9 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   // ---- building the world for a scene ---------------------------------------------------------------
   const build = (): void => {
     world.grants = INITIAL_GRANTS.map((g) => ({ ...g }));
-    canvas.setViews((m: Metrics) => buildViews(world.role, m, mesh, world.screens, world.omit, sceneIndex === 6 && world.role === "operator"));
+    inventory.reset();
+    const named = (host: string): { id: string; name: string } | undefined => { const id = DEFAULT_SESSION[host]; const rec = id ? inventory.get(host, id) : undefined; return rec ? { id: rec.id, name: rec.name } : undefined; };
+    canvas.setViews((m: Metrics) => buildViews(world.role, m, mesh, world.screens, world.omit, sceneIndex === 6 && world.role === "operator", named));
     cx.sharing?.reset();
   };
 
@@ -123,8 +128,9 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   };
 
   // ---- palette rows and actions that exist only in the mockup ---------------------------------------
+  const sessionScenes = installSessionScenes({ cx, inventory, rebuild: () => { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("console", true); } });
   const removeProvider = core.addPaletteProvider(() => {
-    const out: PaletteEntry[] = [];
+    const out: PaletteEntry[] = [...sessionScenes.entries()];
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: view as asha", hint: "receives shared layouts", action: "proto:role:asha" });
@@ -137,6 +143,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     const action = (event as CustomEvent<{ action?: string }>).detail?.action ?? "";
     const [prefix, kind, value] = action.split(":");
     if (prefix !== "proto") return;
+    if (kind === "sessions-scene" && value) { void sessionScenes.run(Number(value)); return; }
     if (kind === "devicechip") showContinueChip();
     else if (kind === "scene" && value) goScene(Number(value) - 1);
     else if (kind === "role" && value) { world.role = value as Role; world.forcedRole = true; goScene(4); window.setTimeout(showContinueChip, 900); }
@@ -166,6 +173,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   // ---- start ----------------------------------------------------------------------------------------
   const startScene = Math.min(scenes.length - 1, Math.max(0, ((options.scene ?? 1) | 0) - 1));
   goScene(startScene);
+  const sessionsScene = Number(new URLSearchParams(location.search).get("sessions")) || 0;
+  if (sessionsScene) window.setTimeout(() => { void sessionScenes.run(sessionsScene); }, 400);
 
   const probe = {
     scene: () => sceneIndex + 1,
@@ -186,6 +195,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     setCanvasLock: (on: boolean) => cx.nav.setCanvasLock(on),
     reachFor: () => cx.mesh?.reachFor()?.model.id,
     reachCount: () => cx.mesh?.reachCount() ?? 0,
+    sessions: () => ({ status: inventory.status(), hosts: inventory.hosts().map((host) => ({ host, sessions: inventory.list(host).map((s) => ({ id: s.id, name: s.name, state: s.state, activity: s.activity ?? null, pinned: s.pinned })) })) }),
+    runSessionScene: (n: number) => sessionScenes.run(n),
   };
   (window as unknown as { __tracerClusters?: typeof probe }).__tracerClusters = probe;
 
@@ -195,6 +206,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       window.clearInterval(streamTimer);
       window.clearInterval(seedTimer);
       removeProvider();
+      sessionScenes.dispose();
+      inventory.dispose();
       mockupTag.remove();
       chip?.remove();
       canvas.dispose();
