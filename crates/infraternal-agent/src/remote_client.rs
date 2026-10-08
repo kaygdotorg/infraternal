@@ -31,12 +31,49 @@ pub struct RemoteIdentity {
 /// # Errors
 /// Refuses local uid mismatch or invalid credentials before contacting the server.
 pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Result<()> {
+    run_inner(identity, state, None).await
+}
+
+/// Keep atomic publication and reconnect identity in sync throughout live renewal.
+/// # Errors
+/// Refuses unsafe local identity, expired credentials or failed transport configuration.
+pub async fn run_with_publisher(
+    identity: &RemoteIdentity,
+    state: Option<PathBuf>,
+    publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
+) -> io::Result<()> {
+    let renewal =
+        crate::remote_renewal::RenewalIdentity::new(&identity.identity, &identity.roots, publisher);
+    run_inner(identity, state, Some(&renewal)).await
+}
+
+async fn run_inner(
+    identity: &RemoteIdentity,
+    state: Option<PathBuf>,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+) -> io::Result<()> {
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    let tls = remote_tls::client_config(&identity.identity, &identity.roots)?;
     let mut backoff = Duration::from_millis(200);
     loop {
+        let current = match renewal {
+            Some(renewal) => renewal.current()?,
+            None => Identity {
+                certificate: identity.identity.certificate.clone(),
+                key: identity.identity.key.clone(),
+            },
+        };
+        crate::remote_renewal::require_current(&current)?;
+        let identity = RemoteIdentity {
+            identity: current,
+            roots: identity.roots.clone(),
+            endpoint: identity.endpoint,
+            server_name: identity.server_name.clone(),
+            execution_uid: identity.execution_uid,
+        };
+        let identity = &identity;
+        let tls = remote_tls::client_config(&identity.identity, &identity.roots)?;
         let started = tokio::time::Instant::now();
         let quic = dial_runtime::DialRuntime::new();
         let mut endpoint = quinn::Endpoint::new(
@@ -56,7 +93,7 @@ pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Resul
         let connected = dial_preferred(&endpoint, identity, &tls).await;
         match connected {
             Ok(Connected::Quic(connection)) => {
-                let _ = quic_session(connection, identity, state.clone()).await;
+                let _ = quic_session(connection, identity, state.clone(), renewal).await;
             }
             Ok(Connected::Tcp(connection)) => {
                 // The losing handshake otherwise retains Quinn drain timers after
@@ -64,10 +101,11 @@ pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Resul
                 // the authenticated TCP channel and rootless shims are independent.
                 drop(endpoint);
                 drop(quic);
-                let _ = daemon::run_authenticated(
+                let _ = daemon::run_authenticated_with_renewal(
                     &connection.channel,
                     state.clone(),
                     identity.execution_uid,
+                    renewal,
                 )
                 .await;
             }
@@ -177,6 +215,7 @@ async fn quic_session(
     connection: quinn::Connection,
     identity: &RemoteIdentity,
     state: Option<PathBuf>,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
 ) -> io::Result<()> {
     let result = async {
         let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
@@ -184,7 +223,7 @@ async fn quic_session(
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
         let mut tx = crate::transport::Transmit::default();
-        let greeting = infraternal_protocol::Frame::Hello { version:1, caps:remote_quic::REMOTE_WRITER_BINDING, client_info:"infraternal agent" };
+        let greeting = infraternal_protocol::Frame::Hello { version:1, caps:remote_quic::REMOTE_WRITER_BINDING | if renewal.is_some() { crate::remote_renewal::LIVE_RENEWAL } else { 0 }, client_info:"infraternal agent" };
         tx.send(&control, 0, &greeting).await?;
         let mut sent_greeting = Vec::new();
         encode_frame_into(&greeting, &mut sent_greeting).map_err(io::Error::other)?;
@@ -195,7 +234,7 @@ async fn quic_session(
         encode_frame_into(&hello.frame, &mut prefix).map_err(io::Error::other)?;
         let control = PrefixedControl { channel:control, prefix:Mutex::new(prefix), sent_greeting:Mutex::new(Some(sent_greeting)), receive:Mutex::new(rx) };
         let mut terminals = JoinSet::new();
-        let dispatch = daemon::run_authenticated(&control, state.clone(), identity.execution_uid);
+        let dispatch = daemon::run_authenticated_with_renewal(&control, state.clone(), identity.execution_uid, renewal);
         tokio::pin!(dispatch);
         loop {
             // Keep partial binding progress across completed terminal jobs.
