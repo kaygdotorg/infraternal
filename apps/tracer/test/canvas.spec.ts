@@ -834,3 +834,14 @@ test("copy works from a plain-http, non-localhost origin: no async clipboard, th
     await browser.close();
   }
 });
+
+test("top pill: the host's operating-system icon replaces the connection dot and follows the active window", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  const pill = page.locator("#capsule");
+  await expect(pill.locator("#connection-dot")).toBeHidden();
+  await expect(pill.locator("#capsule-os svg")).toBeVisible();
+  const first = await pill.locator("#capsule-os").innerHTML();
+  await page.locator(".ui-window").nth(2).locator(".ui-window-body").click(); // an Arch/Debian-family host, not the first
+  await expect.poll(() => pill.locator("#capsule-os").innerHTML()).not.toBe(first);
+});

@@ -320,6 +320,12 @@ body:has(.ui-confirm-tip[data-open="true"]) .terminal-screen .test-double-badge 
 .tab-host { color: var(--fg-3); }
 .tab-name { color: var(--fg); }
 .tab-add svg { width: 14px; height: 14px; }
+.capsule-os { display: none; flex: none; width: 16px; height: 16px; color: var(--fg-2); }
+.capsule-os svg { width: 100%; height: 100%; fill: currentColor; stroke: none; }
+.capsule-os svg.is-line { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
+/* In the canvas preview the pill shows the host's OS mark in place of the connection dot. */
+.terminal-screen[data-preview] .capsule-os { display: inline-grid; place-items: center; }
+.terminal-screen[data-preview] #connection-dot { display: none; }
 .dot { display: inline-block; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); }
 .dot.live { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 18%, transparent); }
 .dot.connecting { background: var(--fg-3); }

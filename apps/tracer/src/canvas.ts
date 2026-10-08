@@ -389,6 +389,9 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     // A window that only hosts a flow has no session: the capsule shows its title once.
     stage.querySelector<HTMLElement>("#capsule")?.toggleAttribute("data-flow", Boolean(window.flow));
     const sessionLabel = stage.querySelector<HTMLElement>(".capsule-session");
+    // The pill shows the window's host operating system (a flow shows the add mark) instead of the dot.
+    const os = stage.querySelector<HTMLElement>("#capsule-os");
+    if (os) os.innerHTML = window.flow ? '<svg viewBox="0 0 24 24" aria-hidden="true" class="is-line"><path d="M12 5v14M5 12h14"/></svg>' : hostIconMarkup(window.host.os, "ui-host-mark");
     if (hostLabel) hostLabel.textContent = window.live ? hostName : `${window.host.user ? `${window.host.user}@` : ""}${window.host.name}`;
     if (sessionLabel) sessionLabel.textContent = window.flow ? "" : window.session.name;
   };
@@ -615,6 +618,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       Object.assign(liveHost, { ...first!, id: "live", name: hostName, sessions: [] });
       liveWindow.card.setIcon(hostIconMarkup(liveHost.os, "ui-host-mark"));
       liveWindow.card.setTitle({ host: hostName, user: liveHost.user, session: liveSession.name });
+      if (active === liveWindow) updateCapsule(liveWindow);
       // Inserted after the live window in order, ahead of any flow window already open.
       let anchor = liveWindow;
       for (const host of [first!, ...rest]) anchor = addWindow(host, host.sessions[0]!, false, anchor);

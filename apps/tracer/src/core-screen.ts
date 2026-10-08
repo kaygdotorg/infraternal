@@ -87,6 +87,7 @@ const SCREEN = `
     <header class="top" aria-label="Terminal controls">
       <span class="top-spacer" aria-hidden="true"></span>
       <button class="ui-pill capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
+        <span class="capsule-os" id="capsule-os" aria-hidden="true"></span>
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
         <span class="capsule-session">SSH shell</span><span class="capsule-rtt" id="rtt" aria-label="Round trip">··</span>
