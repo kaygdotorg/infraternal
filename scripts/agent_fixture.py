@@ -124,6 +124,26 @@ class Binary:
             # travels exclusively over the fixture socket and is never logged.
             raise AssertionError(f'daemon exit {self.child.returncode}: {self.child.stderr.read().decode()}') from error
 
+    def inherit_scope_priority(self):
+        """Apply this test's CPU weight only to its own transient shim scope."""
+        try:
+            relative = next(line.split(':', 2)[2] for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::'))
+            weight = int((Path('/sys/fs/cgroup') / relative.lstrip('/') / 'cpu.weight').read_text())
+        except (OSError, StopIteration, ValueError):
+            return  # Non-cgroup platforms use the inherited process scheduler.
+        if weight == 100:
+            return
+        control = ['systemctl'] + ([] if os.geteuid() == 0 else ['--user'])
+        unit = f'infraternal-session-{self.id.hex}.scope'
+        loaded = subprocess.run(control + ['show', unit, '-p', 'LoadState', '--value'], capture_output=True, text=True)
+        if loaded.returncode or loaded.stdout.strip() != 'loaded':
+            return  # Detached launch already inherits the fixture's cgroup.
+        # systemd moves the shim out of the gate's scope so it can survive its
+        # daemon. Without this explicit runtime property, producer deadlines
+        # measure a default-priority shim against high-priority build jobs.
+        subprocess.run(control + ['set-property', '--runtime', unit, f'CPUWeight={weight}'],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
     def open(self, cols=80, rows=24):
         action = b'terminal.open'
         self.send(0, 0x30, struct.pack('<I', 1) + varint(len(action)) + action +
@@ -137,6 +157,7 @@ class Binary:
             assert stream == 1
         assert (stream, kind) == (0, 0x31) and body[4] == 1, body
         self.id = uuid.UUID(json.loads(body[5:])['session_id'])
+        self.inherit_scope_priority()
         self.out = self.entered = self.acked = 0
         self.credit_pending = 0
         self.data.clear()
