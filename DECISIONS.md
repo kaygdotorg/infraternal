@@ -1231,3 +1231,29 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      view, using the same window frame, tiling and canvas lock. ⌘K jumps to
      any section. Leaving Settings is switching views. Changes apply live.
      Supersedes the Settings overlay mentioned in D177 and D178.
+180. **The canvas document (owner, 2026-10-08, #93):** our own small,
+     versioned JSON format (`infraternal.canvas`), per account (D178).
+     - It holds layout and references only, never content (no scrollback,
+       secrets or configuration).
+     - Views have a kind and a layout (tiled: columns of windows with
+       relative weights; graph: nodes and edges). Views sit on a coarse cell
+       grid.
+     - Windows reference their target by a stable ID plus a readable name;
+       the same IDs back deep links (#86).
+     - Edges reference grants by name only, never the rules themselves.
+     - Sync works by small server-applied operations with a revision
+       number, so concurrent edits from several devices all survive.
+     - Graph nodes are laid out automatically; nodes the user drags are
+       pinned and saved.
+     - Exports: our JSON (with import), Markdown, image (share studio, #94)
+       and Excalidraw; JSON Canvas only if cheap. IPs are redacted by default
+       in exports, hostnames and usernames on request.
+     - The Topology view is renamed **Mesh**.
+     - Live sharing of content (a link for instance users or anonymous
+       viewers, with view or edit permission) is a separate feature from
+       the share studio, still to be designed.
+181. **Adding hosts uses the system OpenSSH (owner, 2026-10-08, #78):** the
+     add-host flow runs the system `ssh`, so the user's `~/.ssh/config`,
+     `known_hosts`, keys and agent work unchanged. A built-in client (russh)
+     comes later for interactive browser sessions, with its own security
+     review, and falls back to the system OpenSSH wherever it lacks support.
