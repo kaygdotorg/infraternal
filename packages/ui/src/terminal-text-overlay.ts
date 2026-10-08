@@ -38,6 +38,8 @@ export interface TerminalTextOverlayPosition {
   fontSize: number;
   devicePixelRatio?: number | undefined;
   foreground?: string | undefined;
+  /** The terminal's opaque background; covers cells whose confirmed glyph a pending erase removes. */
+  background?: string | undefined;
   cursorStyle?: "block" | "underline" | "bar";
   cursorColor?: string;
 }
@@ -47,6 +49,12 @@ export interface TerminalTextOverlayGlyph {
   x: number;
   y: number;
   cells: number;
+}
+
+/** A cell, by whole column and row, that a pending erase has cleared in text the host already confirmed. */
+export interface TerminalTextOverlayCell {
+  x: number;
+  y: number;
 }
 
 export interface TerminalTextOverlayCursor {
@@ -59,6 +67,8 @@ export interface TerminalTextOverlaySnapshot {
   visible: boolean;
   text: string;
   glyphs: Array<{ text: string; x: number; y: number }>;
+  /** Cells covered with the background, in CSS pixels. */
+  erased: Array<{ x: number; y: number }>;
   cursor: { x: number; y: number; width: number; height: number } | undefined;
 }
 
@@ -68,7 +78,7 @@ export class TerminalTextOverlay {
   private offsetKey = "";
   private drawnRows: [number, number] | undefined;
   private shown = false;
-  private last: TerminalTextOverlaySnapshot = { visible: false, text: "", glyphs: [], cursor: undefined };
+  private last: TerminalTextOverlaySnapshot = { visible: false, text: "", glyphs: [], erased: [], cursor: undefined };
   /** The one subtle cue that a glyph is still unconfirmed; the cursor stays fully opaque. */
   private readonly textAlpha: number;
 
@@ -94,9 +104,10 @@ export class TerminalTextOverlay {
     glyphs: readonly TerminalTextOverlayGlyph[],
     cursor: TerminalTextOverlayCursor | undefined,
     position: TerminalTextOverlayPosition,
+    erased: readonly TerminalTextOverlayCell[] = [],
   ): boolean {
     const context = this.context;
-    if (!context || (!glyphs.length && !cursor) || !position.visible || position.alternate || position.viewportY !== 0
+    if (!context || (!glyphs.length && !cursor && !erased.length) || !position.visible || position.alternate || position.viewportY !== 0
       || position.x < 0 || position.x >= position.columns || position.y < 0 || position.y >= position.rows) {
       this.hide();
       return false;
@@ -119,6 +130,19 @@ export class TerminalTextOverlay {
     let minRow = Number.POSITIVE_INFINITY;
     let maxRow = Number.NEGATIVE_INFINITY;
     const drawn: TerminalTextOverlaySnapshot["glyphs"] = [];
+    // Cells erased out of confirmed text are covered first, so the old glyph is gone before the host repaints.
+    const covered: TerminalTextOverlaySnapshot["erased"] = [];
+    if (position.background) {
+      context.globalAlpha = 1;
+      context.fillStyle = position.background;
+      for (const cell of erased) {
+        const x = cell.x * cellWidth;
+        context.fillRect(x, cell.y * cellHeight, cellWidth, cellHeight);
+        covered.push({ x, y: cell.y * cellHeight });
+        if (cell.y < minRow) minRow = cell.y;
+        if (cell.y > maxRow) maxRow = cell.y;
+      }
+    }
     context.font = `${position.fontSize}px ${position.fontFamily}`;
     context.textBaseline = "alphabetic";
     context.textAlign = "left";
@@ -158,8 +182,18 @@ export class TerminalTextOverlay {
       this.canvas.style.visibility = "visible";
       this.shown = true;
     }
-    this.last = { visible: true, text: glyphs.map((glyph) => glyph.text).join(""), glyphs: drawn, cursor: cursorBox };
+    this.last = { visible: true, text: glyphs.map((glyph) => glyph.text).join(""), glyphs: drawn, erased: covered, cursor: cursorBox };
     return true;
+  }
+
+  /**
+   * Synchronises the canvas with the renderer's current size (the costly part of a first draw after a resize)
+   * without drawing or showing anything. A no-op while something is on screen.
+   */
+  warm(position: TerminalTextOverlayPosition): void {
+    const source = position.canvas;
+    if (!this.context || this.shown || source.width <= 0 || source.height <= 0) return;
+    this.syncGeometry(source, position.devicePixelRatio ?? window.devicePixelRatio ?? 1);
   }
 
   /** Removes speculative pixels immediately when their input is confirmed or invalidated. */
@@ -172,7 +206,7 @@ export class TerminalTextOverlay {
       this.canvas.style.visibility = "hidden";
       this.shown = false;
     }
-    this.last = { visible: false, text: "", glyphs: [], cursor: undefined };
+    this.last = { visible: false, text: "", glyphs: [], erased: [], cursor: undefined };
   }
 
   /** What is currently drawn (CSS pixels relative to the renderer canvas). */
