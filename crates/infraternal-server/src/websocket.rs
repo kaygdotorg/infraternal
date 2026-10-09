@@ -603,12 +603,25 @@ async fn run_socket(
 
 /// Interrupt pending work on authority loss. Subscribing before the read closes the missed-wakeup window.
 /// Checks on the ready branch prevent a late backend reply winning against committed revocation.
-async fn while_authorized<T>(
+async fn while_authorized<T: Send>(
     state: &WebSocketState,
     user: &str,
     token: &str,
     renew: bool,
-    operation: impl std::future::Future<Output = Result<T, ()>>,
+    operation: impl std::future::Future<Output = Result<T, ()>> + Send,
+) -> Result<T, ()> {
+    // Sharing the watchdog across operation future types bounds transport code
+    // size as compiled plugins grow. One short-lived allocation replaces each
+    // separate watchdog state machine; operation cancellation stays unchanged.
+    while_authorized_operation(state, user, token, renew, operation.boxed()).await
+}
+
+async fn while_authorized_operation<T: Send>(
+    state: &WebSocketState,
+    user: &str,
+    token: &str,
+    renew: bool,
+    operation: infraternal_plugin_api::Operation<'_, Result<T, ()>>,
 ) -> Result<T, ()> {
     let mut revocations = state.auth.revocation_events();
     let mut expiry = authority_deadline(state, user, token, renew).await?;
