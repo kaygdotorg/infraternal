@@ -1403,3 +1403,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Rendering:** a per-pixel signed-distance smooth-min silhouette in a
        single short-lived GPU surface (iOS memory rule), anti-aliased at the
        device's real density, held to 60 fps or more.
+191. **Phone window width, the keyboard and the plain background (owner, 2026-10-09):**
+     - **Background:** the default background is **Plain** (it was Soft).
+     - **Window width:** on phones a terminal window takes 99% of the screen
+       width by default; desktop keeps today's width. The width is a setting
+       under **Settings → Window Sizes**, with plain option names (technical
+       detail, such as the percentage, only in an option's subtitle).
+     - **Keyboard:** the on-screen keyboard never changes a window's width or
+       its terminal's columns; only the height adapts.
+     - **Focus on open:** a terminal never looks ready for typing (a blinking
+       cursor) unless the keyboard can actually appear; on iOS the keyboard
+       needs a tap, so the first tap on the terminal opens it.
