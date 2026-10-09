@@ -68,3 +68,28 @@ fn flattened_quoted_public_filenames_are_refused_when_existing_trust_would_be_lo
     assert!(!parsed.validate_trust_paths());
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn trust_lookup_uses_every_explicit_alias_verbatim() {
+    let original = Destination::parse("user@original").unwrap();
+    for (alias, expected) in [
+        ("", "[endpoint]:2222"),
+        ("hostkeyalias retained-alias\n", "retained-alias"),
+        ("hostkeyalias none\n", "none"),
+    ] {
+        let bytes = format!(
+            "hostname endpoint\nport 2222\nuserknownhostsfile /dev/null\nglobalknownhostsfile /dev/null\n{alias}"
+        );
+        let parsed = PublicSshConfiguration::parse(&original, bytes.as_bytes()).unwrap();
+        assert_eq!(parsed.trust_policy().unwrap().lookup, expected);
+    }
+}
+#[test]
+fn unresolved_or_relative_public_paths_cannot_admit_first_contact() {
+    let original = Destination::parse("user@original").unwrap();
+    for path in ["relative-public-trust", "/nonexistent/public-trust-%h"] {
+        let bytes = format!("hostname endpoint\nport 22\nuserknownhostsfile {path}\n");
+        let parsed = PublicSshConfiguration::parse(&original, bytes.as_bytes()).unwrap();
+        assert!(parsed.trust_policy().is_none());
+    }
+}
