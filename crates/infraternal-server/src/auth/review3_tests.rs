@@ -721,7 +721,7 @@ async fn review3_backend_reply_has_a_deadline() {
 #[tokio::test(start_paused = true)]
 async fn review3_revoked_resume_must_not_welcome() {
     let _guard = SERIAL.lock().await;
-    let _clock = FrozenSocketTime::new().await;
+    let clock = FrozenSocketTime::new().await;
     let (f, addr, server, _peer) =
         review3_socket_with_authority_read_timeout(Duration::from_millis(25)).await;
     let cookie = format!("__Host-infraternal={}", f.session);
@@ -780,6 +780,11 @@ async fn review3_revoked_resume_must_not_welcome() {
     )
     .unwrap();
     let _ = socket.send(Message::Binary(wire.into())).await;
+    // Authority is already revoked and Resume is queued: only closure is valid.
+    // Shutdown can need its bounded writer fallback, so let real time run in
+    // this negative phase. The read deadline only bounds a hang; no elapsed
+    // time is asserted, and any Welcome still fails the authority assertion.
+    drop(clock);
     let start = Instant::now();
     let next = tokio::time::timeout(Duration::from_secs(30), socket.next())
         .await
