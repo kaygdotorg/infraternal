@@ -29,6 +29,7 @@ rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+zeroize = { version = "1.9", features = ["serde"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "signal", "time", "process", "io-util"] }
