@@ -168,6 +168,8 @@ async fn next(browser: &mut Browser) -> bytes::Bytes {
 }
 
 struct Fixture {
+    signer: Arc<crate::ca_memory::MemoryCaSource>,
+    material: crate::ca::CaMaterial,
     identity: infraternal_agent::remote_tls::Identity,
     pool: sqlx::SqlitePool,
     root: X509,
@@ -192,6 +194,15 @@ async fn fixture(directory: &Directory) -> Fixture {
 }
 
 async fn fixture_at(directory: &Directory, address: SocketAddr, endpoint: SocketAddr) -> Fixture {
+    fixture_at_with_lock(directory, address, endpoint, false).await
+}
+
+async fn fixture_at_with_lock(
+    directory: &Directory,
+    address: SocketAddr,
+    endpoint: SocketAddr,
+    cold_locked: bool,
+) -> Fixture {
     let server_data = directory.0.join("server");
     let pool = open_database(&server_data).await.unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
@@ -203,7 +214,11 @@ async fn fixture_at(directory: &Directory, address: SocketAddr, endpoint: Socket
     let (identity, material) = crate::remote_runtime::tests::server_material();
     let root = material.issuer().clone();
     let signer = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(root.clone()));
-    signer.unlock_from(&Administrator(material)).unwrap();
+    if !cold_locked {
+        signer
+            .unlock_from(&Administrator(material.clone()))
+            .unwrap();
+    }
     let origin = "https://localhost:4701";
     let config = ServerConfig {
         listen: address,
@@ -225,7 +240,7 @@ async fn fixture_at(directory: &Directory, address: SocketAddr, endpoint: Socket
     .unwrap();
     let service = crate::remote_runtime::RemoteService {
         enrollment: crate::remote_http::EnrollmentService {
-            source: signer,
+            source: signer.clone(),
             endpoint: crate::remote_http::EnrollmentEndpoint {
                 ca_der: root.to_der().unwrap(),
                 endpoint,
@@ -259,6 +274,8 @@ async fn fixture_at(directory: &Directory, address: SocketAddr, endpoint: Socket
             .serve(app.into_make_service_with_connect_info::<SocketAddr>()),
     );
     Fixture {
+        signer,
+        material,
         identity,
         pool,
         root,
@@ -376,7 +393,12 @@ async fn idle_canary(process: &Process) {
         .find(|line| line.starts_with("VmRSS:"))
         .unwrap();
     println!(
-        "remote_idle {rss} scale=1 full_daemon=true harness_profile=debug cli_profile=external_artifact"
+        "remote_idle {rss} scale=1 full_daemon=true harness_profile={} cli_profile=external_artifact",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
     );
     let result = tokio::process::Command::new("python3")
         .args([
@@ -678,3 +700,12 @@ mod real_host;
 
 #[path = "remote_cold_tests.rs"]
 mod cold_start;
+
+#[path = "remote_live_renewal_tests.rs"]
+mod renewal;
+
+#[path = "remote_renewal_ack_tests.rs"]
+mod renewal_ack;
+
+#[path = "remote_renewal_cli_tests.rs"]
+mod renewal_cli;

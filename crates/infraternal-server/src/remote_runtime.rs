@@ -63,6 +63,14 @@ impl RemoteHosts {
             .filter(|host| host.authority.permits())
             .map(|host| host.actor.clone())
     }
+    #[cfg(test)]
+    pub(crate) async fn admission_for_test(&self, id: Uuid) -> Option<AuthorityGuard> {
+        self.0
+            .lock()
+            .await
+            .get(&id)
+            .map(|host| host.authority.clone())
+    }
     async fn admit(&self, authority: AuthorityGuard, link: RemoteLink) -> io::Result<()> {
         if !authority.permits() {
             return Err(io::ErrorKind::PermissionDenied.into());

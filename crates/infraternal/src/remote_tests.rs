@@ -1,4 +1,4 @@
-//! Verifies bounded operator input and private no-replace host identity publication [63][132], #78.
+//! Verifies bounded operator input, private identity creation and certificate-only renewal publication [63][132][133], #78.
 
 use super::*;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
@@ -123,4 +123,72 @@ async fn uid_and_privilege_mismatch_fails_before_key_generation() {
         );
         assert!(!data.exists());
     }
+}
+
+#[test]
+fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata() {
+    use infraternal_agent::remote_renewal::CertificatePublisher;
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let stored = StoredIdentity {
+        host_id: uuid::Uuid::new_v4(),
+        certificate_der: "old public certificate".into(),
+        key_der: "private fixture sentinel".into(),
+        ca_der: "public issuer fixture".into(),
+        endpoint: "127.0.0.1:7443".parse().unwrap(),
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
+    let key = PKey::generate_ed25519().unwrap();
+    let mut certificate = X509::builder().unwrap();
+    certificate.set_version(2).unwrap();
+    let name = openssl::x509::X509NameBuilder::new().unwrap().build();
+    certificate.set_subject_name(&name).unwrap();
+    certificate.set_issuer_name(&name).unwrap();
+    certificate.set_pubkey(&key).unwrap();
+    certificate
+        .set_serial_number(
+            &openssl::bn::BigNum::from_u32(1)
+                .unwrap()
+                .to_asn1_integer()
+                .unwrap(),
+        )
+        .unwrap();
+    certificate
+        .set_not_before(&openssl::asn1::Asn1Time::from_unix(1_700_000_000).unwrap())
+        .unwrap();
+    certificate
+        .set_not_after(&openssl::asn1::Asn1Time::from_unix(2_000_000_000).unwrap())
+        .unwrap();
+    certificate.sign(&key, MessageDigest::null()).unwrap();
+    let certificate = certificate.build();
+    let publisher = IdentityPublisher {
+        data: data.clone(),
+        stored,
+    };
+    publisher.publish(&certificate).unwrap();
+    let path = data.join("identity.json");
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut expected = serde_json::to_value(&publisher.stored).unwrap();
+    expected["certificate_der"] = B64.encode(certificate.to_der().unwrap()).into();
+    assert!(
+        current == expected,
+        "publication changed private identity metadata"
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(publisher.publish(&certificate).is_err());
+    std::fs::remove_file(&path).unwrap();
+    let target = directory.0.join("sentinel");
+    std::fs::write(&target, b"unchanged").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    symlink(&target, &path).unwrap();
+    assert!(publisher.publish(&certificate).is_err());
+    assert_eq!(std::fs::read(target).unwrap(), b"unchanged");
 }

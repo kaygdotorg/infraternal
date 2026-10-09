@@ -332,3 +332,6 @@ async fn explicit_listener_pair_never_moves_an_occupied_operator_port() {
     );
     assert_eq!(collision.local_addr().unwrap(), address);
 }
+
+#[path = "remote_renewal_checks.rs"]
+mod renewal_checks;

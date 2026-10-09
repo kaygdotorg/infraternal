@@ -241,6 +241,59 @@ pub(crate) mod tests {
             Ok(CaMaterial::new(self.key.clone(), self.issuer.clone()))
         }
     }
+    /// Test-only leaf construction isolates renewal constraints against the same issuer and retained host key.
+    pub(crate) fn altered_renewal_leaf(
+        material: &CaMaterial,
+        key: &PKey<Private>,
+        host: Uuid,
+        epoch: i64,
+        lifetime: i64,
+        client_auth: bool,
+    ) -> X509 {
+        let mut subject = X509NameBuilder::new().unwrap();
+        subject
+            .append_entry_by_text("CN", &host.to_string())
+            .unwrap();
+        let mut leaf = X509::builder().unwrap();
+        leaf.set_version(2).unwrap();
+        leaf.set_serial_number(&BigNum::from_u32(2).unwrap().to_asn1_integer().unwrap())
+            .unwrap();
+        leaf.set_subject_name(&subject.build()).unwrap();
+        leaf.set_issuer_name(material.issuer.subject_name())
+            .unwrap();
+        leaf.set_pubkey(key).unwrap();
+        leaf.set_not_before(&Asn1Time::from_unix(epoch).unwrap())
+            .unwrap();
+        leaf.set_not_after(&Asn1Time::from_unix(epoch + lifetime).unwrap())
+            .unwrap();
+        leaf.append_extension(BasicConstraints::new().critical().build().unwrap())
+            .unwrap();
+        leaf.append_extension(
+            KeyUsage::new()
+                .critical()
+                .digital_signature()
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut purpose = ExtendedKeyUsage::new();
+        if client_auth {
+            purpose.client_auth();
+        } else {
+            purpose.server_auth();
+        }
+        leaf.append_extension(purpose.build().unwrap()).unwrap();
+        leaf.append_extension(
+            SubjectAlternativeName::new()
+                .uri(&format!("urn:infraternal:host:{host}"))
+                .build(&leaf.x509v3_context(Some(&material.issuer), None))
+                .unwrap(),
+        )
+        .unwrap();
+        leaf.sign(&material.key, MessageDigest::null()).unwrap();
+        leaf.build()
+    }
+
     struct Locked;
     impl CaKeySource for Locked {
         fn load(&self) -> Result<CaMaterial, CaError> {
