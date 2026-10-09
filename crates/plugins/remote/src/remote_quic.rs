@@ -75,13 +75,29 @@ fn identity(
     Ok((vec![certificate], key.into()))
 }
 fn transport(incoming_streams: u32) -> std::sync::Arc<quinn::TransportConfig> {
+    transport_with_liveness(
+        incoming_streams,
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(60),
+    )
+}
+fn transport_with_liveness(
+    incoming_streams: u32,
+    keep_alive: std::time::Duration,
+    idle: std::time::Duration,
+) -> std::sync::Arc<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
     config.congestion_controller_factory(std::sync::Arc::new(
         quinn::congestion::BbrConfig::default(),
     ));
-    // Healthy idle channels have no keepalive or idle-expiry polling deadline.
-    // Reconnect is driven by failure; server authority leases are separate.
-    config.max_idle_timeout(None).keep_alive_interval(None);
+    // A small transport-only probe preserves short NAT mappings. Four missed
+    // intervals allow a minute of transient loss before reconnect; healthy ACKs
+    // reset idle expiry. These probes never perform database or authority work.
+    config
+        .max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(
+            u32::try_from(idle.as_millis()).unwrap_or(60_000),
+        ))))
+        .keep_alive_interval(Some(keep_alive));
     config.max_concurrent_uni_streams(0u32.into());
     // Quinn preallocates slots up to this limit. Hosts initiate only control0;
     // server-opened terminals use the daemon's existing attachment bound, not
@@ -97,7 +113,7 @@ fn transport(incoming_streams: u32) -> std::sync::Arc<quinn::TransportConfig> {
 }
 /// Configure authenticated server admission and event-driven BBR transport.
 /// Callers must bound `Incoming`/`Connecting` and control-Hello negotiation
-/// explicitly: disabling idle expiry also removes Quinn's handshake idle timer.
+/// explicitly; the transport idle deadline is separate from application admission.
 /// # Errors
 /// Refuses invalid identity/trust or unavailable crypto configuration.
 pub fn server_config(
@@ -127,7 +143,7 @@ pub fn server_config(
 }
 /// Configure outgoing mTLS and retained public server trust.
 /// Callers must bound `Connecting` and control-Hello negotiation explicitly;
-/// healthy established connections intentionally have no idle expiry timer.
+/// healthy established connections remain live through acknowledged transport probes.
 /// # Errors
 /// Refuses invalid identity/trust or unavailable crypto configuration.
 pub fn client_config(
@@ -268,6 +284,73 @@ mod tests {
     use super::*;
     use crate::remote_tls::tests::{leaf, root};
     use openssl::hash::MessageDigest;
+
+    /// Exercise acknowledged idle traffic and a lost NAT path using the same
+    /// production configuration helper at accelerated transport-only intervals.
+    #[tokio::test]
+    async fn acknowledged_idle_survives_and_a_silent_path_times_out() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let ca = root();
+        let server_identity = leaf(&ca, true);
+        let client_identity = leaf(&ca, false);
+        let config = transport_with_liveness(
+            1,
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(250),
+        );
+        let mut server_config =
+            server_config(&server_identity, std::slice::from_ref(&ca.certificate)).unwrap();
+        server_config.transport_config(config.clone());
+        let server =
+            quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let server_address = server.local_addr().unwrap();
+        let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy.local_addr().unwrap();
+        let forwarding = Arc::new(AtomicBool::new(true));
+        let state = forwarding.clone();
+        let relay = tokio::spawn(async move {
+            let mut bytes = vec![0; 65536];
+            let mut client = None;
+            loop {
+                let (count, source) = proxy.recv_from(&mut bytes).await.unwrap();
+                let target = if source == server_address {
+                    client
+                } else {
+                    client = Some(source);
+                    Some(server_address)
+                };
+                if state.load(Ordering::Relaxed)
+                    && let Some(target) = target
+                {
+                    proxy.send_to(&bytes[..count], target).await.unwrap();
+                }
+            }
+        });
+        let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut client_config = client_config(&client_identity, &[ca.certificate]).unwrap();
+        client_config.transport_config(config);
+        client.set_default_client_config(client_config);
+        let (dial, accept) =
+            tokio::join!(client.connect(proxy_address, "localhost").unwrap(), async {
+                server.accept().await.unwrap().await
+            });
+        let dial = dial.unwrap();
+        let accept = accept.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        assert!(dial.close_reason().is_none());
+        assert!(accept.close_reason().is_none());
+        forwarding.store(false, Ordering::Relaxed);
+        let failure = tokio::time::timeout(std::time::Duration::from_secs(2), dial.closed())
+            .await
+            .unwrap();
+        assert!(matches!(failure, quinn::ConnectionError::TimedOut));
+        relay.abort();
+        client.close(0u32.into(), b"");
+        server.close(0u32.into(), b"");
+    }
 
     #[tokio::test]
     async fn repeated_native_id_has_distinct_server_writer_authority_and_preserves_suffix() {
