@@ -110,9 +110,10 @@ def run_case(binary, name, fixture):
         while not any(event.get('type') == 'terminal.snapshot_unavailable' for event in client.events):
             client.process()
         assert not client.snapshots, 'legacy peer must not receive approximation'
-        client.send(0, 0x08, struct.pack('<QQ', 123, 456))
-        stream, kind, _ = client.read()
-        assert (stream, kind) == (0, 0x09), 'legacy Snapshot rejection must leave daemon live'
+        # Stream events already queued before Ping can precede its Pong.
+        # The shared fence drains and validates them, then checks the exact
+        # nonce; a live stream must still answer without relaxing its deadline.
+        client.fence()
         print(f'reconnect {name}: legacy limitation parks live stream; Ping PASS', flush=True)
         release(hold)
         client.input(b"printf '\\033cLIVE_%s\\n' RESET\n")
