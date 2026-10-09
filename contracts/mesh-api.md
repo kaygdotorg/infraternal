@@ -134,7 +134,9 @@ revision: liveness expires with time without a database edit. Older revisions
 and delayed list replies at an already delivered revision never replace them.
 
 The initial event is a permission-filtered snapshot. A `changed` event is an
-invalidation; the viewer reloads `mesh.list` with the same tag filter. If a
+invalidation; the viewer reloads `mesh.list` with the same tag filter. An explicit
+subscription tag limits scoped invalidations for every viewer, including owners
+and global roles. Instance-wide changes invalidate every authorized view. If a
 subscriber falls behind the bounded change buffer, the server sends a fresh
 filtered `resync` snapshot. Invalid filters, denied access, missing tags and
 storage errors produce sanitized `error` events (`invalid input`, `forbidden`,

@@ -509,11 +509,12 @@ impl MeshService {
         let Some(changed_tags) = &change.scopes else {
             return Ok(true);
         };
-        if access.all {
-            return Ok(true);
-        }
+        // Global permission authorizes a filter; it never widens that filter.
+        // Scope every tag-specific invalidation to the requested view [D154, D187].
         if let Some(tag) = &filter.tag {
             Ok(changed_tags.contains(tag))
+        } else if access.all {
+            Ok(true)
         } else {
             Ok(access.tags.iter().any(|tag| changed_tags.contains(tag)))
         }
