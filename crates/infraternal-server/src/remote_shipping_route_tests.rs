@@ -76,3 +76,76 @@ async fn review_default_server_must_register_remote_join() {
         "shipping server has no remote enrollment endpoint"
     );
 }
+
+// Independent D168 route assembly evidence uses the production router and cold
+// source; it never mounts the CA router directly or injects an unlocked signer.
+#[tokio::test]
+async fn independent_review_configured_server_mounts_ca_unlock_routes() {
+    let data = PathBuf::from(std::env::var_os("HOME").unwrap())
+        .join(".cache/codex-scratch/remote-agents-review")
+        .join(format!("ca-router-{}", uuid::Uuid::new_v4()));
+    let config = ServerConfig {
+        listen: "127.0.0.1:4786".parse().unwrap(),
+        data_dir: data.clone(),
+        public_origin: "https://localhost:4786".into(),
+        web_root: None,
+        tls: Some(TlsFiles {
+            certificate: "unused.crt".into(),
+            private_key: "unused.key".into(),
+        }),
+        behind_proxy: false,
+        trusted_proxies: Vec::new(),
+    };
+    let (identity, material) = crate::remote_runtime::tests::server_material_for_name("localhost");
+    let issuer = material.issuer().clone();
+    let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(issuer.clone()));
+    let remote = crate::remote_runtime::RemoteService {
+        enrollment: crate::remote_http::EnrollmentService {
+            source,
+            endpoint: crate::remote_http::EnrollmentEndpoint {
+                ca_der: issuer.to_der().unwrap(),
+                endpoint: "127.0.0.1:0".parse().unwrap(),
+                server_name: "localhost".into(),
+            },
+        },
+        identity,
+        roots: vec![issuer],
+    };
+    let (app, _, listeners) = build_router_core(
+        config,
+        Some(EmbeddedAgent::unavailable()),
+        Some(remote.enrollment.clone()),
+        Some(remote),
+    )
+    .await
+    .unwrap();
+    let mut statuses = Vec::new();
+    for path in [
+        "/remote/ca/status",
+        "/remote/ca/unlock/start",
+        "/remote/ca/unlock/finish",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("origin", "https://localhost:4786")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        statuses.push(response.status());
+    }
+    drop(app);
+    drop(listeners);
+    std::fs::remove_dir_all(data).unwrap();
+    assert_eq!(
+        statuses,
+        vec![axum::http::StatusCode::UNAUTHORIZED; 3],
+        "configured server must expose all three cold-CA routes with cookie admission"
+    );
+}
