@@ -200,6 +200,10 @@ class TcpLatencyProxy:
         relay: LatencyDuplex | None = None
         try:
             upstream = socket.create_connection(self.upstream, timeout=10)
+            # The profile supplies the link delay. Nagle on either relay leg
+            # adds delayed-ACK stalls to tiny terminal frames before that delay.
+            client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            upstream.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             client.settimeout(None)
             upstream.settimeout(None)
             relay = LatencyDuplex(client, upstream, self.config)

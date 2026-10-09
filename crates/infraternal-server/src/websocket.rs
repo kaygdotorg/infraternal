@@ -1,7 +1,10 @@
 //! Authenticates browser sockets, resumes connections, and relays user-owned terminal streams [19][41][50].
 
-use crate::auth::Auth;
 use crate::embedded::{AgentError, AttachmentHandle, EmbeddedAgent, TerminalOutput, TerminalSize};
+use crate::{
+    auth::Auth,
+    plugins::{Dispatch, PluginRuntime, SocketPlugins},
+};
 use axum::{
     Router,
     extract::{
@@ -13,8 +16,10 @@ use axum::{
     routing::get,
 };
 use bytes::{Bytes, BytesMut};
-use futures_util::{SinkExt, Stream, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use infraternal_plugin_api::{ActionDef, PluginDescriptor};
+use futures_util::{
+    FutureExt, SinkExt, Stream, StreamExt, future::BoxFuture, stream::FuturesUnordered,
+};
+use infraternal_plugin_api::{ActionDef, Operation, Permission, PluginDescriptor, SocketHost};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
 };
@@ -67,6 +72,7 @@ type PendingPluginCall = BoxFuture<'static, (u32, Result<Vec<u8>, AgentError>)>;
 pub(crate) struct WebSocketState {
     auth: Auth,
     pool: SqlitePool,
+    pub(crate) plugins: PluginRuntime,
     agent: EmbeddedAgent,
     plugin_descriptors: &'static [&'static PluginDescriptor],
     #[cfg(test)]
@@ -81,10 +87,16 @@ pub(crate) struct WebSocketState {
 
 impl WebSocketState {
     /// Create bounded socket admission around the configured auth and agent services.
-    pub(crate) fn new(auth: Auth, pool: SqlitePool, agent: EmbeddedAgent) -> Self {
-        Self {
+    pub(crate) async fn new(
+        auth: Auth,
+        pool: SqlitePool,
+        agent: EmbeddedAgent,
+    ) -> Result<Self, crate::plugins::PluginError> {
+        let plugins = crate::plugins::compiled(&pool).await?;
+        Ok(Self {
             auth,
             pool,
+            plugins,
             agent,
             plugin_descriptors: &[],
             #[cfg(test)]
@@ -95,7 +107,18 @@ impl WebSocketState {
             terminal_connect_timeout: TERMINAL_CONNECT_TIMEOUT,
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             users: Arc::default(),
-        }
+        })
+    }
+
+    /// Bind this socket to the generic host authority bridge without starting features.
+    pub(crate) fn plugin_socket(self: &Arc<Self>, user: &str, token: &str) -> SocketPlugins {
+        let host: Arc<dyn SocketHost> = Arc::new(PluginHost {
+            state: Arc::clone(self),
+            user: user.to_owned(),
+            hash: crate::auth::hash(token),
+            token: token.to_owned(),
+        });
+        SocketPlugins::new(self.plugins.clone(), host)
     }
 
     /// Use only descriptors compiled into the matching infraternal agent binary.
@@ -213,7 +236,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<&str> {
     Some(value)
 }
 
-// This select loop keeps websocket writes, bounded agent output and inbound frames under one backpressure policy.
+// Plugin work has independent bounded admission; this loop dispatches shared control and terminal frames.
 #[allow(clippy::too_many_lines)]
 async fn run_socket(
     socket: WebSocket,
@@ -300,6 +323,7 @@ async fn run_socket(
         mpsc::channel::<(u32, TerminalOutput)>(OUTPUT_CHANNEL_CAPACITY);
     // Poll plugin calls beside inbound frames; dropping this socket drops any unfinished waits.
     let mut pending_plugin_calls = FuturesUnordered::<PendingPluginCall>::new();
+    let mut plugins = state.plugin_socket(&user_id, &session_token);
     let mut output_open = true;
     let mut receive_deadline = None;
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
@@ -309,6 +333,12 @@ async fn run_socket(
         .unwrap_or_else(|()| tokio::time::Instant::now());
     loop {
         tokio::select! {
+            Some(reply) = plugins.recv() => {
+                let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
+                if while_authorized(&state, &user_id, &session_token, true,
+                    send_message(&mut sink, Message::Binary(wire))
+                ).await.is_err() {break;}
+            }
             changed = recovery_events.changed(), if recovery_subscribed => {
                 if changed.is_err() { break; }
                 if while_authorized(&state, &user_id, &session_token, false,
@@ -362,6 +392,15 @@ async fn run_socket(
                         }).await;
                         break;
                     }
+                    match plugins.dispatch(&wire, &mut encode) {
+                        Dispatch::Queued => continue,
+                        Dispatch::Refused(wire) => {
+                            if while_authorized(&state, &user_id, &session_token, true,
+                                send_message(&mut sink,Message::Binary(wire))).await.is_err() {break;}
+                            continue;
+                        }
+                        Dispatch::Unhandled => {}
+                    }
                     if while_authorized(&state, &user_id, &session_token, true, handle_client_frame(
                             wire,
                             &state,
@@ -404,6 +443,7 @@ async fn run_socket(
             }
         }
     }
+    drop(plugins);
     drop(attachments);
     if loop_result.is_err() && session_is_live(&state, &user_id, &session_token).await {
         let _ = tokio::time::timeout(
@@ -436,12 +476,25 @@ async fn run_socket(
 
 /// Interrupt pending work on authority loss. Subscribing before the read closes the missed-wakeup window.
 /// Checks on the ready branch prevent a late backend reply winning against committed revocation.
-async fn while_authorized<T>(
+async fn while_authorized<T: Send>(
     state: &WebSocketState,
     user: &str,
     token: &str,
     renew: bool,
-    operation: impl std::future::Future<Output = Result<T, ()>>,
+    operation: impl std::future::Future<Output = Result<T, ()>> + Send,
+) -> Result<T, ()> {
+    // Sharing the watchdog across operation future types bounds transport code
+    // size as compiled plugins grow. One short-lived allocation replaces each
+    // separate watchdog state machine; operation cancellation stays unchanged.
+    while_authorized_operation(state, user, token, renew, operation.boxed()).await
+}
+
+async fn while_authorized_operation<T: Send>(
+    state: &WebSocketState,
+    user: &str,
+    token: &str,
+    renew: bool,
+    operation: infraternal_plugin_api::Operation<'_, Result<T, ()>>,
 ) -> Result<T, ()> {
     let mut revocations = state.auth.revocation_events();
     let mut expiry = authority_deadline(state, user, token, renew).await?;
@@ -1011,11 +1064,18 @@ where
             input_json,
         } if stream_id == CONTROL_STREAM => {
             let action = state.action(action_id);
-            // This auth slice has no role-grant records yet. The persisted owner bit is the only
-            // grant source for declared plugin permissions; a valid session alone is insufficient.
+            // Node-side actions retain their owner-only grant source. Mesh tag roles
+            // authorize Mesh operations, never host-wide reads or configuration.
+            // A valid unlocked session alone must not forward work to leg B.
             let authorized = action_id.len() <= 128
                 && input_json.len() <= infraternal_plugin_api::MAX_ACTION_BYTES
-                && action.is_some_and(|action| !action.permission.is_empty() && owner);
+                && action.is_some_and(|action| {
+                    owner
+                        && match action.permission {
+                            Permission::One(permission) => !permission.is_empty(),
+                            Permission::Any(permissions) => !permissions.is_empty(),
+                        }
+                });
             if authorized && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS {
                 let agent = state.agent.clone();
                 let action_id = action_id.to_owned();
@@ -1538,3 +1598,67 @@ async fn require_socket_authority_tx(
 #[cfg(test)]
 #[path = "recovery_notification_bench.rs"]
 mod recovery_notification_bench;
+
+/// The host retains session secrets and authority interruption independently of feature work.
+struct PluginHost {
+    state: Arc<WebSocketState>,
+    user: String,
+    token: String,
+    hash: String,
+}
+impl SocketHost for PluginHost {
+    fn user_id(&self) -> &str {
+        &self.user
+    }
+    fn token_hash(&self) -> &str {
+        &self.hash
+    }
+    fn authorized<'a>(
+        &'a self,
+        operation: Operation<'a, Result<(), ()>>,
+    ) -> Operation<'a, Result<(), ()>> {
+        Box::pin(while_authorized_operation(
+            &self.state,
+            &self.user,
+            &self.token,
+            true,
+            operation,
+        ))
+    }
+    fn fresh(&self, now: i64) -> Operation<'_, bool> {
+        Box::pin(async move {
+            self.state
+                .auth
+                .fresh_session(&self.token, now)
+                .await
+                .is_ok()
+        })
+    }
+    fn live(&self) -> Operation<'_, bool> {
+        Box::pin(session_is_live(&self.state, &self.user, &self.token))
+    }
+    fn may_configure(&self) -> Operation<'_, bool> {
+        Box::pin(async move {
+            let Ok(mut tx) = self.state.pool.begin().await else {
+                return false;
+            };
+            let owner = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE id=? AND owner=1)",
+            )
+            .bind(&self.user)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap_or(false);
+            owner
+                && infraternal_plugin_api::fresh_session_tx(
+                    &mut tx,
+                    &self.hash,
+                    &self.user,
+                    unix_seconds().unwrap_or(i64::MAX),
+                    infraternal_plugin_api::FRESH_SECONDS,
+                )
+                .await
+                .unwrap_or(false)
+        })
+    }
+}

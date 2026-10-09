@@ -1,28 +1,31 @@
 //! Tests for generic plugin metadata validation and bounded action dispatch.
 use crate::{
     API_VERSION, ActionDef, AgentPlugin, Effect, PluginDescriptor, PluginError, PluginRegistry,
-    SettingsDef, Target,
 };
 
 const ACTIONS: &[ActionDef] = &[ActionDef {
     id: "example.read",
     summary: "Read example state",
-    input_schema: "{}",
-    output_schema: "{}",
-    target: Target::Host,
+    input: "{}",
+    output: "{}",
+    instructions: &["Read example state."],
     effect: Effect::Read,
-    permission: "example.read",
+    permission: crate::Permission::One("example.read"),
 }];
 const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "example",
     api: API_VERSION,
     actions: ACTIONS,
-    settings: SettingsDef {
-        schema: "{}",
-        defaults: "{}",
-        configure_action: "example.read",
-    },
-    role_dependencies: &[],
+    settings: "{}",
+    topics: &[],
+    roles: &[crate::RoleDef {
+        id: "node",
+        requires: &[],
+        default_enabled: true,
+    }],
+    max_frame_len: crate::MAX_ACTION_BYTES,
+    unavailable: br#"{"error":"action unavailable"}"#,
+    unavailable_event: br#"{"type":"error","error":"action unavailable"}"#,
 };
 
 struct EchoPlugin;

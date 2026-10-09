@@ -18,7 +18,8 @@ mod wraps;
 pub(crate) use crypto::hash;
 use crypto::{constant_prf_input, prf_salt, random, recovery_hash};
 pub use sessions::Session;
-use sessions::{insert_session, require_session_tx};
+use sessions::insert_session;
+pub(crate) use sessions::require_session_tx;
 pub use wraps::Wrap;
 use wraps::put_wrap;
 #[cfg(test)]
@@ -39,7 +40,7 @@ pub use http::router;
 const DAY: i64 = 86_400;
 const SESSION: i64 = 30 * DAY;
 const CEREMONY: i64 = 300;
-const FRESH: i64 = 300;
+const FRESH: i64 = infraternal_plugin_api::FRESH_SECONDS;
 
 /// Errors deliberately expose no credential, capability or database contents.
 #[derive(Debug, thiserror::Error)]

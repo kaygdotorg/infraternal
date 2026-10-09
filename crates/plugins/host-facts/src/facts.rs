@@ -1,8 +1,6 @@
 //! Collects fixed, bounded host identity and on-request live counters without subprocesses or network access.
 
-use infraternal_plugin_api::{
-    ActionDef, AgentPlugin, Effect, PluginDescriptor, PluginError, SettingsDef, Target,
-};
+use infraternal_plugin_api::{ActionDef, AgentPlugin, Effect, PluginDescriptor, PluginError};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,20 +19,26 @@ const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: READ_ACTION,
         summary: "Read host identity and current resource use",
-        input_schema: r#"{"type":"object","properties":{"includeLive":{"type":"boolean"}},"additionalProperties":false}"#,
-        output_schema: r#"{"type":"object","properties":{"os":{"type":"string"},"version":{"type":"string"},"kernel":{"type":"string"},"architecture":{"type":"string"},"model":{"type":"string"},"cpuModel":{"type":"string"},"logicalCpus":{"type":"integer"},"memory":{"type":"object"},"rootDisk":{"type":"object"},"uptimeSeconds":{"type":"integer"},"loadAverage":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"mode":{"enum":["embedded","remote"]},"executionUid":{"type":"integer"},"engines":{"type":"array","items":{"enum":["Docker","Podman"]}},"init":{"type":"string"},"virtualization":{"type":"string"},"shell":{"type":"string"},"locale":{"type":"string"}},"required":["os","version","kernel","architecture","logicalCpus","mode","executionUid","engines"],"additionalProperties":false}"#,
-        target: Target::Host,
+        input: r#"{"type":"object","properties":{"includeLive":{"type":"boolean"}},"additionalProperties":false}"#,
+        output: r#"{"type":"object","properties":{"os":{"type":"string"},"version":{"type":"string"},"kernel":{"type":"string"},"architecture":{"type":"string"},"model":{"type":"string"},"cpuModel":{"type":"string"},"logicalCpus":{"type":"integer"},"memory":{"type":"object"},"rootDisk":{"type":"object"},"uptimeSeconds":{"type":"integer"},"loadAverage":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"mode":{"enum":["embedded","remote"]},"executionUid":{"type":"integer"},"engines":{"type":"array","items":{"enum":["Docker","Podman"]}},"init":{"type":"string"},"virtualization":{"type":"string"},"shell":{"type":"string"},"locale":{"type":"string"}},"required":["os","version","kernel","architecture","logicalCpus","mode","executionUid","engines"],"additionalProperties":false}"#,
+        instructions: &[
+            "Choose the host whose identity is needed.",
+            "Read its facts; include live counters only when needed.",
+        ],
         effect: Effect::Read,
-        permission: READ_ACTION,
+        permission: infraternal_plugin_api::Permission::One(READ_ACTION),
     },
     ActionDef {
         id: CONFIGURE_ACTION,
         summary: "Enable or disable host facts collection",
-        input_schema: r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}"#,
-        output_schema: r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}"#,
-        target: Target::Host,
+        input: r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}"#,
+        output: r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}"#,
+        instructions: &[
+            "Choose the host to configure.",
+            "Set enabled to true or false for host facts collection.",
+        ],
         effect: Effect::Write,
-        permission: CONFIGURE_ACTION,
+        permission: infraternal_plugin_api::Permission::One(CONFIGURE_ACTION),
     },
 ];
 
@@ -43,12 +47,16 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "host",
     api: infraternal_plugin_api::API_VERSION,
     actions: ACTIONS,
-    settings: SettingsDef {
-        schema: r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}"#,
-        defaults: r#"{"enabled":true}"#,
-        configure_action: CONFIGURE_ACTION,
-    },
-    role_dependencies: &[],
+    settings: r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean","default":true}},"additionalProperties":false}"#,
+    topics: &[],
+    roles: &[infraternal_plugin_api::RoleDef {
+        id: "node",
+        requires: &[],
+        default_enabled: true,
+    }],
+    max_frame_len: infraternal_plugin_api::MAX_ACTION_BYTES,
+    unavailable: br#"{"error":"action unavailable"}"#,
+    unavailable_event: br#"{"type":"error","error":"action unavailable"}"#,
 };
 
 /// Whether the collector runs inside the server or on a separately managed host.

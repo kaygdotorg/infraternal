@@ -125,6 +125,10 @@ leg B only, contracts/bootstrap.md §4).
 | 0x32 | `Subscribe` | u32 sub_id, JSON filter | events (contracts/plugin.md §5) |
 | 0x33 | `Event` | u32 sub_id, JSON event | |
 
+The core Mesh inventory uses `Subscribe` and `Event` on control stream 0 with
+the additive JSON contract in contracts/mesh-api.md. It does not allocate new
+frame IDs or change the frozen frame codec.
+
 `Close` on stream 0 closes the connection. On a nonzero mux stream it retires
 only that logical stream; code 1000 is a normal detach. This lets a socketpair
 peer release one terminal attachment while keeping the user's session alive.

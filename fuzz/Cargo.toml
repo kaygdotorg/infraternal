@@ -12,9 +12,11 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys.workspace = true
+infraternal-plugin-api.workspace = true
 infraternal-shim.workspace = true
 infraternal-protocol.workspace = true
 infraternal-plugin-host-facts = { version = "0.1.0", path = "../crates/plugins/host-facts" }
+infraternal-plugin-mesh = { version = "0.1.0", path = "../crates/plugins/mesh", default-features = false, features = ["server"] }
 
 [[bin]]
 name = "shim_frame_decode"
@@ -40,6 +42,13 @@ bench = false
 [[bin]]
 name = "host_facts_decode"
 path = "fuzz_targets/host_facts_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mesh_api_json"
+path = "fuzz_targets/mesh_api_json.rs"
 test = false
 doc = false
 bench = false
