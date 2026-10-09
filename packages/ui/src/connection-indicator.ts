@@ -7,7 +7,9 @@
  * - connecting / reconnecting: an arc turning around a faint ring (a turn every 900 ms).
  * - connected: a calm green dot with a still halo. Nothing moves while the link is healthy, so
  *   an idle terminal schedules no animation frames [81].
- * - slow: an amber dot whose halo breathes outward, only while the round trip stays high.
+ * - slow: an amber dot whose halo breathes outward three times when the link turns slow, then rests as a still amber
+ *   dot (a looping animation would keep the compositor drawing frames, and re-blurring the glass under it, for as long
+ *   as the link is slow; an idle page must do no work).
  * - resumed: a tick pops in over the dot and settles back to "connected" by itself.
  * - approximate: a screen with its lower half filled (the picture was rebuilt, not replayed);
  *   it settles back to "connected" after a few seconds, longer than a tick so it is read.
@@ -109,6 +111,8 @@ export function createConnectionIndicator(options: ConnectionIndicatorOptions = 
     const changed = next !== shown;
     shown = next;
     root.dataset.state = next;
+    // The breath plays once per entry into "slow" (the animation is finite): start it again from its beginning.
+    if (changed && next === "slow") for (const a of root.querySelectorAll(".ui-conn-pulse")) for (const anim of a.getAnimations()) anim.currentTime = 0;
     // The glyph a state uses: slow and connected are two colourings of the same dot.
     if (text !== sentence) {
       sentence = text;
