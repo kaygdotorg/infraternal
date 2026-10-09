@@ -10,8 +10,9 @@ not select a foundational SSH library or change frozen wire frames.
 
 The additive `/v1/bootstrap/ws` WebSocket uses the server's pinned Origin,
 unlocked authenticated session cookie and owner authority. Bodies are bounded
-at 32 KiB. Only credential references enter requests; decrypted material is
-resolved by a trusted, passkey-unlocked vault adapter in server memory.
+at 32 KiB. Requests may carry credential references resolved by a trusted,
+passkey-unlocked vault adapter, or explicit one-attempt browser inputs through
+`auth_once` as specified below. Neither enters public progress history.
 
 An initial `start` request contains up to 100 targets, each with a stable
 request-local id, a manual `user@host[:port]` or discovered-host id, optional
@@ -227,3 +228,91 @@ may ignore this additive field. The completion/failure and retry shapes stay
 compatible with the existing bootstrap contract. One-line offline installation
 continues to require #78's short-lived host-bound invitation; a token never
 enters an URL or argv.
+
+## One-use browser credentials [183]
+
+Start accepts per-target `auth_once` material; a retry accepts it only for a
+failed target on the same authenticated socket. Automatic order is unchanged: an earlier successful method erases
+unused browser material without loading it into an SSH helper.
+
+```json
+{"action":"start","targets":[{"id":"host-1","address":{"kind":"manual","value":"user@host"},"mode":"rootless"}],"auth_once":[{"target":"host-1","auth":{"key":"<browser-unwrapped PEM>"}}]}
+{"action":"retry","target":"host-1","auth_once":{"key":"<browser-unwrapped PEM>","passphrase":"<optional once>","password":"<optional once>"}}
+```
+
+Start validates membership, uniqueness and every credential before scheduling
+any host. The existing request remains valid without `auth_once`. These are
+input-only strings, never event fields. The request/frame limit stays
+32 KiB; the key limit is 24576 bytes and each prompt is at most 16384 bytes.
+A passphrase needs a key. Empty material, NUL, unknown fields, and newlines in
+prompts are refused before scheduling. Material waiting for admission expires
+after 60 seconds. Once admitted, unused material is discarded on selection
+of an earlier method or at the end of the bounded connection attempt; the
+provider refuses to release expired material. Logout, socket close, queue expiry, cancellation and scope
+retirement erase the owned inputs. Nothing enters batch history, SQLite, logs,
+argv, environment or a later retry. The browser must unwrap afresh for each
+attempt; retrying without `auth_once` never reuses earlier private bytes.
+
+Events may also include `host_id`, the UUID from the trusted bound invitation.
+It does not prove readiness: only `done` follows authenticated facts and the
+terminal canary. Authentication evidence is recorded after the bounded fixed
+check even if host compatibility later fails. A new attempt starts without
+method/host metadata; immutable replay events retain the earlier attempt's
+public evidence.
+
+
+## First-contact host-key confirmation [183]
+
+Unknown host keys stop the attempt before any credential fallback or host
+mutation. A `failed` event may add `failure.host_key_challenge` (UUID) alongside
+its public `fingerprints`. Confirm only a fingerprint verified by the owner
+through a trusted channel:
+
+```json
+{"action":"confirm-host-key","target":"host-1","challenge":"<UUID from this failed attempt>","fingerprint":"SHA256:<observed fingerprint>"}
+```
+
+Successful publication returns:
+
+```json
+{"host_key_confirmed":{"target":"host-1","fingerprint":"SHA256:<confirmed fingerprint>"}}
+```
+
+Then send the existing `retry` request. Confirmation alone does not start an
+installation. The exact live unlocked owner session is checked after public
+trust lookups, immediately before publishing. The nonce binds the destination,
+effective public SSH policy and previously observed key; it is consumed by one
+confirmation attempt and expires after 120 seconds. Only this socket's failed,
+idle target and last public failure can request confirmation. Retry clears that
+failure; a fresh check produces a fresh observation.
+
+At most 128 bounded public observations are held in memory. Idle expiration
+is reclaimed on access, without timers. Confirmed public pins persist in the
+server data directory (`ssh-trust/`, mode 0700; files 0600). Publication uses
+create-new and fsync; existing pins are never overwritten. A changed key,
+matching normal/CA/revoked configured record, changed configuration, revoked
+session or ambiguous public paths refuses confirmation. OpenSSH retains its
+configured revocation and cryptographic policy. Later configured matching trust
+alongside a dedicated pin requires review. External public configuration edits
+are not serialized with the application; administrators must avoid racing trust
+changes with confirmation. This API never edits system known_hosts.
+
+
+## Bounded native facts [145][156]
+
+After authenticated remote enrollment, `host.facts` is a control-stream-zero
+Call with an empty JSON object (`{}`). The decoder accepts at most 256 bytes
+and rejects arrays, scalars, unknown parameters and trailing values. Other
+streams do not acquire this action. A successful Result contains:
+
+```json
+{"os":"linux","arch":"x86_64","execution_uid":1101,"version":"0.1.0","logical_cpus":8}
+```
+
+`execution_uid` is the infraternal agent's effective uid, bound to the enrolled
+host's authenticated identity. `logical_cpus` is the OS concurrency policy,
+including affinity/cgroup constraints; it is not a physical CPU inventory.
+Collection uses platform constants and OS concurrency metadata, without
+subprocesses, discovery scans or recurring polling. Invalid input returns the
+short fixed error `invalid host facts request`. Provisioning still requires
+its separate terminal canary before committing and emitting `done`.
