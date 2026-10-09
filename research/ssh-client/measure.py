@@ -80,6 +80,7 @@ def authenticated_ssh(config, port, environment):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--negative-trust-oracle", action="store_true", help="isolate listener source penalties for repeated negative host-trust checks")
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--integration-binary", type=Path)
     parser.add_argument("--samples", type=int, default=25)
@@ -112,6 +113,7 @@ UsePAM no
 StrictModes yes
 AllowUsers {getpass.getuser()}
 MaxStartups 400
+{"PerSourcePenalties no" if args.negative_trust_oracle else ""}
 MaxSessions 256
 LoginGraceTime 600
 LogLevel ERROR
@@ -153,7 +155,7 @@ Host *
   ControlMaster no
   ConnectTimeout 10
 """)
-            print(f"ENVIRONMENT machine={socket.gethostname()} cores={os.cpu_count()} load={' '.join(Path('/proc/loadavg').read_text().split()[:3])} fixture=rootless-real-sshd", flush=True)
+            print(f"ENVIRONMENT machine={socket.gethostname()} cores={os.cpu_count()} load={' '.join(Path('/proc/loadavg').read_text().split()[:3])} fixture=rootless-real-sshd source_penalties={"isolated" if args.negative_trust_oracle else "default"}", flush=True)
             if args.integration_binary:
                 wrapper = fixture / "ssh"
                 wrapper.write_text(f"#!/bin/sh\nexec /usr/bin/ssh -F '{client_config}' \"$@\"\n")
