@@ -107,3 +107,35 @@ async fn missing_ca_refuses_before_database_or_listener_creation() {
     );
     assert!(!directory.exists());
 }
+
+/// New remote operator commands must retain the scripting form required by
+/// D199/D202. Parsing exercises the shipping Clap definitions without reading
+/// local identity or sending an invitation to any endpoint.
+#[test]
+fn independent_review_remote_operator_commands_accept_json_output() {
+    let accepted: Vec<bool> = [
+        vec![
+            "infraternal",
+            "agent",
+            "join",
+            "https://localhost/remote/join",
+            "--json",
+        ],
+        vec!["infraternal", "agent", "run", "--json"],
+        vec![
+            "infraternal",
+            "server",
+            "--remote-listen",
+            "10.69.69.125:7443",
+            "--json",
+        ],
+    ]
+    .into_iter()
+    .map(|arguments| super::super::Cli::try_parse_from(arguments).is_ok())
+    .collect();
+    assert_eq!(
+        accepted,
+        vec![true; 3],
+        "remote commands refuse the required JSON output option"
+    );
+}
