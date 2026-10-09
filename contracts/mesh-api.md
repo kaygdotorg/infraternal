@@ -108,9 +108,12 @@ of the other tags on affected hosts, because node tag metadata changes.
 
 Browser node/tag/grant deletion, membership removal, grant endpoint moves, and
 role definition/assignment require a passkey verification within the existing
-five-minute fresh-session window (D28). Refusal preserves inventory, revisions
-and audit and leaves the multiplexed socket usable. Reads and observations do
-not require fresh confirmation.
+five-minute fresh-session window (D28). Freshness is checked at admission and
+again inside the writer transaction, immediately before commit using the
+SQLite clock. Waiting for the writer cannot extend the confirmation window.
+If confirmation expires, the result says `confirm with your passkey again`;
+inventory, revisions and audit roll back together and the multiplexed socket
+remains usable. Reads and observations do not require fresh confirmation.
 
 Every successful edit, including a liveness observation, advances the shared
 monotonic revision and records an audit row in the same SQLite transaction
@@ -146,7 +149,12 @@ invalidation; the viewer reloads `mesh.list` with the same tag filter. An explic
 subscription tag limits scoped invalidations for every viewer, including owners
 and global roles. Instance-wide changes invalidate every authorized view. If a
 subscriber falls behind the bounded change buffer, the server sends a fresh
-filtered `resync` snapshot. Invalid filters, denied access, missing tags and
+filtered `resync` snapshot. Each view also schedules the earliest visible
+live-node deadline from the complete filtered inventory, before paging. At
+that deadline it sends a `resync` at the current revision, even with no edit
+or subsequent request. This derived expiry changes neither revision nor audit.
+A timed resync may arrive between continuation results; authoritative resyncs
+supersede page assembly as described above. Invalid filters, denied access, missing tags and
 storage errors produce sanitized `error` events (`invalid input`, `forbidden`,
 `not found`, `conflict`, or `mesh unavailable`) and do not expose SQL details.
 A server `error` ends that subscription. Clients withdraw publication before
@@ -187,3 +195,13 @@ complete snapshot. Small inventories keep their existing shape and one request.
 Clients bound continuation work and stop issuing continuation calls when a newer
 authoritative event supersedes an assembly or the subscription is withdrawn.
 Already-issued calls may settle; obsolete results never restart continuation work.
+
+## Plugin ownership [198,201]
+
+The coordinator belongs to `crates/plugins/mesh` as the `mesh` server feature,
+behind the optional Cargo feature of the same name. The core discovers its
+actions and routes opaque bytes through the shared plugin host. Discovery,
+runtime switching, role dependencies and the future node-component naming
+are specified in [the version-1 plugin binding](plugin.md#9-implemented-mesh-socket-binding-version-1).
+The Rust `infraternal-server::mesh_api` module is a feature-gated compatibility
+re-export; the implementation and parsers live in the plugin crate.
