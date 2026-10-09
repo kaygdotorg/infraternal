@@ -3262,3 +3262,6 @@ mod reviewer_tests;
 
 #[path = "rotation_tests.rs"]
 mod rotation_tests;
+
+#[path = "host_facts_review_tests.rs"]
+mod host_facts_review_tests;

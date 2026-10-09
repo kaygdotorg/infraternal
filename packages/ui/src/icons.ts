@@ -12,6 +12,7 @@ export const ICONS = {
   next: '<path d="M9 5l7 7-7 7"/>',
   snap: '<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/>',
   overview: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/>',
+  more: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>',
   lock: '<rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/>',
   unlock: '<rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V7.5a3.5 3.5 0 0 1 6.6-1.6"/>',
   // Split right: the new window opens beside (a vertical divider). Split down: it opens below (a horizontal one).

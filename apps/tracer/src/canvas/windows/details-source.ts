@@ -25,10 +25,34 @@ export interface DetailsFacts {
   sections: DetailsSection[];
 }
 
+/** A bounded snapshot returned by the host.facts.read plugin action. */
+export interface HostFactsSnapshot {
+  os: string;
+  version: string;
+  kernel: string;
+  architecture: string;
+  model?: string;
+  cpuModel?: string;
+  logicalCpus: number;
+  memory?: { usedBytes: number; totalBytes: number };
+  rootDisk?: { usedBytes: number; totalBytes: number };
+  uptimeSeconds?: number;
+  loadAverage?: [number, number, number];
+  mode: "embedded" | "remote";
+  executionUid: number;
+  engines: string[];
+  init?: string;
+  virtualization?: string;
+  shell?: string;
+  locale?: string;
+}
+
 export interface DetailsSource {
   /** Called when the popover opens and each time a tab is shown, so the connection's numbers are current. */
   /** The facts for a window, or nothing for a window with no machine behind it (a settings section, a node): its pill opens nothing. */
   facts(rec: WinRec): DetailsFacts | undefined;
+  /** Starts facts refresh while a popover is open; the returned disposer runs on close. */
+  open?(rec: WinRec, refresh: () => void): () => void;
 }
 
 /** Loads a details source only after a window pill is pressed. */

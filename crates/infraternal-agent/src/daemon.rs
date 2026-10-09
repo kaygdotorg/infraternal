@@ -149,6 +149,8 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     }
     let state = sessions::state(state)?;
     let socket = Socket::inherited(fd)?;
+    let mut plugins = crate::plugins::registry(crate::plugins::ExecutionMode::Embedded)
+        .map_err(|_| sessions::invalid("invalid compiled plugin registry"))?;
     let manager = Manager::detect().await;
     let exe = std::env::current_exe()?;
     let mut registry = HashMap::new();
@@ -200,6 +202,12 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                                 opens.spawn(async move { (stream, call_id, sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await) });
                             } else {
                                 emit(&tx, Message::Result(stream, call_id, false, b"{\"error\":\"invalid terminal open or session limit\"}".to_vec())).await?;
+                            }
+                        }
+                        Frame::Call {call_id, action_id, input_json} if stream == 0 => {
+                            match plugins.call(action_id, input_json) {
+                                Ok(json) => emit(&tx, Message::Result(0, call_id, true, json)).await?,
+                                Err(_) => emit(&tx, Message::Result(0, call_id, false, b"{\"error\":\"plugin action rejected\"}".to_vec())).await?,
                             }
                         }
                         Frame::AttachTerm {session_id, last_out_seq, last_in_seq} if stream != 0 => {

@@ -1,7 +1,18 @@
-<!-- Reproducible parser fuzzing: the shim framing and the wire codec [12][40]. -->
+<!-- Reproducible parser fuzzing: host facts, shim framing and the wire codec [12][40]. -->
 # Fuzzing
 
-Both parsers of untrusted bytes have fuzz targets in this one harness crate.
+The bounded host-facts request decoder and OS release parser, shim framing,
+and wire codec have fuzz targets in this one harness crate.
+
+## Host facts
+
+The host-facts target exercises strict read/configure JSON decoding, the
+bounded `/etc/os-release` and `/proc/loadavg` parsers, and the fixed-size
+macOS load-average sysctl decoder. It performs no host reads while fuzzing.
+
+```sh
+cargo +nightly fuzz run host_facts_decode -- -max_total_time=600 -max_len=16384
+```
 
 ## Shim framing
 

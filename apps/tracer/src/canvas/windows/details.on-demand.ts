@@ -19,6 +19,7 @@ import type { DetailsFacts, DetailsSource } from "./details-source";
 export interface DetailsPopover {
   readonly windowId: string;
   close(source: "pointer" | "keyboard"): void;
+  refresh(): void;
 }
 
 interface DetailsInput {
@@ -51,18 +52,35 @@ export function openDetailsPopover(
     </header>
     <div class="canvas-popover-tabs"></div>
     <div class="canvas-popover-scroll"></div>`;
-  if (first.os) root.querySelector<HTMLElement>(".canvas-popover-logo")!.innerHTML = hostIconMarkup(first.os, "ui-host-mark");
-  else root.querySelector<HTMLElement>(".canvas-popover-logo")!.hidden = true;
-  root.querySelector<HTMLElement>(".canvas-popover-title")!.textContent = first.title;
-  root.querySelector<HTMLElement>(".canvas-popover-sub")!.textContent = first.subtitle;
+  const logo = root.querySelector<HTMLElement>(".canvas-popover-logo")!;
+  const title = root.querySelector<HTMLElement>(".canvas-popover-title")!;
+  const subtitle = root.querySelector<HTMLElement>(".canvas-popover-sub")!;
+  const updateHeader = (facts: DetailsFacts): void => {
+    root.setAttribute("aria-label", `Details for ${facts.title}`);
+    title.textContent = facts.title;
+    subtitle.textContent = facts.subtitle;
+    if (facts.os) {
+      logo.innerHTML = hostIconMarkup(facts.os, "ui-host-mark");
+      logo.hidden = false;
+    } else {
+      logo.replaceChildren();
+      logo.hidden = true;
+    }
+  };
+  updateHeader(first);
 
   const list = createKeyValueList(`${first.title} details`);
   const scroll = root.querySelector<HTMLElement>(".canvas-popover-scroll")!;
   scroll.append(list.root);
   let scrolled = false;
   scroll.addEventListener("scroll", () => { scrolled = true; }, { passive: true });
+  let selected = first.sections[0]?.id ?? "";
   const show = (id: string, animate: boolean): void => {
-    const section = input.read().sections.find((x) => x.id === id) ?? first.sections[0];
+    selected = id;
+    const facts = input.read();
+    updateHeader(facts);
+    list.root.setAttribute("aria-label", `${facts.title} details`);
+    const section = facts.sections.find((x) => x.id === id) ?? first.sections[0];
     list.set((section?.rows ?? []).filter((row) => row.value.trim() !== ""));
     // Resetting the scroll position forces a layout; only a popover that was scrolled needs it.
     if (scrolled) { scroll.scrollTop = 0; scrolled = false; }
@@ -139,7 +157,7 @@ export function openDetailsPopover(
   window.visualViewport?.addEventListener("resize", () => place(), { signal: events.signal });
   if (source === "keyboard") root.querySelector<HTMLElement>(".ui-tab[aria-selected='true']")?.focus({ preventScroll: true });
 
-  return { windowId: input.windowId, close };
+  return { windowId: input.windowId, close, refresh: () => show(selected, false) };
 }
 
 export interface DetailsModule {
@@ -159,7 +177,13 @@ export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
       if (open?.windowId === rec.model.id) { open.close(how); return; }
       open?.close("keyboard");
       if (!source.facts(rec)) return;
-      open = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => source.facts(rec)! }, how, () => { open = undefined; });
+      let stop = (): void => {};
+      const popover = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => source.facts(rec)! }, how, () => {
+        stop();
+        if (open === popover) open = undefined;
+      });
+      open = popover;
+      stop = source.open?.(rec, popover.refresh) ?? stop;
     },
     close,
     isOpen: () => open !== undefined,

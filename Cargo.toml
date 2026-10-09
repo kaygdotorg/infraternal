@@ -11,6 +11,7 @@ members = [
     "crates/infraternal-agent",
     "crates/infraternal-shim",
     "crates/plugins/ssh",
+    "crates/plugins/host-facts",
 ]
 
 [workspace.package]
