@@ -15,7 +15,7 @@ import type { Ctx } from "../context";
 import type { ViewId } from "../model/types";
 import { coarse } from "../dom";
 import { isFreeView } from "../layout/stops";
-import { onDemand } from "../../on-demand";
+import { onDemand, whenIdle } from "../../on-demand";
 
 export interface TreeModule {
   /** Rebuilds the sidebar tree from the views (coalesced). */
@@ -48,6 +48,8 @@ export function createTree(cx: Ctx): TreeModule {
         : [...c.wins.values()].map((w) => ({ id: w.model.id, label: w.model.kind === "terminal" ? `${w.model.host}${w.model.session ? ` · ${w.model.session}` : ""}` : w.model.kind === "settings" ? w.model.host : (w.model.session ?? w.model.kind), glyph: w.model.kind === "terminal" ? "›_" : "▤" })),
     };
   });
+  // Warmed at idle too, so the first time the sidebar opens its sessions are there at once (#128).
+  if (inv) whenIdle(loadLeaves);
   const sections = (): BranchSection[] => {
     const all = viewSections();
     if (!inv || inv.status() !== "ready") return all;

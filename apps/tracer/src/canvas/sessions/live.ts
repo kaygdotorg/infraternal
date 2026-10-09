@@ -20,7 +20,9 @@ import type { TerminalClient, TerminalHooks } from "../../terminal";
 import { el } from "../dom";
 import { createStatusRelay } from "../status";
 import type { WindowModel } from "../model/types";
+import { onDemand, whenIdle } from "../../on-demand";
 import type { HostEntry, SessionBinding, SessionService } from "./adapter";
+import type { ScreenCache } from "./screen-cache.on-demand";
 
 export interface LiveSessionsOptions {
   core: CoreScreen;
@@ -50,6 +52,15 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
   let firstHostUsed = false;
   let firstReported = false;
   let active: Binding | undefined;
+  let serial = 0;
+  // The last known screens (screen-cache.on-demand.ts) load at idle; until then a switch simply has no picture to show.
+  let cache: ScreenCache | undefined;
+  let cacheRequested = false;
+  const warmCache = (): void => {
+    if (cacheRequested) return;
+    cacheRequested = true;
+    whenIdle(() => { void onDemand(() => import("./screen-cache.on-demand")).then((m) => { cache = m.createScreenCache(); }, () => { cacheRequested = false; }); });
+  };
 
   class Binding implements SessionBinding {
     client: TerminalClient | undefined;
@@ -60,8 +71,42 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private wantsFocus = false;
     private visible = true;
     private activeNow = false;
+    private painted = false;
+    private dropGhost: (() => void) | undefined;
+    private ghostTimer = 0;
+    /** Marks for the switch timeline (`sw:<n>:<step>`); a few microseconds each, read by the real specs. */
+    private readonly n = ++serial;
+    private mark(step: string): void { performance.mark(`sw:${this.n}:${step}`); }
 
     constructor(private readonly model: WindowModel, private readonly changed: () => void) {}
+
+    /** Keeps a picture of this terminal's screen as its session's last known one (only while it is drawn). */
+    private keepScreen(): void {
+      const id = this.client?.sessionUuid;
+      const canvas = this.client?.canvas;
+      if (cache && id && canvas && this.painted && this.visible) cache.capture(id, canvas);
+    }
+    /** Puts the last known screen of the session this binding is about to show over its terminal, in the same frame. */
+    private showGhost(): void {
+      this.endGhost();
+      const id = this.model.sessionId;
+      if (!cache || !id || !this.hostEl) return;
+      this.dropGhost = cache.ghost(id, this.hostEl);
+      if (this.dropGhost) this.ghostTimer = window.setTimeout(() => this.endGhost(), 6000);
+      if (this.dropGhost) { this.mark("ghosted"); requestAnimationFrame(() => this.mark("ghost")); }
+    }
+    private endGhost(): void { window.clearTimeout(this.ghostTimer); this.dropGhost?.(); this.dropGhost = undefined; }
+
+    retarget(model: WindowModel): boolean {
+      const client = this.client;
+      if (!client || !model.sessionId || this.disposed) return false;
+      this.keepScreen();
+      this.painted = false;
+      this.mark("retarget");
+      this.showGhost();
+      client.retarget(model.sessionId);
+      return true;
+    }
 
     mount(body: HTMLElement): void {
       let hostEl: HTMLElement;
@@ -79,6 +124,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       }
       this.hostEl = hostEl;
       body.append(hostEl);
+      this.mark("mount");
+      this.showGhost();
       void this.start();
     }
 
@@ -89,6 +136,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       firstReported = true;
       const hooks: TerminalHooks = {
         ...(first ? options.firstHooks : {}),
+        onAttached: (resumed, terminal) => { this.mark("attached"); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
+        onPaintedOutput: (bytes, at, sequence) => { if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
         onSessionCreated: (id) => {
           this.model.sessionId = id;
           this.changed();
@@ -113,6 +162,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         });
         if (this.disposed) { client.dispose(); return; }
         this.client = client;
+        this.mark("client");
+        warmCache();
         this.unregister = core.registerTerminal(client);
         if (this.activeNow) core.setActiveTerminal(client);
         if (!this.visible) client.setSuspended(true);
@@ -140,12 +191,16 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
     setVisible(visible: boolean): void {
       this.visible = visible;
+      // A picture is a canvas that holds pixels: off screen it goes (the terminal repaints from its own state when shown).
+      if (!visible) this.endGhost();
       this.client?.setSuspended(!visible);
     }
 
     refit(): void { this.client?.refit(); }
 
     dispose(): void {
+      this.keepScreen();
+      this.endGhost();
       this.disposed = true;
       bindings.delete(this);
       if (active === this) { active = undefined; core.setActiveTerminal(undefined); }
@@ -170,6 +225,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         id: `t-${crypto.randomUUID()}`, kind: "terminal", host: hostName,
         ...(host.user ? { user: host.user } : {}),
         ...(opts?.from ? { splitOf: opts.from.id } : {}),
+        // Showing a session that already exists: the window attaches to it instead of opening a new shell.
+        ...(opts?.session ? { sessionId: opts.session } : {}),
       };
     },
     hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}) }]; },
