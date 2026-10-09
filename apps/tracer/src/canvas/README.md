@@ -32,7 +32,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `windows/visibility.ts` | which windows are live: near the screen, live level of detail, view not far, page not hidden; tells each binding `setVisible` (the only caller) | `Visibility` |
 | `memory.ts` | views far from the camera are not painted; a hidden page releases big surfaces | `Memory` (reports far views and a paused page to `visibility`) |
 | `windows/lifecycle.ts` | open, close (never ends the session), split | `WindowsModule` (`cx.win`) |
-| `windows/float.ts`, `input-lock.ts` | floating terminal; the input lock (padlock) | `FloatModule`, `InputLock` |
+| `windows/float.on-demand.ts`, `input-lock.ts` | floating terminal; the input lock (padlock) | `FloatModule`, `InputLock` |
 | `toolbar/` | top pill + swipe, view list, tree (sidebar), canvas row + desktop buttons, shortcuts, palette | `PillModule` `ViewList` `TreeModule` `ToolbarModule` |
 | `mesh/` | Mesh view, reach arrows, grant editing; `api.ts` the real source over the Mesh API (`protocol.ts` is its contract), `layout.ts` the automatic graph layout, `graph.ts` what is on screen (cards near the camera, cluster frames far away), `offer.ts` when the view exists (D187) | `MeshModule`, adapter `MeshSource` |
 | `sharing/` | share dialog, received copies, team layouts | `SharingModule`, adapter `SharingAdapter` |

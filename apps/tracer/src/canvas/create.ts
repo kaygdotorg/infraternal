@@ -34,7 +34,7 @@ import { installShortcuts } from "./toolbar/shortcuts";
 import { createTree } from "./toolbar/tree";
 import { createViews } from "./views/world";
 import { createViewList } from "./toolbar/viewlist";
-import { createFloat } from "./windows/float";
+import { createFloatHandle } from "./windows/float-handle";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
 import { createSessionHooks } from "./windows/session-hooks";
@@ -109,7 +109,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.nav = createNav(cx);
   cx.view = createViews(cx);
   cx.win = createWindows(cx);
-  cx.float = createFloat(cx);
+  cx.float = createFloatHandle(cx);
   cx.inputLock = createInputLock(cx);
   if (options.adapters.inventory) cx.sessionUi = createSessionHooks(cx);
   cx.visibility = createVisibility(cx);
