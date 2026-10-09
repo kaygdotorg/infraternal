@@ -445,11 +445,76 @@ test.describe("access", () => {
   });
 });
 
+/** The confirmation's two actions are icon buttons (cross, tick) that carry their name as label and warm tooltip, on bare glyphs: no halo behind them. */
+async function expectIconButtons(tip: ReturnType<Page["locator"]>, names: [string, string]): Promise<void> {
+  const buttons = tip.locator("button");
+  await expect(buttons).toHaveCount(2);
+  await expect(buttons).toHaveText(["", ""]);
+  for (const [i, name] of names.entries()) {
+    await expect(buttons.nth(i)).toHaveAttribute("aria-label", name);
+    await expect(buttons.nth(i)).toHaveAttribute("data-tip", name);
+    await expect(buttons.nth(i).locator("svg")).toHaveCount(1);
+  }
+  // Text is crisp at rest: nothing in the popover carries the material's halo around a button.
+  expect(await buttons.evaluateAll((bs) => bs.map((b) => getComputedStyle(b).textShadow))).toEqual(["none", "none"]);
+}
+
+// ---- snap-fit: an arrow end follows the pointer 1:1, snaps in one frame and holds still; no spring -----------------
+test("snap-fit: the dragged end is exact, lands in a single frame without wobble, and goes home fast without overshoot", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  const live = ".cl-arrow[data-live] .cl-arrow-line";
+  /** The path of the live arrow on each of the next `n` frames. */
+  const frames = (n: number): Promise<string[]> => page.evaluate(({ sel, n: count }) => new Promise<string[]>((res) => {
+    const out: string[] = [];
+    const tick = (): void => { out.push(document.querySelector(sel)?.getAttribute("d") ?? ""); if (out.length < count) requestAnimationFrame(tick); else res(out); };
+    requestAnimationFrame(tick);
+  }), { sel: live, n });
+  const mid = await centre(page, '.cl[data-view="mesh"] .cl-arrow[data-grant="g3"] .cl-arrow-hit');
+  await page.mouse.move(mid.x, mid.y);
+  const handle = await centre(page, '.cl-arrow[data-grant="g3"] .cl-arrow-handle[data-end="head"]');
+  await page.mouse.move(handle.x, handle.y);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + 10, handle.y + 110, { steps: 5 });
+  // Free: after a pointer move the very next frame already shows the final shape (it holds still, never trails).
+  await page.mouse.move(handle.x + 40, handle.y + 140);
+  const free = await frames(6);
+  expect(new Set(free).size, "free end follows the pointer with no lag").toBe(1);
+  // Snap: the frames after the move that enters the snap zone are all identical; there is no wobble.
+  const target = await centre(page, '.ui-window[data-window-id="n-edge-arm"]');
+  await page.mouse.move(target.x, target.y, { steps: 14 });
+  const snapped = await frames(24);
+  expect(new Set(snapped).size, "snapped arrow does not move").toBe(1);
+  expect(snapped[0]).not.toBe(free[0]);
+  await expect(page.locator('.ui-window[data-window-id="n-edge-arm"][data-drop]')).toHaveCount(1);
+  // The head presses once (120 ms) and leaves nothing on the element at rest, so it is never left on a fractional scale.
+  await page.waitForTimeout(200);
+  expect(await page.locator(".cl-arrow[data-live] .cl-arrow-head").evaluate((h) => (h as SVGElement).style.transform + getComputedStyle(h).transform)).toMatch(/^(none)?$/);
+  // Release over the target and cancel: the arrow comes home in at most 180 ms and never overshoots its home.
+  await page.mouse.up();
+  await expect(page.locator(".ui-confirm-tip")).toHaveAttribute("data-open", "true");
+  const home = await page.evaluate((sel) => document.querySelector(sel)?.getAttribute("d"), live);
+  expect(home).toBe(snapped[0]); // released over a target: it stays exactly where it snapped
+  // Time from the click itself (not from when the test asked to click) until the live arrow has been removed.
+  const back = page.evaluate(({ sel }) => new Promise<{ ms: number; ds: string[] }>((res) => {
+    document.addEventListener("click", () => {
+      const t0 = performance.now(), ds: string[] = [];
+      const tick = (): void => { const d = document.querySelector(sel)?.getAttribute("d"); if (d) ds.push(d); if (!d || performance.now() - t0 > 600) res({ ms: performance.now() - t0, ds }); else requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+    }, { capture: true, once: true });
+  }), { sel: live });
+  await page.locator(".ui-confirm-no").click();
+  const r = await back;
+  expect(r.ms, "the live arrow is gone within the glide plus a frame or two").toBeLessThan(260);
+  // Ease-out without overshoot: the end only ever moves toward home, so successive paths never reverse direction.
+  expect(r.ds.length).toBeGreaterThan(2);
+});
+
 // ---- copy: every message says what happens, in plain words (TASTE) ------------------------------------------------
 const noHosts = (t: string): string => t.replace(/nix-cache|edge-arm|studio-mac|build-01/g, "");
 const TECHNICAL = /→|\bgrants?\b|\bnodes?\b|\bedges?\b|\bACL\b|\bid\b|\bAPI\b/i;
 for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const) {
-  test(`copy ${label}: the remove and move confirmations, the toasts and the connector name their effect, with named buttons`, async ({ page }, testInfo) => {
+  test(`copy ${label}: the remove and move confirmations, the toasts and the connector name their effect, with icon buttons and warm tooltips`, async ({ page }, testInfo) => {
     await open(page, "", size);
     await intoMesh(page);
     // On a phone the first stop shows one column of cards: frame the arrows at a size where they can be grabbed.
@@ -458,7 +523,7 @@ for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const
     const move = page.locator(".ui-confirm-tip");
     await expect(move).toContainText("Let nix-cache reach edge-arm instead of studio-mac?");
     await expect(move).toContainText("nix-cache will lose its connection to studio-mac and gain one to edge-arm. You can change it back any time.");
-    await expect(move.locator("button")).toHaveText(["Cancel", "Change access"]);
+    await expectIconButtons(move, ["Cancel", "Change access"]);
     expect(noHosts(await move.innerText())).not.toMatch(TECHNICAL);
     await capture(page, `confirm-move-ink-${label}`, testInfo);
     await page.locator(".ui-confirm-no").click();
@@ -467,7 +532,7 @@ for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const
     const stop = page.locator(".ui-confirm-tip");
     await expect(stop).toContainText("Stop nix-cache reaching studio-mac?");
     await expect(stop).toContainText("nix-cache will lose its connection to studio-mac. You can allow it again any time.");
-    await expect(stop.locator("button")).toHaveText(["Keep it", "Stop access"]);
+    await expectIconButtons(stop, ["Keep it", "Stop access"]);
     expect(noHosts(await stop.innerText())).not.toMatch(TECHNICAL);
     await capture(page, `confirm-stop-ink-${label}`, testInfo);
     await page.locator(".ui-confirm-yes").click();

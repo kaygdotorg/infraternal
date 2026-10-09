@@ -7,7 +7,6 @@
  * Arrow geometry is the only per-frame geometry of the graph, and it is redrawn on the next animation frame after the
  * camera moves (`cull`, called by index.ts from the context's coalesced invalidate).
  */
-import { Spring } from "../../../../../packages/ui/src/spring";
 import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
 import { createWindowCard } from "../../../../../packages/ui/src/window-card";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
@@ -17,7 +16,6 @@ import { SVG_NS, coarse, el } from "../dom";
 import { contentSize, type Pt, type Rect } from "../layout/geometry";
 import type { Grant, NodeModel, WindowModel } from "../model/types";
 import { ICON, lineIcon } from "../views/icons";
-import { SCALE_REST, restAt } from "../springs";
 import { Arrow, DragArrow, anchors } from "./arrows";
 import { createGraph, type GraphController, type TopoArrow } from "./graph";
 import { createLayoutModel } from "./layout-model";
@@ -68,7 +66,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     arrow.g.dataset.grant = g.id;
     arrow.g.dataset.tip = grantName(g); // hover names the grant (warm tooltip); D180: edges carry grant names only
     arrow.g.toggleAttribute("data-dashed", Boolean(g.via));
-    arrow.setPulse(1);
+    arrow.rest();
     for (const flag of ["data-fresh", "data-leaving", "data-editing", "data-cluster"]) arrow.g.removeAttribute(flag);
     if (g.via) {
       if (!entry.label) {
@@ -96,8 +94,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     const { arrow } = entry;
     arrow.g.dataset.fresh = "";
     requestAnimationFrame(() => requestAnimationFrame(() => arrow.g.removeAttribute("data-fresh")));
-    const pulse = restAt(new Spring(1.9, (v) => arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 }), SCALE_REST);
-    pulse.set(1);
+    arrow.press();
   };
   const drawTopoArrow = (c: ViewRec, e: TopoArrow): void => {
     const a = nodeRect(c, e.grant.from), b = nodeRect(c, e.grant.to);
@@ -296,7 +293,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
         label: `Let ${endName(n.id)} reach ${endName(to)}`,
         title: `Let ${endName(n.id)} reach ${endName(to)}?`,
         effect: `${endName(n.id)} will be able to connect to ${endName(to)}. You can stop it any time.`,
-        confirmLabel: "Allow access", cancelLabel: "Cancel", named: true,
+        confirmLabel: "Allow access", cancelLabel: "Cancel",
         onConfirm: () => {
           const g = source.addGrant(n.id, to);
           live.dispose();
@@ -371,15 +368,15 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       handle.removeEventListener("pointercancel", up);
       over?.removeAttribute("data-drop");
     };
-    const springBack = (): void => {
-      live.setTarget(home);
-      entry.arrow.g.removeAttribute("data-editing");
-      window.setTimeout(() => live.dispose(), 380);
+    /** Not changed: the end returns to where it came from, quickly and without overshoot, then the original arrow is back. */
+    const putBack = (): void => {
+      entry.arrow.g.removeAttribute("data-editing"); // the original fades back while the live arrow arrives on top of it
+      live.glideTo(home, 150, () => live.dispose());
     };
     const up = (ev: PointerEvent): void => {
       finish();
       const at = tipAt({ x: ev.clientX, y: ev.clientY });
-      if (ev.type === "pointercancel" || candidate === homeId) { springBack(); at.done(); return; }
+      if (ev.type === "pointercancel" || candidate === homeId) { putBack(); at.done(); return; }
       if (candidate) {
         const next: Grant = end === "head" ? { ...g, to: candidate } : { ...g, from: candidate };
         // What changes for the person, in the words of the cards: who reaches what now, and who will not any more.
@@ -391,20 +388,19 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
         const endTip = tipAt(toClient({ x: live.end().x + origin.x, y: live.end().y + origin.y }));
         mountConfirmTip(endTip.anchor, {
           label: moveTitle, title: moveTitle, effect: moveEffect,
-          confirmLabel: "Change access", cancelLabel: "Cancel", named: true,
+          confirmLabel: "Change access", cancelLabel: "Cancel",
           onConfirm: () => {
             source.moveGrant(g, end === "head" ? { to: next.to } : { from: next.from });
             entry.arrow.g.dataset.tip = grantName(g);
             entry.arrow.g.removeAttribute("data-editing");
             refreshGraph(c);
-            const pulse = restAt(new Spring(1.9, (v) => entry.arrow.setPulse(v), { visualDuration: 0.4, bounce: 0.45 }), SCALE_REST);
-            pulse.set(1);
+            entry.arrow.press();
             live.dispose();
             for (const cl of views.values()) cx.view.geometry(cl);
             cx.toast.show({ message: `${endName(g.from)} can now reach ${endName(g.to)}` });
             endTip.done();
           },
-          onCancel: () => { springBack(); endTip.done(); },
+          onCancel: () => { putBack(); endTip.done(); },
         });
         at.done();
         return;
@@ -413,7 +409,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       mountConfirmTip(at.anchor, {
         label: `Stop ${endName(g.from)} reaching ${endName(g.to)}`, title: `Stop ${endName(g.from)} reaching ${endName(g.to)}?`,
         effect: `${endName(g.from)} will lose its connection to ${endName(g.to)}. You can allow it again any time.`,
-        confirmLabel: "Stop access", cancelLabel: "Keep it", named: true,
+        confirmLabel: "Stop access", cancelLabel: "Keep it",
         onConfirm: () => {
           source.removeGrant(g);
           live.dispose();
@@ -421,7 +417,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
           for (const cl of views.values()) cx.view.geometry(cl);
           cx.toast.show({ message: `${endName(g.from)} can no longer reach ${endName(g.to)}` });
         },
-        onCancel: springBack,
+        onCancel: putBack,
       });
       at.done();
     };

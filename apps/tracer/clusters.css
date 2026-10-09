@@ -56,7 +56,10 @@
 .ui-window[data-kind="node"] { cursor: default; }
 .ui-window-pill[data-grab] { cursor: grab; touch-action: none; }
 .ui-window-pill[data-grab]:active { cursor: grabbing; }
-.ui-window[data-drop] { border-color: var(--accent); }
+/* The landing cue on the node an arrow snaps onto: the border brightens to the accent at once (a 120 ms flash from the
+   foreground colour, ease-out). It stays for reduced motion, which keeps the colour and drops the movement. */
+.ui-window[data-drop] { border-color: var(--accent); animation: cl-land 120ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+@keyframes cl-land { from { border-color: var(--fg); } }
 
 /* The soft outline of where a dragged window will land. */
 .cl-slot {

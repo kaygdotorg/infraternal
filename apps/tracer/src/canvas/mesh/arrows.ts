@@ -6,16 +6,13 @@
  * rectangles and points, so the same code serves the Mesh graph, the on-demand arrows in
  * the Console view, and the live arrow that follows a pointer.
  *
- * `DragArrow` is the live arrow. Its far end is `lerp(pointer, anchor, s)` where `s` is a
- * spring: setting a target runs `s` to 1 with a little overshoot (the end overshoots the
- * anchor and settles, the "snap"); clearing the target runs it back to 0 (the "unsnap"), so the
- * end is pulled off the window and rejoins the pointer. The head also gets a small scale pulse
- * on snap. Only the path data and the head transform change; no layout is touched.
+ * `DragArrow` is the live arrow. It is a snap-fit, not a spring: the free end follows the pointer 1:1, and the moment the
+ * pointer is inside a target's snap zone the end sits on the target's anchor (no tween toward it); leaving the zone
+ * un-snaps just as fast. The landing is confirmed by a cue (`Arrow.press`, a 120 ms press of the head, plus the target's
+ * border, owned by the caller). The only motion is `glideTo`: after a release elsewhere the end returns to where it came
+ * from in at most 180 ms, ease-out, no overshoot. Only path data and the head transform change; no layout is touched.
  */
-import { Spring } from "../../../../../packages/ui/src/spring";
-
 import type { Pt, Rect } from "../layout/geometry";
-import { SCALE_REST, restAt } from "../springs";
 export type { Pt, Rect };
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -62,9 +59,9 @@ export class Arrow {
   tailHandle: SVGCircleElement | undefined;
   headHandle: SVGCircleElement | undefined;
   private ends: { p0: Pt; p1: Pt; r: string } | undefined;
-  /** Last tip and direction, so a scale pulse can pivot on the tip. */
+  /** Last tip, so the press of the head can pivot on it. */
   private tip: Pt = { x: 0, y: 0 };
-  private pulse = 1;
+  private pressing: Animation | undefined;
 
   constructor(style: ArrowStyle = {}) {
     if (style.editable) {
@@ -129,7 +126,6 @@ export class Arrow {
     const bx = p1.x - ux * size, by = p1.y - uy * size;
     this.head.setAttribute("d", `M${p1.x.toFixed(1)} ${p1.y.toFixed(1)}L${(bx - uy * w).toFixed(1)} ${(by + ux * w).toFixed(1)}L${(bx + uy * w).toFixed(1)} ${(by - ux * w).toFixed(1)}Z`);
     this.tip = p1;
-    this.applyPulse();
   }
 
   between(a: Rect, b: Rect, size: number, lane = 0): void {
@@ -137,34 +133,44 @@ export class Arrow {
     this.draw(n.p0, n.t0, n.p1, n.t1, size);
   }
 
-  /** Scales the head about its tip (1 = rest). Transform only. */
-  setPulse(scale: number): void { this.pulse = scale; this.applyPulse(); }
-  private applyPulse(): void {
+  /**
+   * The landing cue: the head presses in and out about its tip, 1 -> 0.92 -> 1 over 120 ms with a strong ease-out and no
+   * overshoot. Transform only, run by the compositor-friendly Web Animations engine, and gone from the element at the end,
+   * so the head is never left on a fractional scale. Reduced motion drops the press (the caller keeps its colour cue).
+   */
+  press(): void {
+    this.pressing?.cancel();
+    this.pressing = undefined;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches || typeof this.head.animate !== "function") return;
     this.head.style.transformOrigin = `${this.tip.x}px ${this.tip.y}px`;
-    this.head.style.transform = this.pulse === 1 ? "" : `scale(${this.pulse})`;
+    this.pressing = this.head.animate([{ transform: "scale(1)" }, { transform: "scale(0.92)" }, { transform: "scale(1)" }], { duration: 120, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
   }
+  /** Stops a press in flight (an arrow taken from the pool starts at rest). */
+  rest(): void { this.pressing?.cancel(); this.pressing = undefined; }
 
   set hidden(value: boolean) { this.g.toggleAttribute("hidden", value); }
   remove(): void { this.g.remove(); }
 }
 
+/** Ease-out cubic: fast at first, settling without overshoot. */
+const easeOut = (t: number): number => 1 - (1 - t) ** 3;
+
 /** The arrow that follows a pointer and snaps onto a target rectangle. */
 export class DragArrow {
   readonly arrow = new Arrow({ tone: "accent" });
-  private readonly snap: Spring;
-  private readonly pulse: Spring;
   private pointer: Pt;
   private target: Rect | undefined;
   private lastSize = 8;
+  /** A return in flight: the end runs from `from` to the target's anchor over `ms`, eased out. */
+  private glide: { from: Pt; t0: number; ms: number; done: () => void } | undefined;
+  private glideFrame = 0;
+  private progress = 0;
   /** Called when the end moved, so the owner can keep a tip anchored to it. */
   onMove: ((end: Pt) => void) | undefined;
 
   /** `reverse`: the dragged end is the tail (the arrow still points at `source`). */
   constructor(private readonly source: Rect, start: Pt, private readonly onFrame: () => void, private readonly reverse = false) {
     this.pointer = start;
-    this.snap = new Spring(0, () => this.render(), { visualDuration: 0.34, bounce: 0.38 });
-    this.pulse = new Spring(1, (v) => { this.arrow.setPulse(v); }, { visualDuration: 0.3, bounce: 0.45 });
-    restAt(this.snap, SCALE_REST); restAt(this.pulse, SCALE_REST);
     this.render();
     this.arrow.g.dataset.live = "";
   }
@@ -177,41 +183,76 @@ export class DragArrow {
     this.render();
   }
 
-  /** Snaps onto `rect`, or lets go when it is undefined. */
+  /** Snaps onto `rect` at once, or lets go when it is undefined. A new snap gets the landing cue. */
   setTarget(rect: Rect | undefined): void {
     const had = this.target !== undefined;
+    this.cancelGlide();
     this.target = rect;
-    this.snap.set(rect ? 1 : 0);
-    if (rect && !had) { this.pulse.value = 1.7; this.pulse.set(1); }
     if (rect) this.arrow.g.dataset.snapped = ""; else this.arrow.g.removeAttribute("data-snapped");
+    this.render();
+    if (rect && !had) this.land();
   }
 
-  /** Starts out snapped on `rect` with no animation (an edit begins with the end still attached). */
+  /** Starts out snapped on `rect` with no cue (an edit begins with the end still attached). */
   snapNow(rect: Rect): void {
     this.target = rect;
-    this.snap.set(1, true);
     this.arrow.g.dataset.snapped = "";
     this.render();
   }
 
+  /** The landing cue: the head presses, and a touch screen that can tick does. */
+  private land(): void {
+    this.arrow.press();
+    if (matchMedia("(pointer: coarse)").matches) navigator.vibrate?.(8);
+  }
+
+  /** Returns the end to `rect` in at most `ms` (ease-out, no overshoot), then calls `done`. Used after a release elsewhere. */
+  glideTo(rect: Rect, ms: number, done: () => void): void {
+    const from = this.end();
+    this.cancelGlide();
+    this.target = rect;
+    this.arrow.g.dataset.snapped = "";
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) { this.render(); done(); return; }
+    this.glide = { from, t0: performance.now(), ms, done };
+    this.progress = 0;
+    const step = (now: number): void => {
+      const g = this.glide;
+      if (!g) return;
+      const t = Math.min(1, (now - g.t0) / g.ms);
+      this.progress = easeOut(t);
+      this.render();
+      if (t < 1) this.glideFrame = requestAnimationFrame(step); else { this.glide = undefined; this.progress = 1; g.done(); }
+    };
+    this.glideFrame = requestAnimationFrame(step);
+  }
+  private cancelGlide(): void {
+    if (this.glide) cancelAnimationFrame(this.glideFrame);
+    this.glide = undefined;
+    this.progress = 0;
+  }
+
+  /** How far the end is attached: 1 on a target, 0 on the pointer, in between only while gliding home. */
+  private get attach(): number { return this.glide ? this.progress : this.target ? 1 : 0; }
+
   /** Where the far end is right now. */
   end(): Pt {
-    const s = this.snap.value;
     if (!this.target) return this.pointer;
     const a = this.reverse ? anchors(this.target, this.source).p0 : anchorOn(this.target, this.source);
-    return { x: this.pointer.x + (a.x - this.pointer.x) * s, y: this.pointer.y + (a.y - this.pointer.y) * s };
+    const g = this.glide;
+    if (!g) return a;
+    const s = this.progress;
+    return { x: g.from.x + (a.x - g.from.x) * s, y: g.from.y + (a.y - g.from.y) * s };
   }
 
   private render(): void {
-    if (!this.snap || !this.pulse) return; // the springs report once while they are being constructed
     const near = this.target ?? { x: this.pointer.x, y: this.pointer.y, w: 0, h: 0 };
+    const s = this.attach;
     if (this.reverse) {
       // The tail is the free end; the head stays on the source and arrives along its side normal.
       const m = anchors(near, this.source);
       const p0 = this.end();
-      const s0 = Math.max(0, Math.min(1, this.snap.value));
       const dx0 = m.p1.x - p0.x, dy0 = m.p1.y - p0.y, l0 = Math.hypot(dx0, dy0) || 1;
-      const t0 = this.target ? { x: m.t0.x * s0 + (dx0 / l0) * (1 - s0), y: m.t0.y * s0 + (dy0 / l0) * (1 - s0) } : { x: dx0 / l0, y: dy0 / l0 };
+      const t0 = this.target ? { x: m.t0.x * s + (dx0 / l0) * (1 - s), y: m.t0.y * s + (dy0 / l0) * (1 - s) } : { x: dx0 / l0, y: dy0 / l0 };
       this.arrow.draw(p0, t0, m.p1, m.t1, this.lastSize);
       this.onMove?.(p0);
       this.onFrame();
@@ -220,7 +261,6 @@ export class DragArrow {
     const n = anchors(this.source, near);
     const p1 = this.end();
     // Free end: arrive along the line of travel. Snapped: arrive along the target's side normal.
-    const s = Math.max(0, Math.min(1, this.snap.value));
     const dx = p1.x - n.p0.x, dy = p1.y - n.p0.y, len = Math.hypot(dx, dy) || 1;
     const t1 = this.target ? { x: n.t1.x * s + (dx / len) * (1 - s), y: n.t1.y * s + (dy / len) * (1 - s) } : { x: dx / len, y: dy / len };
     this.arrow.draw(n.p0, n.t0, p1, t1, this.lastSize);
@@ -228,7 +268,7 @@ export class DragArrow {
     this.onFrame();
   }
 
-  /** The live arrow settles where it is (confirm) or retracts to its source (cancel). */
+  /** The live arrow lets go of its target; its owner fades it out. */
   retract(): void { this.setTarget(undefined); }
-  dispose(): void { this.arrow.remove(); }
+  dispose(): void { this.cancelGlide(); this.arrow.remove(); }
 }
