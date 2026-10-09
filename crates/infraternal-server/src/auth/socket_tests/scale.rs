@@ -98,6 +98,7 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
     let mut pages = 0;
     let mut max_frame = 0;
     let mut total_bytes = 0;
+    let mut expirations = 0;
     loop {
         assert!(wire.len() <= 65_536);
         max_frame = max_frame.max(wire.len());
@@ -132,7 +133,7 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
             },
         )
         .await;
-        wire = read_client_frame(&mut socket).await;
+        wire = read_scale_reply(&mut socket, &mut expirations).await;
         let Frame::Result {
             call_id: 83,
             ok: true,
@@ -155,7 +156,7 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
         },
     )
     .await;
-    let pong = read_client_frame(&mut socket).await;
+    let pong = read_scale_reply(&mut socket, &mut expirations).await;
     assert!(matches!(
         decode_muxed_frame(&pong).unwrap().frame,
         Frame::Pong { nonce: 42, .. }
@@ -172,5 +173,42 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
         let mut file = path.as_os_str().to_owned();
         file.push(suffix);
         let _ = std::fs::remove_file(std::path::PathBuf::from(file));
+    }
+}
+
+/// Liveness can expire during a long manual pagination exchange. Validate that
+/// asynchronous resync instead of confusing it with the outstanding Call result.
+async fn read_scale_reply<S>(socket: &mut S, expirations: &mut usize) -> Bytes
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    loop {
+        let wire = read_client_frame(socket).await;
+        if let Frame::Event {
+            sub_id: 82,
+            event_json,
+        } = decode_muxed_frame(&wire).unwrap().frame
+        {
+            assert!(wire.len() <= 65_536);
+            let event: Value = serde_json::from_slice(event_json).unwrap();
+            assert_eq!(event["type"], "resync");
+            assert_eq!(event["snapshot"]["revision"], 0);
+            assert!(
+                event["snapshot"]["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|node| node["live"] == false)
+            );
+            *expirations += 1;
+            println!(
+                "liveness_resyncs={expirations} expiry_frame_bytes={}",
+                wire.len()
+            );
+        } else {
+            return wire;
+        }
     }
 }

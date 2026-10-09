@@ -2,7 +2,6 @@
 use super::*;
 
 #[tokio::test]
-#[ignore = "R11 reproduced; repaired in the next atomic step of #108"]
 async fn review_mesh_watch_reports_liveness_expiry_without_another_edit() {
     let _guard = SERIAL.lock().await;
     let (f, address, server) =
@@ -72,6 +71,21 @@ async fn review_mesh_watch_reports_liveness_expiry_without_another_edit() {
         current.revision,
         expiry_event.is_ok()
     );
+    if let Ok(Some(Ok(Message::Binary(wire)))) = &expiry_event {
+        let Frame::Event {
+            sub_id: 902,
+            event_json,
+        } = decode_muxed_frame(wire).unwrap().frame
+        else {
+            panic!("expiry must publish a watch event");
+        };
+        let event: Value = serde_json::from_slice(event_json).unwrap();
+        assert_eq!(event["type"], "resync");
+        assert_eq!(event["snapshot"]["nodes"][0]["live"], false);
+        assert_eq!(event["snapshot"]["revision"], 0);
+    } else {
+        panic!("expiry must leave the socket open and publish a binary event");
+    }
     server.abort();
     assert!(
         expiry_event.is_ok(),

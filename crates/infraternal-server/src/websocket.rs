@@ -16,7 +16,7 @@ use axum::{
     routing::get,
 };
 use bytes::{Bytes, BytesMut};
-use futures_util::{SinkExt, Stream, StreamExt};
+use futures_util::{FutureExt, SinkExt, Stream, StreamExt};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
 };
@@ -99,6 +99,7 @@ struct MeshSubscription {
     sub_id: u32,
     filter: MeshFilter,
     generation: u32,
+    liveness_deadline: Option<i64>,
 }
 
 /// The 32-watch bound makes replacement a bounded scan without hashing/allocation.
@@ -347,6 +348,8 @@ async fn run_socket(
     let worker_state = Arc::clone(&state);
     let worker_user = user_id.clone();
     let worker_token = session_token.clone();
+    // Erasing only plugin operation futures shares the authority watchdog code
+    // across request/change/resync/expiry paths; this keeps the static size budget.
     let mesh_worker = tokio::spawn(async move {
         let mut mesh_updates = worker_state.mesh.subscribe();
         let mut mesh_subscriptions = Vec::<MeshSubscription>::with_capacity(MAX_MESH_SUBSCRIPTIONS);
@@ -361,7 +364,26 @@ async fn run_socket(
         loop {
             mesh_subscriptions
                 .retain(|sub| mesh_current(&worker_registry, sub.sub_id, sub.generation));
+            let next_expiry = mesh_subscriptions
+                .iter()
+                .filter_map(|sub| sub.liveness_deadline)
+                .min();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            let expiry_wait = next_expiry
+                .and_then(|expiry| u64::try_from(expiry).ok())
+                .map(|expiry| Duration::from_secs(expiry).saturating_sub(now));
             let result = tokio::select! {
+                () = tokio::time::sleep(expiry_wait.unwrap_or_default()), if expiry_wait.is_some() => {
+                    while_authorized(&worker_state, &worker_user, &worker_token, true,
+                        async {
+                            let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
+                            send_mesh_resync(&worker_state, &worker_user,
+                                &mut mesh_subscriptions, &mut sink, &mut encode, true).await
+                        }.boxed()
+                    ).await
+                }
                 wire = mesh_rx.recv() => {
                     let Some(wire) = wire else { break; };
                     if let Ok(decoded) = decode_muxed_frame(&wire)
@@ -374,7 +396,7 @@ async fn run_socket(
                             let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
                             handle_mesh_frame(wire, &worker_state, &worker_user, &worker_token,
                                 &mut mesh_subscriptions, &mut sink, &mut encode).await
-                        }
+                        }.boxed()
                     ).await
                 }
                 change = mesh_updates.recv(), if !mesh_subscriptions.is_empty() => {
@@ -384,15 +406,15 @@ async fn run_socket(
                                 let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
                                 send_mesh_change(&worker_state, &worker_user, &change,
                                     &mut mesh_subscriptions, &mut sink, &mut encode).await
-                            }
+                            }.boxed()
                         ).await,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =>
                             while_authorized(&worker_state, &worker_user, &worker_token, true,
                                 async {
                                     let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
                                     send_mesh_resync(&worker_state, &worker_user,
-                                        &mut mesh_subscriptions, &mut sink, &mut encode).await
-                                }
+                                        &mut mesh_subscriptions, &mut sink, &mut encode, false).await
+                                }.boxed()
                             ).await,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
                     }
@@ -722,7 +744,18 @@ where
             .can_view_change(user_id, &subscription.filter, change)
             .await
         {
-            Ok(true) => (json!({"type":"changed","revision":change.revision}), false),
+            Ok(true) => {
+                if let Some(deadline) = change.liveness_deadline
+                    && let Some(watch) = subscriptions.iter_mut().find(|sub| sub.sub_id == sub_id)
+                {
+                    watch.liveness_deadline = Some(
+                        watch
+                            .liveness_deadline
+                            .map_or(deadline, |old| old.min(deadline)),
+                    );
+                }
+                (json!({"type":"changed","revision":change.revision}), false)
+            }
             Ok(false) => continue,
             Err(error) => {
                 mesh_remove(subscriptions, sub_id);
@@ -748,15 +781,30 @@ async fn send_mesh_resync<K>(
     subscriptions: &mut Vec<MeshSubscription>,
     sink: &mut K,
     encode: &mut Vec<u8>,
+    expired_only: bool,
 ) -> Result<(), ()>
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
+    let now = unix_seconds()?;
     let current = subscriptions.clone();
     for subscription in current {
-        let sub_id = subscription.sub_id;
-        if !send_mesh_snapshot(state, user_id, sub_id, subscription, sink, encode, "resync").await?
+        if expired_only
+            && subscription
+                .liveness_deadline
+                .is_none_or(|deadline| deadline > now)
         {
+            continue;
+        }
+        let sub_id = subscription.sub_id;
+        let (retained, deadline) =
+            send_mesh_snapshot(state, user_id, sub_id, subscription, sink, encode, "resync")
+                .await?;
+        if retained {
+            if let Some(watch) = subscriptions.iter_mut().find(|sub| sub.sub_id == sub_id) {
+                watch.liveness_deadline = deadline;
+            }
+        } else {
             mesh_remove(subscriptions, sub_id);
         }
     }
@@ -772,17 +820,17 @@ async fn send_mesh_snapshot<K>(
     sink: &mut K,
     encode: &mut Vec<u8>,
     kind: &str,
-) -> Result<bool, ()>
+) -> Result<(bool, Option<i64>), ()>
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
-    let (event, retained) = match state
+    let (event, retained, deadline) = match state
         .mesh
-        .list(user_id, subscription.filter, unix_seconds()?)
+        .list_with_deadline(user_id, subscription.filter, unix_seconds()?)
         .await
     {
-        Ok(snapshot) => (json!({"type":kind,"snapshot":snapshot}), true),
-        Err(error) => (mesh_error_event(error), false),
+        Ok((snapshot, deadline)) => (json!({"type":kind,"snapshot":snapshot}), true, deadline),
+        Err(error) => (mesh_error_event(error), false, None),
     };
     // The worker carries withdrawal as typed metadata, without inspecting JSON.
     send_mesh_event(
@@ -793,7 +841,7 @@ where
         (subscription.generation << 1) | u32::from(!retained),
     )
     .await?;
-    Ok(retained)
+    Ok((retained, deadline))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1222,11 +1270,12 @@ where
                         sub_id,
                         filter,
                         generation,
+                        liveness_deadline: None,
                     };
                     // The worker cannot process updates while assembling this snapshot.
                     // Dispatch drops superseded output; its registry bounds all admission.
                     mesh_subscriptions.push(subscription.clone());
-                    if !send_mesh_snapshot(
+                    let (retained, deadline) = send_mesh_snapshot(
                         state,
                         user_id,
                         sub_id,
@@ -1235,8 +1284,15 @@ where
                         encode,
                         "snapshot",
                     )
-                    .await?
-                    {
+                    .await?;
+                    if retained {
+                        if let Some(watch) = mesh_subscriptions
+                            .iter_mut()
+                            .find(|sub| sub.sub_id == sub_id)
+                        {
+                            watch.liveness_deadline = deadline;
+                        }
+                    } else {
                         mesh_remove(mesh_subscriptions, sub_id);
                     }
                     Ok(())

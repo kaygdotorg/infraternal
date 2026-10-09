@@ -31,6 +31,8 @@ pub struct MeshChange {
     pub revision: i64,
     /// `None` means instance-wide; an empty set is visible only to unscoped roles.
     pub scopes: Option<BTreeSet<String>>,
+    /// Observation deadline hint; it re-arms a watch with no previously live nodes.
+    pub liveness_deadline: Option<i64>,
 }
 
 /// A node combines mesh-core identity with control-plane liveness observations.
@@ -637,6 +639,18 @@ impl MeshService {
         filter: MeshFilter,
         now: i64,
     ) -> Result<MeshSnapshot, MeshApiError> {
+        self.list_with_deadline(actor, filter, now)
+            .await
+            .map(|(page, _)| page)
+    }
+
+    /// Retain the earliest live-node expiry from the complete filtered view, before paging.
+    pub(crate) async fn list_with_deadline(
+        &self,
+        actor: &str,
+        filter: MeshFilter,
+        now: i64,
+    ) -> Result<(MeshSnapshot, Option<i64>), MeshApiError> {
         let mut transaction = self.pool.begin().await.map_err(map_sql_error)?;
         let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
             .fetch_one(&mut *transaction)
@@ -670,10 +684,19 @@ impl MeshService {
         };
         let snapshot = read_snapshot(&mut transaction, revision, now).await?;
         transaction.commit().await.map_err(map_sql_error)?;
-        page_snapshot(
-            filter_snapshot(snapshot, access.all && !restrict_to_filter, &visible_tags),
-            filter.cursor,
-        )
+        let snapshot = filter_snapshot(snapshot, access.all && !restrict_to_filter, &visible_tags);
+        // A node is live through last_seen + 30 inclusive. The first offline
+        // second is +31. Compute before paging so later-page nodes still expire.
+        let deadline = snapshot
+            .nodes
+            .iter()
+            .filter(|node| node.live)
+            .filter_map(|node| {
+                node.last_seen
+                    .and_then(|seen| seen.checked_add(NODE_LIVE_SECONDS + 1))
+            })
+            .min();
+        Ok((page_snapshot(snapshot, filter.cursor)?, deadline))
     }
 
     async fn enroll_node(
@@ -1294,7 +1317,12 @@ impl MeshService {
                 .map_err(|_| MeshApiError::FreshRequired)?;
         }
         tx.commit().await.map_err(map_sql_error)?;
-        let _ = self.updates.send(MeshChange { revision, scopes });
+        let _ = self.updates.send(MeshChange {
+            revision,
+            scopes,
+            liveness_deadline: (action == "mesh.node.observe")
+                .then(|| now.saturating_add(NODE_LIVE_SECONDS + 1)),
+        });
         u64::try_from(revision).map_err(|_| MeshApiError::Storage)
     }
 }
