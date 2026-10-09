@@ -1605,3 +1605,22 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        from the same action definitions (D16), so they never drift; wording
        follows the plain-language rules (#112). Concise, cleanly organised,
        methodical.
+203. **Terminal images and native capture, round 2 (owner, 2026-10-09):**
+     - **Images (I1):** the shim keeps the original compressed PNG and sends
+       it; browsers decode it in a Worker, cached by digest.
+     - **Formats (I2):** the terminal renders only kitty formats (PNG, raw
+       RGB/RGBA). Any other image format is converted to PNG and shown inline,
+       with the original stored in shell history. Conversion of formats
+       without a trusted decoder is decided in I2a.
+     - **Decoder (I4):** the most performant and reliable PNG decoder by
+       measurement (speed plus fuzzing), reported to the owner.
+     - **Capture (C2):** on macOS the infraternal agent stays a daemon; a
+       small per-user helper in the logged-in session does capture and input,
+       as part of the desktop plugin (D198).
+     - **Engines (C4):** capture bindings and encoders are measured
+       (latency, CPU and memory per session at ×10 and ×50); nothing chosen
+       without numbers. The owner has an Apple Developer account for signing
+       (C3, set up later).
+     - **Test Mac permissions (C1):** jobs may grant Screen Recording and
+       event-posting permission to our own spike binary on the shared macOS
+       VM, through VNC over an SSH tunnel, and remove them afterwards.
