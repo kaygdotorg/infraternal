@@ -74,6 +74,8 @@ pub trait AgentPlugin: Send {
     /// Static action and settings metadata.
     fn descriptor(&self) -> &'static PluginDescriptor;
     /// Validate and execute one declared action.
+    /// # Errors
+    /// Returns a bounded plugin error for a rejected action, unknown action, or oversized body.
     fn call(&mut self, action_id: &str, input: &[u8]) -> Result<Vec<u8>, PluginError>;
 }
 
