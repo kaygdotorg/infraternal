@@ -3240,3 +3240,6 @@ mod reviewer_tests;
 
 #[path = "rotation_tests.rs"]
 mod rotation_tests;
+
+#[path = "ca_membership_tests.rs"]
+mod ca_membership_tests;
