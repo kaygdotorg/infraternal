@@ -53,10 +53,15 @@ export class Arrow {
   readonly g = svgEl("g", "cl-arrow");
   private readonly line = svgEl("path", "cl-arrow-line");
   private readonly head = svgEl("path", "cl-arrow-head");
-  /** Editable arrows only: a wide invisible line to hover, and a grab handle on each end. */
+  /**
+   * Editable arrows only: a wide invisible line to hover, and a grab handle on each end. The handles are made when the
+   * pointer first comes near (or at once on touch, where there is no hover): a graph holds hundreds of arrows and
+   * almost none is ever grabbed, and each handle is an element to style and paint.
+   */
   readonly hit: SVGPathElement | undefined;
-  readonly tailHandle: SVGCircleElement | undefined;
-  readonly headHandle: SVGCircleElement | undefined;
+  tailHandle: SVGCircleElement | undefined;
+  headHandle: SVGCircleElement | undefined;
+  private ends: { p0: Pt; p1: Pt; r: string } | undefined;
   /** Last tip and direction, so a scale pulse can pivot on the tip. */
   private tip: Pt = { x: 0, y: 0 };
   private pulse = 1;
@@ -64,14 +69,27 @@ export class Arrow {
   constructor(style: ArrowStyle = {}) {
     if (style.editable) {
       this.hit = svgEl("path", "cl-arrow-hit");
-      this.tailHandle = svgEl("circle", "cl-arrow-handle");
-      this.tailHandle.dataset.end = "tail";
-      this.headHandle = svgEl("circle", "cl-arrow-handle");
-      this.headHandle.dataset.end = "head";
-      this.g.append(this.hit, this.line, this.head, this.tailHandle, this.headHandle);
+      this.g.append(this.hit, this.line, this.head);
+      this.hit.addEventListener("pointerenter", () => this.ensureHandles());
+      if (matchMedia("(pointer: coarse)").matches) queueMicrotask(() => this.ensureHandles());
     } else this.g.append(this.line, this.head);
     this.g.dataset.tone = style.tone ?? "accent";
     if (style.dashed) this.g.dataset.dashed = "";
+  }
+
+  /** Makes the grab handles if they are not there yet, at the ends last drawn. */
+  ensureHandles(): void {
+    if (!this.hit || this.tailHandle) return;
+    this.tailHandle = svgEl("circle", "cl-arrow-handle");
+    this.tailHandle.dataset.end = "tail";
+    this.headHandle = svgEl("circle", "cl-arrow-handle");
+    this.headHandle.dataset.end = "head";
+    this.g.append(this.tailHandle, this.headHandle);
+    if (this.ends) this.placeHandles(this.ends.p0, this.ends.p1, this.ends.r);
+  }
+  private placeHandles(p0: Pt, p1: Pt, r: string): void {
+    if (!this.tailHandle || !this.headHandle) return;
+    for (const [h, pt] of [[this.tailHandle, p0], [this.headHandle, p1]] as const) { h.setAttribute("cx", pt.x.toFixed(1)); h.setAttribute("cy", pt.y.toFixed(1)); h.setAttribute("r", r); }
   }
 
   /** Draws from `p0` (leaving along `t0`) to `p1` (arriving along `t1`). `size` is the head length in world px. */
@@ -87,10 +105,11 @@ export class Arrow {
     const end = { x: p1.x - ux * size * 0.7, y: p1.y - uy * size * 0.7 };
     const d = `M${p0.x.toFixed(1)} ${p0.y.toFixed(1)}C${c0.x.toFixed(1)} ${c0.y.toFixed(1)} ${c1.x.toFixed(1)} ${c1.y.toFixed(1)} ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
     this.line.setAttribute("d", d);
-    if (this.hit && this.tailHandle && this.headHandle) {
+    if (this.hit) {
       this.hit.setAttribute("d", d);
       const r = (size * 0.85).toFixed(1);
-      for (const [h, pt] of [[this.tailHandle, p0], [this.headHandle, p1]] as const) { h.setAttribute("cx", pt.x.toFixed(1)); h.setAttribute("cy", pt.y.toFixed(1)); h.setAttribute("r", r); }
+      this.ends = { p0, p1, r };
+      this.placeHandles(p0, p1, r);
     }
     const w = size * 0.55;
     const bx = p1.x - ux * size, by = p1.y - uy * size;

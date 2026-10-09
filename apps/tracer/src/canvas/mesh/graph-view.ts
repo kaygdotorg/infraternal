@@ -54,20 +54,40 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   };
   /** A grant is shown by its name only (a sentence for one nobody named), never ports or ranges (D180). */
   const grantName = grantSentence;
-  /** An arrow for a grant, not yet in the document: the graph module decides which arrows exist. */
+  /**
+   * An arrow for a grant, not yet in the document: the graph module decides which arrows exist. Arrows are reused: one
+   * that leaves the screen goes to a pool and comes back for the next grant that enters (making one is a handful of SVG
+   * elements, and a pan brings dozens a second). The pool is per kind: with handles or without.
+   */
+  const arrowPool = new Map<boolean, TopoArrow[]>();
   const makeTopoArrow = (g: Grant): TopoArrow => {
-    const arrow = new Arrow({ ...(g.via ? { dashed: true } : {}), tone: "accent", editable: source.canEdit() });
+    const editable = source.canEdit();
+    const entry = arrowPool.get(editable)?.pop() ?? { grant: g, arrow: new Arrow({ tone: "accent", editable }) };
+    entry.grant = g;
+    const { arrow } = entry;
     arrow.g.dataset.grant = g.id;
     arrow.g.dataset.tip = grantName(g); // hover names the grant (warm tooltip); D180: edges carry grant names only
-    const entry: TopoArrow = { grant: g, arrow };
+    arrow.g.toggleAttribute("data-dashed", Boolean(g.via));
+    arrow.setPulse(1);
+    for (const flag of ["data-fresh", "data-leaving", "data-editing", "data-cluster"]) arrow.g.removeAttribute(flag);
     if (g.via) {
-      const t = document.createElementNS(SVG_NS, "text");
-      t.setAttribute("class", "cl-arrow-label");
-      t.textContent = `through ${g.via}`;
-      entry.label = t;
-      arrow.g.append(t);
-    }
+      if (!entry.label) {
+        const t = document.createElementNS(SVG_NS, "text");
+        t.setAttribute("class", "cl-arrow-label");
+        entry.label = t;
+        arrow.g.append(t);
+      }
+      entry.label.textContent = `through ${g.via}`;
+      entry.label.removeAttribute("display");
+    } else entry.label?.setAttribute("display", "none");
     return entry;
+  };
+  const releaseArrow = (entry: TopoArrow): void => {
+    entry.arrow.remove();
+    const kind = entry.arrow.hit !== undefined;
+    const pool = arrowPool.get(kind) ?? [];
+    arrowPool.set(kind, pool);
+    if (pool.length < 400) pool.push(entry);
   };
   /** A grant that was just made: its arrow fades in and its head pulses once. */
   const pulseNew = (c: ViewRec, g: Grant): void => {
@@ -102,47 +122,91 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     graphOf(c)?.redraw();
   };
 
-  const makeNode = (c: ViewRec, n: NodeModel): WinRec => {
-    const m: WindowModel = { id: `n-${n.id}`, kind: "node", host: n.label };
-    const status = n.kind === "tag" ? "none" : n.state === "offline" ? "offline" : n.state === "behind" ? "connecting" : "live";
-    const card = createWindowCard({ id: m.id, title: { host: n.label }, icon: n.kind === "tag" ? lineIcon(ICON.tag) : hostIconMarkup(n.os ?? "unknown", "ui-host-mark"), status, label: `${n.label} node` });
-    const rec: WinRec = { model: m, card, owner: c };
-    card.root.dataset.kind = "node";
-    card.root.style.cssText = `position:absolute;left:0;top:0;width:${state.metrics.nodeW}px;height:${state.metrics.nodeH}px;transform:translate(${n.x}px,${n.y}px)`;
-    const meta = el("div", "cl-node-meta");
-    meta.innerHTML = `<span class="cl-node-detail"></span><span class="cl-node-sub"></span>`;
+  /**
+   * Node cards are reused like arrows: a card that scrolls out of range goes to a pool and is rebound to the node that
+   * scrolls in (its texts, icon, status, place and name), so a pan makes no DOM and the handlers are made once. The
+   * handlers read the node a card is bound to now (`boundTo`), never the one it was made for.
+   */
+  const cardPool: WinRec[] = [];
+  const boundTo = new WeakMap<WinRec, NodeModel>();
+  const nodeStatus = (n: NodeModel): "none" | "offline" | "connecting" | "live" => (n.kind === "tag" ? "none" : n.state === "offline" ? "offline" : n.state === "behind" ? "connecting" : "live");
+  const bindNode = (rec: WinRec, n: NodeModel): void => {
+    boundTo.set(rec, n);
+    rec.model.id = `n-${n.id}`;
+    rec.model.host = n.label;
+    const { card } = rec;
+    card.root.dataset.windowId = rec.model.id;
+    card.setTitle({ host: n.label });
+    card.setIcon(n.kind === "tag" ? lineIcon(ICON.tag) : hostIconMarkup(n.os ?? "unknown", "ui-host-mark"));
+    card.setStatus(nodeStatus(n));
+    card.root.style.transform = `translate(${n.x}px,${n.y}px)`;
+    const meta = card.body.firstElementChild as HTMLElement;
     (meta.children[0] as HTMLElement).textContent = n.detail;
     (meta.children[1] as HTMLElement).textContent = n.sub;
+    const port = card.pill.nextElementSibling as HTMLElement | null;
+    if (port?.classList.contains("cl-port")) { port.dataset.tip = `Drag onto another card to let ${endName(n.id)} reach it`; port.setAttribute("aria-label", `Let ${endName(n.id)} reach another card`); }
+  };
+  const makeNode = (c: ViewRec, n: NodeModel): WinRec => {
+    const pooled = cardPool.pop();
+    if (pooled) { bindNode(pooled, n); return pooled; }
+    const m: WindowModel = { id: `n-${n.id}`, kind: "node", host: n.label };
+    const card = createWindowCard({ id: m.id, title: { host: n.label }, status: nodeStatus(n), lockable: false, label: `${n.label} node` });
+    const rec: WinRec = { model: m, card, owner: c };
+    card.root.dataset.kind = "node";
+    card.root.style.cssText = `position:absolute;left:0;top:0;width:${state.metrics.nodeW}px;height:${state.metrics.nodeH}px`;
+    const meta = el("div", "cl-node-meta");
+    meta.innerHTML = `<span class="cl-node-detail"></span><span class="cl-node-sub"></span>`;
     card.body.append(meta);
-    wireNode(rec, n);
-    wireLink(c, rec, n);
+    wireNode(rec);
+    wireLink(c, rec);
+    bindNode(rec, n);
     return rec;
   };
+  const dropNode = (rec: WinRec): void => {
+    rec.card.root.remove();
+    for (const flag of ["data-lifted", "data-drop", "data-linking", "data-active"]) rec.card.root.removeAttribute(flag);
+    boundTo.delete(rec);
+    if (cardPool.length < 120) cardPool.push(rec); else rec.card.dispose();
+  };
 
-  const wireNode = (rec: WinRec, n: NodeModel): void => {
+  const wireNode = (rec: WinRec): void => {
     const pill = rec.card.pill;
     pill.style.touchAction = "none";
     pill.dataset.grab = "";
-    let d: { id: number; x: number; y: number; nx: number; ny: number } | undefined;
-    pill.addEventListener("pointerdown", (e) => {
-      if (camera.lod === "thumb") return;
-      pill.setPointerCapture(e.pointerId);
-      d = { id: e.pointerId, x: e.clientX, y: e.clientY, nx: n.x, ny: n.y };
-      rec.card.root.dataset.lifted = "";
-    }, { signal });
-    pill.addEventListener("pointermove", (e) => {
-      if (!d || e.pointerId !== d.id) return;
+    let d: { id: number; x: number; y: number; nx: number; ny: number; n: NodeModel; at?: { x: number; y: number }; frame: number } | undefined;
+    // A drag is applied once per frame, from the last pointer position: a pointer that reports faster than the screen
+    // draws would move the card and redraw its arrows several times for one frame.
+    const apply = (): void => {
+      if (!d) return;
+      d.frame = 0;
+      if (!d.at) return;
+      const { n } = d;
       const size = contentSize(rec.owner.view, state.metrics);
-      n.x = clamp(d.nx + (e.clientX - d.x) / cam.z, 0, size.w - state.metrics.nodeW);
-      n.y = clamp(d.ny + (e.clientY - d.y) / cam.z, 0, size.h - state.metrics.nodeH);
+      n.x = clamp(d.nx + (d.at.x - d.x) / cam.z, 0, size.w - state.metrics.nodeW);
+      n.y = clamp(d.ny + (d.at.y - d.y) / cam.z, 0, size.h - state.metrics.nodeH);
       n.pinned = true; // a node the person moved stays where it is (D180); the canvas document keeps it
       source.pin(n.id, n.x, n.y);
       rec.card.root.style.transform = `translate(${n.x}px, ${n.y}px)`;
       // Arrows stay attached to the card they belong to while it moves.
       for (const t of topoOf(rec.owner)) if (t.grant.from === n.id || t.grant.to === n.id) drawTopoArrow(rec.owner, t);
+    };
+    pill.addEventListener("pointerdown", (e) => {
+      const n = boundTo.get(rec);
+      if (camera.lod === "thumb" || !n) return;
+      pill.setPointerCapture(e.pointerId);
+      d = { id: e.pointerId, x: e.clientX, y: e.clientY, nx: n.x, ny: n.y, n, frame: 0 };
+      rec.card.root.dataset.lifted = "";
+    }, { signal });
+    pill.addEventListener("pointermove", (e) => {
+      if (!d || e.pointerId !== d.id) return;
+      d.at = { x: e.clientX, y: e.clientY };
+      if (!d.frame) d.frame = requestAnimationFrame(apply);
     }, { signal });
     const up = (e: PointerEvent): void => {
       if (!d || e.pointerId !== d.id) return;
+      cancelAnimationFrame(d.frame);
+      apply();
+      const { n } = d;
       const moved = d.nx !== n.x || d.ny !== n.y;
       d = undefined;
       delete rec.card.root.dataset.lifted;
@@ -155,17 +219,15 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   // ---- allowing access: drag the connector on a card onto another card (D194: drawn only here) ----------------------
   /** The connectors on the cards; shown while the person may change who can reach what (D187). */
   const ports = new Set<HTMLButtonElement>();
-  const wireLink = (c: ViewRec, rec: WinRec, n: NodeModel): void => {
+  const wireLink = (c: ViewRec, rec: WinRec): void => {
     const port = el("button", "cl-port");
     port.type = "button";
-    port.dataset.tip = `Drag onto another card to let ${endName(n.id)} reach it`;
-    port.setAttribute("aria-label", `Let ${endName(n.id)} reach another card`);
     port.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON.port}</svg>`;
     port.style.touchAction = "none";
     port.hidden = !source.canEdit();
     ports.add(port);
     rec.card.pill.after(port);
-    port.addEventListener("pointerdown", (e) => { if (e.button === 0 && camera.lod !== "thumb") { e.preventDefault(); e.stopPropagation(); beginLink(c, rec, n, port, e); } }, { signal });
+    port.addEventListener("pointerdown", (e) => { const n = boundTo.get(rec); if (n && e.button === 0 && camera.lod !== "thumb") { e.preventDefault(); e.stopPropagation(); beginLink(c, rec, n, port, e); } }, { signal });
   };
   const beginLink = (c: ViewRec, rec: WinRec, n: NodeModel, port: HTMLElement, e: PointerEvent): void => {
     const from = nodeRect(c, n.id);
@@ -383,12 +445,12 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     }, { signal });
     const graph = createGraph(cx, c, source, layoutOf, {
       makeCard: (n) => makeNode(c, n),
-      dropCard: (rec) => { rec.card.dispose(); rec.card.root.remove(); },
+      dropCard: dropNode,
       makeArrow: makeTopoArrow,
       dropArrow: (entry, fade) => {
-        if (!fade) { entry.arrow.remove(); return; }
+        if (!fade) { releaseArrow(entry); return; }
         entry.arrow.g.dataset.leaving = "";
-        window.setTimeout(() => entry.arrow.remove(), 240);
+        window.setTimeout(() => releaseArrow(entry), 240);
       },
       drawArrow: (entry) => drawTopoArrow(c, entry),
       headSize,
