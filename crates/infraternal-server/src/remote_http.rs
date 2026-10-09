@@ -124,6 +124,18 @@ pub fn router(
     router_with_store(auth, pool, store, source, endpoint)
 }
 
+/// Keep the shipping API shape stable before remote trust is configured.
+/// No request can create a signer or bypass the cold-start lock [168].
+pub(crate) fn unavailable_router() -> Router {
+    async fn unavailable() -> StatusCode {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+    Router::new()
+        .route("/remote/invitations", post(unavailable))
+        .route("/remote/join", post(unavailable))
+        .route("/remote/revocations", post(unavailable))
+}
+
 /// Runtime supplies the same event scope used by its admitted host transports.
 pub(crate) fn router_with_store(
     auth: Auth,

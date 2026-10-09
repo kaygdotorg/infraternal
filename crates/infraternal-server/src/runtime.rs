@@ -375,7 +375,7 @@ async fn build_router_core(
     let app = if let Some(remote_api) = remote_api {
         app.merge(remote_api)
     } else {
-        app
+        app.merge(crate::remote_http::unavailable_router())
     };
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
