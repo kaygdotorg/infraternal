@@ -59,3 +59,7 @@ impl<'de> Deserialize<'de> for Input {
         decoder.deserialize_map(EmptyObject)
     }
 }
+
+#[cfg(test)]
+#[path = "facts_tests.rs"]
+mod tests;
