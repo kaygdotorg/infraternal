@@ -1715,3 +1715,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        opens that item where it lives, without losing the dialog the user
        was in (UX in round 2).
      - **"Why can/can't X reach Y":** wanted, made simpler (round 2).
+210. **Settings, Access placement and live chips (owner, 2026-10-09, grill round 2):**
+     - **One Settings (S1):** a single "Settings"; each switched-on
+       component adds its own section and it disappears when the component
+       is off; component pages carry a small gear that opens their section.
+     - **Access (S2):** Settings → Access, first in the list; each machine's
+       popover has an Access row that opens it filtered to that machine.
+     - **Chips in dialogs (C1):** hover shows a small fact card; click goes to
+       the item, selected, instantly (no camera flight); the dialog parks in
+       the top pill as a chip and one click restores it exactly; at most one
+       parked dialog.
+     - **K1–K3 ("can X reach Y", people, live state):** decided against a
+       mockup.
+     All of the above is mocked up while the backend is built.
