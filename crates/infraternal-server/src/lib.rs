@@ -42,6 +42,6 @@ mod websocket;
 pub use remote_runtime::RemoteService;
 #[cfg(feature = "remote")]
 pub use remote_startup::RemoteStartup;
-pub use runtime::{ProxyNetwork, ServerConfig, ServerError, TlsFiles, serve};
+pub use runtime::{ProxyNetwork, ServerConfig, ServerError, TlsFiles, configure_logging, serve};
 #[cfg(feature = "remote")]
 pub use runtime::{serve_with_enrollment, serve_with_remote};

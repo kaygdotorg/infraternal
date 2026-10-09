@@ -36,3 +36,17 @@ pub struct PluginDescriptor {
     /// Roles that must already exist before an action may activate.
     pub role_dependencies: &'static [&'static str],
 }
+
+impl ActionDef {
+    /// Render the declared steps for operator help without a second copy of the instructions.
+    #[must_use]
+    pub fn help(&self) -> String {
+        use std::fmt::Write;
+        let mut help = self.summary.to_owned();
+        for (index, step) in self.instructions.iter().enumerate() {
+            // Formatting into an owned String cannot fail; only static metadata is included.
+            let _ = write!(help, "\n{}. {step}", index + 1);
+        }
+        help
+    }
+}

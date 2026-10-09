@@ -222,7 +222,7 @@ async fn serve_inner(
     enrollment: Option<EnrollmentService>,
     remote: Option<RemoteService>,
 ) -> Result<(), ServerError> {
-    init_logging();
+    configure_logging(false);
     let (app, setup_token, _listeners) =
         build_router_core(config.clone(), None, enrollment, remote).await?;
     if let Some(token) = setup_token {
@@ -585,12 +585,20 @@ fn unix_seconds() -> Result<i64, ServerError> {
     .map_err(|_| ServerError::Clock)
 }
 
-fn init_logging() {
+/// Select human diagnostics by default or JSON lines for machine callers.
+/// Repeated initialization leaves the process-wide subscriber selected by its caller.
+pub fn configure_logging(json: bool) {
+    use std::io::IsTerminal;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(filter)
-        .try_init();
+    let formatter = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter);
+    if json {
+        let _ = formatter.json().with_ansi(false).try_init();
+    } else {
+        let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        let _ = formatter.with_ansi(color).try_init();
+    }
 }
 
 async fn health(State(pool): State<SqlitePool>) -> Response {

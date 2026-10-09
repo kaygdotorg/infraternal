@@ -7,10 +7,28 @@ use std::{net::SocketAddr, path::PathBuf};
 pub(crate) struct Options {
     /// Advertised server IP and port for dial-out QUIC and TCP/TLS hosts.
     #[arg(long, global = true)]
+    #[cfg_attr(feature = "remote", arg(long_help = infraternal_plugin_remote::SERVE.help()))]
     pub remote_listen: Option<SocketAddr>,
     /// Private directory containing retained public issuer.pem (XDG default).
     #[arg(long, global = true, requires = "remote_listen")]
     pub remote_ca_dir: Option<PathBuf>,
+}
+
+impl Options {
+    /// Use the plugin action identifier for configured remote serving.
+    pub(crate) fn action_id(&self) -> &'static str {
+        if self.remote_listen.is_none() {
+            return "server.serve";
+        }
+        #[cfg(feature = "remote")]
+        {
+            infraternal_plugin_remote::SERVE.id
+        }
+        #[cfg(not(feature = "remote"))]
+        {
+            "remote.server.serve"
+        }
+    }
 }
 
 pub(crate) async fn serve(

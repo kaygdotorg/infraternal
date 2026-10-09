@@ -11,7 +11,7 @@ remote = ["infraternal-agent/remote", "infraternal-server/remote", "dep:infrater
 
 [dependencies]
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }
-clap.workspace = true
+clap = { workspace = true, features = ["string"] }
 infraternal-server = { path = "../infraternal-server", version = "0.1.0", default-features = false }
 sqlx.workspace = true
 tokio.workspace = true

@@ -3,6 +3,7 @@
 
 mod embedded_cli;
 mod install;
+mod output;
 #[cfg(feature = "remote")]
 mod remote;
 mod remote_server;
@@ -14,6 +15,9 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(name = "infraternal")]
 struct Cli {
+    /// Print machine-readable result records.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -56,8 +60,10 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum AgentAction {
     /// Redeem a private-stdin invitation over pinned HTTPS, then connect.
+    #[cfg_attr(feature = "remote", command(about = infraternal_plugin_remote::JOIN.summary, long_about = infraternal_plugin_remote::JOIN.help()))]
     Join { url: String },
     /// Reconnect using the local enrolled identity.
+    #[cfg_attr(feature = "remote", command(about = infraternal_plugin_remote::RUN.summary, long_about = infraternal_plugin_remote::RUN.help()))]
     Run,
 }
 
@@ -127,65 +133,29 @@ fn main() -> ExitCode {
     if let Some(result) = embedded_cli::run_if_requested() {
         return result;
     }
-    match Cli::parse().command {
-        Command::Server(mut args) => {
-            // Preserve the no-argument status used by the fast CLI smoke gate while
-            // requiring a configured listener before a real server can start.
-            if args.action.is_none() && std::env::args_os().len() == 2 {
-                eprintln!("not implemented");
-                return ExitCode::from(2);
-            }
-            // A tokio runtime only for the server arm. main() stays synchronous on purpose:
-            // the hidden __shim mode forks (double fork + setsid), and forking a process
-            // that already runs a multi-threaded runtime is unsound.
-            let Ok(runtime) = tokio::runtime::Runtime::new() else {
-                eprintln!("could not start the async runtime");
-                return ExitCode::FAILURE;
-            };
-            match args.action.as_ref() {
-                Some(ServerAction::Install(install_args)) => {
-                    match install::install(&args, install_args) {
-                        Ok(message) => {
-                            print!("{message}");
-                            ExitCode::SUCCESS
-                        }
-                        Err(error) => {
-                            eprintln!("server install failed: {error}");
-                            ExitCode::FAILURE
-                        }
-                    }
-                }
-                Some(ServerAction::SetupToken) => {
-                    match runtime.block_on(read_setup_token(&args.data)) {
-                        Ok(token) => {
-                            println!("{token}");
-                            ExitCode::SUCCESS
-                        }
-                        Err(error) => {
-                            eprintln!("setup token unavailable: {error}");
-                            ExitCode::FAILURE
-                        }
-                    }
-                }
-                None => {
-                    let remote_options = std::mem::take(&mut args.remote);
-                    let config = match server_config(args) {
-                        Ok(config) => config,
-                        Err(error) => {
-                            eprintln!("invalid server configuration: {error}");
-                            return ExitCode::from(2);
-                        }
-                    };
-                    match runtime.block_on(remote_server::serve(config, remote_options)) {
-                        Ok(()) => ExitCode::SUCCESS,
-                        Err(error) => {
-                            eprintln!("server failed: {error}");
-                            ExitCode::FAILURE
-                        }
-                    }
-                }
-            }
+    let requested_json = std::env::args_os().any(|argument| argument == "--json");
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error)
+            if requested_json
+                && !matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+        {
+            return output::refuse(
+                true,
+                "cli",
+                "Invalid command arguments",
+                "Read the command help and retry.",
+                2,
+            );
         }
+        Err(error) => error.exit(),
+    };
+    let json = cli.json;
+    match cli.command {
+        Command::Server(args) => run_server(args, json),
         Command::Shim {
             session,
             uid,
@@ -196,26 +166,142 @@ fn main() -> ExitCode {
             ring_capacity,
         } => match run_shim(&session, uid, cols, rows, state, detach, ring_capacity) {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("shim startup/session failed: {error}");
-                ExitCode::from(1)
-            }
+            Err(_) => output::refuse(
+                json,
+                "internal.shim",
+                "Session startup failed",
+                "Check the session configuration.",
+                1,
+            ),
         },
         Command::Agent { boot, data, action } => {
             let embedded_cli::Options { fd, state } = boot;
             if let Some(action) = action {
-                return run_remote_agent(action, fd, state, data);
+                return run_remote_agent(action, fd, state, data, json);
             }
             let Some(fd) = fd else {
+                if json {
+                    return output::refuse(
+                        true,
+                        "agent.embedded",
+                        "No infraternal agent mode selected",
+                        "Select an infraternal agent component or enrollment action.",
+                        2,
+                    );
+                }
                 eprintln!("not implemented");
                 return ExitCode::from(2);
             };
             match infraternal_agent::run_embedded(fd, state) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(error) => {
-                    eprintln!("infraternal agent failed: {error}");
-                    ExitCode::FAILURE
+                Err(_) => output::refuse(
+                    json,
+                    "agent.embedded",
+                    "Infraternal agent failed",
+                    "Check the inherited channel and private session storage.",
+                    1,
+                ),
+            }
+        }
+    }
+}
+
+/// Dispatch the configured server with one presentation mode for results and logs.
+fn run_server(mut args: ServerArgs, json: bool) -> ExitCode {
+    if args.action.is_none() && std::env::args_os().len() == 2 {
+        eprintln!("not implemented");
+        return ExitCode::from(2);
+    }
+    let action = args.remote.action_id();
+    infraternal_server::configure_logging(json);
+    // Only the server arm constructs a multi-threaded runtime: shim dispatch must remain synchronous before fork.
+    let Ok(runtime) = tokio::runtime::Runtime::new() else {
+        return output::refuse(
+            json,
+            action,
+            "Could not start the async runtime",
+            "Check local runtime resources.",
+            1,
+        );
+    };
+    match args.action.as_ref() {
+        Some(ServerAction::Install(options)) => match install::install(&args, options) {
+            Ok(message) => {
+                if json {
+                    output::report(
+                        true,
+                        "server.install",
+                        "completed",
+                        &message,
+                        "Review the installed service configuration.",
+                    );
+                } else {
+                    print!("{message}");
                 }
+                ExitCode::SUCCESS
+            }
+            Err(_) => output::refuse(
+                json,
+                "server.install",
+                "Server installation failed",
+                "Check the service name and installation target.",
+                1,
+            ),
+        },
+        Some(ServerAction::SetupToken) => match runtime.block_on(read_setup_token(&args.data)) {
+            Ok(token) => {
+                // This explicit local capability retrieval retains the private-socket output contract.
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"action": "server.setup-token", "state": "ready", "setup_token": token})
+                    );
+                } else {
+                    println!("{token}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(_) => output::refuse(
+                json,
+                "server.setup-token",
+                "Setup capability unavailable",
+                "Check that the existing server is awaiting first-owner setup.",
+                1,
+            ),
+        },
+        None => {
+            let options = std::mem::take(&mut args.remote);
+            let config = match server_config(args) {
+                Ok(config) => config,
+                Err(message) => {
+                    return output::refuse(json, action, &message, "Check listener and TLS.", 2);
+                }
+            };
+            output::report(
+                json,
+                action,
+                "starting",
+                "Preparing the configured server",
+                "Check the configured listener and retained public trust.",
+            );
+            match runtime.block_on(remote_server::serve(config, options)) {
+                Ok(()) => {
+                    output::report(
+                        json,
+                        action,
+                        "stopped",
+                        "Server stopped",
+                        "Start the configured server when needed.",
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => output::refuse(
+                    json,
+                    action,
+                    &error.to_string(),
+                    "Check configuration and retained public server trust.",
+                    1,
+                ),
             }
         }
     }
@@ -228,15 +314,37 @@ fn run_remote_agent(
     fd: Option<i32>,
     state: Option<PathBuf>,
     data: Option<PathBuf>,
+    json: bool,
 ) -> ExitCode {
+    let operation = match &action {
+        AgentAction::Join { .. } => infraternal_plugin_remote::JOIN.id,
+        AgentAction::Run => infraternal_plugin_remote::RUN.id,
+    };
     if fd.is_some() {
-        eprintln!("incompatible infraternal agent modes");
-        return ExitCode::from(2);
+        return output::refuse(
+            json,
+            operation,
+            "Incompatible infraternal agent modes",
+            "Choose one infraternal agent mode.",
+            2,
+        );
     }
     let Ok(data) = data.map_or_else(remote::default_data, Ok) else {
-        eprintln!("infraternal agent data directory unavailable");
-        return ExitCode::FAILURE;
+        return output::refuse(
+            json,
+            operation,
+            "Infraternal agent data directory unavailable",
+            "Set a private identity directory with --data.",
+            1,
+        );
     };
+    output::report(
+        json,
+        operation,
+        "starting",
+        "Preparing the enrolled host connection",
+        "Keep invitation material on private stdin; retain private identity locally.",
+    );
     let result = (|| -> std::io::Result<()> {
         use std::io::Read;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -246,14 +354,33 @@ fn run_remote_agent(
             let mut invitation = Vec::with_capacity(8192);
             std::io::stdin().take(8193).read_to_end(&mut invitation)?;
             runtime.block_on(remote::join(&url, &data, &invitation))?;
+            output::report(
+                json,
+                operation,
+                "enrolled",
+                "Private host identity retained",
+                "Keep this process running to maintain the connection.",
+            );
         }
         runtime.block_on(remote::run(&data, state))
     })();
     if result.is_ok() {
+        output::report(
+            json,
+            operation,
+            "stopped",
+            "Remote infraternal agent stopped",
+            "Reconnect with the retained enrolled identity when needed.",
+        );
         ExitCode::SUCCESS
     } else {
-        eprintln!("remote infraternal agent operation failed");
-        ExitCode::FAILURE
+        output::refuse(
+            json,
+            operation,
+            "Remote infraternal agent operation failed",
+            "Check the enrolled identity and existing server trust.",
+            1,
+        )
     }
 }
 
@@ -405,11 +532,22 @@ fn run_shim(
 /// A core-only node refuses remote activation before reading stdin or private identity.
 #[cfg(not(feature = "remote"))]
 fn run_remote_agent(
-    _action: AgentAction,
+    action: AgentAction,
     _fd: Option<i32>,
     _state: Option<PathBuf>,
     _data: Option<PathBuf>,
+    json: bool,
 ) -> ExitCode {
-    eprintln!("remote support is unavailable in this build");
-    ExitCode::from(2)
+    let operation = match action {
+        AgentAction::Join { .. } => "remote.host.join",
+        AgentAction::Run => "remote.host.run",
+    };
+    drop(action);
+    output::refuse(
+        json,
+        operation,
+        "Remote support is unavailable in this build",
+        "Use a build with the remote plugin enabled.",
+        2,
+    )
 }
