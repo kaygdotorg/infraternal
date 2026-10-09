@@ -22,6 +22,7 @@ test("a click on the pill opens the popover, with plain names and a subtitle for
   await expect(popover(page).locator(".canvas-popover-sub")).toContainText("nix-cache");
   await expect(popover(page).locator(".ui-tab")).toHaveText(["Host", "Connection", "Session"]);
   await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Address" })).toBeVisible();
+  await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Kernel" })).toHaveCount(0); // no machine facts in a mock source
   await popover(page).locator(".ui-tab", { hasText: "Connection" }).click();
   const delay = popover(page).locator(".ui-kv-row", { hasText: "Connection delay" });
   await expect(delay.locator(".ui-kv-hint")).toHaveText("Round-trip time to the server");
