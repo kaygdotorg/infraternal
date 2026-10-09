@@ -22,6 +22,12 @@ const RATES = [30, 60, 90, 120, 144, 165, 240];
 const WARMUP = 30;
 
 export const FREEZE_MS = 100;
+/**
+ * A browser throttles the frames of a page it considers hidden to about one a second (Chrome does it for a window
+ * another window covers, while `visibilityState` still says "visible"). Those intervals are not stalls, so an interval
+ * this long that is part of a run of two or more is a throttled page: it is neither a drop nor a freeze.
+ */
+export const THROTTLE_MS = 400;
 export const DROP_FACTOR = 1.5;
 
 export type FrameVerdict = 0 | 1 | 2;
@@ -34,6 +40,8 @@ export class FrameDetector {
   /** Estimated display refresh in Hz; 0 until warm. */
   refresh = 0;
   private last = 0;
+  /** Consecutive intervals of at least THROTTLE_MS. */
+  private longRun = 0;
   private dropAt = Infinity;
   private readonly scratch = new Float32Array(RING);
 
@@ -45,11 +53,29 @@ export class FrameDetector {
     const dt = t - prev;
     this.ring[this.n & MASK] = dt;
     this.n++;
+    // Throttle handling costs one compare per frame on the normal path (dt is short).
+    if (dt >= THROTTLE_MS) this.longRun++;
+    else if (this.longRun > 0) {
+      const wasThrottled = this.longRun >= 2;
+      this.longRun = 0;
+      // The first frame after a throttled run is the page coming back, not a late frame.
+      if (wasThrottled) return OK;
+    }
+    if (this.longRun >= 2) return OK;
     return dt > FREEZE_MS ? FREEZE : dt > this.dropAt ? DROP : OK;
   }
 
+  /**
+   * Whether the interval at ring index `index` belongs to a run of two or more throttled-length intervals. The first
+   * long interval of a run is reported by `frame` before the run is known; the recorder asks this afterwards.
+   */
+  inLongRun(index: number): boolean {
+    const long = (i: number): boolean => i >= 0 && i >= this.n - RING && i < this.n && this.ring[i & MASK]! >= THROTTLE_MS;
+    return long(index) && (long(index - 1) || long(index + 1));
+  }
+
   /** Forget the previous timestamp (the page was hidden: the next interval would be the time away, not a frame). */
-  resume(): void { this.last = 0; }
+  resume(): void { this.last = 0; this.longRun = 0; }
 
   /** The interval written `back` frames ago (0 is the newest); NaN when there is none. */
   at(back: number): number {

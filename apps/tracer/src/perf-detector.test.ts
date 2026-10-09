@@ -58,4 +58,31 @@ describe("FrameDetector", () => {
     expect(d.p95()).toBeCloseTo(10, 1);
     expect(d.window(150, 5, 5)).toHaveLength(11);
   });
+
+  test("a throttled page (one frame a second) is neither a drop nor a freeze, and neither is its return", () => {
+    const d = new FrameDetector();
+    let t = feed(d, 1000, 120, 100);
+    d.estimate();
+    const verdicts: number[] = [];
+    const first = d.n;
+    for (let i = 0; i < 20; i++) verdicts.push(d.frame((t += 1009)));
+    // The first long interval is reported before the run is known; every later one is not.
+    expect(verdicts[0]).toBe(FREEZE);
+    expect(verdicts.slice(1).every((v) => v === OK)).toBe(true);
+    expect(d.inLongRun(first)).toBe(true);
+    expect(d.inLongRun(first + 10)).toBe(true);
+    // Uncovered: a 250 ms interval, then normal frames. None of them is a freeze or a drop.
+    expect(d.frame((t += 250))).toBe(OK);
+    for (let i = 0; i < 30; i++) expect(d.frame((t += 8.3))).toBe(OK);
+  });
+
+  test("a lone long stall is still a freeze and is not a throttled run", () => {
+    const d = new FrameDetector();
+    let t = feed(d, 1000, 120, 100);
+    d.estimate();
+    const index = d.n;
+    expect(d.frame((t += 1009))).toBe(FREEZE);
+    t = feed(d, t, 120, 20);
+    expect(d.inLongRun(index)).toBe(false);
+  });
 });

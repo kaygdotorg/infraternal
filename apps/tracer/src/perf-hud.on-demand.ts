@@ -23,12 +23,14 @@
 import { buildVersion } from "./build-version";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
 import { activityIn, readPerfProbe } from "./perf-activity";
-import { DROP, FREEZE, FrameDetector, RING, type FrameVerdict } from "./perf-detector";
+import { DROP, FREEZE, FrameDetector, RING, THROTTLE_MS, type FrameVerdict } from "./perf-detector";
 
 const OPEN_KEY = "tracer.fps-hud-open";
 const REPAINT_MS = 250;
 const COALESCE_MS = 400;
 const CLOSE_AFTER_MS = 800;
+/** How long a long interval waits before it is reported, to learn whether it started a throttled run (more than two throttled frames fit in it). */
+const THROTTLE_WAIT_MS = 2500;
 const FLUSH_AFTER_MS = 10_000;
 const MAX_INCIDENTS_PER_HOUR = 600;
 const MAX_BODY = 40_000;
@@ -132,9 +134,9 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
   let pendN = 0, drainScheduled = false;
 
   const noteDrop = (d: FrameDetector, t: number, v: FrameVerdict): void => {
-    dropTimes[dropCount++ & 255] = t;
     if (pendN < 32) { pendT[pendN] = t; pendDt[pendN] = d.at(0); pendIdx[pendN] = d.n - 1; pendVerdict[pendN] = v; pendN++; }
-    if (!drainScheduled) { drainScheduled = true; setTimeout(drain, 0); }
+    // A long interval may be the start of a throttled run; wait to see whether the next one is long too.
+    if (!drainScheduled) { drainScheduled = true; setTimeout(drain, d.at(0) >= THROTTLE_MS ? THROTTLE_WAIT_MS : 0); }
   };
   /** The whole per-frame cost. Takes the detector so `bench` can time it on a scratch one. */
   const body = (d: FrameDetector, t: number): void => {
@@ -218,6 +220,9 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
     if (document.hidden) return;
     for (let i = 0; i < n; i++) {
       const t = pendT[i]!, dt = pendDt[i]!, kind = pendVerdict[i] === FREEZE ? "freeze" : "drop";
+      // Not stalls: a throttled page (a run of long intervals, or a long one in a window that has lost focus).
+      if (dt >= THROTTLE_MS && (det.inLongRun(pendIdx[i]!) || (dt >= 500 && !document.hasFocus()))) continue;
+      dropTimes[dropCount++ & 255] = t;
       if (open && t - open.lastT <= COALESCE_MS) {
         open.drops++; open.lastT = t; open.endT = t;
         if (dt > open.worstMs) open.worstMs = r1(dt);
