@@ -279,6 +279,25 @@ async fn build_router_with_enrollment(
     Ok((app, setup))
 }
 
+/// Assemble configured CA authority before any listener starts; unsafe copy
+/// storage refuses startup, while an absent configuration grants no authority.
+fn ca_router(
+    remote: Option<&crate::remote_runtime::RemoteService>,
+    auth: &Auth,
+    pool: &SqlitePool,
+) -> Result<Router, ServerError> {
+    remote
+        .and_then(|service| service.ca_administration.as_ref())
+        .map(|configuration| {
+            configuration
+                .with_auth(auth.clone(), pool.clone())
+                .map(|authority| crate::ca_http::router(auth.clone(), authority))
+                .map_err(|_| ServerError::TlsConfiguration)
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
 async fn build_router_core(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
@@ -293,11 +312,6 @@ async fn build_router_core(
     ServerError,
 > {
     validate_config(&config)?;
-    if let Some(web_root) = &config.web_root
-        && !web_root.is_dir()
-    {
-        return Err(ServerError::WebRoot);
-    }
 
     let pool = open_database(&config.data_dir).await?;
     let origin =
@@ -306,6 +320,7 @@ async fn build_router_core(
     let auth = Auth::new(pool.clone(), rp_id, &config.public_origin)
         .await
         .map_err(ServerError::Auth)?;
+    let ca_api = ca_router(remote.as_ref(), &auth, &pool)?;
     let now = unix_seconds()?;
     websocket::recover_connections(&pool, now)
         .await
@@ -371,7 +386,8 @@ async fn build_router_core(
         .route("/healthz", get(health))
         .with_state(pool)
         .merge(auth::router(auth))
-        .merge(websocket::router(ws_state));
+        .merge(websocket::router(ws_state))
+        .merge(ca_api);
     let app = if let Some(remote_api) = remote_api {
         app.merge(remote_api)
     } else {
@@ -510,6 +526,11 @@ fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
         || origin.host_str().is_none()
     {
         return Err(ServerError::InvalidConfiguration);
+    }
+    if let Some(web_root) = &config.web_root
+        && !web_root.is_dir()
+    {
+        return Err(ServerError::WebRoot);
     }
     Ok(())
 }

@@ -239,6 +239,7 @@ async fn fixture_at_with_lock(
     )
     .unwrap();
     let service = crate::remote_runtime::RemoteService {
+        ca_administration: None,
         enrollment: crate::remote_http::EnrollmentService {
             source: signer.clone(),
             endpoint: crate::remote_http::EnrollmentEndpoint {

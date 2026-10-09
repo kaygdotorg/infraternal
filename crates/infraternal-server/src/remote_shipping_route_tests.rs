@@ -100,6 +100,10 @@ async fn independent_review_configured_server_mounts_ca_unlock_routes() {
     let issuer = material.issuer().clone();
     let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(issuer.clone()));
     let remote = crate::remote_runtime::RemoteService {
+        ca_administration: Some(crate::ca_administration::CaAdministrationConfig::new(
+            source.clone(),
+            data.clone(),
+        )),
         enrollment: crate::remote_http::EnrollmentService {
             source,
             endpoint: crate::remote_http::EnrollmentEndpoint {

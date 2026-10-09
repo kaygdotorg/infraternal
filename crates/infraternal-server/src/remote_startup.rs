@@ -89,6 +89,10 @@ impl RemoteStartup {
         verify_server(&issuer, &certificate, name)?;
         let source = Arc::new(MemoryCaSource::cold_start(issuer.clone()));
         Ok(RemoteService {
+            ca_administration: Some(crate::ca_administration::CaAdministrationConfig::new(
+                source.clone(),
+                ca_dir,
+            )),
             enrollment: EnrollmentService {
                 source,
                 endpoint: EnrollmentEndpoint {

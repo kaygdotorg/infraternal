@@ -19,6 +19,8 @@ use uuid::Uuid;
 
 /// Trusted server transport identity and public issuers, supplied independently of the CA lock.
 pub struct RemoteService {
+    /// Cold signer and private copy store for the shipping administrator adapter.
+    pub ca_administration: Option<crate::ca_administration::CaAdministrationConfig>,
     /// Enrollment signer source and transport coordinates.
     pub enrollment: crate::remote_http::EnrollmentService,
     /// Server-only TLS key and certificate.
