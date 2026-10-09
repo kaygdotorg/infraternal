@@ -1,4 +1,6 @@
 //! Descriptors and bounded socket interfaces for compiled plugins [15,16,28,198,201].
+pub mod routing;
+
 use bytes::Bytes;
 use serde::Serialize;
 use std::{
