@@ -148,3 +148,7 @@ impl AuthProvider for Once {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "auth_once_tests.rs"]
+mod tests;
