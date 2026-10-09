@@ -3268,3 +3268,6 @@ mod ca_membership_tests;
 
 #[path = "verified_passkey_tests.rs"]
 mod verified_passkey_tests;
+
+#[path = "ca_administration_tests.rs"]
+mod ca_administration_tests;
