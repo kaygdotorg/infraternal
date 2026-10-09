@@ -68,3 +68,10 @@ unsafe_code = "forbid"
 pedantic = { level = "deny", priority = -1 }
 unwrap_used = "allow"
 expect_used = "allow"
+
+[[bin]]
+name = "remote_ca_copy_decode"
+path = "fuzz_targets/remote_ca_copy_decode.rs"
+test = false
+doc = false
+bench = false
