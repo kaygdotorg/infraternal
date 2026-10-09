@@ -30,3 +30,6 @@ export interface DetailsSource {
   /** The facts for a window, or nothing for a window with no machine behind it (a settings section, a node): its pill opens nothing. */
   facts(rec: WinRec): DetailsFacts | undefined;
 }
+
+/** Loads a details source only after a window pill is pressed. */
+export type DetailsSourceLoader = () => Promise<DetailsSource>;

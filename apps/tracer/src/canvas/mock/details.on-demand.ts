@@ -1,4 +1,4 @@
-/** Mockup details facts (#127): the fake hosts and the mock inventory, worded exactly like the product's. */
+/** Mockup details source (#127): reads fake host and inventory data after a window pill is pressed. */
 import type { DetailsSource } from "../windows/details-source";
 import { detailsFacts } from "../windows/details-facts";
 import type { SessionInventory } from "../sessions/inventory";

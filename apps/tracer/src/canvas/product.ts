@@ -11,7 +11,7 @@
  * sees it at once, loading, so its pinned nodes are kept in the document while the snapshot is on its way.
  * This module is a lazy chunk, loaded after sign-in and never on the sign-in path.
  */
-import { createLiveDetails } from "./sessions/details-live";
+import { onDemand } from "../on-demand";
 import { MuxConnection } from "../connection";
 import type { CoreScreen } from "../core-screen";
 import type { TerminalClient, TerminalHooks } from "../terminal";
@@ -25,6 +25,7 @@ import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
 import { createLiveInventory } from "./sessions/live-inventory";
+import type { DetailsSourceLoader } from "./windows/details-source";
 import { BUILTIN_SECTIONS, buildSettingsView } from "./views/settings";
 
 export interface ProductCanvasOptions {
@@ -51,7 +52,9 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     ...(options.onRecoveryPending ? { onRecoveryPending: options.onRecoveryPending } : {}),
     onConnectionChange: (connected) => core.setConnection(connected),
   });
-  const offRoundTrip = connection.onRoundTrip((ms) => core.setRoundTrip(ms));
+  // The details source is loaded on a pill press, so keep the last sample for its first read.
+  let roundTrip: number | undefined;
+  const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); });
   const sessions = createLiveSessions({
     core, connection, host: options.host,
     ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
@@ -60,13 +63,14 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   });
   const store = new LocalCanvasStore(options.accountId);
   const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
-  const details = createLiveDetails({ host: options.host, connection, inventory });
+  const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
+    .then((m) => m.createLiveDetails({ host: options.host, connection, inventory, roundTrip: () => roundTrip }));
   const saved = await store.load();
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
   const savedMesh = saved?.views.find((v) => v.id === "mesh");
   const mesh = createMeshApi({ transport: connectionTransport(connection), pins: savedMesh?.layout.type === "graph" ? savedMesh.layout.pinned : {} });
   const canvas = createCanvas(core, {
-    adapters: { sessions, inventory, details: details.source, store, settings: { sections: [], render: () => undefined }, mesh },
+    adapters: { sessions, inventory, details, store, settings: { sections: [], render: () => undefined }, mesh },
     float: false,
     persisted: (id) => id === "console" || id === "mesh",
   });
@@ -97,7 +101,6 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       canvas.dispose();
       mesh.dispose();
       inventory.dispose();
-      details.dispose();
       sessions.dispose();
       connection.dispose();
     },

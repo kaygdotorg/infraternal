@@ -113,7 +113,7 @@ export interface Adapters {
   /** The Containers list; absent until the host API exists, and the Containers view is then not offered. */
   containers?: { /** The host whose containers these are. */ host: string; rows(): ContainerRow[] };
   /** Facts for the window details popover (a pill pressed without moving); absent, and the pill opens nothing. */
-  details?: import("./windows/details-source").DetailsSource;
+  details?: import("./windows/details-source").DetailsSourceLoader;
   /** Starts the add-host flow (#78); absent until it exists, and the empty-state button is then not drawn. */
   addHost?: () => void;
 }

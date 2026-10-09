@@ -6,12 +6,15 @@
 import { onDemand } from "../../on-demand";
 import type { Ctx } from "../context";
 import type { DetailsModule } from "./details.on-demand";
-import type { DetailsSource } from "./details-source";
+import type { DetailsSourceLoader } from "./details-source";
 
-export function createDetailsHandle(cx: Ctx, source: DetailsSource): DetailsModule {
+export function createDetailsHandle(cx: Ctx, loadSource: DetailsSourceLoader): DetailsModule {
   let real: DetailsModule | undefined;
   let loading: Promise<DetailsModule> | undefined;
-  const load = (): Promise<DetailsModule> => loading ??= onDemand(() => import("./details.on-demand")).then((m) => (real = m.createDetails(cx, source)));
+  // Both roots are action-only; start them together so the first open does not pay two download waits.
+  const load = (): Promise<DetailsModule> => loading ??= Promise.all([
+    onDemand(() => import("./details.on-demand")), loadSource(),
+  ]).then(([m, source]) => (real = m.createDetails(cx, source)));
   return {
     toggle: (rec, how) => { void load().then((d) => d.toggle(rec, how)); },
     close: (instant) => real?.close(instant),

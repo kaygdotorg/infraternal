@@ -17,7 +17,6 @@ import type { ViewId } from "../model/types";
 import { el } from "../dom";
 import { CONTAINERS, buildViews, type Role } from "./data";
 import { offerMeshView } from "../mesh/offer";
-import { createMockDetails } from "./details";
 import { DEFAULT_SESSION, createMockInventory } from "./inventory";
 import { createMockMesh } from "./mesh";
 import { createMockSessions } from "./sessions";
@@ -49,7 +48,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     float: true,
     dots: new URLSearchParams(location.search).get("dots") !== "0",
     adapters: {
-      sessions, inventory, details: createMockDetails(world, inventory), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
+      sessions, inventory, details: () => onDemand(() => import("./details.on-demand")).then((m) => m.createMockDetails(world, inventory)), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       addHost: () => core.toast.show({ message: "Add host is its own mockup (proto=addhost)." }),
     },
