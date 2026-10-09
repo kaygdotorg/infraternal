@@ -21,6 +21,9 @@ pub enum Protocol {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+// Port objects cross the action boundary directly; silently dropping a field
+// would make the validated policy differ from the caller's request [40].
+#[serde(deny_unknown_fields)]
 pub struct Port {
     pub protocol: Protocol,
     pub number: u16,
