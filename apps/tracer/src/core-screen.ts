@@ -307,10 +307,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let committedFont = initialFont();
   let shownFont = committedFont;
   let fontRequest = 0;
-  // Plain (`none`): one solid colour with subtle dots. Soft (the default): the theme's gentle gradient. Mesh: the full
+  // Plain (`none`): one solid colour with subtle dots. Soft: the theme's gentle gradient. Plain is the default (D191); a saved choice stays. Mesh: the full
   // theme mesh. The dots sit on all three.
   const validBackground = (v: string | null): v is "none" | "soft" | "mesh" => v === "none" || v === "soft" || v === "mesh";
-  let background: string = validBackground(params.get("bg")) ? params.get("bg")! : validBackground(readLocal("tracer.background")) ? readLocal("tracer.background")! : "soft";
+  let background: string = validBackground(params.get("bg")) ? params.get("bg")! : validBackground(readLocal("tracer.background")) ? readLocal("tracer.background")! : "none";
   /** The terminal paints no background of its own where a window shows the canvas through it (and over the mesh). */
   const translucentTerminal = (): boolean => background === "mesh" || windowLevel > 1;
   /** Every terminal on the screen (they share the look), and the one that takes the keys. */
