@@ -8,6 +8,7 @@
  * `window.__tracerClusters` probe the specs drive. The canvas itself is the product code in `create.ts`; this file
  * only gives it mock adapters and calls its public operations.
  */
+import type { WinRec } from "../context";
 import { isMacPlatform } from "../../../../../packages/ui/src/platform";
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { createCanvas, type CanvasController } from "../create";
@@ -168,15 +169,24 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   }, { signal });
 
   // ---- live-looking content -------------------------------------------------------------------------
-  // A logs window keeps moving, so thumbnails are visibly live.
+  // A logs window keeps moving, so thumbnails are visibly live. Only a window that is on screen ticks: a log that nobody can
+  // see costs a style recalculation, a layout (the scroll read) and a paint every tick, and with a couple of dozen windows
+  // on the canvas that was most of what an idle canvas spent. Rects are read first and writes follow, so one layout serves
+  // them all; a hidden page does nothing.
   const streamTimer = window.setInterval(() => {
+    if (document.hidden) return;
+    const visible: WinRec[] = [];
     for (const c of cx.views.values()) for (const w of c.wins.values()) {
       if (!w.stream || !w.model.lines) continue;
+      const r = w.stream.getBoundingClientRect();
+      if (r.width > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth) visible.push(w);
+    }
+    for (const w of visible) {
       const now = new Date();
       const t = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
-      w.model.lines = [...w.model.lines.slice(-14), `${t}  web-api  GET /healthz 200 1ms`];
-      w.stream.innerHTML = w.model.lines.map((l) => { const [time, src, ...msg] = l.split("  "); return `<span class="cl-log-time">${time}</span>  <span class="cl-log-src">${src}</span>  ${msg.join("  ")}`; }).join("\n");
-      w.stream.scrollTop = w.stream.scrollHeight;
+      w.model.lines = [...w.model.lines!.slice(-14), `${t}  web-api  GET /healthz 200 1ms`];
+      w.stream!.innerHTML = w.model.lines.map((l) => { const [time, src, ...msg] = l.split("  "); return `<span class="cl-log-time">${time}</span>  <span class="cl-log-src">${src}</span>  ${msg.join("  ")}`; }).join("\n");
+      w.stream!.scrollTop = w.stream!.scrollHeight;
     }
   }, 1600);
   // The live terminal's test double starts empty; give it one prompt so the window reads as a shell.
