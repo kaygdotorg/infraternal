@@ -26,7 +26,6 @@ import { SIZE_EVENT, edgeToEdge, readSizes } from "./window-sizes";
 import { createMesh } from "./mesh";
 import { createDocumentSync } from "./model/sync";
 import type { ViewModel } from "./model/types";
-import { createSharing } from "./sharing";
 import { createPill } from "./toolbar/pill";
 import { installPalette } from "./toolbar/palette";
 import { createToolbar } from "./toolbar/row";
@@ -35,6 +34,8 @@ import { createTree } from "./toolbar/tree";
 import { createViews } from "./views/world";
 import { createViewList } from "./toolbar/viewlist";
 import { createFloatHandle } from "./windows/float-handle";
+import { createDetailsHandle } from "./windows/details-handle";
+import { createSharingHandle } from "./sharing";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
 import { createSessionHooks } from "./windows/session-hooks";
@@ -95,10 +96,10 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   } as unknown as Ctx;
   (cx as { camera: Camera }).camera = new Camera(viewport, world, {
     onTransform: (t) => backdrop?.update(t),
-    onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--inv", inv); },
+    onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--label-inv", inv); },
     onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
-    onFrame: () => { cx.invalidate(); cx.memory.cull(); },
+    onFrame: () => { cx.invalidate(); cx.memory.cull(); if (cx.details?.isOpen()) cx.details.close(true); },
     onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); },
     onFlight: () => cx.view.hideSummary(),
   });
@@ -110,6 +111,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.view = createViews(cx);
   cx.win = createWindows(cx);
   cx.float = createFloatHandle(cx);
+  if (options.adapters.details) cx.details = createDetailsHandle(cx, options.adapters.details);
   cx.inputLock = createInputLock(cx);
   if (options.adapters.inventory) cx.sessionUi = createSessionHooks(cx);
   cx.visibility = createVisibility(cx);
@@ -117,7 +119,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.viewList = createViewList(cx);
   cx.tree = createTree(cx);
   if (options.adapters.mesh) cx.mesh = createMesh(cx, options.adapters.mesh);
-  if (options.adapters.sharing) cx.sharing = createSharing(cx, options.adapters.sharing);
+  if (options.adapters.sharing) cx.sharing = createSharingHandle(cx, options.adapters.sharing);
   cx.toolbar = createToolbar(cx);
   installGestures(cx);
   const removeShortcuts = installShortcuts(cx);
@@ -204,6 +206,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.sharing?.dispose();
       cx.mesh?.dispose();
       cx.float.dispose();
+      cx.details?.dispose();
       cx.visibility.dispose();
       cx.view.clear();
       cx.view.dispose();
@@ -214,4 +217,3 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     },
   };
 }
-

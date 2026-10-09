@@ -16,6 +16,7 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
   const cam = camera.cam;
     const c = rec.owner;
     if (c.view.layout !== "tiled") return;
+    cx.details?.close(true);
     cx.mesh?.hideReach(true);
     state.movingWindow = true;
     cx.view.hideSummary();

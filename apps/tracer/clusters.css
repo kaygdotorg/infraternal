@@ -2,6 +2,10 @@
    `.terminal-screen[data-clusters]` or to `cl-` classes; surfaces, pills, window cards,
    tooltips and the toast come from packages/ui and are not restyled. */
 
+/* The screen around the canvas never scrolls. With the viewport no longer an `overflow: clip` box (below), the browser
+   may scroll the nearest scroll container to bring a focused terminal into view, which moved the whole canvas sideways
+   by up to a column and kept off-screen terminals alive (#126). `clip` clips like `hidden` and cannot be scrolled. */
+.terminal-screen[data-clusters] { overflow: clip; }
 /* The viewport clips the world to its box, with 12 px more at the top: a window flush with the top edge (a lone window,
    the first row) carries its lock glyph on the frame line, and the shackle rises above that line. A clip-path rather
    than overflow, because overflow clips at the box exactly and overflow-clip-margin is not in every browser. */
@@ -21,12 +25,14 @@
 }
 .cl-world[data-zoom="out"] .cl-region { opacity: 1; pointer-events: auto; cursor: pointer; }
 
-/* The label keeps a readable size at any zoom: --inv is 1 / zoom (clamped), applied with the
-   individual `scale` and `translate` properties so the pill's own press transform stays free. */
+/* The label keeps a readable size at any zoom: --label-inv is 1 / zoom (clamped), applied with the
+   individual `scale` and `translate` properties so the pill's own press transform stays free. It changes on every
+   frame of a zoom, so it does not inherit: only the label restyles, not its icon, name, meta and menu. */
+@property --label-inv { syntax: "<number>"; inherits: false; initial-value: 1; }
 .cl-label {
   --pill-h: 30px; position: absolute; z-index: 2; pointer-events: auto; gap: 8px; padding: 0 12px 0 10px;
   color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: grab; touch-action: none;
-  transform-origin: 0 0; scale: var(--inv, 1); translate: 0 calc(var(--inv, 1) * -40px);
+  transform-origin: 0 0; scale: var(--label-inv); translate: 0 calc(var(--label-inv) * -40px);
 }
 .cl-label-icon { display: grid; place-items: center; color: var(--fg-2); }
 .cl-label-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -71,10 +77,16 @@
 
 /* ---- window bodies by kind --------------------------------------------------------------- */
 .cl-preview { overscroll-behavior: auto; touch-action: pan-y; overflow: hidden; }
+/* A blinking cursor is a compositor-only opacity change on a layer of its own (`will-change`, and `contain` so nothing
+   outside it is laid out or painted because of it): a blink must never repaint the text beside it, or raster what
+   lies under glass. Only the active window's cursor blinks, and only while that window is on screen: an idle page
+   with many windows then has nothing animating at all (#121: 55 idle frame drops on a phone with three blinks). */
 .cl-cursor {
   display: inline-block; width: 0.6em; height: 1.15em; margin-left: 1px; vertical-align: text-bottom; background: var(--fg); opacity: 0.75;
-  animation: cl-blink 1.1s steps(1) infinite;
+  contain: strict; will-change: opacity;
+  animation: cl-blink 1.1s steps(1) infinite paused;
 }
+.ui-window[data-active][data-onscreen] .cl-cursor { animation-play-state: running; }
 @keyframes cl-blink { 50% { opacity: 0; } }
 .cl-logs { color: var(--fg-2); }
 .cl-log-time { color: var(--fg-3); }
@@ -303,10 +315,3 @@
 /* A phone at full width: the canvas area runs edge to edge, so a window of 99% of the screen is centred with a hairline
    of margin, not cut by the 12 px gutters (D191). The top bar and the key tray keep their margins. */
 .terminal-screen[data-window-edge] .panes { left: env(safe-area-inset-left, 0px); right: env(safe-area-inset-right, 0px); }
-
-/* While the camera moves, glass over the canvas is tint only (#121). A backdrop blur is recomputed from what is behind
-   it every frame, and everything behind the windows and the top pills moves with the camera; at DPR 2 with Frosted cards
-   and windows that is most of the frame budget (a flight rasters about a thousand tiles). The blur radius and the
-   levels' values are unchanged: the blur is back the moment the camera rests (about 140 ms after the last frame).
-   `data-canvas-moving` is one attribute write per move, never per frame (camera/camera.ts). */
-.terminal-screen[data-canvas-moving] :is(.ui-window, .ui-pill, .ui-overlay-surface, .ui-panel) { -webkit-backdrop-filter: none; backdrop-filter: none; }

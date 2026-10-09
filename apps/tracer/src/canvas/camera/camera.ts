@@ -30,7 +30,7 @@ export type ZoomBand = "in" | "out";
 export interface CameraHooks {
   /** The world transform changed: where the world origin is on screen (viewport pixels) and the zoom. */
   onTransform?(t: { tx: number; ty: number; z: number; vw: number; vh: number }): void;
-  /** The counter-scale labels use to keep a readable size at any zoom (`--inv`); only called when it changes. */
+  /** The counter-scale labels use to keep a readable size at any zoom (`--label-inv`); only called when it changes. */
   onLabelScale?(inv: string): void;
   onLod?(lod: Lod): void;
   onBand?(band: ZoomBand): void;
@@ -51,8 +51,14 @@ const KEY_FLIGHT = { visualDuration: 0.08, bounce: 0 };
 const REST_DELAY = 140;
 export const MIN_ZOOM = 0.08;
 export const MAX_ZOOM = 2;
-/** Below this zoom the world is not given `will-change: transform` while it moves (see `apply`). */
-const WILL_CHANGE_MIN_ZOOM = 0.5;
+/**
+ * Below this zoom the world is not given `will-change: transform` while it moves (see `apply`). With the hint the
+ * browser keeps the raster it has and only scales it, so a zoom through the thumbnail band (0.3 to 0.7) re-rasters
+ * nothing until it rests; without it every frame of the zoom re-rasters the visible windows at the new scale (measured
+ * with 21 windows: a third less raster work per frame with the hint). A phone has too little memory to hold a world
+ * that large (D183), so only a fine pointer takes the lower limit.
+ */
+const willChangeMinZoom = (): number => (matchMedia("(pointer: fine)").matches ? 0.25 : 0.5);
 
 export class Camera {
   readonly cam: Cam = { cx: 0, cy: 0, z: 1 };
@@ -77,11 +83,9 @@ export class Camera {
   private hinted = false;
   private ready = false;
   /** The screen around the canvas: its glass (the pills, the sidebar) blurs the canvas behind it, which moves with the camera. */
-  private readonly stage: Element | null;
   private flightKind: "gesture" | "key" = "gesture";
 
   constructor(private readonly viewport: HTMLElement, private readonly world: HTMLElement, private readonly hooks: CameraHooks = {}) {
-    this.stage = world.closest("[data-clusters]");
     world.dataset.lod = this.lod;
     world.dataset.zoom = this.band;
     // The springs paint nothing until `start()`: their first update would run the hooks before the canvas is built.
@@ -104,7 +108,13 @@ export class Camera {
     this.resized();
     // Reading the size inside apply() forces a layout on every frame of a flight, right after the frame's own style
     // writes. The observer delivers the size after layout for free, before the next paint.
-    new ResizeObserver(() => this.resized()).observe(this.viewport);
+    new ResizeObserver(() => {
+      const { vw, vh } = this;
+      this.resized();
+      // A camera at rest has its transform written for the old size: write it again for the new one (a flight does it
+      // on its next frame). Without this a viewport that settles after start left the world offset by half the change.
+      if ((vw !== this.vw || vh !== this.vh) && !this.moving) this.apply(true);
+    }).observe(this.viewport);
     this.apply(true);
   }
 
@@ -130,13 +140,11 @@ export class Camera {
     const nextBand: ZoomBand = this.band === "in" ? (cam.z < 0.76 ? "out" : "in") : (cam.z > 0.82 ? "in" : "out");
     if (nextBand !== this.band) { this.band = nextBand; world.dataset.zoom = nextBand; this.hooks.onBand?.(nextBand); }
     if (!atRest) {
-      // One attribute write at the start of a move (not per frame): CSS may drop costly effects while the camera moves.
-      if (!this.moving) this.stage?.toggleAttribute("data-canvas-moving", true);
       this.moving = true;
       // `will-change: transform` makes the browser raster the layer at its own size (scale 1) so a move never blurs it.
       // Zoomed far out that is the whole visible world at full size: a mesh of a thousand hosts is 7,800 px wide, and
       // a zoom out then rasters about ten times the tiles it needs. Out there the browser rasters at the zoom instead.
-      const hint = cam.z >= WILL_CHANGE_MIN_ZOOM;
+      const hint = cam.z >= willChangeMinZoom();
       if (hint !== this.hinted) { this.hinted = hint; world.style.willChange = hint ? "transform" : ""; }
       window.clearTimeout(this.restTimer);
       this.restTimer = window.setTimeout(() => this.rest(), REST_DELAY);
@@ -148,7 +156,6 @@ export class Camera {
   rest(): void {
     window.clearTimeout(this.restTimer);
     this.moving = false;
-    this.stage?.toggleAttribute("data-canvas-moving", false);
     this.hinted = false;
     this.world.style.willChange = "";
     this.apply(true);

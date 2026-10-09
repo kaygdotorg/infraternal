@@ -12,6 +12,7 @@ test("appearance switches never freeze the page", async ({ browser }) => {
   const page = await context.newPage();
   await page.goto("/?mock=1&proto=clusters&scene=1&theme=tokyo&bg=mesh&card=4&windows=4");
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  if (process.env.EXTRA_CSS) await page.addStyleTag({ content: process.env.EXTRA_CSS });
   await page.waitForTimeout(1500);
   const api = (fn: string, ...args: unknown[]): Promise<unknown> => page.evaluate(([f, a]) => ((window as unknown as { __tracerClusters: Record<string, (...x: unknown[]) => unknown> }).__tracerClusters[f as string] as (...x: unknown[]) => unknown)(...(a as unknown[])), [fn, args] as const);
   await api("flyView", "console");
@@ -19,7 +20,7 @@ test("appearance switches never freeze the page", async ({ browser }) => {
   await page.waitForTimeout(1500);
   let worst = 0;
   const cdp = await context.newCDPSession(page);
-  const events: Array<{ name: string; ph: string; dur?: number }> = [];
+  const events: Array<{ name: string; ph: string; dur?: number; args?: { elementCount?: number } }> = [];
   (cdp as unknown as { on(n: string, f: (e: { value: typeof events }) => void): void }).on("Tracing.dataCollected", (e) => { events.push(...e.value); });
   const traced = async (action: string): Promise<string> => {
     events.length = 0;
@@ -31,7 +32,9 @@ test("appearance switches never freeze the page", async ({ browser }) => {
     await end;
     const sum = (n: string): number => events.filter((e) => e.name === n && e.ph === "X").reduce((a, e) => a + (e.dur ?? 0), 0) / 1000;
     worst = Math.max(worst, total);
-    return `${action} ${total.toFixed(0)} ms (style ${sum("UpdateLayoutTree").toFixed(0)} layout ${sum("Layout").toFixed(0)} paint ${sum("Paint").toFixed(0)} raster ${sum("RasterTask").toFixed(0)})`;
+    // Elements restyled is independent of how busy the machine is; the milliseconds are not.
+    const elements = events.filter((e) => e.name === "UpdateLayoutTree").reduce((a, e) => a + (e.args?.elementCount ?? 0), 0);
+    return `${action} ${total.toFixed(0)} ms (restyled ${elements} elements, style ${sum("UpdateLayoutTree").toFixed(0)} layout ${sum("Layout").toFixed(0)} paint ${sum("Paint").toFixed(0)} raster ${sum("RasterTask").toFixed(0)})`;
   };
   const cost = (action: string): Promise<number> => page.evaluate(([a]) => new Promise<number>((done) => {
     const t0 = performance.now();
