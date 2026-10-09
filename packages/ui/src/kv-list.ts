@@ -20,6 +20,8 @@ export interface KeyValueRow {
   meter?: number; // 0..100
   /** Copied instead of `value` when the value is an abbreviation (a short commit id). */
   copy?: string;
+  /** A technical subtitle under the key, for a plainly named row ("Connection delay": "Round-trip time to the server"). */
+  hint?: string;
 }
 
 export interface KeyValueList {
@@ -68,7 +70,7 @@ export function createKeyValueList(label: string): KeyValueList {
   root.addEventListener("pointerup", pointerup);
   root.addEventListener("click", click);
 
-  const cell = (kind: "key" | "value", text: string, copyText = text): HTMLButtonElement => {
+  const cell = (kind: "key" | "value", text: string, copyText = text, hint?: string): HTMLButtonElement => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `ui-kv-cell ui-kv-${kind}`;
@@ -82,6 +84,12 @@ export function createKeyValueList(label: string): KeyValueList {
     const label = document.createTextNode(text);
     span.append(kind === "key" ? label : inlineTickNode(), kind === "key" ? inlineTickNode() : label);
     button.append(span);
+    if (hint) {
+      const sub = document.createElement("span");
+      sub.className = "ui-kv-hint";
+      sub.textContent = hint;
+      button.append(sub);
+    }
     return button;
   };
 
@@ -92,7 +100,7 @@ export function createKeyValueList(label: string): KeyValueList {
         const item = document.createElement("div");
         item.className = "ui-kv-row";
         item.setAttribute("role", "listitem");
-        item.append(cell("key", row.key), cell("value", row.value, row.copy ?? row.value));
+        item.append(cell("key", row.key, row.key, row.hint), cell("value", row.value, row.copy ?? row.value));
         if (row.meter !== undefined) {
           const meter = document.createElement("span");
           meter.className = "ui-kv-meter";

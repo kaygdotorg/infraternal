@@ -382,6 +382,8 @@
   -webkit-user-select: text; user-select: text; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
 }
 .ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
+.ui-kv-key { display: grid; justify-items: start; }
+.ui-kv-hint { color: var(--fg-3); font: var(--ui-type-label); font-size: 11px; letter-spacing: var(--ui-tracking); white-space: nowrap; }
 .ui-kv-value { justify-self: end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
 .ui-kv-cell:active { transform: scale(var(--ui-press-scale-soft)); }
 /* The highlighted run: 6 px of even padding either side (cancelled by a -6 px margin so the text
