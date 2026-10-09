@@ -38,6 +38,12 @@ pub struct JoinInvitation {
     pub token: String,
     /// Base64url DER public CA pin for authenticated enrollment and leg B.
     pub ca_der: String,
+    /// Optional independently pinned enrollment HTTPS certificate; legacy uses `ca_der`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https_der: Option<String>,
+    /// Reverse-proxy HTTPS uses ordinary verified system roots instead of the internal CA.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub https_system_roots: bool,
     /// Dial-out UDP/TCP address (same port).
     pub endpoint: std::net::SocketAddr,
     /// TLS name verified against the configured server certificate.
@@ -316,7 +322,21 @@ async fn invite(
         mode: request.mode,
         execution_uid: request.execution_uid,
         token: token.secret().to_owned(),
-        ca_der: B64.encode(&api.endpoint.ca_der),
+        ca_der: B64.encode(
+            api.source
+                .public_issuer()
+                .map(|issuer| issuer.to_der())
+                .transpose()
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .unwrap_or(api.endpoint.ca_der),
+        ),
+        https_system_roots: api.source.uses_system_https(),
+        https_der: api
+            .source
+            .https_certificate()
+            .map(|leaf| leaf.to_der().map(|der| B64.encode(der)))
+            .transpose()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
         endpoint: api.endpoint.endpoint,
         server_name: api.endpoint.server_name,
     }))

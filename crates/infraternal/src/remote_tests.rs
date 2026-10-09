@@ -112,6 +112,8 @@ async fn uid_and_privilege_mismatch_fails_before_key_generation() {
             execution_uid,
             token: "invalid public fixture".into(),
             ca_der: String::new(),
+            https_der: None,
+            https_system_roots: false,
             endpoint: "127.0.0.1:0".parse().unwrap(),
             server_name: "localhost".into(),
         };

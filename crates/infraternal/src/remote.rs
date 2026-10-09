@@ -75,7 +75,24 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     };
     let root = X509::from_der(&B64.decode(&invitation.ca_der).map_err(|_| refused())?)
         .map_err(|_| refused())?;
-    let response = tokio::time::timeout(Duration::from_secs(10), redeem(url, &root, &request))
+    let https = invitation
+        .https_der
+        .as_ref()
+        .map(|der| {
+            B64.decode(der)
+                .map_err(|_| refused())
+                .and_then(|der| X509::from_der(&der).map_err(|_| refused()))
+        })
+        .transpose()?;
+    if invitation.https_system_roots && https.is_some() {
+        return Err(refused());
+    }
+    let https_root = if invitation.https_system_roots {
+        None
+    } else {
+        Some(https.as_ref().unwrap_or(&root))
+    };
+    let response = tokio::time::timeout(Duration::from_secs(10), redeem(url, https_root, &request))
         .await
         .map_err(|_| refused())??;
     if response.execution_uid != uid {
@@ -123,7 +140,7 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     Ok(())
 }
 
-async fn redeem(url: &str, root: &X509, request: &JoinRequest) -> io::Result<JoinResponse> {
+async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Result<JoinResponse> {
     use http_body_util::BodyExt;
     let url = url::Url::parse(url).map_err(|_| refused())?;
     if url.scheme() != "https"
@@ -141,9 +158,30 @@ async fn redeem(url: &str, root: &X509, request: &JoinRequest) -> io::Result<Joi
     tls.set_min_proto_version(Some(SslVersion::TLS1_3))
         .map_err(|_| refused())?;
     tls.set_verify(SslVerifyMode::PEER);
-    let mut trust = X509StoreBuilder::new().map_err(|_| refused())?;
-    trust.add_cert(root.clone()).map_err(|_| refused())?;
-    tls.set_cert_store(trust.build());
+    if let Some(root) = root {
+        let mut trust = X509StoreBuilder::new().map_err(|_| refused())?;
+        trust.add_cert(root.clone()).map_err(|_| refused())?;
+        // The invitation may pin the HTTPS leaf independently of machine trust.
+        // Hostname, validity and proof of the corresponding key remain mandatory.
+        trust
+            .set_flags(openssl::x509::verify::X509VerifyFlags::PARTIAL_CHAIN)
+            .map_err(|_| refused())?;
+        tls.set_cert_store(trust.build());
+    } else {
+        tls.set_default_verify_paths().map_err(|_| refused())?;
+        // Vendored OpenSSL may have a build-time prefix absent on this host.
+        // Reuse the operating system's public bundle, never an enrollment TOFU pin.
+        for bundle in [
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem",
+        ] {
+            if Path::new(bundle).is_file() {
+                tls.set_ca_file(bundle).map_err(|_| refused())?;
+                break;
+            }
+        }
+    }
     let ssl = tls
         .build()
         .configure()
