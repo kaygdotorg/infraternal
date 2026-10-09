@@ -84,6 +84,47 @@ def rss(pid):
     return next(int(line.split()[1]) for line in lines if line.startswith('VmRSS:'))
 
 
+def weight_fixture_shim(state, session_id, weight, caller_pid=None, diagnose=False):
+    """Weight only a fixture-owned shim; optional diagnostics record actual before/after values."""
+    if weight is None:
+        return None
+    assert weight.isdecimal() and 1 <= int(weight) <= 10000
+    if caller_pid is None:
+        caller_pid = os.getpid()
+    path = state / 'sessions' / f'{session_id.hex}.sock'
+    with socket.socket(socket.AF_UNIX) as peer:
+        peer.settimeout(20)
+        peer.connect(str(path))
+        hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
+    # Authenticate ownership before changing any scope. These are the same
+    # content-free Hello identity/PID fields used by fixture cleanup.
+    assert hello[0] == 1 and hello[11:27] == session_id.bytes
+    pid = struct.unpack('<I', hello[27:31])[0]
+    if Path(f'/proc/{pid}/cgroup').read_text() == Path(f'/proc/{caller_pid}/cgroup').read_text():
+        return (int(weight), int(weight)) if diagnose else None
+    command = ['systemctl']
+    if os.geteuid() != 0:
+        command.append('--user')
+    unit = f'infraternal-session-{session_id.hex}.scope'
+
+    def current_weight():
+        value = subprocess.run(command + ['show', unit, '-p', 'CPUWeight', '--value'],
+                               capture_output=True, text=True, timeout=20, check=True).stdout.strip()
+        assert value.isdecimal()
+        return int(value)
+
+    before = current_weight() if diagnose else None
+    result = subprocess.run(command + ['set-property', '--runtime', unit, f'CPUWeight={weight}'],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            timeout=20, check=False)
+    assert result.returncode == 0, 'fixture-owned shim benchmark scope could not be weighted'
+    if diagnose:
+        after = current_weight()
+        assert after == int(weight)
+        return before, after
+    return None
+
+
 class Binary:
     def __init__(self, binary, state):
         self.state = state
@@ -180,30 +221,8 @@ class Binary:
         return self.id
 
     def benchmark_scope(self):
-        """Keep an explicitly weighted benchmark's independently managed shim at that weight."""
-        weight = self.cpu_weight
-        if weight is None:
-            return
-        assert weight.isdecimal() and 1 <= int(weight) <= 10000
-        path = self.state / 'sessions' / f'{self.id.hex}.sock'
-        with socket.socket(socket.AF_UNIX) as peer:
-            peer.settimeout(20)
-            peer.connect(str(path))
-            hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
-        # Authenticate ownership before changing any scope. These are the same
-        # content-free Hello identity/PID fields used by fixture cleanup.
-        assert hello[0] == 1 and hello[11:27] == self.id.bytes
-        pid = struct.unpack('<I', hello[27:31])[0]
-        if Path(f'/proc/{pid}/cgroup').read_text() == Path(f'/proc/{self.child.pid}/cgroup').read_text():
-            return  # The detached fallback already inherits the caller's scope.
-        command = ['systemctl']
-        if os.geteuid() != 0:
-            command.append('--user')
-        command += ['set-property', '--runtime', f'infraternal-session-{self.id.hex}.scope',
-                    f'CPUWeight={weight}']
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                timeout=20, check=False)
-        assert result.returncode == 0, 'fixture-owned shim benchmark scope could not be weighted'
+        """Keep the fixture-owned shim at this caller's scheduling weight."""
+        weight_fixture_shim(self.state, self.id, self.cpu_weight, self.child.pid)
 
     def attach(self):
         self.send(1, 0x16, self.id.bytes + struct.pack('<QQ', self.out, self.acked))
