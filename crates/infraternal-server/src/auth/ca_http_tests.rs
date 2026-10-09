@@ -184,3 +184,79 @@ async fn ca_http_refuses_origin_and_cookie_before_decoding_wrapping_material() {
     }
     assert!(f.source.load().is_err());
 }
+
+#[tokio::test]
+async fn independent_review_ca_headers_are_refused_before_reading_an_unfinished_body() {
+    let (_f, app) = http_fixture().await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/remote/ca/unlock/finish")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from_stream(futures_util::stream::pending::<
+            std::result::Result<bytes::Bytes, std::io::Error>,
+        >()))
+        .unwrap();
+    // No Origin or cookie: the response needs no body bytes, database work or
+    // passkey proof. A stalled body must not retain an unauthorized operation.
+    let result = tokio::time::timeout(Duration::from_secs(1), app.oneshot(request)).await;
+    assert!(
+        result.is_ok(),
+        "header refusal waited for an unfinished request body"
+    );
+    assert_eq!(result.unwrap().unwrap().status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn independent_review_ca_body_reads_share_the_eight_request_admission_limit() {
+    let (f, app) = http_fixture().await;
+    let polled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let polled = polled.clone();
+        let mut first = true;
+        let body = Body::from_stream(futures_util::stream::poll_fn(move |_| {
+            if first {
+                first = false;
+                polled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            std::task::Poll::Pending::<Option<std::result::Result<bytes::Bytes, std::io::Error>>>
+        }));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/remote/ca/unlock/finish")
+            .header(header::ORIGIN, ORIGIN)
+            .header(
+                header::COOKIE,
+                format!("__Host-infraternal={}", f.auth.session),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .unwrap();
+        tasks.push(tokio::spawn(app.clone().oneshot(request)));
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while polled.load(std::sync::atomic::Ordering::SeqCst) != 8 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let response = app
+        .oneshot(ca_request(
+            "/remote/ca/status",
+            Some(ORIGIN),
+            Some(&f.auth.session),
+            "{}".into(),
+        ))
+        .await
+        .unwrap();
+    for task in tasks {
+        task.abort();
+        let _ = task.await;
+    }
+    assert_eq!(
+        response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "eight unfinished CA requests did not reserve the declared admission slots"
+    );
+}
