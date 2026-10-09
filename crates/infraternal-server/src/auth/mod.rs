@@ -40,7 +40,7 @@ pub use http::router;
 const DAY: i64 = 86_400;
 const SESSION: i64 = 30 * DAY;
 const CEREMONY: i64 = 300;
-const FRESH: i64 = 300;
+const FRESH: i64 = infraternal_plugin_api::FRESH_SECONDS;
 
 /// Errors deliberately expose no credential, capability or database contents.
 #[derive(Debug, thiserror::Error)]
