@@ -218,6 +218,11 @@ async fn empty() -> (Auth, String) {
         .connect("sqlite::memory:")
         .await
         .unwrap();
+    empty_with_pool(pool).await
+}
+
+/// Reuse the registered auth fixture with a production-shaped inventory pool.
+async fn empty_with_pool(pool: SqlitePool) -> (Auth, String) {
     let auth = Auth::new(pool, "auth.example.test", ORIGIN).await.unwrap();
     let mut token = String::new();
     auth.bootstrap(NOW, |banner| token = banner.lines().nth(1).unwrap().into())
@@ -227,6 +232,11 @@ async fn empty() -> (Auth, String) {
 }
 async fn fixture() -> Fixture {
     let (auth, token) = empty().await;
+    fixture_with_bootstrap(auth, token).await
+}
+
+/// Complete the same real registration flow regardless of the SQLite pool.
+async fn fixture_with_bootstrap(auth: Auth, token: String) -> Fixture {
     let start = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
     let user = str_field(&start, "user_id").to_owned();
     let words = str_field(&start, "recovery_words").to_owned();

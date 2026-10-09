@@ -17,6 +17,8 @@ const MANAGE_ROLES: &str = "mesh.manage_roles";
 const ROLE_ACTIONS: [&str; 4] = [MANAGE_NODES, MANAGE_TAGS, MANAGE_GRANTS, MANAGE_ROLES];
 const NODE_LIVE_SECONDS: i64 = 30;
 const CHANGE_BUFFER: usize = 256;
+// Reserve room for snapshot keys, cursor, event envelope and mux/frame headers.
+const PAGE_ITEM_BYTES: usize = infraternal_protocol::MAX_FRAME_LEN - 1024;
 
 /// A committed inventory change with the tag scopes needed to filter live invalidations.
 #[derive(Clone, Debug)]
@@ -69,6 +71,19 @@ pub struct MeshSnapshot {
     pub tags: Vec<MeshTag>,
     /// Visible grants, keyed by stable readable name.
     pub grants: Vec<MeshGrant>,
+    /// Continue a bounded wire snapshot; absent for a complete snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<MeshCursor>,
+}
+
+/// Position in a revision's permission-filtered nodes, tags, then grants.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MeshCursor {
+    /// Revision whose ordered inventory is being paged.
+    pub revision: u64,
+    /// Number of previously delivered objects across the three arrays.
+    pub offset: usize,
 }
 
 /// Optional filter accepted by `mesh.list` and Mesh subscriptions.
@@ -77,6 +92,8 @@ pub struct MeshSnapshot {
 pub struct MeshFilter {
     /// Restrict the view to one authorized tag and its directly visible endpoints.
     pub tag: Option<String>,
+    /// Continue a `mesh.list` page; subscriptions always begin without a cursor.
+    pub cursor: Option<MeshCursor>,
 }
 
 /// Validated action request. Parsing is pure so fuzz targets exercise the same boundary as WebSocket calls.
@@ -300,6 +317,12 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<MeshRequest, MeshApiEr
     };
     match &request {
         MeshRequest::List(filter) => {
+            if filter
+                .cursor
+                .is_some_and(|cursor| cursor.offset == 0 || i64::try_from(cursor.revision).is_err())
+            {
+                return Err(MeshApiError::InvalidInput);
+            }
             if let Some(tag) = &filter.tag {
                 validate_name(tag)?;
             }
@@ -614,11 +637,10 @@ impl MeshService {
         };
         let snapshot = read_snapshot(&mut transaction, revision, now).await?;
         transaction.commit().await.map_err(map_sql_error)?;
-        Ok(filter_snapshot(
-            snapshot,
-            access.all && !restrict_to_filter,
-            &visible_tags,
-        ))
+        page_snapshot(
+            filter_snapshot(snapshot, access.all && !restrict_to_filter, &visible_tags),
+            filter.cursor,
+        )
     }
 
     async fn enroll_node(
@@ -1476,7 +1498,97 @@ async fn read_snapshot(
         nodes,
         tags,
         grants,
+        next_cursor: None,
     })
+}
+
+/// Bound both list replies and subscription snapshots without altering frame limits.
+pub(crate) fn page_snapshot(
+    mut snapshot: MeshSnapshot,
+    cursor: Option<MeshCursor>,
+) -> Result<MeshSnapshot, MeshApiError> {
+    let total = snapshot.nodes.len() + snapshot.tags.len() + snapshot.grants.len();
+    let start = match cursor {
+        Some(cursor) if cursor.revision > snapshot.revision => {
+            return Err(MeshApiError::InvalidInput);
+        }
+        Some(cursor) if cursor.revision == snapshot.revision => {
+            if cursor.offset == 0 || cursor.offset >= total {
+                return Err(MeshApiError::InvalidInput);
+            }
+            cursor.offset
+        }
+        // Changed permissions or membership invalidate the old ordering. Start a
+        // fresh page; clients discard their previous revision before appending it.
+        _ => 0,
+    };
+    let mut skip = start;
+    let mut used = 0;
+    let (nodes, complete) = page_items(snapshot.nodes, &mut skip, &mut used)?;
+    snapshot.nodes = nodes;
+    let (tags, complete) = if complete {
+        page_items(snapshot.tags, &mut skip, &mut used)?
+    } else {
+        (Vec::new(), false)
+    };
+    snapshot.tags = tags;
+    snapshot.grants = if complete {
+        page_items(snapshot.grants, &mut skip, &mut used)?.0
+    } else {
+        Vec::new()
+    };
+    let end = start + snapshot.nodes.len() + snapshot.tags.len() + snapshot.grants.len();
+    snapshot.next_cursor = (end < total).then_some(MeshCursor {
+        revision: snapshot.revision,
+        offset: end,
+    });
+    Ok(snapshot)
+}
+
+/// Take a prefix in canonical order; never skip an object that did not fit.
+fn page_items<T: Serialize>(
+    items: Vec<T>,
+    skip: &mut usize,
+    used: &mut usize,
+) -> Result<(Vec<T>, bool), MeshApiError> {
+    let skipped = (*skip).min(items.len());
+    *skip -= skipped;
+    let mut page = Vec::with_capacity(items.len() - skipped);
+    for item in items.into_iter().skip(skipped) {
+        let mut counter = JsonByteCount(0);
+        serde_json::to_writer(&mut counter, &item).map_err(|_| MeshApiError::Storage)?;
+        let size = counter.0 + 1;
+        if size > PAGE_ITEM_BYTES {
+            // A single unrepresentable object is a sanitized service failure,
+            // never an encoder error that disconnects sibling terminal streams.
+            return Err(MeshApiError::Storage);
+        }
+        if *used + size > PAGE_ITEM_BYTES {
+            return Ok((page, false));
+        }
+        *used += size;
+        page.push(item);
+    }
+    Ok((page, true))
+}
+
+/// Count the serializer's exact escaping and numeric output without allocating
+/// a second JSON buffer for every object. Refuse an oversized object early.
+struct JsonByteCount(usize);
+
+impl std::io::Write for JsonByteCount {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let remaining = PAGE_ITEM_BYTES - self.0;
+        if bytes.len() > remaining {
+            return Err(std::io::Error::other("mesh object exceeds frame budget"));
+        }
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn filter_snapshot(

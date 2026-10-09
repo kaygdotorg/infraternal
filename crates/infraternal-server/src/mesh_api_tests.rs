@@ -480,7 +480,8 @@ async fn scoped_grant_role_filters_inventory_and_cannot_cross_tags() {
             .list(
                 MEMBER,
                 MeshFilter {
-                    tag: Some("dev".into())
+                    tag: Some("dev".into()),
+                    cursor: None,
                 },
                 NOW
             )
@@ -787,7 +788,42 @@ async fn mesh_api_scale_benchmark() {
         proc_status_kib("VmRSS:"),
         proc_status_kib("VmHWM:"),
     );
+    measure_page_encoding_cpu(&fixture.service.list(OWNER, filter, NOW).await.unwrap());
     fixture.cleanup().await;
+}
+
+/// Compare the former direct encoding with bounded encoding on the same inventory.
+/// Process CPU excludes shared-host scheduling delays; cloning is outside both intervals.
+fn measure_page_encoding_cpu(snapshot: &crate::mesh_api::MeshSnapshot) {
+    let mut direct = Vec::new();
+    let mut paged = Vec::new();
+    for _ in 0..100 {
+        let candidate = snapshot.clone();
+        let started = process_cpu_ns();
+        let payload = serde_json::to_vec(snapshot).unwrap();
+        direct.push(process_cpu_ns() - started);
+        std::hint::black_box(payload);
+        let started = process_cpu_ns();
+        let page = crate::mesh_api::page_snapshot(candidate, None).unwrap();
+        let payload = serde_json::to_vec(&page).unwrap();
+        paged.push(process_cpu_ns() - started);
+        std::hint::black_box(payload);
+    }
+    let direct_p50 = percentile_u128(&direct, 50);
+    let paged_p50 = percentile_u128(&paged, 50);
+    let extra = paged_p50.saturating_sub(direct_p50);
+    println!(
+        "METRIC name=mesh_page_encoding nodes={} tags={} grants={} samples=100 direct_cpu_p50_us={} direct_cpu_p95_us={} paged_cpu_p50_us={} paged_cpu_p95_us={} extra_cpu_p50_us={} extra_cpu_50_viewers_p50_us={}",
+        snapshot.nodes.len(),
+        snapshot.tags.len(),
+        snapshot.grants.len(),
+        direct_p50 / 1000,
+        percentile_u128(&direct, 95) / 1000,
+        paged_p50 / 1000,
+        percentile_u128(&paged, 95) / 1000,
+        extra / 1000,
+        extra * 50 / 1000
+    );
 }
 
 async fn seed_scale_inventory(fixture: &Fixture) -> Vec<String> {
@@ -1036,3 +1072,5 @@ mod membership;
 mod identity;
 
 mod invalidation;
+
+mod pagination;

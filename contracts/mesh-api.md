@@ -32,7 +32,7 @@ uses `Result { ok: true }` with the listed JSON value. A failure uses
 | `mesh.role.define` | `MeshRoleDefinition` | `{"revision":u64}` | Global `mesh.manage_roles` |
 | `mesh.role.assign` | `{"user_id":string,"role":string}` | `{"revision":u64}` | Global `mesh.manage_roles` |
 
-`MeshFilter` is `{}` or `{"tag":string}`. IDs are positive integers no
+`MeshFilter` is `{"tag"?:string,"cursor"?:{"revision":u64,"offset":usize}}`. IDs are positive integers no
 greater than SQLite's signed 64-bit maximum. A node public key is exactly 32
 nonzero bytes; private keys are never accepted by this API.
 
@@ -64,7 +64,7 @@ only (D180).
 `last_seen` is Unix seconds. `live` is true when the last successful
 observation is within the 30-second live window. RTT is in microseconds.
 `MeshTag` is `{"name":string,"members":u64[]}`; member IDs are sorted.
-`MeshSnapshot` is `{"revision":u64,"nodes":MeshNode[],"tags":MeshTag[],"grants":MeshGrant[]}`.
+`MeshSnapshot` is `{"revision":u64,"nodes":MeshNode[],"tags":MeshTag[],"grants":MeshGrant[],"next_cursor"?:{"revision":u64,"offset":usize}}`.
 The snapshot is permission-filtered and read from one consistent database
 transaction.
 
@@ -147,3 +147,17 @@ ends its subscriptions; v1 has no separate unsubscribe frame.
 
 JSON examples for each action, representative results and event forms are in
 `contracts/vectors/mesh/manifest.json`.
+
+List input accepts an optional `cursor: {revision, offset}`; snapshots include
+`next_cursor` only when another bounded page is needed. The offset counts
+objects in stable nodes, tags, then grants order. Every page checks the caller's
+current permissions. A cursor for an older revision restarts at offset zero;
+clients discard the previous revision before assembling the restart. Future
+revisions and invalid offsets are refused. A single object that cannot fit
+produces a sanitized service error. Frames retain the existing 4 MiB limit.
+
+Subscription snapshots and resyncs use the same pages. The typed client follows
+continuations through `mesh.list` with the same tag filter, then publishes a
+complete snapshot. Small inventories keep their existing shape and one request.
+Clients bound continuation work and discard assemblies superseded by a newer
+authoritative event or withdrawn subscription.

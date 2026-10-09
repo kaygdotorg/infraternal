@@ -2,13 +2,25 @@
 use super::*;
 
 async fn socket_fixture() -> (Fixture, SocketAddr, tokio::task::JoinHandle<()>) {
-    let f = fixture().await;
+    socket_fixture_from_fixture(fixture().await, None).await
+}
+
+/// Inventory tests isolate paging from loaded-host authority deadlines; ordinary
+/// socket regressions retain the production timeout, including refusal on stalls.
+async fn socket_fixture_from_fixture(
+    f: Fixture,
+    timeout: Option<Duration>,
+) -> (Fixture, SocketAddr, tokio::task::JoinHandle<()>) {
     let (socket, _peer) = UnixStream::pair().unwrap();
     let state = crate::websocket::WebSocketState::new(
         f.auth.clone(),
         f.auth.pool.clone(),
         EmbeddedAgent::from_test_socket(socket),
     );
+    let state = match timeout {
+        Some(timeout) => state.with_authority_read_timeout(timeout),
+        None => state,
+    };
     let app = crate::websocket::router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -620,3 +632,6 @@ async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
 
 #[path = "socket_tests/fresh_delete.rs"]
 mod fresh_delete;
+
+#[path = "socket_tests/scale.rs"]
+mod scale;

@@ -1040,7 +1040,10 @@ where
             mesh_subscriptions.remove(&sub_id);
             match serde_json::from_slice::<MeshSubscribeFilter>(filter_json) {
                 Ok(request) if request.topic == "mesh" => {
-                    let filter = MeshFilter { tag: request.tag };
+                    let filter = MeshFilter {
+                        tag: request.tag,
+                        cursor: None,
+                    };
                     let now = unix_seconds()?;
                     match state.mesh.list(user_id, filter.clone(), now).await {
                         Ok(snapshot) => {

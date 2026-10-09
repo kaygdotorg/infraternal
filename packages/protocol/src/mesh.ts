@@ -50,6 +50,17 @@ export interface MeshSnapshot {
   grants: readonly MeshGrant[];
 }
 
+/** A continuation bound to one revision and the stable nodes/tags/grants order. */
+export interface MeshCursor {
+  revision: number;
+  offset: number;
+}
+
+/** One bounded wire page; views receive the assembled MeshSnapshot instead. */
+export interface MeshSnapshotPage extends MeshSnapshot {
+  next_cursor?: MeshCursor;
+}
+
 /** Optional tag filter shared by list calls and live subscriptions. */
 export interface MeshFilter {
   tag?: string;
@@ -83,8 +94,8 @@ export type MeshActionId =
 
 /** An invalidation or snapshot delivered by a `topic: mesh` subscription. */
 export type MeshSubscriptionEvent =
-  | { type: "snapshot"; snapshot: MeshSnapshot }
-  | { type: "resync"; snapshot: MeshSnapshot }
+  | { type: "snapshot"; snapshot: MeshSnapshotPage }
+  | { type: "resync"; snapshot: MeshSnapshotPage }
   | { type: "changed"; revision: number }
   | { type: "error"; error: string };
 
@@ -122,8 +133,51 @@ export class MeshClient {
   constructor(private readonly transport: MeshTransport) {}
 
   /** List the caller's authorized inventory, optionally restricted to one tag. */
-  list(filter: MeshFilter = {}): Promise<MeshSnapshot> {
-    return this.transport.call("mesh.list", filter);
+  async list(filter: MeshFilter = {}): Promise<MeshSnapshot> {
+    const first = await this.transport.call<MeshSnapshotPage>("mesh.list", filter);
+    return this.completeSnapshot(first, filter);
+  }
+
+  /** Assemble only one revision; a concurrent edit restarts the server's sequence. */
+  private async completeSnapshot(first: MeshSnapshotPage, filter: MeshFilter): Promise<MeshSnapshot> {
+    if (first.next_cursor === undefined) {
+      return first;
+    }
+    let revision = first.revision;
+    let nodes: MeshNode[] = [];
+    let tags: MeshTag[] = [];
+    let grants: MeshGrant[] = [];
+    let page = first;
+    let restarts = 0;
+    // Bound work if inventory continuously changes or a peer never finishes.
+    for (let count = 0; count < 128; count++) {
+      if (page.revision < revision) {
+        throw new Error("mesh unavailable");
+      }
+      if (page.revision > revision) {
+        if (++restarts > 3) {
+          throw new Error("mesh unavailable");
+        }
+        revision = page.revision;
+        nodes = [];
+        tags = [];
+        grants = [];
+      }
+      for (const node of page.nodes) nodes.push(node);
+      for (const tag of page.tags) tags.push(tag);
+      for (const grant of page.grants) grants.push(grant);
+      const cursor = page.next_cursor;
+      if (cursor === undefined) {
+        return { revision, nodes, tags, grants };
+      }
+      const offset = nodes.length + tags.length + grants.length;
+      if (!Number.isSafeInteger(cursor.offset) || cursor.offset <= 0
+        || cursor.offset !== offset || cursor.revision !== revision) {
+        throw new Error("mesh unavailable");
+      }
+      page = await this.transport.call<MeshSnapshotPage>("mesh.list", { ...filter, cursor });
+    }
+    throw new Error("mesh unavailable");
   }
 
   /** Enroll a public-key identity. */
@@ -230,6 +284,8 @@ export class MeshClient {
     let deliveredRevision = -1;
     let pendingRevision = -1;
     let refreshing = false;
+    let authoritativeGeneration = 0;
+    let authoritativeRevision = -1;
 
     const publish = (snapshot: MeshSnapshot, authoritative = false): void => {
       // Liveness can expire without a database revision. Server snapshots are
@@ -288,7 +344,22 @@ export class MeshClient {
         return;
       }
       if (event.type === "snapshot" || event.type === "resync") {
-        publish(event.snapshot, true);
+        if (event.snapshot.revision < Math.max(deliveredRevision, authoritativeRevision)) {
+          return;
+        }
+        authoritativeRevision = event.snapshot.revision;
+        const generation = ++authoritativeGeneration;
+        if (event.snapshot.next_cursor === undefined) {
+          publish(event.snapshot, true);
+        } else {
+          void this.completeSnapshot(event.snapshot, filter).then((snapshot) => {
+            if (generation === authoritativeGeneration) publish(snapshot, true);
+          }).catch(() => {
+            if (!stopped && generation === authoritativeGeneration) {
+              listener({ type: "error", error: "mesh unavailable" });
+            }
+          });
+        }
       } else if (event.type === "error") {
         // The server withdraws this subscription on error. Stop before notifying
         // the view so pending replies and reentrant delivery cannot republish it.

@@ -115,6 +115,7 @@ async fn filtered_view_invalidations_follow_every_affected_host_tag() {
     .unwrap();
     let filter = MeshFilter {
         tag: Some("prod".to_owned()),
+        cursor: None,
     };
     let mut updates = service.subscribe();
     for (action, input) in [
