@@ -79,3 +79,7 @@ strip = true
 # binary. That is acceptable (DECISIONS 5: measure; robustness here is worth
 # a few hundred KiB).
 panic = "unwind"
+
+# Bound async orchestration code; Mesh and cryptographic dependencies retain speed optimization [5,198].
+[profile.release.package.infraternal-server]
+opt-level = "s"
