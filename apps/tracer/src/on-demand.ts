@@ -15,3 +15,9 @@
 export function onDemand<T>(load: () => Promise<T>): Promise<T> {
   return load();
 }
+
+/** Runs `run` when the page is idle (a timer where idle callbacks do not exist), so warming never competes with input. */
+export function whenIdle(run: () => void, timeout = 3000): void {
+  const w = window as unknown as { requestIdleCallback?: (cb: () => void, options?: { timeout: number }) => number };
+  if (w.requestIdleCallback) w.requestIdleCallback(run, { timeout }); else window.setTimeout(run, 400);
+}

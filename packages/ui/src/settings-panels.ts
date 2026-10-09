@@ -35,39 +35,52 @@ function heading(text: string): HTMLElement {
   return h;
 }
 
+export interface ChoiceItem { id: string; label: string; hint?: string; swatch?: { bg: string; accent: string } }
+
+/** A titled radio list of rows: a label, an optional quiet subtitle (the technical detail) and a tick on the current one. */
+function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: () => string, pick: (id: string) => void): HTMLElement {
+  const block = document.createElement("section");
+  block.append(heading(title));
+  const list = document.createElement("div");
+  list.className = "ui-sp-list";
+  list.setAttribute("role", "radiogroup");
+  list.setAttribute("aria-label", title);
+  for (const item of items) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "ui-sp-row";
+    row.dataset.id = item.id;
+    row.setAttribute("role", "radio");
+    row.innerHTML = `${item.swatch ? '<span class="ui-sp-swatch" aria-hidden="true"></span>' : ""}<span class="ui-sp-label"></span><span class="ui-sp-hint"></span><svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true">${CHECK}</svg>`;
+    (row.querySelector(".ui-sp-label") as HTMLElement).textContent = item.label;
+    (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = item.hint ?? "";
+    const sw = row.querySelector<HTMLElement>(".ui-sp-swatch");
+    if (sw && item.swatch) { sw.style.background = item.swatch.bg; sw.style.setProperty("--dot", item.swatch.accent); }
+    row.addEventListener("click", () => pick(item.id));
+    list.append(row);
+  }
+  block.append(list);
+  block.dataset.kind = kind;
+  block.dataset.current = current();
+  return block;
+}
+
+/** Ticks the row of `current` in a choice block. */
+function paintChoice(block: HTMLElement, current: string): void {
+  for (const row of block.querySelectorAll<HTMLElement>(".ui-sp-row")) {
+    const on = row.dataset.id === current;
+    row.setAttribute("aria-checked", String(on));
+    row.toggleAttribute("data-current", on);
+  }
+}
+
 /** Theme, font, background and card transparency. */
 export function renderAppearance(container: HTMLElement, api: AppearanceApi): () => void {
   const root = document.createElement("div");
   root.className = "ui-sp";
   container.append(root);
 
-  const choices = (title: string, items: Array<{ id: string; label: string; hint?: string; swatch?: { bg: string; accent: string } }>, kind: string, current: () => string): HTMLElement => {
-    const block = document.createElement("section");
-    block.append(heading(title));
-    const list = document.createElement("div");
-    list.className = "ui-sp-list";
-    list.setAttribute("role", "radiogroup");
-    list.setAttribute("aria-label", title);
-    for (const item of items) {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "ui-sp-row";
-      row.dataset.id = item.id;
-      row.setAttribute("role", "radio");
-      row.innerHTML = `${item.swatch ? '<span class="ui-sp-swatch" aria-hidden="true"></span>' : ""}<span class="ui-sp-label"></span><span class="ui-sp-hint"></span><svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true">${CHECK}</svg>`;
-      (row.querySelector(".ui-sp-label") as HTMLElement).textContent = item.label;
-      (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = item.hint ?? "";
-      const sw = row.querySelector<HTMLElement>(".ui-sp-swatch");
-      if (sw && item.swatch) { sw.style.background = item.swatch.bg; sw.style.setProperty("--dot", item.swatch.accent); }
-      row.addEventListener("click", () => api.act(`${kind}:${item.id}`));
-      list.append(row);
-    }
-    block.append(list);
-    block.dataset.kind = kind;
-    block.dataset.current = current();
-    return block;
-  };
-
+  const choices = (title: string, items: ChoiceItem[], kind: string, current: () => string): HTMLElement => choiceBlock(title, items, kind, current, (id) => api.act(`${kind}:${id}`));
   const theme = choices("Theme", api.themes.map((t) => ({ id: t.id, label: t.name, hint: t.dark ? "dark" : "light", swatch: { bg: t.bg, accent: t.accent } })), "theme", () => api.state().theme);
   const font = choices("Font", api.fonts.map((f) => ({ id: f.id, label: f.label, hint: f.hint })), "font", () => api.state().font);
   const background = document.createElement("section");
@@ -87,13 +100,7 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
 
   const paint = (): void => {
     const s = api.state();
-    for (const [block, current] of [[theme, s.theme], [font, s.font]] as const) {
-      for (const row of block.querySelectorAll<HTMLElement>(".ui-sp-row")) {
-        const on = row.dataset.id === current;
-        row.setAttribute("aria-checked", String(on));
-        row.toggleAttribute("data-current", on);
-      }
-    }
+    for (const [block, current] of [[theme, s.theme], [font, s.font]] as const) paintChoice(block, current);
     bgTabs.select(s.background, true);
     cardTabs.select(String(s.card), true);
     windowTabs.select(String(s.windows), true);
@@ -101,6 +108,28 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
   paint();
   const off = api.onChange(paint);
   return () => { off(); bgTabs.dispose(); cardTabs.dispose(); windowTabs.dispose(); root.remove(); };
+}
+
+export interface WindowSizesApi {
+  /** One titled group of choices per kind of device. `id` is what `get` and `set` take. */
+  groups: Array<{ id: string; title: string; options: Array<{ id: string; label: string; hint: string }> }>;
+  get(group: string): string;
+  set(group: string, option: string): void;
+  /** Called after a size changes (here or elsewhere); returns a remover. */
+  onChange(listener: () => void): () => void;
+}
+
+/** How wide a terminal window is, per kind of device. Plain option names; the percentage lives in the subtitle. */
+export function renderWindowSizes(container: HTMLElement, api: WindowSizesApi): () => void {
+  const root = document.createElement("div");
+  root.className = "ui-sp";
+  container.append(root);
+  const blocks = api.groups.map((g) => ({ id: g.id, block: choiceBlock(g.title, g.options, `window-size-${g.id}`, () => api.get(g.id), (id) => api.set(g.id, id)) }));
+  for (const b of blocks) root.append(b.block);
+  const paint = (): void => { for (const b of blocks) paintChoice(b.block, api.get(b.id)); };
+  paint();
+  const off = api.onChange(paint);
+  return () => { off(); root.remove(); };
 }
 
 export type DeviceKind = "phone" | "tablet" | "laptop" | "desktop";

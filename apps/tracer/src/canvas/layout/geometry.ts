@@ -7,6 +7,7 @@
  * - Sizes follow the viewport so a snapped view fills it (`metricsFor`).
  */
 import type { ViewModel } from "../model/types";
+import { DEFAULT_SIZES, columnWidth, type WindowSizes } from "../window-sizes";
 
 export interface Pt { x: number; y: number }
 export interface Rect { x: number; y: number; w: number; h: number }
@@ -23,10 +24,12 @@ export interface Metrics { colW: number; clh: number; narrow: boolean; nodeW: nu
  * sliver for each neighbour to peek in; on a desktop three columns fill the width; a column is always as tall
  * as the viewport (D119: windows tile the pane).
  */
-export const metricsFor = (width: number, height: number, coarse: boolean): Metrics => {
+export const metricsFor = (width: number, height: number, coarse: boolean, sizes: WindowSizes = DEFAULT_SIZES): Metrics => {
   const narrow = coarse || width < 720;
-  const colW = narrow ? Math.max(260, Math.min(520, Math.round(width - 28))) : Math.max(400, Math.min(640, Math.round((width - 24) / 3)));
-  const clh = Math.max(360, Math.round(height));
+  const colW = columnWidth(width, narrow, sizes);
+  // A view is as tall as the canvas area. It may get short (the on-screen keyboard is up): only the height changes,
+  // never the width or a column count, so nothing rewraps and the camera does not scale the window down (D191).
+  const clh = Math.max(120, Math.round(height));
   return { colW, clh, narrow, nodeW: narrow ? 200 : 208, nodeH: 104 };
 };
 

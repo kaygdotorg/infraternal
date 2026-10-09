@@ -1,0 +1,262 @@
+{
+ "loadavg": [
+  19.72,
+  23.07,
+  21.7
+ ],
+ "results": [
+  {
+   "way": "manager→second",
+   "firstPaint": 33,
+   "shown": 12,
+   "fromCache": true,
+   "attached": 20.6,
+   "livePaint": 89.5,
+   "longestTask": 0,
+   "marks": {
+    "sw:1:retarget": 10.9,
+    "sw:1:ghosted": 12,
+    "sw:1:attached": 20.6,
+    "sw:1:ghost": 33,
+    "sw:1:painted": 89.5
+   }
+  },
+  {
+   "way": "manager→first",
+   "firstPaint": 23.9,
+   "shown": 12.8,
+   "fromCache": true,
+   "attached": 18.4,
+   "livePaint": 74.3,
+   "longestTask": 0,
+   "marks": {
+    "sw:1:retarget": 11.8,
+    "sw:1:ghosted": 12.8,
+    "sw:1:attached": 18.4,
+    "sw:1:ghost": 23.9,
+    "sw:1:painted": 74.3
+   }
+  },
+  {
+   "way": "manager→second",
+   "firstPaint": 28.4,
+   "shown": 12.1,
+   "fromCache": true,
+   "attached": 17.2,
+   "livePaint": 116.7,
+   "longestTask": 0,
+   "marks": {
+    "sw:1:retarget": 11.1,
+    "sw:1:ghosted": 12.1,
+    "sw:1:attached": 17.2,
+    "sw:1:ghost": 28.4,
+    "sw:1:painted": 116.7
+   }
+  },
+  {
+   "way": "manager→first",
+   "firstPaint": 27.5,
+   "shown": 11.2,
+   "fromCache": true,
+   "attached": 21.4,
+   "livePaint": 87,
+   "longestTask": 0,
+   "marks": {
+    "sw:1:retarget": 9.9,
+    "sw:1:ghosted": 11.2,
+    "sw:1:attached": 21.4,
+    "sw:1:ghost": 27.5,
+    "sw:1:painted": 87
+   }
+  },
+  {
+   "way": "manager→second",
+   "firstPaint": 19.9,
+   "shown": 9.9,
+   "fromCache": true,
+   "attached": 13.6,
+   "livePaint": 62.2,
+   "longestTask": 0,
+   "marks": {
+    "sw:1:retarget": 8.8,
+    "sw:1:ghosted": 9.9,
+    "sw:1:attached": 13.6,
+    "sw:1:ghost": 19.9,
+    "sw:1:painted": 62.2
+   }
+  },
+  {
+   "way": "manager→first",
+   "firstPaint": 21.1,
+   "shown": 9.3,
+   "fromCache": true,
+   "attached": 13.9,
+   "livePaint": 41.9,
+   "longestTask": 0,
+   "marks": {
+    "sw:1:retarget": 8,
+    "sw:1:ghosted": 9.3,
+    "sw:1:attached": 13.9,
+    "sw:1:ghost": 21.1,
+    "sw:1:painted": 41.9
+   }
+  },
+  {
+   "way": "manager→second",
+   "firstPaint": 27,
+   "shown": 10.4,
+   "fromCache": true,
+   "attached": 21.5,
+   "livePaint": 63.1,
+   "longestTask": 0,
+   "marks": {
+    "sw:1:retarget": 9.2,
+    "sw:1:ghosted": 10.4,
+    "sw:1:attached": 21.5,
+    "sw:1:ghost": 27,
+    "sw:1:painted": 63.1
+   }
+  },
+  {
+   "way": "manager→first",
+   "firstPaint": 29.3,
+   "shown": 8.7,
+   "fromCache": true,
+   "attached": 16.5,
+   "livePaint": 76,
+   "longestTask": 0,
+   "marks": {
+    "sw:1:retarget": 7.5,
+    "sw:1:ghosted": 8.7,
+    "sw:1:attached": 16.5,
+    "sw:1:ghost": 29.3,
+    "sw:1:painted": 76
+   }
+  },
+  {
+   "way": "input after manager switch (ack, ms from first key)",
+   "ackedMs": 193
+  },
+  {
+   "way": "sidebar→new window",
+   "firstPaint": 22,
+   "shown": 9.3,
+   "fromCache": true,
+   "attached": 82.1,
+   "livePaint": 123.2,
+   "longestTask": 0,
+   "marks": {
+    "sw:3:mount": 8.1,
+    "sw:3:ghosted": 9.3,
+    "sw:3:ghost": 22,
+    "sw:3:attached": 82.1,
+    "sw:3:client": 82.1,
+    "sw:3:painted": 123.2
+   }
+  },
+  {
+   "way": "palette→new window",
+   "firstPaint": 16.3,
+   "shown": 5.7,
+   "fromCache": true,
+   "attached": 59.2,
+   "livePaint": 80,
+   "longestTask": 0,
+   "marks": {
+    "sw:4:mount": 4.1,
+    "sw:4:ghosted": 5.7,
+    "sw:4:ghost": 16.3,
+    "sw:4:attached": 59.2,
+    "sw:4:client": 59.2,
+    "sw:4:painted": 80
+   }
+  },
+  {
+   "way": "sidebar→new window",
+   "firstPaint": 22.9,
+   "shown": 10.5,
+   "fromCache": true,
+   "attached": 63.6,
+   "livePaint": 132.5,
+   "longestTask": 0,
+   "marks": {
+    "sw:5:mount": 9.4,
+    "sw:5:ghosted": 10.5,
+    "sw:5:ghost": 22.9,
+    "sw:5:attached": 63.6,
+    "sw:5:client": 63.7,
+    "sw:5:painted": 132.5
+   }
+  },
+  {
+   "way": "palette→new window",
+   "firstPaint": 15.3,
+   "shown": 7,
+   "fromCache": true,
+   "attached": 43.4,
+   "livePaint": 61.8,
+   "longestTask": 0,
+   "marks": {
+    "sw:6:mount": 6,
+    "sw:6:ghosted": 7,
+    "sw:6:ghost": 15.3,
+    "sw:6:attached": 43.4,
+    "sw:6:client": 43.4,
+    "sw:6:painted": 61.8
+   }
+  },
+  {
+   "way": "sidebar→new window",
+   "firstPaint": 31.4,
+   "shown": 16.1,
+   "fromCache": true,
+   "attached": 85.7,
+   "livePaint": 123.3,
+   "longestTask": 0,
+   "marks": {
+    "sw:7:mount": 14.7,
+    "sw:7:ghosted": 16.1,
+    "sw:7:ghost": 31.4,
+    "sw:7:attached": 85.7,
+    "sw:7:client": 85.7,
+    "sw:7:painted": 123.3
+   }
+  },
+  {
+   "way": "palette→new window",
+   "firstPaint": 84.2,
+   "shown": 11.8,
+   "fromCache": true,
+   "attached": 79.2,
+   "livePaint": 185.3,
+   "longestTask": 0,
+   "marks": {
+    "sw:8:mount": 10.5,
+    "sw:8:ghosted": 11.8,
+    "sw:8:attached": 79.2,
+    "sw:8:client": 79.2,
+    "sw:8:ghost": 84.2,
+    "sw:8:painted": 185.3
+   }
+  },
+  {
+   "way": "strip",
+   "frames": 18,
+   "minInk": 425
+  },
+  {
+   "way": "manager→second (not shown since the page loaded)",
+   "firstPaint": 41.4,
+   "shown": null,
+   "fromCache": false,
+   "attached": 26,
+   "livePaint": 41.4,
+   "longestTask": 0,
+   "marks": {
+    "sw:1:retarget": 19.8,
+    "sw:1:attached": 26,
+    "sw:1:painted": 41.4
+   }
+  }
+ ]
+}

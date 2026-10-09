@@ -24,6 +24,12 @@ export interface SessionBinding {
   setActive(active: boolean): void;
   /** The window is on screen and live (true), or hidden, thumbnailed or far away (false). */
   setVisible(visible: boolean): void;
+  /**
+   * Shows the session `model.sessionId` names in this same binding, without tearing the renderer down (#128): the
+   * last known screen of that session paints at once and the stream attaches; returns false when the binding cannot
+   * (its terminal is not ready yet), and the caller then disposes it and binds a new one.
+   */
+  retarget?(model: WindowModel): boolean;
   /** The window's box changed; the renderer refits to the new cell grid. */
   refit(): void;
   /** The window closed. The session is not ended. */

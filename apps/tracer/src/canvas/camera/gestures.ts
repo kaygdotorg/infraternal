@@ -27,15 +27,21 @@ export function installGestures(cx: Ctx): void {
   let pan: { id: number; x: number; y: number; cx: number; cy: number; moved: boolean; target: Element } | undefined;
   const interactive = (t: EventTarget | null): boolean => !!(t as Element | null)?.closest?.(".ui-window, .cl-label, .cl-edge, .cl-port, .cl-empty-add, .cl-arrow-handle");
   // ---- snapped gestures: a wheel or trackpad gesture moves one column or window (a long flick, two) ------
-  const wheelG = { t: 0, x: 0, y: 0, fired: 0, axis: "" };
+  const wheelG = { t: 0, x: 0, y: 0, fired: 0, axis: "", m: 0, fell: false, s: 0 };
   const snapWheel = (e: WheelEvent): void => {
     e.preventDefault();
     if (e.ctrlKey || e.metaKey) return; // no zoom while snapped
     const now = performance.now();
-    if (now - wheelG.t > 140) { wheelG.x = 0; wheelG.y = 0; wheelG.fired = 0; wheelG.axis = ""; }
-    wheelG.t = now;
     let dx = e.deltaX, dy = e.deltaY;
     if (e.shiftKey && !dx) { dx = dy; dy = 0; }
+    // A new swipe can start inside the previous one's momentum tail, so idleness alone cannot end a gesture: the
+    // tail only ever decays, so a clear rise after a fall (or a flip of direction) is a finger on the pad again.
+    const m = Math.hypot(dx, dy), sign = Math.sign(dx || dy);
+    const fresh = wheelG.fell && m - wheelG.m >= 4 && m > wheelG.m * 1.5 || !!wheelG.s && !!sign && sign !== wheelG.s;
+    if (now - wheelG.t > 140 || fresh) { wheelG.x = 0; wheelG.y = 0; wheelG.fired = 0; wheelG.axis = ""; wheelG.fell = false; }
+    if (m < wheelG.m * 0.9) wheelG.fell = true;
+    wheelG.m = m; wheelG.s = sign || wheelG.s;
+    wheelG.t = now;
     wheelG.x += dx; wheelG.y += dy;
     if (!wheelG.axis && Math.hypot(wheelG.x, wheelG.y) > 24) wheelG.axis = Math.abs(wheelG.x) > Math.abs(wheelG.y) ? "x" : "y";
     if (!wheelG.axis) return;

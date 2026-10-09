@@ -315,8 +315,10 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     graphs.set(c, graph);
     refreshGraph(c);
     // The view was built empty and the camera may already be framing it: now that it has its size (and, if it is
-    // big, no stops and a free canvas) the camera goes to where the view really rests.
-    if (state.currentView === c.view.id && cx.camera.target) cx.nav.flyView(c.view.id);
+    // big, no stops and a free canvas) the camera goes to where the view really rests. Only while the canvas is locked
+    // to this view: in the overview (the lock is off) the person is looking at every view, and a graph that fills in
+    // late (the Mesh answers after a terminal attached) must not pull the camera into itself.
+    if (state.canvasLock && state.currentView === c.view.id && cx.camera.target) cx.nav.flyView(c.view.id);
   };
 
   return {
