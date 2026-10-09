@@ -139,18 +139,43 @@ export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMat
   };
 }
 
+/**
+ * The glass levels as literal rules keyed by `data-card` / `data-window-level` / `data-scheme` on the root, written once.
+ * A level change is then one attribute write that restyles only the elements these rules match. The same numbers as
+ * custom properties on the root restyled every element of the page (measured: 10-26 ms against about 1 ms with
+ * 1,800 elements), because every descendant inherits a changed custom property. Specificity is zero (`:where`), so
+ * an instance that sets its own blur (the sign-in card) or the reduced-transparency rule still wins.
+ */
+let levelRules = false;
+function installLevelRules(): void {
+  if (levelRules || typeof CSSStyleSheet === "undefined") return;
+  levelRules = true;
+  const css: string[] = [];
+  for (const [level, glass] of Object.entries(CARD_LEVELS)) {
+    css.push(`:where(:root[data-card="${levelName(Number(level)).toLowerCase()}"]) :where(.ui-overlay-surface, .ui-panel, .ui-pill) { --ui-overlay-blur: ${glass.blur}px; }`);
+  }
+  for (const [level, glass] of Object.entries(WINDOW_LEVELS)) {
+    const name = levelName(Number(level)).toLowerCase();
+    if (name === "solid") continue;
+    for (const scheme of ["dark", "light"] as const) {
+      css.push(`:root[data-window-level="${name}"][data-scheme="${scheme}"] .ui-window { background: color-mix(in srgb, var(--bg) ${Math.round(glass[scheme] * 100)}%, transparent); }`);
+    }
+    if (glass.blur) css.push(`:root[data-window-level="${name}"] .ui-window[data-onscreen] { -webkit-backdrop-filter: blur(${glass.blur}px); backdrop-filter: blur(${glass.blur}px); }`);
+  }
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(css.join("\n"));
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+}
+
 /** Applies UI tokens and mesh source hues; derived surfaces stay coherent with the theme. */
 export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT_CARD, windowLevel = DEFAULT_WINDOW): void {
   const style = root.style;
   const rgb = (hex: string) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16)).join(" ");
   const overlay = overlayMaterial(active, cardLevel);
-  const card = CARD_LEVELS[cardLevel] ?? CARD_LEVELS[DEFAULT_CARD]!;
-  const win = WINDOW_LEVELS[windowLevel] ?? WINDOW_LEVELS[DEFAULT_WINDOW]!;
-  style.setProperty("--ui-overlay-blur", `${card.blur}px`);
   // Windows: a translucent fill (no blur except at Frosted). The data attributes let CSS skip the filter and the
   // alpha entirely at Solid, so the default paints exactly what an opaque card paints.
-  style.setProperty("--ui-window-fill", `${Math.round((active.dark ? win.dark : win.light) * 100)}%`);
-  style.setProperty("--ui-window-blur", `${win.blur}px`);
+  installLevelRules();
+  root.dataset.scheme = active.dark ? "dark" : "light";
   root.dataset.card = levelName(cardLevel).toLowerCase();
   root.dataset.windowLevel = levelName(windowLevel).toLowerCase();
   style.setProperty("--bg", active.bg);

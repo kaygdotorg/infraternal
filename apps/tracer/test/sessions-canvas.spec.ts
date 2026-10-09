@@ -385,18 +385,21 @@ test("scenes run one after another and each starts from the same four windows", 
   } finally { await context.close(); }
 });
 
-test("the manager's code loads on demand, the first time it is opened", async ({ browser }) => {
+test("the manager's code is on demand, fetched at idle so the first open never waits for a download (#128)", async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   const scripts: string[] = [];
   page.on("request", (r) => { if (r.url().endsWith(".js")) scripts.push(r.url()); });
   await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none");
   await expect(page.locator("[data-view='console'] .ui-window")).toHaveCount(4, { timeout: 20_000 });
-  await page.waitForTimeout(800);
-  const before = scripts.length;
+  // Not part of the first screen: it arrives after the page has gone idle, and before anyone asks for it.
+  const atFirstScreen = scripts.length;
+  await expect.poll(() => scripts.length, { timeout: 10_000 }).toBeGreaterThan(atFirstScreen);
+  await page.waitForTimeout(500);
+  const settled = scripts.length;
   await windowOf(page, "build-01").locator("[data-action='sessions']").click();
   await expect(page.locator(".cl-sx-pop")).toBeVisible();
-  expect(scripts.length).toBeGreaterThan(before);
+  expect(scripts.length, "opening the manager fetches nothing").toBe(settled);
   await context.close();
 });
 

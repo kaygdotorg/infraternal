@@ -1,0 +1,142 @@
+[
+ {
+  "way": "manager→second",
+  "firstPaint": 575.9,
+  "fromCache": false,
+  "attached": 28.3,
+  "livePaint": 575.9,
+  "longestTask": 0,
+  "marks": {
+   "sw:3:mount": 10.4,
+   "sw:3:attached": 28.3,
+   "sw:3:client": 28.7,
+   "sw:3:painted": 575.9
+  }
+ },
+ {
+  "way": "manager→first",
+  "firstPaint": 592.3,
+  "fromCache": false,
+  "attached": 28,
+  "livePaint": 592.3,
+  "longestTask": 0,
+  "marks": {
+   "sw:4:mount": 7.8,
+   "sw:4:attached": 28,
+   "sw:4:client": 28.3,
+   "sw:4:painted": 592.3
+  }
+ },
+ {
+  "way": "manager→second",
+  "firstPaint": 601.3,
+  "fromCache": false,
+  "attached": 30.3,
+  "livePaint": 601.3,
+  "longestTask": 0,
+  "marks": {
+   "sw:5:mount": 13.1,
+   "sw:5:attached": 30.3,
+   "sw:5:client": 30.7,
+   "sw:5:painted": 601.3
+  }
+ },
+ {
+  "way": "manager→first",
+  "firstPaint": 586.5,
+  "fromCache": false,
+  "attached": 33.6,
+  "livePaint": 586.5,
+  "longestTask": 0,
+  "marks": {
+   "sw:6:mount": 11.6,
+   "sw:6:attached": 33.6,
+   "sw:6:client": 33.9,
+   "sw:6:painted": 586.5
+  }
+ },
+ {
+  "way": "sidebar→new window",
+  "firstPaint": 726.7,
+  "fromCache": false,
+  "attached": 396.7,
+  "livePaint": 726.7,
+  "longestTask": 0,
+  "marks": {
+   "sw:7:mount": 6.4,
+   "sw:7:client": 48.3,
+   "sw:7:attached": 396.7,
+   "sw:7:painted": 726.7
+  }
+ },
+ {
+  "way": "palette→new window",
+  "firstPaint": 669,
+  "fromCache": false,
+  "attached": 346.1,
+  "livePaint": 669,
+  "longestTask": 0,
+  "marks": {
+   "sw:8:mount": 2.9,
+   "sw:8:client": 22,
+   "sw:8:attached": 346.1,
+   "sw:8:painted": 669
+  }
+ },
+ {
+  "way": "sidebar→new window",
+  "firstPaint": 701.8,
+  "fromCache": false,
+  "attached": 357,
+  "livePaint": 701.8,
+  "longestTask": 0,
+  "marks": {
+   "sw:9:mount": 7,
+   "sw:9:client": 42.8,
+   "sw:9:attached": 357,
+   "sw:9:painted": 701.8
+  }
+ },
+ {
+  "way": "palette→new window",
+  "firstPaint": 653.2,
+  "fromCache": false,
+  "attached": 332.2,
+  "livePaint": 653.2,
+  "longestTask": 0,
+  "marks": {
+   "sw:10:mount": 0.8,
+   "sw:10:client": 22.4,
+   "sw:10:attached": 332.2,
+   "sw:10:painted": 653.2
+  }
+ },
+ {
+  "way": "sidebar→new window",
+  "firstPaint": 670,
+  "fromCache": false,
+  "attached": 361.9,
+  "livePaint": 670,
+  "longestTask": 0,
+  "marks": {
+   "sw:11:mount": 17.7,
+   "sw:11:client": 45.1,
+   "sw:11:attached": 361.9,
+   "sw:11:painted": 670
+  }
+ },
+ {
+  "way": "palette→new window",
+  "firstPaint": 686.2,
+  "fromCache": false,
+  "attached": 361.4,
+  "livePaint": 686.2,
+  "longestTask": 0,
+  "marks": {
+   "sw:12:mount": 3.5,
+   "sw:12:client": 26.1,
+   "sw:12:attached": 361.4,
+   "sw:12:painted": 686.2
+  }
+ }
+]

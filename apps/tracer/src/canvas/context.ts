@@ -32,7 +32,7 @@ import type { Memory } from "./memory";
 import type { Flip } from "./layout/flip";
 import type { ViewsModule } from "./views/world";
 import type { WindowsModule } from "./windows/lifecycle";
-import type { FloatModule } from "./windows/float";
+import type { FloatModule } from "./windows/float.on-demand";
 import type { InputLock } from "./windows/input-lock";
 import type { Visibility } from "./windows/visibility";
 import type { PillModule } from "./toolbar/pill";
