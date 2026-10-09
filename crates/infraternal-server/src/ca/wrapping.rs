@@ -158,3 +158,7 @@ impl WrappedCa {
         Ok(bytes)
     }
 }
+
+#[cfg(test)]
+#[path = "wrapping_tests.rs"]
+mod tests;
