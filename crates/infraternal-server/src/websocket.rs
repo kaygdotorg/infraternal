@@ -1,7 +1,7 @@
 //! Authenticates browser sockets, resumes connections, and relays user-owned terminal streams [19][41][50].
 
 use crate::auth::Auth;
-use crate::embedded::{AttachmentHandle, EmbeddedAgent, TerminalOutput, TerminalSize};
+use crate::embedded::{AgentError, AttachmentHandle, EmbeddedAgent, TerminalOutput, TerminalSize};
 use axum::{
     Router,
     extract::{
@@ -13,7 +13,7 @@ use axum::{
     routing::get,
 };
 use bytes::{Bytes, BytesMut};
-use futures_util::{SinkExt, Stream, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use infraternal_plugin_api::{ActionDef, PluginDescriptor};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
@@ -52,11 +52,15 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
 const MAX_RESUME_ROWS: i64 = 4096;
 // Reject further AttachTerm requests on a socket at this bound.
 const MAX_ATTACHMENTS: usize = 32;
+// One slow host-facts poll per second can queue only a small bounded number per socket.
+const MAX_PENDING_PLUGIN_CALLS: usize = 4;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
 const OUTPUT_CHANNEL_CAPACITY: usize = 4;
 // Cap a fragmented input frame before the decoder retains more bytes.
 const MAX_SOCKET_BUFFER: usize = MAX_FRAME_LEN + 10;
 const MAX_CREDIT: u64 = 8 * 1024 * 1024;
+
+type PendingPluginCall = BoxFuture<'static, (u32, Result<Vec<u8>, AgentError>)>;
 
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
@@ -294,6 +298,8 @@ async fn run_socket(
 
     let (output_tx, mut output_rx) =
         mpsc::channel::<(u32, TerminalOutput)>(OUTPUT_CHANNEL_CAPACITY);
+    // Poll plugin calls beside inbound frames; dropping this socket drops any unfinished waits.
+    let mut pending_plugin_calls = FuturesUnordered::<PendingPluginCall>::new();
     let mut output_open = true;
     let mut receive_deadline = None;
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
@@ -362,6 +368,7 @@ async fn run_socket(
                             &user_id,
                             &session_token,
                             owner,
+                            &mut pending_plugin_calls,
                             &connection_id,
                             &mut attachments,
                             &output_tx,
@@ -383,6 +390,17 @@ async fn run_socket(
                     &state, &user_id, &session_token, &connection_id, stream_id, output,
                     &mut attachments, &mut sink, &mut encode,
                 )).await.is_err() { break; }
+            }
+            plugin_call = pending_plugin_calls.next(), if !pending_plugin_calls.is_empty() => {
+                let Some((call_id, result)) = plugin_call else { continue; };
+                let (ok, json) = match result {
+                    Ok(json) => (true, json),
+                    Err(_) => (false, br#"{"error":"action unavailable"}"#.to_vec()),
+                };
+                if while_authorized(&state, &user_id, &session_token, true,
+                    send_frame(&mut sink, CONTROL_STREAM,
+                        &Frame::Result { call_id, ok, json: &json }, &mut encode)
+                ).await.is_err() { break; }
             }
         }
     }
@@ -897,6 +915,7 @@ async fn handle_client_frame<K>(
     user_id: &str,
     session_token: &str,
     owner: bool,
+    pending_plugin_calls: &mut FuturesUnordered<PendingPluginCall>,
     connection_id: &[u8; 16],
     attachments: &mut HashMap<u32, ClientAttachment>,
     output_tx: &mpsc::Sender<(u32, TerminalOutput)>,
@@ -994,17 +1013,23 @@ where
             let action = state.action(action_id);
             // This auth slice has no role-grant records yet. The persisted owner bit is the only
             // grant source for declared plugin permissions; a valid session alone is insufficient.
-            let result = if action_id.len() <= 128
+            let authorized = action_id.len() <= 128
                 && input_json.len() <= infraternal_plugin_api::MAX_ACTION_BYTES
-                && action.is_some_and(|action| !action.permission.is_empty() && owner)
-            {
-                state
-                    .agent
-                    .call(action_id.to_owned(), input_json.to_vec())
-                    .await
-            } else {
-                Err(crate::embedded::AgentError::Rejected)
-            };
+                && action.is_some_and(|action| !action.permission.is_empty() && owner);
+            if authorized && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS {
+                let agent = state.agent.clone();
+                let action_id = action_id.to_owned();
+                let input_json = input_json.to_vec();
+                pending_plugin_calls.push(Box::pin(async move {
+                    let result =
+                        tokio::time::timeout(BACKEND_TIMEOUT, agent.call(action_id, input_json))
+                            .await
+                            .unwrap_or(Err(AgentError::Unavailable));
+                    (call_id, result)
+                }));
+                return Ok(());
+            }
+            let result = Err(AgentError::Rejected);
             if !session_is_live(state, user_id, session_token).await {
                 return Err(());
             }

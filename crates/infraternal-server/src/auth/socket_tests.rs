@@ -34,7 +34,7 @@ const HOST_FACTS_DESCRIPTOR: infraternal_plugin_api::PluginDescriptor =
         },
         role_dependencies: &[],
     };
-const HOST_FACTS_DESCRIPTORS: &[&infraternal_plugin_api::PluginDescriptor] =
+pub(super) const HOST_FACTS_DESCRIPTORS: &[&infraternal_plugin_api::PluginDescriptor] =
     &[&HOST_FACTS_DESCRIPTOR];
 
 async fn socket_fixture() -> (Fixture, SocketAddr, tokio::task::JoinHandle<()>) {
