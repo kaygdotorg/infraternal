@@ -36,9 +36,8 @@ export function installShortcuts(cx: Ctx): () => void {
   const splitActive = (direction: "right" | "down", e: KeyboardEvent): void => {
     if (e.repeat) return;
     const w = state.activeWin;
-    // The instant (motionless) keyboard split misplaced the camera in production at 54 windows (#141); until it is
-    // fixed it takes the animated path, which is correct. One split per press still holds (auto-repeat is ignored).
-    if (!cx.inputLock.state && w && isTerminal(w)) void cx.win.split(w, direction);
+    // A keyboard split never animates (TASTE): instant, one per press (auto-repeat is ignored above).
+    if (!cx.inputLock.state && w && isTerminal(w)) void cx.win.split(w, direction, undefined, true);
   };
   const removeBindings = [
     bindShortcut("canvas-lock", () => cx.nav.setCanvasLock(!state.canvasLock)),
