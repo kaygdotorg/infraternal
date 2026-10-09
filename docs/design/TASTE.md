@@ -143,7 +143,7 @@ Related documents: `segmented-selection.md` and `toast.md` in this folder.
 | **Scrolling in a focused terminal belongs to the terminal.** With a terminal focused and input locked, the wheel and touch scroll go to that terminal (its scrollback, or the program running in it), never to the strip or the canvas. A terminal with nothing to scroll does nothing; the strip never moves underneath it. | "with input lock set, i can still scroll up and down? if there is no scroll buffer, scrolling up and down should do nothing - basically scroll up and down getting passed to the terminal instead of the apps" | Three stacked windows, focus the middle one, lock input: wheel up and down with and without scrollback; the strip offset stays exactly the same. |
 - **Never repeat the heading in the rows below it.** A group's window list says each window's own name (the Settings section, the host, the session), not "settings" nine times under a "Settings" heading. (owner, 2026-10-09)
 - **Trackpad scrolling through windows never stops responding.** Two swipes then nothing, until a click, is broken; every swipe moves, during or after an animation. (owner, 2026-10-09, again)
-- **Controls never collide with corners.** A window's close button sits fully inside the corner radius with even spacing; heavy rings around small icons are wrong. (owner, 2026-10-09)
+- **Icons sit dead centre in their buttons.** The window close X was off-centre in its round pill; centre within half a pixel, and size the pill like its sibling controls on desktop. (owner, 2026-10-09)
 - **Live output never looks cut off.** A logs window fills with backlog, streams, and stays pinned to the latest line like `tail -f`. (owner, 2026-10-09)
 
 ## 5. Rendering
