@@ -335,16 +335,21 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     meshKey = key;
     const renderer = await getBackdrop();
     if (meshKey !== key || background !== "mesh") return;
-    ROOT.style.setProperty("--grain", `url(${renderer.grainTile()})`);
     ROOT.style.setProperty("--dpr", String(devicePixelRatio));
+    const grain = `url(${renderer.grainTile()})`;
     const url = await renderer.renderBackdrop(active, width, height);
-    if (meshKey === key && background === "mesh" && url) ROOT.style.setProperty("--mesh-image", `url("${url}")`);
+    if (meshKey === key && background === "mesh" && url) setMeshImages(`url("${url}")`, grain);
   };
+
+  // The mesh image and the grain tile are read by the backdrop layers only, so they are set there (a rule in a sheet of
+  // our own) and not as root tokens: a root token is inherited, and changing one restyles every element of the page.
+  const meshSheet = new CSSStyleSheet();
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, meshSheet];
+  const setMeshImages = (image: string, grain: string): void => { meshSheet.replaceSync(`:where(.backdrop, .ui-canvas-backdrop) { --mesh-image: ${image}; --grain: ${grain}; }`); };
 
   const releaseMesh = (): void => {
     meshKey = "";
-    ROOT.style.setProperty("--mesh-image", "none");
-    ROOT.style.setProperty("--grain", "none");
+    setMeshImages("none", "none");
     void backdropModule?.then((renderer) => renderer.releaseBackdrop());
   };
 

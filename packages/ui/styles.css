@@ -17,6 +17,12 @@
 @media (pointer: coarse) { .ui-icon { width: 18px; height: 18px; } }
 .terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
 
+/* The card tint is read by the element that carries it and by nothing inside it, so it does not inherit: a change then
+   restyles the glass surfaces and not their descendants too (themes.ts `installLevelRules` sets it per element). */
+@property --overlay { syntax: "*"; inherits: false; }
+@property --ui-overlay-halo { syntax: "*"; inherits: false; }
+@property --ui-overlay-blur { syntax: "*"; inherits: false; }
+
 /* The one material's blur and saturation: surfaces and pills read these two tokens, so tuning them
    here tunes every floating thing at once. */
 :root { --ui-overlay-blur: 16px; --ui-overlay-saturation: 160%; }
@@ -621,7 +627,7 @@
 .ui-conn-g-slow .halo { fill: color-mix(in oklab, var(--warn) 22%, transparent); }
 .ui-conn .ui-conn-g-slow .ring { stroke: var(--warn); stroke-width: 1.2; }
 .ui-conn-pulse { position: absolute; inset: 0; transform-origin: 50% 50%; opacity: 0; animation: ui-conn-pulse 1700ms cubic-bezier(0.23, 1, 0.32, 1) infinite; animation-play-state: paused; }
-.ui-conn[data-state="slow"] .ui-conn-pulse { animation-play-state: running; }
+.ui-conn[data-state="slow"] .ui-conn-pulse { animation-play-state: running; will-change: transform, opacity; }
 @keyframes ui-conn-pulse { 0% { opacity: 0.7; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.1); } }
 
 .ui-conn .ui-conn-g-reconnecting .track { stroke: var(--fg-3); stroke-width: 1.4; opacity: 0.4; }
