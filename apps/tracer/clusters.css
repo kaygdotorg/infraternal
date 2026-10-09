@@ -235,7 +235,7 @@
 .cl-world[data-snap] .cl-col { overflow-y: hidden; }
 
 @media (prefers-reduced-motion: reduce) {
-  .cl-cursor { animation: none; }
+  .ui-window[data-active] .cl-cursor { animation: none; }
   .cl-region, .cl-port, .cl-badge, .cl-summary { transition: opacity 120ms ease; transform: none; }
 }
 
