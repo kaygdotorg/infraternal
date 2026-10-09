@@ -93,6 +93,12 @@
 .cl-logs { color: var(--fg-2); }
 .cl-log-time { color: var(--fg-3); }
 .cl-log-src { color: var(--accent); }
+.cl-log-warn { color: var(--warn, #e5c07b); }
+.cl-log-error { color: var(--danger, #e06c75); }
+/* A log view scrolls by itself (the preview class hides overflow for thumbnails) and keeps its scrollbar quiet. */
+.cl-logs { white-space: pre-wrap; overflow-wrap: anywhere; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; touch-action: pan-y; }
+.cl-log-jump { position: absolute; right: 12px; bottom: 12px; z-index: 2; }
+.cl-log-jump[hidden] { display: none; }
 
 .cl-list { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 2px; padding: 6px 8px 12px; overflow: auto; scrollbar-width: none; }
 .cl-row {
@@ -251,6 +257,8 @@
 
 /* During a split the two frames are drawn by the goo layer (clusters-split.ts); the windows keep only their contents. */
 .ui-window[data-goo] { transition: none; background: transparent; border-color: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+/* The two frames after the silhouette ends: the real windows are back, their borders do not fade in under the silhouette. */
+.ui-window[data-goo-end] { transition: none !important; }
 .cl-goo { z-index: 0; }
 
 /* Settings view: a section's content fills its window (the shared settings pane, scrolled by itself). */

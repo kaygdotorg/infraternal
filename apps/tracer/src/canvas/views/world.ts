@@ -20,6 +20,7 @@ import type { ColumnModel, ViewId, ViewModel, WindowModel } from "../model/types
 import { el } from "../dom";
 import { restPx } from "../springs";
 import { viewIcon } from "./icons";
+import { windowLabel } from "../windows/label";
 
 export interface ViewsModule {
   contentRect(c: ViewRec): Rect;
@@ -87,7 +88,7 @@ export function createViews(cx: Ctx): ViewsModule {
     summaryFor = c.view.id;
     const rows = c.view.layout === "graph"
       ? (cx.mesh?.summaryRows(c) ?? [["Hosts", String(c.view.nodes.filter((v) => v.kind === "host").length)]])
-      : [...c.wins.values()].map((w) => [w.model.kind === "terminal" ? w.model.host : (w.model.session ?? w.model.kind), w.model.kind === "terminal" ? "shell" : w.model.kind]);
+      : [...c.wins.values()].map((w) => windowLabel(w.model));
     summary.innerHTML = `<div class="cl-summary-head"><span class="cl-summary-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(c.view.id)}</svg></span><span class="cl-summary-name"></span></div><div class="cl-summary-rows"></div>`;
     (summary.querySelector(".cl-summary-name") as HTMLElement).textContent = c.view.name;
     const list = summary.querySelector(".cl-summary-rows") as HTMLElement;

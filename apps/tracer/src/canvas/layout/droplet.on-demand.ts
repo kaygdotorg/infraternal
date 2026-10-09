@@ -115,7 +115,9 @@ export interface SplitProbe { frames: number; drawMs: number; maxDrawMs: number;
 /** The finisher of the animation that is running, if any: there is never more than one GL context alive. */
 let running: (() => void) | undefined;
 /** Ends the running split at once (its layer and GL context are destroyed). A hidden page calls this. */
-export const endSplit = (): void => { running?.(); dropContext(); };
+export const endSplit = (): void => { running?.(); lingering?.(); dropContext(); };
+/** The last animation's layer while it waits two frames to be destroyed (see `finish`); the next one destroys it first. */
+let lingering: (() => void) | undefined;
 
 /**
  * Plays the split of `a` and `b`, already in their final places. `down`: b is below a in the same column
@@ -123,7 +125,7 @@ export const endSplit = (): void => { running?.(); dropContext(); };
  * `host`, the element both columns sit in). Both directions are the same drawing, rotated a quarter turn.
  */
 export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" | "right" = "down", host?: HTMLElement, probe?: SplitProbe): Promise<void> {
-  running?.(); // one context at a time: a split that is still playing settles first
+  running?.(); lingering?.(); // one context at a time (and one layer): a split still playing, or a layer still lingering, ends first; the parked context stays
   probe ??= (window as unknown as { __splitProbe?: SplitProbe }).__splitProbe;
   const t00 = performance.now();
   return new Promise((resolve) => {
@@ -226,11 +228,22 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" |
       finished = true;
       if (running === finish) running = undefined;
       spring.set(g, true);
-      for (const w of [a, b]) { delete w.dataset.goo; w.style.transform = ""; w.style.clipPath = ""; }
+      // Hand back to the real windows without a gap: each frame gets its own fill, border and contents back first
+      // (`data-goo-end` keeps its border from fading in from transparent), and the silhouette stays for two frames so
+      // the first frame drawn with the real windows already has them painted. Destroying the layer in the same frame
+      // the windows return left a frame with neither, which showed as a flash.
+      for (const w of [a, b]) { w.dataset.gooEnd = ""; delete w.dataset.goo; w.style.transform = ""; w.style.clipPath = ""; }
       for (const p of [...partsA, ...partsB]) p.style.opacity = "";
-      canvas.remove();
-      if (pooled === own) { canvas.width = canvas.height = 1; } else { gl.getExtension("WEBGL_lose_context")?.loseContext(); }
-      resolve();
+      const done = (): void => {
+        if (lingering === done) lingering = undefined;
+        for (const w of [a, b]) delete w.dataset.gooEnd;
+        canvas.remove();
+        // A desktop parks the context for the next split (1 px buffer); otherwise it ends with the animation.
+        if (pooled === own) { canvas.width = canvas.height = 1; } else { gl.getExtension("WEBGL_lose_context")?.loseContext(); }
+        resolve();
+      };
+      if (document.hidden) done();
+      else { lingering = done; requestAnimationFrame(() => requestAnimationFrame(() => { if (lingering === done) done(); })); }
     };
     // One spring for the gap, retargeted mid-flight. Pull: a soft spring aimed far past the break distance, so
     // the gap crawls off the start (the neck resists) and speeds up as it thins. When the gap passes K the

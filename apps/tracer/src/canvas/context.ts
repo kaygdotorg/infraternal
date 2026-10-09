@@ -54,6 +54,8 @@ export interface WinRec {
   stopResize?: () => void;
   /** A body that streams text (a logs window); the stream is fed from outside. */
   stream?: HTMLElement;
+  /** Appends one line to a logs window (it stays pinned to the end unless the person scrolled up). */
+  pushLog?: (line: string) => void;
   /** The session this window shows (terminal windows). */
   binding?: SessionBinding;
   /** Releases what the body holds (a settings panel). */

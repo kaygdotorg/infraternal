@@ -16,7 +16,7 @@ import { boxOf, type Metrics } from "../layout/geometry";
 import { MemoryCanvasStore } from "../model/store";
 import type { ViewId } from "../model/types";
 import { el } from "../dom";
-import { CONTAINERS, buildViews, type Role } from "./data";
+import { CONTAINERS, LOG_BACKLOG, buildViews, logLine, type Role } from "./data";
 import { offerMeshView } from "../mesh/offer";
 import { DEFAULT_SESSION, createMockInventory } from "./inventory";
 import { createMockMesh } from "./mesh";
@@ -169,24 +169,19 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   }, { signal });
 
   // ---- live-looking content -------------------------------------------------------------------------
-  // A logs window keeps moving, so thumbnails are visibly live. Only a window that is on screen ticks: a log that nobody can
-  // see costs a style recalculation, a layout (the scroll read) and a paint every tick, and with a couple of dozen windows
-  // on the canvas that was most of what an idle canvas spent. Rects are read first and writes follow, so one layout serves
-  // them all; a hidden page does nothing.
+  // A logs window keeps moving, so thumbnails are visibly live.
+  let logSerial = LOG_BACKLOG;
   const streamTimer = window.setInterval(() => {
-    if (document.hidden) return;
-    const visible: WinRec[] = [];
-    for (const c of cx.views.values()) for (const w of c.wins.values()) {
-      if (!w.stream || !w.model.lines) continue;
-      const r = w.stream.getBoundingClientRect();
-      if (r.width > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth) visible.push(w);
-    }
-    for (const w of visible) {
-      const now = new Date();
-      const t = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
-      w.model.lines = [...w.model.lines!.slice(-14), `${t}  web-api  GET /healthz 200 1ms`];
-      w.stream!.innerHTML = w.model.lines.map((l) => { const [time, src, ...msg] = l.split("  "); return `<span class="cl-log-time">${time}</span>  <span class="cl-log-src">${src}</span>  ${msg.join("  ")}`; }).join("\n");
-      w.stream!.scrollTop = w.stream!.scrollHeight;
+    if (document.hidden) return; // a hidden page does nothing
+    // One line, or a short burst now and then, like a service under a little load.
+    const burst = logSerial % 7 === 0 ? 3 : 1;
+    for (let k = 0; k < burst; k++, logSerial++) {
+      const line = logLine(logSerial, Date.now());
+      for (const c of cx.views.values()) for (const w of c.wins.values()) {
+        if (!w.pushLog || !w.model.lines) continue;
+        w.model.lines = [...w.model.lines.slice(-499), line];
+        w.pushLog(line);
+      }
     }
   }, 1600);
   // The live terminal's test double starts empty; give it one prompt so the window reads as a shell.

@@ -21,25 +21,29 @@ export function installShortcuts(cx: Ctx): () => void {
   const removeRegistry = registerShortcuts({ id: "canvas", title: "Canvas", area: "canvas", shortcuts: [
     { id: "canvas-lock", label: "Canvas lock", keys: "", combo: { code: "KeyG", mod: true, shift: true } },
     { id: "input-lock", label: "Input lock", keys: "", combo: { code: "KeyL", mod: true, shift: true } },
-    // Command+D and Command+Shift+D on a Mac. Elsewhere plain Control+D is the terminal's end-of-input, so the
-    // defaults add Shift (right) and Alt+Shift (down); both can be rebound in Settings, Shortcuts.
-    { id: "split-right", label: "Split right", keys: "", combo: isMacPlatform() ? { code: "KeyD", mod: true } : { code: "KeyD", mod: true, shift: true } },
-    { id: "split-down", label: "Split down", keys: "", combo: isMacPlatform() ? { code: "KeyD", mod: true, shift: true } : { code: "KeyD", mod: true, shift: true, alt: true } },
+    // Mac: Control+Option+R (right) and Control+Option+D (down), with Command+D and Command+Shift+D as alternates (D206).
+    // Elsewhere plain Control+D is the terminal's end-of-input, so the defaults add Shift (right) and Alt+Shift (down);
+    // both can be rebound in Settings, Shortcuts.
+    { id: "split-right", label: "Split right", keys: "", combo: isMacPlatform() ? { code: "KeyR", ctrl: true, alt: true } : { code: "KeyD", mod: true, shift: true }, ...(isMacPlatform() ? { alternates: [{ code: "KeyD", mod: true }] } : {}) },
+    { id: "split-down", label: "Split down", keys: "", combo: isMacPlatform() ? { code: "KeyD", ctrl: true, alt: true } : { code: "KeyD", mod: true, shift: true, alt: true }, ...(isMacPlatform() ? { alternates: [{ code: "KeyD", mod: true, shift: true }] } : {}) },
     { id: "next-window", label: "Next window", keys: "", combo: { code: "ArrowRight", mod: true, shift: true } },
     { id: "previous-window", label: "Previous window", keys: "", combo: { code: "ArrowLeft", mod: true, shift: true } },
     { id: "overview", label: "All views (overview)", keys: "Esc" },
     { id: "pan", label: "Next window or column", keys: "Scroll" },
     { id: "views", label: "Go to view 1 to 3", keys: { mac: "⌘1–3", other: "Ctrl+1–3" } },
   ] });
-  const splitActive = (direction: "right" | "down"): void => {
+  // A key never animates and one press is one split: auto-repeat is ignored, so holding the key cannot queue work.
+  const splitActive = (direction: "right" | "down", e: KeyboardEvent): void => {
+    if (e.repeat) return;
     const w = state.activeWin;
-    if (!cx.inputLock.state && w && isTerminal(w)) void cx.win.split(w, direction);
+    // A keyboard split never animates (TASTE): instant, one per press (auto-repeat is ignored above).
+    if (!cx.inputLock.state && w && isTerminal(w)) void cx.win.split(w, direction, undefined, true);
   };
   const removeBindings = [
     bindShortcut("canvas-lock", () => cx.nav.setCanvasLock(!state.canvasLock)),
     bindShortcut("input-lock", () => cx.inputLock.toggle()),
-    bindShortcut("split-right", () => splitActive("right")),
-    bindShortcut("split-down", () => splitActive("down")),
+    bindShortcut("split-right", (e) => splitActive("right", e)),
+    bindShortcut("split-down", (e) => splitActive("down", e)),
     bindShortcut("next-window", () => { if (!cx.inputLock.state) cx.win.step(1, true); }),
     bindShortcut("previous-window", () => { if (!cx.inputLock.state) cx.win.step(-1, true); }),
   ];
