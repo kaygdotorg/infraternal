@@ -170,8 +170,6 @@ impl Session {
             "-o",
             "VerifyHostKeyDNS=no",
             "-o",
-            "KnownHostsCommand=none",
-            "-o",
             "PermitLocalCommand=no",
             "-o",
             "ClearAllForwardings=yes",

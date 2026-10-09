@@ -222,3 +222,74 @@ async fn first_contact_needs_fresh_authority_and_never_replaces_existing_trust()
         "METRIC first_contact fresh_authority=true foreign_target_refused=true existing_ca_revoked_refused=true confirmed_command=true pin_immutable=true"
     );
 }
+
+#[tokio::test]
+#[ignore = "run through research/ssh-client/measure.py with its synthetic public host key"]
+async fn configured_known_hosts_command_revocation_cannot_offer_first_contact() {
+    let fixture = PathBuf::from(std::env::var_os("INFRATERNAL_SSH_FIXTURE").unwrap());
+    let port = std::env::var("INFRATERNAL_SSH_FIXTURE_PORT").unwrap();
+    let user = std::env::var("USER").unwrap();
+    let destination = Destination::parse(&format!("{user}@127.0.0.1:{port}")).unwrap();
+    let public = std::fs::read_to_string(fixture.join("known_hosts")).unwrap();
+    let revoked = fixture.join("command-public-revocation");
+    std::fs::write(
+        &revoked,
+        format!("@revoked {}\n", public.lines().next().unwrap()),
+    )
+    .unwrap();
+    let configuration = fixture.join("command-revocation-config");
+    std::fs::write(&configuration, format!("# Synthetic public revocation supplied by the configured trust command.\nHost *\n StrictHostKeyChecking yes\n UserKnownHostsFile /dev/null\n GlobalKnownHostsFile /dev/null\n KnownHostsCommand /bin/cat {}\n IdentityFile none\n IdentityAgent none\n BatchMode yes\n", revoked.display())).unwrap();
+    let mut normal = tokio::process::Command::new("/usr/bin/ssh");
+    normal.args(["-F"]).arg(&configuration).args([
+        "-T",
+        "-p",
+        &port,
+        "-l",
+        &user,
+        "127.0.0.1",
+        "true",
+    ]);
+    let output =
+        infraternal_plugin_ssh::process::execute(&mut normal, Input::Empty, Duration::from_secs(5))
+            .await
+            .unwrap();
+    assert!(!output.success);
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .to_ascii_lowercase()
+            .contains("revoked"),
+        "normal OpenSSH must enforce the synthetic command's revocation"
+    );
+    let wrapper = fixture.join("command-revocation-ssh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec /usr/bin/ssh -F '{}' \"$@\"\n",
+            configuration.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ssh = TrustedOpenSsh::new(
+        OpenSsh {
+            ssh: wrapper,
+            ssh_agent: "/usr/bin/ssh-agent".into(),
+            ssh_add: "/usr/bin/ssh-add".into(),
+            ssh_keyscan: "/usr/bin/ssh-keyscan".into(),
+            ssh_keygen: "/usr/bin/ssh-keygen".into(),
+            askpass_binary: std::env::current_exe().unwrap(),
+            scratch: fixture.clone(),
+            command_timeout: Duration::from_secs(5),
+        },
+        fixture.join("command-revocation-pins"),
+    );
+    let failure = ssh
+        .open(destination, Credentials::Network, MeshEvidence::default())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        failure.host_key_challenge.is_none(),
+        "configured revoked key received a first-contact challenge"
+    );
+}

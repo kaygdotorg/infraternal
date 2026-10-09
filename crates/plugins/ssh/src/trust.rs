@@ -102,6 +102,11 @@ impl TrustedOpenSsh {
     }
 
     async fn configured_trust(&self, policy: &TrustPolicy) -> Result<bool, Failure> {
+        // Let the native engine enforce active command policy; never replace it
+        // with a first-contact pin on the strength of a file-only absence check.
+        if policy.dynamic_trust {
+            return Ok(true);
+        }
         for path in &policy.paths {
             match fs::metadata(path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,

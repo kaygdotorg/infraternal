@@ -36,6 +36,7 @@ impl PublicSshConfiguration {
                     | "globalknownhostsfile"
                     | "hostkeyalias"
                     | "revokedhostkeys"
+                    | "knownhostscommand"
                     | "checkhostip"
                     | "hostkeyalgorithms"
                     | "casignaturealgorithms"
@@ -152,6 +153,10 @@ impl PublicSshConfiguration {
             destination: self.destination.clone(),
             lookup,
             paths,
+            dynamic_trust: self
+                .options
+                .iter()
+                .any(|(name, value)| name == "knownhostscommand" && value != "none"),
             digest: digest.finalize().into(),
         })
     }
@@ -238,5 +243,7 @@ pub struct TrustPolicy {
     pub destination: Destination,
     pub lookup: String,
     pub paths: Vec<std::path::PathBuf>,
+    /// Dynamic trust cannot be proven absent by querying static public files.
+    pub dynamic_trust: bool,
     digest: [u8; 32],
 }

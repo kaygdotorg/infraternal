@@ -80,3 +80,34 @@ fn effective_configuration_never_scans_a_proxy_or_invalid_endpoint() {
         assert!(scan_destination(&original, input).is_none());
     }
 }
+
+#[test]
+fn dynamic_public_trust_is_retained_without_becoming_file_only_admission() {
+    use infraternal_plugin_ssh::{config::PublicSshConfiguration, model::Destination};
+    let original = Destination::parse("user@alias").unwrap();
+    let config = PublicSshConfiguration::parse(
+        &original,
+        b"hostname fixture.invalid\nport 22\nknownhostscommand /public/tool '%h' %n\n",
+    )
+    .unwrap();
+    let mut command = tokio::process::Command::new("ssh");
+    config.configure(&mut command);
+    assert!(
+        command
+            .as_std()
+            .get_args()
+            .any(|argument| { argument == "knownhostscommand=/public/tool '%h' alias" })
+    );
+    // Parsing retains syntax for the native engine; this test never executes it.
+    assert!(config.trust_policy().unwrap().dynamic_trust);
+    let disabled = PublicSshConfiguration::parse(
+        &original,
+        b"hostname fixture.invalid\nport 22\nknownhostscommand none\n",
+    )
+    .unwrap();
+    assert!(!disabled.trust_policy().unwrap().dynamic_trust);
+    assert!(PublicSshConfiguration::parse(
+        &original,
+        b"hostname fixture.invalid\nport 22\nknownhostscommand none\nknownhostscommand /public/tool\n",
+    ).is_none());
+}
