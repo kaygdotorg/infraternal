@@ -9,7 +9,7 @@ use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 /// Object-safe asynchronous boundary without adding an async-trait dependency.
 pub type Operation<'a, T> = Pin<Box<dyn Future<Output = Result<T, Failure>> + Send + 'a>>;
 
-/// Decrypted material has no Debug/Display/serde representation and is erased on drop.
+/// Decrypted material has no Debug/Display or output serialization and is erased on drop.
 pub struct Secret(Vec<u8>);
 impl Secret {
     /// Trusted vault adapters transfer decrypted data only for this operation.
@@ -75,4 +75,31 @@ pub trait SshSession: Send + Sync {
 #[must_use]
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+// Input-only private material decoding; no Debug/Display or output serialization.
+impl<'de> serde::Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Input;
+        impl serde::de::Visitor<'_> for Input {
+            type Value = Secret;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a bounded credential string")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Secret, E> {
+                if value.len() > 24576 {
+                    return Err(E::custom("credential input exceeds its bound"));
+                }
+                Ok(Secret::new(value.as_bytes().to_vec()))
+            }
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Secret, E> {
+                let secret = Secret::new(value.into_bytes());
+                if secret.expose().len() > 24576 {
+                    return Err(E::custom("credential input exceeds its bound"));
+                }
+                Ok(secret)
+            }
+        }
+        deserializer.deserialize_string(Input)
+    }
 }
