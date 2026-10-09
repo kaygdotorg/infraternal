@@ -156,7 +156,7 @@ export function installGestures(cx: Ctx): void {
     });
     host.dispatchEvent(forwarded);
   }, { passive: false, capture: true, signal });
-  viewport.addEventListener("wheel", (e) => {
+  const onWheel = (e: WheelEvent): void => {
     if (state.canvasLock) { if (cx.inputLock.state) { e.preventDefault(); return; } snapWheel(e); return; }
     const inCol = (e.target as Element).closest(".cl-col");
     if (!(e.ctrlKey || e.metaKey) && inCol && Math.abs(e.deltaY) > Math.abs(e.deltaX) && camera.lod === "live") {
@@ -169,7 +169,19 @@ export function installGestures(cx: Ctx): void {
     if (e.ctrlKey || e.metaKey) { camera.zoomAt(e.clientX, e.clientY, cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025))); return; }
     const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX, dy = e.shiftKey ? 0 : e.deltaY;
     camera.drive({ cx: cam.cx + dx / cam.z, cy: cam.cy + dy / cam.z });
-  }, { passive: false, signal });
+  };
+  viewport.addEventListener("wheel", onWheel, { passive: false, signal });
+  // The terminal's own wheel handler always consumes the event (scrollback, or the running program) and stops it, so a
+  // swipe that starts over a terminal never reached the bubble listener above: the canvas moved only when the pointer
+  // happened to be over something else, which looked like swipes that "stop working". Unless input is locked to a
+  // terminal (handled above), a wheel over a terminal belongs to the canvas, exactly as over any other window: the
+  // terminal's scrollback is reached through the input lock (D177). The event is handled here, in the capture phase,
+  // before the terminal sees it, and goes no further.
+  viewport.addEventListener("wheel", (e) => {
+    if (cx.inputLock.state || !(e.target as Element).closest?.(".terminal-host")) return;
+    e.stopPropagation();
+    onWheel(e);
+  }, { passive: false, capture: true, signal });
   viewport.addEventListener("pointerdown", (e) => {
     if (e.pointerType === "touch") touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (state.canvasLock) return;
