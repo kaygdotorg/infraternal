@@ -962,14 +962,35 @@ where
                 }
             }
         }
-        Frame::Call { call_id, .. } if stream_id == CONTROL_STREAM => {
+        Frame::Call {
+            call_id,
+            action_id,
+            input_json,
+        } if stream_id == CONTROL_STREAM => {
+            let result = if action_id.len() <= 128
+                && input_json.len() <= infraternal_plugin_api::MAX_ACTION_BYTES
+            {
+                state
+                    .agent
+                    .call(action_id.to_owned(), input_json.to_vec())
+                    .await
+            } else {
+                Err(crate::embedded::AgentError::Rejected)
+            };
+            if !session_is_live(state, user_id, session_token).await {
+                return Err(());
+            }
+            let (ok, json) = match result {
+                Ok(json) => (true, json),
+                Err(_) => (false, br#"{"error":"action unavailable"}"#.to_vec()),
+            };
             send_frame(
                 sink,
                 CONTROL_STREAM,
                 &Frame::Result {
                     call_id,
-                    ok: false,
-                    json: br#"{"error":"unknown action"}"#,
+                    ok,
+                    json: &json,
                 },
                 encode,
             )

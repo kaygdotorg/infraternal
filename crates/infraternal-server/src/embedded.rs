@@ -154,6 +154,27 @@ impl EmbeddedAgent {
         result.await.map_err(|_| AgentError::Unavailable)?
     }
 
+    /// Calls one bounded action declared by the embedded agent's plugin registry.
+    pub async fn call(
+        &self,
+        action_id: String,
+        input_json: Vec<u8>,
+    ) -> Result<Vec<u8>, AgentError> {
+        if action_id.len() > 128 || input_json.len() > infraternal_plugin_api::MAX_ACTION_BYTES {
+            return Err(AgentError::Rejected);
+        }
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::Call {
+                action_id,
+                input_json,
+                reply,
+            })
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        result.await.map_err(|_| AgentError::Unavailable)?
+    }
+
     /// Attach one device to a user-owned terminal session and request replay from its last offsets.
     pub async fn attach(
         &self,
@@ -212,6 +233,11 @@ enum Command {
     Open {
         size: TerminalSize,
         reply: oneshot::Sender<Result<[u8; 16], AgentError>>,
+    },
+    Call {
+        action_id: String,
+        input_json: Vec<u8>,
+        reply: oneshot::Sender<Result<Vec<u8>, AgentError>>,
     },
     Attach {
         id: u64,
@@ -291,7 +317,12 @@ enum Incoming {
 }
 
 struct PendingCall {
-    reply: oneshot::Sender<Result<[u8; 16], AgentError>>,
+    reply: PendingReply,
+}
+
+enum PendingReply {
+    Open(oneshot::Sender<Result<[u8; 16], AgentError>>),
+    Action(oneshot::Sender<Result<Vec<u8>, AgentError>>),
 }
 
 #[derive(serde::Deserialize)]
@@ -538,7 +569,42 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return false;
             }
-            pending.insert(call_id, PendingCall { reply });
+            pending.insert(
+                call_id,
+                PendingCall {
+                    reply: PendingReply::Open(reply),
+                },
+            );
+            true
+        }
+        Command::Call {
+            action_id,
+            input_json,
+            reply,
+        } => {
+            if pending.len() >= COMMAND_CAPACITY {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return true;
+            }
+            let Some(call_id) = allocate_call_id(connection, pending) else {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return true;
+            };
+            let frame = Frame::Call {
+                call_id,
+                action_id: &action_id,
+                input_json: &input_json,
+            };
+            if !write_frame(connection, CONTROL_STREAM, &frame).await {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
+            pending.insert(
+                call_id,
+                PendingCall {
+                    reply: PendingReply::Action(reply),
+                },
+            );
             true
         }
         Command::Attach {
@@ -806,15 +872,34 @@ async fn process_incoming(
                 return false;
             };
             if !ok {
-                let _ = call.reply.send(Err(AgentError::Rejected));
+                match call.reply {
+                    PendingReply::Open(reply) => {
+                        let _ = reply.send(Err(AgentError::Rejected));
+                    }
+                    PendingReply::Action(reply) => {
+                        let _ = reply.send(Err(AgentError::Rejected));
+                    }
+                }
                 return true;
             }
-            let session = serde_json::from_slice::<OpenResult>(&json);
-            let result = session
-                .ok()
-                .and_then(|value| decode_session_id(&value.session_id))
-                .ok_or(AgentError::Protocol);
-            let _ = call.reply.send(result);
+            match call.reply {
+                PendingReply::Open(reply) => {
+                    let session = serde_json::from_slice::<OpenResult>(&json);
+                    let result = session
+                        .ok()
+                        .and_then(|value| decode_session_id(&value.session_id))
+                        .ok_or(AgentError::Protocol);
+                    let _ = reply.send(result);
+                }
+                PendingReply::Action(reply) => {
+                    let result = if json.len() <= infraternal_plugin_api::MAX_ACTION_BYTES {
+                        Ok(json)
+                    } else {
+                        Err(AgentError::Protocol)
+                    };
+                    let _ = reply.send(result);
+                }
+            }
             true
         }
         Incoming::Output {
@@ -1118,7 +1203,14 @@ async fn connection_lost(
 ) {
     routes.clear();
     for (_, call) in pending.drain() {
-        let _ = call.reply.send(Err(AgentError::Unavailable));
+        match call.reply {
+            PendingReply::Open(reply) => {
+                let _ = reply.send(Err(AgentError::Unavailable));
+            }
+            PendingReply::Action(reply) => {
+                let _ = reply.send(Err(AgentError::Unavailable));
+            }
+        }
     }
     if let Some(pid) = connection.pid.take() {
         stop_child(pid).await;
