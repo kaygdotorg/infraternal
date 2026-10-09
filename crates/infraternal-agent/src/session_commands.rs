@@ -1,0 +1,146 @@
+//! Accumulates consecutive Credit without occupying the bounded ordered FIFO; credit fences preserve Input/Resize recovery order [130], #78.
+use super::Command;
+use tokio::sync::{mpsc, watch};
+
+pub(super) struct Ordered {
+    command: Command,
+    credit_before: u64,
+}
+
+// One shared dispatcher owns this sender; exposing no Clone keeps the credit
+// publication and ordered-command fences under that single producer's order.
+// Mutable admission also prevents concurrent callers from interleaving a fence
+// snapshot with publication of a later credit total.
+pub(super) struct Sender {
+    raw: mpsc::Sender<Ordered>,
+    credits: watch::Sender<u64>,
+}
+pub(super) enum Receiver {
+    Native(mpsc::Receiver<Command>),
+    Shared {
+        raw: mpsc::Receiver<Ordered>,
+        credits: watch::Receiver<u64>,
+        seen: u64,
+        pending: Option<Ordered>,
+    },
+}
+pub(super) fn channel() -> (Sender, Receiver) {
+    let (tx, rx) = mpsc::channel(8);
+    let (credits, reader) = watch::channel(0);
+    (
+        Sender { raw: tx, credits },
+        Receiver::Shared {
+            raw: rx,
+            credits: reader,
+            seen: 0,
+            pending: None,
+        },
+    )
+}
+impl Sender {
+    pub(super) fn is_closed(&self) -> bool {
+        self.raw.is_closed()
+    }
+    pub(super) fn try_send(
+        &mut self,
+        command: Command,
+    ) -> Result<(), mpsc::error::TrySendError<Command>> {
+        if let Command::Credit(bytes) = command {
+            if self.raw.is_closed() {
+                return Err(mpsc::error::TrySendError::Closed(Command::Credit(bytes)));
+            }
+            let mut overflow = false;
+            self.credits.send_if_modified(|total| {
+                if bytes == 0 {
+                    return false;
+                }
+                if let Some(sum) = total.checked_add(u64::from(bytes)) {
+                    *total = sum;
+                    true
+                } else {
+                    overflow = true;
+                    false
+                }
+            });
+            if overflow {
+                Err(mpsc::error::TrySendError::Full(Command::Credit(bytes)))
+            } else {
+                Ok(())
+            }
+        } else {
+            let credit_before = *self.credits.borrow();
+            self.raw
+                .try_send(Ordered {
+                    command,
+                    credit_before,
+                })
+                .map_err(|error| match error {
+                    mpsc::error::TrySendError::Full(ordered) => {
+                        mpsc::error::TrySendError::Full(ordered.command)
+                    }
+                    mpsc::error::TrySendError::Closed(ordered) => {
+                        mpsc::error::TrySendError::Closed(ordered.command)
+                    }
+                })
+        }
+    }
+}
+impl Receiver {
+    pub(super) async fn next(&mut self) -> Option<Command> {
+        match self {
+            Self::Native(raw) => raw.recv().await,
+            Self::Shared {
+                raw,
+                credits,
+                seen,
+                pending,
+            } => next_shared(raw, credits, seen, pending).await,
+        }
+    }
+}
+async fn next_shared(
+    raw: &mut mpsc::Receiver<Ordered>,
+    credits: &mut watch::Receiver<u64>,
+    seen: &mut u64,
+    pending: &mut Option<Ordered>,
+) -> Option<Command> {
+    loop {
+        // Observe the total BEFORE looking ahead in the FIFO. If this total
+        // includes credit sent after an Input, that Input is already published
+        // by the single producer and its fence must cap this grant.
+        let total = *credits.borrow_and_update();
+        let mut closed = false;
+        if pending.is_none() {
+            match raw.try_recv() {
+                Ok(ordered) => *pending = Some(ordered),
+                Err(mpsc::error::TryRecvError::Disconnected) => closed = true,
+                Err(mpsc::error::TryRecvError::Empty) => {}
+            }
+        }
+        let target = pending
+            .as_ref()
+            .map_or(total, |ordered| ordered.credit_before);
+        let allowance = target.checked_sub(*seen)?;
+        if allowance != 0 {
+            // Commit only when returning Ready. The pending ordered command
+            // stays in this receiver across cancellation by the terminal's
+            // outer select; neither its fence nor a credit delta can disappear.
+            let grant = u32::try_from(allowance.min(u64::from(u32::MAX))).ok()?;
+            *seen += u64::from(grant);
+            return Some(Command::Credit(grant));
+        }
+        if let Some(ordered) = pending.take() {
+            return Some(ordered.command);
+        }
+        if closed {
+            return None;
+        }
+        tokio::select! {
+            ordered = raw.recv() => {
+                let Some(ordered) = ordered else { continue; };
+                *pending = Some(ordered);
+            },
+            _ = credits.changed() => {},
+        }
+    }
+}

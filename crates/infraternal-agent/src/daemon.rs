@@ -1,6 +1,7 @@
 //! Shared inherited and authenticated remote leg-B dispatcher and bounded session registry for the tracer bullet [9][13][41].
 //!
-//! Each terminal owns one pending output frame. Commands have eight slots;
+//! Each terminal owns one pending output frame. Input/Resize commands have eight slots;
+//! shared-stream Credit is accumulated in constant space without occupying that FIFO;
 //! a full queue retires only that stream, cancelling its shim link. Unacknowledged
 //! input is replayed on attachment using shim-owned per-writer cursors. Bulk output has eight slots
 //! and awaits capacity. Control replies use a separate eight-slot lane, selected
@@ -40,6 +41,9 @@ use tokio::{
     task::JoinSet,
 };
 
+#[path = "session_commands.rs"]
+mod session_commands;
+
 enum Command {
     Input(u64, Vec<u8>),
     Credit(u32),
@@ -47,7 +51,7 @@ enum Command {
 }
 // Dropping cancellation retires a stalled handshake as well as queued commands.
 struct Stream {
-    commands: mpsc::Sender<Command>,
+    commands: session_commands::Sender,
     _cancel: oneshot::Sender<()>,
 }
 enum Message {
@@ -333,7 +337,7 @@ async fn run_channel(
                             }
                             let path = registry.get(session_id).ok_or_else(|| sessions::invalid("unknown terminal session"))?.clone();
                             let id = *session_id;
-                            let (commands, rx) = mpsc::channel(8);
+                            let (commands, rx) = session_commands::channel();
                             let (cancel, cancelled) = oneshot::channel();
                             streams.insert(stream, Stream { commands, _cancel: cancel });
                             let tx = tx.clone();
@@ -357,7 +361,7 @@ async fn run_channel(
                             // Retire overload before accepting this command. Drop the
                             // cancellation sender to release even a stalled handshake;
                             // shim-owned accepted/written cursors make input replay safe.
-                            let overloaded = streams.get(&stream).is_some_and(|entry| {
+                            let overloaded = streams.get_mut(&stream).is_some_and(|entry| {
                                 matches!(entry.commands.try_send(command), Err(mpsc::error::TrySendError::Full(_)))
                             });
                             if overloaded {
@@ -443,7 +447,7 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
     tokio::select! {
         result = dispatch => result,
         result = writer(channel, rx, None, false, false) => result,
-        result = terminal(path, id, writer_id, cursor, input, command_rx, tx) => result,
+        result = terminal(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx) => result,
     }
 }
 
@@ -508,7 +512,7 @@ async fn terminal(
     stream: u32,
     cursor: u64,
     last_input: u64,
-    mut commands: mpsc::Receiver<Command>,
+    mut commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
 ) -> io::Result<()> {
     let mut session = Some(Link::connect(path.clone(), id, stream).await?);
@@ -630,7 +634,7 @@ async fn terminal(
             session = Some(next);
         }
         tokio::select! {
-            command = commands.recv() => {
+            command = commands.next() => {
                 let Some(command) = command else { return Ok(()); };
                 match command {
                     Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?; if session.is_none() && bytes > 0 { output.retry_recovery(); } deadline = None; }
