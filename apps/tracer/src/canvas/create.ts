@@ -103,7 +103,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); },
     onFlight: () => cx.view.hideSummary(),
   });
-  (cx as { flip: Ctx["flip"] }).flip = createFlip(() => cx.camera.cam.z, () => cx.invalidate());
+  (cx as { flip: Ctx["flip"] }).flip = createFlip(() => cx.camera.cam.z, () => cx.invalidate(), (on) => cx.stage.toggleAttribute("data-canvas-flipping", on));
 
   cx.memory = createMemory(cx, backdrop);
   cx.store = createDocumentSync(cx, options.persisted);
