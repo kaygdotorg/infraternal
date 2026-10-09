@@ -215,9 +215,18 @@ pub struct GrantCreate {
     pub to: Endpoint,
     /// Permit initiation in both directions when true.
     pub both_ways: bool,
-    /// Optional narrowed TCP/UDP policy; omitted grants all ports.
-    #[serde(default)]
+    /// Optional narrowed TCP/UDP policy; omission grants all ports, explicit null is refused.
+    #[serde(default, deserialize_with = "deserialize_grant_ports")]
     pub ports: Option<TrafficPolicy>,
+}
+
+/// A provided policy must be typed. Only field absence uses Serde's default,
+/// preserving omission's documented All policy without widening explicit null.
+fn deserialize_grant_ports<'de, D>(deserializer: D) -> Result<Option<TrafficPolicy>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    TrafficPolicy::deserialize(deserializer).map(Some)
 }
 
 /// Which end of a named grant should move.

@@ -36,6 +36,11 @@ def seed_mesh():
     for selector, (name, value) in enumerate(cases):
         payload = json.dumps(value, separators=(',', ':'), sort_keys=True).encode()
         (corpus / name).write_bytes(bytes([selector]) + payload)
+        if name == 'grant-create':
+            # Exercise explicit null separately from the valid omitted policy.
+            null_policy = dict(value, ports=None)
+            payload = json.dumps(null_policy, separators=(',', ':'), sort_keys=True).encode()
+            (corpus / 'grant-null-policy').write_bytes(bytes([selector]) + payload)
 
 if sys.argv[1:] == ['--mesh-only']:
     seed_mesh()

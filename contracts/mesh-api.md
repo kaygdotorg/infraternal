@@ -49,7 +49,8 @@ Endpoints and port policies use mesh-core's serde representation:
 
 `MeshGrantCreate` is
 `{"name":string,"from":Endpoint,"to":Endpoint,"both_ways":boolean,"ports"?:TrafficPolicy}`.
-Omitting `ports` means `All`. A `Ports` list must be nonempty and each port
+Omitting `ports` means `All`. An explicit `ports: null` is refused as `invalid input`
+before any grant or revision is committed. A `Ports` list must be nonempty and each port
 must be in 1..=65535. `None`, user endpoints, and endpoints that do not exist
 are not accepted for a grant. `both_ways` permits new connections to be
 initiated from either end. `MeshGrantMove` is

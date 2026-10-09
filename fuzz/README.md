@@ -45,13 +45,14 @@ or connection-layer authorization tests.
 
 ## Mesh action JSON
 
-Run from the repository root to seed all 16 public Mesh actions and fuzz the
-same `parse_action` function used before server-side SQLite work:
+Run from the repository root to seed all 16 public Mesh actions, including an
+explicit null port policy, and fuzz the same `parse_action` function used before
+server-side SQLite work:
 
 ```sh
 python3 fuzz/seed.py --mesh-only
-cargo +nightly fuzz run mesh_api_json -- --max_total_time=60 \
-  --max_len=65536 --rss_limit_mb=2048
+CARGO_PROFILE_RELEASE_LTO=false cargo +nightly fuzz run mesh_api_json -- \
+  -max_total_time=60 -max_len=65536 -rss_limit_mb=2048
 ```
 
 The first input byte selects an action; remaining bytes are its JSON input.
