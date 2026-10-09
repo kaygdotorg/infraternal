@@ -1040,7 +1040,13 @@ impl MeshService {
         let mut endpoint_requirements = vec![scopes];
         endpoint_requirements.push(endpoint_scopes(&mut tx, &arrow.to).await?);
         let changed_scopes = endpoint_requirements.iter().flatten().cloned().collect();
-        authorize(&mut tx, actor, MANAGE_GRANTS, &endpoint_requirements).await?;
+        authorize(
+            &mut tx,
+            actor,
+            MANAGE_GRANTS,
+            &grant_requirements(&endpoint_requirements),
+        )
+        .await?;
         let (from_kind, from_value) = endpoint_fields(&arrow.from)?;
         let (to_kind, to_value) = endpoint_fields(&arrow.to)?;
         let policy = serde_json::to_string(&arrow.ports).map_err(|_| MeshApiError::Storage)?;
@@ -1085,7 +1091,13 @@ impl MeshService {
         };
         requirements.push(endpoint_scopes(&mut tx, other).await?);
         let changed_scopes = requirements.iter().flatten().cloned().collect();
-        authorize(&mut tx, actor, MANAGE_GRANTS, &requirements).await?;
+        authorize(
+            &mut tx,
+            actor,
+            MANAGE_GRANTS,
+            &grant_requirements(&requirements),
+        )
+        .await?;
         let (kind, value) = endpoint_fields(&request.endpoint)?;
         let column = match request.side {
             EndpointSide::From => "from",
@@ -1128,7 +1140,13 @@ impl MeshService {
             endpoint_scopes(&mut tx, &current.arrow.to).await?,
         ];
         let changed_scopes = requirements.iter().flatten().cloned().collect();
-        authorize(&mut tx, actor, MANAGE_GRANTS, &requirements).await?;
+        authorize(
+            &mut tx,
+            actor,
+            MANAGE_GRANTS,
+            &grant_requirements(&requirements),
+        )
+        .await?;
         let changed = sqlx::query("DELETE FROM mesh_grants WHERE name=?")
             .bind(&request.name)
             .execute(&mut *tx)
@@ -1163,7 +1181,13 @@ impl MeshService {
             endpoint_scopes(&mut tx, &current.arrow.to).await?,
         ];
         let changed_scopes = requirements.iter().flatten().cloned().collect();
-        authorize(&mut tx, actor, MANAGE_GRANTS, &requirements).await?;
+        authorize(
+            &mut tx,
+            actor,
+            MANAGE_GRANTS,
+            &grant_requirements(&requirements),
+        )
+        .await?;
         let changed = sqlx::query("UPDATE mesh_grants SET name=? WHERE name=?")
             .bind(&request.new_name)
             .bind(&request.name)
@@ -1429,6 +1453,21 @@ async fn authorize(
 /// Require a scoped node editor to hold access to every tag the edit can affect.
 fn require_each_scope(scopes: &[String]) -> Vec<Vec<String>> {
     scopes.iter().map(|scope| vec![scope.clone()]).collect()
+}
+
+/// Every machine membership is required [211]; an empty endpoint stays
+/// an unsatisfiable scoped group, preserving global-only untagged access.
+fn grant_requirements(endpoints: &[Vec<String>]) -> Vec<Vec<String>> {
+    endpoints
+        .iter()
+        .flat_map(|scopes| {
+            if scopes.is_empty() {
+                vec![Vec::new()]
+            } else {
+                require_each_scope(scopes)
+            }
+        })
+        .collect()
 }
 
 /// Collect every tag whose viewers see metadata changed by a cascading tag rename.
