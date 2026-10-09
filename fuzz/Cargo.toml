@@ -14,7 +14,7 @@ cargo-fuzz = true
 libfuzzer-sys.workspace = true
 infraternal-shim.workspace = true
 infraternal-protocol.workspace = true
-infraternal-plugin-host-facts = { path = "../crates/plugins/host-facts" }
+infraternal-plugin-host-facts = { version = "0.1.0", path = "../crates/plugins/host-facts" }
 
 [[bin]]
 name = "shim_frame_decode"
