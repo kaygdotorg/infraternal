@@ -74,6 +74,13 @@ async fn shipping_post(root: &X509, cookie: &str, path: &str, body: Value) -> (S
     (status, value)
 }
 async fn shipping_start(binary: &std::path::Path, root: &std::path::Path) -> ShippingServer {
+    shipping_start_with_ca(binary, root, root).await
+}
+async fn shipping_start_with_ca(
+    binary: &std::path::Path,
+    root: &std::path::Path,
+    ca: &std::path::Path,
+) -> ShippingServer {
     let child = Command::new(binary)
         .arg("server")
         .args([
@@ -87,7 +94,7 @@ async fn shipping_start(binary: &std::path::Path, root: &std::path::Path) -> Shi
         .arg("--data")
         .arg(root.join("db"))
         .arg("--remote-ca-dir")
-        .arg(root)
+        .arg(ca)
         .arg("--tls-cert")
         .arg(root.join("server.pem"))
         .arg("--tls-key")
@@ -102,10 +109,8 @@ async fn shipping_start(binary: &std::path::Path, root: &std::path::Path) -> Shi
     let mut server = ShippingServer(child);
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            assert!(
-                server.0.try_wait().unwrap().is_none(),
-                "configured shipping server exited before readiness"
-            );
+            let exited = server.0.try_wait().unwrap();
+            assert!(exited.is_none(), "configured shipping server exited before readiness: status={exited:?}, retained_machine_trust={}", ca.join("active").exists());
             if tokio::net::TcpStream::connect("10.69.69.125:4701")
                 .await
                 .is_ok()
@@ -274,3 +279,6 @@ async fn configured_release_cli_cold_lock_real_passkey_unlock_and_cold_restart()
         "configured_release_cli rootless=true cold_lock=true real_passkey_unlock=true encrypted_copy=true fixture_signer_injected=false enrollment_unlock=true cold_restart_locked=true"
     );
 }
+
+#[path = "ca_bootstrap_cli_tests.rs"]
+mod bootstrap_cli;
