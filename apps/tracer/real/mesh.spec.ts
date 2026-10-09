@@ -119,4 +119,32 @@ test.describe("a server that serves the Mesh", () => {
     expect(await page.locator(".cl-arrow-handle").count()).toBe(0); // least privilege until the server sends `access`
     await page.screenshot({ path: resolve(import.meta.dirname, "../captures/canvas-mesh/real-server-ink-1440x900.png") });
   });
+
+  test("a mesh bigger than one frame arrives in pages and shows every host", async () => {
+    test.skip(!meshServed(), "this binary does not serve the Mesh API yet");
+    test.setTimeout(120_000);
+    // 450 hosts: a list of that size does not fit the 64 KiB a Mesh frame may be, so the server pages it.
+    const cookie = (await page.context().cookies()).map((c) => `${c.name}=${c.value}`).join("; ");
+    const socket = new WebSocket(server.backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: server.origin, Cookie: cookie } });
+    const decoder = new WebSocketFrameDecoder();
+    const total = 450;
+    let answered = 0, failed = 0;
+    const enrol = (i: number): void => socket.send(encodeMuxedFrame(0, { type: "Call", callId: i + 1, actionId: "mesh.node.enroll", inputJson: new TextEncoder().encode(JSON.stringify({ name: `bulk-${String(i).padStart(4, "0")}`, public_key: Array.from({ length: 32 }, (_, k) => (k === 0 ? (i % 250) + 1 : k === 1 ? Math.floor(i / 250) + 1 : k + 1)) })) }));
+    const finished = new Promise<void>((resolve, reject) => {
+      socket.on("message", (data) => decoder.feed(new Uint8Array(Buffer.from(data as Buffer)), (_s: number, f: WireFrame) => {
+        if (f.type === "Hello") socket.send(encodeMuxedFrame(0, { type: "Hello", version: 1, caps: 0n, clientInfo: "mesh-real-bulk" }));
+        // One call at a time: a socket admits one running Mesh request and four queued, and refuses the rest.
+        if (f.type === "Welcome") enrol(0);
+        if (f.type === "Result") { answered++; if (!f.ok) failed++; if (answered === total) resolve(); else enrol(answered); }
+      }));
+      socket.on("error", reject);
+      setTimeout(() => reject(new Error("bulk enrol timed out")), 100_000);
+    });
+    try { await finished; } finally { socket.terminate(); }
+    expect(failed).toBe(0);
+    await page.reload();
+    await page.locator(".cl-viewport").waitFor();
+    await expect(page.locator('.cl[data-view="mesh"] .cl-label-meta')).toContainText("452 hosts", { timeout: 30_000 });
+  });
 });
+
