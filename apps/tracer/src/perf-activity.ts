@@ -72,3 +72,29 @@ export function setPerfProbe(next: PerfProbe | undefined): void { probe = next; 
 export function readPerfProbe(): Record<string, string | number | boolean> {
   try { return probe?.() ?? {}; } catch { return {}; }
 }
+
+/**
+ * WebSocket traffic in 100 ms buckets (a ring of 16, so the last 1.6 s), for the meter's question "did a burst of
+ * messages arrive just before the stall?". One clock read and three typed-array writes per message; no allocation.
+ */
+const WS_BUCKETS = 16;
+const wsMsgs = new Uint32Array(WS_BUCKETS);
+const wsBytes = new Float64Array(WS_BUCKETS);
+const wsStamp = new Float64Array(WS_BUCKETS).fill(-1);
+export function noteWsMessage(bytes: number): void {
+  const bucket = Math.floor(performance.now() / 100);
+  const i = bucket % WS_BUCKETS;
+  if (wsStamp[i] !== bucket) { wsStamp[i] = bucket; wsMsgs[i] = 0; wsBytes[i] = 0; }
+  wsMsgs[i]!++;
+  wsBytes[i]! += bytes;
+}
+/** Messages and bytes that arrived in the buckets overlapping `[t0, t1]` (performance.now times, at most 1.6 s back). */
+export function wsBetween(t0: number, t1: number): { msgs: number; bytes: number } {
+  let msgs = 0, bytes = 0;
+  const lo = Math.floor(t0 / 100), hi = Math.floor(t1 / 100);
+  for (let i = 0; i < WS_BUCKETS; i++) {
+    const b = wsStamp[i]!;
+    if (b >= lo && b <= hi) { msgs += wsMsgs[i]!; bytes += wsBytes[i]!; }
+  }
+  return { msgs, bytes };
+}

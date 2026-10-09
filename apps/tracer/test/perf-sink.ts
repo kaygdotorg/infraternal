@@ -8,7 +8,8 @@
  *   {"t":"incident","recv":"<ISO time the server received it>","recvMs":<epoch ms>,"sid":"<tab session id>",
  *    "page":"/?mock=1&proto=clusters...","kind":"drop|freeze","at":<epoch ms of the late frame>,"worstMs":..,
  *    "drops":..,"refreshHz":..,"activity":"pan|zoom|...","animations":{..},"ctx":{..},"intervals":[..],
- *    "loaf":[..],"longtasks":[..],"slowEvents":[..]}
+ *    "loaf":[..],"longtasks":[..],"slowEvents":[..],"diag":{"stalls":[..],"ws":{..},"heap":{..}|null,"events":[..],
+ *    "action":{..}|null,"support":{..}}}
  *
  * and, the first time a tab session is seen, one `{"t":"session",...,"session":{ua, platform, dpr, refreshHz, ...}}`
  * line before its incidents. A tab that hit its hourly cap sends `suppressed`, written as `{"t":"suppressed",...}`.

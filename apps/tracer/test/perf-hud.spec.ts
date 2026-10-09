@@ -61,6 +61,15 @@ test("a 200 ms stall during a pan reaches the file as one freeze, with its activ
   expect(incident!.loaf.length).toBeGreaterThan(0);
   const scripts = incident!.loaf.flatMap((f: { scripts: Array<{ src: string; ms: number }> }) => f.scripts);
   expect(scripts.some((s: { src: string; ms: number }) => s.src.includes("perf-spec-stall") && s.ms > 150)).toBe(true);
+  // The evidence for a stall at rest: the heartbeat timer was late (the main thread was blocked), the last input is
+  // named, the page-state ring and the support flags are there, and the JS heap is read where the browser has it.
+  const diag = incident!.diag;
+  expect(diag.stalls.some((s: { late: number }) => s.late > 100)).toBe(true);
+  expect(diag.action.type).toBe("wheel");
+  expect(diag.ws).toEqual({ msgs: expect.any(Number), bytes: expect.any(Number) });
+  expect(Array.isArray(diag.events)).toBe(true);
+  expect(diag.support).toEqual({ loaf: expect.any(Boolean), longtask: expect.any(Boolean), event: expect.any(Boolean) });
+  expect(diag.heap === null || typeof diag.heap.usedMB === "number").toBe(true);
 });
 
 test("the frame body costs under 0.05 ms and the meter causes no layout or style work between repaints", async ({ page }) => {

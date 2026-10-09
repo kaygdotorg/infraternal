@@ -13,6 +13,11 @@
  *   (long animation frames, long tasks, slow input events) are the browser's own: they report only frames and tasks
  *   over 50 ms, and a browser without them (Safari) simply sends incidents without script attribution.
  *
+ * Evidence for a stall at rest (`diag`, see `Diag`): a 100 ms heartbeat timer (late = the main thread was blocked, on time =
+ * the stall was in the compositor or the GPU), WebSocket traffic in the 500 ms before, JS heap falls (a collection;
+ * Chromium), page-state changes, the last user input and which observers the browser has. The rings are fixed typed
+ * arrays written by one-line listeners; they are read only when an incident opens, never per frame.
+ *
  * Incidents that follow each other within 400 ms are one incident (a stutter is not a hundred records). Incidents
  * are batched and sent with `sendBeacon` ten seconds after the first one waits, and when the page is hidden. A tab
  * sends at most 600 incidents an hour.
@@ -22,7 +27,7 @@
  */
 import { buildVersion } from "./build-version";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
-import { activityIn, readPerfProbe } from "./perf-activity";
+import { activityIn, readPerfProbe, wsBetween } from "./perf-activity";
 import { DROP, FREEZE, FrameDetector, RING, THROTTLE_MS, type FrameVerdict } from "./perf-detector";
 
 const OPEN_KEY = "tracer.fps-hud-open";
@@ -61,6 +66,31 @@ export interface Incident {
   loaf: Loaf[];
   longtasks: Task[];
   slowEvents: Slow[];
+  /** What else was going on, read once when the incident opens (see `diagnose`). */
+  diag: Diag;
+}
+
+/**
+ * The evidence a freeze at rest needs, because a stall can come from the page's own main thread (a task, a timer, a
+ * garbage collection) or from outside it (the compositor, the GPU process, the window server) and the frame times alone
+ * cannot tell which:
+ * - `stalls`: late wake-ups of a 100 ms heartbeat timer around the incident. A late heartbeat means the main thread was
+ *   blocked (a script, a GC, a layout); on time while frames were late means the main thread was free and the stall
+ *   was elsewhere. Works in every browser, unlike long-task entries (not in Safari).
+ * - `animations`/`transitions`: how many CSS animations and transitions were running (in `animations`, above).
+ * - `ws`: WebSocket messages and bytes that arrived in the 500 ms before the late frame.
+ * - `heap`: JS heap in MB now and the largest fall between the last samples (a fall is a collection); Chromium only.
+ * - `events`: the latest visibility, focus, resize and page-lifecycle changes, with their age.
+ * - `action`: the last user input before the incident, and how long before it.
+ * - `support`: which of the observers this browser has (an empty `loaf`/`longtasks` is only news when it does).
+ */
+interface Diag {
+  stalls: Array<{ ago: number; late: number }>;
+  ws: { msgs: number; bytes: number };
+  heap: { usedMB: number; fellMB: number } | null;
+  events: Array<{ type: string; ago: number }>;
+  action: { type: string; ago: number } | null;
+  support: { loaf: boolean; longtask: boolean; event: boolean };
 }
 
 interface Open extends Incident { firstIdx: number; firstT: number; lastT: number; endT: number }
@@ -186,6 +216,36 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
     keep(slows, { start: r1(e.startTime), ms: r1(e.duration), delay: r1((ev.processingStart ?? e.startTime) - e.startTime), name: clip(e.name, 30), target: clip(ev.target?.tagName?.toLowerCase() ?? "", 20) });
   });
 
+  // ---- the evidence rings: assignments into fixed arrays, nothing allocated, nothing read from the page --------------
+  // Last user input. A capture listener per type that only stores a string and a number.
+  let actType = "", actT = 0;
+  const onAct = (e: Event): void => { actType = e.type; actT = performance.now(); };
+  const ACT_TYPES = ["pointerdown", "pointerup", "keydown", "wheel", "touchstart", "pointermove"];
+  for (const t of ACT_TYPES) window.addEventListener(t, onAct, { capture: true, passive: true });
+  // Page state changes: visibility, focus, size, lifecycle.
+  const EV = 12;
+  const evT = new Float64Array(EV), evType = new Array<string>(EV).fill("");
+  let evHead = 0;
+  const onState = (e: Event): void => { evHead = (evHead + 1) % EV; evT[evHead] = performance.now(); evType[evHead] = e.type === "visibilitychange" ? `visibility:${document.visibilityState}` : e.type; };
+  const STATE_TYPES = ["visibilitychange", "focus", "blur", "resize", "pageshow", "pagehide", "freeze", "resume", "online", "offline", "fullscreenchange", "orientationchange"];
+  for (const t of STATE_TYPES) window.addEventListener(t, onState, true);
+  // A heartbeat: a timer that is late was blocked behind main-thread work. 10 wake-ups a second, no allocation.
+  const HB = 100, ST = 16;
+  const stT = new Float64Array(ST), stLate = new Float64Array(ST);
+  let stHead = 0, hbLast = performance.now();
+  const heartbeat = window.setInterval(() => {
+    const now = performance.now();
+    const late = now - hbLast - HB;
+    hbLast = now;
+    if (late > 30) { stHead = (stHead + 1) % ST; stT[stHead] = now; stLate[stHead] = late; }
+  }, HB);
+  // JS heap samples (Chromium): taken with the 4 Hz repaint, so a collection shows as a fall between two of them.
+  const HS = 16;
+  const hpT = new Float64Array(HS), hpV = new Float64Array(HS);
+  let hpHead = 0;
+  const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;
+  const sampleHeap = (): void => { if (!memory) return; hpHead = (hpHead + 1) % HS; hpT[hpHead] = performance.now(); hpV[hpHead] = memory.usedJSHeapSize; };
+
   // ---- incidents --------------------------------------------------------------------------------------
   let open: Open | undefined;
   let closeTimer = 0, flushTimer = 0;
@@ -213,6 +273,28 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
       sidebar: !!stage.querySelector("[data-sidebar-open]") || stage.hasAttribute("data-sidebar-open"),
     };
   };
+  /** Reads the rings for an incident that began at `t0` (performance.now time). Called once per incident, not per frame. */
+  const diagnose = (t0: number, t1: number): Diag => {
+    const now = performance.now();
+    const stalls: Diag["stalls"] = [];
+    for (let i = 0; i < ST; i++) if (stT[i]! > t0 - 1000 && stLate[i]! > 0) stalls.push({ ago: Math.round(now - stT[i]!), late: Math.round(stLate[i]!) });
+    const events: Diag["events"] = [];
+    for (let n = 0; n < EV; n++) { const i = (evHead - n + EV) % EV; if (evType[i] && evT[i]! > 0) events.push({ type: evType[i]!, ago: Math.round(now - evT[i]!) }); }
+    let heap: Diag["heap"] = null;
+    if (memory) {
+      let fell = 0, prev = -1;
+      const samples: Array<[number, number]> = [];
+      for (let n = 0; n < HS; n++) { const i = (hpHead - n + HS) % HS; if (hpT[i]! > 0) samples.push([hpT[i]!, hpV[i]!]); }
+      samples.reverse();
+      for (const [t, v] of samples) { if (t >= t0 - 1500 && prev >= 0) fell = Math.max(fell, prev - v); prev = v; }
+      heap = { usedMB: r1(memory.usedJSHeapSize / 1048576), fellMB: r1(fell / 1048576) };
+    }
+    return {
+      stalls: stalls.slice(0, 8), ws: wsBetween(t0 - 500, t1), heap, events: events.slice(0, 8),
+      action: actType ? { type: actType, ago: Math.round(t0 - actT) } : null,
+      support: { loaf: supported.includes("long-animation-frame"), longtask: supported.includes("longtask"), event: supported.includes("event") },
+    };
+  };
   function drain(): void {
     drainScheduled = false;
     const n = pendN;
@@ -231,7 +313,7 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
         if (open) finish();
         open = {
           kind, at: Math.round(startedAt + t - dt), worstMs: r1(dt), drops: 1, refreshHz: det.refresh,
-          activity: activityIn(t - dt, t), animations: animationsNow(), ctx: context(), intervals: [], loaf: [], longtasks: [], slowEvents: [],
+          activity: activityIn(t - dt, t), animations: animationsNow(), ctx: context(), intervals: [], loaf: [], longtasks: [], slowEvents: [], diag: diagnose(t - dt, t),
           firstIdx: pendIdx[i]!, firstT: t - dt, lastT: t, endT: t,
         };
         lastIncident = open;
@@ -283,7 +365,7 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
   }
   const onHide = (): void => {
     if (document.visibilityState === "hidden") { finish(); flush(); clearInterval(repaintTimer); repaintTimer = 0; }
-    else { det.resume(); if (!repaintTimer) repaintTimer = window.setInterval(paint, REPAINT_MS); }
+    else { det.resume(); hbLast = performance.now(); if (!repaintTimer) repaintTimer = window.setInterval(() => { sampleHeap(); paint(); }, REPAINT_MS); }
   };
   document.addEventListener("visibilitychange", onHide);
   window.addEventListener("pagehide", onHide);
@@ -342,7 +424,7 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
       g.fillRect(x * dpr, (SPARK_H - h) * dpr, dpr, h * dpr);
     }
   }
-  let repaintTimer = window.setInterval(paint, REPAINT_MS);
+  let repaintTimer = window.setInterval(() => { sampleHeap(); paint(); }, REPAINT_MS);
   readColors();
   setExpanded(expanded);
 
@@ -375,7 +457,9 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
   return {
     dispose() {
       cancelAnimationFrame(raf);
-      clearInterval(repaintTimer); clearTimeout(closeTimer); clearTimeout(flushTimer);
+      clearInterval(repaintTimer); clearInterval(heartbeat); clearTimeout(closeTimer); clearTimeout(flushTimer);
+      for (const t of ACT_TYPES) window.removeEventListener(t, onAct, true);
+      for (const t of STATE_TYPES) window.removeEventListener(t, onState, true);
       for (const o of observers) o.disconnect();
       themeWatch.disconnect();
       document.removeEventListener("visibilitychange", onHide);
