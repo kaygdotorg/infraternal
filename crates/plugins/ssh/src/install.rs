@@ -232,13 +232,18 @@ mkdir -p "$base/bin" "$(dirname "$launcher")" "$(dirname "$unit")"
 # upload file. This makes failures after a service stop explicitly reversible.
 # Replacing a running daemon requires an acknowledged stop; otherwise its old
 # authenticated connection could conceal a failed upgrade.
+# Intent survives an interrupted reply after the manager stopped the old service.
+: > "$stage/stopping"
 if [ -f "$stage/was-active" ]; then
-    $manager stop infraternal-agent.service >/dev/null 2>&1
+    if ! $manager stop infraternal-agent.service >/dev/null 2>&1; then
+        : > "$stage/stop-refused"
+        exit 1
+    fi
 else
     $manager stop infraternal-agent.service >/dev/null 2>&1 || :
 fi
 # Journal ownership before replacement, after stopping the previous service.
-# A refused prior stop changed no live files and needs staging-only cleanup.
+# A refused prior stop is separate from an unknown/interrupted reply.
 : > "$stage/activating"
 if [ -e "$base/bin/live" ]; then : > "$stage/had-binary"; mv "$base/bin/live" "$stage/previous-binary"; fi
 : > "$stage/replacing-binary"
@@ -381,6 +386,11 @@ if [ -f "$stage/activating" ]; then
     $manager daemon-reload
     [ ! -f "$stage/was-enabled" ] || $manager enable infraternal-agent.service
     [ ! -f "$stage/was-active" ] || $manager start infraternal-agent.service
+fi
+# No replacement began, but a lost stop reply may have stopped the old service.
+# An acknowledged refusal is staging-only cleanup and must not restart it.
+if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop-refused" ] && [ ! -f "$stage/activating" ]; then
+    $manager start infraternal-agent.service
 fi
 if [ "$kind" = fresh ]; then
     if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then

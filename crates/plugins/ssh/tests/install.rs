@@ -700,3 +700,73 @@ async fn linked_owner_marker_is_refused_before_retiring_the_transaction() {
     assert!(transaction.rollback().await.is_err());
     assert!(fixture.base().join(".bootstrap-lock/transaction").exists());
 }
+
+#[tokio::test]
+async fn interrupted_upgrade_after_acknowledged_stop_restarts_the_previous_service() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    transaction.commit().await.unwrap();
+    let active = fixture.root.join("active");
+    let lost = fixture.root.join("shell-lost");
+    std::fs::write(&active, "").unwrap();
+    // The service manager completes the stop, then the remote shell is lost
+    // before its next statement (lost session, OOM, reboot of the login scope).
+    // The stopped previous service is live state that rollback must restore.
+    executable(
+        &fixture.root.join("tools/systemctl"),
+        &format!(
+            "#!/bin/sh\ncase \"$*\" in\n*is-enabled*) exit 0;;\n*is-active*) [ -f '{a}' ];;\n*stop*) rm -f '{a}'; if [ ! -f '{l}' ]; then : > '{l}'; kill -KILL $PPID; fi;;\n*start*) [ ! -f '{r}' ] || exit 1; : > '{a}';;\n*) exit 0;;\nesac\n",
+            a = active.display(),
+            l = lost.display(),
+            r = fixture.root.join("refuse-restart").display()
+        ),
+    );
+    let upgrade = fixture.transaction();
+    upgrade.stage(&fixture.binary).await.unwrap();
+    assert!(upgrade.enroll_and_start(&fixture.join).await.is_err());
+    assert!(
+        !active.exists(),
+        "fixture: the previous service was stopped"
+    );
+    // A refused restart keeps the journal so a later cleanup can resume.
+    let refuse_restart = fixture.root.join("refuse-restart");
+    std::fs::write(&refuse_restart, "").unwrap();
+    assert!(upgrade.rollback().await.is_err());
+    assert!(fixture.base().join(".bootstrap-lock/stopping").exists());
+    std::fs::remove_file(refuse_restart).unwrap();
+    upgrade.rollback().await.unwrap();
+    assert!(
+        active.exists(),
+        "rollback left the previously active service stopped after an interrupted upgrade"
+    );
+}
+
+#[tokio::test]
+async fn refused_previous_service_stop_only_removes_staging() {
+    let fixture = Fixture::new();
+    let installed = fixture.transaction();
+    installed.stage(&fixture.binary).await.unwrap();
+    installed.enroll_and_start(&fixture.join).await.unwrap();
+    installed.commit().await.unwrap();
+    let before = std::fs::read(fixture.base().join("bin/live")).unwrap();
+    let restart = fixture.root.join("unexpected-restart");
+    executable(
+        &fixture.root.join("tools/systemctl"),
+        &format!(
+            "#!/bin/sh\ncase \"$*\" in\n*is-enabled*|*is-active*) exit 0;;\n*stop*) exit 1;;\n*start*) : > '{}' ;;\n*) exit 0;;\nesac\n",
+            restart.display()
+        ),
+    );
+    let upgrade = fixture.transaction();
+    upgrade.stage(&fixture.binary).await.unwrap();
+    assert!(upgrade.enroll_and_start(&fixture.join).await.is_err());
+    upgrade.rollback().await.unwrap();
+    assert_eq!(
+        std::fs::read(fixture.base().join("bin/live")).unwrap(),
+        before
+    );
+    assert!(!restart.exists());
+    assert!(!fixture.base().join(".bootstrap-lock").exists());
+}
