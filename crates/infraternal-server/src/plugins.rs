@@ -8,6 +8,14 @@ use infraternal_plugin_api::{
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use serde::Deserialize;
 use serde_json::{Value, json};
+// Serde structs also accept positional arrays. Control actions declare objects,
+// so reject that alternate representation before deserializing bounded input.
+fn parse_control<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, ()> {
+    if input.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{') {
+        return Err(());
+    }
+    serde_json::from_slice(input).map_err(|_| ())
+}
 /// Core lifecycle actions share their labels and skill instructions with discovery [16,202].
 const CONTROL_ACTIONS: &[ActionDef] = &[
     ActionDef {
@@ -423,17 +431,17 @@ impl SocketPlugins {
                             #[derive(Deserialize)]
                             #[serde(deny_unknown_fields)]
                             struct Empty {}
-                            if serde_json::from_slice::<Empty>(input_json).is_ok() {(true, runtime.list())} else {(false,json!({"error":"invalid input"}))}
+                            if parse_control::<Empty>(input_json).is_ok() {(true, runtime.list())} else {(false,json!({"error":"invalid input"}))}
                         } else {
                             #[derive(Deserialize)]
                             #[serde(deny_unknown_fields)]
                             struct Setting { plugin: String, enabled: bool }
-                            match serde_json::from_slice::<Setting>(input_json) {
+                            match parse_control::<Setting>(input_json) {
                                 Ok(setting) => match runtime.switch(&setting.plugin,setting.enabled,Some(host.as_ref())).await {
                                     Ok(()) => (true,json!({"plugin":setting.plugin,"enabled":setting.enabled})),
                                     Err(_) => (false,json!({"error":"not permitted"})),
                                 },
-                                Err(_) => (false,json!({"error":"invalid input"})),
+                                Err(()) => (false,json!({"error":"invalid input"})),
                             }
                         };
                         let json = serde_json::to_vec(&result).map_err(|_| ())?;

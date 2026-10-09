@@ -728,3 +728,10 @@ mod review_fresh_wait;
 #[cfg(feature = "mesh")]
 #[path = "socket_tests/review_liveness.rs"]
 mod review_liveness;
+
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/plugin_lifecycle.rs"]
+mod plugin_lifecycle;
+#[cfg(not(feature = "mesh"))]
+#[path = "socket_tests/plugin_no_features.rs"]
+mod plugin_no_features;

@@ -20,3 +20,7 @@ pub fn subscription_topic(filter_json: &[u8], max_len: usize) -> Option<Cow<'_, 
         .ok()
         .map(|filter| filter.topic)
 }
+
+#[cfg(test)]
+#[path = "routing_tests.rs"]
+mod tests;
