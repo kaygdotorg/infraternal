@@ -603,48 +603,55 @@ impl SocketPlugins {
                 sub_id,
                 filter_json,
             } => {
-                // With one subscription provider, let its existing strict
-                // filter parser own validation. No JSON parsing is needed in
-                // terminal dispatch, including refusal of oversized input.
-                let mut providers = self
+                let providers = self
                     .runtime
                     .inner
                     .entries
                     .iter()
                     .filter(|entry| !entry.plugin.descriptor().topics.is_empty());
-                let mut single = providers.clone();
-                let first = single.next();
-                if single.next().is_none() {
-                    first.cloned()
-                } else {
-                    let limit = providers
-                        .clone()
-                        .map(|entry| entry.plugin.descriptor().max_frame_len)
-                        .max()
-                        .unwrap_or(0);
-                    if wire.len() > limit {
-                        if encode_muxed_frame_into(
-                            0,
-                            &Frame::Event {
-                                sub_id,
-                                event_json: br#"{"type":"error","error":"plugin unavailable"}"#,
-                            },
-                            encode,
+                let limit = providers
+                    .clone()
+                    .map(|entry| entry.plugin.descriptor().max_frame_len)
+                    .max()
+                    .unwrap_or(0);
+                if limit == 0 {
+                    return Dispatch::Unhandled;
+                }
+                if wire.len() > limit {
+                    let mut candidates = providers.clone();
+                    let first = candidates.next();
+                    let event_json = if candidates.next().is_none() {
+                        first.map_or(
+                            br#"{"type":"error","error":"plugin unavailable"}"#.as_slice(),
+                            |entry| entry.plugin.descriptor().unavailable_event,
                         )
+                    } else {
+                        br#"{"type":"error","error":"plugin unavailable"}"#
+                    };
+                    if encode_muxed_frame_into(0, &Frame::Event { sub_id, event_json }, encode)
                         .is_ok()
-                        {
-                            return Dispatch::Refused(Bytes::copy_from_slice(encode));
-                        }
+                    {
+                        return Dispatch::Refused(Bytes::copy_from_slice(encode));
+                    }
+                    return Dispatch::Unhandled;
+                }
+                let topic = subscription_topic(filter_json, limit);
+                if let Some(topic) = topic.as_deref() {
+                    // The auth namespace is core-owned even if a plugin declares it.
+                    // Valid undeclared topics must reach the core with one or many providers.
+                    if topic.starts_with("auth.") {
                         return Dispatch::Unhandled;
                     }
-                    let topic = subscription_topic(filter_json, limit);
-                    providers
-                        .find(|entry| {
-                            topic.as_deref().is_some_and(|topic| {
-                                entry.plugin.descriptor().topics.contains(&topic)
-                            })
-                        })
-                        .cloned()
+                    let entry = providers
+                        .into_iter()
+                        .find(|entry| entry.plugin.descriptor().topics.contains(&topic))
+                        .cloned();
+                    if entry.is_none() {
+                        return Dispatch::Unhandled;
+                    }
+                    entry
+                } else {
+                    None
                 }
             }
             _ => None,

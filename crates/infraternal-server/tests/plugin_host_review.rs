@@ -302,3 +302,79 @@ async fn review_completed_call_survives_normal_worker_exit() {
         }
     ));
 }
+static OTHER: PluginDescriptor = PluginDescriptor {
+    id: "other",
+    api: 1,
+    actions: &[],
+    topics: &["other"],
+    settings: "{}",
+    roles: ROLES,
+    max_frame_len: 64 * 1024,
+    unavailable: br#"{"error":"other unavailable"}"#,
+    unavailable_event: br#"{"type":"error","error":"other unavailable"}"#,
+};
+
+/// Undeclared topics belong to the core (for example `auth.recovery`), not to a plugin.
+#[tokio::test]
+async fn review_undeclared_topic_is_left_to_the_core() {
+    let core = wire(&Frame::Subscribe {
+        sub_id: 45,
+        filter_json: br#"{"topic":"auth.recovery"}"#,
+    });
+    let (_runtime, mut single) = socket(vec![Arc::new(Probe {
+        descriptor: &PROBE,
+        mode: Mode::Hold,
+    })]);
+    let mut encode = Vec::new();
+    let single_result = match single.dispatch(&core, &mut encode) {
+        Dispatch::Unhandled => "unhandled",
+        Dispatch::Queued => "queued to the plugin",
+        Dispatch::Refused(_) => "refused",
+    };
+    let (_runtime, mut multiple) = socket(vec![
+        Arc::new(Probe {
+            descriptor: &PROBE,
+            mode: Mode::Hold,
+        }),
+        Arc::new(Probe {
+            descriptor: &OTHER,
+            mode: Mode::Hold,
+        }),
+    ]);
+    let multiple_result = match multiple.dispatch(&core, &mut encode) {
+        Dispatch::Unhandled => "unhandled",
+        Dispatch::Queued => "queued to a plugin",
+        Dispatch::Refused(_) => "refused",
+    };
+    assert_eq!(
+        (single_result, multiple_result),
+        ("unhandled", "unhandled"),
+        "a core topic must fall through to the core dispatcher"
+    );
+}
+
+static CLAIMS_CORE: PluginDescriptor = PluginDescriptor {
+    id: "core-claim",
+    topics: &["auth.recovery"],
+    ..OTHER
+};
+#[tokio::test]
+async fn review_core_topic_remains_core_owned_even_when_declared() {
+    let (_runtime, mut socket) = socket(vec![Arc::new(Probe {
+        descriptor: &CLAIMS_CORE,
+        mode: Mode::Hold,
+    })]);
+    let core = wire(&Frame::Subscribe {
+        sub_id: 45,
+        filter_json: br#"{"topic":"auth.recovery"}"#,
+    });
+    assert!(matches!(
+        socket.dispatch(&core, &mut Vec::new()),
+        Dispatch::Unhandled
+    ));
+    let (_runtime, mut empty) = self::socket(vec![]);
+    assert!(matches!(
+        empty.dispatch(&core, &mut Vec::new()),
+        Dispatch::Unhandled
+    ));
+}
