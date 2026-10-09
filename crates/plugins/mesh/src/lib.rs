@@ -7,3 +7,8 @@ pub use infraternal_mesh as policy;
 
 #[cfg(feature = "server")]
 pub mod descriptor;
+
+#[cfg(feature = "server")]
+mod socket;
+#[cfg(feature = "server")]
+pub use socket::{MeshPlugin, parse_subscription};
