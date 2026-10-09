@@ -479,6 +479,32 @@ for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const
   });
 }
 
+// ---- the label of an arrow that goes through another host stays clear of the cards at every zoom -----------------
+for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const) {
+  test(`arrow label ${label}: "via fra-relay" never sits under a card, at any zoom, and is not louder than the cards' own text`, async ({ page }) => {
+    await open(page, "", size);
+    await intoMesh(page);
+    const overlaps = (): Promise<{ shown: boolean; hits: number; fs: number }> => page.evaluate(() => {
+      const t = document.querySelector('.cl-arrow[data-grant="g2"] .cl-arrow-label') as SVGTextElement | null;
+      if (!t || getComputedStyle(t).display === "none") return { shown: false, hits: 0, fs: 0 };
+      const r = t.getBoundingClientRect();
+      const hits = [...document.querySelectorAll('.ui-window[data-kind="node"]')].filter((n) => { const b = n.getBoundingClientRect(); return r.left < b.right && b.left < r.right && r.top < b.bottom && b.top < r.bottom; }).length;
+      return { shown: true, hits, fs: r.height };
+    });
+    const v = (await probe(page, (p) => p.views())).find((o) => o.id === "mesh")!;
+    for (const z of [0.5, 0.8, 1, 1.6]) {
+      await page.evaluate((a) => (window as unknown as { __tracerClusters: Probe }).__tracerClusters.setCamera(a.x, a.y, a.z), { x: v.x + v.w / 2, y: v.y + v.h / 2, z });
+      await page.waitForTimeout(500);
+      const o = await overlaps();
+      expect(o.hits, `zoom ${z}`).toBe(0);
+    }
+    // At the framing the person lands on, the label is there (the gap between the two cards is wide enough).
+    await probe(page, (p) => p.flyView("mesh"));
+    await page.waitForTimeout(1200);
+    expect((await overlaps()).hits).toBe(0);
+  });
+}
+
 // ---- pins -------------------------------------------------------------------------------------------------------
 test("a dragged node is pinned and saved in the canvas document; the others are not", async ({ page }) => {
   await open(page);

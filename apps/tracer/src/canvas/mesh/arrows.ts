@@ -77,6 +77,19 @@ export class Arrow {
     if (style.dashed) this.g.dataset.dashed = "";
   }
 
+  private curve: { p0: Pt; c0: Pt; c1: Pt; p1: Pt } | undefined;
+  /** A point of the curve last drawn, `t` from 0 (tail) to 1 (head), and the direction there. */
+  pointAt(t: number): { x: number; y: number; dx: number; dy: number } | undefined {
+    const c = this.curve;
+    if (!c) return undefined;
+    const u = 1 - t;
+    const x = u * u * u * c.p0.x + 3 * u * u * t * c.c0.x + 3 * u * t * t * c.c1.x + t * t * t * c.p1.x;
+    const y = u * u * u * c.p0.y + 3 * u * u * t * c.c0.y + 3 * u * t * t * c.c1.y + t * t * t * c.p1.y;
+    const dx = 3 * u * u * (c.c0.x - c.p0.x) + 6 * u * t * (c.c1.x - c.c0.x) + 3 * t * t * (c.p1.x - c.c1.x);
+    const dy = 3 * u * u * (c.c0.y - c.p0.y) + 6 * u * t * (c.c1.y - c.c0.y) + 3 * t * t * (c.p1.y - c.c1.y);
+    return { x, y, dx, dy };
+  }
+
   /** Makes the grab handles if they are not there yet, at the ends last drawn. */
   ensureHandles(): void {
     if (!this.hit || this.tailHandle) return;
@@ -105,6 +118,7 @@ export class Arrow {
     const end = { x: p1.x - ux * size * 0.7, y: p1.y - uy * size * 0.7 };
     const d = `M${p0.x.toFixed(1)} ${p0.y.toFixed(1)}C${c0.x.toFixed(1)} ${c0.y.toFixed(1)} ${c1.x.toFixed(1)} ${c1.y.toFixed(1)} ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
     this.line.setAttribute("d", d);
+    this.curve = { p0, c0, c1, p1: end };
     if (this.hit) {
       this.hit.setAttribute("d", d);
       const r = (size * 0.85).toFixed(1);

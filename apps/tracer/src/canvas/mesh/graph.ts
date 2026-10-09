@@ -60,6 +60,8 @@ export interface GraphController {
   arrows(): TopoArrow[];
   /** A node of the graph by id. */
   node(id: string): NodeModel | undefined;
+  /** The nodes whose cards meet a rectangle (the graph's own coordinates). */
+  nodesIn(r: Rect): NodeModel[];
   /** The zoom changed enough to change arrow heads: draw the arrows again. */
   redraw(): void;
   /** Arrows are made again (the person's rights changed, so handles appear or go). */
@@ -506,6 +508,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
     stats: () => ({ cards: cards.size, arrows: arrows.size, chips: chips.size && level === "clusters" ? chips.size : 0, clusterArrows: clusterArrows.size, passes, passMs: Math.round(passMs * 10) / 10, mounted: mounted_ }),
     arrows: () => mounted,
     node: (id) => nodes.get(id),
+    nodesIn(r) { const out: NodeModel[] = []; inRect(r, (n) => { if (meets(n, r)) out.push(n); }); return out; },
     redraw() {
       strokeScale();
       for (const e of mounted) hooks.drawArrow(e);

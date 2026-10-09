@@ -53,7 +53,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     return n ? { x: n.x, y: n.y, w: state.metrics.nodeW, h: state.metrics.nodeH } : undefined;
   };
   /** A grant is shown by its name only (a sentence for one nobody named), never ports or ranges (D180). */
-  const grantName = grantSentence;
+  const grantName = (g: Grant): string => grantSentence(g) + (g.via ? `, through ${g.via}` : "");
   /**
    * An arrow for a grant, not yet in the document: the graph module decides which arrows exist. Arrows are reused: one
    * that leaves the screen goes to a pool and comes back for the next grant that enters (making one is a handful of SVG
@@ -77,7 +77,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
         entry.label = t;
         arrow.g.append(t);
       }
-      entry.label.textContent = `through ${g.via}`;
+      entry.label.textContent = `via ${g.via}`;
       entry.label.removeAttribute("display");
     } else entry.label?.setAttribute("display", "none");
     return entry;
@@ -105,12 +105,33 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     // Arrows that end on the same card fan out along its edge instead of piling onto one point.
     const lane = graphOf(c)?.lane(e.grant) ?? 0;
     e.arrow.between(a, b, headSize(), lane * Math.max(1, (headSize() * 1.5) / 14));
-    if (e.label) {
-      const n = anchors(a, b);
-      e.label.setAttribute("x", String((n.p0.x + n.p1.x) / 2));
-      e.label.setAttribute("y", String((n.p0.y + n.p1.y) / 2 - 8));
-      e.label.setAttribute("text-anchor", "middle");
+    if (e.label) placeLabel(c, e);
+  };
+  /**
+   * The label of an arrow that goes through another host sits on the curve, at the place nearest its middle where the
+   * words clear every card; if there is none (cards all along it) the label is left out, and the hover says the same.
+   * Its size follows the zoom (about 11 screen pixels), so it reads at every zoom and is quiet at every one.
+   */
+  const placeLabel = (c: ViewRec, e: TopoArrow): void => {
+    const label = e.label!;
+    const fs = clamp(11 / cam.z, 9, 40);
+    const w = label.textContent!.length * fs * 0.62 + fs * 0.6, h = fs * 1.3;
+    const graph = graphOf(c);
+    for (const t of [0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.18, 0.82]) {
+      const p = e.arrow.pointAt(t);
+      if (!p) break;
+      // The words sit just above the curve, centred on it.
+      const box = { x: p.x - w / 2, y: p.y - h - fs * 0.25, w, h };
+      const hit = graph?.nodesIn(box) ?? [];
+      if (hit.length) continue;
+      label.style.fontSize = `${fs.toFixed(1)}px`;
+      label.setAttribute("x", p.x.toFixed(1));
+      label.setAttribute("y", (p.y - fs * 0.4).toFixed(1));
+      label.setAttribute("text-anchor", "middle");
+      label.removeAttribute("display");
+      return;
     }
+    label.setAttribute("display", "none");
   };
   let lastTopoZ = 0;
   const redrawMesh = (): void => {
