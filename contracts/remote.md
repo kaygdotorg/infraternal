@@ -336,5 +336,54 @@ The normal configured release CLI uses the same migrated Auth/database and cold
 `MemoryCaSource` for this HTTP authority and enrollment/renewal. Unlocking one
 therefore enables signing in the other; restart recreates the cold lock. Startup
 refuses unsafe encrypted-copy storage rather than silently disabling unlock.
-The API does not provision a missing administrator copy or alter role membership;
-those actions must follow the provisioning/rewrap rules above.
+The additive setup and administrator-role actions below provide provisioning
+and rewrap without changing the existing unlock contract.
+
+### First machine certificate setup and role rewrap [151][168], #78
+
+The declared `remote.ca.bootstrap` action uses
+`POST /remote/ca/bootstrap/start` with `{}` at the pinned HTTPS origin and the
+administrator's existing session cookie. It returns the usual WebAuthn ceremony
+and options plus `ca.member`, `ca.generation`, base64url `ca.salt`, and
+`ca.operation` (`setup` or `unlock`). The browser performs fresh user verification
+and derives a 32-byte key locally using HKDF-SHA256, account DEK as input,
+`ca.salt` as salt and `infraternal/ca-wrap/v1|<member>|<generation>` as info.
+It sends `POST /remote/ca/bootstrap/finish` with exactly
+`{"ceremony":...,"proof":...,"scoped_key":[32 bytes]}`. Success returns only
+`{"locked":false}`. The add-host flow calls these two endpoints before
+`POST /remote/invitations`. A retained cold CA uses its existing copy and the
+same two calls to unlock; setup never replaces retained trust.
+
+First setup publishes a complete private `active/` directory atomically under
+CA state: public issuer, remote server certificate/key and encrypted
+administrator copies. The CA signing key has no plaintext disk representation.
+The database writer lock serializes setup and role changes. Successful setup
+keeps the signer in memory and activates the configured remote listeners.
+Cold startup uses retained public trust and recreates the signing lock. An interrupted publication is recovered as public locked trust; retry never creates another issuer.
+HTTPS enrollment trust is independent: invitations may carry an explicit
+`https_der` leaf pin or `https_system_roots:true` for a public HTTPS proxy;
+legacy invitations retain their original issuer-based HTTPS trust.
+
+The declared `remote.ca.administrators` action requires a current owner who is
+also an administrator. `POST /remote/ca/administrators/start` accepts exactly
+`{"user_id":...,"administrator":true|false}` and binds that change to fresh
+passkey verification. `/remote/ca/administrators/finish` accepts exactly
+`{"ceremony":...,"proof":...}`. Each role transition advances membership
+generation and removes the old generation's wrapped copy. A recipient's copy
+is pending until that administrator runs bootstrap with their own locally
+derived key while the signer is unlocked. Offline keys are never fabricated or
+stored centrally. Removing the last administrator or the last retained current wrapped copy is refused.
+
+Anonymous join bodies have an eight-request pool and at most two slots per
+canonical source IP. Invitation/revocation requests have a separate eight-slot
+pool, after exact-origin and live-owner checks; CA operations have their own
+administrator pool. Request processing, including pre-admission checks, has a
+five-second deadline. Trusted forwarding policy supplies canonical IP metadata.
+Remote handshakes reserve 16 slots for previously authenticated source hints,
+with 48 anonymous TLS slots, four per source. Hints never grant host authority:
+all peers still prove a live ledger certificate. Anonymous TCP first bytes have
+48 slots with a two-second deadline, plus 16 short 100ms probes, one per source,
+to permit an immediate ClientHello behind the same NAT as stalled sockets.
+QUIC sends a keep-alive every 15 seconds and expires a silent transport after
+60 seconds. Acknowledged probes keep healthy idle connections alive; four
+intervals allow transient mobile loss while bounding stale NAT connections.
