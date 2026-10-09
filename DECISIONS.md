@@ -1676,3 +1676,21 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      canvas window through the D200 pipeline (macOS first, using D204). The
      server-held browser window (#140, W1–W3) is parked for later
      exploration.
+208. **App windows from a machine (owner, 2026-10-09, A1–A6; extends D200, D207):**
+     - **What can be added (A1):** single app windows and the whole screen.
+       A machine's "add window" list shows its open app windows with icon,
+       app name and title; what infraternal shows about an app is inferred
+       automatically from what macOS already records (researched first).
+     - **Input (A3):** remote input brings the app forward; the Mac shows a
+       small "Controlled from infraternal" indicator, and local mouse or
+       keyboard input pauses remote input for 2 seconds so the person at
+       the machine always wins.
+     - **Menus and dialogs (A4):** the app's own windows that overlap its
+       main window (menus, sheets, dialogs) are part of the stream; other
+       apps' windows never are.
+     - **Which apps (A5):** any app, no default exclusions.
+     - **Order (A6):** macOS first.
+     - **Permissions:** using Accessibility and Screen Recording is
+       expected and fine; the code is open source so users can see exactly
+       what is done with them.
+     - **Resizing (A2):** still open.
