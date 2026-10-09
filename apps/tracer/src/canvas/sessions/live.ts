@@ -15,7 +15,7 @@
  * - The first window uses the screen's own terminal host element, so the page still has one `#terminal-host`.
  */
 import type { CoreScreen } from "../../core-screen";
-import type { MuxConnection } from "../../connection";
+import type { ConnectionPool, MuxConnection } from "../../connection";
 import type { TerminalClient, TerminalHooks } from "../../terminal";
 import { el } from "../dom";
 import { createStatusRelay } from "../status";
@@ -27,6 +27,8 @@ import type { ScreenCache } from "./screen-cache.on-demand";
 export interface LiveSessionsOptions {
   core: CoreScreen;
   connection: MuxConnection;
+  /** The sockets terminals share (the server takes 32 terminals per socket); without it every terminal uses `connection`. */
+  pool?: ConnectionPool;
   /** The embedded host: its name and the person's login. Remote hosts join the list as #78 lands. */
   host: { name: string; user?: string };
   /** `?predict=1`: the opt-in predictive echo. */
@@ -46,7 +48,7 @@ export interface LiveSessions extends SessionService {
 }
 
 export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
-  const { core, connection, host } = options;
+  const { core, connection, host, pool } = options;
   const listeners = new Set<() => void>();
   const bindings = new Set<Binding>();
   let firstHostUsed = false;
@@ -129,6 +131,9 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       void this.start();
     }
 
+    /** The socket this window's terminal uses (taken from the pool, given back on dispose). */
+    private conn: MuxConnection | undefined;
+
     private async start(): Promise<void> {
       const hostEl = this.hostEl;
       if (!hostEl) return;
@@ -144,6 +149,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
           options.onSessionCreated?.(id);
         },
       };
+      // Reserved before the module loads: windows restored together all ask now, and each must count against its socket.
+      const conn = this.conn = pool && !this.disposed ? pool.acquire() : connection;
       try {
         const { TerminalClient } = await import("../../terminal");
         if (this.disposed) return;
@@ -153,7 +160,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
           status: this.status.element,
           theme: core.theme(),
           font: core.font(),
-          connection,
+          connection: conn,
           hooks,
           ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
           ...(this.model.sessionId ? { attachSessionId: this.model.sessionId } : {}),
@@ -205,6 +212,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       bindings.delete(this);
       if (active === this) { active = undefined; core.setActiveTerminal(undefined); }
       this.unregister?.();
+      if (pool && this.conn) { pool.release(this.conn); this.conn = undefined; }
       this.client?.dispose();
       this.client = undefined;
       this.status.dispose();
