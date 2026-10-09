@@ -4,6 +4,7 @@ use crate::{
     mesh_api::{MeshApiError, MeshFilter, MeshService, parse_action},
 };
 use futures_util::future::join_all;
+use infraternal_plugin_mesh::policy as infraternal_mesh;
 use infraternal_protocol::{Frame, encode_muxed_frame_into};
 use serde_json::{Value, json};
 use sqlx::{

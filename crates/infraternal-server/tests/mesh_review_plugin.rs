@@ -3,7 +3,6 @@
 use serde_json::Value;
 
 #[test]
-#[ignore = "R12 reproduced; plugin conversion follows R10/R11 in #108"]
 fn review_mesh_dependency_is_removable_at_build_time() {
     let metadata = std::process::Command::new(env!("CARGO"))
         .args([
@@ -24,12 +23,20 @@ fn review_mesh_dependency_is_removable_at_build_time() {
         .iter()
         .find(|package| package["name"] == "infraternal-server")
         .expect("server package");
+    assert!(
+        server["dependencies"]
+            .as_array()
+            .expect("server dependencies")
+            .iter()
+            .all(|dependency| dependency["name"] != "infraternal-mesh"),
+        "core must not depend directly on Mesh policy implementation"
+    );
     let mesh = server["dependencies"]
         .as_array()
         .expect("server dependencies")
         .iter()
-        .find(|dependency| dependency["name"] == "infraternal-mesh")
-        .expect("Mesh dependency");
+        .find(|dependency| dependency["name"] == "infraternal-plugin-mesh")
+        .expect("Mesh plugin dependency");
     assert_eq!(
         mesh["optional"], true,
         "a no-default-features server retains the mandatory Mesh dependency"

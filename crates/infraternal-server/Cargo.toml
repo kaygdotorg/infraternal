@@ -8,6 +8,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["mesh"]
+mesh = ["dep:infraternal-plugin-mesh"]
+
 [dependencies]
 argon2.workspace = true
 axum.workspace = true
@@ -30,7 +34,7 @@ futures-util.workspace = true
 nix.workspace = true
 infraternal-protocol.workspace = true
 infraternal-plugin-api.workspace = true
-infraternal-mesh = { version = "0.1.0", path = "../infraternal-mesh" }
+infraternal-plugin-mesh = { version = "0.1.0", path = "../plugins/mesh", optional = true, default-features = false, features = ["server"] }
 url.workspace = true
 uuid.workspace = true
 webauthn-rs.workspace = true

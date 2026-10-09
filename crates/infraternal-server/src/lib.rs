@@ -3,8 +3,10 @@
 
 pub mod auth;
 mod embedded;
-pub mod mesh_api;
-#[cfg(test)]
+/// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
+#[cfg(feature = "mesh")]
+pub use infraternal_plugin_mesh::api as mesh_api;
+#[cfg(all(test, feature = "mesh"))]
 mod mesh_api_tests;
 mod runtime;
 mod web_assets;

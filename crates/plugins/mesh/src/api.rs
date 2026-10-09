@@ -21,7 +21,8 @@ const CHANGE_BUFFER: usize = 256;
 // Mesh frames share a socket with latency-sensitive terminal traffic [D11].
 // Exact per-item JSON counting leaves 1 KiB for fixed snapshot/event/cursor and
 // mux/frame envelopes, including maximum-width numeric identifiers.
-pub(crate) const MAX_MESH_FRAME_LEN: usize = 64 * 1024;
+/// Mesh work never occupies more than one 64 KiB shared-socket frame [11].
+pub const MAX_MESH_FRAME_LEN: usize = 64 * 1024;
 const PAGE_ITEM_BYTES: usize = MAX_MESH_FRAME_LEN - 1024;
 
 /// A committed inventory change with the tag scopes needed to filter live invalidations.
@@ -494,7 +495,7 @@ impl MeshService {
     /// Bind destructive browser authority to the transaction that commits the edit.
     /// Direct service callers remain responsible for authenticating their adapter.
     #[must_use]
-    pub(crate) fn with_fresh_authority(&self, token_hash: String) -> Self {
+    pub fn with_fresh_authority(&self, token_hash: String) -> Self {
         let mut request = self.clone();
         request.fresh_authority = Some(token_hash);
         request
@@ -645,7 +646,10 @@ impl MeshService {
     }
 
     /// Retain the earliest live-node expiry from the complete filtered view, before paging.
-    pub(crate) async fn list_with_deadline(
+    ///
+    /// # Errors
+    /// Returns the same authorization, validation and storage errors as [`Self::list`].
+    pub async fn list_with_deadline(
         &self,
         actor: &str,
         filter: MeshFilter,
@@ -1311,10 +1315,18 @@ impl MeshService {
             .execute(&mut *tx).await.map_err(map_sql_error)?;
         // Re-read inside the writer transaction after all waits, immediately before
         // commit. Denial rolls back inventory, revision and audit together [28].
-        if let Some(token_hash) = &self.fresh_authority {
-            crate::auth::require_session_tx(&mut tx, token_hash, actor, now)
-                .await
-                .map_err(|_| MeshApiError::FreshRequired)?;
+        if let Some(token_hash) = &self.fresh_authority
+            && !infraternal_plugin_api::fresh_session_tx(
+                &mut tx,
+                token_hash,
+                actor,
+                now,
+                infraternal_plugin_api::FRESH_SECONDS,
+            )
+            .await
+            .map_err(map_sql_error)?
+        {
+            return Err(MeshApiError::FreshRequired);
         }
         tx.commit().await.map_err(map_sql_error)?;
         let _ = self.updates.send(MeshChange {
@@ -1571,7 +1583,10 @@ async fn read_snapshot(
 }
 
 /// Bound list replies and subscription snapshots to the Mesh scheduling limit.
-pub(crate) fn page_snapshot(
+///
+/// # Errors
+/// Refuses invalid cursors and objects that cannot fit the bounded frame budget.
+pub fn page_snapshot(
     mut snapshot: MeshSnapshot,
     cursor: Option<MeshCursor>,
 ) -> Result<MeshSnapshot, MeshApiError> {
