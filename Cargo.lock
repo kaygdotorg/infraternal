@@ -1347,6 +1347,7 @@ dependencies = [
  "infraternal-server",
  "infraternal-shim",
  "libfuzzer-sys",
+ "serde_json",
 ]
 
 [[package]]
