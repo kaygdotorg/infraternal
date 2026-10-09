@@ -58,7 +58,7 @@ export class AuthError extends Error {
 /** Reads only the public first-run flag before choosing an access screen. */
 export async function checkStatus(): Promise<boolean> {
   const status = await post<{ setup_required: unknown }>("status", {});
-  if (typeof status.setup_required !== "boolean") throw new AuthError("The server returned an invalid setup status.");
+  if (typeof status.setup_required !== "boolean") throw new AuthError("The server's answer could not be used. Try again.");
   return status.setup_required;
 }
 
@@ -285,7 +285,7 @@ async function credentialPrf(
       extensions: { prf: { eval: { first: toArrayBuffer(first) } } } as AuthenticationExtensionsClientInputs,
     },
   });
-  if (!(result instanceof PublicKeyCredential)) throw new AuthError("The passkey key proof was cancelled.");
+  if (!(result instanceof PublicKeyCredential)) throw new AuthError("The passkey prompt was cancelled.");
   const prf = prfFrom(result);
   if (!prf) {
     binaryDiagnostic(undefined, "prf.first");
@@ -377,7 +377,7 @@ async function recoverySecrets(words: string): Promise<{ verifier: string; wrap:
 
 /** Stored metadata determines derivation; old envelopes are never silently relabeled. */
 async function unwrapRecoveryDek(words: string, wrap: Wrap, userId: string, version: number): Promise<Uint8Array> {
-  if (version !== 1 && version !== 2) throw new AuthError("The recovery envelope version is unsupported.");
+  if (version !== 1 && version !== 2) throw new AuthError("This recovery key was made by a newer version of infraternal. Update this app and try again.");
   const material = version === 1 ? mnemonicToEntropy(words, wordlist) : (await recoverySecrets(words)).wrap;
   try { return await unwrapDek(material, wrap, userId, "recovery"); }
   finally { material.fill(0); }
@@ -453,10 +453,10 @@ function copyBytes(input: unknown, field: string): Uint8Array {
     }
   } catch {
     binaryDiagnostic(input, field);
-    throw new AuthError(`This browser returned invalid passkey binary data (${field}). Try another browser.`);
+    throw new AuthError("This browser returned passkey data that could not be read. Try another browser.");
   }
   binaryDiagnostic(input, field);
-  throw new AuthError(`This browser returned invalid passkey binary data (${field}). Try another browser.`);
+  throw new AuthError("This browser returned passkey data that could not be read. Try another browser.");
 }
 
 /** Log only fixed shape codes and sizes; never values, credential IDs or arbitrary object tags. */
@@ -487,28 +487,28 @@ function base64url(bytes: Uint8Array): string {
 }
 
 function decodeBase64url(value: string): Uint8Array {
-  if (!/^[A-Za-z0-9_-]*$/.test(value) || value.length % 4 === 1) throw new AuthError("The server returned invalid binary data.");
+  if (!/^[A-Za-z0-9_-]*$/.test(value) || value.length % 4 === 1) throw new AuthError("The server's answer could not be used. Try again.");
   const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  if (base64url(bytes) !== value) throw new AuthError("The server returned non-canonical binary data.");
+  if (base64url(bytes) !== value) throw new AuthError("The server's answer could not be used. Try again.");
   return bytes;
 }
 
 function record(value: unknown, name: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new AuthError(`The server returned invalid ${name}.`);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new AuthError("The server's answer could not be used. Try again.");
   return value as Record<string, unknown>;
 }
 
 function requiredString(value: unknown, name: string): string {
-  if (typeof value !== "string" || value.length === 0) throw new AuthError(`The server omitted ${name}.`);
+  if (typeof value !== "string" || value.length === 0) throw new AuthError("The server's answer was incomplete. Try again.");
   return value;
 }
 
 function canonicalUuid(value: unknown, name: string): string {
   const result = requiredString(value, name);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(result)) {
-    throw new AuthError(`The server returned an invalid ${name}.`);
+    throw new AuthError("The server's answer could not be used. Try again.");
   }
   return result;
 }

@@ -1,0 +1,108 @@
+/**
+ * The anchored popover (D125, D127, D160): a floating card that opens from a window's header control and stays
+ * inside that window. It is the shared placement and motion for every popover a window header opens; the
+ * session manager uses it, and the details popover can adopt it.
+ *
+ * - Material: the caller's content sits in an `.ui-overlay-surface` (the one overlay material), so content
+ *   behind it reads as soft shapes. Nothing here paints a fill of its own.
+ * - Placement: under the anchor, aligned to its start or end edge, and kept one window-header inset away from
+ *   the window's edges on every side, so at its maximum height the gap is the same left, right and bottom.
+ *   The visible viewport and an optional bottom limit (a key tray) only ever shrink it further.
+ * - Motion: a pointer open grows from the anchor (scale 0.96 → 1 with opacity, 200 ms strong ease-out); closing
+ *   is quicker (130 ms). Keyboard opens and closes are instant. Web Animations without fill leave nothing
+ *   transformed at rest, so text stays crisp (TASTE section 5).
+ * - Dismissal: a press outside (the anchor toggles it itself) or Escape closes it.
+ */
+export type PopoverSource = "pointer" | "keyboard";
+
+export interface AnchoredPopoverOptions {
+  /** The positioned ancestor the popover is appended to (the screen). */
+  stage: HTMLElement;
+  anchor: HTMLElement;
+  /** Accessible name of the dialog. */
+  label: string;
+  /** Extra classes on the root, next to `ui-overlay-surface`. */
+  className?: string;
+  /** Which anchor edge the popover lines up with. Default `start`. */
+  align?: "start" | "end";
+  maxWidth?: number;
+  /** The y below which the popover must not reach (a key tray's top); read on every placement. */
+  bottomLimit?(): number | undefined;
+}
+
+export interface AnchoredPopover {
+  readonly root: HTMLElement;
+  /** Re-places it, for content whose size changed. */
+  place(): void;
+  close(source: PopoverSource): void;
+}
+
+const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
+/** The window header's padding: the gap kept between the popover and its window's edges. */
+const INSET = 8;
+const reduced = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/** Opens the popover; `onClosed` runs once it has gone. The caller fills `root` before or after. */
+export function openAnchoredPopover(options: AnchoredPopoverOptions, source: PopoverSource, onClosed: () => void): AnchoredPopover {
+  const { stage, anchor } = options;
+  const root = document.createElement("section");
+  root.className = `ui-overlay-surface ui-anchored-popover ${options.className ?? ""}`.trim();
+  root.setAttribute("role", "dialog");
+  root.setAttribute("aria-label", options.label);
+
+  const place = (): void => {
+    const box = anchor.getBoundingClientRect();
+    const win = anchor.closest(".ui-window")?.getBoundingClientRect() ?? box;
+    const screen = stage.getBoundingClientRect();
+    const frame = parseFloat(getComputedStyle(anchor.closest(".ui-window") ?? anchor).borderLeftWidth) || 0;
+    const inset = INSET + frame;
+    const width = Math.min(options.maxWidth ?? 400, win.width - inset * 2);
+    const wanted = options.align === "end" ? box.right - width : box.left;
+    const left = Math.round(Math.max(win.left + inset, Math.min(wanted, win.right - inset - width)));
+    const top = Math.round(box.bottom + INSET);
+    const bottom = Math.min(win.bottom - inset, options.bottomLimit?.() ?? screen.bottom, (window.visualViewport?.height ?? innerHeight) - INSET);
+    root.style.left = `${left - screen.left}px`;
+    root.style.top = `${top - screen.top}px`;
+    root.style.width = `${Math.round(width)}px`;
+    root.style.maxHeight = `${Math.max(0, Math.floor(bottom - top))}px`;
+    root.style.transformOrigin = `${Math.round(box.left + box.width / 2 - left)}px 0`;
+  };
+  // Placed before it is attached: the measurements are read while no new content is pending, so the browser
+  // lays out once, after the single write below.
+  place();
+  stage.append(root);
+  if (source === "pointer") {
+    if (reduced()) root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease" });
+    else root.animate([{ opacity: 0, transform: "translateY(-4px) scale(0.96)" }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE });
+  }
+  anchor.setAttribute("aria-expanded", "true");
+
+  let closed = false;
+  const events = new AbortController();
+  const close = (how: PopoverSource): void => {
+    if (closed) return;
+    closed = true;
+    events.abort();
+    anchor.setAttribute("aria-expanded", "false");
+    const done = (): void => { root.remove(); onClosed(); };
+    if (how === "keyboard" || reduced()) { done(); return; }
+    root.style.pointerEvents = "none";
+    root.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-2px) scale(0.98)" }],
+      { duration: 130, easing: EASE, fill: "forwards" }).onfinish = done;
+  };
+  // A confirmation anchored inside the popover lives on the body; pressing it must not dismiss the popover.
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target as Element;
+    if (root.contains(target) || anchor.contains(target) || target.closest?.(".ui-confirm-tip")) return;
+    close("pointer");
+  }, { capture: true, signal: events.signal });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || document.querySelector(".ui-confirm-tip")) return;
+    event.stopPropagation();
+    close("keyboard");
+    anchor.focus({ preventScroll: true });
+  }, { capture: true, signal: events.signal });
+  window.addEventListener("resize", place, { signal: events.signal });
+  window.visualViewport?.addEventListener("resize", place, { signal: events.signal });
+  return { root, place, close };
+}

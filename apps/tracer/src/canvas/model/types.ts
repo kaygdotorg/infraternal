@@ -1,0 +1,73 @@
+/**
+ * The canvas's runtime model: views, columns, windows and graph nodes as the view layer draws them.
+ *
+ * This is the working shape. The persisted shape is the canvas document (`document.ts`, D180), which holds
+ * layout and references only; `toDocument` and `fromDocument` convert between the two. Nothing here is DOM.
+ */
+import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
+
+/** What a window shows. Only a `terminal` window is bound to a session and can split. */
+export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings";
+
+/** The built-in views have fixed ids; a view someone shared with you gets an id of its own. */
+export type ViewId = string;
+
+export interface WindowModel {
+  id: string;
+  kind: WindowKind;
+  /** Host (or tag) name shown in the pill. */
+  host: string;
+  /** The session's readable name (D178); the stable target is `sessionId`. */
+  session?: string;
+  /** The session this window shows (a terminal window): stable across renames and reloads (D180). */
+  sessionId?: string;
+  user?: string;
+  os?: HostPlatform;
+  /** Fixed height in px, or a ratio of the column height when 1 or less; a window without one shares its column equally. */
+  h?: number;
+  /** Preview text for windows that are not bound to a live session (mockups, thumbnails). */
+  lines?: string[];
+  /** Set on a window made by a split: it shares its column with the window it came from and is not resized on its own. */
+  splitOf?: string;
+  /** The window's host is not covered by the viewer's grants (a shared layout connects through your own access). */
+  noAccess?: boolean;
+}
+
+export interface ColumnModel { id: string; w: number; wins: WindowModel[] }
+
+export interface NodeModel {
+  id: string; kind: "host" | "tag"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform;
+  /** Live state of a host (a tag has none): drives the card's status icon. */
+  state?: "online" | "behind" | "offline";
+  /** The person dragged this node, so it stays where it is while the rest are laid out automatically (D180). */
+  pinned?: boolean;
+}
+
+/**
+ * A mesh access rule, shown by name only (D180: edges reference grants by name, never the rules).
+ * `id` is the stable reference; `name` is what people read (and rename). `auto` means the name still says who may
+ * reach what, so the canvas renames the grant along when an end moves; a name a person chose is never touched.
+ */
+export interface Grant { id: string; from: string; to: string; via?: string; name?: string; auto?: boolean; /** Reaches both ways (D164: a double-headed arrow). */ both?: boolean }
+
+export interface ViewModel {
+  id: ViewId;
+  name: string;
+  layout: "tiled" | "graph";
+  cols: ColumnModel[];
+  nodes: NodeModel[];
+  /** Content size of a graph view. */
+  graph?: { w: number; h: number };
+  /** Position on the coarse cell grid, in pixels (always a multiple of `CELL`). */
+  x: number;
+  y: number;
+  /** Arrived from someone: a copy that is yours (`from` only names where it came from). */
+  from?: string;
+  /** A published team layout you follow: read-only until you unlink it. */
+  team?: { from: string; shareId: string; key: string; rev: number };
+  /** Mine, and published to the team: changes to its arrangement go to the people who follow it. */
+  published?: { shareId: string; key: string };
+}
+
+/** One row of the Containers list. */
+export interface ContainerRow { name: string; image: string; state: "running" | "restarting" | "exited"; cpu: string }

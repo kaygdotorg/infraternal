@@ -36,6 +36,7 @@ webauthn-rs.workspace = true
 openssl.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 aes-gcm.workspace = true
 hkdf.workspace = true
 nix = { workspace = true, features = ["time"] }

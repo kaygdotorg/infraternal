@@ -8,6 +8,9 @@ import { gunzipSync } from "node:zlib";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
+import { serveProvisioning } from "./provisioning-double";
+import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
+import { sessionDevices, sessionHosts } from "./session-fixtures";
 
 const HOST = "localhost";
 // The browser connects to TRACER_TEST_PORT; the TCP latency proxy reaches this private upstream port.
@@ -96,6 +99,17 @@ let socketCloseCount = 0;
 
 server.on("upgrade", (request, socket, head) => {
   const path = new URL(request.url ?? "/", `http://${request.headers.host ?? `${HOST}:${PORT}`}`).pathname;
+  if (path === "/v1/bootstrap/ws") {
+    // Same admission as the real route: exact Origin (403), then the unlocked owner session (401).
+    const status = !sameOrigin(request) ? "403 Forbidden" : !isAuthenticated(request) ? "401 Unauthorized" : undefined;
+    if (status) {
+      socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      socket.destroy();
+      return;
+    }
+    webSockets.handleUpgrade(request, socket, head, (webSocket) => serveProvisioning(webSocket, request));
+    return;
+  }
   if (path !== "/v1/ws") {
     socket.destroy();
     return;
@@ -151,24 +165,66 @@ server.listen(PORT, HOST, () => {
 
 async function routeHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
   response.setHeader(TEST_DOUBLE_HEADER, "true");
+  ensurePreviewSession(request, response);
   const host = request.headers.host ?? `${HOST}:${PORT}`;
   const url = new URL(request.url ?? "/", `http://${host}`);
 
   if (request.method === "GET" && url.pathname === "/health") {
     return sendJson(response, 200, { ok: true });
   }
+  if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
+    return sendJson(response, 200, { hosts: prototypeHosts });
+  }
+  if (request.method === "GET" && url.pathname === "/__mock/proto/sessions") {
+    // The session inventory (D178). `?delay=<ms>` and `?fail=1` let the mockup show its slow and failed states.
+    const delay = Math.min(5000, Math.max(0, Number(url.searchParams.get("delay")) || 0));
+    if (delay) await new Promise((done) => setTimeout(done, delay));
+    if (url.searchParams.get("fail") === "1") return sendJson(response, 503, { error: "session list unavailable" });
+    return sendJson(response, 200, { hosts: sessionHosts, devices: sessionDevices });
+  }
+  if (request.method === "GET" && url.pathname === "/__mock/proto/addhost") {
+    return sendJson(response, 200, { hosts: addHostFixtures });
+  }
+  // The account's toolbar layout (account default, shared by every device). The real server stores it per account.
+  if (url.pathname === "/__mock/account/toolbar") {
+    if (request.method === "GET") return sendJson(response, 200, { layout: accountToolbar ?? null });
+    if (request.method === "PUT") {
+      const body = await readJson(request);
+      if (body === undefined || typeof body !== "object") return sendJson(response, 400, { error: "invalid request" });
+      accountToolbar = body;
+      return sendJson(response, 200, { ok: true });
+    }
+  }
+  // Shared layouts (D182): a copy sent to users or groups, and team layouts that stay linked (a revision per update).
+  if (url.pathname === "/__mock/shares") {
+    if (request.method === "GET") {
+      const person = url.searchParams.get("for") ?? "";
+      const groups = Object.entries(mockGroups).filter(([, members]) => members.includes(person)).map(([g]) => `group:${g}`);
+      const mine = mockShares.filter((x) => x.to.includes(`user:${person}`) || x.to.some((t) => groups.includes(t)));
+      return sendJson(response, 200, { shares: mine });
+    }
+    if (request.method === "POST") {
+      const body = await readJson(request);
+      if (body === undefined || typeof body !== "object") return sendJson(response, 400, { error: "invalid request" });
+      const share = { ...(body as object), id: `sh${mockShares.length + 1}`, rev: 1 } as MockShare;
+      mockShares.push(share);
+      return sendJson(response, 200, { id: share.id });
+    }
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/shares/update") {
+    const body = (await readJson(request)) as { id?: string; key?: string; snapshot?: unknown } | undefined;
+    const share = mockShares.find((x) => x.id === body?.id);
+    const view = share?.views.find((v) => v.key === body?.key);
+    if (!share || !view || !share.publish) return sendJson(response, 404, { error: "not found" });
+    view.snapshot = body!.snapshot;
+    share.rev++;
+    return sendJson(response, 200, { rev: share.rev });
+  }
   if (request.method === "GET" && url.pathname === "/__mock/setup-token") {
     return sendJson(response, 200, { setup_token: setupToken });
   }
   if (request.method === "POST" && url.pathname === "/__mock/open-terminal") {
-    owner = {
-      userId: randomUuid(),
-      username: "renderer_test",
-      displayName: "Renderer test",
-      credentialId: newToken(),
-      passkeyWrap: {},
-      prfInput: newToken(),
-    };
+    owner = makeMockOwner();
     activeAuthCookie = newToken();
     setAuthCookie(response, activeAuthCookie);
     return sendJson(response, 200, { ok: true });
@@ -392,6 +448,14 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method !== "GET" && request.method !== "HEAD") {
     return sendJson(response, 404, { error: "not found" });
   }
+  if ((url.pathname === "/" || url.pathname === "/index.html") && ["windows", "addhost", "clusters"].includes(url.searchParams.get("proto") ?? "")) {
+    if (!owner) owner = makeMockOwner();
+    activeAuthCookie = newToken();
+    unlockPending = false;
+    pendingTransaction = undefined;
+    pendingLogin = undefined;
+    setPreviewAuthCookie(response, activeAuthCookie);
+  }
   await serveDist(url.pathname, request.method === "HEAD", response);
 }
 
@@ -561,6 +625,11 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       sendWelcome(connection);
       return;
     case "Call": {
+      // Like the server, an action it does not know is refused (the Mesh asks `mesh.list` and must be told no).
+      if (connection.welcomed && connection.session && frame.actionId.startsWith("mesh.")) {
+        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"unknown action"}') });
+        return;
+      }
       if (!connection.welcomed || frame.callId !== 1 || frame.actionId !== "ssh.session.open") {
         connection.socket.close(1002, "unexpected test-double action");
         return;
@@ -787,25 +856,65 @@ function sameOrigin(request: IncomingMessage): boolean {
   return request.headers.origin === `http://${request.headers.host ?? `${HOST}:${PORT}`}`;
 }
 
+/**
+ * Test double only: a mockup preview page (`?mock=1&proto=...`) whose session cookie this process does not
+ * know (the double restarted, or the cookie expired) gets a fresh mock session on its next request, so a
+ * restart never strands an open tab. Plain `?mock=1` pages (the sign-in and onboarding tests) are left alone.
+ */
+function ensurePreviewSession(request: IncomingMessage, response: ServerResponse): void {
+  const referer = request.headers.referer ?? "";
+  if (!/[?&]mock=1(&|$)/.test(referer) || !/[?&]proto=/.test(referer)) return;
+  if (!request.url?.startsWith("/auth/") && !request.url?.startsWith("/__mock/")) return;
+  if (request.url.startsWith("/__mock/reset") || isAuthenticated(request)) return;
+  if (!owner) owner = makeMockOwner();
+  activeAuthCookie = newToken();
+  setPreviewAuthCookie(response, activeAuthCookie);
+  request.headers.cookie = `infraternal-mock-session=${activeAuthCookie}`;
+}
+
 function isAuthenticated(request: IncomingMessage): boolean {
-  return Boolean(owner && activeAuthCookie && cookieValue(request) === activeAuthCookie);
+  const cookie = activeAuthCookie;
+  return Boolean(owner && cookie && [cookieValue(request, "__Host-infraternal"), cookieValue(request, "infraternal-mock-session")].includes(cookie));
 }
 
 function hasAuthCookie(request: IncomingMessage): boolean {
   return isAuthenticated(request);
 }
 
-function cookieValue(request: IncomingMessage): string | undefined {
-  const item = request.headers.cookie?.split(";").map((part) => part.trim())
-    .find((part) => part.startsWith("__Host-infraternal="));
-  return item?.slice("__Host-infraternal=".length);
+function cookieValue(request: IncomingMessage, name: string): string | undefined {
+  const prefix = `${name}=`;
+  const item = request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith(prefix));
+  return item?.slice(prefix.length);
 }
 
 function setAuthCookie(response: ServerResponse, value: string): void {
   response.setHeader("Set-Cookie", `__Host-infraternal=${value}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`);
 }
 
+function setPreviewAuthCookie(response: ServerResponse, value: string): void {
+  // The owner's preview is plain HTTP on a private IP, where browsers reject Secure cookies.
+  // Keep this HTTP-only cookie confined to the test double and leave product auth unchanged.
+  response.setHeader("Set-Cookie", `infraternal-mock-session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`);
+}
+
+function makeMockOwner(): MockOwner {
+  return {
+    userId: randomUuid(),
+    username: "renderer_test",
+    displayName: "Renderer test",
+    credentialId: newToken(),
+    passkeyWrap: {},
+    prfInput: newToken(),
+  };
+}
+
+interface MockShare { id: string; from: string; to: string[]; publish: boolean; rev: number; views: Array<{ key: string; name: string; snapshot: unknown }> }
+const mockShares: MockShare[] = [];
+const mockGroups: Record<string, string[]> = { ops: ["kayg", "asha"], sre: ["ravi", "asha"] };
+let accountToolbar: unknown;
 function resetMockState(): void {
+  mockShares.length = 0;
+  accountToolbar = undefined;
   owner = undefined;
   activeAuthCookie = undefined;
   setupToken = newToken();

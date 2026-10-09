@@ -267,7 +267,7 @@ test("signed-in device shows a persistent notice and can cancel recovery", async
   });
   await page.goto("/?mock=1&proto=recovery");
   await expect(page.locator("#recovery-notice")).toBeVisible();
-  await expect(page.locator("#recovery-toast")).toContainText("Recovery requested");
+  await expect(page.locator(".ui-toast")).toContainText("Recovery requested");
   await capture(page, info, "pending-recovery-notice");
   await page.getByRole("button", { name: "Cancel recovery", exact: true }).click();
   await expect(page.locator("#recovery-notice")).toBeHidden();

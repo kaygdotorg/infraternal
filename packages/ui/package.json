@@ -15,8 +15,12 @@
     "./faulty-terminal": "./src/faulty-terminal.ts",
     "./color": "./src/color.ts",
     "./themes": "./src/themes.ts",
+    "./fonts": "./src/fonts.ts",
+    "./local-pref": "./src/local-pref.ts",
     "./backdrop": "./src/backdrop.ts",
     "./branched": "./src/branched.ts",
+    "./host-icons": "./src/host-icons.ts",
+    "./segmented": "./src/segmented.ts",
     "./terminal-text-overlay": "./src/terminal-text-overlay.ts",
     "./styles.css": "./styles.css"
   }
