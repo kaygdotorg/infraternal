@@ -139,7 +139,7 @@ fn default_ca_dir() -> Result<PathBuf, ServerError> {
     Ok(root.join("infraternal/ca"))
 }
 
-fn private_directory(path: &Path) -> Result<(), ServerError> {
+pub(crate) fn private_directory(path: &Path) -> Result<(), ServerError> {
     let metadata = std::fs::symlink_metadata(path).map_err(|_| ServerError::TlsConfiguration)?;
     if !path.is_absolute()
         || !metadata.is_dir()
@@ -153,7 +153,7 @@ fn private_directory(path: &Path) -> Result<(), ServerError> {
 
 /// Bound reads through a no-follow descriptor; check the opened inode, not an
 /// earlier pathname lookup. Public issuer files share the private layout policy.
-fn private_file(path: &Path) -> Result<Vec<u8>, ServerError> {
+pub(crate) fn private_file(path: &Path) -> Result<Vec<u8>, ServerError> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
