@@ -12,6 +12,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys.workspace = true
+infraternal-plugin-api.workspace = true
 infraternal-shim.workspace = true
 infraternal-protocol.workspace = true
 infraternal-plugin-mesh = { version = "0.1.0", path = "../crates/plugins/mesh", default-features = false, features = ["server"] }
