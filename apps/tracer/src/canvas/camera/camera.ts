@@ -48,6 +48,8 @@ export const clamp = (v: number, lo: number, hi: number): number => Math.max(lo,
 // test/clusters-flight.spec.ts. Pointer, touch and pill flights about 350 ms (was 1.3 s); a key's about 190 ms (was 430 ms) (the motion rule).
 const FLIGHT = { visualDuration: 0.16, bounce: 0 };
 const KEY_FLIGHT = { visualDuration: 0.08, bounce: 0 };
+/** The layout spring (the same one windows use when a layout moves, layout/flip.ts). */
+const LAYOUT_FLIGHT = { visualDuration: 0.5, bounce: 0.22 };
 const REST_DELAY = 140;
 export const MIN_ZOOM = 0.08;
 export const MAX_ZOOM = 2;
@@ -76,7 +78,7 @@ export class Camera {
   /** Whether `will-change: transform` is on the world right now. */
   private hinted = false;
   private ready = false;
-  private flightKind: "gesture" | "key" = "gesture";
+  private flightKind: "gesture" | "key" | "layout" = "gesture";
 
   constructor(private readonly viewport: HTMLElement, private readonly world: HTMLElement, private readonly hooks: CameraHooks = {}) {
     world.dataset.lod = this.lod;
@@ -188,6 +190,12 @@ export class Camera {
     try { return run(); } finally { this.flightKind = "gesture"; }
   }
 
+  /** Runs a flight on the layout spring: the framing moved because the layout around it did (a window-size setting). */
+  layoutFlight<T>(run: () => T): T {
+    this.flightKind = "layout";
+    try { return run(); } finally { this.flightKind = "gesture"; }
+  }
+
   /** Flies the camera (interruptible: a new target keeps the current velocity). */
   flyTo(target: () => Cam, instant = false): void {
     this.target = target;
@@ -200,7 +208,7 @@ export class Camera {
       return;
     }
     this.restThresholds(Math.max(t.z, this.cam.z));
-    const cfg = this.flightKind === "key" ? KEY_FLIGHT : FLIGHT;
+    const cfg = this.flightKind === "key" ? KEY_FLIGHT : this.flightKind === "layout" ? LAYOUT_FLIGHT : FLIGHT;
     this.springCx.configure(cfg); this.springCy.configure(cfg); this.springLz.configure(cfg);
     const { cam } = this;
     this.springCx.value = cam.cx; this.springCy.value = cam.cy; this.springLz.value = Math.log(cam.z);

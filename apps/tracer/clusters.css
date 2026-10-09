@@ -296,3 +296,7 @@
 /* Input locked to a terminal: touch on the strip does nothing (the terminal scrolls itself, terminal-touch.ts), so a
    finger outside it, or one that runs past its end, cannot scroll the column or chain to the canvas (#113). */
 .cl-viewport[data-input-lock] .cl-col { touch-action: none; overflow-y: hidden; }
+
+/* A phone at full width: the canvas area runs edge to edge, so a window of 99% of the screen is centred with a hairline
+   of margin, not cut by the 12 px gutters (D191). The top bar and the key tray keep their margins. */
+.terminal-screen[data-window-edge] .panes { left: env(safe-area-inset-left, 0px); right: env(safe-area-inset-right, 0px); }
