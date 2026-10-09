@@ -77,11 +77,9 @@ export class Camera {
   private hinted = false;
   private ready = false;
   /** The screen around the canvas: its glass (the pills, the sidebar) blurs the canvas behind it, which moves with the camera. */
-  private readonly stage: Element | null;
   private flightKind: "gesture" | "key" = "gesture";
 
   constructor(private readonly viewport: HTMLElement, private readonly world: HTMLElement, private readonly hooks: CameraHooks = {}) {
-    this.stage = world.closest("[data-clusters]");
     world.dataset.lod = this.lod;
     world.dataset.zoom = this.band;
     // The springs paint nothing until `start()`: their first update would run the hooks before the canvas is built.
@@ -104,7 +102,13 @@ export class Camera {
     this.resized();
     // Reading the size inside apply() forces a layout on every frame of a flight, right after the frame's own style
     // writes. The observer delivers the size after layout for free, before the next paint.
-    new ResizeObserver(() => this.resized()).observe(this.viewport);
+    new ResizeObserver(() => {
+      const { vw, vh } = this;
+      this.resized();
+      // A camera at rest has its transform written for the old size: write it again for the new one (a flight does it
+      // on its next frame). Without this a viewport that settles after start left the world offset by half the change.
+      if ((vw !== this.vw || vh !== this.vh) && !this.moving) this.apply(true);
+    }).observe(this.viewport);
     this.apply(true);
   }
 
@@ -130,8 +134,6 @@ export class Camera {
     const nextBand: ZoomBand = this.band === "in" ? (cam.z < 0.76 ? "out" : "in") : (cam.z > 0.82 ? "in" : "out");
     if (nextBand !== this.band) { this.band = nextBand; world.dataset.zoom = nextBand; this.hooks.onBand?.(nextBand); }
     if (!atRest) {
-      // One attribute write at the start of a move (not per frame): CSS may drop costly effects while the camera moves.
-      if (!this.moving) this.stage?.toggleAttribute("data-canvas-moving", true);
       this.moving = true;
       // `will-change: transform` makes the browser raster the layer at its own size (scale 1) so a move never blurs it.
       // Zoomed far out that is the whole visible world at full size: a mesh of a thousand hosts is 7,800 px wide, and
@@ -148,7 +150,6 @@ export class Camera {
   rest(): void {
     window.clearTimeout(this.restTimer);
     this.moving = false;
-    this.stage?.toggleAttribute("data-canvas-moving", false);
     this.hinted = false;
     this.world.style.willChange = "";
     this.apply(true);
