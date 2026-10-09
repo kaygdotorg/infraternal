@@ -147,3 +147,40 @@ async fn ca_http_parser_is_bounded_and_errors_do_not_reflect_wrapping_material()
     );
     assert!(f.source.load().is_err());
 }
+
+#[tokio::test]
+async fn ca_http_refuses_origin_and_cookie_before_decoding_wrapping_material() {
+    let (f, app) = http_fixture().await;
+    for (origin, cookie, status) in [
+        (None, Some(f.auth.session.as_str()), StatusCode::FORBIDDEN),
+        (
+            Some("https://foreign.example"),
+            Some(f.auth.session.as_str()),
+            StatusCode::FORBIDDEN,
+        ),
+        (Some(ORIGIN), None, StatusCode::UNAUTHORIZED),
+        (Some(ORIGIN), Some("invalid"), StatusCode::UNAUTHORIZED),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(ca_request(
+                "/remote/ca/unlock/finish",
+                origin,
+                cookie,
+                "{\"scoped_key\":\"secret-shaped-invalid-value\"}".into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+    }
+    assert!(f.source.load().is_err());
+}

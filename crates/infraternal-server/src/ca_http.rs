@@ -89,15 +89,16 @@ async fn finish(
     headers: HeaderMap,
     body: bytes::Bytes,
 ) -> Result<Json<Value>, StatusCode> {
-    // Return a static parser error rather than Axum's JSON diagnostic, which
-    // could reflect attacker-controlled wrapping material in an invalid value.
-    let body = decode_unlock(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let key = body.scoped_key;
     let (token, now) = request(&api, &headers)?;
     let _permit = api
         .admission
         .try_acquire()
         .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    // Reject cheap header failures and reserve admission before constructing
+    // proof JSON or wrapping-key buffers. Parser errors remain static so an
+    // invalid value cannot be reflected into a response.
+    let body = decode_unlock(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let key = body.scoped_key;
     api.administration
         .finish(token, &body.ceremony, body.proof, key, now)
         .await
