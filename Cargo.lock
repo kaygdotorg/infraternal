@@ -1285,9 +1285,15 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "infraternal-agent",
+ "infraternal-mesh",
+ "infraternal-plugin-api",
+ "infraternal-plugin-backup",
+ "infraternal-plugin-relay",
+ "infraternal-plugin-ssh",
  "infraternal-server",
  "infraternal-shim",
  "nix",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
@@ -1298,6 +1304,7 @@ dependencies = [
 name = "infraternal-agent"
 version = "0.1.0"
 dependencies = [
+ "infraternal-plugin-api",
  "infraternal-protocol",
  "infraternal-shim",
  "nix",
@@ -1320,6 +1327,7 @@ dependencies = [
 name = "infraternal-mesh"
 version = "0.1.0"
 dependencies = [
+ "infraternal-plugin-api",
  "nix",
  "serde",
  "serde_json",
@@ -1334,8 +1342,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "infraternal-plugin-backup"
+version = "0.1.0"
+dependencies = [
+ "infraternal-plugin-api",
+]
+
+[[package]]
+name = "infraternal-plugin-relay"
+version = "0.1.0"
+dependencies = [
+ "infraternal-plugin-api",
+]
+
+[[package]]
 name = "infraternal-plugin-ssh"
 version = "0.1.0"
+dependencies = [
+ "infraternal-plugin-api",
+]
 
 [[package]]
 name = "infraternal-protocol"
@@ -1359,6 +1384,7 @@ dependencies = [
  "futures-util",
  "hkdf",
  "http-body-util",
+ "infraternal-plugin-api",
  "infraternal-protocol",
  "nix",
  "openssl",

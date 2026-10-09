@@ -7,12 +7,27 @@ license.workspace = true
 
 [dependencies]
 clap.workspace = true
+infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
+serde_json.workspace = true
 infraternal-server = { path = "../infraternal-server", version = "0.1.0" }
 sqlx.workspace = true
 tokio.workspace = true
 infraternal-shim.workspace = true
 infraternal-agent = { path = "../infraternal-agent", version = "0.1.0" }
+infraternal-mesh = { path = "../infraternal-mesh", version = "0.1.0", optional = true }
+infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
+infraternal-plugin-relay = { path = "../plugins/relay", version = "0.1.0", optional = true }
+infraternal-plugin-backup = { path = "../plugins/backup", version = "0.1.0", optional = true }
 thiserror.workspace = true
+
+[features]
+default = ["plugin-agent", "plugin-backup", "plugin-mesh", "plugin-relay", "plugin-server", "plugin-ssh"]
+plugin-agent = []
+plugin-backup = ["dep:infraternal-plugin-backup"]
+plugin-mesh = ["dep:infraternal-mesh"]
+plugin-relay = ["dep:infraternal-plugin-relay"]
+plugin-server = []
+plugin-ssh = ["dep:infraternal-plugin-ssh"]
 
 [lints]
 workspace = true

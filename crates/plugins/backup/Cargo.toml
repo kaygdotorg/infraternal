@@ -1,0 +1,12 @@
+# The metadata-only backup plugin package; backup behavior is built in a separate lane.
+[package]
+name = "infraternal-plugin-backup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
+
+[lints]
+workspace = true
