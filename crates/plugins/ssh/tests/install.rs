@@ -418,3 +418,29 @@ async fn fresh_receipt_is_removed_before_transaction_rollback() {
         "fresh manual receipt left an installed artifact behind"
     );
 }
+
+#[tokio::test]
+async fn rollback_stop_refusal_retains_artifacts_for_later_cleanup() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    assert!(transaction.enable_linger().await.unwrap());
+    // Once activation has succeeded, a refused stop leaves the new service live.
+    // Its identity and transaction must survive so fresh credentials can retry cleanup.
+    executable(
+        &fixture.root.join("tools/systemctl"),
+        "#!/bin/sh\ncase \"$*\" in *stop*) exit 1;; *) exit 0;; esac\n",
+    );
+    assert!(
+        transaction.rollback().await.is_err(),
+        "rollback reported success despite service stop refusal"
+    );
+    assert!(fixture.base().join("state/proof").exists());
+    assert!(fixture.base().join(".bootstrap-lock/transaction").exists());
+    assert!(fixture.root.join("linger").exists());
+    executable(&fixture.root.join("tools/systemctl"), "#!/bin/sh\nexit 0\n");
+    transaction.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+    assert!(!fixture.root.join("linger").exists());
+}

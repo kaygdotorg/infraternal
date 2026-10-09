@@ -225,7 +225,6 @@ $manager is-active infraternal-agent.service >/dev/null 2>&1 && : > "$stage/was-
 mkdir -p "$base/bin" "$(dirname "$launcher")" "$(dirname "$unit")"
 # Rename the old live binary/state into the transaction, not into a disposable
 # upload file. This makes failures after a service stop explicitly reversible.
-: > "$stage/activating"
 # Replacing a running daemon requires an acknowledged stop; otherwise its old
 # authenticated connection could conceal a failed upgrade.
 if [ -f "$stage/was-active" ]; then
@@ -233,6 +232,9 @@ if [ -f "$stage/was-active" ]; then
 else
     $manager stop infraternal-agent.service >/dev/null 2>&1 || :
 fi
+# Journal ownership before replacement, after stopping the previous service.
+# A refused prior stop changed no live files and needs staging-only cleanup.
+: > "$stage/activating"
 if [ -e "$base/bin/live" ]; then : > "$stage/had-binary"; mv "$base/bin/live" "$stage/previous-binary"; fi
 : > "$stage/replacing-binary"
 mv "$stage/payload" "$base/bin/live"
@@ -314,6 +316,10 @@ stage="$base/.bootstrap-lock"
 if [ ! -e "$stage" ] && [ ! -L "$stage" ]; then exit 0; fi
 [ -d "$stage" ] && [ ! -L "$stage" ] || exit 71
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+# Refused stop retains both installation and policy receipts for cleanup retry.
+if [ -f "$stage/activating" ]; then
+    $manager stop infraternal-agent.service >/dev/null 2>&1
+fi
 if [ -f "$stage/linger-requested" ]; then
     uid=$(id -u)
     if [ "$(loginctl show-user "$uid" -p Linger --value 2>/dev/null || :)" = yes ]; then
@@ -322,7 +328,6 @@ if [ -f "$stage/linger-requested" ]; then
     rm -f "$stage/linger-requested"
 fi
 if [ -f "$stage/activating" ]; then
-    $manager stop infraternal-agent.service >/dev/null 2>&1 || :
     $manager disable infraternal-agent.service >/dev/null 2>&1 || :
     if [ -f "$stage/replacing-binary" ] || [ -f "$stage/previous-binary" ]; then rm -f "$base/bin/live" "$base/bin/current"; fi
     if [ -f "$stage/replacing-state" ] || [ -d "$stage/previous-state" ]; then rm -rf "$base/state"; fi
