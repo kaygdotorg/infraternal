@@ -256,3 +256,50 @@ and retries once per hour within the remaining validity window. Healthy
 connections use only the half-life/expiry deadlines, never periodic heartbeats.
 Expired local identities refuse further connection attempts; arbitrary TLS
 failure never removes host state.
+
+## Shipping administrator CA authority [168]
+
+The following additive requirements govern the production unlock adapter; the
+trusted in-memory adapter alone is not acceptance. This does not change the
+invitation or join request/response shape used by #87.
+
+Administrator membership is explicit, with a positive, monotone per-user
+membership generation. The initial installation owner seeds this role once.
+Subsequent authorization reads current membership, never an owner boolean.
+Role revocation and a later grant cannot resurrect a ceremony or encrypted copy
+bound to the earlier generation. SQLite contains role/copy state metadata only,
+never a CA seed, decrypted wrapping key or encrypted CA-key copy.
+
+CA copies live in the private XDG CA directory, under `administrators/`, one
+current copy per administrator. Use the existing AES-256-GCM/HKDF-SHA256 wrapping
+stack and the D168 Ed25519 seed. Authenticate issuer fingerprint, member,
+membership generation and wrapping salt as associated data. The browser derives
+only the domain-separated CA wrapping key from its locally unwrapped account
+DEK; neither PRF output nor DEK reaches the server, and CA seed/ciphertext copies
+are never sent to the browser. Decrypted seeds and wrapping keys are transient
+secret memory. Authenticate the GCM tag before constructing signer material;
+every failing decrypt path clears its plaintext buffer.
+
+Publication is atomic and durable in owned 0700 directories with 0600 files.
+Bound copy reads to 8192 bytes and refuse unsafe ownership, permissions or
+symlink reads. Removing one membership generation cannot remove another user's
+or generation's copy. Role grant/revoke updates rewrap/removal state; offline
+recipient wrapping follows the pending-grant rule [151].
+
+Unlock requires a single-use, expiring passkey ceremony bound to its purpose,
+original browser session, user and membership generation. Use the existing real
+WebAuthn verifier and credential-counter transaction. Before installing the key,
+recheck the original live session, current membership and the fresh proof's
+still-registered credential under the database writer lock. A concurrent role,
+session or credential revocation must fail closed. Reject malformed/oversized
+requests with static errors; never reflect or log wrapping material.
+
+Cold startup retains public trust while refusing enrollment and renewal until
+any current administrator completes that unlock. Existing host authority and
+sessions do not depend on the CA lock. Deliver locked and approaching-expiry
+notifications to current administrators without idle polling. A configured
+release CLI must use this actual adapter and encrypted store; fixture signer
+injection is not a substitute. Unconfigured shipping servers still register
+remote enrollment paths and return service-unavailable rather than route-not-found.
+Process-only update/rollback handoff remains distinct from cold startup; update
+IPC integration is a later slice.
