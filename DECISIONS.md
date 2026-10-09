@@ -1700,3 +1700,18 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        following is wrong: an app that refuses the size (sized as close as it
        allows), or local input on the machine in the last minute (it snaps to
        size once the machine is idle).
+209. **Mesh pages and Access (owner, 2026-10-09, grill round 1):**
+     - **Pages:** Machines (landing list), Map (the canvas view), Names &
+       routes; Mesh settings live in the global Settings (round 2).
+     - **Names:** "Map" for the canvas view; user-friendly names everywhere.
+     - **Access:** one table of rules, each row a sentence with chips
+       ("[tag:ci] can reach [nix-cache]", "[group:ops] can operate
+       [tag:prod]"); people and machine rules together, filtered by chips;
+       it lives in the global Settings (placement in round 2).
+     - **Editing:** the table and the Map edit the same rules and update
+       each other instantly; rules are added with a sentence builder whose
+       blanks are chip pickers; saving needs a fresh passkey.
+     - **Chips are live:** hovering a chip shows useful facts; clicking it
+       opens that item where it lives, without losing the dialog the user
+       was in (UX in round 2).
+     - **"Why can/can't X reach Y":** wanted, made simpler (round 2).
