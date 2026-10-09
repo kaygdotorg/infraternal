@@ -112,7 +112,7 @@ async fn independent_review_configured_server_mounts_ca_unlock_routes() {
                 server_name: "localhost".into(),
             },
         },
-        identity,
+        identity: Some(identity),
         roots: vec![issuer],
     };
     let (app, _, listeners) = build_router_core(

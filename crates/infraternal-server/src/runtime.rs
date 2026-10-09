@@ -300,12 +300,14 @@ fn ca_router(
     remote: Option<&RemoteService>,
     auth: &Auth,
     pool: &SqlitePool,
+    hosts: crate::remote_runtime::RemoteHosts,
+    store: crate::enrollment::EnrollmentStore,
 ) -> Result<Router, ServerError> {
     remote
         .and_then(|service| service.ca_administration.as_ref())
         .map(|configuration| {
             configuration
-                .with_auth(auth.clone(), pool.clone())
+                .with_runtime(auth.clone(), pool.clone(), hosts, store)
                 .map(|authority| crate::ca_http::router(auth.clone(), authority))
                 .map_err(|_| ServerError::TlsConfiguration)
         })
@@ -323,6 +325,7 @@ async fn remote_router(
 ) -> Result<
     (
         Router,
+        Router,
         crate::remote_runtime::RemoteHosts,
         Option<RemoteListeners>,
     ),
@@ -332,11 +335,18 @@ async fn remote_router(
         enrollment.as_ref().map(|service| service.source.clone()),
     );
     let enrollment_store = crate::enrollment::EnrollmentStore::new(pool.clone());
-    let listeners = if let Some(remote) = remote {
+    let ca_api = ca_router(
+        remote.as_ref(),
+        &auth,
+        &pool,
+        hosts.clone(),
+        enrollment_store.clone(),
+    )?;
+    let listeners = if let Some(remote) = remote.filter(|remote| remote.identity.is_some()) {
         Some(
             crate::remote_runtime::RemoteListeners::start(
                 remote.enrollment.endpoint.endpoint,
-                &remote.identity,
+                &remote.identity.ok_or(ServerError::TlsConfiguration)?,
                 &remote.roots,
                 enrollment_store.clone(),
                 hosts.clone(),
@@ -360,6 +370,7 @@ async fn remote_router(
         )
     });
     Ok((
+        ca_api,
         remote_api.unwrap_or_else(crate::remote_http::unavailable_router),
         hosts,
         listeners,
@@ -383,8 +394,6 @@ async fn build_router_core(
     let auth = Auth::new(pool.clone(), rp_id, &config.public_origin)
         .await
         .map_err(ServerError::Auth)?;
-    #[cfg(feature = "remote")]
-    let ca_api = ca_router(remote.as_ref(), &auth, &pool)?;
     #[cfg(not(feature = "remote"))]
     let ca_api = Router::new();
     let now = unix_seconds()?;
@@ -417,7 +426,7 @@ async fn build_router_core(
         EmbeddedAgent::spawn(executable)
     };
     #[cfg(feature = "remote")]
-    let (remote_api, hosts, listeners) =
+    let (ca_api, remote_api, hosts, listeners) =
         remote_router(auth.clone(), pool.clone(), enrollment, remote).await?;
     #[cfg(feature = "remote")]
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent).with_remote_hosts(hosts);
@@ -550,7 +559,7 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
     Ok(pool)
 }
 
-fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
+pub(crate) fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
     if config.behind_proxy == config.trusted_proxies.is_empty() {
         return Err(ServerError::InvalidConfiguration);
     }

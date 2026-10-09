@@ -24,7 +24,7 @@ pub struct RemoteService {
     /// Enrollment signer source and transport coordinates.
     pub enrollment: crate::remote_http::EnrollmentService,
     /// Server-only TLS key and certificate.
-    pub identity: Identity,
+    pub identity: Option<Identity>,
     /// Public issuer overlap for mutual TLS.
     pub roots: Vec<X509>,
 }

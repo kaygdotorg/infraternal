@@ -44,16 +44,29 @@ pub const SERVE: ActionDef = ActionDef {
     summary: "Accept enrolled infraternal agents on a configured server",
     instructions: &[
         "Initialize and confirm the server separately.",
-        "Retain the public issuer certificate in the private CA directory.",
+        "Configure private machine certificate storage; first setup requires a fresh administrator passkey.",
         "Configure the remote listener and public server trust.",
-        "Start the server; the certificate authority remains cold until administrator unlock.",
+        "Start the server; call remote.ca.bootstrap from an administrator session before enrolling a host.",
+    ],
+};
+/// Create machine trust only after a fresh administrator passkey verification.
+pub const BOOTSTRAP_CA: ActionDef = ActionDef {
+    id: "remote.ca.bootstrap",
+    summary: "Set up machine certificates",
+    instructions: &[
+        "Use an administrator session on the existing server.",
+        "POST /remote/ca/bootstrap/start with the exact Origin and session cookie.",
+        "Verify the returned passkey challenge with user verification required.",
+        "Derive the scoped CA key locally with HKDF-SHA256, the returned salt and info infraternal/ca-wrap/v1|member|generation.",
+        "POST ceremony, proof and scoped_key to /remote/ca/bootstrap/finish, then create the host invitation.",
+        "On a cold start the same bootstrap calls unlock the retained issuer using this administrator's wrapped copy.",
     ],
 };
 /// Explicit defaults leave remote runtime work disabled until configured.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "remote",
     api: 1,
-    actions: &[JOIN, RUN, SERVE],
+    actions: &[JOIN, RUN, SERVE, BOOTSTRAP_CA],
     settings: &[
         SettingDef {
             id: "enabled",
@@ -80,5 +93,6 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         "remote.host.join:existing-server",
         "remote.host.run:enrolled-node",
         "remote.server.serve:confirmed-server",
+        "remote.ca.bootstrap:confirmed-server",
     ],
 };

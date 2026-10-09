@@ -3,6 +3,8 @@ use crate::{
     ca::{CaError, CaMaterial, wrapping::WrappedCa},
     ca_copies::CaCopies,
     ca_memory::MemoryCaSource,
+    enrollment::EnrollmentStore,
+    remote_runtime::{RemoteHosts, RemoteListeners},
     remote_startup::{private_directory, private_file},
 };
 use infraternal_agent::remote_tls::Identity;
@@ -18,17 +20,69 @@ use openssl::{
 };
 use std::{
     io::Write,
+    net::SocketAddr,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tokio::sync::Mutex;
 
 /// Configured server coordinates; no initialization or background work occurs at construction.
 #[derive(Clone)]
 pub struct BootstrapConfig {
     pub(crate) directory: PathBuf,
     pub(crate) name: String,
+    pub(crate) address: SocketAddr,
+    pub(crate) deferred: bool,
 }
+/// Owns deferred listeners with the router, so disabling/dropping remote leaves no work.
+pub(crate) struct BootstrapRuntime {
+    pub(crate) config: BootstrapConfig,
+    pub(crate) hosts: RemoteHosts,
+    pub(crate) store: EnrollmentStore,
+    listeners: Mutex<Option<RemoteListeners>>,
+}
+impl BootstrapRuntime {
+    /// Construct inactive plugin listener ownership; no work starts here.
+    #[must_use]
+    pub(crate) fn new(config: BootstrapConfig, hosts: RemoteHosts, store: EnrollmentStore) -> Self {
+        Self {
+            config,
+            hosts,
+            store,
+            listeners: Mutex::new(None),
+        }
+    }
+    /// Activate configured listeners after durable machine trust exists.
+    /// # Errors
+    /// Refuses invalid retained trust or unavailable configured ports.
+    pub(crate) async fn activate(&self) -> Result<(), CaError> {
+        if !self.config.deferred {
+            return Ok(());
+        }
+        let mut listeners = self.listeners.lock().await;
+        if listeners.is_some() {
+            return Ok(());
+        }
+        let directory = self.config.directory.join("active");
+        let (identity, issuer) = tokio::task::spawn_blocking(move || retained_identity(&directory))
+            .await
+            .map_err(|_| CaError)??;
+        *listeners = Some(
+            RemoteListeners::start(
+                self.config.address,
+                &identity,
+                &[issuer],
+                self.store.clone(),
+                self.hosts.clone(),
+            )
+            .await
+            .map_err(|_| CaError)?,
+        );
+        Ok(())
+    }
+}
+
 /// Load only durable public trust without reading transport or signing keys.
 /// # Errors
 /// Refuses unsafe files or an issuer that is not self-signed Ed25519.

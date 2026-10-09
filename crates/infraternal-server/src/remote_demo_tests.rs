@@ -248,10 +248,10 @@ async fn fixture_at_with_lock(
                 server_name: "localhost".into(),
             },
         },
-        identity: infraternal_agent::remote_tls::Identity {
+        identity: Some(infraternal_agent::remote_tls::Identity {
             certificate: identity.certificate.clone(),
             key: identity.key.clone(),
-        },
+        }),
         roots: vec![root.clone()],
     };
     let (app, setup, listeners) = build_router_core(

@@ -282,7 +282,12 @@ async fn ca_body_admission_at_1000_requests() {
     }
     samples.sort_unstable();
     println!(
-        "CA_BODY_ADMISSION n=1000 profile=debug p50_ns={} p99_ns={} median_projected_ns_at1000={} payload_bound_bytes_at8={} machine={} load={}",
+        "CA_BODY_ADMISSION n=1000 profile={} p50_ns={} p99_ns={} median_projected_ns_at1000={} payload_bound_bytes_at8={} machine={} load={}",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
         samples[500],
         samples[990],
         samples[500] * 1000,
@@ -333,4 +338,20 @@ async fn ca_finish_body_deadline_returns_its_admission_slot() {
         .status(),
         StatusCode::OK
     );
+}
+
+/// Provisioning is a real administrator action rather than fixture-only state.
+#[tokio::test]
+async fn first_machine_certificate_setup_starts_a_fresh_passkey_ceremony() {
+    let (f, app) = http_fixture().await;
+    let response = app
+        .oneshot(ca_request(
+            "/remote/ca/bootstrap/start",
+            Some(ORIGIN),
+            Some(&f.auth.session),
+            "{}".into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }

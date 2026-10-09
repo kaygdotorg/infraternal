@@ -14,7 +14,7 @@ use openssl::{
 use std::{
     io::Read,
     net::SocketAddr,
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -34,11 +34,152 @@ impl RemoteStartup {
     /// Refuses missing/unsafe trust files, mismatched leaf/key, invalid chain/name
     /// or unsupported reverse-proxy trust configuration without regenerating CA.
     pub fn cold_start(&self, config: &ServerConfig) -> Result<RemoteService, ServerError> {
-        if self.listen.ip().is_unspecified() || self.listen.port() == 0 || config.behind_proxy {
+        if self.listen.ip().is_unspecified() || self.listen.port() == 0 {
             return Err(ServerError::InvalidConfiguration);
         }
+        crate::runtime::validate_config(config)?;
+        let _https = https_identity(config)?;
         let ca_dir = self.ca_dir.clone().map_or_else(default_ca_dir, Ok)?;
+        if !ca_dir.is_absolute() {
+            return Err(ServerError::InvalidConfiguration);
+        }
+        if !ca_dir
+            .try_exists()
+            .map_err(|_| ServerError::TlsConfiguration)?
+        {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&ca_dir)
+                .map_err(|_| ServerError::TlsConfiguration)?;
+        }
         private_directory(&ca_dir)?;
+        let origin = url::Url::parse(&config.public_origin)
+            .map_err(|_| ServerError::InvalidConfiguration)?;
+        let name = origin.host_str().ok_or(ServerError::InvalidConfiguration)?;
+        if ca_dir.join("active").symlink_metadata().is_ok() {
+            self.retained_service(config, ca_dir, name)
+        } else if ca_dir.join("issuer.pem").symlink_metadata().is_ok() {
+            self.legacy_service(config, ca_dir, name)
+        } else {
+            self.fresh_service(config, ca_dir, name)
+        }
+    }
+    fn retained_service(
+        &self,
+        config: &ServerConfig,
+        ca_dir: PathBuf,
+        name: &str,
+    ) -> Result<RemoteService, ServerError> {
+        let (identity, issuer) = crate::ca_bootstrap::retained_identity(&ca_dir.join("active"))
+            .map_err(|_| ServerError::TlsConfiguration)?;
+        verify_server(&issuer, &identity.certificate, name)?;
+        let https = config
+            .tls
+            .as_ref()
+            .map(|tls| {
+                X509::from_pem(&private_file(&tls.certificate)?)
+                    .map_err(|_| ServerError::TlsConfiguration)
+            })
+            .transpose()?;
+        let source = Arc::new(if let Some(https) = https {
+            MemoryCaSource::cold_start_with_https(issuer.clone(), https)
+        } else {
+            MemoryCaSource::cold_start_with_system_https(issuer.clone())
+        });
+        let mut administration = crate::ca_administration::CaAdministrationConfig::new(
+            source.clone(),
+            ca_dir.join("active"),
+        );
+        administration.bootstrap = Some(crate::ca_bootstrap::BootstrapConfig {
+            directory: ca_dir,
+            name: name.to_owned(),
+            address: self.listen,
+            deferred: false,
+        });
+        Ok(RemoteService {
+            ca_administration: Some(administration),
+            enrollment: EnrollmentService {
+                source,
+                endpoint: EnrollmentEndpoint {
+                    ca_der: issuer.to_der().map_err(|_| ServerError::TlsConfiguration)?,
+                    endpoint: self.listen,
+                    server_name: name.to_owned(),
+                },
+            },
+            identity: Some(identity),
+            roots: vec![issuer],
+        })
+    }
+    fn fresh_service(
+        &self,
+        config: &ServerConfig,
+        ca_dir: PathBuf,
+        name: &str,
+    ) -> Result<RemoteService, ServerError> {
+        // A fresh private CA directory can be configured before the first tap.
+        // Refuse incomplete legacy trust; removing an issuer must never create a new CA.
+        if std::fs::read_dir(&ca_dir)
+            .map_err(|_| ServerError::TlsConfiguration)?
+            .next()
+            .is_none()
+        {
+            let marker = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(ca_dir.join("pending"))
+                .map_err(|_| ServerError::TlsConfiguration)?;
+            marker
+                .sync_all()
+                .map_err(|_| ServerError::TlsConfiguration)?;
+            std::fs::File::open(&ca_dir)
+                .and_then(|dir| dir.sync_all())
+                .map_err(|_| ServerError::TlsConfiguration)?;
+        }
+        if !private_file(&ca_dir.join("pending"))?.is_empty() {
+            return Err(ServerError::TlsConfiguration);
+        }
+        let https = config
+            .tls
+            .as_ref()
+            .map(|tls| {
+                X509::from_pem(&private_file(&tls.certificate)?)
+                    .map_err(|_| ServerError::TlsConfiguration)
+            })
+            .transpose()?;
+        let source = Arc::new(MemoryCaSource::unprovisioned(https));
+        let mut administration =
+            crate::ca_administration::CaAdministrationConfig::new(source.clone(), ca_dir.clone());
+        administration.bootstrap = Some(crate::ca_bootstrap::BootstrapConfig {
+            directory: ca_dir,
+            name: name.to_owned(),
+            address: self.listen,
+            deferred: true,
+        });
+        Ok(RemoteService {
+            ca_administration: Some(administration),
+            enrollment: EnrollmentService {
+                source,
+                endpoint: EnrollmentEndpoint {
+                    ca_der: vec![],
+                    endpoint: self.listen,
+                    server_name: name.to_owned(),
+                },
+            },
+            identity: None,
+            roots: vec![],
+        })
+    }
+    fn legacy_service(
+        &self,
+        config: &ServerConfig,
+        ca_dir: PathBuf,
+        name: &str,
+    ) -> Result<RemoteService, ServerError> {
+        if config.behind_proxy {
+            return Err(ServerError::InvalidConfiguration);
+        }
         let issuer = X509::from_pem(&private_file(&ca_dir.join("issuer.pem"))?)
             .map_err(|_| ServerError::TlsConfiguration)?;
         let public = issuer
@@ -83,9 +224,6 @@ impl RemoteStartup {
         {
             return Err(ServerError::TlsConfiguration);
         }
-        let origin = url::Url::parse(&config.public_origin)
-            .map_err(|_| ServerError::InvalidConfiguration)?;
-        let name = origin.host_str().ok_or(ServerError::InvalidConfiguration)?;
         verify_server(&issuer, &certificate, name)?;
         let source = Arc::new(MemoryCaSource::cold_start(issuer.clone()));
         Ok(RemoteService {
@@ -101,10 +239,31 @@ impl RemoteStartup {
                     server_name: name.to_owned(),
                 },
             },
-            identity: Identity { certificate, key },
+            identity: Some(Identity { certificate, key }),
             roots: vec![issuer],
         })
     }
+}
+
+fn https_identity(config: &ServerConfig) -> Result<Option<Identity>, ServerError> {
+    config
+        .tls
+        .as_ref()
+        .map(|tls| {
+            let certificate = X509::from_pem(&private_file(&tls.certificate)?)
+                .map_err(|_| ServerError::TlsConfiguration)?;
+            let key = PKey::private_key_from_pem(&private_file(&tls.private_key)?)
+                .map_err(|_| ServerError::TlsConfiguration)?;
+            if !certificate
+                .public_key()
+                .map_err(|_| ServerError::TlsConfiguration)?
+                .public_eq(&key)
+            {
+                return Err(ServerError::TlsConfiguration);
+            }
+            Ok(Identity { certificate, key })
+        })
+        .transpose()
 }
 
 fn verify_server(issuer: &X509, leaf: &X509, name: &str) -> Result<(), ServerError> {

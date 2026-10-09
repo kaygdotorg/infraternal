@@ -1,7 +1,7 @@
 //! Authorizes CA unlock through a purpose-bound real passkey ceremony and current explicit administrator generation [168], #78.
 use crate::{
     auth::Auth,
-    ca::{CaError, CaMaterial},
+    ca::{CaError, CaKeySource, CaMaterial},
     ca_copies::CaCopies,
     ca_membership::{Membership, require_binding, require_live},
     ca_memory::{AdministratorCaUnlock, MemoryCaSource},
@@ -14,18 +14,41 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, Semaphore};
 use zeroize::Zeroizing;
 
+mod bootstrap;
+
 /// Startup carries public trust and private encrypted-copy storage into runtime
 /// auth wiring. Constructing this configuration never unlocks the signing source.
 #[derive(Clone)]
 pub struct CaAdministrationConfig {
     source: Arc<MemoryCaSource>,
     directory: PathBuf,
+    pub(crate) bootstrap: Option<crate::ca_bootstrap::BootstrapConfig>,
 }
 impl CaAdministrationConfig {
     /// Associate the cold memory source with its checked private copy store.
     #[must_use]
     pub fn new(source: Arc<MemoryCaSource>, directory: PathBuf) -> Self {
-        Self { source, directory }
+        Self {
+            source,
+            directory,
+            bootstrap: None,
+        }
+    }
+    pub(crate) fn with_runtime(
+        &self,
+        auth: Auth,
+        pool: SqlitePool,
+        hosts: crate::remote_runtime::RemoteHosts,
+        store: crate::enrollment::EnrollmentStore,
+    ) -> Result<Arc<CaAdministration>, CaError> {
+        let copies = Arc::new(CaCopies::new(&self.directory)?);
+        let mut authority = CaAdministration::new(auth, pool, self.source.clone(), copies);
+        authority.bootstrap = self.bootstrap.clone().map(|config| {
+            Arc::new(crate::ca_bootstrap::BootstrapRuntime::new(
+                config, hosts, store,
+            ))
+        });
+        Ok(Arc::new(authority))
     }
     /// Create one runtime authority using its actual migrated auth/database state.
     /// # Errors
@@ -45,10 +68,19 @@ impl CaAdministrationConfig {
     }
 }
 
+/// Explicit generation-changing role mutation; no owner flag mirrors membership.
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleChange {
+    pub user_id: String,
+    pub administrator: bool,
+}
 struct PendingUnlock {
     session_hash: String,
     membership: Membership,
     expires: i64,
+    salt: Option<[u8; 32]>,
+    role: Option<RoleChange>,
 }
 /// One shipping server's CA authority. Signing stays locked until a verified
 /// current administrator decrypts their generation-bound private copy.
@@ -59,8 +91,37 @@ pub struct CaAdministration {
     copies: Arc<CaCopies>,
     pending: Mutex<HashMap<String, PendingUnlock>>,
     crypto: Arc<Semaphore>,
+    pub(crate) bootstrap: Option<Arc<crate::ca_bootstrap::BootstrapRuntime>>,
 }
 impl CaAdministration {
+    // A process-owned mutation retains admission and the writer transaction if
+    // HTTP disconnects. The purpose registry is consumed before this clone exists.
+    fn operation(&self) -> Self {
+        Self {
+            auth: self.auth.clone(),
+            pool: self.pool.clone(),
+            source: self.source.clone(),
+            copies: self.copies.clone(),
+            pending: Mutex::default(),
+            crypto: self.crypto.clone(),
+            bootstrap: self.bootstrap.clone(),
+        }
+    }
+
+    fn copy_store(&self) -> Result<Arc<CaCopies>, CaError> {
+        self.bootstrap.as_ref().map_or_else(
+            || Ok(self.copies.clone()),
+            |runtime| {
+                let active = runtime.config.directory.join("active");
+                if active.try_exists().map_err(|_| CaError)? {
+                    Ok(Arc::new(CaCopies::new(&active)?))
+                } else {
+                    Ok(self.copies.clone())
+                }
+            },
+        )
+    }
+
     /// Read lock status only for a current, live administrator credential session.
     /// # Errors
     /// Refuses missing/revoked administrator authority or storage failures.
@@ -86,6 +147,7 @@ impl CaAdministration {
             copies,
             pending: Mutex::new(HashMap::new()),
             crypto: Arc::new(Semaphore::new(8)),
+            bootstrap: None,
         }
     }
     /// Start a single-use unlock proof for this exact live browser and role generation.
@@ -97,7 +159,7 @@ impl CaAdministration {
         let membership = require_live(&mut tx, &session_hash, now).await?;
         tx.rollback().await.map_err(|_| CaError)?;
         let generation = u64::try_from(membership.generation()).map_err(|_| CaError)?;
-        let copies = self.copies.clone();
+        let copies = self.copy_store()?;
         let member = membership.user().to_owned();
         let permit = self
             .crypto
@@ -136,6 +198,8 @@ impl CaAdministration {
                 session_hash,
                 membership,
                 expires: now.checked_add(300).ok_or(CaError)?,
+                salt: None,
+                role: None,
             },
         );
         Ok(start)
@@ -161,7 +225,7 @@ impl CaAdministration {
             }
             pending.remove(id).ok_or(CaError)?
         };
-        if entry.expires <= now {
+        if entry.expires <= now || entry.salt.is_some() || entry.role.is_some() {
             return Err(CaError);
         }
         let verified = self
@@ -169,7 +233,7 @@ impl CaAdministration {
             .verify_passkey(id, proof, now)
             .await
             .map_err(|_| CaError)?;
-        let copies = self.copies.clone();
+        let copies = self.copy_store()?;
         let issuer = self.source.issuer()?;
         let member = entry.membership.user().to_owned();
         let generation = u64::try_from(entry.membership.generation()).map_err(|_| CaError)?;

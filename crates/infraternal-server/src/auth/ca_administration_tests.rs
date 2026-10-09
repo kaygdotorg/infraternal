@@ -371,3 +371,231 @@ mod http_tests;
 
 #[path = "ca_shipping_cli_tests.rs"]
 mod shipping_cli_tests;
+
+async fn bootstrap_fixture() -> UnlockFixture {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = unlock_fixture().await;
+    let directory = f.root.join("fresh-ca");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(directory.join("pending"))
+        .unwrap();
+    let source = Arc::new(MemoryCaSource::unprovisioned(None));
+    let mut administration = CaAdministration::new(
+        f.auth.auth.clone(),
+        f.auth.auth.pool.clone(),
+        source.clone(),
+        Arc::new(CaCopies::new(&directory).unwrap()),
+    );
+    administration.bootstrap = Some(Arc::new(crate::ca_bootstrap::BootstrapRuntime::new(
+        crate::ca_bootstrap::BootstrapConfig {
+            directory,
+            name: "auth.example.test".into(),
+            address: "127.0.0.1:0".parse().unwrap(),
+            deferred: true,
+        },
+        crate::remote_runtime::RemoteHosts::default(),
+        crate::enrollment::EnrollmentStore::new(f.auth.auth.pool.clone()),
+    )));
+    f.administration = administration;
+    f.source = source;
+    f
+}
+#[tokio::test]
+async fn bootstrap_requires_a_fresh_real_proof_and_publishes_only_wrapped_ca_material() {
+    struct Unlocked(crate::ca::CaMaterial);
+    impl crate::ca_memory::AdministratorCaUnlock for Unlocked {
+        fn unlock(&self) -> std::result::Result<crate::ca::CaMaterial, crate::ca::CaError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    let mut f = bootstrap_fixture().await;
+    let directory = f.root.join("fresh-ca");
+    let start = f
+        .administration
+        .bootstrap_start(&f.auth.session, NOW)
+        .await
+        .unwrap();
+    assert!(f.source.issuer().is_err());
+    assert!(!directory.join("active").exists());
+    let proof = f.auth.software.login(&start, ORIGIN, false);
+    assert!(
+        f.administration
+            .bootstrap_finish(
+                &f.auth.session,
+                str_field(&start, "ceremony"),
+                proof,
+                Zeroizing::new([7; 32]),
+                NOW
+            )
+            .await
+            .is_err()
+    );
+    assert!(!directory.join("active").exists());
+    let start = f
+        .administration
+        .bootstrap_start(&f.auth.session, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    f.administration
+        .bootstrap_finish(
+            &f.auth.session,
+            str_field(&start, "ceremony"),
+            proof,
+            Zeroizing::new([7; 32]),
+            NOW,
+        )
+        .await
+        .unwrap();
+    let issuer = f.source.issuer().unwrap();
+    assert!(f.source.load().is_ok());
+    let copy = CaCopies::new(&directory.join("active"))
+        .unwrap()
+        .read(&f.auth.user, 1)
+        .unwrap();
+    let material = copy.open(&issuer, &f.auth.user, 1, &[7; 32]).unwrap();
+    let cold = MemoryCaSource::cold_start(issuer.clone());
+    assert!(cold.load().is_err());
+    cold.unlock_from(&Unlocked(material)).unwrap();
+    assert!(cold.load().is_ok());
+    assert!(!directory.join("pending").exists());
+    let mut names = std::fs::read_dir(directory.join("active"))
+        .unwrap()
+        .map(|v| v.unwrap().file_name().to_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        ["administrators", "issuer.pem", "remote.key", "remote.pem"]
+    );
+}
+#[tokio::test]
+async fn concurrent_bootstrap_ceremonies_retain_one_issuer_and_replay_is_refused() {
+    let mut f = bootstrap_fixture().await;
+    let a = f
+        .administration
+        .bootstrap_start(&f.auth.session, NOW)
+        .await
+        .unwrap();
+    let b = f
+        .administration
+        .bootstrap_start(&f.auth.session, NOW)
+        .await
+        .unwrap();
+    let ap = f.auth.software.login(&a, ORIGIN, true);
+    let bp = f.auth.software.login(&b, ORIGIN, true);
+    let (ar, br) = tokio::join!(
+        f.administration.bootstrap_finish(
+            &f.auth.session,
+            str_field(&a, "ceremony"),
+            ap.clone(),
+            Zeroizing::new([7; 32]),
+            NOW
+        ),
+        f.administration.bootstrap_finish(
+            &f.auth.session,
+            str_field(&b, "ceremony"),
+            bp,
+            Zeroizing::new([7; 32]),
+            NOW
+        ),
+    );
+    assert!(ar.is_ok() || br.is_ok());
+    let issuer = f.source.issuer().unwrap().to_der().unwrap();
+    assert!(
+        f.administration
+            .bootstrap_finish(
+                &f.auth.session,
+                str_field(&a, "ceremony"),
+                ap,
+                Zeroizing::new([7; 32]),
+                NOW
+            )
+            .await
+            .is_err()
+    );
+    let c = f
+        .administration
+        .bootstrap_start(&f.auth.session, NOW)
+        .await
+        .unwrap();
+    let cp = f.auth.software.login(&c, ORIGIN, true);
+    f.administration
+        .bootstrap_finish(
+            &f.auth.session,
+            str_field(&c, "ceremony"),
+            cp,
+            Zeroizing::new([7; 32]),
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(issuer, f.source.issuer().unwrap().to_der().unwrap());
+}
+
+/// Offline role recipients remain pending until their own device supplies a
+/// scoped key; revocation removes only the previous generation's private copy.
+#[tokio::test]
+async fn published_issuer_without_memory_projection_is_recovered_as_locked_trust() {
+    let mut f = bootstrap_fixture().await;
+    let start = f
+        .administration
+        .bootstrap_start(&f.auth.session, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    f.administration
+        .bootstrap_finish(
+            &f.auth.session,
+            str_field(&start, "ceremony"),
+            proof,
+            Zeroizing::new([7; 32]),
+            NOW,
+        )
+        .await
+        .unwrap();
+    let issuer = f.source.issuer().unwrap().to_der().unwrap();
+    let source = Arc::new(MemoryCaSource::unprovisioned(None));
+    let mut authority = CaAdministration::new(
+        f.auth.auth.clone(),
+        f.auth.auth.pool.clone(),
+        source.clone(),
+        Arc::new(CaCopies::new(&f.root.join("fresh-ca")).unwrap()),
+    );
+    authority.bootstrap = f.administration.bootstrap.clone();
+    f.administration = authority;
+    f.source = source;
+    let start = f
+        .administration
+        .bootstrap_start(&f.auth.session, NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        start["ca"]["operation"], "unlock",
+        "durable publication must never become another setup attempt"
+    );
+    assert!(
+        f.source.load().is_err(),
+        "recovering public trust unlocked private signing material"
+    );
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    f.administration
+        .bootstrap_finish(
+            &f.auth.session,
+            str_field(&start, "ceremony"),
+            proof,
+            Zeroizing::new([7; 32]),
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.source.issuer().unwrap().to_der().unwrap(), issuer);
+}
