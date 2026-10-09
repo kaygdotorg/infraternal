@@ -70,10 +70,12 @@ impl Fixture {
         executable(
             &root.join("tools/loginctl"),
             &format!(
-                "#!/bin/sh\ncase \"$*\" in\n*show-user*) if [ -f '{}' ]; then printf 'yes\\n'; else printf 'no\\n'; fi;;\n*enable-linger*) [ ! -f '{}' ] && touch '{}';;\n*disable-linger*) rm -f '{}';;\n*) exit 1;;\nesac\n",
+                "#!/bin/sh\ncase \"$*\" in\n*show-user*) if [ -f '{}' ]; then printf 'yes\\n'; else printf 'no\\n'; fi;;\n*enable-linger*) [ ! -f '{}' ] || exit 1; [ -f '{}' ] || touch '{}'; [ ! -f '{}' ] || kill -TERM \"$PPID\";;\n*disable-linger*) rm -f '{}';;\n*) exit 1;;\nesac\n",
                 root.join("linger").display(),
                 root.join("deny-linger").display(),
+                root.join("noop-linger").display(),
                 root.join("linger").display(),
+                root.join("interrupt-linger").display(),
                 root.join("linger").display()
             ),
         );
@@ -442,5 +444,52 @@ async fn rollback_stop_refusal_retains_artifacts_for_later_cleanup() {
     executable(&fixture.root.join("tools/systemctl"), "#!/bin/sh\nexit 0\n");
     transaction.rollback().await.unwrap();
     assert!(!fixture.base().exists());
+    assert!(!fixture.root.join("linger").exists());
+}
+
+#[tokio::test]
+async fn denied_linger_request_does_not_undo_a_later_external_enable() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    std::fs::write(fixture.root.join("deny-linger"), "public policy refusal").unwrap();
+    assert!(!transaction.enable_linger().await.unwrap());
+    // A separate operator enables linger after our denied request. Intent alone
+    // is not a receipt that this transaction owns the policy change.
+    std::fs::write(fixture.root.join("linger"), "external policy enable").unwrap();
+    transaction.rollback().await.unwrap();
+    assert!(
+        fixture.root.join("linger").exists(),
+        "rollback reversed external linger policy"
+    );
+}
+
+#[tokio::test]
+async fn acknowledged_linger_noop_does_not_own_later_external_enable() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    std::fs::write(fixture.root.join("noop-linger"), "public policy no-op").unwrap();
+    assert!(!transaction.enable_linger().await.unwrap());
+    std::fs::write(fixture.root.join("linger"), "external policy enable").unwrap();
+    transaction.rollback().await.unwrap();
+    assert!(fixture.root.join("linger").exists());
+}
+
+#[tokio::test]
+async fn interrupted_linger_reply_retains_intent_for_cleanup() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    std::fs::write(fixture.root.join("interrupt-linger"), "interrupt reply").unwrap();
+    assert!(transaction.enable_linger().await.is_err());
+    assert!(fixture.root.join("linger").exists());
+    assert!(
+        fixture
+            .base()
+            .join(".bootstrap-lock/linger-requested")
+            .exists()
+    );
+    transaction.rollback().await.unwrap();
     assert!(!fixture.root.join("linger").exists());
 }

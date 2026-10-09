@@ -273,8 +273,19 @@ uid=$(id -u)
 if [ "$(loginctl show-user "$uid" -p Linger --value 2>/dev/null || :)" = yes ]; then printf 'yes\n'; exit 0; fi
 # Intent precedes mutation so interrupted policy calls remain reversible.
 : > "$stage/linger-requested"
-loginctl --no-ask-password enable-linger "$uid" >/dev/null 2>&1 || :
-if [ "$(loginctl show-user "$uid" -p Linger --value 2>/dev/null || :)" = yes ]; then printf 'yes\n'; else printf 'no\n'; fi
+if ! loginctl --no-ask-password enable-linger "$uid" >/dev/null 2>&1; then
+    # An acknowledged refusal owns no policy change. Interrupted calls retain
+    # intent, but later external enablement must not belong to this attempt.
+    rm -f "$stage/linger-requested"
+    printf 'no\n'
+    exit 0
+fi
+state=$(loginctl show-user "$uid" -p Linger --value 2>/dev/null || :)
+case "$state" in
+    yes) printf 'yes\n';;
+    no) rm -f "$stage/linger-requested"; printf 'no\n';;
+    *) printf 'no\n';;
+esac
 "#), Input::Empty).await?;
         parse_linger(&output.stdout)
     }
