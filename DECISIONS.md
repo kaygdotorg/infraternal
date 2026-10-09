@@ -1422,3 +1422,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      noise (11.3 vs 12.8 MiB/s median, overlapping ranges). The webrtc-rs
      candidate is removed; the trait boundary stays so the engine remains
      replaceable.
+193. **Full screen a terminal (owner, 2026-10-09):** any terminal window can
+     go full screen: it fills the whole viewport with nothing else (no top
+     pill, toolbar, sidebar, other windows or canvas), and returns to exactly
+     where it was. Entered from the window's header pill, ⌘K and a shortcut;
+     left with the same shortcut, Esc (when the terminal does not need it) or
+     a small control that appears on hover/edge tap. The transition animates
+     (the window grows to the viewport), and the terminal refits once at the
+     end, never per frame. Mockup first (D162).
