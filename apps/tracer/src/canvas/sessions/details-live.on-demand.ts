@@ -1,5 +1,5 @@
 /** The product's details source (#127): reads live host, connection and session data after the popover is requested. */
-import type { MuxConnection } from "../../connection";
+import { ActionRefused, type MuxConnection } from "../../connection";
 import type { DetailsSource, HostFactsSnapshot } from "../windows/details-source";
 import { detailsFacts } from "../windows/details-facts";
 import type { SessionInventory } from "./inventory";
@@ -68,8 +68,12 @@ export function createLiveDetails(options: {
             snapshots.set(id, snapshot);
             refresh();
           }
-        } catch {
-          // A reconnect is picked up by the next bounded poll while the popover remains open.
+        } catch (error) {
+          if (error instanceof ActionRefused) {
+            // Refused actions will not recover by polling; reopening can retry after state changes.
+            active = false;
+          }
+          // Transport failures remain eligible for the next bounded poll after reconnect.
         } finally {
           inFlight = false;
           if (active) timer = window.setTimeout(() => { void read(); }, 1_000);
