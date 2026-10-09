@@ -28,6 +28,7 @@ Related documents: `segmented-selection.md` and `toast.md` in this folder.
 | **No settings inside a flow.** A flow does one job. Configuration (sources, extended info, toggles) lives in Settings, if it exists at all. | "why is 'discovery sources' even a thing?" | List every toggle in a flow and justify each one, or move it out. |
 | **One input, not modes.** No tabs to switch between "discovered" and "manual". One field filters, and anything it doesn't recognise becomes the manual path. | "there is no reason for there to be two tabs when there is an input field already?", "anytime the user types something that is not recognized, assume it's a manual flow?" | Count the mode switches. The target is zero. |
 | **No invented chrome.** No counters, labels, headers or badges that the decisions don't call for. | "it looks nothing like our existing product's aesthetics", "generic slop" | Every element maps to a decision or to the flow's job. |
+- **Pick the right behaviour at each level instead of offering choices.** A setting with three options is a failure to decide; choose the behaviour that fits each situation and fall back automatically where it doesn't (app-window resizing, D208 A2). (owner, 2026-10-09: "this is exactly the intuitive defaults i was talking about")
 
 ## 2. Consistency with the product
 

@@ -1693,4 +1693,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Permissions:** using Accessibility and Screen Recording is
        expected and fine; the code is open source so users can see exactly
        what is done with them.
-     - **Resizing (A2):** still open.
+     - **Resizing (A2):** the real window follows the canvas window (size ×
+       the machine's pixel density) so the stream is 1:1 sharp with no bands,
+       and returns to its original size and position when the stream closes.
+       Letterboxing in the window's background colour is used only where
+       following is wrong: an app that refuses the size (sized as close as it
+       allows), or local input on the machine in the last minute (it snaps to
+       size once the machine is idle).
