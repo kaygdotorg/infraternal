@@ -540,12 +540,11 @@ fn linux_logical_cpus(cpuinfo: Option<&str>) -> Option<u16> {
 fn count_online_cpus(value: &str) -> Option<u16> {
     let mut count: u32 = 0;
     for range in value.trim().split(',') {
-        let (first, last) = match range.split_once('-') {
-            Some((first, last)) => (first.parse::<u32>().ok()?, last.parse::<u32>().ok()?),
-            None => {
-                let cpu = range.parse::<u32>().ok()?;
-                (cpu, cpu)
-            }
+        let (first, last) = if let Some((first, last)) = range.split_once('-') {
+            (first.parse::<u32>().ok()?, last.parse::<u32>().ok()?)
+        } else {
+            let cpu = range.parse::<u32>().ok()?;
+            (cpu, cpu)
         };
         if last < first || last > 65_535 {
             return None;
@@ -613,15 +612,15 @@ pub fn parse_macos_load_average(value: &[u8]) -> Option<[f64; 3]> {
     if value.len() != 24 {
         return None;
     }
-    let scale = i64::from_ne_bytes(value.get(16..24)?.try_into().ok()?);
-    if scale <= 0 {
+    let scale = u32::try_from(i64::from_ne_bytes(value.get(16..24)?.try_into().ok()?)).ok()?;
+    if scale == 0 {
         return None;
     }
-    let scale = scale as f64;
+    let scale = f64::from(scale);
     let result = [
-        u32::from_ne_bytes(value.get(0..4)?.try_into().ok()?) as f64 / scale,
-        u32::from_ne_bytes(value.get(4..8)?.try_into().ok()?) as f64 / scale,
-        u32::from_ne_bytes(value.get(8..12)?.try_into().ok()?) as f64 / scale,
+        f64::from(u32::from_ne_bytes(value.get(0..4)?.try_into().ok()?)) / scale,
+        f64::from(u32::from_ne_bytes(value.get(4..8)?.try_into().ok()?)) / scale,
+        f64::from(u32::from_ne_bytes(value.get(8..12)?.try_into().ok()?)) / scale,
     ];
     result
         .iter()

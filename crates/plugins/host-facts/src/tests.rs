@@ -138,5 +138,5 @@ fn descriptor_declares_default_settings_actions_and_no_hidden_role_dependency() 
     assert_eq!(DESCRIPTOR.settings.defaults, r#"{"enabled":true}"#);
     assert_eq!(DESCRIPTOR.settings.configure_action, "host.facts.configure");
     assert_eq!(DESCRIPTOR.actions.len(), 2);
-    assert!(DESCRIPTOR.role_dependencies.is_empty());
+    assert_eq!(DESCRIPTOR.role_dependencies, &[] as &[&str]);
 }
