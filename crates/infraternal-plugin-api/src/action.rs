@@ -95,6 +95,12 @@ impl JsonSchema {
     /// Create the stable result schema used for action state and next-step output.
     #[must_use]
     pub fn command_result() -> Self {
+        Self::command_result_with(Self::empty_object())
+    }
+
+    /// Create the stable result envelope with an action-specific typed data object.
+    #[must_use]
+    pub fn command_result_with(data: Self) -> Self {
         Self::object(
             [
                 (
@@ -111,12 +117,14 @@ impl JsonSchema {
                     "next_step".to_owned(),
                     Self::string("Optional recommended follow-up action."),
                 ),
+                ("data".to_owned(), data),
             ],
             [
                 "schema_version".to_owned(),
                 "command".to_owned(),
                 "state".to_owned(),
                 "message".to_owned(),
+                "data".to_owned(),
             ],
         )
     }
@@ -580,9 +588,27 @@ mod tests {
         assert_eq!(schema.schema_type, super::JsonSchemaType::Object);
         assert_eq!(
             schema.required,
-            ["schema_version", "command", "state", "message"]
+            ["schema_version", "command", "state", "message", "data"]
         );
         assert!(schema.properties.contains_key("next_step"));
+        assert_eq!(
+            schema.properties["data"].schema_type,
+            super::JsonSchemaType::Object
+        );
         assert_eq!(schema.additional_properties, Some(false));
+    }
+
+    #[test]
+    fn command_result_schema_keeps_action_data_typed_inside_stable_envelope() {
+        let schema = JsonSchema::command_result_with(JsonSchema::object(
+            [("role".to_owned(), JsonSchema::string("Current node role."))],
+            ["role".to_owned()],
+        ));
+        assert_eq!(
+            schema.properties["data"].schema_type,
+            super::JsonSchemaType::Object
+        );
+        assert_eq!(schema.properties["data"].required, ["role"]);
+        assert!(schema.properties["data"].properties.contains_key("role"));
     }
 }
