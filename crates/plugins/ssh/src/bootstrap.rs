@@ -1,6 +1,7 @@
 //! Runs independent host attempts under one global concurrency bound and a bounded replayable event log [138 H4].
 
 use crate::{
+    auth_once::{OneUseAuth, TargetAuth},
     auth_order::Authentication,
     install::{BinaryPaths, Cleanup, Installation, JoinMaterial},
     model::{Destination, Event, Failure, MeshEvidence, Step, Target, identifier},
@@ -114,6 +115,7 @@ impl Bootstrap {
             },
             targets,
             credential,
+            Vec::new(),
         )
     }
 
@@ -140,6 +142,35 @@ impl Bootstrap {
             },
             targets,
             credential,
+            Vec::new(),
+        )
+    }
+
+    /// Start with private material bound to one target attempt, never the whole batch.
+    /// # Errors
+    /// Refuses invalid sessions, duplicate/foreign material and all normal batch admission errors.
+    pub fn start_authenticated_with_auth(
+        &self,
+        owner: String,
+        session: Secret,
+        targets: Vec<Target>,
+        credential: Option<String>,
+        auth_once: Vec<TargetAuth>,
+    ) -> Result<Batch, Failure> {
+        if session.expose().is_empty() || session.expose().len() > 512 {
+            return Err(Failure::unsupported(
+                "The bootstrap session is unavailable.",
+            ));
+        }
+        self.start_authority(
+            Authority {
+                owner,
+                batch: uuid::Uuid::new_v4(),
+                session: Some(session),
+            },
+            targets,
+            credential,
+            auth_once,
         )
     }
 
@@ -148,6 +179,7 @@ impl Bootstrap {
         authority: Authority,
         targets: Vec<Target>,
         credential: Option<String>,
+        auth_once: Vec<TargetAuth>,
     ) -> Result<Batch, Failure> {
         if targets.is_empty()
             || targets.len() > 100
@@ -179,6 +211,18 @@ impl Bootstrap {
                 ));
             }
         }
+        // Validate every private binding before spawning even the first target.
+        let mut private = HashMap::new();
+        for input in auth_once {
+            input.auth.validate()?;
+            if !states.contains_key(&input.target)
+                || private.insert(input.target, input.auth).is_some()
+            {
+                return Err(Failure::unsupported(
+                    "One-use credentials need unique selected targets.",
+                ));
+            }
+        }
         let permit = self.batches.clone().try_acquire_owned().map_err(|_| {
             Failure::install("Too many bootstrap batches are running. Try again shortly.")
         })?;
@@ -201,12 +245,20 @@ impl Bootstrap {
         };
         let ids: Vec<_> = lock(&batch.inner.states).keys().cloned().collect();
         for id in ids {
-            self.schedule(batch.inner.clone(), &id)?;
+            self.schedule(batch.inner.clone(), &id, private.remove(&id))?;
         }
         Ok(batch)
     }
 
-    fn schedule(&self, batch: Arc<BatchInner>, id: &str) -> Result<(), Failure> {
+    fn schedule(
+        &self,
+        batch: Arc<BatchInner>,
+        id: &str,
+        auth_once: Option<OneUseAuth>,
+    ) -> Result<(), Failure> {
+        if let Some(material) = &auth_once {
+            material.validate()?;
+        }
         let (target, attempt) = {
             let mut states = lock(&batch.states);
             let state = states
@@ -232,37 +284,56 @@ impl Bootstrap {
         );
         let runner = self.clone();
         tokio::spawn(async move {
-            runner.attempt(batch, target, attempt).await;
+            runner.attempt(batch, target, attempt, auth_once).await;
         });
         Ok(())
     }
 
-    async fn attempt(&self, batch: Arc<BatchInner>, target: Target, attempt: u32) {
+    async fn attempt(
+        &self,
+        batch: Arc<BatchInner>,
+        target: Target,
+        attempt: u32,
+        auth_once: Option<OneUseAuth>,
+    ) {
         let mut cancel = batch.cancel.subscribe();
         let started = Instant::now();
-        let mut installation = None;
-        let mut host = None;
+        let mut resources = AttemptResources::default();
         let cancelled = Failure::install("Host installation was cancelled.");
         // Hold the admission slot through rollback too: failed hosts must not
         // create another eight live SSH children while the next hosts install.
+        // Queued plaintext never waits behind the full 180-second install limit.
+        // It belongs to this future, not HostState, and drops on timeout/cancellation.
+        let queue_limit = auth_once.as_ref().map(OneUseAuth::remaining);
         let admission = if *cancel.borrow() {
             Err(cancelled.clone())
         } else {
             tokio::select! {
                 _ = cancel.changed() => Err(cancelled.clone()),
-                permit = self.concurrency.clone().acquire_owned() => permit.map_err(|_| Failure::install("Bootstrap is shutting down.")),
+                permit = async {
+                    if let Some(limit) = queue_limit {
+                        match tokio::time::timeout(limit, self.concurrency.clone().acquire_owned()).await {
+                            Ok(permit) => permit.map_err(|_| Failure::install("Bootstrap is shutting down.")),
+                            Err(_) => Err(Failure::unsupported("Queued SSH credentials expired. Retry with fresh material.")),
+                        }
+                    } else {
+                        self.concurrency.clone().acquire_owned().await.map_err(|_| Failure::install("Bootstrap is shutting down."))
+                    }
+                } => permit,
             }
         };
-        let result = if admission.is_err() || *cancel.borrow() {
+        let result = if let Err(error) = &admission {
+            Err(error.clone())
+        } else if *cancel.borrow() {
             Err(cancelled)
         } else {
             tokio::select! {
                 _ = cancel.changed() => Err(cancelled),
-                result = tokio::time::timeout(self.deadline, self.run(&batch, &target, attempt, started, &mut installation, &mut host)) => result.unwrap_or_else(|_| Err(Failure::install("Host installation exceeded its time limit."))),
+                result = tokio::time::timeout(self.deadline, self.run(&batch, &target, attempt, started, &mut resources, auth_once)) => result.unwrap_or_else(|_| Err(Failure::install("Host installation exceeded its time limit."))),
             }
         };
         if result.is_err() {
-            if let Some(installation) = installation {
+            if let Some(installation) = resources.installation {
                 let cleanup =
                     tokio::time::timeout(Duration::from_secs(30), installation.rollback()).await;
                 if !matches!(cleanup, Ok(Ok(()))) {
@@ -280,7 +351,7 @@ impl Bootstrap {
                     );
                 }
             }
-            if let Some(host) = host {
+            if let Some(host) = resources.host {
                 // Invalidate invitations/partial new authority through the trusted
                 // backend; it must preserve an existing enrolled installation.
                 let _ = tokio::time::timeout(
@@ -320,14 +391,48 @@ impl Bootstrap {
     }
 
     #[allow(clippy::too_many_arguments)]
+    // Transient bytes remain in this future and its lazy provider, never batch state.
+    async fn resolve_attempt(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        auth_once: Option<OneUseAuth>,
+    ) -> Result<Resolved, Failure> {
+        let resolving = self.backend.resolve(
+            &batch.authority,
+            target,
+            target.credential.as_deref().or(batch.credential.as_deref()),
+        );
+        let mut resolved = if let Some(material) = &auth_once {
+            tokio::time::timeout(material.remaining(), resolving)
+                .await
+                .map_err(|_| {
+                    Failure::unsupported(
+                        "Queued SSH credentials expired. Retry with fresh material.",
+                    )
+                })??
+        } else {
+            resolving.await?
+        };
+        if let Some(material) = auth_once {
+            let Credentials::Automatic(base) = resolved.credentials else {
+                return Err(Failure::unsupported(
+                    "One-use credentials need automatic authentication.",
+                ));
+            };
+            resolved.credentials = Credentials::Automatic(material.layer(base));
+        }
+        Ok(resolved)
+    }
+
     async fn run(
         &self,
         batch: &BatchInner,
         target: &Target,
         attempt: u32,
         started: Instant,
-        installation: &mut Option<Installation>,
-        host: &mut Option<uuid::Uuid>,
+        resources: &mut AttemptResources,
+        auth_once: Option<OneUseAuth>,
     ) -> Result<(), Failure> {
         emit(
             batch,
@@ -338,14 +443,7 @@ impl Bootstrap {
             started,
             None,
         );
-        let resolved = self
-            .backend
-            .resolve(
-                &batch.authority,
-                target,
-                target.credential.as_deref().or(batch.credential.as_deref()),
-            )
-            .await?;
+        let resolved = self.resolve_attempt(batch, target, auth_once).await?;
         let session = self
             .transport
             .open(resolved.destination, resolved.credentials, resolved.mesh)
@@ -364,12 +462,13 @@ impl Bootstrap {
             .backend
             .invitation(&batch.authority, target, &check)
             .await?;
-        *host = Some(join.host);
+        resources.host = Some(join.host);
         if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
             metadata.host_id = Some(join.host);
         }
-        *installation = Some(Installation::new(session, target, &join)?);
-        let transaction = installation
+        resources.installation = Some(Installation::new(session, target, &join)?);
+        let transaction = resources
+            .installation
             .as_ref()
             .ok_or_else(|| Failure::install("The installation transaction is unavailable."))?;
         emit(
@@ -397,8 +496,9 @@ impl Bootstrap {
                 None,
             );
         }
-        let host =
-            host.ok_or_else(|| Failure::install("The enrolled host identity is unavailable."))?;
+        let host = resources
+            .host
+            .ok_or_else(|| Failure::install("The enrolled host identity is unavailable."))?;
         emit(
             batch,
             target,
@@ -430,7 +530,23 @@ impl Bootstrap {
         if batch.inner.authority.owner != owner || *batch.inner.cancel.borrow() {
             return Err(Failure::unsupported("The bootstrap batch is unavailable."));
         }
-        self.schedule(batch.inner.clone(), id)
+        self.retry_with_auth(batch, owner, id, None)
+    }
+
+    /// Retry one failed host with transient browser material; no other target or later retry can reuse it.
+    /// # Errors
+    /// Refuses invalid material and the same owner/host/attempt admission errors as retry.
+    pub fn retry_with_auth(
+        &self,
+        batch: &Batch,
+        owner: &str,
+        id: &str,
+        auth_once: Option<OneUseAuth>,
+    ) -> Result<(), Failure> {
+        if batch.inner.authority.owner != owner || *batch.inner.cancel.borrow() {
+            return Err(Failure::unsupported("The bootstrap batch is unavailable."));
+        }
+        self.schedule(batch.inner.clone(), id, auth_once)
     }
 }
 
@@ -462,6 +578,13 @@ async fn restore_previous(
         }
     }
     Ok(())
+}
+
+/// Mutation resources belong to one attempt, including its rollback and host retirement.
+#[derive(Default)]
+struct AttemptResources {
+    installation: Option<Installation>,
+    host: Option<uuid::Uuid>,
 }
 
 struct HostState {
