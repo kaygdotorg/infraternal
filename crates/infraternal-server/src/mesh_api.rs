@@ -216,17 +216,18 @@ pub struct GrantCreate {
     /// Permit initiation in both directions when true.
     pub both_ways: bool,
     /// Optional narrowed TCP/UDP policy; omission grants all ports, explicit null is refused.
-    #[serde(default, deserialize_with = "deserialize_grant_ports")]
+    #[serde(default, deserialize_with = "deserialize_provided")]
     pub ports: Option<TrafficPolicy>,
 }
 
-/// A provided policy must be typed. Only field absence uses Serde's default,
-/// preserving omission's documented All policy without widening explicit null.
-fn deserialize_grant_ports<'de, D>(deserializer: D) -> Result<Option<TrafficPolicy>, D::Error>
+/// A provided policy or scope must be typed. Only field absence uses Serde's
+/// default; explicit null cannot acquire omission's unrestricted authority.
+fn deserialize_provided<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
 {
-    TrafficPolicy::deserialize(deserializer).map(Some)
+    T::deserialize(deserializer).map(Some)
 }
 
 /// Which end of a named grant should move.
@@ -259,8 +260,8 @@ pub struct RoleDefinition {
     pub name: String,
     /// Granular actions granted by this role.
     pub actions: BTreeSet<String>,
-    /// Omitted means instance-wide; provided names restrict every action in this role.
-    #[serde(default)]
+    /// Omitted means instance-wide; provided names restrict every action. Null is refused.
+    #[serde(default, deserialize_with = "deserialize_provided")]
     pub scopes: Option<BTreeSet<String>>,
 }
 

@@ -81,7 +81,10 @@ The only assignable Mesh role actions are `mesh.manage_nodes`,
 `mesh.manage_tags`, `mesh.manage_grants` and `mesh.manage_roles`. A role has a
 nonempty `actions` array and optional nonempty `scopes` array of existing tag
 names. `MeshRoleDefinition` is
-`{"name":string,"actions":string[],"scopes"?:string[]}`. A role granting
+`{"name":string,"actions":string[],"scopes"?:string[]}`. Omitting `scopes`
+means instance-wide authority. Explicit `scopes: null` is refused as `invalid
+input` before any role, revision or audit is committed; it never becomes global
+authority. A role granting
 `mesh.manage_roles` is global and cannot have tag scopes. Node enrollment and
 role management are global actions; node observation, rename and delete can
 use `mesh.manage_nodes` scoped to tags. A scoped node edit must cover every
