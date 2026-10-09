@@ -34,6 +34,15 @@ def fixture_state(label):
     return state
 
 
+def process_cpu_weight(pid):
+    """Read the actual cgroup weight for one fixture-owned process."""
+    group = next(line[3:] for line in Path(f'/proc/{pid}/cgroup').read_text().splitlines()
+                 if line.startswith('0::'))
+    value = (Path('/sys/fs/cgroup') / group.lstrip('/') / 'cpu.weight').read_text().strip()
+    assert value.isdecimal() and 1 <= int(value) <= 10000
+    return value
+
+
 def fixture_cpu_weight():
     """Managed test shims inherit their caller's scheduling, including benchmark scopes."""
     weight = os.environ.get('INFRATERNAL_TEST_CPU_WEIGHT')
@@ -41,9 +50,7 @@ def fixture_cpu_weight():
         # A manager creates an independent scope instead of inheriting this
         # cgroup. Copy its weight in the test launcher, never in production.
         try:
-            group = next(line[3:] for line in Path('/proc/self/cgroup').read_text().splitlines()
-                         if line.startswith('0::'))
-            weight = (Path('/sys/fs/cgroup') / group.lstrip('/') / 'cpu.weight').read_text().strip()
+            weight = process_cpu_weight(os.getpid())
         except (OSError, StopIteration):
             return None  # Legacy hierarchies retain the ordinary fixture setup.
     assert weight.isdecimal() and 1 <= int(weight) <= 10000
@@ -108,10 +115,9 @@ def weight_fixture_shim(state, session_id, weight, caller_pid=None, diagnose=Fal
     unit = f'infraternal-session-{session_id.hex}.scope'
 
     def current_weight():
-        value = subprocess.run(command + ['show', unit, '-p', 'CPUWeight', '--value'],
-                               capture_output=True, text=True, timeout=20, check=True).stdout.strip()
-        assert value.isdecimal()
-        return int(value)
+        # An unset manager property is not a number. The owned process's
+        # kernel cgroup value measures actual scheduling, including defaults.
+        return int(process_cpu_weight(pid))
 
     before = current_weight() if diagnose else None
     result = subprocess.run(command + ['set-property', '--runtime', unit, f'CPUWeight={weight}'],
