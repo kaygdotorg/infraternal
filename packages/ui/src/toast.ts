@@ -8,6 +8,8 @@ export interface ToastAction {
 
 export interface ToastMessage {
   message: string;
+  /** The message with entity chips in it (`entityText`); it replaces `message` on screen, which stays the plain text. */
+  messageNode?: Node;
   action?: ToastAction;
   duration?: number;
   /** `error` drops the success tick: the message is a failure, not a confirmation. */
@@ -67,7 +69,7 @@ export function mountToast(parent: HTMLElement): ToastController {
   return {
     show(value) {
       window.clearTimeout(hideTimer);
-      label.textContent = value.message;
+      if (value.messageNode) label.replaceChildren(value.messageNode); else label.textContent = value.message;
       selectAction = value.action?.onSelect;
       action.textContent = value.action?.label ?? "";
       action.hidden = !value.action;

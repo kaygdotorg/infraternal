@@ -124,6 +124,8 @@
   transform-origin: center bottom;
   transition: opacity 170ms ease-out, transform 190ms cubic-bezier(0.23, 1, 0.32, 1);
 }
+/* A toast is a small card of its own, not text over a busy terminal: the material's halo would only smear its glyphs. */
+.ui-toast, .ui-toast * { text-shadow: none; }
 .ui-toast[hidden] { display: none !important; }
 .ui-toast[data-tone="error"] .ui-toast-marker { display: none; }
 .ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
@@ -775,3 +777,16 @@
 .bm-leaf .bm-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A caption between groups inside one section: the host above its sessions. It has no branch of its own. */
 .bm-subhead { display: flex; align-items: center; height: var(--row); padding: 0 8px; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1.2 var(--font-mono); letter-spacing: 0; }
+
+/* Entity chips (entity-chip.ts): a recognised thing named in text. Text-height, on the baseline, one unit when the line
+   wraps, never animated. The fill is set inline from the palette tokens, so a theme switch recolours it with no script. */
+.ui-entity {
+  display: inline-flex; align-items: center; gap: 0.3em; box-sizing: border-box; max-width: 100%; padding: 0 0.55em 0 0.45em;
+  border-radius: 999px; font-weight: 500; line-height: 1.35; white-space: nowrap; text-shadow: none; vertical-align: baseline;
+  letter-spacing: 0; transition: none; animation: none;
+}
+.ui-entity-name { overflow: hidden; text-overflow: ellipsis; }
+.ui-entity-glyph { flex: none; width: 0.9em; height: 0.9em; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ui-entity-glyph.ui-entity-fill { fill: currentColor; stroke: none; }
+.ui-entity-initial { flex: none; min-width: 0.9em; text-align: center; font-size: 0.9em; font-weight: 600; line-height: 1; }
+.ui-entity-unit { white-space: nowrap; }

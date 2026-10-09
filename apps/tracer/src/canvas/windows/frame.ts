@@ -93,9 +93,6 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
     if (e.button !== 0 || camera.lod === "thumb" || rec.owner.view.team) return;
     const touch = e.pointerType !== "mouse";
     press = { id: e.pointerId, x: e.clientX, y: e.clientY, touch, timer: 0 };
-    if (touch && rec.model.kind === "terminal" && cx.mesh) {
-      press.timer = window.setTimeout(() => { if (press) { cx.mesh?.showReach(rec, true); press = undefined; } }, 450);
-    }
     pill.setPointerCapture(e.pointerId);
   }, { signal });
   pill.addEventListener("pointermove", (e) => {
@@ -118,9 +115,6 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
   if (rec.owner.view.layout === "tiled" && !rec.model.splitOf && !rec.owner.view.team) {
     rec.stopResize = attachWindowResize(rec.card, resizeHost(cx, rec)).dispose;
   }
-  if (!isTerminal(rec)) return;
-  // Arrows on demand (hover on the pill, the port to grant access) belong to the mesh.
-  cx.mesh?.wireTerminal(rec);
 }
 
 /**

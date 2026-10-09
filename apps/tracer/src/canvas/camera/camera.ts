@@ -159,6 +159,7 @@ export class Camera {
 
   /** The camera came to rest: raster-crisp text, then the rest hook. */
   rest(): void {
+    this.box = undefined;
     window.clearTimeout(this.restTimer);
     this.moving = false;
     this.hinted = false;
@@ -234,18 +235,31 @@ export class Camera {
 
   /** Re-reads the viewport size and re-aims a flight in progress. Called by the canvas on every resize. */
   resized(): void {
+    this.box = undefined;
     this.vw = this.viewport.clientWidth; this.vh = this.viewport.clientHeight;
+  }
+
+  /**
+   * The viewport's box, read when the camera is at rest and kept while it moves. A gesture asks for it on every wheel or
+   * pointer event, and a read in the middle of a gesture makes the browser lay out and restyle the whole canvas first
+   * (6 ms a frame with a thousand cards). The viewport does not move while the camera does; a resize or a rest reads it
+   * again.
+   */
+  private box: DOMRect | undefined;
+  private rect(): DOMRect {
+    this.box ??= this.viewport.getBoundingClientRect();
+    return this.box;
   }
 
   /** A point of the screen as a point of the world. */
   toWorld(clientX: number, clientY: number): Pt {
-    const r = this.viewport.getBoundingClientRect();
+    const r = this.rect();
     return { x: (clientX - r.left - this.tx) / this.cam.z, y: (clientY - r.top - this.ty) / this.cam.z };
   }
 
   /** A point of the world as a point of the screen. */
   toClient(p: Pt): Pt {
-    const r = this.viewport.getBoundingClientRect();
+    const r = this.rect();
     return { x: r.left + this.tx + p.x * this.cam.z, y: r.top + this.ty + p.y * this.cam.z };
   }
 
@@ -258,7 +272,7 @@ export class Camera {
 
   /** Zooms about a screen point (a pinch or ctrl-wheel): the world point under it stays under it. */
   zoomAt(clientX: number, clientY: number, z: number): void {
-    const r = this.viewport.getBoundingClientRect();
+    const r = this.rect();
     const wp = this.toWorld(clientX, clientY);
     const next = clamp(z, MIN_ZOOM, MAX_ZOOM);
     this.drive({ z: next, cx: wp.x - (clientX - r.left - this.vw / 2) / next, cy: wp.y - (clientY - r.top - this.vh / 2) / next });

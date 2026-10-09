@@ -135,8 +135,10 @@ fn compatibility_fields_are_kept_in_the_rust_shape_and_architecture_on_wire() {
 #[test]
 fn descriptor_declares_default_settings_actions_and_no_hidden_role_dependency() {
     assert_eq!(DESCRIPTOR.id, "host");
-    assert_eq!(DESCRIPTOR.settings.defaults, r#"{"enabled":true}"#);
-    assert_eq!(DESCRIPTOR.settings.configure_action, "host.facts.configure");
+    assert!(DESCRIPTOR.roles[0].default_enabled);
+    let settings: serde_json::Value = serde_json::from_str(DESCRIPTOR.settings).unwrap();
+    assert_eq!(settings["properties"]["enabled"]["default"], true);
+    assert_eq!(DESCRIPTOR.actions[1].id, "host.facts.configure");
     assert_eq!(DESCRIPTOR.actions.len(), 2);
-    assert_eq!(DESCRIPTOR.role_dependencies, &[] as &[&str]);
+    assert_eq!(DESCRIPTOR.roles[0].requires, &[] as &[&str]);
 }

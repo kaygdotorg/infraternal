@@ -83,7 +83,7 @@ export function createViews(cx: Ctx): ViewsModule {
     window.setTimeout(() => { if (summary.dataset.open === "false") summary.hidden = true; }, 170);
   };
   const showSummary = (c: ViewRec): void => {
-    if (camera.band !== "out" || !matchMedia("(hover: hover) and (pointer: fine)").matches || cx.mesh?.dragging() || clusterDrag || state.movingWindow) return;
+    if (camera.band !== "out" || !matchMedia("(hover: hover) and (pointer: fine)").matches || clusterDrag || state.movingWindow) return;
     window.clearTimeout(summaryTimer);
     if (summaryFor === c.view.id && !summary.hidden) return;
     summaryFor = c.view.id;

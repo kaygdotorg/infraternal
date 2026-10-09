@@ -41,3 +41,5 @@ export * from "./toolbar-settings";
 export * from "./shortcuts-settings";
 export * from "./canvas-backdrop";
 export * from "./settings-panels";
+export * from "./entity-palette";
+export * from "./entity-chip";

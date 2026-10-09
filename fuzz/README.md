@@ -13,6 +13,8 @@ macOS load-average sysctl decoder. It performs no host reads while fuzzing.
 ```sh
 cargo +nightly fuzz run host_facts_decode -- -max_total_time=600 -max_len=16384
 ```
+Both parsers of untrusted bytes have fuzz targets in this one harness crate.
+The production Mesh action parser also has a target for its JSON boundary.
 
 ## Shim framing
 
@@ -52,3 +54,20 @@ re-encoding across every two-chunk split and seeded random multi-splits.
 Maximum 4 MiB frames are deterministic tests, avoiding that cost on every fuzz
 iteration. Execution/edge counts are evidence, not source-coverage percentages
 or connection-layer authorization tests.
+
+## Mesh action JSON
+
+Run from the repository root to seed all 16 public Mesh actions, including an
+explicit null port policy, and fuzz the same `parse_action` function used before
+server-side SQLite work:
+
+```sh
+python3 fuzz/seed.py --mesh-only
+CARGO_PROFILE_RELEASE_LTO=false cargo +nightly fuzz run mesh_api_json -- \
+  -max_total_time=60 -max_len=65536 -rss_limit_mb=2048
+```
+
+The first input byte selects an action; remaining bytes are its JSON input.
+The target checks parser robustness and validation boundaries, not database
+authorization or transaction behavior. The JSON shapes and action IDs are
+specified in contracts/mesh-api.md.

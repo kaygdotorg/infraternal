@@ -13,6 +13,8 @@ async fn pending_host_facts_read_keeps_control_ping_responsive() {
         f.auth.pool.clone(),
         EmbeddedAgent::from_test_socket(socket),
     )
+    .await
+    .unwrap()
     .with_plugin_descriptors(super::socket_tests::HOST_FACTS_DESCRIPTORS);
     let app = crate::websocket::router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

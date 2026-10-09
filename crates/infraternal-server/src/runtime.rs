@@ -305,6 +305,8 @@ async fn build_router_with_plugin_descriptors(
         EmbeddedAgent::spawn(executable)
     };
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
+        .await
+        .map_err(|_| ServerError::InvalidConfiguration)?
         .with_plugin_descriptors(plugin_descriptors);
     let app = Router::new()
         .route("/healthz", get(health))

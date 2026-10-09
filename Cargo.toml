@@ -12,6 +12,7 @@ members = [
     "crates/infraternal-shim",
     "crates/plugins/ssh",
     "crates/plugins/host-facts",
+    "crates/plugins/mesh",
 ]
 
 [workspace.package]
@@ -55,6 +56,8 @@ alacritty_terminal = "0.25"
 nix = { version = "0.30", features = ["fs", "term", "process", "signal", "user", "socket", "poll", "hostname"] }
 infraternal-shim = { version = "0.1.0", path = "crates/infraternal-shim" }
 infraternal-protocol = { version = "0.1.0", path = "crates/infraternal-protocol" }
+infraternal-plugin-api = { version = "0.1.0", path = "crates/infraternal-plugin-api" }
+infraternal-server = { version = "0.1.0", path = "crates/infraternal-server" }
 clap = { version = "4.5", features = ["derive"] }
 criterion = "0.7"
 
@@ -77,3 +80,7 @@ strip = true
 # binary. That is acceptable (DECISIONS 5: measure; robustness here is worth
 # a few hundred KiB).
 panic = "unwind"
+
+# Bound async orchestration code; Mesh and cryptographic dependencies retain speed optimization [5,198].
+[profile.release.package.infraternal-server]
+opt-level = "s"

@@ -21,7 +21,8 @@
  *   through the canvas document (`pin` marks the node; the canvas saves it, D180).
  */
 import type { Grant } from "../model/types";
-import { ACTION, ActionRefused, TOPIC, endpointJson, parseAnswer, parseEvent, parseSnapshot, type MeshTransport, type Snapshot, type WireAccess, type WireGrant, type WireNode } from "./protocol";
+import { MeshClient, type MeshSubscriptionEvent } from "../../../../../packages/protocol/src/mesh";
+import { ACTION, ActionRefused, endpointJson, parseAnswer, parseSnapshot, type MeshTransport, type Snapshot, type WireAccess, type WireGrant, type WireNode } from "./protocol";
 import { derivedGrantName, endName, tagNodeId, type MeshSource, type MeshStatus } from "./source";
 
 export interface MeshApiOptions {
@@ -33,7 +34,6 @@ export interface MeshApiOptions {
 }
 
 const RETRY_MS = [2_000, 5_000, 15_000, 30_000];
-const REFRESH_COALESCE_MS = 200;
 const NOTIFY_COALESCE_MS = 80;
 
 /** What a grant is called when nobody named it: who may reach what. */
@@ -55,9 +55,9 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   let serial = 0;
   let generation = 0;
   let disposed = false;
-  let retryTimer = 0, notifyTimer = 0, refreshTimer = 0, retryStep = 0;
+  let retryTimer = 0, notifyTimer = 0, retryStep = 0;
   let notifyQueued = false;
-  let inflight = 0, dirty = false, wanted = 0;
+  let inflight = 0, dirty = false;
   let version = 0;
 
   const notify = (immediate: boolean): void => {
@@ -94,19 +94,20 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
     notify(true);
   };
 
+  /** Lists the whole mesh (the client follows the server's pages) and shows it. */
   const refresh = (): void => {
     if (disposed) return;
     if (inflight > 0) { dirty = true; return; }
     const mine = ++generation;
     window.clearTimeout(retryTimer); retryTimer = 0;
     if (status === "error") status = "loading";
-    transport.call(ACTION.list, {}).then((raw) => {
+    client.list().then((raw) => {
       if (disposed || mine !== generation) return;
       const snap = parseSnapshot(raw);
       if (!snap) { toError(); return; }
       if (snap.rev < rev) return; // an answer that raced a newer edit
       apply(snap);
-      subscribe();
+      watch();
     }, (error: unknown) => {
       if (disposed || mine !== generation) return;
       // Refused (not allowed, or no such action here): the person has no Mesh. A server that could not answer is an error.
@@ -119,35 +120,38 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
     const wait = RETRY_MS[Math.min(retryStep++, RETRY_MS.length - 1)]!;
     retryTimer = window.setTimeout(refresh, wait);
   };
-  /** Something newer exists: list again soon (one list for a burst of events). */
-  const invalidate = (to: number): void => {
-    wanted = Math.max(wanted, to);
-    if (refreshTimer) return;
-    refreshTimer = window.setTimeout(() => { refreshTimer = 0; if (rev < wanted) refresh(); }, REFRESH_COALESCE_MS);
-  };
 
-  const onEvent = (raw: Record<string, unknown>): void => {
-    const ev = parseEvent(raw);
-    if (!ev || status === "loading") return;
-    if (ev.kind === "changed") { if (ev.rev > rev) invalidate(ev.rev); return; }
-    if (ev.kind === "snapshot") {
+  // The live part is the protocol client's: it follows the server's pages, keeps one revision line, drops answers a newer
+  // one supersedes, and lists again when told something changed. It is started only after the server has answered a
+  // list: a server that does not serve the Mesh does not know the subscription, and an unknown subscription closes the
+  // connection (so does everything else on it).
+  const client = new MeshClient({
+    call: (action, input) => transport.call(action, input as Record<string, unknown>) as Promise<never>,
+    subscribe: (filter, listener) => transport.subscribe(filter.topic, (raw) => listener(raw as unknown as MeshSubscriptionEvent), () => undefined),
+  });
+  let stopWatch: (() => void) | undefined;
+  const watch = (): void => {
+    if (stopWatch || disposed) return;
+    stopWatch = client.watch({}, (ev) => {
+      if (disposed) return;
+      if (ev.type === "error") {
+        // The server ended the subscription. A withdrawn view: the Mesh goes. Anything else: ask again, with a new watch.
+        stopWatch = undefined;
+        if (ev.error === "forbidden") { status = "unavailable"; access = { view: false, manageGrants: false }; notify(true); } else toError();
+        return;
+      }
+      const snap = parseSnapshot(ev.snapshot);
+      if (!snap) return;
       // The server's own list, pushed: the same as asking, unless an edit is in flight or it is older than ours.
       if (inflight > 0) { dirty = true; return; }
-      if (ev.snapshot.rev >= rev) apply(ev.snapshot);
-      return;
-    }
-    // The subscription is over. Withdrawn view: the Mesh goes; anything else: ask again (and it will say why).
-    if (ev.reason === "forbidden") { status = "unavailable"; access = { view: false, manageGrants: false }; notify(true); } else invalidate(rev + 1);
+      if (snap.rev >= rev) apply(snap);
+    });
   };
-
-  // Events are subscribed only after the server has answered a list: a server that does not serve the Mesh does not
-  // know the subscription, and an unknown subscription closes the connection (so does everything else on it).
-  let unsubscribe: (() => void) | undefined;
-  const subscribe = (): void => { if (!unsubscribe) unsubscribe = transport.subscribe(TOPIC, onEvent, () => undefined); };
-  // A reconnect (and the first connection) starts from a list: events sent while the socket was down are gone.
+  // The first connection and every reconnect (a terminal is attached): start from a list when nothing is live; a live
+  // watch is subscribed again by the connection and answers with its own snapshot.
   let skipReady = Boolean(options.prime);
-  const offReady = transport.onReady(() => { if (skipReady) { skipReady = false; return; } refresh(); });
-  if (options.prime) { apply(options.prime); subscribe(); }
+  const offReady = transport.onReady(() => { if (skipReady) { skipReady = false; return; } if (!stopWatch) refresh(); });
+  if (options.prime) { apply(options.prime); watch(); }
 
   // ---- edits ------------------------------------------------------------------------------------------------------
   const uniqueName = (base: string, except?: Grant): string => {
@@ -171,9 +175,12 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       if (disposed) return;
       undo(); notify(true);
       fail(!(error instanceof ActionRefused) ? `Could not ${what}. Check your connection and try again.`
-        : error.reason === "forbidden" ? `You are not allowed to ${what}.`
+        // Changing or ending access also needs a recent passkey check; the server answers both "no" and "check first" alike.
+        : error.reason === "forbidden" ? `Could not ${what}. You may not be allowed to, or you need to confirm with your passkey first. Sign in again and try once more.`
         : error.reason === "conflict" ? `Could not ${what}: that already exists.`
-        : `Could not ${what}. Please try again.`);
+        : error.reason === "not found" ? `Could not ${what}: it is no longer there.`
+        : error.reason === "invalid input" ? `Could not ${what}: the server did not accept those details.`
+        : `Could not ${what}. The mesh is busy; please try again in a moment.`);
       dirty = true; // what the server holds may differ from what was tried: list again once nothing is in flight
       inflight -= 1; settled();
     });
@@ -239,7 +246,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
     pin(id, x, y) { pins.set(id, { x: Math.round(x), y: Math.round(y) }); },
     onChange(l) { listeners.add(l); return () => { listeners.delete(l); }; },
     onFailure(l) { failures.add(l); return () => { failures.delete(l); }; },
-    dispose() { disposed = true; window.clearTimeout(retryTimer); window.clearTimeout(notifyTimer); window.clearTimeout(refreshTimer); offReady(); unsubscribe?.(); listeners.clear(); failures.clear(); },
+    dispose() { disposed = true; window.clearTimeout(retryTimer); window.clearTimeout(notifyTimer); offReady(); stopWatch?.(); listeners.clear(); failures.clear(); },
   };
   return source;
 }
