@@ -25,12 +25,14 @@
 }
 .cl-world[data-zoom="out"] .cl-region { opacity: 1; pointer-events: auto; cursor: pointer; }
 
-/* The label keeps a readable size at any zoom: --inv is 1 / zoom (clamped), applied with the
-   individual `scale` and `translate` properties so the pill's own press transform stays free. */
+/* The label keeps a readable size at any zoom: --label-inv is 1 / zoom (clamped), applied with the
+   individual `scale` and `translate` properties so the pill's own press transform stays free. It changes on every
+   frame of a zoom, so it does not inherit: only the label restyles, not its icon, name, meta and menu. */
+@property --label-inv { syntax: "<number>"; inherits: false; initial-value: 1; }
 .cl-label {
   --pill-h: 30px; position: absolute; z-index: 2; pointer-events: auto; gap: 8px; padding: 0 12px 0 10px;
   color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: grab; touch-action: none;
-  transform-origin: 0 0; scale: var(--inv, 1); translate: 0 calc(var(--inv, 1) * -40px);
+  transform-origin: 0 0; scale: var(--label-inv); translate: 0 calc(var(--label-inv) * -40px);
 }
 .cl-label-icon { display: grid; place-items: center; color: var(--fg-2); }
 .cl-label-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }

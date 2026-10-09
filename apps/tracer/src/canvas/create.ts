@@ -95,7 +95,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   } as unknown as Ctx;
   (cx as { camera: Camera }).camera = new Camera(viewport, world, {
     onTransform: (t) => backdrop?.update(t),
-    onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--inv", inv); },
+    onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--label-inv", inv); },
     onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
     onFrame: () => { cx.invalidate(); cx.memory.cull(); },

@@ -30,7 +30,7 @@ export type ZoomBand = "in" | "out";
 export interface CameraHooks {
   /** The world transform changed: where the world origin is on screen (viewport pixels) and the zoom. */
   onTransform?(t: { tx: number; ty: number; z: number; vw: number; vh: number }): void;
-  /** The counter-scale labels use to keep a readable size at any zoom (`--inv`); only called when it changes. */
+  /** The counter-scale labels use to keep a readable size at any zoom (`--label-inv`); only called when it changes. */
   onLabelScale?(inv: string): void;
   onLod?(lod: Lod): void;
   onBand?(band: ZoomBand): void;
@@ -51,8 +51,14 @@ const KEY_FLIGHT = { visualDuration: 0.08, bounce: 0 };
 const REST_DELAY = 140;
 export const MIN_ZOOM = 0.08;
 export const MAX_ZOOM = 2;
-/** Below this zoom the world is not given `will-change: transform` while it moves (see `apply`). */
-const WILL_CHANGE_MIN_ZOOM = 0.5;
+/**
+ * Below this zoom the world is not given `will-change: transform` while it moves (see `apply`). With the hint the
+ * browser keeps the raster it has and only scales it, so a zoom through the thumbnail band (0.3 to 0.7) re-rasters
+ * nothing until it rests; without it every frame of the zoom re-rasters the visible windows at the new scale (measured
+ * with 21 windows: a third less raster work per frame with the hint). A phone has too little memory to hold a world
+ * that large (D183), so only a fine pointer takes the lower limit.
+ */
+const WILL_CHANGE_MIN_ZOOM = matchMedia("(pointer: fine)").matches ? 0.25 : 0.5;
 
 export class Camera {
   readonly cam: Cam = { cx: 0, cy: 0, z: 1 };
