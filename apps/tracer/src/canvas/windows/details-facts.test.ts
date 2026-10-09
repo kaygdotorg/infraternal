@@ -2,7 +2,7 @@
 import { expect, test } from "bun:test";
 import { detailsFacts } from "./details-facts";
 
-test("host facts become the existing Host key/value rows", () => {
+test("host facts become plain-language details rows", () => {
   const facts = detailsFacts({
     host: {
       name: "build-01",
@@ -41,7 +41,7 @@ test("host facts become the existing Host key/value rows", () => {
   expect(rows.get("Uptime")).toBe("1 day, 1 hour");
   expect(rows.get("Infraternal agent")).toBe("Embedded · user");
   expect(rows.get("Engines")).toBe("Docker");
-  expect(rows.get("Virtualization")).toBe("KVM");
+  expect(new Map(facts.sections.find((section) => section.id === "more")!.rows.map(({ key, value }) => [key, value])).get("Virtualization")).toBe("KVM");
 });
 
 test("unknown optional host facts stay absent instead of appearing as placeholders", () => {
@@ -69,4 +69,29 @@ test("unknown optional host facts stay absent instead of appearing as placeholde
   expect(rows.get("Uptime")).toBe("Less than a minute");
   expect(rows.get("Infraternal agent")).toBe("Remote · root");
   expect(rows.get("Engines")).toBe("None detected");
+});
+
+// D126 and #144 keep secondary identity fields behind the explicit more control.
+test("default Host rows keep secondary facts behind more", () => {
+  const facts = detailsFacts({
+    host: {
+      name: "build-01",
+      facts: {
+        os: "Linux", version: "", kernel: "6.12", architecture: "x86_64",
+        logicalCpus: 8, mode: "embedded", executionUid: 1000, engines: [],
+        init: "systemd", virtualization: "KVM", shell: "/bin/zsh", locale: "en_US.UTF-8",
+      },
+    },
+    connection: { state: "connected" },
+  });
+  const visibleKeys = facts.sections[0]!.rows.filter((row) => row.value.trim() !== "").map((row) => row.key);
+  expect(visibleKeys).not.toContain("Init");
+  expect(visibleKeys).not.toContain("Virtualization");
+  expect(visibleKeys).not.toContain("Shell");
+  expect(visibleKeys).not.toContain("Locale");
+  const more = facts.sections.find((section) => section.id === "more");
+  expect(more?.label).toBe("More");
+  expect(more?.rows.filter((row) => row.value.trim() !== "").map((row) => row.key)).toEqual([
+    "Init", "Virtualization", "Shell", "Locale",
+  ]);
 });

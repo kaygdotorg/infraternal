@@ -4,6 +4,7 @@
  * technical name is a subtitle on the row. A value that is not known is left out, never shown as a dash or "unknown".
  */
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
+import { ICONS } from "../../../../../packages/ui/src/icons";
 import type { DetailsFacts, HostFactsSnapshot } from "./details-source";
 
 const OS_NAME: Record<HostPlatform, string> = { ubuntu: "Ubuntu", debian: "Debian", redhat: "Red Hat", proxmox: "Proxmox", nixos: "NixOS", apple: "macOS", unknown: "" };
@@ -72,13 +73,15 @@ export function detailsFacts(input: DetailsInput): DetailsFacts {
         { key: "Load average", value: facts?.loadAverage?.map((value) => value.toFixed(2)).join(", ") ?? "" },
         { key: "Infraternal agent", value: facts ? `${facts.mode === "embedded" ? "Embedded" : "Remote"} · ${facts.executionUid === 0 ? "root" : "user"}` : "" },
         { key: "Engines", value: facts ? facts.engines.length ? facts.engines.join(", ") : "None detected" : "" },
+        { key: "Login", value: host.user ?? "" },
+        { key: "Address", value: host.address ?? "" },
+        { key: "How it is reached", value: host.reach ?? "" },
+      ]),
+      section("more", "More", ICONS.more, [
         { key: "Init", value: facts?.init ?? "" },
         { key: "Virtualization", value: facts?.virtualization ?? "" },
         { key: "Shell", value: facts?.shell ?? "" },
         { key: "Locale", value: facts?.locale ?? "" },
-        { key: "Login", value: host.user ?? "" },
-        { key: "Address", value: host.address ?? "" },
-        { key: "How it is reached", value: host.reach ?? "" },
       ]),
       section("connection", "Connection", ICON_CONNECTION, [
         { key: "Status", value: STATE_TEXT[connection.state] },
