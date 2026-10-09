@@ -3,6 +3,7 @@ import { plainCloseReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
+import { pulseActivity } from "./perf-activity";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import type { WireFrame } from "../../../packages/protocol/src/codec";
 import { MuxConnection, type StreamHandler } from "./connection";
@@ -878,6 +879,7 @@ export class TerminalClient {
   }
 
   private handleInput(data: string): void {
+    pulseActivity("typing", 400);
     if (this.closed || !data) return;
     const ctrl = this.inputModifiers.ctrl !== "off";
     const alt = this.inputModifiers.alt !== "off";
@@ -1025,6 +1027,7 @@ export class TerminalClient {
         this.protocolFailure("output queue has no contiguous data");
         return;
       }
+      pulseActivity("output", 300);
       this.outputWriteInFlight = true;
       this.outputWriteLength = region.byteLength;
       this.requestSymbolsIfNeeded(region);

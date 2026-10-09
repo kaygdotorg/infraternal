@@ -14,6 +14,7 @@ import { toolbarSection } from "../../../packages/ui/src/toolbar-settings";
 import { readLocal as readPref, writeLocal as writePref } from "../../../packages/ui/src/local-pref";
 import { aboutSection, createSettingsOverlay, type SettingsSection } from "../../../packages/ui/src/settings-overlay";
 import { buildVersion } from "./build-version";
+import { pulseActivity } from "./perf-activity";
 import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
 import { initialFont, rememberFont } from "./font-preference";
@@ -606,6 +607,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
 
   const setSidebar = (open: boolean, instant = false): void => {
+    pulseActivity("sidebar", 450);
     dockPanes(open, instant);
     // The toggle travels between the top bar and the sidebar header on a transform transition.
     sidebarToggle.classList.toggle("instant", instant);

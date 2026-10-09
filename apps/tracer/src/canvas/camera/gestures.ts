@@ -18,6 +18,7 @@ import type { Ctx, ViewRec } from "../context";
 import type { Pt } from "../layout/geometry";
 import type { ViewId } from "../model/types";
 import { clamp } from "./camera";
+import { pulseActivity, setActivity } from "../../perf-activity";
 
 export function installGestures(cx: Ctx): void {
   const { viewport, world, signal, camera, state, views } = cx;
@@ -96,6 +97,7 @@ export function installGestures(cx: Ctx): void {
     const lo = st.lefts[0]! + st.view / 2, hi = st.lefts[st.lefts.length - 1]! + st.view / 2;
     let x = two.cx0 - (c.x - two.x) / cam.z;
     if (x < lo) x = lo - Math.min(60, (lo - x) * 0.3); else if (x > hi) x = hi + Math.min(60, (x - hi) * 0.3);
+    setActivity("pan");
     camera.drive({ cx: x });
     two.samples.push({ x: c.x, t: e.timeStamp });
     if (two.samples.length > 6) two.samples.shift();
@@ -165,12 +167,13 @@ export function installGestures(cx: Ctx): void {
     if (!(e.ctrlKey || e.metaKey) && inCol && Math.abs(e.deltaY) > Math.abs(e.deltaX) && camera.lod === "live") {
       const colEl = inCol as HTMLElement;
       const canScroll = colEl.scrollHeight > colEl.clientHeight + 1 && (e.deltaY < 0 ? colEl.scrollTop > 0 : colEl.scrollTop + colEl.clientHeight < colEl.scrollHeight - 1);
-      if (canScroll) return;
+      if (canScroll) { pulseActivity("scroll", 200); return; }
     }
     e.preventDefault();
     camera.takeOver();
-    if (e.ctrlKey || e.metaKey) { camera.zoomAt(e.clientX, e.clientY, cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025))); return; }
+    if (e.ctrlKey || e.metaKey) { setActivity("zoom"); camera.zoomAt(e.clientX, e.clientY, cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025))); return; }
     const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX, dy = e.shiftKey ? 0 : e.deltaY;
+    setActivity("pan");
     camera.drive({ cx: cam.cx + dx / cam.z, cy: cam.cy + dy / cam.z });
   };
   viewport.addEventListener("wheel", onWheel, { passive: false, signal });
@@ -211,12 +214,14 @@ export function installGestures(cx: Ctx): void {
       const z = clamp(pinch.z0 * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0), 0.08, 2);
       const r = viewport.getBoundingClientRect();
       const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      setActivity("zoom");
       camera.drive({ z, cx: pinch.wp.x - (mx - r.left - camera.vw / 2) / z, cy: pinch.wp.y - (my - r.top - camera.vh / 2) / z });
       return;
     }
     if (!pan || e.pointerId !== pan.id) return;
     if (!pan.moved && Math.hypot(e.clientX - pan.x, e.clientY - pan.y) < 6) return;
     if (!pan.moved) { pan.moved = true; camera.takeOver(); viewport.dataset.panning = ""; cx.view.hideSummary(); }
+    setActivity("pan");
     camera.drive({ cx: pan.cx - (e.clientX - pan.x) / cam.z, cy: pan.cy - (e.clientY - pan.y) / cam.z });
   }, { signal });
   const pointerEnd = (e: PointerEvent): void => {

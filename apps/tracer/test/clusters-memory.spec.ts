@@ -48,7 +48,7 @@ for (const scene of [1, 6]) {
     test.setTimeout(60_000);
     const context = await browser.newContext({ ...devices["iPhone 15"], deviceScaleFactor: 3 });
     const page = await context.newPage();
-    await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink`);
+    await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&fps=0`);
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     await page.waitForTimeout(2500);
     const m = await memory(page);
@@ -61,7 +61,7 @@ test("memory: a hidden page releases its surfaces and a shown page draws them ag
   test.setTimeout(60_000);
   const context = await browser.newContext({ ...devices["iPhone 15"], deviceScaleFactor: 3 });
   const page = await context.newPage();
-  await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink");
+  await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&fps=0");
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.keyboard.press("Escape");
   await page.waitForTimeout(1500);

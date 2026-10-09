@@ -12,6 +12,7 @@ import { loading } from "../../../packages/ui/src/countup";
 import { releaseAuthScheme, useAuthScheme } from "./auth-scheme";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
+import { onDemand } from "./on-demand";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
 
@@ -80,6 +81,8 @@ let currentTerminal: TerminalClient | undefined;
 let coreScreen: import("./core-screen").CoreScreen | undefined;
 let performanceProbe: PerformanceProbe | undefined;
 let backdrop: FaultyTerminal | undefined;
+let perfHud: { dispose(): void } | undefined;
+let perfHudGeneration = 0;
 let welcomeEffect: ReturnType<typeof glitchText> | undefined;
 let welcomeTimer = 0;
 let foregroundListenerInstalled = false;
@@ -87,6 +90,25 @@ let backdropTimer = 0;
 
 /** True only in builds made with INFRATERNAL_CLUSTERS_PREVIEW=1 (see build.ts); false removes the mockup from the bundle. */
 declare const __CLUSTERS_PREVIEW__: boolean;
+
+/**
+ * Preview builds only: the frame meter and frame-drop recorder (issue #116) load after the first idle, so they add
+ * nothing to the first screen's work or to the critical and deferred transfer budgets. `requestIdleCallback` has a
+ * timeout, and Safari, which has none, falls back to a timer.
+ */
+function startPerfHud(bench: boolean): void {
+  if (!__CLUSTERS_PREVIEW__) return;
+  const generation = ++perfHudGeneration;
+  const load = (): void => {
+    if (generation !== perfHudGeneration) return;
+    void onDemand(() => import("./perf-hud.on-demand")).then((mod) => {
+      if (generation !== perfHudGeneration) return;
+      perfHud = mod.mountPerfHud({ bench });
+    }).catch((error: unknown) => { console.warn("frame meter failed to load", error); });
+  };
+  if (typeof requestIdleCallback === "function") requestIdleCallback(load, { timeout: 2000 });
+  else window.setTimeout(load, 1200);
+}
 
 void start();
 
@@ -300,6 +322,9 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   productCanvas = undefined;
   coreScreen?.dispose();
   performanceProbe?.dispose();
+  perfHudGeneration++;
+  perfHud?.dispose();
+  perfHud = undefined;
   currentTerminal = undefined;
   coreScreen = undefined;
   performanceProbe = undefined;
@@ -343,6 +368,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     return;
   }
   coreScreen = screen;
+  if ((clustersMode || canvasMode) && query.get("fps") !== "0") startPerfHud(query.get("fps") === "bench");
   if (clustersMode) {
     const { mountMockup } = await import("./canvas/mock");
     const scene = Number(query.get("scene"));

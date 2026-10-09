@@ -16,6 +16,7 @@
  * Round trips: pings are sampled on attachment and on typing, at most one per 2 s, and only while a stream is
  * attached; an idle connection schedules no wakeups [81].
  */
+import { noteWsMessage } from "./perf-activity";
 import { plainCloseReason } from "./close-reasons";
 import {
   WebSocketFrameDecoder,
@@ -311,6 +312,7 @@ export class MuxConnection {
     socket.onmessage = (event: MessageEvent<ArrayBuffer>) => {
       const receivedAt = performance.now();
       if (!(event.data instanceof ArrayBuffer)) { this.fail("server sent a non-binary frame"); return; }
+      noteWsMessage(event.data.byteLength);
       try {
         const message = new Uint8Array(event.data);
         this.decoder?.feed(message, (streamId, frame) => this.dispatch(streamId, frame, message, receivedAt));

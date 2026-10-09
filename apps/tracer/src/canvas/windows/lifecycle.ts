@@ -18,6 +18,7 @@ import { loadDroplet } from "../layout/droplet-handle";
 import { COLUMN_GAP } from "../layout/geometry";
 import type { ViewId, WindowModel } from "../model/types";
 import { coarse, reduced } from "../dom";
+import { endActivity, setActivity } from "../../perf-activity";
 import { makeWindow, setActive } from "./frame";
 import { isTerminal, makeBody } from "../views/body";
 import { SCALE_REST, restAt } from "../springs";
@@ -210,8 +211,10 @@ export function createWindows(cx: Ctx): WindowsModule {
       return;
     }
     colEl.dataset.split = "";
+    setActivity("split");
     const { dropletSplit } = await loadDroplet();
     await dropletSplit(root, b.card.root, direction, c.colsEl);
+    endActivity("split");
     delete colEl.dataset.split;
     rec.binding?.refit();
     b.binding?.refit();
