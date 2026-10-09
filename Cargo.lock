@@ -1330,6 +1330,26 @@ dependencies = [
 [[package]]
 name = "infraternal-plugin-api"
 version = "0.1.0"
+dependencies = [
+ "bytes",
+ "serde",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
+name = "infraternal-plugin-mesh"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "infraternal-mesh",
+ "infraternal-plugin-api",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
 
 [[package]]
 name = "infraternal-plugin-ssh"
@@ -1358,6 +1378,7 @@ dependencies = [
  "hkdf",
  "http-body-util",
  "infraternal-mesh",
+ "infraternal-plugin-api",
  "infraternal-protocol",
  "nix",
  "openssl",
