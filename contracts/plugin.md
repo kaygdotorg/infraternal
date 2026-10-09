@@ -183,14 +183,24 @@ Control-stream calls are:
 
 Both reject unknown fields, duplicate fields and wrong field types; control
 frames are bounded to 1 KiB. Mesh keeps its existing 64 KiB frame limit.
-Runtime settings are process-local; the descriptor's enabled default applies
-after restart. Enabling starts no worker. The first admitted action or view
-starts one bounded ordered worker per socket. Disabling invalidates buffered
-replies, aborts all registered workers and joins them before acknowledging,
-leaving no Mesh worker, watch or timer running. Disabled calls are refused.
+Runtime switches persist per host role and plugin in SQLite and restore before
+serving sockets. Descriptor defaults apply only without a saved override.
+Unreadable settings prevent startup. Enabling saves before admitting work and
+starts no worker. The first admitted action or view starts one bounded ordered
+worker per socket. Disabling invalidates buffered replies, aborts all registered
+workers and joins them before waiting for the settings writer, then saves
+before acknowledging success. This ordering cancels pending inventory writes
+without waiting behind them. A failed save restores the previous enabled
+state lazily. Owner/fresh authority is rechecked inside the writer transaction
+after lock waits [28]. Disabled calls are refused; unanswered in-flight calls
+receive one error result, leaving no Mesh worker, watch or timer running.
 
-Existing views receive a final plain `forbidden` event on disable. Epochs
-invalidate old worker replies; never-reused view generations prevent an old
-withdrawal from ending a replacement with the same subscription id. Core
-checks this typed lifecycle metadata without parsing snapshot JSON. The
-control worker remains available to re-enable compiled features.
+Existing views receive a final plain `forbidden` event on disable or worker
+exit. Already-buffered successful calls settle on normal worker exit before
+unanswered calls fail. Distinct feature epochs and worker generations reject
+old replies, including after reusing a call id. Never-reused view generations
+prevent an old withdrawal from ending a replacement with the same subscription
+id. Core checks this typed lifecycle metadata without parsing snapshot JSON.
+Only declared plugin topics are routed to workers; `auth.*` topics remain core
+owned regardless of descriptor claims. The control worker remains available
+to re-enable compiled features.

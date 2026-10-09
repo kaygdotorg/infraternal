@@ -62,8 +62,10 @@ Its numeric ID is server inventory identity. Layouts refer to grants by name
 only (D180).
 
 `MeshNode` is `{"node":{"id":u64,"public_key":[u8;32],"host":string,"tags":string[]},"live":boolean,"last_seen":i64|null,"last_rtt_us":u64|null}`.
-`last_seen` is Unix seconds. `live` is true when the last successful
-observation is within the 30-second live window. RTT is in microseconds.
+`last_seen` is Unix seconds and never decreases when observations admitted
+before writer waits commit out of order. `live` is true when the newest
+successful observation is within the 30-second live window. RTT is in
+microseconds.
 `MeshTag` is `{"name":string,"members":u64[]}`; member IDs are sorted.
 `MeshSnapshot` is `{"revision":u64,"nodes":MeshNode[],"tags":MeshTag[],"grants":MeshGrant[],"next_cursor"?:{"revision":u64,"offset":usize}}`.
 The snapshot is permission-filtered and read from one consistent database
@@ -92,10 +94,11 @@ current node membership; an untagged node requires a global node-management
 role. Tag membership changes require `mesh.manage_tags` on the destination
 tag and every current node membership; untagged hosts require global access.
 Checks use pre-edit memberships so an editor cannot claim an out-of-scope host.
-A tag endpoint's scope is
-that tag; a node endpoint's scopes are its current memberships. A scoped grant
-role must cover each endpoint's scope group, so an untagged node endpoint
-requires a global `mesh.manage_grants` role.
+A tag endpoint requires that tag; a node endpoint requires every current
+membership. Creating, moving, deleting or renaming a grant requires
+`mesh.manage_grants` covering every tag of every touched endpoint [211].
+Moving includes the old, replacement and retained endpoint. An untagged node
+endpoint requires global grant-management authority.
 
 Owners bypass role checks. Other users need an assigned role. Any assigned
 Mesh management action grants inventory view access, narrowed by its scopes;
@@ -150,7 +153,9 @@ subscription tag limits scoped invalidations for every viewer, including owners
 and global roles. Instance-wide changes invalidate every authorized view. If a
 subscriber falls behind the bounded change buffer, the server sends a fresh
 filtered `resync` snapshot. Each view also schedules the earliest visible
-live-node deadline from the complete filtered inventory, before paging. At
+live-node deadline from the complete filtered inventory, before paging.
+Membership and role changes recompute this deadline for newly visible hosts,
+including watches which previously had no live-node timer. At
 that deadline it sends a `resync` at the current revision, even with no edit
 or subsequent request. This derived expiry changes neither revision nor audit.
 A timed resync may arrive between continuation results; authoritative resyncs
