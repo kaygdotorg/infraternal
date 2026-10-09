@@ -74,7 +74,8 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   const edges = el("div", "cl-edges");
   viewport.append(world, edges);
   core.panes.append(viewport);
-  stage.toggleAttribute("data-window-edge", edgeToEdge(coarse.matches || innerWidth < 720, readSizes()));
+  const setEdge = (sizes: ReturnType<typeof readSizes>): void => { stage.toggleAttribute("data-window-edge", edgeToEdge(coarse.matches || innerWidth < 720, sizes)); };
+  setEdge(readSizes());
   const backdrop: Backdrop | undefined = options.dots === false ? undefined : createBackdrop(stage, viewport);
   backdrop?.measure();
   const events = new AbortController();
@@ -129,7 +130,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   let lastW = 0, lastH = 0, animatingUntil = 0;
   const relayout = (animate: boolean): void => {
     const sizes = readSizes();
-    stage.toggleAttribute("data-window-edge", edgeToEdge(coarse.matches || innerWidth < 720, sizes));
+    setEdge(sizes);
     const w = viewport.clientWidth, h = viewport.clientHeight;
     lastW = w; lastH = h;
     cx.camera.resized();
@@ -158,7 +159,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       first.forEach((m) => cx.flip.play(m, true));
       animatingUntil = performance.now() + 700;
       const target = cx.camera.target;
-      if (target) cx.camera.layoutFlight(() => cx.camera.flyTo(target));
+      if (target) cx.camera.flyTo(target);
     } else if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true);
   };
   const ro = new ResizeObserver(() => {

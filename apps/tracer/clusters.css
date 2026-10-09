@@ -300,3 +300,10 @@
 /* A phone at full width: the canvas area runs edge to edge, so a window of 99% of the screen is centred with a hairline
    of margin, not cut by the 12 px gutters (D191). The top bar and the key tray keep their margins. */
 .terminal-screen[data-window-edge] .panes { left: env(safe-area-inset-left, 0px); right: env(safe-area-inset-right, 0px); }
+
+/* While the camera moves, glass over the canvas is tint only (#121). A backdrop blur is recomputed from what is behind
+   it every frame, and everything behind the windows and the top pills moves with the camera; at DPR 2 with Frosted cards
+   and windows that is most of the frame budget (a flight rasters about a thousand tiles). The blur radius and the
+   levels' values are unchanged: the blur is back the moment the camera rests (about 140 ms after the last frame).
+   `data-canvas-moving` is one attribute write per move, never per frame (camera/camera.ts). */
+.terminal-screen[data-canvas-moving] :is(.ui-window, .ui-pill, .ui-overlay-surface, .ui-panel) { -webkit-backdrop-filter: none; backdrop-filter: none; }

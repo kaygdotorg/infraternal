@@ -48,8 +48,6 @@ export const clamp = (v: number, lo: number, hi: number): number => Math.max(lo,
 // test/clusters-flight.spec.ts. Pointer, touch and pill flights about 350 ms (was 1.3 s); a key's about 190 ms (was 430 ms) (the motion rule).
 const FLIGHT = { visualDuration: 0.16, bounce: 0 };
 const KEY_FLIGHT = { visualDuration: 0.08, bounce: 0 };
-/** The layout spring (the same one windows use when a layout moves, layout/flip.ts). */
-const LAYOUT_FLIGHT = { visualDuration: 0.5, bounce: 0.22 };
 const REST_DELAY = 140;
 export const MIN_ZOOM = 0.08;
 export const MAX_ZOOM = 2;
@@ -78,9 +76,12 @@ export class Camera {
   /** Whether `will-change: transform` is on the world right now. */
   private hinted = false;
   private ready = false;
-  private flightKind: "gesture" | "key" | "layout" = "gesture";
+  /** The screen around the canvas: its glass (the pills, the sidebar) blurs the canvas behind it, which moves with the camera. */
+  private readonly stage: Element | null;
+  private flightKind: "gesture" | "key" = "gesture";
 
   constructor(private readonly viewport: HTMLElement, private readonly world: HTMLElement, private readonly hooks: CameraHooks = {}) {
+    this.stage = world.closest("[data-clusters]");
     world.dataset.lod = this.lod;
     world.dataset.zoom = this.band;
     // The springs paint nothing until `start()`: their first update would run the hooks before the canvas is built.
@@ -126,6 +127,8 @@ export class Camera {
     const nextBand: ZoomBand = this.band === "in" ? (cam.z < 0.76 ? "out" : "in") : (cam.z > 0.82 ? "in" : "out");
     if (nextBand !== this.band) { this.band = nextBand; world.dataset.zoom = nextBand; this.hooks.onBand?.(nextBand); }
     if (!atRest) {
+      // One attribute write at the start of a move (not per frame): CSS may drop costly effects while the camera moves.
+      if (!this.moving) this.stage?.toggleAttribute("data-canvas-moving", true);
       this.moving = true;
       // `will-change: transform` makes the browser raster the layer at its own size (scale 1) so a move never blurs it.
       // Zoomed far out that is the whole visible world at full size: a mesh of a thousand hosts is 7,800 px wide, and
@@ -142,6 +145,7 @@ export class Camera {
   rest(): void {
     window.clearTimeout(this.restTimer);
     this.moving = false;
+    this.stage?.toggleAttribute("data-canvas-moving", false);
     this.hinted = false;
     this.world.style.willChange = "";
     this.apply(true);
@@ -190,12 +194,6 @@ export class Camera {
     try { return run(); } finally { this.flightKind = "gesture"; }
   }
 
-  /** Runs a flight on the layout spring: the framing moved because the layout around it did (a window-size setting). */
-  layoutFlight<T>(run: () => T): T {
-    this.flightKind = "layout";
-    try { return run(); } finally { this.flightKind = "gesture"; }
-  }
-
   /** Flies the camera (interruptible: a new target keeps the current velocity). */
   flyTo(target: () => Cam, instant = false): void {
     this.target = target;
@@ -208,7 +206,7 @@ export class Camera {
       return;
     }
     this.restThresholds(Math.max(t.z, this.cam.z));
-    const cfg = this.flightKind === "key" ? KEY_FLIGHT : this.flightKind === "layout" ? LAYOUT_FLIGHT : FLIGHT;
+    const cfg = this.flightKind === "key" ? KEY_FLIGHT : FLIGHT;
     this.springCx.configure(cfg); this.springCy.configure(cfg); this.springLz.configure(cfg);
     const { cam } = this;
     this.springCx.value = cam.cx; this.springCy.value = cam.cy; this.springLz.value = Math.log(cam.z);
