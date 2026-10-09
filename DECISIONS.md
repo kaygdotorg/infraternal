@@ -1515,3 +1515,27 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - New work (mesh data plane, relay, backup, metrics) is built this way
        from the start; existing code moves behind the interface as it is
        touched.
+199. **Mesh settings and the CLI shape (owner, 2026-10-09, grill G1–G6):**
+     - **No change ever drops a connection (G1):** changing the address
+       range, suffix, rules or keys is seamless: names update first, nodes
+       carry old and new addresses until every peer has moved, and only then
+       is the old state removed.
+     - **Old domain suffix (G2)** keeps resolving as an alias for 7 days, with
+       a notice in the Mesh view saying when it stops.
+     - **Upstream DNS (G3):** plain DNS, DNS over HTTPS and DNS over TLS, one
+       global upstream plus selective routing (send chosen domains to chosen
+       resolvers, e.g. a home AdGuard for one zone).
+     - **Backup turning itself on (G4)** waits for a measurement of how large
+       backups grow, and a separate backup grill (including high
+       availability, automatic rollback of failed updates, and the
+       architecture they need).
+     - **CLI (G5):** one pattern for every role, `infraternal <role> up |
+       down | status` (e.g. `infraternal mesh up --ssh`), each with `--json`;
+       bare `infraternal status` summarises everything running on the
+       machine. Very intuitive, very easy.
+     - **Mesh view extras (G6):** "why can't A reach B", preview and undo of
+       changes, temporary access, service discovery, live paths, `infraternal
+       mesh doctor` and per-arrow traffic are each filed as an issue, to be
+       grilled and refined for the easiest UX before they are built. Per-arrow
+       traffic and service discovery grow with a later metrics, graphs and
+       logs component. The basics come first.
