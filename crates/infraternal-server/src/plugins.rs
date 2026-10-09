@@ -70,6 +70,13 @@ struct Entry {
     epoch: AtomicU64,
     tasks: Mutex<Vec<Arc<Task>>>,
 }
+// Wake socket lifecycle delivery even when a worker returns, panics or is cancelled.
+struct WorkerWake(watch::Sender<()>);
+impl Drop for WorkerWake {
+    fn drop(&mut self) {
+        self.0.send_replace(());
+    }
+}
 struct Task {
     handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -285,7 +292,8 @@ impl SocketPlugins {
     pub async fn recv(&mut self) -> Option<SocketReply> {
         loop {
             for socket in &self.entries {
-                let expired = socket.entry.epoch.load(Ordering::Acquire) != socket.epoch;
+                let expired = socket.entry.epoch.load(Ordering::Acquire) != socket.epoch
+                    || socket.requests.is_closed();
                 if !expired && socket.withdraw_before == 0 {
                     continue;
                 }
@@ -394,12 +402,17 @@ impl SocketPlugins {
                 .lock()
                 .is_ok_and(|handle| handle.as_ref().is_some_and(|handle| !handle.is_finished()))
         });
-        let handle = tokio::spawn(entry.plugin.run(
+        let worker = entry.plugin.run(
             Arc::clone(&self.host),
             receiver,
             ReplySender::new(self.replies.clone(), id, epoch),
             Arc::clone(&registry),
-        ));
+        );
+        let changed = self.runtime.inner.changed.clone();
+        let handle = tokio::spawn(async move {
+            let _wake = WorkerWake(changed);
+            worker.await;
+        });
         let task = Arc::new(Task {
             handle: Mutex::new(Some(handle)),
         });
