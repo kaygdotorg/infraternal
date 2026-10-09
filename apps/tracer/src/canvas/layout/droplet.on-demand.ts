@@ -47,8 +47,11 @@ void main() {
   gl_FragColor = line + fill * (1.0 - line.a);
 }`;
 
-/** The resolved rgba (premultiplied, 0..1) of any CSS colour string, through a 1 px 2D canvas. */
+const rgbaCache = new Map<string, [number, number, number, number]>();
+/** The resolved rgba (premultiplied, 0..1) of any CSS colour string, through a 1 px 2D canvas (read back once per colour). */
 function rgba(css: string): [number, number, number, number] {
+  const known = rgbaCache.get(css);
+  if (known) return known;
   const c = document.createElement("canvas");
   c.width = c.height = 1;
   const g = c.getContext("2d", { willReadFrequently: true })!;
@@ -57,15 +60,62 @@ function rgba(css: string): [number, number, number, number] {
   g.fillRect(0, 0, 1, 1);
   const [r, gg, b, a] = g.getImageData(0, 0, 1, 1).data as unknown as number[];
   const al = a! / 255;
-  return [(r! / 255) * al, (gg! / 255) * al, (b! / 255) * al, al];
+  const out: [number, number, number, number] = [(r! / 255) * al, (gg! / 255) * al, (b! / 255) * al, al];
+  if (rgbaCache.size > 32) rgbaCache.clear();
+  rgbaCache.set(css, out);
+  return out;
 }
+
+/**
+ * The GL context and the compiled program. Creating a context is a round trip to the GPU process and a shader link is
+ * another, both blocking the page's main thread (measured: about 17 ms of the first frame of a split, where the budget of a
+ * frame is 8.3 ms). A device with a fine pointer (a desktop, which has memory to spare and is the one that runs at 120 Hz)
+ * therefore keeps ONE parked context between splits, with a 1 px drawing buffer, and builds it before the first split when
+ * the browser is idle (`warmContext`). A touch device still creates the context for the length of the animation and
+ * destroys it at the end (the iOS memory rule, README). The context is dropped when the page is hidden (`endSplit`).
+ */
+interface Gl { canvas: HTMLCanvasElement; gl: WebGLRenderingContext; prog: WebGLProgram; U: Record<string, WebGLUniformLocation> }
+let pooled: Gl | undefined;
+const keepContext = (): boolean => matchMedia("(pointer: fine)").matches;
+const UNIFORMS = ["uRes", "uDpr", "uR", "uK", "uFill", "uLine", "uA", "uB", "uRA", "uRB"] as const;
+
+function createGl(): Gl | undefined {
+  const canvas = document.createElement("canvas");
+  canvas.className = "cl-goo";
+  const gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: true, antialias: false });
+  if (!gl) return undefined;
+  const compile = (type: number, src: string): WebGLShader => { const sh = gl.createShader(type)!; gl.shaderSource(sh, src); gl.compileShader(sh); return sh; };
+  const prog = gl.createProgram()!;
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  const buf = gl.createBuffer()!;
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, "a");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  const U = Object.fromEntries(UNIFORMS.map((n) => [n, gl.getUniformLocation(prog, n)!])) as Gl["U"];
+  canvas.width = canvas.height = 1;
+  return { canvas, gl, prog, U };
+}
+
+const dropContext = (): void => {
+  pooled?.gl.getExtension("WEBGL_lose_context")?.loseContext();
+  pooled = undefined;
+};
+/** Builds the parked context when the browser is idle (fine pointers only). */
+export const warmContext = (): void => { if (!pooled && keepContext()) pooled = createGl(); };
 
 export interface SplitProbe { frames: number; drawMs: number; maxDrawMs: number; trace?: Array<[number, number]> }
 
 /** The finisher of the animation that is running, if any: there is never more than one GL context alive. */
 let running: (() => void) | undefined;
 /** Ends the running split at once (its layer and GL context are destroyed). A hidden page calls this. */
-export const endSplit = (): void => running?.();
+export const endSplit = (): void => { running?.(); dropContext(); };
 
 /**
  * Plays the split of `a` and `b`, already in their final places. `down`: b is below a in the same column
@@ -73,7 +123,7 @@ export const endSplit = (): void => running?.();
  * `host`, the element both columns sit in). Both directions are the same drawing, rotated a quarter turn.
  */
 export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" | "right" = "down", host?: HTMLElement, probe?: SplitProbe): Promise<void> {
-  endSplit(); // one context at a time: a split that is still playing settles first
+  running?.(); // one context at a time: a split that is still playing settles first
   probe ??= (window as unknown as { __splitProbe?: SplitProbe }).__splitProbe;
   const t00 = performance.now();
   return new Promise((resolve) => {
@@ -101,26 +151,15 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" |
       ? { x: ar.x - 6, y: Math.min(ar.y, br.y) - 6, w: H + 12, h: Math.max(ar.y + ar.h, br.y + br.h) - Math.min(ar.y, br.y) + 12 }
       : { x: ar.x - 6, y: ar.y - 6, w: ar.w + 12, h: H + 12 };
     const dpr = Math.min(devicePixelRatio || 1, 2);
-    const canvas = document.createElement("canvas");
-    canvas.className = "cl-goo";
+    if (pooled?.gl.isContextLost()) pooled = undefined;
+    const own = pooled ?? createGl();
+    if (!own) { b.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: "ease-out" }).onfinish = () => resolve(); return; }
+    if (keepContext()) pooled = own;
+    const { canvas, gl, U: locs } = own;
     canvas.width = Math.round(css.w * dpr);
     canvas.height = Math.round(css.h * dpr);
     canvas.style.cssText = `position:absolute;left:${css.x}px;top:${css.y}px;width:${css.w}px;height:${css.h}px;pointer-events:none`;
-    const gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: true, antialias: false });
-    if (!gl) { b.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: "ease-out" }).onfinish = () => resolve(); return; }
-    const compile = (type: number, src: string): WebGLShader => { const s = gl.createShader(type)!; gl.shaderSource(s, src); gl.compileShader(s); return s; };
-    const prog = gl.createProgram()!;
-    gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
-    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
-    gl.linkProgram(prog);
-    gl.useProgram(prog);
-    const buf = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    const loc = gl.getAttribLocation(prog, "a");
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-    const U = (n: string): WebGLUniformLocation => gl.getUniformLocation(prog, n)!;
+    const U = (n: string): WebGLUniformLocation => locs[n as (typeof UNIFORMS)[number]]!;
     const cs = getComputedStyle(a);
     const dbg = (window as unknown as { __gooDebug?: boolean }).__gooDebug;
     const fill = dbg ? ([0.8, 0.1, 0.1, 1] as [number, number, number, number]) : rgba(cs.backgroundColor === "rgba(0, 0, 0, 0)" ? "rgba(13,14,16,0.9)" : cs.backgroundColor);
@@ -133,8 +172,6 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" |
     gl.uniform1f(U("uK"), K);
     gl.uniform4f(U("uFill"), fill[0], fill[1], fill[2], fill[3]);
     gl.uniform4f(U("uLine"), line[0], line[1], line[2], line[3]);
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
     if (right) column.prepend(canvas); else column.insertBefore(canvas, a);
     for (const w of [a, b]) { w.dataset.goo = ""; }
@@ -192,7 +229,7 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" |
       for (const w of [a, b]) { delete w.dataset.goo; w.style.transform = ""; w.style.clipPath = ""; }
       for (const p of [...partsA, ...partsB]) p.style.opacity = "";
       canvas.remove();
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      if (pooled === own) { canvas.width = canvas.height = 1; } else { gl.getExtension("WEBGL_lose_context")?.loseContext(); }
       resolve();
     };
     // One spring for the gap, retargeted mid-flight. Pull: a soft spring aimed far past the break distance, so
