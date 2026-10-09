@@ -103,3 +103,7 @@ impl CaCopies {
             .map_err(|_| CaError)
     }
 }
+
+#[cfg(test)]
+#[path = "ca_copies_tests.rs"]
+mod tests;
