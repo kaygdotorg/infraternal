@@ -1589,3 +1589,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - `infraternal status` shows the machine's role ("server" and/or "node
        of <server>") and every component running; every command has `--json`
        (D199).
+202. **The CLI is pretty by default and teaches AI agents (owner, 2026-10-09):**
+     - **Output:** every command prints clean, organised, human-readable
+       output by default: short sections, aligned columns, plain-language
+       states and next steps, colour and symbols used sparingly and turned
+       off when output is not a terminal or `NO_COLOR` is set. `--json` gives
+       the full machine form for every command (D199).
+     - **`infraternal skill`:** prints agent skills for AI agents: for each
+       command and subcommand, a concise description and step-by-step
+       instructions (what it does, when to use it, inputs, outputs, `--json`
+       shape, safety notes such as dry-run first for destructive actions).
+       `infraternal skill` lists them, `infraternal skill <command>` prints
+       one, and an option writes them as skill files for agent tools.
+     - **One source:** help text, skills, the API, MCP and UI labels come
+       from the same action definitions (D16), so they never drift; wording
+       follows the plain-language rules (#112). Concise, cleanly organised,
+       methodical.
