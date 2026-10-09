@@ -1,5 +1,7 @@
-//! Proves global admission, failure isolation and credential precedence using deterministic held backend calls.
+//! Exercises global admission, component shutdown and login selection using held backend calls and a real helper.
 #![allow(clippy::unwrap_used)]
+
+mod common;
 
 use infraternal_plugin_ssh::{
     bootstrap::{Authority, Backend, Bootstrap, Resolved},
@@ -19,6 +21,13 @@ struct HeldBackend {
     release: Semaphore,
     active: AtomicUsize,
     peak: AtomicUsize,
+    helper: Option<std::path::PathBuf>,
+}
+struct Active<'a>(&'a AtomicUsize);
+impl Drop for Active<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 impl Backend for HeldBackend {
     fn resolve<'a>(
@@ -36,8 +45,23 @@ impl Backend for HeldBackend {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
             self.entered.add_permits(1);
-            self.release.acquire().await.unwrap().forget();
-            self.active.fetch_sub(1, Ordering::SeqCst);
+            let _active = Active(&self.active);
+            if let Some(path) = &self.helper {
+                let mut command = tokio::process::Command::new("/bin/sh");
+                let script = format!(
+                    "printf '%s' \"$$\" > {}; sleep 60 & wait",
+                    infraternal_plugin_ssh::transport::shell_quote(path.to_str().unwrap())
+                );
+                command.args(["-c", &script]);
+                infraternal_plugin_ssh::process::execute(
+                    &mut command,
+                    Input::Empty,
+                    std::time::Duration::from_secs(70),
+                )
+                .await?;
+            } else {
+                self.release.acquire().await.unwrap().forget();
+            }
             assert_eq!(
                 credential,
                 Some(if target.id == "a0" {
@@ -120,6 +144,7 @@ async fn concurrency_is_eight_across_batches_and_all_ten_hosts_fail_independentl
         release: Semaphore::new(0),
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
+        helper: None,
     });
     let runner = Bootstrap::new(
         Arc::new(ReadOnly),
@@ -208,6 +233,7 @@ async fn entire_batch_validates_before_start_and_duplicates_are_refused() {
         release: Semaphore::new(0),
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
+        helper: None,
     });
     let runner = Bootstrap::new(
         Arc::new(ReadOnly),
@@ -248,6 +274,7 @@ async fn a_thousand_admitted_targets_keep_eight_active_backend_calls() {
         release: Semaphore::new(0),
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
+        helper: None,
     });
     let runner = Bootstrap::new(
         Arc::new(ReadOnly),
@@ -313,6 +340,7 @@ async fn authenticated_batches_retain_an_opaque_session_for_trusted_issuance() {
         release: Semaphore::new(0),
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
+        helper: None,
     });
     let runner = Bootstrap::new(
         Arc::new(ReadOnly),
@@ -360,4 +388,172 @@ async fn authenticated_batches_retain_an_opaque_session_for_trusted_issuance() {
             .unwrap()
             .contains("synthetic-session-capability")
     }));
+}
+
+#[tokio::test]
+async fn turning_off_drains_queued_work_and_reenable_never_resumes_old_batches() {
+    use infraternal_plugin_api::{Plugin, PluginState};
+    let backend = Arc::new(HeldBackend {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+        helper: None,
+    });
+    let runner = Bootstrap::new(
+        Arc::new(ReadOnly),
+        backend.clone(),
+        BinaryPaths {
+            x86_64: "unused".into(),
+            aarch64: "unused".into(),
+        },
+    );
+    runner.descriptor().validate().unwrap();
+    assert_eq!(runner.status().state, PluginState::On);
+    assert_eq!(runner.status().active_work, 0);
+    // Idempotent enable must not terminate any adapter listening for off.
+    let mut enabled = runner.enabled_changes();
+    runner.set_enabled(true).await.unwrap();
+    assert!(!enabled.has_changed().unwrap());
+    let batch = runner
+        .start("owner".into(), targets("batch", 100), Some("shared".into()))
+        .unwrap();
+    backend.entered.acquire_many(8).await.unwrap().forget();
+    assert_eq!(runner.status().active_work, 100);
+    tokio::time::timeout(std::time::Duration::from_secs(5), runner.set_enabled(false))
+        .await
+        .unwrap()
+        .unwrap();
+    enabled.changed().await.unwrap();
+    assert!(!*enabled.borrow());
+    assert_eq!(runner.status().state, PluginState::Off);
+    assert_eq!(runner.status().active_work, 0);
+    assert_eq!(backend.active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        batch
+            .events(0)
+            .1
+            .iter()
+            .filter(|event| event.step == Step::Failed)
+            .count(),
+        100
+    );
+    assert!(
+        runner
+            .start("owner".into(), targets("a", 1), Some("shared".into()))
+            .is_err()
+    );
+    assert!(runner.activity().is_err());
+    runner.set_enabled(true).await.unwrap();
+    assert!(runner.retry(&batch, "owner", "batch0").is_err());
+    let fresh = runner
+        .start("owner".into(), targets("b", 1), Some("shared".into()))
+        .unwrap();
+    backend.entered.acquire().await.unwrap().forget();
+    runner.set_enabled(false).await.unwrap();
+    assert_eq!(
+        fresh
+            .events(0)
+            .1
+            .iter()
+            .filter(|event| event.step == Step::Failed)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn an_interrupted_disable_keeps_admission_closed_until_its_adapter_retires() {
+    use infraternal_plugin_api::{Plugin, PluginState};
+    let backend = Arc::new(HeldBackend {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+        helper: None,
+    });
+    let runner = Bootstrap::new(
+        Arc::new(ReadOnly),
+        backend,
+        BinaryPaths {
+            x86_64: "unused".into(),
+            aarch64: "unused".into(),
+        },
+    );
+    let activity = runner.activity().unwrap();
+    let mut enabled = runner.enabled_changes();
+    let stopping = runner.clone();
+    let disabled = tokio::spawn(async move { stopping.set_enabled(false).await });
+    enabled.changed().await.unwrap();
+    assert_eq!(runner.status().state, PluginState::Stopping);
+    disabled.abort();
+    let _ = disabled.await;
+    assert!(runner.activity().is_err());
+    let starting = runner.clone();
+    let (entered, admission) = tokio::sync::oneshot::channel();
+    let started = tokio::spawn(async move {
+        entered.send(()).unwrap();
+        starting.set_enabled(true).await
+    });
+    admission.await.unwrap();
+    assert!(!started.is_finished());
+    drop(activity);
+    tokio::time::timeout(std::time::Duration::from_secs(5), started)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(runner.status().state, PluginState::On);
+    assert_eq!(runner.status().active_work, 0);
+}
+
+#[tokio::test]
+async fn component_off_retires_a_real_native_helper() {
+    use infraternal_plugin_api::Plugin;
+    let path = common::scratch().join(format!("component-helper-{}", uuid::Uuid::new_v4()));
+    let backend = Arc::new(HeldBackend {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+        helper: Some(path.clone()),
+    });
+    let runner = Bootstrap::new(
+        Arc::new(ReadOnly),
+        backend.clone(),
+        BinaryPaths {
+            x86_64: "unused".into(),
+            aarch64: "unused".into(),
+        },
+    );
+    let _batch = runner
+        .start("owner".into(), targets("b", 1), Some("shared".into()))
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let pid: u32 = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), runner.set_enabled(false))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(runner.status().active_work, 0);
+    assert_eq!(backend.active.load(Ordering::SeqCst), 0);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| stat.split_whitespace().nth(2) != Some("Z"))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    std::fs::remove_file(path).unwrap();
 }

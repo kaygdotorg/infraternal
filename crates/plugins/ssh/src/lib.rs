@@ -7,6 +7,8 @@ pub mod bootstrap;
 pub mod config;
 pub mod credentials;
 pub mod install;
+mod lifecycle;
+
 pub mod manifest;
 pub mod master;
 pub mod model;

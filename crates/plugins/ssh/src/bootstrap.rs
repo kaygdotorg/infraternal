@@ -4,6 +4,7 @@ use crate::{
     auth_once::{OneUseAuth, TargetAuth},
     auth_order::Authentication,
     install::{BinaryPaths, Cleanup, Installation, JoinMaterial},
+    lifecycle::Lifecycle,
     model::{Destination, Event, Failure, MeshEvidence, Step, Target, identifier},
     probe::{CHECK_SCRIPT, Check},
     transport::{
@@ -80,6 +81,7 @@ pub struct Bootstrap {
     concurrency: Arc<Semaphore>,
     batches: Arc<Semaphore>,
     deadline: Duration,
+    lifecycle: Arc<Lifecycle>,
 }
 
 impl Bootstrap {
@@ -97,6 +99,7 @@ impl Bootstrap {
             concurrency: Arc::new(Semaphore::new(crate::manifest::CONCURRENT_HOSTS)),
             batches: Arc::new(Semaphore::new(crate::manifest::CONCURRENT_BATCHES)),
             deadline: Duration::from_secs(crate::manifest::ATTEMPT_SECONDS),
+            lifecycle: Lifecycle::new(),
         }
     }
 
@@ -246,6 +249,9 @@ impl Bootstrap {
                 _permit: permit,
             }),
         };
+        self.lifecycle
+            .register(&batch.inner)
+            .map_err(Failure::install)?;
         let ids: Vec<_> = lock(&batch.inner.states).keys().cloned().collect();
         for id in ids {
             self.schedule(batch.inner.clone(), &id, private.remove(&id))?;
@@ -259,6 +265,10 @@ impl Bootstrap {
         id: &str,
         auth_once: Option<OneUseAuth>,
     ) -> Result<(), Failure> {
+        if *batch.cancel.borrow() {
+            return Err(Failure::install("The host setup batch has stopped."));
+        }
+        let activity = self.activity().map_err(Failure::install)?;
         if let Some(material) = &auth_once {
             material.validate()?;
         }
@@ -288,6 +298,7 @@ impl Bootstrap {
         );
         let runner = self.clone();
         tokio::spawn(async move {
+            let _activity = activity;
             runner.attempt(batch, target, attempt, auth_once).await;
         });
         Ok(())
@@ -541,6 +552,15 @@ impl Bootstrap {
         fingerprint: &str,
         authority: &dyn ConfirmationAuthority,
     ) -> Result<(), Failure> {
+        let _activity = self.activity().map_err(Failure::install)?;
+        let mut enabled = self.enabled_changes();
+        if !*enabled.borrow() {
+            return Err(Failure::install("SSH host provisioning is off."));
+        }
+        tokio::select! {
+            biased;
+            _ = enabled.changed() => Err(Failure::install("SSH host provisioning is off.")),
+            result = async {
         if batch.inner.authority.owner != owner || *batch.inner.cancel.borrow() {
             return Err(Failure::unsupported("The bootstrap batch is unavailable."));
         }
@@ -583,6 +603,8 @@ impl Bootstrap {
         self.transport
             .confirm_host_key(resolved.destination, challenge, fingerprint, authority)
             .await
+            } => result,
+        }
     }
 
     /// Retry one failed host, keeping its trusted host identity in the backend.
@@ -670,13 +692,13 @@ struct History {
     events: VecDeque<Event>,
     metadata: HashMap<String, HostMetadata>,
 }
-struct BatchInner {
+pub(crate) struct BatchInner {
     authority: Authority,
     credential: Option<String>,
     states: Mutex<HashMap<String, HostState>>,
     history: Mutex<History>,
     changed: watch::Sender<u64>,
-    cancel: watch::Sender<bool>,
+    pub(crate) cancel: watch::Sender<bool>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
@@ -758,8 +780,38 @@ fn emit(
     batch.changed.send_replace(sequence);
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub use crate::lifecycle::Activity;
+
+impl Bootstrap {
+    /// Admit an adapter lifetime; it must retire when the component is turned off.
+    /// # Errors
+    /// Refuses admission while stopping or off.
+    pub fn activity(&self) -> Result<Activity, &'static str> {
+        self.lifecycle.admit()
+    }
+    /// Observe component lifetime changes without polling or starting a timer.
+    #[must_use]
+    pub fn enabled_changes(&self) -> watch::Receiver<bool> {
+        self.lifecycle.subscribe()
+    }
+}
+impl infraternal_plugin_api::Plugin for Bootstrap {
+    fn descriptor(&self) -> &'static infraternal_plugin_api::PluginDescriptor {
+        &crate::manifest::DESCRIPTOR
+    }
+    fn status(&self) -> infraternal_plugin_api::PluginStatus {
+        self.lifecycle.status()
+    }
+    fn set_enabled(&self, enabled: bool) -> infraternal_plugin_api::PluginOperation<'_, ()> {
+        Box::pin(async move {
+            self.lifecycle.set_enabled(enabled).await;
+            Ok(())
+        })
+    }
 }
