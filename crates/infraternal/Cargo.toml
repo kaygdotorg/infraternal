@@ -5,10 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["ssh"]
+ssh = ["dep:infraternal-plugin-ssh", "infraternal-server/ssh"]
+
 [dependencies]
-infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0" }
+infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
 clap.workspace = true
-infraternal-server = { path = "../infraternal-server", version = "0.1.0" }
+infraternal-server = { path = "../infraternal-server", version = "0.1.0", default-features = false }
 sqlx.workspace = true
 tokio.workspace = true
 infraternal-shim.workspace = true

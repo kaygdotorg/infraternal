@@ -1,4 +1,5 @@
 //! Proves the real hidden CLI responds only through a private socket, with no credential file or argv.
+#![cfg(feature = "ssh")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 #[path = "../../plugins/ssh/tests/common/mod.rs"]

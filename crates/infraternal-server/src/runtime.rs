@@ -180,25 +180,40 @@ pub enum ServerError {
 ///
 /// Returns a sanitized startup, storage, migration, TLS, or listener error.
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
-    serve_with_bootstrap(config, None).await
+    serve_with_key_setup(
+        config,
+        #[cfg(feature = "ssh")]
+        None,
+        #[cfg(feature = "ssh")]
+        None,
+    )
+    .await
 }
 
 /// Reuse startup and serving with one trusted bootstrap factory.
+#[cfg(feature = "ssh")]
 pub(crate) async fn serve_with_bootstrap(
     config: ServerConfig,
-    factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
+    #[cfg(feature = "ssh")] factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
 ) -> Result<(), ServerError> {
     serve_with_key_setup(config, factory, None).await
 }
 
 pub(crate) async fn serve_with_key_setup(
     config: ServerConfig,
-    factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
-    key_setup: Option<crate::bootstrap_runtime::KeyInitialization>,
+    #[cfg(feature = "ssh")] factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
+    #[cfg(feature = "ssh")] key_setup: Option<crate::bootstrap_runtime::KeyInitialization>,
 ) -> Result<(), ServerError> {
     init_logging();
-    let (app, setup_token) =
-        build_router_with_key_setup(config.clone(), None, factory, key_setup).await?;
+    let (app, setup_token) = build_router_with_key_setup(
+        config.clone(),
+        None,
+        #[cfg(feature = "ssh")]
+        factory,
+        #[cfg(feature = "ssh")]
+        key_setup,
+    )
+    .await?;
     if let Some(token) = setup_token {
         start_setup_token_socket(&config.data_dir, token)?;
     }
@@ -253,23 +268,22 @@ async fn build_router(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
 ) -> Result<(Router, Option<String>), ServerError> {
-    build_router_with_bootstrap(config, supplied_agent, None).await
-}
-
-#[cfg(test)]
-async fn build_router_with_bootstrap(
-    config: ServerConfig,
-    supplied_agent: Option<EmbeddedAgent>,
-    factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
-) -> Result<(Router, Option<String>), ServerError> {
-    build_router_with_key_setup(config, supplied_agent, factory, None).await
+    build_router_with_key_setup(
+        config,
+        supplied_agent,
+        #[cfg(feature = "ssh")]
+        None,
+        #[cfg(feature = "ssh")]
+        None,
+    )
+    .await
 }
 
 async fn build_router_with_key_setup(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
-    factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
-    key_setup: Option<crate::bootstrap_runtime::KeyInitialization>,
+    #[cfg(feature = "ssh")] factory: Option<crate::bootstrap_runtime::BootstrapFactory>,
+    #[cfg(feature = "ssh")] key_setup: Option<crate::bootstrap_runtime::KeyInitialization>,
 ) -> Result<(Router, Option<String>), ServerError> {
     validate_config(&config)?;
     if let Some(web_root) = &config.web_root
@@ -317,6 +331,7 @@ async fn build_router_with_key_setup(
     // A single runner owns concurrency across all sockets. The factory receives
     // this live Auth (including revocation state) and this migrated database,
     // never a second authenticator or enrollment store [23][138][168].
+    #[cfg(feature = "ssh")]
     let (bootstrap, ssh_key): (_, Arc<dyn crate::ssh_key::SshKeySource>) =
         if let Some(setup) = key_setup {
             let key = Arc::new(
@@ -352,10 +367,11 @@ async fn build_router_with_key_setup(
         .route("/healthz", get(health))
         .with_state(pool)
         .merge(auth::router(auth.clone()))
-        .merge(websocket::router(ws_state))
-        .merge(crate::bootstrap_api::router_with_ssh_key(
-            auth, bootstrap, ssh_key,
-        ));
+        .merge(websocket::router(ws_state));
+    #[cfg(feature = "ssh")]
+    let app = app.merge(crate::bootstrap_api::router_with_ssh_key(
+        auth, bootstrap, ssh_key,
+    ));
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
     } else {
@@ -692,6 +708,7 @@ mod tests {
     }
 
     /// The ordinary runtime, rather than a standalone plugin router, must expose admission.
+    #[cfg(feature = "ssh")]
     #[tokio::test]
     async fn production_router_exposes_bootstrap_owner_admission() {
         use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
@@ -1092,6 +1109,6 @@ mod reviewer_admission {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ssh"))]
 #[path = "key_runtime_tests.rs"]
 mod key_runtime_tests;

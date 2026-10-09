@@ -9,11 +9,14 @@ mod embedded;
 pub mod enrollment;
 pub mod remote_enrollment;
 mod runtime;
+#[cfg(feature = "ssh")]
 pub mod ssh_key;
 mod web_assets;
 mod websocket;
 
 pub use runtime::{ProxyNetwork, ServerConfig, ServerError, TlsFiles, serve};
 
+#[cfg(feature = "ssh")]
 pub mod bootstrap_api;
+#[cfg(feature = "ssh")]
 pub mod bootstrap_runtime;
