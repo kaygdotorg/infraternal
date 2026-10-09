@@ -77,10 +77,16 @@
 
 /* ---- window bodies by kind --------------------------------------------------------------- */
 .cl-preview { overscroll-behavior: auto; touch-action: pan-y; overflow: hidden; }
+/* A blinking cursor is a compositor-only opacity change on a layer of its own (`will-change`, and `contain` so nothing
+   outside it is laid out or painted because of it): a blink must never repaint the text beside it, or raster what
+   lies under glass. Only the active window's cursor blinks, and only while that window is on screen: an idle page
+   with many windows then has nothing animating at all (#121: 55 idle frame drops on a phone with three blinks). */
 .cl-cursor {
   display: inline-block; width: 0.6em; height: 1.15em; margin-left: 1px; vertical-align: text-bottom; background: var(--fg); opacity: 0.75;
-  animation: cl-blink 1.1s steps(1) infinite;
+  contain: strict; will-change: opacity;
+  animation: cl-blink 1.1s steps(1) infinite paused;
 }
+.ui-window[data-active][data-onscreen] .cl-cursor { animation-play-state: running; }
 @keyframes cl-blink { 50% { opacity: 0; } }
 .cl-logs { color: var(--fg-2); }
 .cl-log-time { color: var(--fg-3); }
