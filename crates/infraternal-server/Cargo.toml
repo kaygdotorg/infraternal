@@ -29,6 +29,7 @@ tracing-subscriber.workspace = true
 futures-util.workspace = true
 nix.workspace = true
 infraternal-protocol.workspace = true
+infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 url.workspace = true
 uuid.workspace = true
 webauthn-rs.workspace = true

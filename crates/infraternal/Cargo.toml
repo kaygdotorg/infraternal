@@ -5,13 +5,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["plugin-host-facts"]
+plugin-host-facts = ["infraternal-agent/plugin-host-facts"]
+
 [dependencies]
 clap.workspace = true
 infraternal-server = { path = "../infraternal-server", version = "0.1.0" }
 sqlx.workspace = true
 tokio.workspace = true
 infraternal-shim.workspace = true
-infraternal-agent = { path = "../infraternal-agent", version = "0.1.0" }
+infraternal-agent = { path = "../infraternal-agent", version = "0.1.0", default-features = false }
 thiserror.workspace = true
 
 [lints]
