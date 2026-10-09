@@ -101,6 +101,10 @@ export class Camera {
   /** Paints the first frame, at rest. Call once the canvas around the camera exists. */
   start(): void {
     this.ready = true;
+    this.resized();
+    // Reading the size inside apply() forces a layout on every frame of a flight, right after the frame's own style
+    // writes. The observer delivers the size after layout for free, before the next paint.
+    new ResizeObserver(() => this.resized()).observe(this.viewport);
     this.apply(true);
   }
 
@@ -111,7 +115,6 @@ export class Camera {
   apply(atRest = false): void {
     if (!this.ready) return;
     const { cam, world } = this;
-    this.vw = this.viewport.clientWidth; this.vh = this.viewport.clientHeight;
     this.tx = this.vw / 2 - cam.cx * cam.z;
     this.ty = this.vh / 2 - cam.cy * cam.z;
     // At rest the translation lands on whole device pixels, so text is as crisp as it can be.
