@@ -494,3 +494,31 @@ async fn settings_public_key_requires_exact_origin_and_live_unlocked_owner() {
     );
     serving.abort();
 }
+
+#[tokio::test]
+async fn host_key_confirmation_rechecks_the_exact_live_owner_capability() {
+    let (auth, owner, cookie, _, _, serving, pool, _) = fixture(false).await;
+    let proof = LiveConfirmation {
+        auth: auth.clone(),
+        owner: owner.clone(),
+        token: Secret::new(cookie.split_once('=').unwrap().1.as_bytes().to_vec()),
+    };
+    proof.authorize().await.unwrap();
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(proof.authorize().await.is_err());
+    sqlx::query("UPDATE users SET owner=1 WHERE id=?")
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    proof.authorize().await.unwrap();
+    auth.logout(cookie.split_once('=').unwrap().1)
+        .await
+        .unwrap();
+    assert!(proof.authorize().await.is_err());
+    serving.abort();
+}
