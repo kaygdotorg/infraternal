@@ -718,3 +718,5 @@ mod review_subscription_refusal;
 #[path = "socket_tests/review_fresh_wait.rs"]
 mod review_fresh_wait;
 
+#[path = "socket_tests/review_liveness.rs"]
+mod review_liveness;
