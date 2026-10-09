@@ -9,7 +9,7 @@
  * - `windowFor` answers "which window shows this session" for the lifecycle, the manager and the sidebar.
  * - `toggleManager` loads the on-demand part, then opens the card; a failed load shows a toast and nothing else.
  */
-import { onDemand } from "../../on-demand";
+import { onDemand, whenIdle } from "../../on-demand";
 import type { PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
 import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
@@ -36,6 +36,8 @@ export function createSessionHooks(cx: Ctx): SessionUi {
       .catch(() => { loading = undefined; cx.toast.show({ message: "Could not load the session list. Try again.", tone: "error", duration: 5000 }); return undefined; });
     return loading;
   };
+  // Warm the manager's code once the page is idle, so the first open never waits for a download (#128).
+  whenIdle(() => { void load(); });
   const windows = (): WinRec[] => [...cx.views.values()].flatMap((c) => [...c.wins.values()]);
   const windowFor = (host: string, id: string): WinRec | undefined => windows().find((w) => isTerminal(w) && w.model.host === host && w.model.sessionId === id);
 

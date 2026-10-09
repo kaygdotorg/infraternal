@@ -240,6 +240,13 @@ export class TerminalClient {
   private connectionIsResume = false;
   private renderIdleTimer = 0;
   private rendererCursorBlinking = false;
+  /**
+   * Whether typing would reach this terminal now. A desktop terminal focuses itself, so it is always ready. On a
+   * phone the keyboard needs a tap: until the terminal's input has focus the cursor waits (steady, an underline) and
+   * after the keyboard goes away it waits again; a blinking cursor never promises a keyboard that will not come (D191).
+   */
+  private openingFocus = false;
+  private typingReady = !matchMedia("(pointer: coarse)").matches;
   private predictionCursorHidden = false;
   private lastThemeColorsMs = 0;
   private lastThemeRenderMs = 0;
@@ -256,6 +263,13 @@ export class TerminalClient {
     this.ghostty = terminal as unknown as GhosttyActivityControls;
     this.screen = config.screen ?? config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
+    // Ghostty focuses its input as it opens, and again on the next task. On a phone that focus is not a tap: no keyboard
+    // follows, yet the cursor would look live. The terminal starts unfocused there (after Ghostty's own second focus)
+    // and the first tap focuses it (D191).
+    if (matchMedia("(pointer: coarse)").matches) {
+      this.openingFocus = true;
+      window.setTimeout(() => { this.openingFocus = false; if (config.host.contains(document.activeElement)) (document.activeElement as HTMLElement).blur(); }, 0);
+    }
     this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal());
     this.pauseTerminal(); // Ghostty opens with one live loop; the client owns its activity window.
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
@@ -279,6 +293,8 @@ export class TerminalClient {
     window.visualViewport?.addEventListener("resize", this.onViewportChange);
     window.visualViewport?.addEventListener("scroll", this.onViewportChange);
     this.terminal.onResize(({ cols, rows }) => {
+      // The grid is readable from the page (specs, and anyone judging that a line did not rewrap).
+      config.host.dataset.cols = String(cols); config.host.dataset.rows = String(rows);
       this.prediction?.layoutChanged();
       this.wakeTerminal();
       const rect = config.host.getBoundingClientRect();
@@ -314,6 +330,12 @@ export class TerminalClient {
     });
     this.streamId = this.conn.openStream(this.streamHandler());
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
+    config.host.addEventListener("focusin", () => { if (!this.openingFocus) this.setTypingReady(true); });
+    config.host.addEventListener("focusout", (event) => {
+      // Focus moving between the host's own elements (its input and the host) keeps the terminal ready.
+      if (!this.openingFocus && !config.host.contains(event.relatedTarget as Node | null) && matchMedia("(pointer: coarse)").matches) this.setTypingReady(false);
+    });
+    this.paintTypingState();
   }
 
   /**
@@ -557,6 +579,20 @@ export class TerminalClient {
     this.scheduleFit();
   }
 
+  private setTypingReady(ready: boolean): void {
+    if (ready === this.typingReady || this.closed) return;
+    this.typingReady = ready;
+    this.paintTypingState();
+    this.wakeTerminal();
+  }
+
+  /** The cursor tells the truth: a bar that blinks when typing will land, a steady underline while it waits for a tap. */
+  private paintTypingState(): void {
+    this.config.host.dataset.typing = this.typingReady ? "ready" : "waiting";
+    this.terminal.options.cursorStyle = this.typingReady ? "bar" : "underline";
+    if (!this.typingReady) this.ghostty.renderer?.setCursorBlink(false);
+  }
+
   /** Focuses Ghostty's actual input host so the mobile keyboard can stay open. */
   focus(): void {
     this.terminal.focus();
@@ -770,6 +806,43 @@ export class TerminalClient {
     this.config.hooks?.onAttached?.(this.connectionIsResume, this);
   }
 
+  /** The session this terminal shows, as a lowercase UUID. */
+  get sessionUuid(): string | undefined {
+    const b = this.sessionId;
+    if (!b) return undefined;
+    const hex = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  /** The renderer's canvas, for a caller that keeps a picture of the last screen (the switch's ghost). */
+  get canvas(): HTMLCanvasElement | undefined {
+    return this.config.host.querySelector<HTMLCanvasElement>("canvas:not(.cl-ghost)") ?? undefined;
+  }
+
+  /**
+   * Shows another session in this same terminal, without tearing the renderer down (#128): the old stream detaches
+   * (its session keeps running), the screen starts over, and a new stream attaches to `sessionId` from the
+   * beginning, as after a reload. Nothing waits on the network: the attach goes out now and the snapshot paints when
+   * it arrives. Font, glyph atlas, canvas and layout stay.
+   */
+  retarget(sessionId: string): void {
+    if (this.closed || !isCanonicalUuid(sessionId)) return;
+    if (this.attached) this.conn.streamAttached(false);
+    this.conn.closeStream(this.streamId);
+    this.attached = false;
+    this.attachRequested = false;
+    this.openCallSent = false;
+    this.hasAttached = false;
+    this.snapshotWriteInFlight = false;
+    this.outputWriteInFlight = false;
+    this.sessionId = uuidBytes(sessionId);
+    this.restartCursors();
+    this.connectionIsResume = true;
+    this.streamId = this.conn.openStream(this.streamHandler());
+    // Choosing a session is the person's own act in this window, so on a desktop the keys go to it, as for a new terminal.
+    if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
+  }
+
   /** Starts the stream's cursors over: its session is attached again from the beginning, as after a reload. */
   private restartCursors(): void {
     this.cursorEpoch += 1;
@@ -893,6 +966,8 @@ export class TerminalClient {
   }
 
   private acceptSnapshot(sequence: bigint, bytes: Uint8Array): void {
+    performance.mark(`sw:snapshot:${this.streamId}`);
+    performance.mark(`sw:snapshot:${this.streamId}`);
     if (sequence < this.receivedOutSeq || bytes.byteLength > this.creditAvailable) {
       this.protocolFailure("server sent a stale snapshot or exceeded output credit");
       return;
@@ -1449,7 +1524,7 @@ export class TerminalClient {
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = window.setTimeout(() => this.pauseTerminal(), RENDER_IDLE_MS);
     this.rendererCursorBlinking = true;
-    this.ghostty.renderer?.setCursorBlink(true);
+    this.ghostty.renderer?.setCursorBlink(this.typingReady);
     this.ghostty.startRenderLoop();
   }
 

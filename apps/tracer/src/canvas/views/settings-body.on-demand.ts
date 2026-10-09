@@ -11,7 +11,8 @@
  */
 import { FONTS } from "../../../../../packages/ui/src/fonts";
 import { THEMES } from "../../../../../packages/ui/src/themes";
-import { renderAppearance, type AppearanceApi } from "../../../../../packages/ui/src/settings-panels";
+import { renderAppearance, renderWindowSizes, type AppearanceApi, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
+import { SIZE_EVENT, readSizes, writeSize, type DesktopSize, type PhoneSize } from "../window-sizes";
 import type { Ctx } from "../context";
 import { el } from "../dom";
 
@@ -31,6 +32,23 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
     act: (action) => core.act(action),
     onChange(listener) { window.addEventListener("tracer:appearance", listener); return () => window.removeEventListener("tracer:appearance", listener); },
   };
+  // Plain names; the technical detail (the percentage) is in each option's subtitle (the plain-names rule).
+  const windowSizes: WindowSizesApi = {
+    groups: [
+      { id: "phone", title: "Phones", options: [
+        { id: "full", label: "Full width", hint: "99% of the screen" },
+        { id: "comfortable", label: "Comfortable", hint: "with margins" },
+      ] },
+      { id: "desktop", title: "Desktop", options: [
+        { id: "comfortable", label: "Comfortable", hint: "one third of the canvas" },
+        { id: "wide", label: "Wide", hint: "half of the canvas" },
+        { id: "full", label: "Full width", hint: "99% of the canvas" },
+      ] },
+    ],
+    get: (group) => readSizes()[group === "phone" ? "phone" : "desktop"],
+    set: (group, option) => { if (group === "phone") writeSize("phone", option as PhoneSize); else writeSize("desktop", option as DesktopSize); },
+    onChange(listener) { window.addEventListener(SIZE_EVENT, listener); return () => window.removeEventListener(SIZE_EVENT, listener); },
+  };
   const pane = el("div", "ui-settings-pane");
   pane.setAttribute("role", "region");
   pane.setAttribute("aria-label", section);
@@ -38,6 +56,7 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
   const done = ((): (() => void) | void => {
     switch (section) {
       case "appearance": return renderAppearance(pane, appearance);
+      case "windows": return renderWindowSizes(pane, windowSizes);
       case "toolbar": return core.settingsPanels.toolbar.render(pane);
       case "shortcuts": return core.settingsPanels.shortcuts.render(pane);
       case "about": return core.settingsPanels.about.render(pane);

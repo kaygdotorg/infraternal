@@ -77,7 +77,7 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     await page.goto(`/?theme=${theme}&bg=mesh`);
     await waitForAttached(page);
     await page.mouse.move(width / 2, height / 2);
-    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"))).toContain("blob:");
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).getPropertyValue("--mesh-image"))).toContain("blob:");
 
     const material = await page.evaluate(() => {
       const root = getComputedStyle(document.documentElement);
@@ -86,12 +86,13 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
       if (getComputedStyle(document.querySelector<HTMLElement>(".tabs")!).display !== "none") layers.push(".tab-add");
       if (getComputedStyle(document.querySelector<HTMLElement>(".keybar")!).display !== "none") layers.push(".keytray");
       return {
-        root: root.getPropertyValue("--overlay").trim(),
-        rootPanel: root.getPropertyValue("--overlay-panel").trim(),
+        // The card tint lives on the elements that read it, not on the root (a root token restyles the whole page).
+        root: getComputedStyle(document.querySelector<HTMLElement>(".capsule")!).getPropertyValue("--overlay").trim(),
+        rootPanel: getComputedStyle(document.querySelector<HTMLElement>("#sidebar")!).getPropertyValue("--overlay").trim(),
         rootLine: root.getPropertyValue("--overlay-line").trim(),
         rootShadow: root.getPropertyValue("--shadow").trim(),
         rootLargeShadow: root.getPropertyValue("--overlay-shadow-large").trim(),
-        stage: getComputedStyle(stage).getPropertyValue("--overlay").trim(),
+        stage: getComputedStyle(document.querySelector<HTMLElement>("#sidebar-toggle")!).getPropertyValue("--overlay").trim(),
         stageLine: getComputedStyle(stage).getPropertyValue("--overlay-line").trim(),
         stageShadow: getComputedStyle(stage).getPropertyValue("--shadow").trim(),
         layers: layers.map((selector) => {
@@ -170,7 +171,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   await expect(page.locator(".tabs")).toBeVisible();
   expect(await page.locator("#terminal-host").locator("xpath=..").evaluate((element) => getComputedStyle(element).backdropFilter)).toBe("none");
   await expect(page.locator(".terminal-screen")).not.toContainText(/static example|STATIC|name unavailable|not available yet|not connected/i);
-  await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"))).toContain("blob:");
+  await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).getPropertyValue("--mesh-image"))).toContain("blob:");
   await expect.poll(() => backdropWorkers.length).toBe(1);
   await page.waitForTimeout(2100);
   expect(backdropWorkers).toHaveLength(1);
@@ -201,12 +202,12 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   ].sort());
   // Superseded (TASTE: animation never gets in the way): a key-triggered open is a short 180 ms fade, never blocking input.
   expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0.18s");
-  const previousMesh = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"));
+  const previousMesh = await page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).getPropertyValue("--mesh-image"));
   await page.locator("#palette-input").fill("dracula");
   await expect(page.getByRole("option", { name: /Dracula/ })).toBeVisible();
   await page.keyboard.press("Enter");
   await expect(page.locator("#terminal-screen")).toHaveAttribute("data-theme", "dracula");
-  await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"))).not.toBe(previousMesh);
+  await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).getPropertyValue("--mesh-image"))).not.toBe(previousMesh);
   expect(backdropWorkers).toHaveLength(1);
 
   await page.keyboard.press("Control+k");
@@ -229,6 +230,8 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
     await mobilePage.goto("/?theme=paper&bg=mesh");
     await waitForAttached(mobilePage);
     await expect(mobilePage.locator("#keybar")).toBeVisible();
+    // The key row exists only while a terminal has input focus (a phone needs a tap for that).
+    await mobilePage.locator(".terminal-host").first().tap();
     // The product screen is the canvas: on a phone the top bar keeps only the "+" (a new window) beside the pill.
     await expect(mobilePage.locator(".tabs .tab-add")).toBeVisible();
     for (const desktopOnly of [".tabs .cl-snap", ".tabs .cl-viewsbtn"]) await expect(mobilePage.locator(desktopOnly)).toBeHidden();

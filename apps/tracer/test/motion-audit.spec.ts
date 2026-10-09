@@ -635,7 +635,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   }, backdropStartAt);
   expect(keyboardBackdrop.events.filter((event) => event.selector === "div.backdrop")).toEqual([]);
   expect(backdropTiming.longTasks).toEqual([]);
-  await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--mesh-image"))).toContain("blob:");
+  await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).getPropertyValue("--mesh-image"))).toContain("blob:");
   expect(requestedWorkers).toHaveLength(1);
   const meshPath = testInfo.outputPath("motion-audit-mesh.png");
   await page.screenshot({ path: meshPath });

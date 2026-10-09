@@ -24,6 +24,8 @@ const root = resolve(import.meta.dirname, "../../..");
 export interface Bridge {
   id: number;
   closed: boolean;
+  /** Which side ended the socket first, and its close code. */
+  closedBy?: string;
   /** AttachTerm frames by client stream id: the session each stream attached to (hex). */
   attached: Map<number, string[]>;
   /** Terminal output text by client stream id. */
@@ -48,7 +50,13 @@ export interface RealServer {
 
 const text = new TextDecoder();
 
-export async function startRealServer(): Promise<RealServer> {
+/**
+ * `latencyMs` (or `REAL_ONE_WAY_MS`) delays every browser-socket message by that many milliseconds in each direction
+ * (so 150 is the 300 ms round-trip profile of docs/PROCESS.md); order is kept. Page loads are not delayed.
+ */
+export async function startRealServer(options: { latencyMs?: number } = {}): Promise<RealServer> {
+  const delay = options.latencyMs ?? Number(process.env.REAL_ONE_WAY_MS ?? 0);
+  const later = (run: () => void): void => { if (delay > 0) setTimeout(run, delay); else run(); };
   const binary = process.env.INFRATERNAL_BIN ?? resolve(root, "target/x86_64-unknown-linux-musl/release/infraternal");
   const dist = resolve(process.env.TRACER_DIST ?? resolve(root, "apps/tracer/dist"));
   const state = await mkdtemp(resolve(tmpdir(), "infraternal-real-"));
@@ -86,7 +94,7 @@ export async function startRealServer(): Promise<RealServer> {
     env: { ...process.env, XDG_RUNTIME_DIR: `${state}/runtime`, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
     stdio: ["ignore", "ignore", "pipe"],
   });
-  child.stderr?.resume();
+  if (process.env.REAL_SERVER_LOG === "1") child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); else child.stderr?.resume();
 
   const bridges: Bridge[] = [];
   const front = new WebSocketServer({ noServer: true });
@@ -101,27 +109,29 @@ export async function startRealServer(): Promise<RealServer> {
       browser.on("message", (data) => {
         const bytes = Buffer.from(data as Buffer);
         inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+          if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Input" && f.type !== "Credit" && f.type !== "Pong") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} up s${stream} ${f.type}`);
           if (f.type === "AttachTerm") bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
           if (f.type === "Close" && stream !== 0) bridge.detached.push(stream);
           if (f.type === "Call") bridge.control.push({ dir: "up", type: "Call", detail: f.actionId, callId: f.callId });
           if (f.type === "Subscribe") bridge.control.push({ dir: "up", type: "Subscribe", detail: (() => { try { return String((JSON.parse(text.decode(f.filterJson)) as { topic?: unknown }).topic); } catch { return "?"; } })() });
         });
-        if (upstream.readyState === WebSocket.OPEN) upstream.send(bytes); else queued.push(bytes);
+        later(() => { if (upstream.readyState === WebSocket.OPEN) upstream.send(bytes); else queued.push(bytes); });
       });
-      upstream.on("open", () => { for (const q of queued) upstream.send(q); queued.length = 0; });
+      upstream.on("open", () => { for (const q of queued.splice(0)) upstream.send(q); });
       upstream.on("message", (data) => {
         const bytes = Buffer.from(data as Buffer);
         outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+          if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack" && f.type !== "Ping") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
           if (f.type === "Output") bridge.output.set(stream, (bridge.output.get(stream) ?? "") + text.decode(f.bytes, { stream: true }));
           if (f.type === "Snapshot") bridge.output.set(stream, text.decode(f.bytes));
           if (f.type === "Ack") bridge.acked.set(stream, f.inSeqAcked);
           if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
         });
-        if (browser.readyState === WebSocket.OPEN) browser.send(bytes);
+        later(() => { if (browser.readyState === WebSocket.OPEN) browser.send(bytes); });
       });
-      upstream.on("close", () => { bridge.closed = true; browser.close(); });
+      upstream.on("close", (code) => { bridge.closed = true; bridge.closedBy = `server ${code}`; browser.close(); });
       upstream.on("error", () => browser.close());
-      browser.on("close", () => { bridge.closed = true; upstream.close(); });
+      browser.on("close", (code) => { bridge.closed = true; bridge.closedBy ??= `browser ${code}`; upstream.close(); });
     });
   });
 

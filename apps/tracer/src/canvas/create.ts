@@ -22,6 +22,7 @@ import type { Adapters, CanvasState, Ctx } from "./context";
 import { SVG_NS, coarse, el } from "./dom";
 import { createFlip } from "./layout/flip";
 import { metricsFor, type Metrics } from "./layout/geometry";
+import { SIZE_EVENT, edgeToEdge, readSizes } from "./window-sizes";
 import { createMesh } from "./mesh";
 import { createDocumentSync } from "./model/sync";
 import type { ViewModel } from "./model/types";
@@ -33,7 +34,8 @@ import { installShortcuts } from "./toolbar/shortcuts";
 import { createTree } from "./toolbar/tree";
 import { createViews } from "./views/world";
 import { createViewList } from "./toolbar/viewlist";
-import { createFloat } from "./windows/float";
+import { createFloatHandle } from "./windows/float-handle";
+import { createDetailsHandle } from "./windows/details-handle";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
 import { createSessionHooks } from "./windows/session-hooks";
@@ -73,12 +75,14 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   const edges = el("div", "cl-edges");
   viewport.append(world, edges);
   core.panes.append(viewport);
+  const setEdge = (sizes: ReturnType<typeof readSizes>): void => { stage.toggleAttribute("data-window-edge", edgeToEdge(coarse.matches || innerWidth < 720, sizes)); };
+  setEdge(readSizes());
   const backdrop: Backdrop | undefined = options.dots === false ? undefined : createBackdrop(stage, viewport);
   backdrop?.measure();
   const events = new AbortController();
 
   const state: CanvasState = {
-    metrics: metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches),
+    metrics: metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes()),
     activeWin: undefined, currentView: "console", canvasLock: true, snapIdx: 0, movingWindow: false, serial: 0,
   };
   let frameQueued = 0;
@@ -92,10 +96,10 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   } as unknown as Ctx;
   (cx as { camera: Camera }).camera = new Camera(viewport, world, {
     onTransform: (t) => backdrop?.update(t),
-    onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--inv", inv); },
+    onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--label-inv", inv); },
     onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
-    onFrame: () => { cx.invalidate(); cx.memory.cull(); },
+    onFrame: () => { cx.invalidate(); cx.memory.cull(); if (cx.details?.isOpen()) cx.details.close(true); },
     onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); },
     onFlight: () => cx.view.hideSummary(),
   });
@@ -106,7 +110,8 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.nav = createNav(cx);
   cx.view = createViews(cx);
   cx.win = createWindows(cx);
-  cx.float = createFloat(cx);
+  cx.float = createFloatHandle(cx);
+  if (options.adapters.details) cx.details = createDetailsHandle(cx, options.adapters.details);
   cx.inputLock = createInputLock(cx);
   if (options.adapters.inventory) cx.sessionUi = createSessionHooks(cx);
   cx.visibility = createVisibility(cx);
@@ -120,32 +125,50 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   const removeShortcuts = installShortcuts(cx);
   const removePalette = installPalette(cx);
 
-  // Refit when the pane changes size (sidebar docks, rotation) so the framing holds. Views are as tall as the
-  // viewport, so a resize (the keyboard, the URL bar, a rotation) refits them.
-  let lastW = 0, lastH = 0;
-  const ro = new ResizeObserver(() => {
+  // Relayout: the canvas area changed size (a rotation, the keyboard, a window resize) or the window-size setting did
+  // (Settings -> Window Sizes, applied live with the layout spring). Views are as tall as the area, and a column the
+  // person never resized follows the default width. The keyboard changes only the height: the width, and so the
+  // columns of every terminal, stay (D191).
+  let lastW = 0, lastH = 0, animatingUntil = 0;
+  const relayout = (animate: boolean): void => {
+    const sizes = readSizes();
+    setEdge(sizes);
     const w = viewport.clientWidth, h = viewport.clientHeight;
-    if (w === lastW && h === lastH) return;
     lastW = w; lastH = h;
     cx.camera.resized();
     backdrop?.measure();
-    const previousColW = state.metrics.colW;
-    state.metrics = metricsFor(w, h, coarse.matches);
-    world.style.setProperty("--clh", `${state.metrics.clh}px`);
-    // A column the person never resized follows the viewport (a rotation or a window resize changes the default
-    // width); a stale width would leave the window wider than the screen and the framing off to a side.
+    const previous = state.metrics;
+    const next = metricsFor(w, h, coarse.matches, sizes);
+    if (next.colW === previous.colW && next.clh === previous.clh && next.narrow === previous.narrow) {
+      // Nothing about the windows changed (the area did): keep the framing centred, unless a flight is under way.
+      if (performance.now() >= animatingUntil) { if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true); }
+      return;
+    }
+    const first = animate ? [...cx.views.values()].map((c) => cx.flip.measure(cx.flip.targets(c.colsEl))) : [];
+    state.metrics = next;
+    world.style.setProperty("--clh", `${next.clh}px`);
     for (const c of cx.views.values()) {
       if (c.view.layout !== "tiled") continue;
       for (const colEl of c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")) {
-        if (colEl.dataset.user || colEl.dataset.w !== String(previousColW)) continue;
-        colEl.dataset.w = String(state.metrics.colW);
-        colEl.style.setProperty("--w", `${state.metrics.colW}px`);
+        if (colEl.dataset.user || colEl.dataset.w !== String(previous.colW)) continue;
+        colEl.dataset.w = String(next.colW);
+        colEl.style.setProperty("--w", `${next.colW}px`);
       }
     }
     for (const c of cx.views.values()) cx.view.geometry(c);
     for (const c of cx.views.values()) for (const rec of c.wins.values()) rec.binding?.refit();
-    if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true);
+    if (animate) {
+      first.forEach((m) => cx.flip.play(m, true));
+      animatingUntil = performance.now() + 700;
+      const target = cx.camera.target;
+      if (target) cx.camera.flyTo(target);
+    } else if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true);
+  };
+  const ro = new ResizeObserver(() => {
+    if (viewport.clientWidth === lastW && viewport.clientHeight === lastH) return;
+    relayout(false);
   });
+  window.addEventListener(SIZE_EVENT, () => relayout(true), { signal: events.signal });
   ro.observe(viewport);
   cx.camera.start();
   warmDroplet();
@@ -161,7 +184,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.inputLock.reset();
       cx.mesh?.hideReach(true);
       cx.view.clear();
-      state.metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches);
+      state.metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes());
       cx.camera.resized();
       world.style.setProperty("--clh", `${state.metrics.clh}px`);
       for (const v of typeof models === "function" ? models(state.metrics) : models) cx.views.set(v.id, cx.view.build(v));
@@ -183,6 +206,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.sharing?.dispose();
       cx.mesh?.dispose();
       cx.float.dispose();
+      cx.details?.dispose();
       cx.visibility.dispose();
       cx.view.clear();
       cx.view.dispose();

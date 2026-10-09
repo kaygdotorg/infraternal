@@ -17,6 +17,7 @@ import type { ViewId } from "../model/types";
 import { el } from "../dom";
 import { CONTAINERS, buildViews, type Role } from "./data";
 import { offerMeshView } from "../mesh/offer";
+import { createMockDetails } from "./details";
 import { DEFAULT_SESSION, createMockInventory } from "./inventory";
 import { createMockMesh } from "./mesh";
 import { createMockSessions } from "./sessions";
@@ -48,7 +49,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     float: true,
     dots: new URLSearchParams(location.search).get("dots") !== "0",
     adapters: {
-      sessions, inventory, mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
+      sessions, inventory, details: createMockDetails(world, inventory), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       addHost: () => core.toast.show({ message: "Add host is its own mockup (proto=addhost)." }),
     },
@@ -201,6 +202,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     views: () => [...cx.views.values()].map((c) => ({ id: c.view.id, name: c.view.name, team: Boolean(c.view.team), x: c.x, y: c.y, w: boxOf(c.view, state.metrics).w, h: boxOf(c.view, state.metrics).h, windows: [...c.wins.keys()] })),
     grants: () => world.grants.map((g) => ({ ...g })),
     flyView: (id: ViewId) => cx.nav.flyView(id),
+    /** Runs an appearance action (`theme:mocha`, `card:3`, `windows:4`, `bg:mesh`) as the palette does. */
+    act: (action: string) => cx.core.act(action),
     overview: () => cx.nav.showOverview(),
     openSession: (host: string, container?: string) => cx.win.open(host, container),
     openSettings: (section: string) => { const c = cx.views.get("settings"); const rec = c?.wins.get(`s-${section}`) ?? [...(c?.wins.values() ?? [])][0]; if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); } },

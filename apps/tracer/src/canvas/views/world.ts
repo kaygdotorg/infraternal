@@ -182,7 +182,7 @@ export function createViews(cx: Ctx): ViewsModule {
     const region = el("div", "cl-region");
     const label = el("button", "cl-label ui-pill");
     label.type = "button";
-    label.style.setProperty("--inv", camera.labelScale);
+    label.style.setProperty("--label-inv", camera.labelScale);
     const menu = cx.sharing ? '<span class="cl-label-menu" role="button" tabindex="0" aria-label="View menu" data-tip="Share layout…"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg></span>' : "";
     label.innerHTML = `<span class="cl-label-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(view.id)}</svg></span><span class="cl-label-name"></span><span class="cl-label-meta"></span>${view.team ? '<span class="ui-ts-tag cl-team">team</span>' : ""}${menu}`;
     (label.querySelector(".cl-label-name") as HTMLElement).textContent = view.name;

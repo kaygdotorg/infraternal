@@ -1,21 +1,20 @@
 /**
- * The window details popover: machine, connection and session facts for one window,
- * anchored to its header pill.
+ * The window details popover: facts for one window, anchored to its header pill (#127).
  *
- * - Material: the shared floating overlay (`.ui-overlay-surface`); content behind it
- *   reads as soft shapes.
- * - Layout: OS mark and name on top, capsule tabs, then a key/value list (keys left,
- *   values right, each cell copies on click or double tap). The list scrolls inside a
- *   popover that never runs past the visible viewport or under the key tray.
- * - Motion: a pointer open grows from the pill (scale 0.96 → 1 with opacity, 200 ms
- *   strong ease-out); closing is quicker (130 ms). Keyboard opens and closes are
- *   instant. The animations use the Web Animations API without fill, so nothing is left
- *   transformed at rest and text stays crisp.
+ * - Material: the shared floating overlay (`.ui-overlay-surface`); content behind it reads as soft shapes.
+ * - Layout: the mark and name on top, capsule tabs, then a key/value list (keys left, values right, each cell copies on
+ *   click or double tap). The list scrolls inside a popover that never runs past the visible viewport or under the key
+ *   tray. The facts come from a `DetailsSource` (details-source.ts); this module only draws them.
+ * - Motion: a pointer open grows from the pill (scale 0.96 to 1 with opacity, 200 ms strong ease-out); closing is quicker
+ *   (130 ms). Keyboard opens and closes are instant. The animations use the Web Animations API without fill, so nothing
+ *   is left transformed at rest and text stays crisp.
+ * - It loads on demand (D188): nothing of it is fetched until a pill is first pressed.
  */
-import { createCapsuleTabs } from "../../../../../../packages/ui/src/capsule-tabs";
-import { hostIconMarkup } from "../../../../../../packages/ui/src/host-icons";
-import { createKeyValueList, type KeyValueRow } from "../../../../../../packages/ui/src/kv-list";
-import type { CanvasHost, CanvasSession } from "./canvas";
+import { createCapsuleTabs } from "../../../../../packages/ui/src/capsule-tabs";
+import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
+import { createKeyValueList } from "../../../../../packages/ui/src/kv-list";
+import type { Ctx, WinRec } from "../context";
+import type { DetailsFacts, DetailsSource } from "./details-source";
 
 export interface DetailsPopover {
   readonly windowId: string;
@@ -24,60 +23,13 @@ export interface DetailsPopover {
 
 interface DetailsInput {
   windowId: string;
-  host: CanvasHost;
-  session: CanvasSession;
-  hostLabel: string;
-  icons: { machine: string; connection: string; session: string };
+  /** Read at open and each time a tab is shown. */
+  read: () => DetailsFacts;
 }
-
-type Section = "machine" | "connection" | "session";
 
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 /** The window header's padding: the gap kept between the popover and its window's edges. */
 const INSET = 8;
-
-function rows(section: Section, host: CanvasHost, session: CanvasSession): KeyValueRow[] {
-  const present = (list: KeyValueRow[]): KeyValueRow[] => list.filter((row) => row.value.trim() !== "");
-  if (section === "machine") {
-    return present([
-      { key: "Kernel", value: host.kernel },
-      { key: "Architecture", value: host.architecture },
-      { key: "Model", value: host.model },
-      { key: "CPU", value: host.cores ? `${host.cpu} · ${host.cores} cores` : host.cpu },
-      { key: "Memory", value: host.memory ? `${host.memory}% used` : "", meter: host.memory },
-      { key: "Disk", value: host.disk ? `${host.disk}% used` : "", meter: host.disk },
-      { key: "Uptime", value: host.uptime },
-      { key: "Load", value: host.load },
-      { key: "Init", value: host.init },
-      { key: "Virtualization", value: host.virtualization },
-      { key: "Shell", value: host.shell },
-      { key: "Locale", value: host.locale },
-      { key: "IP addresses", value: host.ips.join(" · ") },
-      { key: "Engines", value: host.engines.join(" · ") },
-      { key: "infraternal agent", value: host.mode },
-    ]);
-  }
-  if (section === "connection") {
-    return present([
-      { key: "Route", value: host.connection.route },
-      { key: "Transport", value: host.connection.transport },
-      { key: "Mesh", value: host.connection.mesh },
-      { key: "Certificate", value: host.connection.certificate },
-      { key: "Connection delay", value: host.connection.roundTrip },
-      { key: "Traffic", value: host.connection.bytes },
-      { key: "Reconnects", value: String(host.connection.reconnects) },
-    ]);
-  }
-  return present([
-    { key: "Session", value: session.name },
-    { key: "Started", value: session.started },
-    { key: "Age", value: session.age },
-    { key: "Viewers", value: String(session.viewers) },
-    { key: "Size", value: session.size },
-    { key: "Scrollback", value: session.scrollback },
-    { key: "Last output", value: session.lastOutput },
-  ]);
-}
 
 /** Opens the popover under `anchor`; `onClosed` runs once it has gone. */
 export function openDetailsPopover(
@@ -87,43 +39,40 @@ export function openDetailsPopover(
   source: "pointer" | "keyboard",
   onClosed: () => void,
 ): DetailsPopover {
-  const { host, session } = input;
+  const first = input.read();
   const root = document.createElement("section");
   root.className = "canvas-popover ui-overlay-surface";
   root.setAttribute("role", "dialog");
-  root.setAttribute("aria-label", `Details for ${input.hostLabel}`);
-  const title = [host.osName, host.version].filter(Boolean).join(" ");
-  const subtitle = [`${host.user ? `${host.user}@` : ""}${input.hostLabel}`, host.architecture].filter(Boolean).join(" · ");
+  root.setAttribute("aria-label", `Details for ${first.title}`);
   root.innerHTML = `
     <header class="canvas-popover-head">
-      <span class="canvas-popover-logo">${hostIconMarkup(host.os, "ui-host-mark")}</span>
+      <span class="canvas-popover-logo"></span>
       <span class="canvas-popover-names"><span class="canvas-popover-title"></span><span class="canvas-popover-sub"></span></span>
     </header>
     <div class="canvas-popover-tabs"></div>
     <div class="canvas-popover-scroll"></div>`;
-  root.querySelector<HTMLElement>(".canvas-popover-title")!.textContent = title || input.hostLabel;
-  root.querySelector<HTMLElement>(".canvas-popover-sub")!.textContent = subtitle;
+  if (first.os) root.querySelector<HTMLElement>(".canvas-popover-logo")!.innerHTML = hostIconMarkup(first.os, "ui-host-mark");
+  else root.querySelector<HTMLElement>(".canvas-popover-logo")!.hidden = true;
+  root.querySelector<HTMLElement>(".canvas-popover-title")!.textContent = first.title;
+  root.querySelector<HTMLElement>(".canvas-popover-sub")!.textContent = first.subtitle;
 
-  const list = createKeyValueList(`${input.hostLabel} details`);
+  const list = createKeyValueList(`${first.title} details`);
   const scroll = root.querySelector<HTMLElement>(".canvas-popover-scroll")!;
   scroll.append(list.root);
   let scrolled = false;
   scroll.addEventListener("scroll", () => { scrolled = true; }, { passive: true });
-  const show = (section: Section, animate: boolean): void => {
-    list.set(rows(section, host, session));
+  const show = (id: string, animate: boolean): void => {
+    const section = input.read().sections.find((x) => x.id === id) ?? first.sections[0];
+    list.set((section?.rows ?? []).filter((row) => row.value.trim() !== ""));
     // Resetting the scroll position forces a layout; only a popover that was scrolled needs it.
     if (scrolled) { scroll.scrollTop = 0; scrolled = false; }
     if (animate && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
       list.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE });
     }
   };
-  const tabs = createCapsuleTabs([
-    { id: "machine", label: "Machine", icon: input.icons.machine },
-    { id: "connection", label: "Connection", icon: input.icons.connection },
-    { id: "session", label: "Session", icon: input.icons.session },
-  ], "machine", (id, how) => show(id as Section, how === "pointer"), "Details", true);
+  const tabs = createCapsuleTabs(first.sections.map((s) => ({ id: s.id, label: s.label, icon: s.icon })), first.sections[0]?.id ?? "", (id, how) => show(id, how === "pointer"), "Details", true);
   root.querySelector(".canvas-popover-tabs")!.append(tabs.root);
-  show("machine", false);
+  show(first.sections[0]?.id ?? "", false);
 
   // ---- placement: inside the window, under the pill, one inset on every side ----------
   // The inset equals the window header's padding, so at its maximum height the popover sits
@@ -191,4 +140,29 @@ export function openDetailsPopover(
   if (source === "keyboard") root.querySelector<HTMLElement>(".ui-tab[aria-selected='true']")?.focus({ preventScroll: true });
 
   return { windowId: input.windowId, close };
+}
+
+export interface DetailsModule {
+  /** Opens the popover for a window, or closes it when it is that window's. */
+  toggle(rec: WinRec, source: "pointer" | "keyboard"): void;
+  /** Closes it (instantly when `instant`). */
+  close(instant?: boolean): void;
+  isOpen(): boolean;
+  dispose(): void;
+}
+
+export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
+  let open: DetailsPopover | undefined;
+  const close = (instant = false): void => { open?.close(instant ? "keyboard" : "pointer"); };
+  return {
+    toggle(rec, how) {
+      if (open?.windowId === rec.model.id) { open.close(how); return; }
+      open?.close("keyboard");
+      if (!source.facts(rec)) return;
+      open = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => source.facts(rec)! }, how, () => { open = undefined; });
+    },
+    close,
+    isOpen: () => open !== undefined,
+    dispose() { open?.close("keyboard"); },
+  };
 }
