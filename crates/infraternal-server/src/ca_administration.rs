@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, Semaphore};
 use zeroize::Zeroizing;
 
 mod bootstrap;
+mod roles;
 
 /// Startup carries public trust and private encrypted-copy storage into runtime
 /// auth wiring. Constructing this configuration never unlocks the signing source.

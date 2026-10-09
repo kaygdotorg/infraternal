@@ -62,11 +62,24 @@ pub const BOOTSTRAP_CA: ActionDef = ActionDef {
         "On a cold start the same bootstrap calls unlock the retained issuer using this administrator's wrapped copy.",
     ],
 };
+/// Manage current administrator generations without transporting any account key.
+pub const CA_ADMINISTRATORS: ActionDef = ActionDef {
+    id: "remote.ca.administrators",
+    summary: "Manage machine certificate administrators",
+    instructions: &[
+        "Sign in as the server owner.",
+        "POST user_id and administrator to /remote/ca/administrators/start.",
+        "Verify the exact returned passkey challenge with user verification required.",
+        "POST ceremony and proof to /remote/ca/administrators/finish.",
+        "An offline recipient has a pending copy grant; their device calls remote.ca.bootstrap with its own scoped key while the CA is unlocked.",
+        "Revoking membership removes its previous wrapped copy and advances its generation.",
+    ],
+};
 /// Explicit defaults leave remote runtime work disabled until configured.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "remote",
     api: 1,
-    actions: &[JOIN, RUN, SERVE, BOOTSTRAP_CA],
+    actions: &[JOIN, RUN, SERVE, BOOTSTRAP_CA, CA_ADMINISTRATORS],
     settings: &[
         SettingDef {
             id: "enabled",
@@ -94,5 +107,6 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         "remote.host.run:enrolled-node",
         "remote.server.serve:confirmed-server",
         "remote.ca.bootstrap:confirmed-server",
+        "remote.ca.administrators:confirmed-server",
     ],
 };

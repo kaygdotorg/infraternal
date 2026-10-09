@@ -599,3 +599,304 @@ async fn published_issuer_without_memory_projection_is_recovered_as_locked_trust
         .unwrap();
     assert_eq!(f.source.issuer().unwrap().to_der().unwrap(), issuer);
 }
+
+#[tokio::test]
+async fn role_grant_is_pending_and_revoke_removes_old_copy_without_restoring_old_authority() {
+    let mut f = bootstrap_fixture().await;
+    let start = f
+        .administration
+        .bootstrap_start(&f.auth.session, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    f.administration
+        .bootstrap_finish(
+            &f.auth.session,
+            str_field(&start, "ceremony"),
+            proof,
+            Zeroizing::new([7; 32]),
+            NOW,
+        )
+        .await
+        .unwrap();
+    let pool = &f.auth.auth.pool;
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('role-recipient','Recipient',0,'public-fixture','recipient','Recipient')").execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO passkeys(id,user_id,credential) SELECT 'role-fixture-credential','role-recipient',credential FROM passkeys WHERE user_id=? LIMIT 1").bind(&f.auth.user).execute(pool).await.unwrap();
+    for administrator in [true, false, true] {
+        let change = crate::ca_administration::RoleChange {
+            user_id: "role-recipient".into(),
+            administrator,
+        };
+        let start = f
+            .administration
+            .membership_start(&f.auth.session, change, NOW)
+            .await
+            .unwrap();
+        let proof = f.auth.software.login(&start, ORIGIN, true);
+        f.administration
+            .membership_finish(&f.auth.session, str_field(&start, "ceremony"), proof, NOW)
+            .await
+            .unwrap();
+        let (generation, active): (i64, bool) = sqlx::query_as(
+            "SELECT generation,active FROM ca_administrators WHERE user_id='role-recipient'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(active, administrator);
+        if generation == 1 {
+            let material = f.source.load().unwrap();
+            let copies = CaCopies::new(&f.root.join("fresh-ca/active")).unwrap();
+            assert!(
+                copies.read("role-recipient", 1).is_err(),
+                "offline grant created an unauthorized wrap"
+            );
+            copies
+                .publish(
+                    "role-recipient",
+                    1,
+                    &WrappedCa::seal(&material, "role-recipient", 1, &[3; 32], &[9; 32]).unwrap(),
+                )
+                .unwrap();
+        } else {
+            assert!(
+                CaCopies::new(&f.root.join("fresh-ca/active"))
+                    .unwrap()
+                    .read("role-recipient", 1)
+                    .is_err()
+            );
+        }
+    }
+    let generation: i64 = sqlx::query_scalar(
+        "SELECT generation FROM ca_administrators WHERE user_id='role-recipient'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(generation, 3);
+    assert!(f.source.load().is_ok());
+}
+#[tokio::test]
+async fn role_changes_require_fresh_purpose_bound_proofs_and_recheck_owner_permission() {
+    let mut f = unlock_fixture().await;
+    let change = crate::ca_administration::RoleChange {
+        user_id: f.auth.user.clone(),
+        administrator: false,
+    };
+    let start = f
+        .administration
+        .membership_start(&f.auth.session, change, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    assert!(
+        f.administration
+            .membership_finish(&f.auth.session, str_field(&start, "ceremony"), proof, NOW)
+            .await
+            .is_err(),
+        "removed the last administrator"
+    );
+    let change = crate::ca_administration::RoleChange {
+        user_id: f.auth.user.clone(),
+        administrator: true,
+    };
+    let start = f
+        .administration
+        .membership_start(&f.auth.session, change, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&f.auth.user)
+        .execute(&f.auth.auth.pool)
+        .await
+        .unwrap();
+    assert!(
+        f.administration
+            .membership_finish(&f.auth.session, str_field(&start, "ceremony"), proof, NOW)
+            .await
+            .is_err()
+    );
+}
+
+async fn registered_recipient(auth: &Auth) -> (String, String, Software) {
+    let user = Uuid::new_v4();
+    let software = Software::new();
+    let (options, state) = auth
+        .webauthn
+        .start_passkey_registration(user, "recipient", "Recipient", None)
+        .unwrap();
+    let mut start = json!({"options":options});
+    start["options"]["publicKey"]["authenticatorSelection"]["residentKey"] = json!("required");
+    start["options"]["publicKey"]["authenticatorSelection"]["userVerification"] = json!("required");
+    let proof = serde_json::from_value(software.registration(&start, ORIGIN, true)).unwrap();
+    let passkey = auth
+        .webauthn
+        .finish_passkey_registration(&proof, &state)
+        .unwrap();
+    let user = user.to_string();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES(?,'Recipient',0,'public-fixture','recipient','Recipient')").bind(&user).execute(&auth.pool).await.unwrap();
+    sqlx::query("INSERT INTO passkeys(id,user_id,credential) VALUES(?,?,?)")
+        .bind(B64.encode(&software.id))
+        .bind(&user)
+        .bind(serde_json::to_string(&passkey).unwrap())
+        .execute(&auth.pool)
+        .await
+        .unwrap();
+    let token = random();
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked,passkey_id) VALUES(?,?,'recipient-fixture',?,?,1,?)").bind(hash(&token)).bind(&user).bind(NOW+3600).bind(NOW).bind(B64.encode(&software.id)).execute(&auth.pool).await.unwrap();
+    (user, token, software)
+}
+async fn change_role(f: &mut UnlockFixture, user: &str, administrator: bool) {
+    let start = f
+        .administration
+        .membership_start(
+            &f.auth.session,
+            crate::ca_administration::RoleChange {
+                user_id: user.into(),
+                administrator,
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    f.administration
+        .membership_finish(&f.auth.session, str_field(&start, "ceremony"), proof, NOW)
+        .await
+        .unwrap();
+}
+#[tokio::test]
+async fn new_administrator_device_rewraps_pending_copy_and_role_generation_never_resurrects_it() {
+    let mut f = bootstrap_fixture().await;
+    let start = f
+        .administration
+        .bootstrap_start(&f.auth.session, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    f.administration
+        .bootstrap_finish(
+            &f.auth.session,
+            str_field(&start, "ceremony"),
+            proof,
+            Zeroizing::new([7; 32]),
+            NOW,
+        )
+        .await
+        .unwrap();
+    let issuer = f.source.issuer().unwrap();
+    let (user, token, mut software) = registered_recipient(&f.auth.auth).await;
+    change_role(&mut f, &user, true).await;
+    let copies = CaCopies::new(&f.root.join("fresh-ca/active")).unwrap();
+    assert!(copies.read(&user, 1).is_err());
+    let start = f.administration.bootstrap_start(&token, NOW).await.unwrap();
+    let proof = software.login(&start, ORIGIN, true);
+    f.administration
+        .bootstrap_finish(
+            &token,
+            str_field(&start, "ceremony"),
+            proof,
+            Zeroizing::new([9; 32]),
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert!(
+        copies
+            .read(&user, 1)
+            .unwrap()
+            .open(&issuer, &user, 1, &[9; 32])
+            .is_ok()
+    );
+    let stale = f.administration.bootstrap_start(&token, NOW).await.unwrap();
+    let proof = software.login(&stale, ORIGIN, true);
+    change_role(&mut f, &user, false).await;
+    assert!(copies.read(&user, 1).is_err());
+    change_role(&mut f, &user, true).await;
+    assert!(
+        f.administration
+            .bootstrap_finish(
+                &token,
+                str_field(&stale, "ceremony"),
+                proof,
+                Zeroizing::new([9; 32]),
+                NOW
+            )
+            .await
+            .is_err()
+    );
+    let start = f.administration.bootstrap_start(&token, NOW).await.unwrap();
+    assert_eq!(start["ca"]["generation"], 3);
+    let proof = software.login(&start, ORIGIN, true);
+    f.administration
+        .bootstrap_finish(
+            &token,
+            str_field(&start, "ceremony"),
+            proof,
+            Zeroizing::new([9; 32]),
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert!(
+        copies
+            .read(&user, 3)
+            .unwrap()
+            .open(&issuer, &user, 3, &[9; 32])
+            .is_ok()
+    );
+    assert_eq!(
+        issuer.to_der().unwrap(),
+        f.source.issuer().unwrap().to_der().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn pending_administrator_cannot_replace_the_last_retained_wrapped_copy() {
+    let mut f = bootstrap_fixture().await;
+    let start = f
+        .administration
+        .bootstrap_start(&f.auth.session, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    f.administration
+        .bootstrap_finish(
+            &f.auth.session,
+            str_field(&start, "ceremony"),
+            proof,
+            Zeroizing::new([7; 32]),
+            NOW,
+        )
+        .await
+        .unwrap();
+    let (recipient, _, _) = registered_recipient(&f.auth.auth).await;
+    change_role(&mut f, &recipient, true).await;
+    let start = f
+        .administration
+        .membership_start(
+            &f.auth.session,
+            crate::ca_administration::RoleChange {
+                user_id: f.auth.user.clone(),
+                administrator: false,
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    assert!(
+        f.administration
+            .membership_finish(&f.auth.session, str_field(&start, "ceremony"), proof, NOW)
+            .await
+            .is_err(),
+        "pending grants cannot unlock after losing the last retained wrapped copy"
+    );
+    assert!(
+        CaCopies::new(&f.root.join("fresh-ca/active"))
+            .unwrap()
+            .read(&f.auth.user, 1)
+            .is_ok()
+    );
+}
