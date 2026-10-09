@@ -128,18 +128,29 @@ export interface MeshGrantCreateResult extends MeshEditResult {
   grant_id: number;
 }
 
+/** Internal cancellation marker: obsolete work is silent, not a service failure. */
+class SnapshotSuperseded extends Error {}
+
 /** Typed action and subscription client for the Mesh control plane. */
 export class MeshClient {
   constructor(private readonly transport: MeshTransport) {}
 
   /** List the caller's authorized inventory, optionally restricted to one tag. */
   async list(filter: MeshFilter = {}): Promise<MeshSnapshot> {
+    return this.fetchSnapshot(filter);
+  }
+
+  /** Carry watch lifetime and generation through the first list and every continuation. */
+  private async fetchSnapshot(filter: MeshFilter, isCurrent?: () => boolean): Promise<MeshSnapshot> {
     const first = await this.transport.call<MeshSnapshotPage>("mesh.list", filter);
-    return this.completeSnapshot(first, filter);
+    return this.completeSnapshot(first, filter, isCurrent);
   }
 
   /** Assemble only one revision; a concurrent edit restarts the server's sequence. */
-  private async completeSnapshot(first: MeshSnapshotPage, filter: MeshFilter): Promise<MeshSnapshot> {
+  private async completeSnapshot(
+    first: MeshSnapshotPage, filter: MeshFilter, isCurrent?: () => boolean,
+  ): Promise<MeshSnapshot> {
+    if (isCurrent?.() === false) throw new SnapshotSuperseded("superseded");
     if (first.next_cursor === undefined) {
       return first;
     }
@@ -151,6 +162,7 @@ export class MeshClient {
     let restarts = 0;
     // Bound work if inventory continuously changes or a peer never finishes.
     for (let count = 0; count < 128; count++) {
+      if (isCurrent?.() === false) throw new SnapshotSuperseded("superseded");
       if (page.revision < revision) {
         throw new Error("mesh unavailable");
       }
@@ -306,7 +318,9 @@ export class MeshClient {
       try {
         while (!stopped && pendingRevision > deliveredRevision) {
           const requestedRevision = pendingRevision;
-          const snapshot = await this.list(filter);
+          const generation = authoritativeGeneration;
+          const snapshot = await this.fetchSnapshot(filter,
+            () => !stopped && generation === authoritativeGeneration);
           if (stopped) {
             break;
           }
@@ -320,10 +334,12 @@ export class MeshClient {
           }
           publish(snapshot);
         }
-      } catch {
-        pendingRevision = deliveredRevision;
-        if (!stopped) {
-          listener({ type: "error", error: "mesh unavailable" });
+      } catch (error) {
+        if (!(error instanceof SnapshotSuperseded)) {
+          pendingRevision = deliveredRevision;
+          if (!stopped) {
+            listener({ type: "error", error: "mesh unavailable" });
+          }
         }
       } finally {
         refreshing = false;
@@ -352,7 +368,8 @@ export class MeshClient {
         if (event.snapshot.next_cursor === undefined) {
           publish(event.snapshot, true);
         } else {
-          void this.completeSnapshot(event.snapshot, filter).then((snapshot) => {
+          void this.completeSnapshot(event.snapshot, filter,
+            () => !stopped && generation === authoritativeGeneration).then((snapshot) => {
             if (generation === authoritativeGeneration) publish(snapshot, true);
           }).catch(() => {
             if (!stopped && generation === authoritativeGeneration) {

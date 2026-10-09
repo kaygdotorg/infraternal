@@ -171,5 +171,6 @@ Input frames above that scheduling limit are refused before Mesh work begins.
 Subscription snapshots and resyncs use the same pages. The typed client follows
 continuations through `mesh.list` with the same tag filter, then publishes a
 complete snapshot. Small inventories keep their existing shape and one request.
-Clients bound continuation work and discard assemblies superseded by a newer
-authoritative event or withdrawn subscription.
+Clients bound continuation work and stop issuing continuation calls when a newer
+authoritative event supersedes an assembly or the subscription is withdrawn.
+Already-issued calls may settle; obsolete results never restart continuation work.
