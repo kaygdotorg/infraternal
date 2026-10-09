@@ -13,7 +13,7 @@ use std::{
 
 const SAMPLES: usize = 1_000;
 
-fn report_samples(label: &str, mut sample: impl FnMut()) {
+fn report_samples(label: &str, mut sample: impl FnMut() -> u64) {
     let mut elapsed = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         let started = Instant::now();
@@ -63,11 +63,12 @@ fn action(plugin: &mut HostFactsPlugin, input: &[u8]) -> Result<Vec<u8>, Box<dyn
 
 fn main() -> Result<(), Box<dyn Error>> {
     report_samples("static_collection", || {
-        black_box(collect_static_facts(AgentMode::Embedded));
+        u64::from(collect_static_facts(AgentMode::Embedded).cpus)
     });
     let mut live_facts = collect_static_facts(AgentMode::Embedded);
     report_samples("live_collection", || {
         refresh_live_facts(&mut live_facts);
+        live_facts.load_average.unwrap_or_default()[0].to_bits()
     });
 
     let mut plugin = HostFactsPlugin::new(AgentMode::Embedded);

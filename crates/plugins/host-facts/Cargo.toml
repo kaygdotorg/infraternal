@@ -21,5 +21,9 @@ sysctl = "0.7.1"
 [dev-dependencies]
 infraternal-protocol = { path = "../../infraternal-protocol", version = "0.1.0" }
 
+[[example]]
+name = "host_facts_measure"
+path = "examples/measure.rs"
+
 [lints]
 workspace = true
