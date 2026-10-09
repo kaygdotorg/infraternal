@@ -55,7 +55,8 @@
 .cl-col::-webkit-scrollbar { display: none; }
 .cl-col > .ui-window { flex: 1 1 0; min-height: 160px; pointer-events: auto; }
 .cl-col > .ui-window[style*="height"] { flex: none; }
-.cl-world[data-lod="thumb"] .ui-window { pointer-events: none; }
+/* `data-hit`, not `data-lod`: pointer-events is inherited, so flipping it mid-zoom restyled every element under every window (38-47 ms in one frame). The camera sets data-hit when it comes to rest. */
+.cl-world[data-hit="thumb"] .ui-window { pointer-events: none; }
 .cl-world[data-lod="thumb"] .ui-window-actions, .cl-world[data-lod="thumb"] .ui-window-lock, .cl-world[data-lod="thumb"] .cl-port { opacity: 0 !important; }
 .ui-window-actions { transition: opacity 160ms ease; }
 .ui-window.is-lifted { z-index: 20; pointer-events: none; box-shadow: var(--overlay-shadow-large, var(--shadow)); }

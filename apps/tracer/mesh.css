@@ -46,7 +46,7 @@
 
 /* A node card is dragged by its pill (to pin it, D180); the rest of the card takes no pointer events, so the arrows
    that run beside it keep theirs. At the thumbnail zoom nothing on a card is live, as everywhere on the canvas. */
-.cl-world:not([data-lod="thumb"]) .cl-graph .ui-window-pill { pointer-events: auto; cursor: grab; }
+.cl-world[data-hit="live"] .cl-graph .ui-window-pill { pointer-events: auto; cursor: grab; }
 
 /* In a big graph the cards' shadow is small and plain: the soft blur costs a raster tile per card per move (mesh/graph.ts). */
 .cl-graph[data-big] .ui-window { box-shadow: 0 1px 3px rgb(0 0 0 / 0.3); }

@@ -10,6 +10,9 @@
  * - A flight is a spring per axis; a new target keeps the current velocity, so a flight is always interruptible.
  *   A flight a gesture drives may take its time; one a key triggers is the short version (`keyFlight`).
  *   Reduced motion jumps (with a short fade) instead of flying.
+ * - `data-lod` flips mid-gesture and only changes non-inherited properties; `data-hit` (which windows take the pointer)
+ *   follows it at rest, because `pointer-events` is inherited and flipping it on the windows restyles every element
+ *   under them (2,249 elements, 38-47 ms in one frame of a zoom with 55 windows).
  * - Nothing runs while the camera is still: the springs and the rest timer stop on their own.
  *
  * The camera knows nothing about views, windows or sessions. The canvas hands it a viewport, a world layer and a
@@ -87,6 +90,7 @@ export class Camera {
 
   constructor(private readonly viewport: HTMLElement, private readonly world: HTMLElement, private readonly hooks: CameraHooks = {}) {
     world.dataset.lod = this.lod;
+    world.dataset.hit = this.lod;
     world.dataset.zoom = this.band;
     // The springs paint nothing until `start()`: their first update would run the hooks before the canvas is built.
     this.springCx = new Spring(0, (v) => { this.cam.cx = v; this.apply(); }, FLIGHT);
@@ -158,6 +162,8 @@ export class Camera {
     this.moving = false;
     this.hinted = false;
     this.world.style.willChange = "";
+    // Which windows take the pointer follows the level of detail only once the camera rests (see clusters.css).
+    if (this.world.dataset.hit !== this.lod) this.world.dataset.hit = this.lod;
     this.apply(true);
     this.hooks.onRest?.();
   }
