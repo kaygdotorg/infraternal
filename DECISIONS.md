@@ -1414,3 +1414,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Focus on open:** a terminal never looks ready for typing (a blinking
        cursor) unless the keyboard can actually appear; on iOS the keyboard
        needs a tap, so the first tap on the terminal opens it.
+192. **The direct path uses str0m (owner, 2026-10-09):** the browser-to-host
+     WebRTC direct path (D185, #103) is built on str0m 0.24.x (sans-IO, driven
+     by our own transport event loop; OpenSSL, already in the binary). Chosen
+     over webrtc-rs 0.21 on the quiet perf-VM comparison: keystroke echo p99
+     0.90 vs 2.90 ms, connection set-up 8.5 vs 209 ms, throughput equal within
+     noise (11.3 vs 12.8 MiB/s median, overlapping ranges). The webrtc-rs
+     candidate is removed; the trait boundary stays so the engine remains
+     replaceable.
