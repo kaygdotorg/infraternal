@@ -6,6 +6,15 @@ use super::{
     require_session_tx, setup::valid_username,
 };
 
+// The successful verifier retains its counter transaction until the caller
+// publishes a session or commits a proof-only operation. Cancellation rolls it back.
+struct VerifiedLogin {
+    tx: sqlx::Transaction<'static, sqlx::Sqlite>,
+    user: String,
+    credential: String,
+    expires: i64,
+}
+
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
     pub(super) async fn registration(
@@ -366,6 +375,35 @@ impl Auth {
         now: i64,
         pending_unlock: bool,
     ) -> Result<String> {
+        let VerifiedLogin {
+            mut tx,
+            user,
+            credential,
+            ..
+        } = self.verified_login(id, proof, device, now).await?;
+        let token = random();
+        insert_session(&mut tx, &token, &user, device, now, Some(&credential)).await?;
+        if pending_unlock {
+            sqlx::query("UPDATE sessions SET unlocked=0,expires=? WHERE token_hash=?")
+                .bind(now + CEREMONY)
+                .bind(hash(&token))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(token)
+    }
+
+    // Reuse exactly the signed-proof, registered-credential and monotone-counter
+    // checks for operations that must not create a browser session. The caller
+    // keeps this writer transaction until committing its own resulting authority.
+    async fn verified_login(
+        &self,
+        id: &str,
+        proof: Value,
+        device: &str,
+        now: i64,
+    ) -> Result<VerifiedLogin> {
         let login = self
             .pending
             .lock()
@@ -381,6 +419,7 @@ impl Auth {
         if proof.type_ != "public-key" {
             return Err(Error::Denied);
         }
+        let expires = login.expires;
         let user = match &login.state {
             LoginState::Identified(_, user) => {
                 if proof.get_user_unique_id().is_some_and(|handle| {
@@ -435,25 +474,65 @@ impl Auth {
             .bind(row.get::<String, _>("id"))
             .execute(&mut *tx)
             .await?;
-        let token = random();
-        insert_session(
-            &mut tx,
-            &token,
-            &user,
-            device,
-            now,
-            Some(&row.get::<String, _>("id")),
-        )
-        .await?;
-        if pending_unlock {
-            sqlx::query("UPDATE sessions SET unlocked=0,expires=? WHERE token_hash=?")
-                .bind(now + CEREMONY)
-                .bind(hash(&token))
-                .execute(&mut *tx)
-                .await?;
+        let credential = row.get("id");
+        Ok(VerifiedLogin {
+            tx,
+            user,
+            credential,
+            expires,
+        })
+    }
+
+    /// Verify a real, single-use passkey proof without creating a browser session.
+    /// The result grants no CA or role authority; callers recheck current policy
+    /// and the registered credential under their own final writer transaction.
+    /// # Errors
+    /// Refuses invalid, expired or replayed proofs and stale credential counters.
+    pub async fn verify_passkey(
+        &self,
+        id: &str,
+        proof: Value,
+        now: i64,
+    ) -> Result<super::VerifiedPasskey> {
+        self.verify_passkey_clock(id, proof, || {
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|time| i64::try_from(time.as_secs()).ok())
+                .ok_or(Error::Invalid)?;
+            Ok(now.max(wall))
+        })
+        .await
+    }
+
+    // Re-read the clock after awaited writer admission; tests advance this same
+    // boundary deterministically instead of waiting for a five-minute ceremony.
+    pub(crate) async fn verify_passkey_clock(
+        &self,
+        id: &str,
+        proof: Value,
+        clock: impl Fn() -> Result<i64>,
+    ) -> Result<super::VerifiedPasskey> {
+        let initial = clock()?;
+        let VerifiedLogin {
+            tx,
+            user,
+            credential,
+            expires,
+        } = self
+            .verified_login(id, proof, "passkey operation", initial)
+            .await?;
+        let verified_at = clock()?.max(initial);
+        if expires <= verified_at {
+            return Err(Error::Denied);
         }
         tx.commit().await?;
-        Ok(token)
+        Ok(super::VerifiedPasskey {
+            user,
+            credential,
+            verified_at,
+            expires,
+        })
     }
 
     /// Enroll the optional second passkey after a fresh tap.

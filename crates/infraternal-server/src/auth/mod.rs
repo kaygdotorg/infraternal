@@ -42,6 +42,37 @@ const SESSION: i64 = 30 * DAY;
 const CEREMONY: i64 = 300;
 const FRESH: i64 = 300;
 
+/// Fresh real passkey verification without a browser session or implied role.
+/// Construction stays inside the verifier; identifiers alone cannot forge it.
+pub struct VerifiedPasskey {
+    user: String,
+    credential: String,
+    verified_at: i64,
+    expires: i64,
+}
+impl VerifiedPasskey {
+    /// Identity authenticated by the registered credential's signature.
+    #[must_use]
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+    /// Exact registered credential rechecked by the consuming operation.
+    #[must_use]
+    pub fn credential(&self) -> &str {
+        &self.credential
+    }
+    /// Server time when this fresh proof completed verification.
+    #[must_use]
+    pub fn verified_at(&self) -> i64 {
+        self.verified_at
+    }
+    /// Original challenge deadline, retained for the final operation check.
+    #[must_use]
+    pub fn expires(&self) -> i64 {
+        self.expires
+    }
+}
+
 /// Errors deliberately expose no credential, capability or database contents.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
