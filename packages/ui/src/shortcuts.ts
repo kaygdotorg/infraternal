@@ -19,7 +19,11 @@ import { readLocal, writeLocal } from "./local-pref";
  * A key combination, platform-neutral: `mod` is Command on macOS and Control elsewhere, `code` is the
  * physical key (`KeyG`, `ArrowLeft`, `Digit1`), so a binding means the same key on every layout.
  */
-export interface Combo { code: string; mod?: boolean; shift?: boolean; alt?: boolean }
+export interface Combo {
+  code: string; mod?: boolean; shift?: boolean; alt?: boolean;
+  /** The Control key itself on macOS, where `mod` is Command (so Control+Option chords can be written). Ignored elsewhere. */
+  ctrl?: boolean;
+}
 
 export interface Shortcut {
   id: string;
@@ -31,6 +35,8 @@ export interface Shortcut {
    * single source: `?`, the palette hints, tooltips and the toolbar all read the binding from here.
    */
   combo?: Combo;
+  /** Further default bindings that run the same action. Labels and tooltips show `combo`, the primary one. */
+  alternates?: Combo[];
 }
 
 export interface ShortcutSection {
@@ -94,11 +100,11 @@ export const keyName = (code: string): string => KEY_NAMES[code] ?? code.replace
 /** The label of a combination on this platform: ⌘⇧G on a Mac, Ctrl+Shift+G elsewhere. */
 export function comboLabel(combo: Combo): string {
   const key = keyName(combo.code);
-  if (isMacPlatform()) return `${combo.alt ? "⌥" : ""}${combo.shift ? "⇧" : ""}${combo.mod ? "⌘" : ""}${key}`.replace(/^(⌥?⇧?)(⌘)/, "$1$2");
+  if (isMacPlatform()) return `${combo.ctrl ? "⌃" : ""}${combo.alt ? "⌥" : ""}${combo.shift ? "⇧" : ""}${combo.mod ? "⌘" : ""}${key}`.replace(/^(⌥?⇧?)(⌘)/, "$1$2");
   return [combo.mod ? "Ctrl" : "", combo.alt ? "Alt" : "", combo.shift ? "Shift" : "", key].filter(Boolean).join("+");
 }
-export const sameCombo = (a: Combo, b: Combo): boolean => a.code === b.code && Boolean(a.mod) === Boolean(b.mod) && Boolean(a.shift) === Boolean(b.shift) && Boolean(a.alt) === Boolean(b.alt);
-export const comboOf = (event: KeyboardEvent): Combo => ({ code: event.code, mod: isMacPlatform() ? event.metaKey : event.ctrlKey, shift: event.shiftKey, alt: event.altKey });
+export const sameCombo = (a: Combo, b: Combo): boolean => a.code === b.code && Boolean(a.mod) === Boolean(b.mod) && Boolean(a.shift) === Boolean(b.shift) && Boolean(a.alt) === Boolean(b.alt) && Boolean(a.ctrl) === Boolean(b.ctrl);
+export const comboOf = (event: KeyboardEvent): Combo => ({ code: event.code, mod: isMacPlatform() ? event.metaKey : event.ctrlKey, shift: event.shiftKey, alt: event.altKey, ctrl: isMacPlatform() && event.ctrlKey });
 export const matchesCombo = (event: KeyboardEvent, combo: Combo): boolean => sameCombo(comboOf(event), combo);
 
 /** The binding in force: the user's, else the default. */
@@ -126,7 +132,9 @@ export function bindShortcut(id: string, handler: (event: KeyboardEvent) => void
     if (document.querySelector("[data-capturing]")) return; // Settings, Shortcuts is listening for a new binding
     const found = allShortcuts().find((entry) => entry.shortcut.id === id);
     const combo = found && bindingOf(found.shortcut);
-    if (!combo || !matchesCombo(event, combo)) return;
+    // A rebinding replaces the primary combo; the alternates stay only while the shortcut still has its default.
+    const spare = found && !isOverridden(id) ? found.shortcut.alternates ?? [] : [];
+    if (!combo || ![combo, ...spare].some((c) => matchesCombo(event, c))) return;
     event.preventDefault();
     event.stopPropagation();
     handler(event);
