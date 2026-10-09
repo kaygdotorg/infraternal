@@ -2,7 +2,7 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use infraternal_server::mesh_api::parse_action;
+use infraternal_plugin_mesh::api::parse_action;
 use libfuzzer_sys::fuzz_target;
 
 const ACTIONS: [&str; 16] = [

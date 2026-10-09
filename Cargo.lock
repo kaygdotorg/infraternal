@@ -1311,8 +1311,8 @@ dependencies = [
 name = "infraternal-fuzz"
 version = "0.1.0"
 dependencies = [
+ "infraternal-plugin-mesh",
  "infraternal-protocol",
- "infraternal-server",
  "infraternal-shim",
  "libfuzzer-sys",
 ]
@@ -1333,6 +1333,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "serde",
+ "serde_json",
  "sqlx",
  "tokio",
 ]
@@ -1345,6 +1346,7 @@ dependencies = [
  "futures-util",
  "infraternal-mesh",
  "infraternal-plugin-api",
+ "infraternal-protocol",
  "serde",
  "serde_json",
  "sqlx",
