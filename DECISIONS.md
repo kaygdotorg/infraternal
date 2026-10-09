@@ -1624,3 +1624,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Test Mac permissions (C1):** jobs may grant Screen Recording and
        event-posting permission to our own spike binary on the shared macOS
        VM, through VNC over an SSH tunnel, and remove them afterwards.
+204. **macOS capture bindings and encoder (owner, 2026-10-09, #139):**
+     - **Bindings (C5):** the maintained `screencapturekit` Rust crate,
+       pinned to an exact version after an AGPL compatibility check, behind
+       our capture trait so it can be replaced. Measured on the macOS VM at a
+       960×600 window: 0.8 / 3.6 ms delivery p50/p95 against 29.6 / 158.6 ms
+       for generated `objc2` bindings, which also reported spurious idle
+       frames.
+     - **Encoder (C6):** VideoToolbox. H.264 first for the widest browser
+       support; HEVC where the browser supports it. Encode latency is
+       re-measured on physical Apple hardware when the owner's Mac is
+       available (the VM measured 25–30 / 40–44 ms at 1080p60).
