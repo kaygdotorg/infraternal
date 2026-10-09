@@ -2,13 +2,17 @@
 
 use crate::{model::Failure, transport::Input};
 use nix::{
-    sys::signal::{Signal, killpg},
+    sys::{
+        signal::{Signal, killpg},
+        wait::{Id, WaitPidFlag, WaitStatus, waitid},
+    },
     unistd::Pid,
 };
 use std::{os::unix::process::CommandExt, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
+    signal::unix::{Signal as ExitEvents, SignalKind, signal},
 };
 
 /// Process data is bounded even when a compromised SSH endpoint streams endlessly.
@@ -48,6 +52,10 @@ pub async fn execute_bounded(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Subscribe before spawning so exit cannot fall between observation and
+    // notification. The shared Tokio SIGCHLD path adds no blocking pool thread.
+    let mut exits = signal(SignalKind::child())
+        .map_err(|_| Failure::install("The SSH helper exit could not be observed."))?;
     let mut child = command
         .spawn()
         .map_err(|_| Failure::install("The SSH helper could not start."))?;
@@ -107,6 +115,9 @@ pub async fn execute_bounded(
         // A descendant can leave the group but keep a pipe open; reaping first
         // would let cancellation signal a subsequently reused group id.
         let (write, read) = tokio::join!(write, read);
+        observe_exit(group.id, &mut exits).await?;
+        // Retire closed-pipe descendants before reaping releases the group id.
+        group.retire();
         let status = child.wait().await;
         let status =
             status.map_err(|_| Failure::install("The SSH helper did not exit cleanly."))?;
@@ -122,14 +133,42 @@ pub async fn execute_bounded(
         })
     };
     if let Ok(result) = tokio::time::timeout(timeout, operation).await {
-        // No await between completed wait/read/write and disarming: an exited
-        // and reaped group identity must not be signalled after pid reuse.
-        group.armed = false;
+        // Normal completion retired the group before reaping. Early errors still
+        // own the leader identity and must also retire descendants.
+        group.retire();
         result
     } else {
         group.retire();
         let _ = child.wait().await;
         Err(Failure::install("The SSH operation timed out."))
+    }
+}
+
+/// Keep the leader unreaped while awaiting its natural exit through the existing
+/// asynchronous child signal path. Recheck after every notification because
+/// SIGCHLD is shared and can describe another owned helper.
+async fn observe_exit(pid: Pid, exits: &mut ExitEvents) -> Result<(), Failure> {
+    loop {
+        let status = exit_status(pid)
+            .map_err(|_| Failure::install("The SSH helper exit could not be observed."))?;
+        if status != WaitStatus::StillAlive {
+            return Ok(());
+        }
+        if exits.recv().await.is_none() {
+            return Err(Failure::install(
+                "The SSH helper exit could not be observed.",
+            ));
+        }
+    }
+}
+
+fn exit_status(pid: Pid) -> nix::Result<WaitStatus> {
+    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT | WaitPidFlag::WNOHANG;
+    loop {
+        match waitid(Id::Pid(pid), flags) {
+            Err(nix::errno::Errno::EINTR) => {}
+            result => return result,
+        }
     }
 }
 

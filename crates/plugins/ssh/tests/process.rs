@@ -149,3 +149,39 @@ async fn group_identity_is_retained_until_inherited_pipes_finish() {
         "the cancellation group id was released while owned I/O remained pending"
     );
 }
+
+#[tokio::test]
+async fn completed_helper_retires_descendants_with_closed_pipes() {
+    let mut command = Command::new("/bin/sh");
+    // A child can close its inherited pipes while remaining in the owned group.
+    // Successful leader exit must not leave that group running after scope retirement.
+    command.args([
+        "-c",
+        "sleep 60 </dev/null >/dev/null 2>&1 & printf '%s' \"$!\"",
+    ]);
+    let output = execute(&mut command, Input::Empty, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert!(output.success);
+    let pid = std::str::from_utf8(&output.stdout)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let cleanup = Descendant {
+        pid,
+        birth: birth(pid),
+    };
+    // Group signals are asynchronous. Bound termination as the cancellation
+    // oracle does, rather than racing delivery immediately after killpg returns.
+    let retired = tokio::time::timeout(Duration::from_secs(1), async {
+        while live(pid) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    drop(cleanup);
+    assert!(
+        retired.is_ok(),
+        "owned descendant remained live after helper completion"
+    );
+}
