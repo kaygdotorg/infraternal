@@ -86,6 +86,7 @@
   contain: strict; will-change: opacity;
   animation: cl-blink 1.1s steps(1) infinite paused;
 }
+.ui-window[data-parked]:not([data-active]):not([data-goo]) { visibility: hidden; } /* memory.ts: a screen or more away */
 .ui-window[data-active][data-onscreen] .cl-cursor { animation-play-state: running; }
 @keyframes cl-blink { 50% { opacity: 0; } }
 .cl-logs { color: var(--fg-2); }
