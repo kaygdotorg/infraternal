@@ -3091,7 +3091,7 @@ async fn recovery_audit_commits_once_with_start_cancel_and_complete() {
 impl Auth {
     async fn legacy_enrollment(&self, mut start: Value) -> Value {
         let words = bip39::Mnemonic::generate(24).unwrap().to_string();
-        let stored = recovery_hash(words.clone()).await.unwrap();
+        let stored = crypto::recovery_hash_fixture(words.clone()).await.unwrap();
         self.pending
             .lock()
             .await
@@ -3130,7 +3130,11 @@ fn recovery_verifier(words: &str) -> String {
 async fn fixture_v2() -> Fixture {
     let f = fixture().await;
     sqlx::query("UPDATE users SET recovery_hash=?,recovery_version=2 WHERE id=?")
-        .bind(recovery_hash(recovery_verifier(&f.words)).await.unwrap())
+        .bind(
+            crypto::recovery_hash_fixture(recovery_verifier(&f.words))
+                .await
+                .unwrap(),
+        )
         .bind(&f.user)
         .execute(&f.auth.pool)
         .await
@@ -3235,7 +3239,7 @@ async fn recovery_unknown_identity_pays_the_same_database_and_verifier_work() {
         .unwrap();
     let auth = Auth::new(pool, "auth.example.test", ORIGIN).await.unwrap();
     let user = uuid::Uuid::new_v4().to_string();
-    let stored = recovery_hash(random()).await.unwrap();
+    let stored = crypto::recovery_hash_fixture(random()).await.unwrap();
     sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name,recovery_version) VALUES (?,'owner',1,?,'owner','Owner',2)")
         .bind(&user).bind(stored).execute(&auth.pool).await.unwrap();
     let wrong_secret = random();
