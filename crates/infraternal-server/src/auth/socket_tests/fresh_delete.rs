@@ -110,7 +110,7 @@ async fn review_mesh_delete_requires_fresh_passkey_tap() {
         else {
             panic!("fresh confirmation must be required")
         };
-        assert_eq!(json, br#"{"error":"forbidden"}"#);
+        assert_eq!(json, br#"{"error":"confirm with your passkey again"}"#);
     }
     // A refusal leaves the shared socket usable; a new passkey timestamp permits the edit.
     sqlx::query("UPDATE sessions SET fresh=unixepoch()")

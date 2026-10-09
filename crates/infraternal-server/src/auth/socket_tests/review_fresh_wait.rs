@@ -112,5 +112,9 @@ async fn review_mesh_delete_refused_when_freshness_expires_during_writer_wait() 
         !ok,
         "fresh authority expired before the destructive edit committed"
     );
+    assert_eq!(
+        serde_json::from_slice::<Value>(json).unwrap()["error"],
+        "confirm with your passkey again"
+    );
     assert_eq!((remaining, revision, audits), (1, 0, 0));
 }

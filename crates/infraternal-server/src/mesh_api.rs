@@ -282,6 +282,8 @@ pub enum MeshApiError {
     InvalidInput,
     /// The caller lacks the required role action or scope.
     Denied,
+    /// Destructive browser authority expired before commit [28].
+    FreshRequired,
     /// A referenced object is absent or hidden from this caller.
     NotFound,
     /// A unique name, key, or nonempty-tag invariant would be violated.
@@ -296,6 +298,7 @@ impl MeshApiError {
     pub const fn wire_error(self) -> &'static [u8] {
         match self {
             Self::InvalidInput => br#"{"error":"invalid input"}"#,
+            Self::FreshRequired => br#"{"error":"confirm with your passkey again"}"#,
             Self::Denied => br#"{"error":"forbidden"}"#,
             Self::NotFound => br#"{"error":"not found"}"#,
             Self::Conflict => br#"{"error":"conflict"}"#,
@@ -470,6 +473,8 @@ fn node_id(id: u64) -> Result<i64, MeshApiError> {
 pub struct MeshService {
     pool: SqlitePool,
     updates: broadcast::Sender<MeshChange>,
+    // Request-local authority is never installed in the shared service.
+    fresh_authority: Option<String>,
 }
 
 impl MeshService {
@@ -477,7 +482,20 @@ impl MeshService {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         let (updates, _) = broadcast::channel(CHANGE_BUFFER);
-        Self { pool, updates }
+        Self {
+            pool,
+            updates,
+            fresh_authority: None,
+        }
+    }
+
+    /// Bind destructive browser authority to the transaction that commits the edit.
+    /// Direct service callers remain responsible for authenticating their adapter.
+    #[must_use]
+    pub(crate) fn with_fresh_authority(&self, token_hash: String) -> Self {
+        let mut request = self.clone();
+        request.fresh_authority = Some(token_hash);
+        request
     }
 
     /// Subscribe to post-commit revision invalidations; a lagging reader should reload its filtered list.
@@ -1268,6 +1286,13 @@ impl MeshService {
         sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) VALUES (?,?,?,?,?,?)")
             .bind(actor).bind(action).bind(resource).bind(revision).bind(now).bind(detail)
             .execute(&mut *tx).await.map_err(map_sql_error)?;
+        // Re-read inside the writer transaction after all waits, immediately before
+        // commit. Denial rolls back inventory, revision and audit together [28].
+        if let Some(token_hash) = &self.fresh_authority {
+            crate::auth::require_session_tx(&mut tx, token_hash, actor, now)
+                .await
+                .map_err(|_| MeshApiError::FreshRequired)?;
+        }
         tx.commit().await.map_err(map_sql_error)?;
         let _ = self.updates.send(MeshChange { revision, scopes });
         u64::try_from(revision).map_err(|_| MeshApiError::Storage)

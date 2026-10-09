@@ -141,7 +141,7 @@ impl Auth {
     }
 }
 
-pub(super) async fn require_session_tx(
+pub(crate) async fn require_session_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     token_hash: &str,
     user: &str,

@@ -671,6 +671,7 @@ fn mesh_error_event(error: MeshApiError) -> Value {
     let message = match error {
         MeshApiError::InvalidInput => "invalid input",
         MeshApiError::Denied => "forbidden",
+        MeshApiError::FreshRequired => "confirm with your passkey again",
         MeshApiError::NotFound => "not found",
         MeshApiError::Conflict => "conflict",
         MeshApiError::Storage => "mesh unavailable",
@@ -1271,14 +1272,18 @@ where
                     | "mesh.role.define"
                     | "mesh.role.assign"
             );
+            let service = if requires_fresh {
+                state
+                    .mesh
+                    .with_fresh_authority(crate::auth::hash(session_token))
+            } else {
+                state.mesh.clone()
+            };
             let value =
                 if requires_fresh && state.auth.fresh_session(session_token, now).await.is_err() {
-                    Err(MeshApiError::Denied)
+                    Err(MeshApiError::FreshRequired)
                 } else {
-                    state
-                        .mesh
-                        .execute(user_id, action_id, input_json, now)
-                        .await
+                    service.execute(user_id, action_id, input_json, now).await
                 };
             if !session_is_live(state, user_id, session_token).await {
                 return Err(());
