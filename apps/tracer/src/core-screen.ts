@@ -245,7 +245,20 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     overlayQueued = false;
     stage.toggleAttribute("data-overlay", stage.querySelector(OVERLAYS) !== null || document.querySelector(".ui-confirm-tip") !== null);
   };
-  const overlayWatch = new MutationObserver(() => { if (!overlayQueued) { overlayQueued = true; queueMicrotask(syncOverlay); } });
+  // Only a change to one of the floating things can change the answer. The terminals add and remove nodes all the time
+  // (every window, every output), and re-running `querySelector` over the whole screen for each of those was the top
+  // item of the main thread with 54 terminals open (90-120 ms of every second).
+  const OVERLAY_NODE = ".sidebar, .palette, .ui-toast, .ah-float, .canvas-popover, .ui-settings, .ui-shortcuts, .ui-confirm-tip";
+  const relevantNode = (n: Node): boolean => n.nodeType === 1 && ((n as Element).matches(OVERLAY_NODE) || (n as Element).querySelector(OVERLAY_NODE) !== null);
+  const overlayWatch = new MutationObserver((records) => {
+    if (overlayQueued) return;
+    for (const r of records) {
+      const hit = r.type === "attributes"
+        ? (r.target as Element).matches(OVERLAY_NODE)
+        : [...r.addedNodes, ...r.removedNodes].some(relevantNode);
+      if (hit) { overlayQueued = true; queueMicrotask(syncOverlay); return; }
+    }
+  });
   overlayWatch.observe(document.body, { childList: true }); // the anchored confirmation lives on the body
   overlayWatch.observe(stage, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
   // The footer (who is signed in, settings, the build) is part of the canvas preview.
