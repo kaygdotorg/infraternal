@@ -76,3 +76,10 @@ path = "fuzz_targets/ssh_public_config_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ssh_host_record_parse"
+path = "fuzz_targets/ssh_host_record_parse.rs"
+test = false
+doc = false
+bench = false
