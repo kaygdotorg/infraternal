@@ -403,3 +403,18 @@ async fn active_service_stop_failure_never_replaces_live_artifacts() {
     transaction.rollback().await.unwrap();
     assert_eq!(std::fs::read(fixture.base().join("bin/live")).unwrap(), old);
 }
+
+#[tokio::test]
+async fn fresh_receipt_is_removed_before_transaction_rollback() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    // Model cancellation between receipt publication and lock release.
+    std::fs::write(fixture.base().join(".bootstrap-ready"), b"public-receipt\n").unwrap();
+    transaction.rollback().await.unwrap();
+    assert!(
+        !fixture.base().exists(),
+        "fresh manual receipt left an installed artifact behind"
+    );
+}
