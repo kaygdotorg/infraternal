@@ -296,7 +296,7 @@ export class MeshClient {
     let deliveredRevision = -1;
     let pendingRevision = -1;
     let refreshing = false;
-    let authoritativeGeneration = 0;
+    let snapshotGeneration = 0;
     let authoritativeRevision = -1;
 
     const publish = (snapshot: MeshSnapshot, authoritative = false): void => {
@@ -307,6 +307,9 @@ export class MeshClient {
         return;
       }
       deliveredRevision = snapshot.revision;
+      // A completed view supersedes earlier page work, including its errors and
+      // equal-revision liveness. Advance before a listener can deliver reentrantly.
+      snapshotGeneration += 1;
       listener({ type: "snapshot", snapshot });
     };
 
@@ -315,15 +318,16 @@ export class MeshClient {
         return;
       }
       refreshing = true;
-      let refreshGeneration = authoritativeGeneration;
+      let refreshGeneration = snapshotGeneration;
       try {
         while (!stopped && pendingRevision > deliveredRevision) {
           const requestedRevision = pendingRevision;
-          const generation = authoritativeGeneration;
+          const generation = snapshotGeneration;
           refreshGeneration = generation;
           const snapshot = await this.fetchSnapshot(filter,
-            () => !stopped && generation === authoritativeGeneration);
-          if (stopped) {
+            () => !stopped && generation === snapshotGeneration);
+          // Ownership can change between assembly and this parent await resuming.
+          if (stopped || generation !== snapshotGeneration) {
             break;
           }
           if (snapshot.revision < requestedRevision) {
@@ -337,9 +341,9 @@ export class MeshClient {
           publish(snapshot);
         }
       } catch (error) {
-        // A newer authoritative event owns both inventory and error delivery.
+        // A newer snapshot owns both inventory and error delivery.
         // Keep its pending revision intact when an obsolete request rejects.
-        if (refreshGeneration === authoritativeGeneration
+        if (refreshGeneration === snapshotGeneration
           && !(error instanceof SnapshotSuperseded)) {
           pendingRevision = deliveredRevision;
           if (!stopped) {
@@ -369,15 +373,15 @@ export class MeshClient {
           return;
         }
         authoritativeRevision = event.snapshot.revision;
-        const generation = ++authoritativeGeneration;
+        const generation = ++snapshotGeneration;
         if (event.snapshot.next_cursor === undefined) {
           publish(event.snapshot, true);
         } else {
           void this.completeSnapshot(event.snapshot, filter,
-            () => !stopped && generation === authoritativeGeneration).then((snapshot) => {
-            if (generation === authoritativeGeneration) publish(snapshot, true);
+            () => !stopped && generation === snapshotGeneration).then((snapshot) => {
+            if (generation === snapshotGeneration) publish(snapshot, true);
           }).catch(() => {
-            if (!stopped && generation === authoritativeGeneration) {
+            if (!stopped && generation === snapshotGeneration) {
               listener({ type: "error", error: "mesh unavailable" });
             }
           });
