@@ -15,6 +15,7 @@ use axum::{
     routing::get,
 };
 use infraternal_plugin_ssh::{
+    auth_once::{OneUseAuth, TargetAuth},
     bootstrap::{Batch, Bootstrap},
     model::Target,
     transport::Secret,
@@ -66,9 +67,13 @@ enum Request {
         targets: Vec<Target>,
         #[serde(default)]
         credential: Option<String>,
+        #[serde(default)]
+        auth_once: Vec<TargetAuth>,
     },
     Retry {
         target: String,
+        #[serde(default)]
+        auth_once: Option<OneUseAuth>,
     },
     Replay {
         after: u64,
@@ -206,18 +211,22 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                     Some(Ok(Message::Text(text))) => {
                 if !authorized(&api, token, &owner).await { break; }
                 expiry.as_mut().reset(tokio::time::Instant::now() + Duration::from_hours(30 * 24));
-                let Ok(request) = serde_json::from_str::<Request>(&text) else {
+                let decoded = serde_json::from_str::<Request>(&text);
+                // Transient private fields are now owned zeroizing buffers; no raw
+                // JSON is retained by batch state, helper tasks or replay history.
+                drop(text);
+                let Ok(request) = decoded else {
                     if send_live(&mut socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":"invalid bootstrap request"})).ok()).await.is_err() { break; }
                     continue;
                 };
                 let result = match request {
-                    Request::Start { targets, credential } if batch.is_none() => {
-                        match api.runner.start_authenticated(owner.clone(), Secret::new(token.as_bytes().to_vec()), targets, credential) {
+                    Request::Start { targets, credential, auth_once } if batch.is_none() => {
+                        match api.runner.start_authenticated_with_auth(owner.clone(), Secret::new(token.as_bytes().to_vec()), targets, credential, auth_once) {
                             Ok(started) => { changed = Some(started.subscribe()); batch = Some(started); Ok(()) }
                             Err(error) => Err(error)
                         }
                     }
-                    Request::Retry { target } => batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.retry(batch, &owner, &target)),
+                    Request::Retry { target, auth_once } => batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.retry_with_auth(batch, &owner, &target, auth_once)),
                     Request::Replay { after: sequence } => { after = sequence; Ok(()) }
                     Request::Start { .. } => Err(infraternal_plugin_ssh::model::Failure::unsupported("A host batch is already running.")),
                 };
