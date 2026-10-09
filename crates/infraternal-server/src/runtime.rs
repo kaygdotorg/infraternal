@@ -188,6 +188,10 @@ pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
 ///
 /// Descriptors stay in one source of truth, while the server can refuse undeclared actions and
 /// authorize declared permissions before any request reaches the embedded infraternal agent.
+///
+/// # Errors
+///
+/// Returns a configuration, storage, migration, authentication, TLS, setup-token socket, or listener error.
 pub async fn serve_with_plugin_descriptors(
     config: ServerConfig,
     plugin_descriptors: &'static [&'static PluginDescriptor],
@@ -244,6 +248,7 @@ pub(crate) async fn router_with_agent(
         .ok_or(ServerError::InvalidConfiguration)
 }
 
+#[cfg(test)]
 async fn build_router(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
