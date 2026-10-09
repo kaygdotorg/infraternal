@@ -303,3 +303,38 @@ injection is not a substitute. Unconfigured shipping servers still register
 remote enrollment paths and return service-unavailable rather than route-not-found.
 Process-only update/rollback handoff remains distinct from cold startup; update
 IPC integration is a later slice.
+
+### Administrator CA HTTP adapter
+
+A configured remote service mounts these POST-only paths at the pinned public
+HTTPS origin. All three require exact `Origin`, the existing secure session
+cookie and current explicit administrator membership with a registered passkey.
+The finish body is bounded to 32768 bytes and rejects unknown fields; status and
+start do not consume a request body.
+Missing/malformed cookies return 401; a valid-shaped unauthorized cookie or bad
+Origin returns403. Admission is bounded to eight requests and exhaustion
+returns 429. Finish parser errors return an empty 400; oversized finish bodies
+return 413.
+Responses never set a session cookie or include private CA material.
+
+- `/remote/ca/status`, body `{}`: returns `{"locked":true}` or
+  `{"locked":false}`. Existing administrator session liveness is required; a
+  stale freshness timestamp does not prevent starting a new passkey proof.
+- `/remote/ca/unlock/start`, body `{}`: returns the existing `login_start`
+  ceremony/options plus public `ca` metadata: `member`, positive `generation`,
+  base64url `salt` and `issuer_fingerprint`. The private purpose registry binds
+  this 300-second single-use ceremony to its original session and membership
+  generation. Neither encrypted copy nor CA seed is returned.
+- `/remote/ca/unlock/finish`, body with exactly `ceremony`, existing WebAuthn
+  `proof`, and `scoped_key` (array of exactly 32 bytes): requires a fresh real
+  registered-passkey proof, authenticated copy decryption and final authority
+  checks under the database writer lock. Returns only `{"locked":false}`.
+  Failures never echo wrapping material. The scoped key is the locally derived
+  CA wrapping key described above, never the account DEK or passkey PRF output.
+
+The normal configured release CLI uses the same migrated Auth/database and cold
+`MemoryCaSource` for this HTTP authority and enrollment/renewal. Unlocking one
+therefore enables signing in the other; restart recreates the cold lock. Startup
+refuses unsafe encrypted-copy storage rather than silently disabling unlock.
+The API does not provision a missing administrator copy or alter role membership;
+those actions must follow the provisioning/rewrap rules above.
