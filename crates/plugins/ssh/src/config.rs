@@ -179,6 +179,18 @@ impl PublicSshConfiguration {
         true
     }
 
+    pub(crate) fn configure_pin(&mut self, path: &std::path::Path) {
+        // Admission already checked this exact lookup and configured trust.
+        // Retain KRL and crypto policy while selecting only the immutable pin.
+        self.options.retain(|(name, _)| {
+            !matches!(name.as_str(), "userknownhostsfile" | "globalknownhostsfile")
+        });
+        self.options
+            .push(("userknownhostsfile".into(), quoted(&path.to_string_lossy())));
+        self.options
+            .push(("globalknownhostsfile".into(), "/dev/null".into()));
+    }
+
     /// Empty config prevents configured keys/certificates from being appended.
     /// Only public policy is re-applied; credential policy follows separately.
     pub fn configure(&self, command: &mut Command) {
