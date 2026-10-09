@@ -125,6 +125,9 @@ export interface ConfirmTipOptions {
   message?: string;
   /** One secondary line explaining the consequence (the earlier name of `effect`). */
   detail?: string;
+  /** The same two lines with entity chips in them (`entityText`); they replace `title` and `effect` on screen, which stay the plain text. */
+  titleNode?: Node;
+  effectNode?: Node;
   confirmLabel: string;
   cancelLabel: string;
   onConfirm(): void;
@@ -158,13 +161,13 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   text.className = "ui-confirm-tip-text";
   const message = document.createElement("p");
   message.className = "ui-confirm-tip-message";
-  message.textContent = options.title ?? options.message ?? options.label;
+  if (options.titleNode) message.append(options.titleNode); else message.textContent = options.title ?? options.message ?? options.label;
   text.append(message);
   const effectText = options.effect ?? options.detail;
-  if (effectText) {
+  if (effectText || options.effectNode) {
     const detail = document.createElement("p");
     detail.className = "ui-confirm-tip-detail";
-    detail.textContent = effectText;
+    if (options.effectNode) detail.append(options.effectNode); else detail.textContent = effectText!;
     text.append(detail);
   }
 
