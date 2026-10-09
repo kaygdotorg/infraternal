@@ -19,6 +19,7 @@ import type { DetailsFacts, DetailsSource } from "./details-source";
 export interface DetailsPopover {
   readonly windowId: string;
   close(source: "pointer" | "keyboard"): void;
+  refresh(): void;
 }
 
 interface DetailsInput {
@@ -61,7 +62,9 @@ export function openDetailsPopover(
   scroll.append(list.root);
   let scrolled = false;
   scroll.addEventListener("scroll", () => { scrolled = true; }, { passive: true });
+  let selected = first.sections[0]?.id ?? "";
   const show = (id: string, animate: boolean): void => {
+    selected = id;
     const section = input.read().sections.find((x) => x.id === id) ?? first.sections[0];
     list.set((section?.rows ?? []).filter((row) => row.value.trim() !== ""));
     // Resetting the scroll position forces a layout; only a popover that was scrolled needs it.
@@ -139,7 +142,7 @@ export function openDetailsPopover(
   window.visualViewport?.addEventListener("resize", () => place(), { signal: events.signal });
   if (source === "keyboard") root.querySelector<HTMLElement>(".ui-tab[aria-selected='true']")?.focus({ preventScroll: true });
 
-  return { windowId: input.windowId, close };
+  return { windowId: input.windowId, close, refresh: () => show(selected, false) };
 }
 
 export interface DetailsModule {
@@ -159,7 +162,13 @@ export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
       if (open?.windowId === rec.model.id) { open.close(how); return; }
       open?.close("keyboard");
       if (!source.facts(rec)) return;
-      open = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => source.facts(rec)! }, how, () => { open = undefined; });
+      let stop = (): void => {};
+      const popover = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => source.facts(rec)! }, how, () => {
+        stop();
+        if (open === popover) open = undefined;
+      });
+      open = popover;
+      stop = source.open?.(rec, popover.refresh) ?? stop;
     },
     close,
     isOpen: () => open !== undefined,

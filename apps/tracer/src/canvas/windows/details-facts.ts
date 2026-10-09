@@ -4,7 +4,7 @@
  * technical name is a subtitle on the row. A value that is not known is left out, never shown as a dash or "unknown".
  */
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
-import type { DetailsFacts } from "./details-source";
+import type { DetailsFacts, HostFactsSnapshot } from "./details-source";
 
 const OS_NAME: Record<HostPlatform, string> = { ubuntu: "Ubuntu", debian: "Debian", redhat: "Red Hat", proxmox: "Proxmox", nixos: "NixOS", apple: "macOS", unknown: "" };
 
@@ -13,15 +13,44 @@ const ICON_CONNECTION = '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-
 const ICON_SESSION = '<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="m7.5 10 2.5 2-2.5 2M12.5 14h4"/>';
 
 export interface DetailsInput {
-  host: { name: string; user?: string; os?: HostPlatform; address?: string; reach?: string };
+  host: { name: string; user?: string; os?: HostPlatform; address?: string; reach?: string; facts?: HostFactsSnapshot };
   connection: { state: "connected" | "connecting" | "offline"; delayMs?: number; encrypted?: boolean };
   session?: { name?: string; lastCommand?: string; size?: string; sizedBy?: string; lastUsed?: string; started?: string };
 }
 
 const STATE_TEXT = { connected: "Connected", connecting: "Connecting…", offline: "Offline. This machine can't be reached right now." } as const;
 
+function compactBytes(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"] as const;
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  const digits = value >= 10 || unit === 0 ? 0 : 1;
+  return `${Number(value.toFixed(digits))} ${units[unit]}`;
+}
+
+function capacity(fact: { usedBytes: number; totalBytes: number } | undefined): string {
+  if (!fact) return "";
+  return `${compactBytes(fact.usedBytes)} of ${compactBytes(fact.totalBytes)}`;
+}
+
+function uptime(seconds: number | undefined): string {
+  if (seconds === undefined) return "";
+  if (seconds < 60) return "Less than a minute";
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor((seconds % 86_400) / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  if (days) return `${days} ${days === 1 ? "day" : "days"}, ${hours} ${hours === 1 ? "hour" : "hours"}`;
+  if (hours) return `${hours} ${hours === 1 ? "hour" : "hours"}, ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+}
+
 export function detailsFacts(input: DetailsInput): DetailsFacts {
   const { host, connection, session } = input;
+  const facts = host.facts;
   const os = host.os && host.os !== "unknown" ? host.os : undefined;
   const osName = host.os ? OS_NAME[host.os] : "";
   const section = (id: string, label: string, icon: string, rows: DetailsFacts["sections"][number]["rows"]) => ({ id, label, icon, rows });
@@ -32,7 +61,21 @@ export function detailsFacts(input: DetailsInput): DetailsFacts {
     sections: [
       section("host", "Host", ICON_HOST, [
         { key: "Name", value: host.name },
-        { key: "System", value: osName },
+        { key: "System", value: facts ? `${facts.os}${facts.version ? ` ${facts.version}` : ""}` : osName },
+        { key: "Kernel", value: facts?.kernel ?? "" },
+        { key: "Architecture", value: facts?.architecture ?? "" },
+        { key: "Model", value: facts?.model ?? "" },
+        { key: "CPU", value: facts ? `${facts.logicalCpus} logical ${facts.logicalCpus === 1 ? "core" : "cores"}${facts.cpuModel ? ` · ${facts.cpuModel}` : ""}` : "" },
+        { key: "Memory", value: capacity(facts?.memory) },
+        { key: "Disk used on /", value: capacity(facts?.rootDisk) },
+        { key: "Uptime", value: uptime(facts?.uptimeSeconds) },
+        { key: "Load average", value: facts?.loadAverage?.map((value) => value.toFixed(2)).join(", ") ?? "" },
+        { key: "Infraternal agent", value: facts ? `${facts.mode === "embedded" ? "Embedded" : "Remote"} · ${facts.executionUid === 0 ? "root" : "user"}` : "" },
+        { key: "Engines", value: facts ? facts.engines.length ? facts.engines.join(", ") : "None detected" : "" },
+        { key: "Init", value: facts?.init ?? "" },
+        { key: "Virtualization", value: facts?.virtualization ?? "" },
+        { key: "Shell", value: facts?.shell ?? "" },
+        { key: "Locale", value: facts?.locale ?? "" },
         { key: "Login", value: host.user ?? "" },
         { key: "Address", value: host.address ?? "" },
         { key: "How it is reached", value: host.reach ?? "" },
