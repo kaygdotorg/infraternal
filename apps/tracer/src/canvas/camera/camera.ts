@@ -58,7 +58,7 @@ export const MAX_ZOOM = 2;
  * with 21 windows: a third less raster work per frame with the hint). A phone has too little memory to hold a world
  * that large (D183), so only a fine pointer takes the lower limit.
  */
-const WILL_CHANGE_MIN_ZOOM = matchMedia("(pointer: fine)").matches ? 0.25 : 0.5;
+const willChangeMinZoom = (): number => (matchMedia("(pointer: fine)").matches ? 0.25 : 0.5);
 
 export class Camera {
   readonly cam: Cam = { cx: 0, cy: 0, z: 1 };
@@ -144,7 +144,7 @@ export class Camera {
       // `will-change: transform` makes the browser raster the layer at its own size (scale 1) so a move never blurs it.
       // Zoomed far out that is the whole visible world at full size: a mesh of a thousand hosts is 7,800 px wide, and
       // a zoom out then rasters about ten times the tiles it needs. Out there the browser rasters at the zoom instead.
-      const hint = cam.z >= WILL_CHANGE_MIN_ZOOM;
+      const hint = cam.z >= willChangeMinZoom();
       if (hint !== this.hinted) { this.hinted = hint; world.style.willChange = hint ? "transform" : ""; }
       window.clearTimeout(this.restTimer);
       this.restTimer = window.setTimeout(() => this.rest(), REST_DELAY);
