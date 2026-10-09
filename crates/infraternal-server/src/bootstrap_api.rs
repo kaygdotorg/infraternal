@@ -18,7 +18,7 @@ use infraternal_plugin_ssh::{
     auth_once::{OneUseAuth, TargetAuth},
     bootstrap::{Batch, Bootstrap},
     model::Target,
-    transport::Secret,
+    transport::{ConfirmationAuthority, Operation, Secret},
 };
 use serde::Deserialize;
 use std::{
@@ -78,6 +78,44 @@ enum Request {
     Replay {
         after: u64,
     },
+    ConfirmHostKey {
+        target: String,
+        challenge: String,
+        fingerprint: String,
+    },
+}
+
+/// Capability plaintext belongs only to this confirmation future, never the public observation store.
+struct LiveConfirmation {
+    auth: Auth,
+    owner: String,
+    token: Secret,
+}
+impl ConfirmationAuthority for LiveConfirmation {
+    fn authorize(&self) -> Operation<'_, ()> {
+        Box::pin(async move {
+            let token = std::str::from_utf8(self.token.expose()).map_err(|_| {
+                infraternal_plugin_ssh::model::Failure::unsupported(
+                    "The bootstrap session is unavailable.",
+                )
+            })?;
+            let time = now().map_err(|()| {
+                infraternal_plugin_ssh::model::Failure::install("The server clock is unavailable.")
+            })?;
+            if self
+                .auth
+                .bootstrap_owner(token, time)
+                .await
+                .is_ok_and(|owner| owner == self.owner)
+            {
+                Ok(())
+            } else {
+                Err(infraternal_plugin_ssh::model::Failure::unsupported(
+                    "The bootstrap session is no longer authorized.",
+                ))
+            }
+        })
+    }
 }
 
 async fn upgrade(
@@ -227,6 +265,19 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                         }
                     }
                     Request::Retry { target, auth_once } => batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.retry_with_auth(batch, &owner, &target, auth_once)),
+                    Request::ConfirmHostKey {target,challenge,fingerprint} => {
+                        if let Some(batch)=&batch {
+                            let proof=LiveConfirmation {auth:api.auth.clone(),owner:owner.clone(),token:Secret::new(token.as_bytes().to_vec())};
+                            match api.runner.confirm_host_key(batch,&owner,&target,&challenge,&fingerprint,&proof).await {
+                                Ok(())=>{
+                                    let reply=serde_json::to_string(&serde_json::json!({"host_key_confirmed":{"target":target,"fingerprint":fingerprint}})).ok();
+                                    if send_live(&mut socket,&api,&owner,token,&mut revocation,reply).await.is_err() {break;}
+                                    Ok(())
+                                }
+                                Err(error)=>Err(error),
+                            }
+                        } else {Err(infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first."))}
+                    }
                     Request::Replay { after: sequence } => { after = sequence; Ok(()) }
                     Request::Start { .. } => Err(infraternal_plugin_ssh::model::Failure::unsupported("A host batch is already running.")),
                 };
