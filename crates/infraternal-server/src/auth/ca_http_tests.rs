@@ -1,0 +1,149 @@
+//! Exercises the same-origin CA HTTP boundary using real signed proofs and private copies; errors never reflect secret-shaped input [168], #78.
+use super::*;
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode, header},
+};
+use tower::ServiceExt;
+
+async fn http_fixture() -> (UnlockFixture, Router) {
+    let f = unlock_fixture().await;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    sqlx::query("UPDATE sessions SET fresh=?,expires=? WHERE token_hash=?")
+        .bind(now)
+        .bind(now + 3600)
+        .bind(hash(&f.auth.session))
+        .execute(&f.auth.auth.pool)
+        .await
+        .unwrap();
+    let authority = Arc::new(CaAdministration::new(
+        f.auth.auth.clone(),
+        f.auth.auth.pool.clone(),
+        f.source.clone(),
+        Arc::new(CaCopies::new(&f.root).unwrap()),
+    ));
+    let router = crate::ca_http::router(f.auth.auth.clone(), authority);
+    (f, router)
+}
+fn ca_request(
+    path: &str,
+    origin: Option<&str>,
+    cookie: Option<&str>,
+    body: String,
+) -> Request<Body> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(origin) = origin {
+        request = request.header(header::ORIGIN, origin);
+    }
+    if let Some(cookie) = cookie {
+        request = request.header(header::COOKIE, format!("__Host-infraternal={cookie}"));
+    }
+    request.body(Body::from(body)).unwrap()
+}
+#[tokio::test]
+async fn ca_http_exact_origin_and_live_cookie_are_required() {
+    let (f, app) = http_fixture().await;
+    let unknown = random();
+    for (origin, cookie, status) in [
+        (None, Some(f.auth.session.as_str()), StatusCode::FORBIDDEN),
+        (
+            Some("https://foreign.example"),
+            Some(f.auth.session.as_str()),
+            StatusCode::FORBIDDEN,
+        ),
+        (Some(ORIGIN), None, StatusCode::UNAUTHORIZED),
+        (Some(ORIGIN), Some("invalid"), StatusCode::UNAUTHORIZED),
+        (Some(ORIGIN), Some(unknown.as_str()), StatusCode::FORBIDDEN),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(ca_request("/remote/ca/status", origin, cookie, "{}".into()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+    }
+    assert!(f.source.load().is_err());
+}
+#[tokio::test]
+async fn ca_http_real_passkey_unlock_returns_only_lock_status_without_a_session_cookie() {
+    let (mut f, app) = http_fixture().await;
+    let response = app
+        .clone()
+        .oneshot(ca_request(
+            "/remote/ca/unlock/start",
+            Some(ORIGIN),
+            Some(&f.auth.session),
+            "{}".into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let start: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(start["ca"]["member"], f.auth.user);
+    assert!(start["ca"].get("ciphertext").is_none());
+    let proof = f.auth.software.login(&start, ORIGIN, true);
+    let response = app
+        .clone()
+        .oneshot(ca_request(
+            "/remote/ca/unlock/finish",
+            Some(ORIGIN),
+            Some(&f.auth.session),
+            serde_json::to_string(
+                &json!({"ceremony":start["ceremony"],"proof":proof,"scoped_key":vec![7u8;32]}),
+            )
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::SET_COOKIE).is_none());
+    let result =
+        serde_json::from_slice::<Value>(&response.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert!(
+        result == json!({"locked":false}),
+        "unexpected public lock-status response shape"
+    );
+    assert!(f.source.load().is_ok());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions")
+            .fetch_one(&f.auth.auth.pool)
+            .await
+            .unwrap(),
+        1
+    );
+}
+#[tokio::test]
+async fn ca_http_parser_is_bounded_and_errors_do_not_reflect_wrapping_material() {
+    let (f, app) = http_fixture().await;
+    for body in [json!({"ceremony":"fixture","proof":{},"scoped_key":"secret-shaped-invalid-value"}).to_string(),json!({"ceremony":"fixture","proof":{},"scoped_key":vec![7u8;32],"unexpected":"secret-shaped-invalid-value"}).to_string()] {
+        let response=app.clone().oneshot(ca_request("/remote/ca/unlock/finish",Some(ORIGIN),Some(&f.auth.session),body)).await.unwrap();
+        assert_eq!(response.status(),StatusCode::BAD_REQUEST);
+        assert!(response.into_body().collect().await.unwrap().to_bytes().is_empty());
+    }
+    assert_eq!(
+        app.oneshot(ca_request(
+            "/remote/ca/unlock/finish",
+            Some(ORIGIN),
+            Some(&f.auth.session),
+            "x".repeat(32769)
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert!(f.source.load().is_err());
+}
