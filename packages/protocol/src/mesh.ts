@@ -315,10 +315,12 @@ export class MeshClient {
         return;
       }
       refreshing = true;
+      let refreshGeneration = authoritativeGeneration;
       try {
         while (!stopped && pendingRevision > deliveredRevision) {
           const requestedRevision = pendingRevision;
           const generation = authoritativeGeneration;
+          refreshGeneration = generation;
           const snapshot = await this.fetchSnapshot(filter,
             () => !stopped && generation === authoritativeGeneration);
           if (stopped) {
@@ -335,7 +337,10 @@ export class MeshClient {
           publish(snapshot);
         }
       } catch (error) {
-        if (!(error instanceof SnapshotSuperseded)) {
+        // A newer authoritative event owns both inventory and error delivery.
+        // Keep its pending revision intact when an obsolete request rejects.
+        if (refreshGeneration === authoritativeGeneration
+          && !(error instanceof SnapshotSuperseded)) {
           pendingRevision = deliveredRevision;
           if (!stopped) {
             listener({ type: "error", error: "mesh unavailable" });
