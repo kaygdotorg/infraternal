@@ -7,6 +7,8 @@ pub mod ca;
 #[cfg(feature = "remote")]
 pub mod ca_administration;
 #[cfg(feature = "remote")]
+pub mod ca_bootstrap;
+#[cfg(feature = "remote")]
 pub mod ca_copies;
 #[cfg(feature = "remote")]
 pub mod ca_http;

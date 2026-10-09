@@ -575,7 +575,7 @@ fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
     Ok(())
 }
 
-fn unix_seconds() -> Result<i64, ServerError> {
+pub(crate) fn unix_seconds() -> Result<i64, ServerError> {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

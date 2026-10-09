@@ -70,6 +70,18 @@ impl CaMaterial {
 
 /// The owner-selected restart/unlock adapter supplies private material, never SQLite.
 pub trait CaKeySource: Send + Sync {
+    /// Configured reverse proxy enrollment verifies against system HTTPS roots.
+    fn uses_system_https(&self) -> bool {
+        false
+    }
+    /// Retained public trust is readable even while signing is cold-locked.
+    fn public_issuer(&self) -> Option<X509> {
+        None
+    }
+    /// Optional enrollment HTTPS pin when its trust differs from machine trust.
+    fn https_certificate(&self) -> Option<X509> {
+        None
+    }
     /// Load an unlocked key and corresponding public issuer generation.
     /// # Errors
     /// Missing/wrong unlock credentials fail closed without regeneration.

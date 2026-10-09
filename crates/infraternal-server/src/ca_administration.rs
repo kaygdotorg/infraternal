@@ -112,7 +112,7 @@ impl CaAdministration {
         .map_err(|_| CaError)??;
         let fingerprint = self
             .source
-            .issuer()
+            .issuer()?
             .digest(MessageDigest::sha256())
             .map_err(|_| CaError)?;
         let metadata = json!({"member":membership.user(),"generation":generation,"salt":B64.encode(salt),"issuer_fingerprint":B64.encode(fingerprint)});
@@ -170,7 +170,7 @@ impl CaAdministration {
             .await
             .map_err(|_| CaError)?;
         let copies = self.copies.clone();
-        let issuer = self.source.issuer().clone();
+        let issuer = self.source.issuer()?;
         let member = entry.membership.user().to_owned();
         let generation = u64::try_from(entry.membership.generation()).map_err(|_| CaError)?;
         // Private file I/O and authenticated decryption never block the reactor or

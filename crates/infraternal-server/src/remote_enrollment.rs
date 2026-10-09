@@ -280,7 +280,7 @@ mod tests {
             .await
             .unwrap();
         // Cold restart has the same public trust and ledger, with no inherited secret.
-        let cold = Arc::new(MemoryCaSource::cold_start(source.issuer().clone()));
+        let cold = Arc::new(MemoryCaSource::cold_start(source.issuer().unwrap()));
         let restarted = RemoteEnrollment::new(cold, store.clone());
         assert!(
             store
