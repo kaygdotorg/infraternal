@@ -21,6 +21,8 @@ type FakeServer = {
   addNode(n: Record<string, unknown>): void;
   removeNode(name: string): void;
   reconnect(lose?: () => void): void;
+  resync(): void;
+  pageSize: number;
   churn(hz: number, perTick?: number): () => void;
   muted: boolean;
   setAccess(a: { view: boolean; manageGrants: boolean }): void;
@@ -42,7 +44,7 @@ type Probe = {
     pins(): Record<string, { x: number; y: number }>;
     stats(): Stats | undefined;
     document(): Promise<{ views: Array<{ id: string; layout: { type: string; pinned?: Record<string, { x: number; y: number }> } }> } | undefined>;
-    source(): { retry(): void; renameGrant(g: unknown, name: string): void; grants(): Grant[] };
+    source(): { data(): { nodes: { size: number } }; retry(): void; renameGrant(g: unknown, name: string): void; grants(): Grant[] };
   };
 };
 const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
@@ -251,8 +253,8 @@ test.describe("live updates", () => {
     await expect.poll(() => sub(page, "build-01")).toBe("direct · 33 ms");
     await server(page, (s) => s.reconnect(() => { s.muted = true; s.patchNode("studio-mac", { rttMs: 9 }); s.muted = false; }));
     await expect.poll(() => sub(page, "studio-mac")).toBe("direct · 9 ms");
-    // One list for the gap and one for the reconnect: events are only ever a reason to ask again.
-    expect((await server(page, (s) => s.calls)).filter((c) => c.action === "mesh.list")).toHaveLength(2);
+    // One list for the gap; the reconnect is answered by the subscription's own snapshot, with no list asked for.
+    expect((await server(page, (s) => s.calls)).filter((c) => c.action === "mesh.list")).toHaveLength(1);
   });
 
   test("a change made elsewhere moves its arrow, and an answer that comes after its own event is not applied twice", async ({ page }) => {
@@ -266,6 +268,15 @@ test.describe("live updates", () => {
     await page.waitForTimeout(400);
     expect(await page.locator('.cl[data-view="mesh"] .cl-arrow').count()).toBe(before);
     expect(await probe(page, (p) => p.grants().length)).toBe(before);
+  });
+
+  test("a big inventory arrives in pages: a resync follows the server's continuations and shows all of it, once", async ({ page }) => {
+    await open(page, "&mesh=1000");
+    await server(page, (s) => { s.pageSize = 150; s.resync(); });
+    await expect.poll(async () => (await server(page, (s) => s.calls)).filter((c) => c.action === "mesh.list" && c.input.cursor !== undefined).length, { timeout: 15_000 }).toBeGreaterThanOrEqual(5);
+    expect(await probe(page, (p) => p.mesh.source().data().nodes.size)).toBe(1000);
+    // A page that is a lone page of a half-assembled list is never shown: the count stays whole throughout.
+    expect(await server(page, (s) => s.hostCount())).toBe(1000);
   });
 
   test("a host-heavy stream of status events does not reflow the graph (60 events a second on 1,000 hosts)", async ({ page }) => {
@@ -353,7 +364,7 @@ test.describe("editing arrows", () => {
     await server(page, (s) => s.failNext("mesh.grant.move", "refuse"));
     await dragEnd(page, "g3", "head", "edge-arm");
     await page.locator(".ui-confirm-yes").click();
-    await expect(page.locator(".ui-toast, .toast").first()).toContainText("You are not allowed to change who nix-cache can reach");
+    await expect(page.locator(".ui-toast, .toast").first()).toContainText("Could not change who nix-cache can reach. You may not be allowed to");
     await expect.poll(async () => (await grant("g3"))?.to).toBe("studio-mac");
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveAttribute("data-tip", "nix-cache can reach studio-mac");
     await page.waitForTimeout(3600);
