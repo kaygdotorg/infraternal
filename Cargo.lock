@@ -1293,6 +1293,7 @@ dependencies = [
  "infraternal-server",
  "infraternal-shim",
  "nix",
+ "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.21",

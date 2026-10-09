@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
+serde.workspace = true
 serde_json.workspace = true
 infraternal-server = { path = "../infraternal-server", version = "0.1.0" }
 sqlx.workspace = true
