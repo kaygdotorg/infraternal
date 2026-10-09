@@ -86,24 +86,31 @@ async fn start(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value>
 }
 async fn finish(
     State(api): State<Api>,
-    headers: HeaderMap,
-    body: bytes::Bytes,
+    incoming: axum::extract::Request,
 ) -> Result<Json<Value>, StatusCode> {
-    let (token, now) = request(&api, &headers)?;
+    let (parts, body) = incoming.into_parts();
+    let (token, now) = request(&api, &parts.headers)?;
     let _permit = api
         .admission
         .try_acquire()
         .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
-    // Reject cheap header failures and reserve admission before constructing
-    // proof JSON or wrapping-key buffers. Parser errors remain static so an
-    // invalid value cannot be reflected into a response.
-    let body = decode_unlock(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let key = body.scoped_key;
-    api.administration
-        .finish(token, &body.ceremony, body.proof, key, now)
-        .await
-        .map_err(|_| StatusCode::FORBIDDEN)?;
-    Ok(Json(json!({"locked":false})))
+    // Extraction must not read the body before admission. Keep the reservation
+    // through reading and proof verification; cancellation or the single
+    // request deadline releases it. A stalled sender cannot hold all slots.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let body = axum::body::to_bytes(body, 32768)
+            .await
+            .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+        // Parser errors remain static: wrapping material is never reflected.
+        let body = decode_unlock(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+        api.administration
+            .finish(token, &body.ceremony, body.proof, body.scoped_key, now)
+            .await
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+        Ok(Json(json!({"locked":false})))
+    })
+    .await
+    .map_err(|_| StatusCode::REQUEST_TIMEOUT)?
 }
 async fn status(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
     let (token, now) = request(&api, &headers)?;

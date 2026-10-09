@@ -260,3 +260,77 @@ async fn independent_review_ca_body_reads_share_the_eight_request_admission_limi
         "eight unfinished CA requests did not reserve the declared admission slots"
     );
 }
+
+/// Measures only the real router's admission/body/decoder rejection pipeline;
+/// no passkey verification or network latency is included [5][40][168].
+#[tokio::test]
+#[ignore = "1000-request body admission diagnostic; run alone without builds"]
+async fn ca_body_admission_at_1000_requests() {
+    let (f, app) = http_fixture().await;
+    let mut samples = Vec::with_capacity(1000);
+    for _ in 0..1000 {
+        let request = ca_request(
+            "/remote/ca/unlock/finish",
+            Some(ORIGIN),
+            Some(&f.auth.session),
+            "{}".into(),
+        );
+        let start = std::time::Instant::now();
+        let response = app.clone().oneshot(request).await.unwrap();
+        samples.push(start.elapsed().as_nanos());
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    samples.sort_unstable();
+    println!(
+        "CA_BODY_ADMISSION n=1000 profile=debug p50_ns={} p99_ns={} median_projected_ns_at1000={} payload_bound_bytes_at8={} machine={} load={}",
+        samples[500],
+        samples[990],
+        samples[500] * 1000,
+        8 * 32768,
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap()
+            .trim(),
+        std::fs::read_to_string("/proc/loadavg").unwrap().trim(),
+    );
+}
+
+/// A stalled valid-header body expires and returns its admission reservation.
+#[tokio::test]
+async fn ca_finish_body_deadline_returns_its_admission_slot() {
+    let (f, app) = http_fixture().await;
+    tokio::time::pause();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/remote/ca/unlock/finish")
+        .header(header::ORIGIN, ORIGIN)
+        .header(
+            header::COOKIE,
+            format!("__Host-infraternal={}", f.auth.session),
+        )
+        .body(Body::from_stream(futures_util::stream::pending::<
+            std::result::Result<bytes::Bytes, std::io::Error>,
+        >()))
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(6), app.clone().oneshot(request)).await;
+    tokio::time::resume();
+    assert!(
+        result.is_ok(),
+        "stalled body has no bounded request deadline"
+    );
+    assert_eq!(
+        result.unwrap().unwrap().status(),
+        StatusCode::REQUEST_TIMEOUT
+    );
+    assert_eq!(
+        app.oneshot(ca_request(
+            "/remote/ca/status",
+            Some(ORIGIN),
+            Some(&f.auth.session),
+            "{}".into()
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+}
