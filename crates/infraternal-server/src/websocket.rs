@@ -80,9 +80,13 @@ pub(crate) struct WebSocketState {
 
 impl WebSocketState {
     /// Create bounded socket admission around the configured auth and agent services.
-    pub(crate) fn new(auth: Auth, pool: SqlitePool, agent: EmbeddedAgent) -> Self {
-        let plugins = crate::plugins::compiled(&pool);
-        Self {
+    pub(crate) async fn new(
+        auth: Auth,
+        pool: SqlitePool,
+        agent: EmbeddedAgent,
+    ) -> Result<Self, crate::plugins::PluginError> {
+        let plugins = crate::plugins::compiled(&pool).await?;
+        Ok(Self {
             auth,
             pool,
             plugins,
@@ -95,7 +99,7 @@ impl WebSocketState {
             terminal_connect_timeout: TERMINAL_CONNECT_TIMEOUT,
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             users: Arc::default(),
-        }
+        })
     }
 
     /// Bind this socket to the generic host authority bridge without starting features.

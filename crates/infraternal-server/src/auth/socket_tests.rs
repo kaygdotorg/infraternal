@@ -16,7 +16,9 @@ async fn socket_fixture_from_fixture(
         f.auth.clone(),
         f.auth.pool.clone(),
         EmbeddedAgent::from_test_socket(socket),
-    );
+    )
+    .await
+    .unwrap();
     let state = match timeout {
         Some(timeout) => state.with_authority_read_timeout(timeout),
         None => state,

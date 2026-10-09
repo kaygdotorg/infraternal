@@ -57,7 +57,9 @@ async fn mesh_snapshot_keystroke_latency_at_10000_nodes() {
         f.auth.clone(),
         f.auth.pool.clone(),
         EmbeddedAgent::spawn(wrapper),
-    );
+    )
+    .await
+    .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {

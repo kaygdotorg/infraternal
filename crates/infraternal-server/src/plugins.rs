@@ -61,6 +61,7 @@ pub struct PluginRuntime {
 struct Runtime {
     entries: Vec<Arc<Entry>>,
     role: &'static str,
+    store: Option<sqlx::SqlitePool>,
     switches: tokio::sync::Mutex<()>,
     changed: watch::Sender<()>,
 }
@@ -95,6 +96,7 @@ pub enum PluginError {
     NotFound,
     RoleUnavailable,
     Forbidden,
+    Storage,
 }
 impl PluginRuntime {
     /// Assemble pure declarations; no worker, timer or listener starts here.
@@ -124,10 +126,91 @@ impl PluginRuntime {
             inner: Arc::new(Runtime {
                 entries,
                 role,
+                store: None,
                 switches: tokio::sync::Mutex::new(()),
                 changed: watch::channel(()).0,
             }),
         }
+    }
+    /// Restore durable switches before sharing a newly constructed runtime.
+    ///
+    /// # Errors
+    /// Refuses storage failures, a shared runtime or enabled roles unavailable here.
+    pub async fn with_store(mut self, pool: sqlx::SqlitePool) -> Result<Self, PluginError> {
+        use sqlx::Row;
+        let inner = Arc::get_mut(&mut self.inner).ok_or(PluginError::RoleUnavailable)?;
+        let rows = sqlx::query("SELECT plugin,enabled FROM plugin_settings WHERE role=?")
+            .bind(inner.role)
+            .fetch_all(&pool)
+            .await
+            .map_err(|_| PluginError::Storage)?;
+        for row in rows {
+            let id: String = row.get("plugin");
+            let enabled: bool = row.get("enabled");
+            if let Some(entry) = inner
+                .entries
+                .iter()
+                .find(|entry| entry.plugin.descriptor().id == id)
+            {
+                if enabled
+                    && !entry.plugin.descriptor().roles.iter().any(|part| {
+                        part.id == inner.role
+                            && part.requires.iter().all(|required| *required == inner.role)
+                    })
+                {
+                    return Err(PluginError::RoleUnavailable);
+                }
+                entry.enabled.store(enabled, Ordering::Release);
+            }
+        }
+        inner.store = Some(pool);
+        Ok(self)
+    }
+    // Disable joins work before waiting for the SQLite writer. Otherwise an
+    // in-flight inventory writer could prevent the switch which cancels it.
+    async fn persist_setting(
+        &self,
+        id: &str,
+        enabled: bool,
+        host: Option<&dyn SocketHost>,
+    ) -> Result<(), PluginError> {
+        let Some(pool) = &self.inner.store else {
+            return Ok(());
+        };
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| PluginError::Storage)?;
+        sqlx::query("INSERT INTO plugin_settings(role,plugin,enabled) VALUES (?,?,?) ON CONFLICT(role,plugin) DO UPDATE SET enabled=excluded.enabled")
+            .bind(self.inner.role).bind(id).bind(enabled).execute(&mut *tx).await.map_err(|_| PluginError::Storage)?;
+        if let Some(host) = host {
+            // Repeat owner/fresh authority inside the writer transaction after
+            // lock waits, exactly where rollback still protects the setting [28].
+            let now: i64 = sqlx::query_scalar("SELECT unixepoch()")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|_| PluginError::Storage)?;
+            let owner: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id=? AND owner=1)")
+                    .bind(host.user_id())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|_| PluginError::Storage)?;
+            if !owner
+                || !infraternal_plugin_api::fresh_session_tx(
+                    &mut tx,
+                    host.token_hash(),
+                    host.user_id(),
+                    now,
+                    infraternal_plugin_api::FRESH_SECONDS,
+                )
+                .await
+                .map_err(|_| PluginError::Storage)?
+            {
+                return Err(PluginError::Forbidden);
+            }
+        }
+        tx.commit().await.map_err(|_| PluginError::Storage)
     }
     /// Discovery uses the plugin's action definitions, including while it is off.
     #[must_use]
@@ -170,6 +253,21 @@ impl PluginRuntime {
         {
             return Err(PluginError::RoleUnavailable);
         }
+        if entry.enabled.load(Ordering::Acquire) == enabled {
+            return self.persist_setting(id, enabled, host).await;
+        }
+        let next_epoch = entry
+            .epoch
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or(PluginError::RoleUnavailable)?;
+        let restore_epoch = next_epoch
+            .checked_add(1)
+            .ok_or(PluginError::RoleUnavailable)?;
+        // Enabling cannot admit a worker until its setting is durable.
+        if enabled {
+            self.persist_setting(id, enabled, host).await?;
+        }
         let tasks = {
             let mut tasks = entry
                 .tasks
@@ -178,12 +276,7 @@ impl PluginRuntime {
             if entry.enabled.load(Ordering::Acquire) == enabled {
                 return Ok(());
             }
-            let epoch = entry
-                .epoch
-                .load(Ordering::Acquire)
-                .checked_add(1)
-                .ok_or(PluginError::RoleUnavailable)?;
-            entry.epoch.store(epoch, Ordering::Release);
+            entry.epoch.store(next_epoch, Ordering::Release);
             entry.enabled.store(enabled, Ordering::Release);
             if enabled {
                 Vec::new()
@@ -206,6 +299,14 @@ impl PluginRuntime {
         }
         for handle in handles {
             let _ = handle.await;
+        }
+        if !enabled && let Err(error) = self.persist_setting(id, enabled, host).await {
+            // A failed save must retain the previous durable state. Old workers
+            // stay stopped; restoring enabled state remains lazy.
+            entry.epoch.store(restore_epoch, Ordering::Release);
+            entry.enabled.store(true, Ordering::Release);
+            self.inner.changed.send_replace(());
+            return Err(error);
         }
         Ok(())
     }
@@ -773,8 +874,10 @@ impl SocketPlugins {
 }
 
 /// Register server features for an existing server; no constructor creates one [201].
-#[must_use]
-pub fn compiled(pool: &sqlx::SqlitePool) -> PluginRuntime {
+///
+/// # Errors
+/// Refuses unavailable or inconsistent persisted feature settings.
+pub async fn compiled(pool: &sqlx::SqlitePool) -> Result<PluginRuntime, PluginError> {
     #[cfg(feature = "mesh")]
     let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(infraternal_plugin_mesh::MeshPlugin::new(
         pool.clone(),
@@ -785,4 +888,6 @@ pub fn compiled(pool: &sqlx::SqlitePool) -> PluginRuntime {
         Vec::new()
     };
     PluginRuntime::new(plugins, "server")
+        .with_store(pool.clone())
+        .await
 }

@@ -43,6 +43,8 @@ async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
         f.auth.pool.clone(),
         EmbeddedAgent::from_test_socket(socket),
     )
+    .await
+    .unwrap()
     .with_authority_read_timeout(Duration::from_secs(2));
     let runtime = state.plugins.clone();
     assert_eq!(
@@ -260,6 +262,8 @@ async fn disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches() {
         f.auth.pool.clone(),
         EmbeddedAgent::from_test_socket(agent_socket),
     )
+    .await
+    .unwrap()
     .with_authority_read_timeout(Duration::from_secs(2));
     let runtime = state.plugins.clone();
     let app = crate::websocket::router(state);
@@ -451,6 +455,8 @@ async fn mesh_lifecycle_withdrawals_survive_calls_but_never_end_a_replacement() 
             f.auth.pool.clone(),
             EmbeddedAgent::from_test_socket(socket),
         )
+        .await
+        .unwrap()
         .with_authority_read_timeout(Duration::from_secs(2)),
     );
     let runtime = state.plugins.clone();

@@ -278,7 +278,9 @@ async fn build_router(
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
         EmbeddedAgent::spawn(executable)
     };
-    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent);
+    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
+        .await
+        .map_err(|_| ServerError::InvalidConfiguration)?;
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
