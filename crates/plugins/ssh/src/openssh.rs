@@ -37,6 +37,20 @@ impl SshTransport for OpenSsh {
             // Refuse those configurations before materializing credentials or
             // contacting a host; a future adapter must enforce every hop.
             let configuration = effective_destination(&self.ssh, &destination).await?;
+            self.open_configuration(configuration, credentials, mesh)
+                .await
+        })
+    }
+}
+
+impl OpenSsh {
+    pub(crate) fn open_configuration(
+        &self,
+        configuration: PublicSshConfiguration,
+        credentials: Credentials,
+        mesh: MeshEvidence,
+    ) -> Operation<'_, Arc<dyn SshSession>> {
+        Box::pin(async move {
             if !configuration.validate_trust_paths() {
                 return Err(Failure::unsupported(
                     "The SSH public trust paths are ambiguous or inaccessible.",
@@ -189,7 +203,7 @@ impl Session {
     }
 }
 
-async fn effective_destination(
+pub(crate) async fn effective_destination(
     ssh: &std::path::Path,
     destination: &Destination,
 ) -> Result<PublicSshConfiguration, Failure> {
