@@ -286,6 +286,7 @@ async fn build_router_with_key_setup(
     #[cfg(feature = "ssh")] key_setup: Option<crate::bootstrap_runtime::KeyInitialization>,
 ) -> Result<(Router, Option<String>), ServerError> {
     validate_config(&config)?;
+
     if let Some(web_root) = &config.web_root
         && !web_root.is_dir()
     {
@@ -489,6 +490,12 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
 }
 
 fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
+    if crate::compiled_plugins()
+        .iter()
+        .any(|descriptor| descriptor.validate().is_err())
+    {
+        return Err(ServerError::InvalidConfiguration);
+    }
     if config.behind_proxy == config.trusted_proxies.is_empty() {
         return Err(ServerError::InvalidConfiguration);
     }

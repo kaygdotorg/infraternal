@@ -94,9 +94,9 @@ impl Bootstrap {
             transport,
             backend,
             binaries,
-            concurrency: Arc::new(Semaphore::new(8)),
-            batches: Arc::new(Semaphore::new(16)),
-            deadline: Duration::from_secs(180),
+            concurrency: Arc::new(Semaphore::new(crate::manifest::CONCURRENT_HOSTS)),
+            batches: Arc::new(Semaphore::new(crate::manifest::CONCURRENT_BATCHES)),
+            deadline: Duration::from_secs(crate::manifest::ATTEMPT_SECONDS),
         }
     }
 
