@@ -714,3 +714,7 @@ where
 
 #[path = "socket_tests/review_subscription_refusal.rs"]
 mod review_subscription_refusal;
+
+#[path = "socket_tests/review_fresh_wait.rs"]
+mod review_fresh_wait;
+
