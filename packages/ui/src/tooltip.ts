@@ -73,6 +73,10 @@ const STYLE = `
 .ui-confirm-tip button:focus { outline: none; }
 :root[data-focus-ring="on"] .ui-confirm-tip button:focus-visible { outline: 2px solid color-mix(in oklab, var(--fg) 55%, transparent); outline-offset: 2px; }
 @media (hover: hover) and (pointer: fine) { .ui-confirm-tip button:not(.ui-confirm-yes):hover { background: var(--hover); color: var(--fg); } }
+/* The overlay material gives its text a soft halo in the tint colour (styles.css), and buttons inherit it. On the solid
+   confirm button that halo is dark smear around dark glyphs, which reads as blurred text; buttons here sit on their own
+   fill, so they take none. */
+.ui-confirm-tip button { text-shadow: none; }
 .ui-confirm-tip .ui-confirm-yes { background: var(--fg); color: var(--bg); }
 .ui-confirm-tip .ui-confirm-yes svg { stroke-width: 2; }
 /* Named actions: the two buttons carry their words. */
