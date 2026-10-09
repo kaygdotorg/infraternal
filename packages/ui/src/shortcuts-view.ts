@@ -11,6 +11,11 @@
  * clip, no transform and no opacity is left on anything (crisp text). Reduced motion: a
  * crossfade, no shape travel.
  *
+ * Toggling is idempotent and never leaves a shell behind: opening while the close is still playing takes the panel that
+ * is on screen and runs the same spring back from where it is (one panel at a time, the only one ever mounted), and a
+ * press that arrives while the panel is already in the state it asks for does nothing. Whatever the sequence of
+ * presses, the end state is the panel fully open with its content, or no panel at all.
+ *
  * Closes on Escape, `?` again, a press outside, or `close()`. Content comes from the registry
  * (shortcuts.ts): current area first, then global, one shortcut per action for this platform.
  */
@@ -144,9 +149,45 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
     requestAnimationFrame(wait);
   };
 
+  /** Keys and presses that close the panel while it is open. */
+  const listen = (): void => {
+    controller = new AbortController();
+    const { signal } = controller;
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" || (event.key === "?" && !event.ctrlKey && !event.metaKey)) {
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+      }
+    }, { capture: true, signal });
+    document.addEventListener("pointerdown", (event) => {
+      if (!(event.target instanceof Node) || panel?.contains(event.target)) return;
+      close();
+    }, { capture: true, signal });
+  };
+
+  /** Brings the shadow back once the shape is whole (the clip would cut it off while morphing). */
+  const settle = (): void => {
+    if (!openState || !panel) return;
+    if (spring.value < 0.999) { requestAnimationFrame(settle); return; }
+    panel.style.boxShadow = "";
+    panel.animate([{ boxShadow: "none" }, { boxShadow: getComputedStyle(panel).boxShadow }], { duration: 160, easing: "ease-out" });
+  };
+
   const open = (): void => {
     if (openState) return;
     openState = true;
+    listen();
+    if (panel) {
+      // The close is still playing: reverse it, on the panel that is there. A second panel would leave the first one
+      // behind, half clipped and without content.
+      for (const animation of panel.getAnimations()) animation.cancel();
+      pill.style.pointerEvents = "none";
+      if (reduced.matches) { pill.style.opacity = "0"; panel.style.opacity = ""; spring.set(1, true); return; }
+      spring.set(1);
+      requestAnimationFrame(settle);
+      return;
+    }
     restore = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     panel = build();
     stage.append(panel);
@@ -171,19 +212,6 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
     to = { radius: parseFloat(getComputedStyle(panel).borderTopLeftRadius) || 18 };
     pill.setAttribute("aria-expanded", "true");
     pill.style.pointerEvents = "none";
-    controller = new AbortController();
-    const { signal } = controller;
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" || (event.key === "?" && !event.ctrlKey && !event.metaKey)) {
-        event.preventDefault();
-        event.stopPropagation();
-        close();
-      }
-    }, { capture: true, signal });
-    document.addEventListener("pointerdown", (event) => {
-      if (!(event.target instanceof Node) || panel?.contains(event.target)) return;
-      close();
-    }, { capture: true, signal });
     panel.focus({ preventScroll: true });
     if (reduced.matches) {
       pill.style.opacity = "0";
@@ -191,17 +219,10 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
       spring.set(1, true);
       return;
     }
-    // Shadow joins once the shape is whole; the clip would cut it off while morphing.
     panel.style.boxShadow = "none";
     spring.set(0, true);
     apply(0);
     spring.set(1);
-    const settle = (): void => {
-      if (!openState || !panel) return;
-      if (spring.value < 0.999) { requestAnimationFrame(settle); return; }
-      panel.style.boxShadow = "";
-      panel.animate([{ boxShadow: "none" }, { boxShadow: getComputedStyle(panel).boxShadow }], { duration: 160, easing: "ease-out" });
-    };
     requestAnimationFrame(settle);
   };
 

@@ -15,7 +15,7 @@ import { boxOf, type Metrics } from "../layout/geometry";
 import { MemoryCanvasStore } from "../model/store";
 import type { ViewId } from "../model/types";
 import { el } from "../dom";
-import { CONTAINERS, buildViews, type Role } from "./data";
+import { CONTAINERS, LOG_BACKLOG, buildViews, logLine, type Role } from "./data";
 import { offerMeshView } from "../mesh/offer";
 import { DEFAULT_SESSION, createMockInventory } from "./inventory";
 import { createMockMesh } from "./mesh";
@@ -169,14 +169,17 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
 
   // ---- live-looking content -------------------------------------------------------------------------
   // A logs window keeps moving, so thumbnails are visibly live.
+  let logSerial = LOG_BACKLOG;
   const streamTimer = window.setInterval(() => {
-    for (const c of cx.views.values()) for (const w of c.wins.values()) {
-      if (!w.stream || !w.model.lines) continue;
-      const now = new Date();
-      const t = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
-      w.model.lines = [...w.model.lines.slice(-14), `${t}  web-api  GET /healthz 200 1ms`];
-      w.stream.innerHTML = w.model.lines.map((l) => { const [time, src, ...msg] = l.split("  "); return `<span class="cl-log-time">${time}</span>  <span class="cl-log-src">${src}</span>  ${msg.join("  ")}`; }).join("\n");
-      w.stream.scrollTop = w.stream.scrollHeight;
+    // One line, or a short burst now and then, like a service under a little load.
+    const burst = logSerial % 7 === 0 ? 3 : 1;
+    for (let k = 0; k < burst; k++, logSerial++) {
+      const line = logLine(logSerial, Date.now());
+      for (const c of cx.views.values()) for (const w of c.wins.values()) {
+        if (!w.pushLog || !w.model.lines) continue;
+        w.model.lines = [...w.model.lines.slice(-499), line];
+        w.pushLog(line);
+      }
     }
   }, 1600);
   // The live terminal's test double starts empty; give it one prompt so the window reads as a shell.
