@@ -72,6 +72,7 @@ test("the Host popover reports this server's OS release and kernel", async () =>
     .locator(".ui-kv-value");
   await expect(valueByKey("System")).toHaveText(expectedSystem, { timeout: 15_000 });
   await expect(valueByKey("Kernel")).toHaveText(expectedKernel);
+  await expect(popover.locator(".canvas-popover-logo svg.ui-host-mark")).toBeVisible();
   await expect.poll(factsReadCount).toBeGreaterThan(0);
 
   const screenshot = process.env.HOST_FACTS_SCREENSHOT;
