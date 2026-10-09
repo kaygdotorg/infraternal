@@ -118,7 +118,6 @@ export function createWindows(cx: Ctx): WindowsModule {
     if (placed && wasRunning) cx.toast.show({ message: "Session keeps running", action: { label: "Undo", onSelect: () => reopen(placed) }, duration: 6000 });
     if (cx.inputLock.state?.win === rec) cx.inputLock.toggle();
     if (state.activeWin === rec) setActive(cx, undefined);
-    if (cx.mesh?.reachFor() === rec) cx.mesh.hideReach(true);
     const root = rec.card.root;
     const finish = (): void => {
       const before = flip.measure(flip.targets(c.colsEl));

@@ -230,8 +230,6 @@ export function installGestures(cx: Ctx): void {
     const cl = (e.target as Element).closest<HTMLElement>(".cl");
     if (cl?.dataset.view && !(e.target as Element).closest(".cl-label") && !pan) cx.nav.flyView(cl.dataset.view as ViewId);
   }, { signal });
-  document.addEventListener("pointerdown", (e) => {
-    if (cx.mesh?.reachPinned() && !(e.target as Element).closest(".cl-port, .ui-window-pill, .ui-confirm-tip, .cl-edge")) cx.mesh.hideReach();
-  }, { signal, capture: true });
+
 
 }

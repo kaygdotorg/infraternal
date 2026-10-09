@@ -37,7 +37,6 @@ type Probe = {
   setCamera(cx: number, cy: number, z: number): void;
   flyView(id: string): void;
   canvasLock(): { on: boolean; index: number; stops: number; view: string };
-  reachCount(): number;
   mesh: {
     server(): FakeServer;
     status(): string;
@@ -311,7 +310,7 @@ test.describe("editing arrows", () => {
     await expect(page.locator(".ui-toast, .toast").first()).toContainText("nix-cache can now reach edge-arm");
   });
 
-  test("a tail move sends the new source; removing sends a delete; adding from a terminal sends a create", async ({ page }) => {
+  test("a tail move sends the new source; removing sends a delete; allowing from a card sends a create", async ({ page }) => {
     await open(page);
     await intoMesh(page);
     await dragEnd(page, "g7", "tail", "studio-mac");
@@ -322,17 +321,15 @@ test.describe("editing arrows", () => {
     await page.locator(".ui-confirm-yes").click();
     await expect.poll(() => called(page, "mesh.grant.delete")).toEqual([{ name: "nix-cache to studio-mac" }]);
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveCount(0);
-    // Back in Console: a drag from the connector grants access.
-    await page.keyboard.press("Control+1");
-    await page.waitForTimeout(1500);
-    await page.locator('.ui-window[data-window-id="w-build-01"] .ui-window-pill').hover();
-    await expect.poll(() => probe(page, (p) => p.reachCount())).toBeGreaterThan(0);
-    const port = (await page.locator('.ui-window[data-window-id="w-build-01"] .cl-port').boundingBox())!;
-    const target = (await page.locator('.ui-window[data-window-id="w-studio-mac"] .ui-window-body').boundingBox())!;
-    await page.mouse.move(port.x + 12, port.y + 12);
+    // A drag from the connector on a card onto another card allows access (the connector exists only in this view, D194).
+    await page.locator('.ui-window[data-window-id="n-build-01"] .ui-window-pill').hover();
+    const port = await centre(page, '.ui-window[data-window-id="n-build-01"] .cl-port');
+    const target = await centre(page, '.ui-window[data-window-id="n-studio-mac"]');
+    await page.mouse.move(port.x, port.y);
     await page.mouse.down();
-    await page.mouse.move(target.x + 200, target.y + 200, { steps: 12 });
+    await page.mouse.move(target.x, target.y, { steps: 12 });
     await page.mouse.up();
+    await expect(page.locator(".ui-confirm-tip")).toContainText("Let build-01 reach studio-mac?");
     await page.locator(".ui-confirm-yes").click();
     await expect.poll(() => called(page, "mesh.grant.create")).toEqual([{ name: "build-01 to studio-mac", from: { Node: 1 }, to: { Node: 4 }, both_ways: false }]);
     await expect.poll(async () => (await server(page, (s) => s.grantList())).some((g) => g.from === "build-01" && g.to === "studio-mac")).toBe(true);
@@ -378,16 +375,15 @@ test.describe("editing arrows", () => {
 
 // ---- who sees and edits what (D187) -----------------------------------------------------------------------------
 test.describe("access", () => {
-  test("arrows have handles, and terminals the connector, only for a person who may manage grants", async ({ page }) => {
+  test("arrows have handles, and cards the connector, only for a person who may manage grants; terminals never have either (D194)", async ({ page }) => {
     await open(page);
-    await expect(page.locator('.ui-window[data-kind="terminal"] .cl-port').first()).toBeAttached();
-    expect(await page.locator('.ui-window[data-kind="terminal"] .cl-port:not([hidden])').count()).toBeGreaterThan(0);
+    expect(await page.locator('.ui-window[data-kind="terminal"] .cl-port').count()).toBe(0);
     await intoMesh(page);
     expect(await page.locator(".cl-arrow-handle").count()).toBeGreaterThan(0);
     await server(page, (s) => s.setAccess({ view: true, manageGrants: false }));
     await expect.poll(() => page.locator(".cl-arrow-handle").count()).toBe(0);
-    expect(await page.locator('.ui-window[data-kind="terminal"] .cl-port:not([hidden])').count()).toBe(0);
-    expect(await page.locator('.ui-window[data-kind="terminal"] .cl-port').first().evaluate((n) => getComputedStyle(n).display)).toBe("none"); // really gone, not just marked
+    expect(await page.locator('.ui-window[data-kind="node"] .cl-port:not([hidden])').count()).toBe(0);
+    expect(await page.locator('.ui-window[data-kind="node"] .cl-port').first().evaluate((n) => getComputedStyle(n).display)).toBe("none"); // really gone, not just marked
     // Hover still names a grant, but nothing can be dragged.
     const hit = await centre(page, '.cl[data-view="mesh"] .cl-arrow[data-grant="g3"]');
     await page.mouse.move(hit.x, hit.y);
@@ -430,7 +426,7 @@ test.describe("access", () => {
     expect(await probe(page, (p) => p.mesh.status())).toBe("ready");
     expect(await page.locator(".cl-arrow").count()).toBeGreaterThan(0);
     expect(await page.locator(".cl-arrow-handle").count()).toBe(0); // least privilege: nothing to drag without `access`
-    expect(await page.locator('.ui-window[data-kind="terminal"] .cl-port:not([hidden])').count()).toBe(0);
+    expect(await page.locator('.ui-window[data-kind="node"] .cl-port:not([hidden])').count()).toBe(0);
     expect(await sub(page, "build-01")).toBe("42 ms"); // no path was sent, so none is claimed
     await expect(page.locator('.ui-window[data-window-id="n-build-01"] .cl-node-detail')).toHaveText("tag:ci"); // no address was sent either
   });

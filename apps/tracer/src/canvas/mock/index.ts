@@ -211,7 +211,6 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     setRole: (r: Role) => { world.role = r; world.forcedRole = true; goScene(4); },
     canvasLock: () => ({ on: state.canvasLock, index: state.snapIdx, stops: (() => { const c = cx.views.get(state.currentView); return c ? cx.nav.stopsFor(c).lefts.length : 0; })(), view: state.currentView }),
     setCanvasLock: (on: boolean) => cx.nav.setCanvasLock(on),
-    reachFor: () => cx.mesh?.reachFor()?.model.id,
     /** The fake Mesh server and what the Mesh view has on screen (specs drive and read these). */
     mesh: {
       server: () => mesh.server,
@@ -223,7 +222,6 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       /** The saved canvas document (what a reload would restore). */
       document: () => cx.adapters.store.load(),
     },
-    reachCount: () => cx.mesh?.reachCount() ?? 0,
     sessions: () => ({ status: inventory.status(), hosts: inventory.hosts().map((host) => ({ host, sessions: inventory.list(host).map((s) => ({ id: s.id, name: s.name, state: s.state, activity: s.activity ?? null, pinned: s.pinned })) })) }),
     runSessionScene: (n: number) => sessionScenes.run(n),
   };

@@ -115,6 +115,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     (meta.children[1] as HTMLElement).textContent = n.sub;
     card.body.append(meta);
     wireNode(rec, n);
+    wireLink(c, rec, n);
     return rec;
   };
 
@@ -149,6 +150,86 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     };
     pill.addEventListener("pointerup", up, { signal });
     pill.addEventListener("pointercancel", up, { signal });
+  };
+
+  // ---- allowing access: drag the connector on a card onto another card (D194: drawn only here) ----------------------
+  /** The connectors on the cards; shown while the person may change who can reach what (D187). */
+  const ports = new Set<HTMLButtonElement>();
+  const wireLink = (c: ViewRec, rec: WinRec, n: NodeModel): void => {
+    const port = el("button", "cl-port");
+    port.type = "button";
+    port.dataset.tip = `Drag onto another card to let ${endName(n.id)} reach it`;
+    port.setAttribute("aria-label", `Let ${endName(n.id)} reach another card`);
+    port.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON.port}</svg>`;
+    port.style.touchAction = "none";
+    port.hidden = !source.canEdit();
+    ports.add(port);
+    rec.card.pill.after(port);
+    port.addEventListener("pointerdown", (e) => { if (e.button === 0 && camera.lod !== "thumb") { e.preventDefault(); e.stopPropagation(); beginLink(c, rec, n, port, e); } }, { signal });
+  };
+  const beginLink = (c: ViewRec, rec: WinRec, n: NodeModel, port: HTMLElement, e: PointerEvent): void => {
+    const from = nodeRect(c, n.id);
+    if (!from) return;
+    port.setPointerCapture(e.pointerId);
+    const origin = cx.view.contentRect(c);
+    const toLocal = (clientX: number, clientY: number): Pt => { const w = toWorld(clientX, clientY); return { x: w.x - origin.x, y: w.y - origin.y }; };
+    const live = new DragArrow(from, toLocal(e.clientX, e.clientY), cx.invalidate);
+    c.graphSvg!.append(live.arrow.g);
+    rec.card.root.dataset.linking = "";
+    let candidate: string | undefined;
+    let over: HTMLElement | undefined;
+    const taken = (id: string): boolean => source.grants().some((o) => o.from === n.id && o.to === id);
+    const move = (ev: PointerEvent): void => {
+      const w = toLocal(ev.clientX, ev.clientY);
+      live.move(w, headSize());
+      const radius = (coarse.matches ? 48 : 32) / cam.z;
+      const gap = (r: Rect): number => Math.hypot(Math.max(r.x - w.x, 0, w.x - (r.x + r.w)), Math.max(r.y - w.y, 0, w.y - (r.y + r.h)));
+      let id: string | undefined, best = Infinity;
+      for (const o of c.view.nodes) {
+        const r = nodeRect(c, o.id);
+        if (!r || o.id === n.id || taken(o.id)) continue;
+        const d = gap(r), limit = o.id === candidate ? radius * 1.25 : radius;
+        if (d <= limit && d < best) { best = d; id = o.id; }
+      }
+      if (id !== candidate) {
+        over?.removeAttribute("data-drop");
+        over = id ? c.wins.get(`n-${id}`)?.card.root : undefined;
+        over?.setAttribute("data-drop", "");
+        candidate = id;
+        live.setTarget(id ? nodeRect(c, id) : undefined);
+      }
+    };
+    const retract = (): void => { live.retract(); live.arrow.g.dataset.leaving = ""; window.setTimeout(() => live.dispose(), 320); };
+    const up = (ev: PointerEvent): void => {
+      port.removeEventListener("pointermove", move);
+      port.removeEventListener("pointerup", up);
+      port.removeEventListener("pointercancel", up);
+      delete rec.card.root.dataset.linking;
+      over?.removeAttribute("data-drop");
+      if (!candidate || ev.type === "pointercancel") { retract(); return; }
+      const to = candidate;
+      const at = tipAt(toClient({ x: live.end().x + origin.x, y: live.end().y + origin.y }));
+      mountConfirmTip(at.anchor, {
+        label: `Let ${endName(n.id)} reach ${endName(to)}`,
+        title: `Let ${endName(n.id)} reach ${endName(to)}?`,
+        effect: `${endName(n.id)} will be able to connect to ${endName(to)}. You can stop it any time.`,
+        confirmLabel: "Allow access", cancelLabel: "Cancel", named: true,
+        onConfirm: () => {
+          const g = source.addGrant(n.id, to);
+          live.dispose();
+          refreshGraph(c);
+          pulseNew(c, g);
+          for (const cl of views.values()) cx.view.geometry(cl);
+          cx.toast.show({ message: `${endName(n.id)} can now reach ${endName(to)}` });
+          at.done();
+        },
+        onCancel: () => { retract(); at.done(); },
+      });
+    };
+    port.addEventListener("pointermove", move);
+    port.addEventListener("pointerup", up);
+    port.addEventListener("pointercancel", up);
+    move(e);
   };
 
   // ---- editing a grant: grab an arrow's head or tail, unsnap it, snap it to another node or drop it on empty canvas ----------------
@@ -326,6 +407,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     refresh: refreshGraph,
     pulseNew,
     changed(rightsChanged) {
+      for (const port of ports) { if (port.isConnected) port.hidden = !source.canEdit(); else ports.delete(port); } // a dropped card's connector goes with it
       // Handles on arrows exist only for people who may use them (D187): arrows are made again when that changes.
       if (rightsChanged) for (const c of views.values()) graphOf(c)?.reset();
       for (const c of views.values()) if (c.view.layout === "graph") refreshGraph(c);
