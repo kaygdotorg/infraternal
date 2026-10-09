@@ -201,6 +201,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     views: () => [...cx.views.values()].map((c) => ({ id: c.view.id, name: c.view.name, team: Boolean(c.view.team), x: c.x, y: c.y, w: boxOf(c.view, state.metrics).w, h: boxOf(c.view, state.metrics).h, windows: [...c.wins.keys()] })),
     grants: () => world.grants.map((g) => ({ ...g })),
     flyView: (id: ViewId) => cx.nav.flyView(id),
+    /** Runs an appearance action (`theme:mocha`, `card:3`, `windows:4`, `bg:mesh`) as the palette does. */
+    act: (action: string) => cx.core.act(action),
     overview: () => cx.nav.showOverview(),
     openSession: (host: string, container?: string) => cx.win.open(host, container),
     openSettings: (section: string) => { const c = cx.views.get("settings"); const rec = c?.wins.get(`s-${section}`) ?? [...(c?.wins.values() ?? [])][0]; if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); } },

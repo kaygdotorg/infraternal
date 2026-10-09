@@ -1284,6 +1284,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   /** Runs a palette action; returns true when the action closed the palette itself. */
   function runAction(action: string, source: "keyboard" | "pointer"): boolean {
     const [kind, value] = action.split(":");
+    // An appearance change is its own activity in a frame trace: a User Timing measure from the action to the second
+    // frame after it, named by what changed (theme, font, card, windows, bg).
+    if (kind === "theme" || kind === "font" || kind === "card" || kind === "windows" || kind === "bg") {
+      const start = performance.now();
+      requestAnimationFrame(() => requestAnimationFrame(() => performance.measure(`appearance:${kind}`, { start, detail: { value } })));
+    }
     if (kind === "account" && value === "recovery") {
       setPalette(false, source);
       options.onRecovery?.();
