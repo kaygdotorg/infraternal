@@ -9,6 +9,7 @@ pub struct PublicSshConfiguration {
     pub destination: Destination,
     options: Vec<(String, String)>,
     trust_paths: Vec<Vec<String>>,
+    alias: Option<String>,
 }
 impl PublicSshConfiguration {
     /// Parse only the bounded output of trusted system OpenSSH's configuration query.
@@ -21,6 +22,7 @@ impl PublicSshConfiguration {
         let mut options = Vec::new();
         let mut trust_paths = Vec::new();
         let mut seen = HashSet::new();
+        let mut alias = None;
         for line in text.lines() {
             let Some((name, value)) = line.split_once(' ') else {
                 continue;
@@ -64,6 +66,9 @@ impl PublicSshConfiguration {
                 return None;
             }
             let value = original_host_token(value, original.host());
+            if name == "hostkeyalias" {
+                alias = Some(value.clone());
+            }
             let value = if matches!(name, "userknownhostsfile" | "globalknownhostsfile") {
                 let paths: Vec<_> = value.split_whitespace().map(str::to_owned).collect();
                 if paths.len() > 16 {
@@ -97,6 +102,57 @@ impl PublicSshConfiguration {
             destination,
             options,
             trust_paths,
+            alias,
+        })
+    }
+
+    /// Confirmation requires exact reconstructable public paths and lookup identity.
+    #[must_use]
+    pub fn trust_policy(&self) -> Option<TrustPolicy> {
+        use sha2::{Digest, Sha256};
+        if !self.validate_trust_paths() {
+            return None;
+        }
+        let host = self.alias.as_deref().unwrap_or(self.destination.host());
+        if host.is_empty()
+            || host.len() > 253
+            || host.starts_with('-')
+            || !host.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+            })
+        {
+            return None;
+        }
+        // HostKeyAlias is the complete trust lookup, never bracketed with the port.
+        let lookup = if self.alias.is_some() || self.destination.port().unwrap_or(22) == 22 {
+            host.to_owned()
+        } else {
+            format!("[{host}]:{}", self.destination.port().unwrap_or(22))
+        };
+        let mut paths = Vec::new();
+        for path in self.trust_paths.iter().flatten() {
+            if matches!(path.as_str(), "none" | "/dev/null") {
+                continue;
+            }
+            let path = std::path::PathBuf::from(path);
+            if !path.is_absolute() || path.as_os_str().as_encoded_bytes().contains(&b'%') {
+                return None;
+            }
+            paths.push(path);
+        }
+        let mut digest = Sha256::new();
+        for (name, value) in &self.options {
+            digest.update(name);
+            digest.update([0]);
+            digest.update(value);
+            digest.update([0]);
+        }
+        Some(TrustPolicy {
+            destination: self.destination.clone(),
+            lookup,
+            paths,
+            digest: digest.finalize().into(),
         })
     }
 
@@ -163,3 +219,12 @@ fn quoted(value: &str) -> String {
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+/// Only public addressing/trust policy is retained across first-contact confirmation.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TrustPolicy {
+    pub destination: Destination,
+    pub lookup: String,
+    pub paths: Vec<std::path::PathBuf>,
+    digest: [u8; 32],
+}
