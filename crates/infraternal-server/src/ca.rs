@@ -1,5 +1,7 @@
 //! Signs host identities from independently validated keys, with CA unlock policy supplied by the owner [133], #78.
 
+pub mod wrapping;
+
 use crate::{csr::ValidatedCsr, enrollment::CertificateRecord};
 use openssl::{
     asn1::Asn1Time,
