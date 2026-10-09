@@ -160,7 +160,10 @@ objects in stable nodes, tags, then grants order. Every page checks the caller's
 current permissions. A cursor for an older revision restarts at offset zero;
 clients discard the previous revision before assembling the restart. Future
 revisions and invalid offsets are refused. A single object that cannot fit
-produces a sanitized service error. Frames retain the existing 4 MiB limit.
+produces a sanitized service error. The global wire codec retains its existing 4 MiB limit. Every Mesh frame,
+including mux/frame headers, is at most 64 KiB so terminal frames interleave
+between pages. Paging reserves 1 KiB for the fixed envelopes and cursor.
+Input frames above that scheduling limit are refused before Mesh work begins.
 
 Subscription snapshots and resyncs use the same pages. The typed client follows
 continuations through `mesh.list` with the same tag filter, then publishes a

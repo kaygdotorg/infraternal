@@ -18,7 +18,11 @@ const ROLE_ACTIONS: [&str; 4] = [MANAGE_NODES, MANAGE_TAGS, MANAGE_GRANTS, MANAG
 const NODE_LIVE_SECONDS: i64 = 30;
 const CHANGE_BUFFER: usize = 256;
 // Reserve room for snapshot keys, cursor, event envelope and mux/frame headers.
-const PAGE_ITEM_BYTES: usize = infraternal_protocol::MAX_FRAME_LEN - 1024;
+// Mesh frames share a socket with latency-sensitive terminal traffic [D11].
+// Exact per-item JSON counting leaves 1 KiB for fixed snapshot/event/cursor and
+// mux/frame envelopes, including maximum-width numeric identifiers.
+pub(crate) const MAX_MESH_FRAME_LEN: usize = 64 * 1024;
+const PAGE_ITEM_BYTES: usize = MAX_MESH_FRAME_LEN - 1024;
 
 /// A committed inventory change with the tag scopes needed to filter live invalidations.
 #[derive(Clone, Debug)]
@@ -1502,7 +1506,7 @@ async fn read_snapshot(
     })
 }
 
-/// Bound both list replies and subscription snapshots without altering frame limits.
+/// Bound list replies and subscription snapshots to the Mesh scheduling limit.
 pub(crate) fn page_snapshot(
     mut snapshot: MeshSnapshot,
     cursor: Option<MeshCursor>,

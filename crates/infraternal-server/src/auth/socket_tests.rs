@@ -638,3 +638,6 @@ mod scale;
 
 #[path = "socket_tests/review_control.rs"]
 mod review_control;
+
+#[path = "socket_tests/mesh_latency.rs"]
+mod mesh_latency;

@@ -3,7 +3,7 @@
 use crate::embedded::{AttachmentHandle, EmbeddedAgent, TerminalOutput, TerminalSize};
 use crate::{
     auth::Auth,
-    mesh_api::{MeshApiError, MeshChange, MeshFilter, MeshService},
+    mesh_api::{MAX_MESH_FRAME_LEN, MeshApiError, MeshChange, MeshFilter, MeshService},
 };
 use axum::{
     Router,
@@ -422,7 +422,7 @@ async fn run_socket(
                             _ => None,
                         };
                         if let Some(refusal) = refusal {
-                            if (wire.len() > 65_536 || mesh_tx.try_send(wire.clone()).is_err())
+                            if (wire.len() > MAX_MESH_FRAME_LEN || mesh_tx.try_send(wire.clone()).is_err())
                                 && while_authorized(&state, &user_id, &session_token, true,
                                     send_frame(&mut sink, CONTROL_STREAM, &refusal, &mut encode)
                                 ).await.is_err() { break; }

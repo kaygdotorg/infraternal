@@ -99,7 +99,7 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
     let mut max_frame = 0;
     let mut total_bytes = 0;
     loop {
-        assert!(wire.len() <= infraternal_protocol::MAX_FRAME_LEN + 10);
+        assert!(wire.len() <= 65_536);
         max_frame = max_frame.max(wire.len());
         total_bytes += wire.len();
         pages += 1;
