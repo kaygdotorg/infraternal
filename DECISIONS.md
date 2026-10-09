@@ -1441,3 +1441,24 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      alone in its strip, between the minimum size and the widest option of
      Settings → Window Sizes (D191), with the matching resize cursor on every
      edge and corner.
+196. **Getting through NATs (owner, 2026-10-09, mesh grill N1–N6):**
+     - **Direct paths, our own:** each node learns its public address from
+       the server and relays (address discovery), the server swaps the
+       candidate addresses between the two peers, and both send at the same
+       moment to open their NATs. Built on our QUIC transport and relays
+       (D176, D131). A job measures success rates per NAT type.
+     - **Hard NATs** (both sides port-changing) are relayed in stage 1; port
+       prediction is added only if measurements show many relayed pairs that
+       could have been direct.
+     - **Router port mapping:** nodes ask the home router to open a port with
+       PCP and NAT-PMP first and UPnP as a fallback; on by default, with a
+       per-node switch.
+     - **Networks that block UDP:** relays also accept the mesh over TCP/TLS
+       on port 443, so the mesh works wherever a website does.
+     - **Any node can be a relay** (D131); peers pick the lowest-latency
+       relay, as for terminals (#103).
+     - **Priority features:** SSH over the mesh with our identities, exit
+       nodes and subnet routes are very important and move ahead of the
+       other extras (D164 had exit nodes and subnet routes "later"); a
+       public exposure of services, file drop, device posture checks and
+       connection logs come later.
