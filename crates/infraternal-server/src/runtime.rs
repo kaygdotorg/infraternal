@@ -612,7 +612,14 @@ async fn health(State(pool): State<SqlitePool>) -> Response {
     }
 }
 
-/// Per-source auth admission runs before JSON extraction and trusts forwarding data only from configured peers.
+/// Canonical client address from the listener and explicitly trusted proxy policy.
+/// Plugins may bound work by it; untrusted forwarding headers never set this value.
+#[derive(Clone, Copy)]
+pub(crate) struct ClientAddress(
+    #[cfg_attr(not(feature = "remote"), allow(dead_code))] pub(crate) IpAddr,
+);
+
+/// Per-source auth admission trusts forwarding data only from configured peers.
 #[derive(Clone)]
 struct SourceAdmission {
     behind_proxy: bool,
@@ -627,28 +634,22 @@ struct SourceBucket {
 
 async fn source_admission(
     State(policy): State<SourceAdmission>,
-    request: Request<axum::body::Body>,
+    mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let path = request.uri().path();
-    // Exact-Origin checking still runs in auth; source admission cannot deny revocation.
-    if !path.starts_with("/auth/") || path == "/auth/logout" {
-        return next.run(request).await;
-    }
-    let device = matches!(
-        path.trim_start_matches("/auth/"),
-        "device-start" | "device-redeem"
-    );
     let Some(peer) = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|address| address.0.ip())
     else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "request address unavailable",
-        )
-            .into_response();
+        if request.uri().path().starts_with("/auth/") && request.uri().path() != "/auth/logout" {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "request address unavailable",
+            )
+                .into_response();
+        }
+        return next.run(request).await;
     };
     let source = if policy.behind_proxy
         && policy
@@ -668,6 +669,17 @@ async fn source_admission(
     } else {
         peer
     };
+    request.extensions_mut().insert(ClientAddress(source));
+    let path = request.uri().path();
+    // Resolve trusted client metadata once for every plugin, before auth's own
+    // request-rate policy. Plugin-specific admission remains in its router.
+    if !path.starts_with("/auth/") || path == "/auth/logout" {
+        return next.run(request).await;
+    }
+    let device = matches!(
+        path.trim_start_matches("/auth/"),
+        "device-start" | "device-redeem"
+    );
     let Ok(now) = unix_seconds() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };

@@ -20,6 +20,8 @@ mod embedded;
 #[cfg(feature = "remote")]
 pub mod enrollment;
 #[cfg(feature = "remote")]
+mod remote_admission;
+#[cfg(feature = "remote")]
 pub mod remote_enrollment;
 #[cfg(feature = "remote")]
 mod remote_guard;

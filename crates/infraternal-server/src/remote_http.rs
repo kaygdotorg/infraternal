@@ -72,6 +72,8 @@ struct Api {
     source: Arc<dyn CaKeySource>,
     endpoint: EnrollmentEndpoint,
     admission: Arc<Semaphore>,
+    owner_admission: Arc<Semaphore>,
+    sources: Arc<crate::remote_admission::SourceSlots>,
 }
 
 #[derive(Deserialize)]
@@ -151,6 +153,8 @@ pub(crate) fn router_with_store(
         source,
         endpoint,
         admission: Arc::new(Semaphore::new(8)),
+        owner_admission: Arc::new(Semaphore::new(8)),
+        sources: Arc::new(crate::remote_admission::SourceSlots::new(2)),
     };
     Router::new()
         .route("/remote/invitations", post(invite))
@@ -184,7 +188,61 @@ async fn revoke(
 }
 
 async fn admission(State(api): State<Api>, request: Request, next: Next) -> Response {
-    let Ok(_permit) = api.admission.try_acquire() else {
+    tokio::time::timeout(Duration::from_secs(5), admit_request(api, request, next))
+        .await
+        .unwrap_or_else(|_| StatusCode::REQUEST_TIMEOUT.into_response())
+}
+async fn admit_request(api: Api, request: Request, next: Next) -> Response {
+    let owner = request.uri().path() != "/remote/join";
+    let _source = if owner {
+        if request
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            != Some(api.auth.origin())
+        {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        let Ok(token) = crate::auth::session_cookie_from_headers(request.headers()) else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        let Ok(now) = now() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let Ok(session) = api.auth.session(token, now).await else {
+            return StatusCode::FORBIDDEN.into_response();
+        };
+        let allowed = sqlx::query_scalar::<_, bool>("SELECT owner=1 FROM users WHERE id=?")
+            .bind(&session.user_id)
+            .fetch_optional(&api.pool)
+            .await;
+        if !matches!(allowed, Ok(Some(true))) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        None
+    } else {
+        let address = request
+            .extensions()
+            .get::<crate::runtime::ClientAddress>()
+            .map(|v| v.0)
+            .or_else(|| {
+                request
+                    .extensions()
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                    .map(|v| v.0.ip())
+            })
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        let Some(permit) = api.sources.reserve(address) else {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        };
+        Some(permit)
+    };
+    let semaphore = if owner {
+        &api.owner_admission
+    } else {
+        &api.admission
+    };
+    let Ok(_permit) = semaphore.try_acquire() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
     // Includes body extraction: a slow upload cannot hold a signer slot indefinitely.

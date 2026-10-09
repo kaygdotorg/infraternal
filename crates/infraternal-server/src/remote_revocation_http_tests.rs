@@ -299,3 +299,48 @@ async fn permission_revoked_while_waiting_for_sqlite_writer_refuses_tombstone() 
     assert_eq!(blocked.await.unwrap(), StatusCode::FORBIDDEN);
     assert!(guard.permits());
 }
+
+/// Owner revocation is the security control that cuts a compromised host. It
+/// must not share its admission slots with the unauthenticated join route:
+/// eight anonymous clients holding stalled `/remote/join` bodies must not turn
+/// an authorized revocation into 429 [134][168], #78.
+#[tokio::test]
+async fn claude_review_anonymous_stalled_joins_cannot_block_owner_revocation() {
+    let (app, store, _pool, host, token) = revocation_fixture().await;
+    let guard = crate::remote_guard::AuthorityGuard::admit(store.clone(), [1; 32])
+        .await
+        .unwrap();
+    let mut stalled = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/remote/join")
+            .header("content-type", "application/json")
+            .body(Body::from_stream(futures_util::stream::pending::<
+                std::result::Result<bytes::Bytes, std::io::Error>,
+            >()))
+            .unwrap();
+        let app = app.clone();
+        stalled.spawn(async move { app.oneshot(request).await });
+    }
+    // Let every anonymous request reach the admission middleware.
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    let status = request(
+        &app,
+        "/remote/revocations",
+        json!({"host_id":host}),
+        Some(&token),
+        "https://auth.example.test",
+    )
+    .await
+    .status();
+    stalled.abort_all();
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "anonymous stalled join bodies exhausted owner revocation admission"
+    );
+    assert!(!guard.permits());
+}
