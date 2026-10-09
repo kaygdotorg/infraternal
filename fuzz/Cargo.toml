@@ -91,3 +91,10 @@ path = "fuzz_targets/ssh_auth_once_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "native_facts_request"
+path = "fuzz_targets/native_facts_request.rs"
+test = false
+doc = false
+bench = false
