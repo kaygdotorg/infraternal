@@ -193,6 +193,9 @@ pub struct Failure {
     /// Only exhausted D183 authentication permits the UI to request another method.
     #[serde(skip_serializing_if = "is_false")]
     pub choose_method: bool,
+    /// Public first-contact handle; never admission by possession alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_key_challenge: Option<uuid::Uuid>,
 }
 impl Failure {
     #[must_use]
@@ -203,6 +206,7 @@ impl Failure {
             log_tail: Vec::new(),
             fingerprints: Vec::new(),
             choose_method: false,
+            host_key_challenge: None,
         }
     }
     #[must_use]
