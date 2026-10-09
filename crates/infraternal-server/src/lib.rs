@@ -5,6 +5,7 @@ pub mod auth;
 pub mod ca;
 pub mod ca_administration;
 pub mod ca_copies;
+pub mod ca_http;
 pub mod ca_membership;
 pub mod ca_memory;
 pub mod csr;
