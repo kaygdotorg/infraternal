@@ -1568,3 +1568,24 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Order (V8):** native macOS capture, then Proxmox/QEMU over VNC, then
        native Linux capture, then RDP (IronRDP). Browser windows reuse this
        pipeline (#140).
+201. **One control plane, many node components (owner, 2026-10-09, N7):**
+     - **The server is the control plane** (sign-in, database, rules, web
+       UI), one per deployment. It is created only by an explicit, confirmed
+       `infraternal server init` ("This machine will become an infraternal
+       server"; `--yes` for scripts), which prints the setup token; afterwards
+       `infraternal server` runs it as a service. No other command ever
+       creates a server.
+     - **Server features, not modes:** what the server offers (terminals,
+       mesh coordination, backups, add-host, …) is a set of features
+       switchable at any time in Settings → Server and with `infraternal
+       server features`; setup asks "What should this server do?" with all
+       ticked. A mesh-only server is the same server with only Mesh ticked.
+     - **Node components:** `infraternal up` joins this machine to a server
+       with sensible defaults (agent, SSH, relay, mesh node, backup where
+       there is room); it finds or asks for a server and can never create
+       one. Each component also runs alone: `infraternal <component> up |
+       down | status` (mesh, relay, ssh, backup, agent). The server machine
+       also joins as a node.
+     - `infraternal status` shows the machine's role ("server" and/or "node
+       of <server>") and every component running; every command has `--json`
+       (D199).
