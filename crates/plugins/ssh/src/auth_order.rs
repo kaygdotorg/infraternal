@@ -167,6 +167,16 @@ impl SshTransport for AutoAuth {
             }
         })
     }
+    fn confirm_host_key<'a>(
+        &'a self,
+        destination: Destination,
+        challenge: &'a str,
+        fingerprint: &'a str,
+        authority: &'a dyn crate::transport::ConfirmationAuthority,
+    ) -> Operation<'a, ()> {
+        self.transport
+            .confirm_host_key(destination, challenge, fingerprint, authority)
+    }
 }
 
 /// Serialize the first read-only check, then reuse its authenticated method.
