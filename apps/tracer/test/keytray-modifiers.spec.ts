@@ -7,6 +7,8 @@ const baseURL = `http://localhost:${Number(process.env.TRACER_TEST_PORT ?? "4173
 
 async function mobilePage(browser: Browser): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext({ ...devices["iPhone 15"], baseURL });
+  // Paste reads the clipboard; without the permission it opens a paste target, which (rightly) takes the focus.
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: baseURL });
   await context.request.post("/__mock/open-terminal");
   const page = await context.newPage();
   await page.goto("/?mock=1&theme=ink&bg=none");
@@ -137,7 +139,7 @@ test("iPhone 15 tray modifiers send one-shot, locked, combined, and xterm arrow 
 test("every visible iPhone 15 key tray button keeps focus in the terminal input", async ({ browser }) => {
   const { context, page } = await mobilePage(browser);
   try {
-    const keys = page.locator("#keybar .keytray > button:not([hidden])");
+    const keys = page.locator("#keybar .keyrow > button:not([hidden])");
     const count = await keys.count();
     expect(count).toBeGreaterThan(0);
     for (let index = 0; index < count; index += 1) {

@@ -26,7 +26,7 @@ test("owned output drains while detached before the next Attach", async ({ page 
   await context.setOffline(true);
   await page.evaluate(() => window.__tracerTestDouble?.dropConnection());
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected())).toBe(false);
-  await expect(page.locator("#connection-status")).toContainText("resuming");
+  await expect(page.locator("#connection-status")).toContainText("Reconnecting");
   const callbacks = await page.evaluate(() => (window as Window & { __releaseDetachedFrames?: () => number }).__releaseDetachedFrames?.());
   expect(callbacks).toBeGreaterThan(0);
   await context.setOffline(false);

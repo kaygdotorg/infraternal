@@ -71,18 +71,52 @@ function mix(left: string, right: string, amount: number): string {
 
 export interface OverlayMaterial {
   overlay: string;
+  /** The tint at 0.9: a soft halo behind text on the material, so contrast comes from the halo and not from more tint. */
+  halo: string;
   /** Large floating panels (the sidebar): thinner than pills so content visibly blurs through. */
   overlayPanel: string;
   overlaySolid: string;
   overlayLine: string;
   shadow: string;
+  largeShadow: string;
   surface: string;
 }
 
 /** Keeps dark glass close to its palette and computes the same alpha composite used by the contrast audit. */
-export function overlayMaterial(active: Theme): OverlayMaterial {
+/**
+ * How much of what is behind shows through, in four named levels, for the two kinds of surface (the owner's
+ * approved values). Cards are the floating material (popovers, palette, sidebar, pills, toasts); windows are the
+ * terminal and other window cards. `dark` and `light` are the fill's opacity on a dark and on a light theme;
+ * `blur` is the backdrop blur in CSS pixels. Only Frosted blurs windows (many large blurred windows cost frames
+ * and memory), and only the windows on screen (see canvas/memory.ts). Solid paints no transparency and no blur at
+ * all. Levels apply through one token write (`applyTheme`); nothing runs per frame.
+ */
+export const LEVEL_NAMES = ["Solid", "Tinted", "Clear", "Frosted"] as const;
+export interface Level { dark: number; light: number; blur: number }
+export const CARD_LEVELS: Record<number, Level> = {
+  1: { dark: 1, light: 1, blur: 0 },
+  2: { dark: 0.7, light: 0.78, blur: 8 },
+  3: { dark: 0.4, light: 0.5, blur: 24 },
+  4: { dark: 0.2, light: 0.3, blur: 32 },
+};
+export const WINDOW_LEVELS: Record<number, Level> = {
+  1: { dark: 1, light: 1, blur: 0 },
+  2: { dark: 0.85, light: 0.9, blur: 0 },
+  3: { dark: 0.65, light: 0.75, blur: 0 },
+  4: { dark: 0.45, light: 0.55, blur: 24 },
+};
+/** Cards default to Tinted, windows to Solid. */
+export const DEFAULT_CARD = 2;
+export const DEFAULT_WINDOW = 1;
+export const levelName = (level: number): string => LEVEL_NAMES[level - 1] ?? LEVEL_NAMES[0];
+
+export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMaterial {
   const tinted = mix(active.bg, "#ffffff", active.dark ? 0.06 : 0.6);
-  const opacity = active.dark ? 0.68 : 0.72;
+  // The one floating-card material (popover, flow card, confirmation, sidebar, toast): the page
+  // behind must visibly show through, softly blurred. Secondary text over the busiest terminal
+  // state stays above 4.5:1 (a text shadow carries it at the thin levels, never more tint).
+  const glass = CARD_LEVELS[level] ?? CARD_LEVELS[DEFAULT_CARD]!;
+  const opacity = active.dark ? glass.dark : glass.light;
   const channels = (hex: string) => [1, 3, 5].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
   const rgb = (hex: string) => channels(hex).join(" ");
   const tint = channels(tinted);
@@ -91,21 +125,34 @@ export function overlayMaterial(active: Theme): OverlayMaterial {
 
   return {
     overlay: `rgb(${rgb(tinted)} / ${opacity})`,
-    overlayPanel: `rgb(${rgb(tinted)} / ${active.dark ? 0.56 : 0.6})`,
+    halo: `rgb(${rgb(tinted)} / 1)`,
+    overlayPanel: `rgb(${rgb(tinted)} / ${opacity})`,
     overlaySolid: mix(active.bg, "#ffffff", active.dark ? 0.07 : 0.7),
     overlayLine: `rgb(${rgb(active.fg)} / 0.09)`,
     shadow: active.dark
       ? "0 1px 1px rgb(0 0 0 / 0.3), 0 12px 32px -8px rgb(0 0 0 / 0.6)"
       : "0 1px 1px rgb(0 0 0 / 0.04), 0 8px 24px -6px rgb(0 0 0 / 0.12)",
+    largeShadow: active.dark
+      ? "0 2px 3px rgb(0 0 0 / 0.34), 0 24px 56px -10px rgb(0 0 0 / 0.72)"
+      : "0 2px 4px rgb(0 0 0 / 0.08), 0 20px 48px -8px rgb(0 0 0 / 0.24)",
     surface,
   };
 }
 
 /** Applies UI tokens and mesh source hues; derived surfaces stay coherent with the theme. */
-export function applyTheme(active: Theme, root: HTMLElement): void {
+export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT_CARD, windowLevel = DEFAULT_WINDOW): void {
   const style = root.style;
   const rgb = (hex: string) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16)).join(" ");
-  const overlay = overlayMaterial(active);
+  const overlay = overlayMaterial(active, cardLevel);
+  const card = CARD_LEVELS[cardLevel] ?? CARD_LEVELS[DEFAULT_CARD]!;
+  const win = WINDOW_LEVELS[windowLevel] ?? WINDOW_LEVELS[DEFAULT_WINDOW]!;
+  style.setProperty("--ui-overlay-blur", `${card.blur}px`);
+  // Windows: a translucent fill (no blur except at Frosted). The data attributes let CSS skip the filter and the
+  // alpha entirely at Solid, so the default paints exactly what an opaque card paints.
+  style.setProperty("--ui-window-fill", `${Math.round((active.dark ? win.dark : win.light) * 100)}%`);
+  style.setProperty("--ui-window-blur", `${win.blur}px`);
+  root.dataset.card = levelName(cardLevel).toLowerCase();
+  root.dataset.windowLevel = levelName(windowLevel).toLowerCase();
   style.setProperty("--bg", active.bg);
   style.setProperty("--fg", active.fg);
   style.setProperty("--fg-2", active.fg2);
@@ -114,11 +161,26 @@ export function applyTheme(active: Theme, root: HTMLElement): void {
   style.setProperty("--accent-soft", `rgb(${rgb(active.accent)} / 0.16)`);
   style.setProperty("--accent-fg", active.dark ? active.bg : "#ffffff");
   style.setProperty("--ok", active.ok);
+  // The canvas backdrop: the gradient shows everywhere at this strength, and the dots are light marks (a brighter
+  // tint of the gradient on dark themes, a deeper one on light themes) at a low opacity.
+  style.setProperty("--gradient-opacity", active.dark ? "0.46" : "0.32");
+  style.setProperty("--dot-opacity", active.dark ? "0.4" : "0.34");
+  style.setProperty("--dot-color", active.dark ? "color-mix(in oklab, var(--mesh-3) 40%, white)" : "color-mix(in oklab, var(--mesh-3) 55%, black)");
+  style.setProperty("--warn", active.ansi[3]); // the theme's amber: slow links, approximate screens
+  style.setProperty("--danger", active.ansi[1]);
   style.setProperty("--overlay", overlay.overlay);
+  style.setProperty("--ui-overlay-halo", overlay.halo);
   style.setProperty("--overlay-panel", overlay.overlayPanel);
   style.setProperty("--overlay-solid", overlay.overlaySolid);
   style.setProperty("--overlay-line", overlay.overlayLine);
   style.setProperty("--shadow", overlay.shadow);
+  style.setProperty("--overlay-shadow-large", overlay.largeShadow);
+  // Elevation for lifted in-page cards (a flow card over its window): a tight contact
+  // shadow plus a wide ambient one. Not glass: no highlight, no blur.
+  style.setProperty("--elevation", active.dark
+    ? "0 0 0 1px rgb(0 0 0 / 0.35), 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 20px -6px rgb(0 0 0 / 0.5), 0 36px 90px -18px rgb(0 0 0 / 0.8)"
+    : "0 0 0 1px rgb(0 0 0 / 0.05), 0 1px 2px rgb(0 0 0 / 0.1), 0 8px 20px -6px rgb(0 0 0 / 0.14), 0 36px 90px -18px rgb(0 0 0 / 0.32)");
+  style.setProperty("--overlay-highlight", `rgb(255 255 255 / ${active.dark ? "0.32" : "0.78"})`);
   style.setProperty("--line", `rgb(${rgb(active.fg)} / 0.07)`);
   style.setProperty("--hover", `rgb(${rgb(active.fg)} / 0.06)`);
   root.style.colorScheme = active.dark ? "dark" : "light";

@@ -41,6 +41,7 @@ quinn.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 tokio-openssl.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 aes-gcm.workspace = true
 hkdf.workspace = true
 tower.workspace = true

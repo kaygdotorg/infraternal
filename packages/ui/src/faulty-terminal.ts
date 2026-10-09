@@ -1,7 +1,8 @@
 /**
  * "Faulty terminal" backdrop (DECISIONS 96, #21): a field of terminal glyphs that
  * drift in and out of a low-frequency noise, with scanlines, flicker and the
- * occasional horizontal glitch band. Black and white.
+ * occasional horizontal glitch band. Black and white: pale glyphs on black, or (light scheme)
+ * dark glyphs on near-white.
  *
  * Budget (DECISION 96): renders continuously at half resolution and at most 30 fps
  * while visible. It pauses when the tab is hidden or the canvas is offscreen, stops
@@ -24,6 +25,7 @@ uniform vec2 mouse;               // 0..1, or -1 when absent
 uniform float cell;               // cell height in canvas pixels
 uniform float glyphs;
 uniform float intro;              // 0..1 page-load reveal
+uniform float light;              // 0 pale glyphs on black, 1 dark glyphs on near-white
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p) {
   vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -57,19 +59,27 @@ void main() {
   // Vignette keeps the middle (where the card is) calm.
   vec2 q = uv - 0.5;
   v *= 1.0 - dot(q, q) * 1.6;
-  o = vec4(vec3(v), 1.0);
+  // The light scheme inverts the ink, not the pattern: the same glyphs, the same drift, the same
+  // calm middle, drawn dark on a paper-white field (the page's own light background colour).
+  vec3 paper = vec3(0.965, 0.965, 0.957) - vec3(v) * 0.82;
+  o = vec4(mix(vec3(v), paper, light), 1.0);
 }`;
 
 const GLYPHS = "01<>/\\|=+-_:;{}[]()#$%&*!?~^".split("");
 const FRAME_INTERVAL_MS = 1000 / 30;
 
-export interface FaultyTerminal { destroy(): void }
+export interface FaultyTerminal {
+  /** Switches between the dark field (default) and the light field without remounting. */
+  setLight(light: boolean): void;
+  destroy(): void;
+}
 
-export function mountFaultyTerminal(canvas: HTMLCanvasElement, font = '"Geist Mono", monospace'): FaultyTerminal | undefined {
-  return mountOffscreen(canvas, font) ?? mountOnMainThread(canvas, font);
+export function mountFaultyTerminal(canvas: HTMLCanvasElement, light = false, font = '"Geist Mono", monospace'): FaultyTerminal | undefined {
+  return mountOffscreen(canvas, font, light) ?? mountOnMainThread(canvas, font, light);
 }
 
 export interface FaultyTerminalRenderer {
+  setLight(light: boolean): void;
   resize(width: number, height: number, dpr: number): void;
   draw(now: number, reduced: boolean, mouse: PointerPosition, glow: PointerPosition): void;
   destroy(): void;
@@ -79,7 +89,7 @@ interface PointerPosition { x: number; y: number }
 type ShaderCanvas = HTMLCanvasElement | OffscreenCanvas;
 
 /** Owns WebGL resources while the caller owns the frame schedule and input source. */
-function createRenderer(canvas: ShaderCanvas, font: string): FaultyTerminalRenderer | undefined {
+function createRenderer(canvas: ShaderCanvas, font: string, light: boolean): FaultyTerminalRenderer | undefined {
   const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, powerPreference: "low-power" }) as WebGL2RenderingContext | null;
   if (!gl) return undefined;
   const sh = (type: number, src: string) => { const s = gl.createShader(type)!; gl.shaderSource(s, src); gl.compileShader(s); return s; };
@@ -114,6 +124,7 @@ function createRenderer(canvas: ShaderCanvas, font: string): FaultyTerminalRende
 
   const u = (n: string) => gl.getUniformLocation(prog, n);
   gl.uniform1f(u("glyphs"), GLYPHS.length);
+  gl.uniform1f(u("light"), light ? 1 : 0);
   const SCALE = 0.5; // half resolution: the effect is soft by nature
   const start = performance.now();
   const resize = (width: number, height: number, dpr: number): void => {
@@ -136,18 +147,19 @@ function createRenderer(canvas: ShaderCanvas, font: string): FaultyTerminalRende
   return {
     resize,
     draw,
+    setLight(next) { gl.uniform1f(u("light"), next ? 1 : 0); },
     destroy() { gl.getExtension("WEBGL_lose_context")?.loseContext(); },
   };
 }
 
 /** Creates the worker-safe shader renderer without attaching browser input or frame loops. */
-export function createFaultyTerminalRenderer(canvas: OffscreenCanvas, font: string): FaultyTerminalRenderer | undefined {
-  return createRenderer(canvas, font);
+export function createFaultyTerminalRenderer(canvas: OffscreenCanvas, font: string, light = false): FaultyTerminalRenderer | undefined {
+  return createRenderer(canvas, font, light);
 }
 
 /** Keeps fallback WebGL work at the approved cadence when canvas workers are unavailable. */
-function mountOnMainThread(canvas: HTMLCanvasElement, font: string): FaultyTerminal | undefined {
-  const candidate = createRenderer(canvas, font);
+function mountOnMainThread(canvas: HTMLCanvasElement, font: string, light: boolean): FaultyTerminal | undefined {
+  const candidate = createRenderer(canvas, font, light);
   if (!candidate) return undefined;
   // Scheduled callbacks use one validated renderer for their entire lifetime.
   const renderer: FaultyTerminalRenderer = candidate;
@@ -212,6 +224,7 @@ function mountOnMainThread(canvas: HTMLCanvasElement, font: string): FaultyTermi
   wake();
 
   return {
+    setLight(next) { renderer.setLight(next); stillDirty = true; wake(); },
     destroy() {
       alive = false; pause();
       ro.disconnect(); io.disconnect();
@@ -224,7 +237,7 @@ function mountOnMainThread(canvas: HTMLCanvasElement, font: string): FaultyTermi
 }
 
 /** Compiles and draws the auth field in a worker, leaving first paint responsive. */
-function mountOffscreen(canvas: HTMLCanvasElement, font: string): FaultyTerminal | undefined {
+function mountOffscreen(canvas: HTMLCanvasElement, font: string, initialLight: boolean): FaultyTerminal | undefined {
   if (typeof Worker === "undefined" || typeof OffscreenCanvas === "undefined" || !canvas.transferControlToOffscreen) return undefined;
   let worker: Worker;
   let offscreen: OffscreenCanvas;
@@ -244,6 +257,7 @@ function mountOffscreen(canvas: HTMLCanvasElement, font: string): FaultyTerminal
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
   let intersecting = true, pageVisible = !document.hidden, alive = true, failedOver = false;
   let fallback: FaultyTerminal | undefined;
+  let light = initialLight;
   const post = (message: object): void => {
     if (!alive || failedOver) return;
     try { worker.postMessage(message); }
@@ -283,7 +297,7 @@ function mountOffscreen(canvas: HTMLCanvasElement, font: string): FaultyTerminal
     const replacement = canvas.cloneNode(false) as HTMLCanvasElement;
     replacement.dataset.ready = "false";
     canvas.replaceWith(replacement);
-    fallback = mountOnMainThread(replacement, font);
+    fallback = mountOnMainThread(replacement, font, light);
   };
   worker.addEventListener("message", (event: MessageEvent<{ type: string; ok?: boolean }>) => {
     if (event.data.type === "ready" && event.data.ok) canvas.dataset.ready = "true";
@@ -305,6 +319,7 @@ function mountOffscreen(canvas: HTMLCanvasElement, font: string): FaultyTerminal
       height: canvas.clientHeight,
       dpr: devicePixelRatio,
       reduced,
+      light,
       visible: intersecting && pageVisible,
     }, [offscreen]);
   } catch {
@@ -312,6 +327,10 @@ function mountOffscreen(canvas: HTMLCanvasElement, font: string): FaultyTerminal
   }
 
   return {
+    setLight(next) {
+      light = next;
+      if (fallback) fallback.setLight(next); else post({ type: "scheme", light: next });
+    },
     destroy() {
       if (!alive) return;
       alive = false; detach();

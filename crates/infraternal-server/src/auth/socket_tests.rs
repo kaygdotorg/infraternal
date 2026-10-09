@@ -18,9 +18,10 @@ async fn socket_fixture() -> (Fixture, SocketAddr, tokio::task::JoinHandle<()>) 
     (f, address, server)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn revoked_idle_socket_loses_all_authority() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
@@ -108,9 +109,10 @@ async fn socket_authority_latency_at_user_capacity() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn half_open_sockets_obey_user_limit() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let mut sockets = Vec::new();
@@ -130,19 +132,31 @@ async fn half_open_sockets_obey_user_limit() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn expired_handshake_releases_user_permits() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let mut held = Vec::new();
     for _ in 0..16 {
-        let (socket, _) = connect_async(test_ws_request(address, &cookie))
+        let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
             .await
             .unwrap();
+        assert_server_hello(&mut socket).await;
         held.push(socket);
     }
-    tokio::time::sleep(Duration::from_millis(5250)).await;
+    // Admission remains full one millisecond before the production deadline.
+    tokio::time::advance(Duration::from_millis(4999)).await;
+    assert!(matches!(
+        connect_async(test_ws_request(address, &cookie)).await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(ref response))
+            if response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE
+    ));
+    tokio::time::advance(Duration::from_millis(1)).await;
+    for socket in &mut held {
+        assert_socket_closed(socket).await;
+    }
     let schema_live: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')",
     )
@@ -165,9 +179,10 @@ async fn expired_handshake_releases_user_permits() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn fragmented_wire_frame_has_a_completion_deadline() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
@@ -189,12 +204,33 @@ async fn fragmented_wire_frame_has_a_completion_deadline() {
         .send(Message::Binary(Bytes::from_static(&[0x80])))
         .await
         .unwrap();
-    let start = Instant::now();
-    let ended = tokio::time::timeout(Duration::from_secs(6), socket.next()).await;
-    assert!(
-        ended.is_ok(),
-        "fragmented frame never completed or timed out"
-    );
+    // RFC Ping is handled after the partial mux byte, proving its deadline is armed.
+    let ping = Bytes::from_static(b"partial-frame-fence");
+    socket.send(Message::Ping(ping.clone())).await.unwrap();
+    assert!(matches!(socket.next().await, Some(Ok(Message::Pong(bytes))) if bytes == ping));
+    let start = tokio::time::Instant::now();
+    tokio::time::advance(Duration::from_millis(4999)).await;
+    let before_deadline = Bytes::from_static(b"before-partial-deadline");
+    socket
+        .send(Message::Ping(before_deadline.clone()))
+        .await
+        .unwrap();
+    loop {
+        match socket.next().await {
+            Some(Ok(Message::Pong(bytes))) if bytes == before_deadline => break,
+            Some(Ok(Message::Pong(_))) => {} // Drain the earlier transport Pong.
+            _ => panic!("partial frame expired before its configured deadline"),
+        }
+    }
+    tokio::time::advance(Duration::from_millis(1)).await;
+    // A protocol completion error sends a control Close before the RFC Close.
+    // Revocation probes still reject all authority-bearing binary frames.
+    let wire = read_client_frame(&mut socket).await;
+    assert!(matches!(
+        decode_muxed_frame(&wire).unwrap().frame,
+        Frame::Close { .. }
+    ));
+    assert_socket_closed(&mut socket).await;
     println!(
         "partial frame removed after {}ms (configured 5000ms)",
         start.elapsed().as_millis()
@@ -202,9 +238,10 @@ async fn fragmented_wire_frame_has_a_completion_deadline() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn clean_control_close_is_not_an_internal_error() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
@@ -243,9 +280,10 @@ async fn clean_control_close_is_not_an_internal_error() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn authenticated_idle_socket_survives_the_former_read_timeout() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
@@ -263,7 +301,7 @@ async fn authenticated_idle_socket_survives_the_former_read_timeout() {
     )
     .await;
     read_welcome(&mut socket).await;
-    tokio::time::sleep(Duration::from_secs(31)).await;
+    tokio::time::advance(Duration::from_secs(31)).await;
     client_ws_send(
         &mut socket,
         0,
@@ -286,13 +324,14 @@ async fn authenticated_idle_socket_survives_the_former_read_timeout() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn incomplete_rfc_message_still_loses_authority_on_revocation() {
     use tokio_tungstenite::tungstenite::protocol::frame::{
         Frame as WebSocketFrame,
         coding::{Data, OpCode},
     };
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
@@ -332,10 +371,11 @@ async fn incomplete_rfc_message_still_loses_authority_on_revocation() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)] // Keep full-capacity and cross-account events in one real fixture.
 async fn recovery_subscription_updates_every_signed_in_socket() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let now = crate::websocket::now_seconds().unwrap();
     let other_user = uuid::Uuid::new_v4().to_string();
@@ -413,12 +453,7 @@ async fn recovery_subscription_updates_every_signed_in_socket() {
             ready
         );
     }
-    assert!(
-        tokio::time::timeout(Duration::from_millis(250), other.next())
-            .await
-            .is_err(),
-        "another account received recovery start state"
-    );
+    assert_other_recovery_unchanged(&mut other).await;
     f.auth.recovery_cancel(&f.session, now).await.unwrap();
     for socket in &mut devices {
         let bytes = read_client_frame(socket).await;
@@ -431,14 +466,50 @@ async fn recovery_subscription_updates_every_signed_in_socket() {
         };
         assert!(serde_json::from_slice::<Value>(event_json).unwrap()["pending"].is_null());
     }
-    assert!(
-        tokio::time::timeout(Duration::from_millis(250), other.next())
-            .await
-            .is_err(),
-        "another account received recovery cancel state"
-    );
+    assert_other_recovery_unchanged(&mut other).await;
     println!(
         "Recovery events: 16/16 signed-in devices received start and cancel; other account received 0 events."
     );
     server.abort();
+}
+
+/// A fresh subscription and Pong fence expose both leaked state and queued extra events.
+async fn assert_other_recovery_unchanged<S>(socket: &mut S)
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    client_ws_send(
+        socket,
+        0,
+        &Frame::Subscribe {
+            sub_id: 45,
+            filter_json: br#"{"topic":"auth.recovery"}"#,
+        },
+    )
+    .await;
+    let wire = read_client_frame(socket).await;
+    let Frame::Event {
+        sub_id: 45,
+        event_json,
+    } = decode_muxed_frame(&wire).unwrap().frame
+    else {
+        panic!("missing other-account recovery snapshot");
+    };
+    assert!(serde_json::from_slice::<Value>(event_json).unwrap()["pending"].is_null());
+    client_ws_send(
+        socket,
+        0,
+        &Frame::Ping {
+            nonce: 118,
+            sent_us: 0,
+        },
+    )
+    .await;
+    let wire = read_client_frame(socket).await;
+    assert!(matches!(
+        decode_muxed_frame(&wire).unwrap().frame,
+        Frame::Pong { nonce: 118, .. }
+    ));
 }

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -31,6 +32,22 @@ def fixture_state(label):
     if longest >= 108:
         raise ValueError(f'test state path is too long for an AF_UNIX socket: {longest} bytes')
     return state
+
+
+def fixture_cpu_weight():
+    """Managed test shims inherit their caller's scheduling, including benchmark scopes."""
+    weight = os.environ.get('INFRATERNAL_TEST_CPU_WEIGHT')
+    if weight is None:
+        # A manager creates an independent scope instead of inheriting this
+        # cgroup. Copy its weight in the test launcher, never in production.
+        try:
+            group = next(line[3:] for line in Path('/proc/self/cgroup').read_text().splitlines()
+                         if line.startswith('0::'))
+            weight = (Path('/sys/fs/cgroup') / group.lstrip('/') / 'cpu.weight').read_text().strip()
+        except (OSError, StopIteration):
+            return None  # Legacy hierarchies retain the ordinary fixture setup.
+    assert weight.isdecimal() and 1 <= int(weight) <= 10000
+    return weight
 
 
 def varint(n):
@@ -77,6 +94,9 @@ class Binary:
         self.data = bytearray()
         self.credit_batch = 64 * 1024
         self.credit_pending = 0
+        self.credit_available = 0
+        self.fence_nonce = 0
+        self.cpu_weight = fixture_cpu_weight()
         self.events = []
         self.snapshots = []
         self.link = None
@@ -90,6 +110,19 @@ class Binary:
         self.link = LatencyDuplex(test_peer, agent_peer, config)
         self.link.start()
         env = dict(os.environ, ZDOTDIR=str(Path('crates/infraternal/tests/profile').resolve()))
+        weight = self.cpu_weight
+        if weight is not None:
+            launcher = shutil.which('systemd-run')
+            if launcher is not None:
+                directory = self.state / 'benchmark-bin'
+                directory.mkdir(mode=0o700, exist_ok=True)
+                wrapper = directory / 'systemd-run'
+                # Include the unchanged two-second readiness bound in the
+                # inherited test scheduling. Detached shims inherit directly.
+                wrapper.write_text('#!/bin/sh\n# Propagate the fixture caller CPU weight.\n'
+                                   f'exec {shlex.quote(launcher)} -p CPUWeight={weight} "$@"\n')
+                wrapper.chmod(0o700)
+                env['PATH'] = str(directory.resolve()) + os.pathsep + env['PATH']
         # Shell duplication closes the original descriptor before exec; the
         # binary's launch wrapper later closes fd 3 before every shim exec.
         # Bash supports closing descriptor numbers above nine, which concurrent
@@ -109,6 +142,8 @@ class Binary:
 
     def send(self, stream, kind, body=b''):
         self.sock.sendall(varint(stream) + varint(1 + len(body)) + bytes([kind]) + body)
+        if stream == 1 and kind == 0x14:
+            self.credit_available += struct.unpack('<I', body)[0]
 
     def read(self):
         try:
@@ -124,25 +159,20 @@ class Binary:
             # travels exclusively over the fixture socket and is never logged.
             raise AssertionError(f'daemon exit {self.child.returncode}: {self.child.stderr.read().decode()}') from error
 
-    def inherit_scope_priority(self):
+    def inherit_scope_priority(self, weight=None):
         """Apply this test's CPU weight only to its own transient shim scope."""
-        try:
-            relative = next(line.split(':', 2)[2] for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::'))
-            weight = int((Path('/sys/fs/cgroup') / relative.lstrip('/') / 'cpu.weight').read_text())
-        except (OSError, StopIteration, ValueError):
-            return  # Non-cgroup platforms use the inherited process scheduler.
-        if weight == 100:
+        weight = fixture_cpu_weight() if weight is None else weight
+        if weight is None:
             return
+        assert weight.isdecimal() and 1 <= int(weight) <= 10000
         control = ['systemctl'] + ([] if os.geteuid() == 0 else ['--user'])
         unit = f'infraternal-session-{self.id.hex}.scope'
-        loaded = subprocess.run(control + ['show', unit, '-p', 'LoadState', '--value'], capture_output=True, text=True)
+        loaded = subprocess.run(control + ['show', unit, '-p', 'LoadState', '--value'],
+                                capture_output=True, text=True, timeout=20)
         if loaded.returncode or loaded.stdout.strip() != 'loaded':
             return  # Detached launch already inherits the fixture's cgroup.
-        # systemd moves the shim out of the gate's scope so it can survive its
-        # daemon. Without this explicit runtime property, producer deadlines
-        # measure a default-priority shim against high-priority build jobs.
         subprocess.run(control + ['set-property', '--runtime', unit, f'CPUWeight={weight}'],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20)
 
     def open(self, cols=80, rows=24):
         action = b'terminal.open'
@@ -157,17 +187,40 @@ class Binary:
             assert stream == 1
         assert (stream, kind) == (0, 0x31) and body[4] == 1, body
         self.id = uuid.UUID(json.loads(body[5:])['session_id'])
-        self.inherit_scope_priority()
+        self.benchmark_scope()
         self.out = self.entered = self.acked = 0
         self.credit_pending = 0
+        self.credit_available = 0
         self.data.clear()
         return self.id
+
+    def benchmark_scope(self):
+        """Keep an explicitly weighted benchmark's independently managed shim at that weight."""
+        weight = self.cpu_weight
+        if weight is None:
+            return
+        assert weight.isdecimal() and 1 <= int(weight) <= 10000
+        path = self.state / 'sessions' / f'{self.id.hex}.sock'
+        with socket.socket(socket.AF_UNIX) as peer:
+            peer.settimeout(20)
+            peer.connect(str(path))
+            hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
+        # Authenticate ownership before changing any scope. These are the same
+        # content-free Hello identity/PID fields used by fixture cleanup.
+        assert hello[0] == 1 and hello[11:27] == self.id.bytes
+        pid = struct.unpack('<I', hello[27:31])[0]
+        if Path(f'/proc/{pid}/cgroup').read_text() == Path(f'/proc/{self.child.pid}/cgroup').read_text():
+            return  # The detached fallback already inherits the caller's scope.
+        # The remote flood harness uses the same exact-UUID property update
+        # after its independently created session; keep one implementation.
+        self.inherit_scope_priority(weight)
 
     def attach(self):
         self.send(1, 0x16, self.id.bytes + struct.pack('<QQ', self.out, self.acked))
         # Each new attachment owns a fresh explicit credit window. Old batched
         # refunds cannot fund a new connection; no grant is implicit in Attach.
         self.credit_pending = 0
+        self.credit_available = 0
         self.send(1, 0x14, struct.pack('<I', 1048576))
         self.process()
 
@@ -207,6 +260,7 @@ class Binary:
             seq = struct.unpack('<Q', body[:8])[0]
             assert seq == self.out, (seq, self.out)
             self.out += len(body) - 8
+            self.credit_available -= len(body) - 8
             self.data.extend(body[8:])
             if credit:
                 # Refund in bounded batches to avoid one scheduling round per
@@ -224,12 +278,31 @@ class Binary:
             assert seq >= self.out
             self.out = seq
             self.snapshots.append((seq, len(body) - 8))
+            self.credit_available -= len(body) - 8
         elif kind == 0x33:
             assert body[:4] == bytes(4)
             self.events.append(json.loads(body[4:]))
         else:
             raise AssertionError((kind, body))
         return kind
+
+    def drain_credit(self):
+        """Consume the exact funded window; socket silence is not an output fence."""
+        while self.credit_available > 0:
+            self.process(credit=False)
+        assert self.credit_available == 0, 'output exceeded its explicit credit'
+
+    def fence(self):
+        """Drain writer messages preceding an ordered control Pong without refunding output."""
+        self.fence_nonce += 1
+        body = struct.pack('<QQ', self.fence_nonce, 0)
+        self.send(0, 0x08, body)
+        while True:
+            frame = self.read()
+            if frame[:2] == (0, 0x09):
+                assert frame[2] == body
+                return
+            self.process(credit=False, frame=frame)
 
     def until(self, marker, credit=True):
         deadline = time.monotonic() + 20
@@ -259,7 +332,7 @@ class Binary:
 
 class AckBarrier:
     """Proxy only the local shim leg, holding a real PTY-write Ack before delivery."""
-    def __init__(self, state, session, kind=0x18, caps_mask=None):
+    def __init__(self, state, session, kind=0x18, caps_mask=None, on_frame=None, on_disconnect=None):
         self.path = state / 'sessions' / (session.hex + '.sock')
         self.real = self.path.with_suffix('.upstream')
         self.path.rename(self.real)
@@ -271,6 +344,8 @@ class AckBarrier:
         self.release = threading.Event()
         self.caps_mask = caps_mask
         self.kind = kind
+        self.on_frame = on_frame
+        self.on_disconnect = on_disconnect
         self.threshold = None
         self.phase = {}
         self.active = ()
@@ -286,6 +361,8 @@ class AckBarrier:
                 length = struct.unpack('<I', prefix)[0]
                 assert 0 < length <= 1024 * 1024, 'oversized shim proxy frame'
                 body = exact(source, length)
+                if self.on_frame is not None:
+                    self.on_frame(direction, body)
                 if direction == 'output' and body[0] == 1 and self.caps_mask is not None:
                     caps = struct.unpack('<Q', body[3:11])[0] & self.caps_mask
                     body = body[:3] + struct.pack('<Q', caps) + body[11:]
@@ -299,6 +376,8 @@ class AckBarrier:
         except (EOFError, BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
+            if direction == 'input' and self.on_disconnect is not None:
+                self.on_disconnect()
             # Closing either leg interrupts its companion pump, including a
             # partial frame read/write, before the next connection is accepted.
             for sock in (source, destination):

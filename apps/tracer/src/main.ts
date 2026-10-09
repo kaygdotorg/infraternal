@@ -4,7 +4,12 @@ import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/s
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { installFocusRing } from "../../../packages/ui/src/focus-ring";
+import { applyFontVars, loadFont } from "../../../packages/ui/src/fonts";
+import { initialFont } from "./font-preference";
 import { mountOnboarding } from "./onboarding";
+import { BRAND_MARK } from "./auth-marks";
+import { loading } from "../../../packages/ui/src/countup";
+import { releaseAuthScheme, useAuthScheme } from "./auth-scheme";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
@@ -41,6 +46,8 @@ declare global {
         viewportY: number;
         cursorVisible: boolean;
         fontSize: number;
+        fontFamily: string;
+        fontId: string;
         wasmMemoryBytes: number;
         themeColorsMs: number;
         themeRenderMs: number;
@@ -78,13 +85,20 @@ let welcomeTimer = 0;
 let foregroundListenerInstalled = false;
 let backdropTimer = 0;
 
+/** True only in builds made with INFRATERNAL_CLUSTERS_PREVIEW=1 (see build.ts); false removes the mockup from the bundle. */
+declare const __CLUSTERS_PREVIEW__: boolean;
+
 void start();
 
 async function start(): Promise<void> {
   installFocusRing();
   installForegroundListener();
+  // The chosen font applies to the whole app, sign-in card included, before the first paint.
+  // The default is already declared in CSS and preloaded; another font is fetched here.
+  const font = initialFont();
+  applyFontVars(font, document.documentElement);
   const fontsReady = Promise.race([
-    document.fonts.load('450 14px "Maple Mono NF"').then(() => undefined),
+    loadFont(font),
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
   ]).catch(() => undefined);
   try {
@@ -142,18 +156,52 @@ function installForegroundListener(): void {
   });
 }
 
+/**
+ * A mockup preview (`?mock=1&proto=...`) re-creates its mock session by loading the page again: the
+ * test double hands the session cookie out on that load. After the double restarts, a tab that
+ * was open lands here instead of on a dead "Could not reach the server".
+ */
+const previewProto = (): boolean => { if (!__CLUSTERS_PREVIEW__) return false; const q = new URLSearchParams(location.search); return q.get("mock") === "1" && !!q.get("proto"); };
+let healTimer = 0;
+function healPreview(): void {
+  if (!previewProto()) return;
+  window.clearInterval(healTimer);
+  healTimer = window.setInterval(() => {
+    void fetch("/health", { cache: "no-store" }).then((r) => { if (r.ok) location.reload(); }).catch(() => undefined);
+  }, 2000);
+}
+
+/** Applies the sign-in scheme (light or dark); the backdrop follows later scheme changes live. */
+const authLight = (): boolean => useAuthScheme((light) => backdrop?.setLight(light));
+
+/**
+ * The access card for a server that cannot be reached. It is the sign-in card with different words:
+ * the same mark, title, lede and full-width primary, through the sign-in card's own classes, so the
+ * mark, the lede-to-action gap and the padding cannot drift from it. The explanation is the lede (it is
+ * what the person reads next); pressing "Try again" shows the shared wait counter on the button.
+ */
 function renderUnavailable(message: string): void {
+  authLight();
   document.documentElement.removeAttribute("data-ui-font");
-  app.innerHTML = `<section class="auth-screen"><section class="auth-card auth-signin">
-    <div class="auth-mark">infraternal</div><h1>Could not reach the server</h1>
-    <p id="status-error" class="auth-message" role="alert"></p>
-    <button id="retry-status" class="auth-primary" type="button">Try again</button></section></section>`;
+  app.innerHTML = `<section class="auth-screen" aria-label="Server unavailable"><section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="unavailable-title">
+    <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
+    <h1 id="unavailable-title">Could not reach the server</h1>
+    <p id="status-error" class="auth-lede" role="alert"></p>
+    <button id="retry-status" class="auth-primary auth-login" type="button"><span>Try again</span><span class="busy-count" hidden></span></button></section></section>`;
   mustGet<HTMLElement>("#status-error").textContent = message;
-  mustGet<HTMLButtonElement>("#retry-status").addEventListener("click", () => { void refreshAuth(); }, { once: true });
+  const retry = mustGet<HTMLButtonElement>("#retry-status");
+  retry.addEventListener("click", () => {
+    if (previewProto()) { location.reload(); return; }
+    retry.disabled = true;
+    loading(retry.querySelector<HTMLElement>(".busy-count")!, 400);
+    void refreshAuth();
+  }, { once: true });
+  healPreview();
   scheduleBackdrop();
 }
 
 function renderAuth(setupRequired: boolean, message = ""): void {
+  authLight();
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
     saveBrowserId("tracer.user-id", userId);
@@ -165,6 +213,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
 }
 
 function showWelcome(displayName: string, instant = false): void {
+  authLight();
   document.documentElement.removeAttribute("data-ui-font");
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
@@ -193,7 +242,7 @@ function startBackdrop(): void {
   canvas.style.opacity = "1";
   canvas.style.transition = "none";
   backdrop?.destroy();
-  backdrop = mountFaultyTerminal(canvas);
+  backdrop = mountFaultyTerminal(canvas, authLight());
 }
 
 function scheduleBackdrop(): void {
@@ -235,14 +284,20 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   const identity = knownSession ?? await checkSession();
   const hostName = sessionHostname(identity);
   if (!hostName) {
-    renderUnavailable("The authenticated session did not include the server hostname.");
+    renderUnavailable("Could not read this server's name. Try again.");
     return;
   }
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
   welcomeEffect = undefined;
   stopBackdrop(instant);
+  // The app paints its own theme; the sign-in scheme lets go once the backdrop has faded out.
+  window.setTimeout(() => { if (!app.querySelector(".auth-screen")) releaseAuthScheme(); }, instant ? 0 : 260);
   currentTerminal?.dispose();
+  canvasPrototype?.dispose();
+  canvasPrototype = undefined;
+  productCanvas?.dispose();
+  productCanvas = undefined;
   coreScreen?.dispose();
   performanceProbe?.dispose();
   currentTerminal = undefined;
@@ -250,28 +305,86 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   performanceProbe = undefined;
   const query = new URLSearchParams(location.search);
   const mockMode = query.get("mock") === "1";
+  // One combined preview (D160): `?proto=windows` is the canvas, and the add-host flow opens
+  // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
+  const proto = query.get("proto");
+  const canvasMode = __CLUSTERS_PREVIEW__ && mockMode && (proto === "windows" || proto === "addhost");
+  // Concept mockup for views on one canvas (#89): it brings its own windows and no live terminal.
+  const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
   const predictiveEcho = query.get("predict") === "1";
+  // The canvas is the product screen. The test double's plain page and the latency probe keep the single
+  // terminal screen: the terminal specs and the probe drive that one terminal.
+  const useCanvas = !mockMode && !probeMode;
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
   try {
     const { mountCoreScreen } = await import("./core-screen");
     // The screen mounts only after its selected face is ready, preventing a one-frame
     // fallback and keeping the mobile layout stable while the font loads.
-    await document.fonts.load(uiFont === "mono" ? '450 13px "Maple Mono NF"' : '450 14px "Geist Sans"');
+    await (uiFont === "mono" ? loadFont(initialFont()) : document.fonts.load('450 14px "Geist Sans"'));
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
+      canvas: canvasMode || clustersMode || useCanvas,
+      addHostEntry: canvasMode || clustersMode,
+      ...(clustersMode || useCanvas ? { settingsView: true } : {}),
+      ...(identity?.display_name ? { displayName: identity.display_name } : {}),
+      ...(identity?.username ? { username: identity.username } : {}),
+      ...(query.get("footer") === "b" ? { footerVariant: "b" as const } : {}),
       ...(recoveryUiEnabled() ? {
         onRecovery: () => { void showRecovery(); },
         onCancelRecovery: async () => { await recoveryAuth.post("recovery-cancel", {}); await checkForegroundSession(); },
       } : {}),
     });
   } catch (error: unknown) {
+    screen?.dispose();
     renderUnavailable(safeMessage(error));
     return;
   }
   coreScreen = screen;
+  if (clustersMode) {
+    const { mountMockup } = await import("./canvas/mock");
+    const scene = Number(query.get("scene"));
+    const roleParam = query.get("role");
+    let clusters: Awaited<ReturnType<typeof mountMockup>>;
+    try {
+      clusters = await mountMockup(screen, {
+      ...(scene ? { scene } : {}),
+      ...(roleParam === "viewer" || roleParam === "operator" || roleParam === "new" || roleParam === "asha" ? { role: roleParam } : {}),
+    });
+    } catch (error: unknown) { console.error("clusters mockup failed", error); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
+    canvasPrototype = clusters;
+    // The flow carries on: the live terminal opens into the build-01 window the mockup hosts it in.
+  }
+  if (canvasMode) {
+    // Gated mockup (D162): the window canvas and the add-host flow on it, built against the
+    // test double only. The canvas mounts first; the flow hangs its windows on the canvas.
+    const { mountCanvas } = await import("./canvas/mock/windows-proto/canvas");
+    const { mountAddHostPrototype } = await import("./add-host-prototype");
+    const canvas = mountCanvas(screen, hostName);
+    let addHost: { dispose(): void } | undefined;
+    try { addHost = await mountAddHostPrototype(screen, canvas, query.get("empty") === "1", proto === "addhost" || query.get("wizard") === "1"); }
+    catch (error: unknown) { canvas.dispose(); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
+    canvasPrototype = { dispose() { addHost?.dispose(); canvas.dispose(); } };
+  }
+  if (useCanvas) {
+    screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
+    try {
+      const { mountProductCanvas } = await import("./canvas/product");
+      productCanvas = await mountProductCanvas(screen, {
+        host: { name: hostName, ...(identity?.username ? { user: identity.username } : {}) },
+        accountId: activeUserId ?? "account",
+        predictiveEcho,
+        onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen.setRecoveryPending(readyAt); },
+      });
+    } catch (error: unknown) {
+      console.error("canvas failed to start", error);
+      screen.dispose();
+      renderUnavailable(safeMessage(error));
+    }
+    return;
+  }
   if (probeMode) performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
   const probeHooks = performanceProbe?.hooks();
   // Session continuity across reloads (integration, #34): the tab remembers its
@@ -306,6 +419,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
       screen: screen.stage,
       status: screen.status,
       theme: screen.theme(),
+      font: screen.font(),
       hooks,
       predictiveEcho,
       onRoundTrip: (milliseconds) => screen?.setRoundTrip(milliseconds),
@@ -319,6 +433,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     });
     currentTerminal = client;
     screen.bindTerminal(client);
+    if (canvasMode && mockMode && query.get("fixture") !== "none") void seedItalicFixture(client);
     performanceProbe?.bind(client);
     if (mockMode) {
       window.__tracerTestDouble = {
@@ -365,6 +480,7 @@ async function showRecovery(): Promise<void> {
   if (!recoveryUiEnabled()) return;
   const { mountRecovery } = await import("./recovery");
   currentTerminal?.dispose(); currentTerminal = undefined;
+  productCanvas?.dispose(); productCanvas = undefined;
   coreScreen?.dispose(); coreScreen = undefined;
   performanceProbe?.dispose(); performanceProbe = undefined;
   delete window.__tracerTestDouble;
@@ -379,6 +495,9 @@ async function showRecovery(): Promise<void> {
 
 /** URL choices win and are remembered when storage is available; private mode still works. */
 function uiFontPreference(): UiFont {
+  // The canvas mockup is monospace throughout (owner rule, docs/design/TASTE.md §2).
+  const proto = new URLSearchParams(location.search).get("proto");
+  if (proto === "windows" || proto === "addhost" || proto === "clusters") return "mono";
   const requested = new URLSearchParams(location.search).get("ui");
   if (requested === "sans" || requested === "mono") {
     try { window.localStorage.setItem("tracer.ui-font", requested); } catch { /* The URL remains the preference without storage. */ }
@@ -405,6 +524,9 @@ function probeCount(value: string | null): number {
 }
 
 let recoveryNoticeGeneration = 0;
+let canvasPrototype: { dispose(): void } | undefined;
+/** The product canvas: Console on real sessions (a lazy chunk, loaded after sign-in). */
+let productCanvas: { dispose(): void } | undefined;
 
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
@@ -414,9 +536,12 @@ async function checkForegroundSession(): Promise<void> {
     const session = await checkSession();
     // A delayed HTTP snapshot must not overwrite a newer WebSocket state event.
     if (session && noticeGeneration === recoveryNoticeGeneration) coreScreen?.setRecoveryPending(session.recovery_pending?.ready_at);
+    if (!session && previewProto()) { location.reload(); return; }
     if (!session) {
       currentTerminal?.dispose();
       currentTerminal = undefined;
+      productCanvas?.dispose();
+      productCanvas = undefined;
       performanceProbe?.dispose();
       performanceProbe = undefined;
       coreScreen?.dispose();
@@ -425,9 +550,11 @@ async function checkForegroundSession(): Promise<void> {
       activeUserId = undefined;
       renderAuth(false, "Your session ended. Sign in again to reconnect.");
     }
-  } catch (error: unknown) {
-    const status = document.querySelector<HTMLElement>("#connection-status");
-    if (status) status.textContent = safeMessage(error);
+  } catch {
+    // The session check is background housekeeping, not something the person asked for. When it
+    // cannot complete (the server restarting, the link dropping, a proxy answering with a page)
+    // nothing is said: the terminal's own reconnection shows state through the status icon, and
+    // the next return to the tab checks again. Only a definite "no session" (401) changes the UI.
   } finally {
     checkingResume = false;
   }
@@ -458,4 +585,23 @@ function mustGet<ElementType extends HTMLElement = HTMLElement>(selector: string
 
 function missingMount(): never {
   throw new Error("tracer mount point is missing");
+}
+
+/**
+ * Preview only: writes a prompt line and italic, bold and bold-italic output into the fresh mock
+ * terminal, so every font in the picker can be judged on slanted text (a font without a real italic
+ * is slanted by the browser, which is part of what the owner compares). `?fixture=none` skips it.
+ */
+async function seedItalicFixture(client: import("./terminal").TerminalClient): Promise<void> {
+  for (let attempt = 0; attempt < 40 && !client.isConnected; attempt++) await new Promise((resolve) => setTimeout(resolve, 100));
+  const text = [
+    "infraternal-dev:~$ printf '\\e[3mitalic\\e[0m'",
+    "\u001b[3mitalic: the quick brown fox jumps over the lazy dog\u001b[0m",
+    "\u001b[1mbold\u001b[0m regular \u001b[1;3mbold italic\u001b[0m \u001b[3m0123456789 -> => != ===\u001b[0m",
+    "",
+    "infraternal-dev:~$ ",
+  ].join("\r\n");
+  try {
+    await fetch("/__mock/text-output", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+  } catch { /* a resumed session or a closed socket: the fixture is a convenience, never an error */ }
 }
