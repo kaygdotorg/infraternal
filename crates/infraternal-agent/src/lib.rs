@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod channel;
 pub mod daemon;
+pub mod facts;
 pub mod relay;
 pub mod remote_native;
 pub mod remote_quic;
