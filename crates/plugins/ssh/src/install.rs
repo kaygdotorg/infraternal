@@ -119,6 +119,11 @@ impl Installation {
     pub async fn stage(&self, binary: &Path) -> Result<(), Failure> {
         let digest = binary_digest(binary).await?;
         self.session.run(&self.script(&format!(r#"
+# A retired fresh transaction still owns final cleanup outside the base.
+# Admit no replacement until its receipt is removed after successful cleanup.
+for receipt in "$base".bootstrap-rollback-*; do
+    [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || exit 72
+done
 if [ -e "$base" ] || [ -L "$base" ]; then
     [ ! -L "$base" ] && [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
 else
@@ -320,14 +325,27 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
     /// # Errors
     /// Reports an unreachable host/failed cleanup; callers retain that fact in progress.
     pub async fn rollback(&self) -> Result<(), Failure> {
-        self.session.run(&self.script(r#"
+        self.session.run(&self.script(&format!("{FRESH_CLEANUP}\n{}", r#"
+if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    validate_receipt
+    if [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
+        finish_fresh
+        exit 0
+    fi
+fi
 if [ ! -e "$base" ] && [ ! -L "$base" ]; then exit 0; fi
-[ -f "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
+[ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
 stage="$base/.bootstrap-lock"
 if [ ! -e "$stage" ] && [ ! -L "$stage" ]; then exit 0; fi
 [ -d "$stage" ] && [ ! -L "$stage" ] || exit 71
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
 # Refused stop retains both installation and policy receipts for cleanup retry.
+kind=$(cat "$stage/kind")
+case "$kind" in
+    fresh) validate_parent;;
+    upgrade) :;;
+    *) exit 71;;
+esac
 if [ -f "$stage/activating" ]; then
     $manager stop infraternal-agent.service >/dev/null 2>&1
 fi
@@ -364,19 +382,64 @@ if [ -f "$stage/activating" ]; then
     [ ! -f "$stage/was-enabled" ] || $manager enable infraternal-agent.service
     [ ! -f "$stage/was-active" ] || $manager start infraternal-agent.service
 fi
-kind=$(cat "$stage/kind")
+if [ "$kind" = fresh ]; then
+    if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
+        printf '%s %s fresh %s\n' "$host" "$transaction" "$(stat -c '%d:%i' "$base")" > "$receipt"
+    fi
+    validate_receipt
+fi
 rm -rf "$stage"
 if [ "$kind" = fresh ]; then
-    # A manual receipt belongs only to this fresh transaction, never an upgrade.
-    rm -f "$base/.bootstrap-ready"
-    rm -f "$base/.bootstrap-owner"
-    rmdir "$base/bin" 2>/dev/null || :
-    rmdir "$base" 2>/dev/null || :
+    finish_fresh
 fi
-"#), Input::Empty).await?;
+"#)), Input::Empty).await?;
         Ok(())
     }
 }
+
+// This public ownership receipt survives removal of the transaction directory,
+// owner marker and base. Noclobber creation, bounded reads, uid/mode and directory
+// identity checks preserve exact binding
+// prevent stale or foreign cleanup from being mistaken for this fresh attempt.
+const FRESH_CLEANUP: &str = r#"
+receipt="$base.bootstrap-rollback-$transaction"
+validate_parent() {
+    parent=$(dirname "$base")
+    [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
+    mode=$(stat -c '%a' "$parent")
+    [ "$((0$mode & 022))" -eq 0 ] || exit 71
+}
+validate_receipt() {
+    validate_parent
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] && [ -O "$receipt" ] && [ "$(stat -c '%a' "$receipt")" = 600 ] || exit 71
+    size=$(stat -c '%s' "$receipt")
+    [ "$size" -ge 76 ] && [ "$size" -le 114 ] || exit 71
+    binding="$host $transaction fresh "
+    data=$(cat "$receipt")
+    case "$data" in "$binding"*) identity=${data#"$binding"};; *) exit 71;; esac
+    case "$identity" in ''|:*|*:|*:*:*|*[!0-9:]*) exit 71;; esac
+    case "$identity" in *:*) :;; *) exit 71;; esac
+    if [ -e "$base" ] || [ -L "$base" ]; then
+        [ "$(stat -c '%d:%i' "$base")" = "$identity" ] || exit 71
+    fi
+}
+finish_fresh() {
+    validate_receipt
+    if [ -e "$base" ] || [ -L "$base" ]; then
+        [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ] || exit 72
+        if [ -e "$base/.bootstrap-owner" ] || [ -L "$base/.bootstrap-owner" ]; then
+            [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
+        fi
+        # Never recursively delete unjournaled contents. Unexpected data keeps
+        # the receipt and makes cleanup fail rather than claiming success.
+        rm -f "$base/.bootstrap-ready"
+        rmdir "$base/bin" 2>/dev/null || :
+        [ ! -e "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] || rm -f "$base/.bootstrap-owner"
+        rmdir "$base"
+    fi
+    rm -f "$receipt"
+}
+"#;
 
 async fn binary_digest(path: &Path) -> Result<String, Failure> {
     let mut file = tokio::fs::File::open(path)

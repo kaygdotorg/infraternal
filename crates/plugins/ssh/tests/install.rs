@@ -119,6 +119,18 @@ impl Fixture {
         )
         .unwrap()
     }
+    fn receipt(&self) -> PathBuf {
+        std::fs::read_dir(self.base().parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("infraternal.bootstrap-rollback-")
+            })
+            .unwrap()
+    }
     fn base(&self) -> PathBuf {
         self.root.join(".local/share/infraternal")
     }
@@ -492,4 +504,199 @@ async fn interrupted_linger_reply_retains_intent_for_cleanup() {
     );
     transaction.rollback().await.unwrap();
     assert!(!fixture.root.join("linger").exists());
+}
+
+#[tokio::test]
+async fn fresh_rollback_resumes_after_transaction_directory_removal() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    let stage = fixture.base().join(".bootstrap-lock");
+    // Model a stop after deleting the transaction directory but before deleting
+    // its owner marker and empty base. The caller still has cleanup coordinates.
+    executable(
+        &fixture.root.join("tools/rm"),
+        &format!(
+            "#!/bin/sh\n/usr/bin/rm \"$@\" || exit $?\n[ \"${{2-}}\" != '{}' ] || exit 1\n",
+            stage.display()
+        ),
+    );
+    assert!(transaction.rollback().await.is_err());
+    assert!(!stage.exists());
+    assert!(fixture.base().join(".bootstrap-owner").exists());
+    transaction.rollback().await.unwrap();
+    assert!(
+        !fixture.base().exists(),
+        "resumed fresh rollback retained owned installation root"
+    );
+}
+
+#[tokio::test]
+async fn fresh_cleanup_resumes_after_owner_marker_removal_with_a_fresh_session() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let owner = fixture.base().join(".bootstrap-owner");
+    executable(
+        &fixture.root.join("tools/rm"),
+        &format!(
+            "#!/bin/sh\n/usr/bin/rm \"$@\" || exit $?\n[ \"${{2-}}\" != '{}' ] || exit 1\n",
+            owner.display()
+        ),
+    );
+    assert!(transaction.rollback().await.is_err());
+    assert!(!owner.exists());
+    let resumed = Installation::resume_cleanup(
+        Arc::new(Local {
+            root: fixture.root.clone(),
+        }),
+        &fixture.target,
+        transaction.cleanup_coordinates(),
+    )
+    .unwrap();
+    resumed.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+}
+
+#[tokio::test]
+async fn fresh_cleanup_resumes_after_base_removal_and_retires_its_receipt() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    executable(
+        &fixture.root.join("tools/rmdir"),
+        &format!(
+            "#!/bin/sh\n/usr/bin/rmdir \"$@\" || exit $?\n[ \"${{1-}}\" != '{}' ] || exit 1\n",
+            fixture.base().display()
+        ),
+    );
+    assert!(transaction.rollback().await.is_err());
+    assert!(!fixture.base().exists());
+    let receipt = fixture.receipt();
+    transaction.rollback().await.unwrap();
+    assert!(!receipt.exists());
+}
+
+#[tokio::test]
+async fn pending_fresh_cleanup_refuses_replacement_staging_until_finished() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let stage = fixture.base().join(".bootstrap-lock");
+    executable(
+        &fixture.root.join("tools/rm"),
+        &format!(
+            "#!/bin/sh\n/usr/bin/rm \"$@\" || exit $?\n[ \"${{2-}}\" != '{}' ] || exit 1\n",
+            stage.display()
+        ),
+    );
+    assert!(transaction.rollback().await.is_err());
+    let replacement = fixture.transaction();
+    assert!(replacement.stage(&fixture.binary).await.is_err());
+    std::fs::remove_file(fixture.root.join("tools/rm")).unwrap();
+    transaction.rollback().await.unwrap();
+    replacement.stage(&fixture.binary).await.unwrap();
+    replacement.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn cleanup_receipt_cannot_authorize_a_replaced_unowned_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let owner = fixture.base().join(".bootstrap-owner");
+    executable(
+        &fixture.root.join("tools/rm"),
+        &format!(
+            "#!/bin/sh\n/usr/bin/rm \"$@\" || exit $?\n[ \"${{2-}}\" != '{}' ] || exit 1\n",
+            owner.display()
+        ),
+    );
+    assert!(transaction.rollback().await.is_err());
+    // Retain the old directory inode, then replace the path with unowned data.
+    std::fs::rename(fixture.base(), fixture.root.join("saved-base")).unwrap();
+    std::fs::create_dir(fixture.base()).unwrap();
+    std::fs::set_permissions(fixture.base(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let foreign = fixture.base().join(".bootstrap-ready");
+    std::fs::write(&foreign, "public foreign readiness receipt").unwrap();
+    assert!(transaction.rollback().await.is_err());
+    assert!(foreign.exists());
+}
+
+#[tokio::test]
+async fn malformed_or_exposed_cleanup_receipts_never_remove_the_owned_root() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for kind in ["link", "mode", "length", "binding"] {
+        let fixture = Fixture::new();
+        let transaction = fixture.transaction();
+        transaction.stage(&fixture.binary).await.unwrap();
+        let stage = fixture.base().join(".bootstrap-lock");
+        executable(
+            &fixture.root.join("tools/rm"),
+            &format!(
+                "#!/bin/sh\n/usr/bin/rm \"$@\" || exit $?\n[ \"${{2-}}\" != '{}' ] || exit 1\n",
+                stage.display()
+            ),
+        );
+        assert!(transaction.rollback().await.is_err());
+        let receipt = fixture.receipt();
+        match kind {
+            "link" => {
+                let copy = fixture.root.join("public-receipt-copy");
+                std::fs::rename(&receipt, &copy).unwrap();
+                symlink(copy, &receipt).unwrap();
+            }
+            "mode" => {
+                std::fs::set_permissions(&receipt, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            "length" => std::fs::write(&receipt, [b'x'; 115]).unwrap(),
+            "binding" => {
+                let public = std::fs::read_to_string(&receipt).unwrap();
+                std::fs::write(
+                    &receipt,
+                    public.replacen(
+                        &fixture.join.host.simple().to_string(),
+                        &uuid::Uuid::new_v4().simple().to_string(),
+                        1,
+                    ),
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(transaction.rollback().await.is_err());
+        assert!(fixture.base().join(".bootstrap-owner").exists());
+    }
+}
+
+#[tokio::test]
+async fn fresh_cleanup_refuses_a_shared_writable_receipt_parent_before_mutation() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    std::fs::set_permissions(
+        fixture.base().parent().unwrap(),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+    assert!(transaction.rollback().await.is_err());
+    assert!(fixture.base().join(".bootstrap-lock/transaction").exists());
+}
+
+#[tokio::test]
+async fn linked_owner_marker_is_refused_before_retiring_the_transaction() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let public = fixture.root.join("public-host-binding");
+    std::fs::write(&public, format!("{}\n", fixture.join.host.simple())).unwrap();
+    let owner = fixture.base().join(".bootstrap-owner");
+    std::fs::remove_file(&owner).unwrap();
+    symlink(public, owner).unwrap();
+    assert!(transaction.rollback().await.is_err());
+    assert!(fixture.base().join(".bootstrap-lock/transaction").exists());
 }
