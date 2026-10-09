@@ -144,3 +144,13 @@ async fn next_shared(
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[path = "session_commands_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[path = "session_commands_bench.rs"]
+mod measurements;
