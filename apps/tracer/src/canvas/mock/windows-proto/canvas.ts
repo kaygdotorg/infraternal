@@ -35,7 +35,8 @@ import type { ToastController } from "../../../../../../packages/ui/src/toast";
 import { registerShortcuts } from "../../../../../../packages/ui/src/shortcuts";
 import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResize, type WindowResizeHost } from "../../../../../../packages/ui/src/window-resize";
 import { previewLine } from "../../windows/preview";
-import { openDetailsPopover, type DetailsPopover } from "./popover";
+import { openDetailsPopover, type DetailsPopover } from "../../windows/details.on-demand";
+import { prototypeFacts } from "./details-facts";
 import type { BranchSection, BranchedMenu } from "../../../../../../packages/ui/src/branched";
 import type { CoreScreen } from "../../../core-screen";
 
@@ -491,10 +492,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     popover?.close("keyboard");
     popover = openDetailsPopover(stage, target.card.pill, {
       windowId: target.id,
-      host: target.host,
-      session: target.session,
-      hostLabel: target.live ? hostName : target.host.name,
-      icons,
+      read: () => prototypeFacts(target.host, target.session, target.live ? hostName : target.host.name, icons),
     }, source, () => { popover = undefined; });
   };
 

@@ -35,6 +35,7 @@ import { createTree } from "./toolbar/tree";
 import { createViews } from "./views/world";
 import { createViewList } from "./toolbar/viewlist";
 import { createFloatHandle } from "./windows/float-handle";
+import { createDetailsHandle } from "./windows/details-handle";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
 import { createSessionHooks } from "./windows/session-hooks";
@@ -98,7 +99,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--inv", inv); },
     onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
-    onFrame: () => { cx.invalidate(); cx.memory.cull(); },
+    onFrame: () => { cx.invalidate(); cx.memory.cull(); if (cx.details?.isOpen()) cx.details.close(true); },
     onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); },
     onFlight: () => cx.view.hideSummary(),
   });
@@ -110,6 +111,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.view = createViews(cx);
   cx.win = createWindows(cx);
   cx.float = createFloatHandle(cx);
+  if (options.adapters.details) cx.details = createDetailsHandle(cx, options.adapters.details);
   cx.inputLock = createInputLock(cx);
   if (options.adapters.inventory) cx.sessionUi = createSessionHooks(cx);
   cx.visibility = createVisibility(cx);
@@ -204,6 +206,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.sharing?.dispose();
       cx.mesh?.dispose();
       cx.float.dispose();
+      cx.details?.dispose();
       cx.visibility.dispose();
       cx.view.clear();
       cx.view.dispose();

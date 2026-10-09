@@ -33,6 +33,7 @@ import type { Flip } from "./layout/flip";
 import type { ViewsModule } from "./views/world";
 import type { WindowsModule } from "./windows/lifecycle";
 import type { FloatModule } from "./windows/float.on-demand";
+import type { DetailsModule } from "./windows/details.on-demand";
 import type { InputLock } from "./windows/input-lock";
 import type { Visibility } from "./windows/visibility";
 import type { PillModule } from "./toolbar/pill";
@@ -111,6 +112,8 @@ export interface Adapters {
   settings: SettingsSource;
   /** The Containers list; absent until the host API exists, and the Containers view is then not offered. */
   containers?: { /** The host whose containers these are. */ host: string; rows(): ContainerRow[] };
+  /** Facts for the window details popover (a pill pressed without moving); absent, and the pill opens nothing. */
+  details?: import("./windows/details-source").DetailsSource;
   /** Starts the add-host flow (#78); absent until it exists, and the empty-state button is then not drawn. */
   addHost?: () => void;
 }
@@ -147,6 +150,8 @@ export interface Ctx {
   view: ViewsModule;
   win: WindowsModule;
   float: FloatModule;
+  /** The window details popover; absent when the instance has no `DetailsSource`. */
+  details?: DetailsModule;
   inputLock: InputLock;
   /** The session manager, the final-screen strip and the size badge; exists only with an inventory. */
   sessionUi?: SessionUi;
