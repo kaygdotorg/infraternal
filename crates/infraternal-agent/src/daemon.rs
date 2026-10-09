@@ -260,6 +260,14 @@ async fn run_channel(
                     match decoded.frame {
                         Frame::Hello {version: 1, ..} if stream == 0 => {}
                         Frame::Ping {nonce, sent_us} if stream == 0 => emit(&tx, Message::Pong(nonce, sent_us)).await?,
+                        Frame::Call {call_id, action_id: "host.facts", input_json} if stream == 0 => {
+                            if crate::facts::accepts_request(input_json) {
+                                let report = serde_json::to_vec(&crate::facts::HostFacts::collect())?;
+                                emit(&tx, Message::Result(stream, call_id, true, report)).await?;
+                            } else {
+                                emit(&tx, Message::Result(stream, call_id, false, b"{\"error\":\"invalid host facts request\"}".to_vec())).await?;
+                            }
+                        }
                         Frame::Call {call_id, action_id: "terminal.open", input_json} if execution_uid.is_none() || stream == 0 => {
                             let input = serde_json::from_slice::<Open>(input_json);
                             if let Ok(input) = input && execution_uid.is_none_or(|uid| input.uid == uid) && registry.len() + opens.len() < sessions::MAX_SESSIONS {
