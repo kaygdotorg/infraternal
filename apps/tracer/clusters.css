@@ -317,3 +317,6 @@
    levels' values are unchanged: the blur is back the moment the camera rests (about 140 ms after the last frame).
    `data-canvas-moving` is one attribute write per move, never per frame (camera/camera.ts). */
 .terminal-screen:is([data-canvas-moving], [data-canvas-flipping]) :is(.ui-window, .ui-pill, .ui-overlay-surface, .ui-panel) { -webkit-backdrop-filter: none; backdrop-filter: none; }
+
+/* The summary card is a card of its own (counts and labels), so it takes no halo from the overlay material. */
+.cl-summary, .cl-summary * { text-shadow: none; }

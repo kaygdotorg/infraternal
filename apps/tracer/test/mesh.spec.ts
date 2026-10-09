@@ -457,6 +457,8 @@ async function expectIconButtons(tip: ReturnType<Page["locator"]>, names: [strin
   }
   // Text is crisp at rest: nothing in the popover carries the material's halo around a button.
   expect(await buttons.evaluateAll((bs) => bs.map((b) => getComputedStyle(b).textShadow))).toEqual(["none", "none"]);
+  // Nor does any text of the card: the halo is for text straight on glass, and on this card it is a smear around the glyphs.
+  expect(await tip.evaluate((root) => [root, ...root.querySelectorAll("*")].filter((e) => getComputedStyle(e).textShadow !== "none").length)).toBe(0);
 }
 
 // ---- snap-fit: an arrow end follows the pointer 1:1, snaps in one frame and holds still; no spring -----------------
