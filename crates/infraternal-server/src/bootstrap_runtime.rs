@@ -15,6 +15,7 @@ use infraternal_plugin_ssh::{
     openssh::OpenSsh,
     probe::Check,
     transport::{Credentials, Operation, Secret},
+    trust::TrustedOpenSsh,
 };
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -64,16 +65,19 @@ pub(crate) fn default_runner(
 ) -> Result<Bootstrap, ServerError> {
     let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
     Ok(Bootstrap::new(
-        Arc::new(AutoAuth::new(Arc::new(OpenSsh {
-            ssh: "ssh".into(),
-            ssh_agent: "ssh-agent".into(),
-            ssh_add: "ssh-add".into(),
-            ssh_keyscan: "ssh-keyscan".into(),
-            ssh_keygen: "ssh-keygen".into(),
-            askpass_binary: executable.clone(),
-            scratch: data_dir.join("ssh"),
-            command_timeout: Duration::from_secs(30),
-        }))),
+        Arc::new(AutoAuth::new(Arc::new(TrustedOpenSsh::new(
+            OpenSsh {
+                ssh: "ssh".into(),
+                ssh_agent: "ssh-agent".into(),
+                ssh_add: "ssh-add".into(),
+                ssh_keyscan: "ssh-keyscan".into(),
+                ssh_keygen: "ssh-keygen".into(),
+                askpass_binary: executable.clone(),
+                scratch: data_dir.join("ssh"),
+                command_timeout: Duration::from_secs(30),
+            },
+            data_dir.join("ssh-trust"),
+        )))),
         Arc::new(PendingRemoteRuntime {
             auth: Some(auth),
             key,
