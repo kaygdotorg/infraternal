@@ -7,4 +7,6 @@ mod runtime;
 mod web_assets;
 mod websocket;
 
-pub use runtime::{ProxyNetwork, ServerConfig, ServerError, TlsFiles, serve};
+pub use runtime::{
+    ProxyNetwork, ServerConfig, ServerError, TlsFiles, serve, serve_with_plugin_descriptors,
+};

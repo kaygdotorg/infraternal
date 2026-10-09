@@ -1,6 +1,11 @@
 //! Builds the static compiled plugin registry shared by embedded and remote agent runners [D198].
 
-use infraternal_plugin_api::{PluginError, PluginRegistry};
+use infraternal_plugin_api::{PluginDescriptor, PluginError, PluginRegistry};
+
+#[cfg(feature = "plugin-host-facts")]
+const DESCRIPTORS: &[&PluginDescriptor] = &[&infraternal_plugin_host_facts::DESCRIPTOR];
+#[cfg(not(feature = "plugin-host-facts"))]
+const DESCRIPTORS: &[&PluginDescriptor] = &[];
 
 /// Host role bound to one agent process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9,6 +14,12 @@ pub enum ExecutionMode {
     Embedded,
     /// A separately managed host.
     Remote,
+}
+
+/// Descriptors compiled into this infraternal agent binary, for server-side authorization.
+#[must_use]
+pub fn descriptors() -> &'static [&'static PluginDescriptor] {
+    DESCRIPTORS
 }
 
 /// Creates the enabled-by-default registry for an agent execution context.

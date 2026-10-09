@@ -15,6 +15,7 @@ use axum::{
     serve::ListenerExt,
 };
 use axum_server::tls_openssl::OpenSSLConfig;
+use infraternal_plugin_api::PluginDescriptor;
 use serde_json::json;
 use sqlx::{
     SqlitePool,
@@ -180,8 +181,20 @@ pub enum ServerError {
 ///
 /// Returns a sanitized startup, storage, migration, TLS, or listener error.
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
+    serve_with_plugin_descriptors(config, &[]).await
+}
+
+/// Start the control plane with the plugin action catalog compiled into its infraternal agent.
+///
+/// Descriptors stay in one source of truth, while the server can refuse undeclared actions and
+/// authorize declared permissions before any request reaches the embedded infraternal agent.
+pub async fn serve_with_plugin_descriptors(
+    config: ServerConfig,
+    plugin_descriptors: &'static [&'static PluginDescriptor],
+) -> Result<(), ServerError> {
     init_logging();
-    let (app, setup_token) = build_router(config.clone(), None).await?;
+    let (app, setup_token) =
+        build_router_with_plugin_descriptors(config.clone(), None, plugin_descriptors).await?;
     if let Some(token) = setup_token {
         start_setup_token_socket(&config.data_dir, token)?;
     }
@@ -235,6 +248,14 @@ async fn build_router(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
 ) -> Result<(Router, Option<String>), ServerError> {
+    build_router_with_plugin_descriptors(config, supplied_agent, &[]).await
+}
+
+async fn build_router_with_plugin_descriptors(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+    plugin_descriptors: &'static [&'static PluginDescriptor],
+) -> Result<(Router, Option<String>), ServerError> {
     validate_config(&config)?;
     if let Some(web_root) = &config.web_root
         && !web_root.is_dir()
@@ -278,7 +299,8 @@ async fn build_router(
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
         EmbeddedAgent::spawn(executable)
     };
-    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent);
+    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
+        .with_plugin_descriptors(plugin_descriptors);
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)

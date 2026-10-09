@@ -12,6 +12,9 @@ pub struct Session {
     pub device: String,
     pub fresh: i64,
     pub passkey_provider: Option<&'static str>,
+    /// Current owner authority, kept server-side and omitted from session JSON.
+    #[serde(skip)]
+    pub(crate) owner: bool,
 }
 /// Pending recovery discloses only its original deadline, including after bearer expiry.
 #[derive(Serialize)]
@@ -43,7 +46,7 @@ impl Auth {
     async fn read_session(&self, token: &str, now: i64, pending: bool) -> Result<Session> {
         // Keep the diagnostic lookup in the existing write/returning query. The
         // indexed credential ID and user binding identify this session's passkey.
-        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name,(SELECT aaguid FROM passkeys WHERE id=sessions.passkey_id AND user_id=sessions.user_id) AS aaguid,(SELECT ready FROM recovery WHERE user_id=sessions.user_id) AS recovery_ready,(SELECT recovery_version=1 OR recovery_wrap_version=1 FROM users WHERE id=sessions.user_id) AS recovery_words_need_replacing")
+        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name,(SELECT aaguid FROM passkeys WHERE id=sessions.passkey_id AND user_id=sessions.user_id) AS aaguid,(SELECT ready FROM recovery WHERE user_id=sessions.user_id) AS recovery_ready,(SELECT recovery_version=1 OR recovery_wrap_version=1 FROM users WHERE id=sessions.user_id) AS recovery_words_need_replacing,(SELECT owner FROM users WHERE id=sessions.user_id) AS owner")
             .bind(now + SESSION).bind(hash(token)).bind(now).bind(pending).fetch_optional(&self.pool).await?;
         let Some(row) = row else {
             // Successful sessions keep the original single write; cleanup runs only on denial.
@@ -65,6 +68,7 @@ impl Auth {
             device: row.get("device"),
             fresh: row.get("fresh"),
             passkey_provider: provider_name(row.get::<Option<&str>, _>("aaguid")),
+            owner: row.get("owner"),
         })
     }
 

@@ -1,6 +1,42 @@
 //! Real WebSocket regressions for upgrade reservation, revoked idle sockets and clean Close.
 use super::*;
 
+/// Minimal descriptor catalog for the real socket tests of generic host-facts authorization.
+const HOST_FACTS_ACTIONS: &[infraternal_plugin_api::ActionDef] = &[
+    infraternal_plugin_api::ActionDef {
+        id: "host.facts.read",
+        summary: "Read host facts",
+        input_schema: "{}",
+        output_schema: "{}",
+        target: infraternal_plugin_api::Target::Host,
+        effect: infraternal_plugin_api::Effect::Read,
+        permission: "host.facts.read",
+    },
+    infraternal_plugin_api::ActionDef {
+        id: "host.facts.configure",
+        summary: "Configure host facts",
+        input_schema: "{}",
+        output_schema: "{}",
+        target: infraternal_plugin_api::Target::Host,
+        effect: infraternal_plugin_api::Effect::Write,
+        permission: "host.facts.configure",
+    },
+];
+const HOST_FACTS_DESCRIPTOR: infraternal_plugin_api::PluginDescriptor =
+    infraternal_plugin_api::PluginDescriptor {
+        id: "host",
+        api: infraternal_plugin_api::API_VERSION,
+        actions: HOST_FACTS_ACTIONS,
+        settings: infraternal_plugin_api::SettingsDef {
+            schema: "{}",
+            defaults: "{}",
+            configure_action: "host.facts.configure",
+        },
+        role_dependencies: &[],
+    };
+const HOST_FACTS_DESCRIPTORS: &[&infraternal_plugin_api::PluginDescriptor] =
+    &[&HOST_FACTS_DESCRIPTOR];
+
 async fn socket_fixture() -> (Fixture, SocketAddr, tokio::task::JoinHandle<()>) {
     let f = fixture().await;
     let (socket, _peer) = UnixStream::pair().unwrap();
@@ -8,7 +44,8 @@ async fn socket_fixture() -> (Fixture, SocketAddr, tokio::task::JoinHandle<()>) 
         f.auth.clone(),
         f.auth.pool.clone(),
         EmbeddedAgent::from_test_socket(socket),
-    );
+    )
+    .with_plugin_descriptors(HOST_FACTS_DESCRIPTORS);
     let app = crate::websocket::router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -512,4 +549,89 @@ where
         decode_muxed_frame(&wire).unwrap().frame,
         Frame::Pong { nonce: 118, .. }
     ));
+}
+
+/// D29 and plugin.md section 4 require permission checks before host-wide writes reach leg B.
+#[tokio::test(start_paused = true)]
+async fn non_owner_without_host_configure_permission_is_refused_before_leg_b() {
+    let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
+    let f = fixture().await;
+    // Keep the real unlocked session but remove owner authority. No role grant exists.
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    let state = crate::websocket::WebSocketState::new(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        EmbeddedAgent::from_test_socket(socket),
+    )
+    .with_plugin_descriptors(HOST_FACTS_DESCRIPTORS);
+    let app = crate::websocket::router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut receive = BytesMut::new();
+    let hello = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+    assert!(matches!(
+        decode_muxed_frame(&hello).unwrap().frame,
+        Frame::Hello { .. }
+    ));
+    leg_b_send(
+        &mut peer,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "permission-fixture",
+        },
+    )
+    .await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut browser, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "permission-fixture",
+        },
+    )
+    .await;
+    read_welcome(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Call {
+            call_id: 144,
+            action_id: "host.facts.configure",
+            input_json: br#"{"enabled":false}"#,
+        },
+    )
+    .await;
+    let forwarded = tokio::select! {
+        wire = read_leg_b_frame(&mut peer, &mut receive) => {
+            let wire = wire.unwrap();
+            matches!(decode_muxed_frame(&wire).unwrap().frame, Frame::Call { action_id: "host.facts.configure", .. })
+        }
+        wire = read_client_frame(&mut browser) => {
+            assert!(matches!(decode_muxed_frame(&wire).unwrap().frame, Frame::Result { call_id: 144, ok: false, .. }));
+            false
+        }
+        () = tokio::time::sleep(Duration::from_secs(5)) => panic!("configure was not refused"),
+    };
+    server.abort();
+    assert!(
+        !forwarded,
+        "host-wide configuration reached leg B without owner authority or a permission grant"
+    );
 }

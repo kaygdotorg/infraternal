@@ -156,7 +156,10 @@ fn main() -> ExitCode {
                             return ExitCode::from(2);
                         }
                     };
-                    match runtime.block_on(infraternal_server::serve(config)) {
+                    match runtime.block_on(infraternal_server::serve_with_plugin_descriptors(
+                        config,
+                        infraternal_agent::plugins::descriptors(),
+                    )) {
                         Ok(()) => ExitCode::SUCCESS,
                         Err(error) => {
                             eprintln!("server failed: {error}");

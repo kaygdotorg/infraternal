@@ -14,6 +14,7 @@ use axum::{
 };
 use bytes::{Bytes, BytesMut};
 use futures_util::{SinkExt, Stream, StreamExt};
+use infraternal_plugin_api::{ActionDef, PluginDescriptor};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
 };
@@ -63,6 +64,7 @@ pub(crate) struct WebSocketState {
     auth: Auth,
     pool: SqlitePool,
     agent: EmbeddedAgent,
+    plugin_descriptors: &'static [&'static PluginDescriptor],
     #[cfg(test)]
     handshake_timeout: Duration,
     #[cfg(test)]
@@ -80,6 +82,7 @@ impl WebSocketState {
             auth,
             pool,
             agent,
+            plugin_descriptors: &[],
             #[cfg(test)]
             handshake_timeout: HANDSHAKE_TIMEOUT,
             #[cfg(test)]
@@ -89,6 +92,23 @@ impl WebSocketState {
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             users: Arc::default(),
         }
+    }
+
+    /// Use only descriptors compiled into the matching infraternal agent binary.
+    pub(crate) fn with_plugin_descriptors(
+        mut self,
+        plugin_descriptors: &'static [&'static PluginDescriptor],
+    ) -> Self {
+        self.plugin_descriptors = plugin_descriptors;
+        self
+    }
+
+    fn action(&self, action_id: &str) -> Option<ActionDef> {
+        self.plugin_descriptors
+            .iter()
+            .flat_map(|descriptor| descriptor.actions)
+            .find(|action| action.id == action_id)
+            .copied()
     }
 
     /// Keep production's terminal deadline fixed while allowing deadline tests to run quickly.
@@ -154,6 +174,7 @@ async fn upgrade(
     let Ok(session) = state.auth.session(token, now).await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    let owner = session.owner;
     let session_token = token.to_owned();
     let Ok(permit) = state.connections.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -166,7 +187,7 @@ async fn upgrade(
         .on_upgrade(move |socket| async move {
             let _permit = permit;
             let _user_permit = user_permit;
-            run_socket(socket, state, session.user_id, session_token).await;
+            run_socket(socket, state, session.user_id, session_token, owner).await;
         })
 }
 
@@ -195,6 +216,7 @@ async fn run_socket(
     state: Arc<WebSocketState>,
     user_id: String,
     session_token: String,
+    owner: bool,
 ) {
     // One absolute budget covers server Hello, authority reads, client Hello and Resume.
     // Starting a fresh five seconds after a slow initial write would retain admission too long.
@@ -339,6 +361,7 @@ async fn run_socket(
                             &state,
                             &user_id,
                             &session_token,
+                            owner,
                             &connection_id,
                             &mut attachments,
                             &output_tx,
@@ -873,6 +896,7 @@ async fn handle_client_frame<K>(
     state: &WebSocketState,
     user_id: &str,
     session_token: &str,
+    owner: bool,
     connection_id: &[u8; 16],
     attachments: &mut HashMap<u32, ClientAttachment>,
     output_tx: &mpsc::Sender<(u32, TerminalOutput)>,
@@ -967,8 +991,12 @@ where
             action_id,
             input_json,
         } if stream_id == CONTROL_STREAM => {
+            let action = state.action(action_id);
+            // This auth slice has no role-grant records yet. The persisted owner bit is the only
+            // grant source for declared plugin permissions; a valid session alone is insufficient.
             let result = if action_id.len() <= 128
                 && input_json.len() <= infraternal_plugin_api::MAX_ACTION_BYTES
+                && action.is_some_and(|action| !action.permission.is_empty() && owner)
             {
                 state
                     .agent
