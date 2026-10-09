@@ -230,6 +230,11 @@ async fn empty() -> (Auth, String) {
 }
 async fn fixture() -> Fixture {
     let (auth, token) = empty().await;
+    fixture_with_auth(auth, token).await
+}
+
+// Reuse the real signed owner enrollment for memory and shipping disk fixtures.
+async fn fixture_with_auth(auth: Auth, token: String) -> Fixture {
     let start = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
     let user = str_field(&start, "user_id").to_owned();
     let words = str_field(&start, "recovery_words").to_owned();

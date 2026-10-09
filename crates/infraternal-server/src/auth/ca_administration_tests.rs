@@ -368,3 +368,6 @@ async fn actual_ca_unlock_cost_at_1000_administrator_records() {
 
 #[path = "ca_http_tests.rs"]
 mod http_tests;
+
+#[path = "ca_shipping_cli_tests.rs"]
+mod shipping_cli_tests;

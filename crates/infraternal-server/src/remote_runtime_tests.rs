@@ -18,6 +18,10 @@ use openssl::{
 };
 
 fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) {
+    identities_for_name("localhost")
+}
+
+fn identities_for_name(server_dns: &str) -> (Identity, Identity, X509, crate::ca::CaMaterial) {
     let key = PKey::generate_ed25519().unwrap();
     let mut name = X509NameBuilder::new().unwrap();
     name.append_entry_by_text("CN", "runtime test CA").unwrap();
@@ -62,7 +66,7 @@ fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) {
         .set_serial_number(&BigNum::from_u32(2).unwrap().to_asn1_integer().unwrap())
         .unwrap();
     let mut server_name = X509NameBuilder::new().unwrap();
-    server_name.append_entry_by_text("CN", "localhost").unwrap();
+    server_name.append_entry_by_text("CN", server_dns).unwrap();
     server.set_subject_name(&server_name.build()).unwrap();
     server.set_issuer_name(&name).unwrap();
     server.set_pubkey(&server_key).unwrap();
@@ -90,7 +94,7 @@ fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) {
     server
         .append_extension(
             SubjectAlternativeName::new()
-                .dns("localhost")
+                .dns(server_dns)
                 .ip("10.69.69.125")
                 .build(&server.x509v3_context(Some(&root), None))
                 .unwrap(),
@@ -335,3 +339,9 @@ async fn explicit_listener_pair_never_moves_an_occupied_operator_port() {
 
 #[path = "remote_renewal_checks.rs"]
 mod renewal_checks;
+
+/// Retain the real shared TLS builder for a pinned browser-auth origin.
+pub(crate) fn server_material_for_name(name: &str) -> (Identity, crate::ca::CaMaterial) {
+    let (server, _, _, material) = identities_for_name(name);
+    (server, material)
+}
