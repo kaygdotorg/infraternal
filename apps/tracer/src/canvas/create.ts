@@ -26,7 +26,6 @@ import { SIZE_EVENT, edgeToEdge, readSizes } from "./window-sizes";
 import { createMesh } from "./mesh";
 import { createDocumentSync } from "./model/sync";
 import type { ViewModel } from "./model/types";
-import { createSharing } from "./sharing";
 import { createPill } from "./toolbar/pill";
 import { installPalette } from "./toolbar/palette";
 import { createToolbar } from "./toolbar/row";
@@ -36,6 +35,7 @@ import { createViews } from "./views/world";
 import { createViewList } from "./toolbar/viewlist";
 import { createFloatHandle } from "./windows/float-handle";
 import { createDetailsHandle } from "./windows/details-handle";
+import { createSharingHandle } from "./sharing";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
 import { createSessionHooks } from "./windows/session-hooks";
@@ -119,7 +119,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.viewList = createViewList(cx);
   cx.tree = createTree(cx);
   if (options.adapters.mesh) cx.mesh = createMesh(cx, options.adapters.mesh);
-  if (options.adapters.sharing) cx.sharing = createSharing(cx, options.adapters.sharing);
+  if (options.adapters.sharing) cx.sharing = createSharingHandle(cx, options.adapters.sharing);
   cx.toolbar = createToolbar(cx);
   installGestures(cx);
   const removeShortcuts = installShortcuts(cx);
@@ -217,4 +217,3 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     },
   };
 }
-
