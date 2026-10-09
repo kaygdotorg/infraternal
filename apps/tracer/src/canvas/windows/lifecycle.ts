@@ -26,7 +26,7 @@ export interface WindowsModule {
   make(c: ViewRec, m: WindowModel): WinRec;
   setActive(rec: WinRec | undefined): void;
   /** Adds a window in a new column at `index` of a tiled view; the others glide aside. */
-  addColumn(c: ViewRec, m: WindowModel, index: number, w?: number, silent?: boolean): WinRec;
+  addColumn(c: ViewRec, m: WindowModel, index: number, w?: number, silent?: boolean, opaque?: boolean): WinRec;
   close(rec: WinRec): void;
   /** Splits a terminal window: a new shell beside or below it, or (with `session`) an existing session of the host. */
   split(rec: WinRec, direction?: "down" | "right", session?: string): Promise<void>;
@@ -49,14 +49,15 @@ export interface WindowsModule {
 export function createWindows(cx: Ctx): WindowsModule {
   const { camera, state, views, flip } = cx;
 
-  const enterAnimation = (rec: WinRec): void => {
+  /** `opaque`: the window's content is there from the first frame (a session already exists); only its size springs. */
+  const enterAnimation = (rec: WinRec, opaque = false): void => {
     if (reduced.matches) { rec.card.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160 }); return; }
     const root = rec.card.root;
     const spring = new Spring(1, (p) => {
       if (p === 0) { root.style.transform = ""; root.style.opacity = ""; root.style.transformOrigin = ""; return; }
       root.style.transformOrigin = "0 50%";
       root.style.transform = `scale(${1 - 0.06 * p})`;
-      root.style.opacity = String(clamp(1 - p * 1.4, 0, 1));
+      root.style.opacity = opaque ? "" : String(clamp(1 - p * 1.4, 0, 1));
       cx.invalidate();
     }, { visualDuration: 0.5, bounce: 0.28 });
     // p scales the window by 6 % and fades it: it rests when the scale is within 0.0005 (p about 0.008).
@@ -64,7 +65,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     spring.set(0);
   };
 
-  const addColumn = (c: ViewRec, m: WindowModel, index: number, w = state.metrics.colW, silent = false): WinRec => {
+  const addColumn = (c: ViewRec, m: WindowModel, index: number, w = state.metrics.colW, silent = false, opaque = false): WinRec => {
     const before = flip.measure(flip.targets(c.colsEl));
     const rec = makeWindow(cx, c, m);
     c.wins.set(m.id, rec);
@@ -76,7 +77,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     cx.view.geometry(c);
     cx.view.settle(c.view.id);
     flip.play(before);
-    if (!silent) enterAnimation(rec);
+    if (!silent) enterAnimation(rec, opaque);
     cx.tree.render();
     cx.invalidate();
     return rec;
@@ -223,11 +224,16 @@ export function createWindows(cx: Ctx): WindowsModule {
     // A different screen (another session, a run again): the old binding goes and the new one mounts. The work is
     // done at once; only the frame and the name animate (session-ui.ts).
     if (reshown) {
-      rec.binding?.dispose();
-      makeBody(cx, rec);
-      rec.binding?.setActive(state.activeWin === rec);
-      rec.binding?.refit();
-      cx.sessionUi?.paint(rec);
+      // Another session of this window: the same terminal shows it (the renderer, the atlas and the canvas stay, and
+      // the last known screen is on screen at once); only a binding that cannot do that is built again.
+      if (force && rec.binding?.retarget?.(rec.model)) { rec.binding.refit(); cx.sessionUi?.paint(rec); }
+      else {
+        rec.binding?.dispose();
+        makeBody(cx, rec);
+        rec.binding?.setActive(state.activeWin === rec);
+        rec.binding?.refit();
+        cx.sessionUi?.paint(rec);
+      }
     }
     if (renamed || reshown) { cx.tree.render(); cx.store.changed(); }
   };
@@ -251,7 +257,10 @@ export function createWindows(cx: Ctx): WindowsModule {
     if (!inv || !c || !inv.get(host, sessionId)) return undefined;
     const existing = cx.sessionUi?.windowFor(host, sessionId);
     const model = cx.adapters.sessions.open(host, { session: sessionId });
-    const rec = existing ?? addColumn(c, model, c.colsEl.querySelectorAll(":scope > .cl-col").length, state.metrics.colW, false);
+    // The window carries the session's name from the first frame (the inventory knows it).
+    const named = inv.get(host, sessionId)?.name;
+    if (named && !model.session) model.session = named;
+    const rec = existing ?? addColumn(c, model, c.colsEl.querySelectorAll(":scope > .cl-col").length, state.metrics.colW, false, true);
     if (existing) pulse(rec);
     setActive(cx, rec);
     cx.nav.focusWindow(rec);

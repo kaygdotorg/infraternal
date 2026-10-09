@@ -806,6 +806,43 @@ export class TerminalClient {
     this.config.hooks?.onAttached?.(this.connectionIsResume, this);
   }
 
+  /** The session this terminal shows, as a lowercase UUID. */
+  get sessionUuid(): string | undefined {
+    const b = this.sessionId;
+    if (!b) return undefined;
+    const hex = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  /** The renderer's canvas, for a caller that keeps a picture of the last screen (the switch's ghost). */
+  get canvas(): HTMLCanvasElement | undefined {
+    return this.config.host.querySelector<HTMLCanvasElement>("canvas:not(.cl-ghost)") ?? undefined;
+  }
+
+  /**
+   * Shows another session in this same terminal, without tearing the renderer down (#128): the old stream detaches
+   * (its session keeps running), the screen starts over, and a new stream attaches to `sessionId` from the
+   * beginning, as after a reload. Nothing waits on the network: the attach goes out now and the snapshot paints when
+   * it arrives. Font, glyph atlas, canvas and layout stay.
+   */
+  retarget(sessionId: string): void {
+    if (this.closed || !isCanonicalUuid(sessionId)) return;
+    if (this.attached) this.conn.streamAttached(false);
+    this.conn.closeStream(this.streamId);
+    this.attached = false;
+    this.attachRequested = false;
+    this.openCallSent = false;
+    this.hasAttached = false;
+    this.snapshotWriteInFlight = false;
+    this.outputWriteInFlight = false;
+    this.sessionId = uuidBytes(sessionId);
+    this.restartCursors();
+    this.connectionIsResume = true;
+    this.streamId = this.conn.openStream(this.streamHandler());
+    // Choosing a session is the person's own act in this window, so on a desktop the keys go to it, as for a new terminal.
+    if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
+  }
+
   /** Starts the stream's cursors over: its session is attached again from the beginning, as after a reload. */
   private restartCursors(): void {
     this.cursorEpoch += 1;
@@ -929,6 +966,8 @@ export class TerminalClient {
   }
 
   private acceptSnapshot(sequence: bigint, bytes: Uint8Array): void {
+    performance.mark(`sw:snapshot:${this.streamId}`);
+    performance.mark(`sw:snapshot:${this.streamId}`);
     if (sequence < this.receivedOutSeq || bytes.byteLength > this.creditAvailable) {
       this.protocolFailure("server sent a stale snapshot or exceeded output credit");
       return;
