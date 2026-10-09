@@ -1728,3 +1728,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **K1–K3 ("can X reach Y", people, live state):** decided against a
        mockup.
      All of the above is mocked up while the backend is built.
+211. **Scoped rule managers cover every tag (owner, 2026-10-09, F1):** to
+     create, move, delete or rename an access rule that touches a machine, a
+     tag-scoped manager must cover every tag that machine has, the same rule
+     as editing the machine itself. Someone scoped to `prod` cannot change
+     access into a machine that `dev` also owns.
