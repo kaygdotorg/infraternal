@@ -331,18 +331,52 @@ async fn disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches() {
         "writer did not remain pending"
     );
     assert_eq!(runtime.active_workers("mesh"), 1);
-    assert!(
-        exchange(
-            &mut socket,
-            4,
-            "plugins.set_enabled",
-            br#"{"plugin":"mesh","enabled":false}"#
-        )
-        .await
-        .0
-    );
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 4,
+            action_id: "plugins.set_enabled",
+            input_json: br#"{"plugin":"mesh","enabled":false}"#,
+        },
+    )
+    .await;
+    let mut switched = false;
+    loop {
+        let wire = tokio::time::timeout(Duration::from_secs(20), read_client_frame(&mut socket))
+            .await
+            .unwrap();
+        match decode_muxed_frame(&wire).unwrap().frame {
+            Frame::Result {
+                call_id: 3,
+                ok: false,
+                ..
+            } => break,
+            Frame::Result {
+                call_id: 4,
+                ok: true,
+                ..
+            } => switched = true,
+            other => panic!("unexpected cancellation reply {other:?}"),
+        }
+    }
     assert_eq!(runtime.active_workers("mesh"), 0);
+    // Releasing the writer after cancellation lets a durable switch commit;
+    // the cancelled node edit must never run when that lock becomes available.
     writer.rollback().await.unwrap();
+    if !switched {
+        let wire = tokio::time::timeout(Duration::from_secs(20), read_client_frame(&mut socket))
+            .await
+            .unwrap();
+        assert!(matches!(
+            decode_muxed_frame(&wire).unwrap().frame,
+            Frame::Result {
+                call_id: 4,
+                ok: true,
+                ..
+            }
+        ));
+    }
     client_ws_send(
         &mut socket,
         0,
@@ -374,7 +408,7 @@ async fn disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches() {
         .unwrap();
     assert_eq!((count, revision, audits), (1, 0, 0));
     println!(
-        "writer_pending_before_disable=true workers_after_disable=0 remaining={count} revision={revision} audits={audits} stale_result=false pong=true fresh_nonowner_refused=true"
+        "writer_pending_before_disable=true workers_after_disable=0 remaining={count} revision={revision} audits={audits} cancelled_result=true stale_success=false pong=true fresh_nonowner_refused=true"
     );
     server.abort();
     f.auth.pool.close().await;

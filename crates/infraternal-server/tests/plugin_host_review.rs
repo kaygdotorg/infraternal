@@ -41,6 +41,8 @@ enum Mode {
     ExitAfterFirst,
     /// The worker holds every request, as a slow database call does.
     Hold,
+    /// A completed call is queued before the worker returns normally.
+    AnswerFirst,
 }
 struct Probe {
     descriptor: &'static PluginDescriptor,
@@ -54,14 +56,27 @@ impl Plugin for Probe {
         &self,
         _host: Arc<dyn SocketHost>,
         mut requests: mpsc::Receiver<Bytes>,
-        _replies: ReplySender,
+        replies: ReplySender,
         _registry: SubscriptionRegistry,
     ) -> Operation<'static, ()> {
         let mode = self.mode;
         Box::pin(async move {
-            let _first = requests.recv().await;
+            let first = requests.recv().await;
             if matches!(mode, Mode::Hold) {
                 std::future::pending::<()>().await;
+            } else if matches!(mode, Mode::AnswerFirst) {
+                let first = first.unwrap();
+                let Frame::Call { call_id, .. } = decode_muxed_frame(&first).unwrap().frame else {
+                    panic!("expected call");
+                };
+                replies
+                    .send(wire(&Frame::Result {
+                        call_id,
+                        ok: true,
+                        json: b"{}",
+                    }))
+                    .await
+                    .unwrap();
             }
         })
     }
@@ -171,5 +186,119 @@ async fn review_disable_withdraws_view_and_keeps_socket() {
     assert!(matches!(
         socket.dispatch(&subscribe, &mut encode),
         Dispatch::Queued
+    ));
+}
+/// Disabling a plugin must answer a call it accepted; the browser otherwise waits forever.
+#[tokio::test]
+async fn review_disable_answers_inflight_call() {
+    let (runtime, mut socket) = socket(vec![Arc::new(Probe {
+        descriptor: &PROBE,
+        mode: Mode::Hold,
+    })]);
+    let mut encode = Vec::new();
+    let call = wire(&Frame::Call {
+        call_id: 9,
+        action_id: "probe.wait",
+        input_json: b"{}",
+    });
+    assert!(matches!(
+        socket.dispatch(&call, &mut encode),
+        Dispatch::Queued
+    ));
+    tokio::task::yield_now().await;
+    runtime.set_enabled("probe", false).await.unwrap();
+    assert_eq!(
+        runtime.active_workers("probe"),
+        0,
+        "abort and join on disable"
+    );
+    let frames = delivered(&mut socket, Duration::from_millis(500)).await;
+    assert!(
+        frames.iter().any(|frame| matches!(
+            decode_muxed_frame(frame).unwrap().frame,
+            Frame::Result {
+                call_id: 9,
+                ok: false,
+                ..
+            }
+        )),
+        "call 9 was accepted, then the plugin was disabled; no Result was delivered: {frames:?}"
+    );
+}
+
+#[tokio::test]
+async fn review_reenable_preserves_cancelled_calls_until_delivery() {
+    let (runtime, mut socket) = socket(vec![Arc::new(Probe {
+        descriptor: &PROBE,
+        mode: Mode::Hold,
+    })]);
+    let mut encode = Vec::new();
+    let request = |call_id| {
+        wire(&Frame::Call {
+            call_id,
+            action_id: "probe.wait",
+            input_json: b"{}",
+        })
+    };
+    assert!(matches!(
+        socket.dispatch(&request(21), &mut encode),
+        Dispatch::Queued
+    ));
+    runtime.set_enabled("probe", false).await.unwrap();
+    runtime.set_enabled("probe", true).await.unwrap();
+    assert!(matches!(
+        socket.dispatch(&request(22), &mut encode),
+        Dispatch::Queued
+    ));
+    let ended = delivered(&mut socket, Duration::from_millis(100)).await;
+    assert_eq!(ended.len(), 1);
+    assert!(matches!(
+        decode_muxed_frame(&ended[0]).unwrap().frame,
+        Frame::Result {
+            call_id: 21,
+            ok: false,
+            ..
+        }
+    ));
+    runtime.set_enabled("probe", false).await.unwrap();
+    let ended = delivered(&mut socket, Duration::from_millis(100)).await;
+    assert_eq!(ended.len(), 1);
+    assert!(matches!(
+        decode_muxed_frame(&ended[0]).unwrap().frame,
+        Frame::Result {
+            call_id: 22,
+            ok: false,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn review_completed_call_survives_normal_worker_exit() {
+    let (_runtime, mut socket) = socket(vec![Arc::new(Probe {
+        descriptor: &PROBE,
+        mode: Mode::AnswerFirst,
+    })]);
+    assert!(matches!(
+        socket.dispatch(
+            &wire(&Frame::Call {
+                call_id: 31,
+                action_id: "probe.wait",
+                input_json: b"{}"
+            }),
+            &mut Vec::new()
+        ),
+        Dispatch::Queued
+    ));
+    tokio::task::yield_now().await;
+    let frames = delivered(&mut socket, Duration::from_millis(100)).await;
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(
+        decode_muxed_frame(&frames[0]).unwrap().frame,
+        Frame::Result {
+            call_id: 31,
+            ok: true,
+            ..
+        }
     ));
 }

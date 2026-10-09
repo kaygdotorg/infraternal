@@ -236,12 +236,17 @@ pub enum Dispatch {
     Queued,
     Refused(Bytes),
 }
+// Four queued requests, one active call and four buffered replies bound admission.
+const MAX_PENDING_CALLS: usize = 9;
 struct SocketEntry {
     entry: Arc<Entry>,
     epoch: u64,
+    reply_epoch: u64,
     requests: mpsc::Sender<Bytes>,
     registry: SubscriptionRegistry,
     withdraw_before: u32,
+    // The cancellation flag survives lazy restarts until its Result is delivered.
+    pending_calls: Vec<(u32, bool)>,
     task: Arc<Task>,
 }
 impl Drop for SocketEntry {
@@ -291,9 +296,44 @@ impl SocketPlugins {
     /// Wait on queued work and lifecycle changes; disabled views end without polling.
     pub async fn recv(&mut self) -> Option<SocketReply> {
         loop {
-            for socket in &self.entries {
+            if self.entries.iter().any(|socket| {
+                socket.requests.is_closed()
+                    && socket.entry.epoch.load(Ordering::Acquire) == socket.epoch
+                    && socket.pending_calls.iter().any(|pending| !pending.1)
+            }) && let Ok(reply) = self.receiver.try_recv()
+            {
+                return Some(SocketReply::Plugin(reply));
+            }
+            for socket in &mut self.entries {
                 let expired = socket.entry.epoch.load(Ordering::Acquire) != socket.epoch
                     || socket.requests.is_closed();
+                if expired {
+                    for pending in &mut socket.pending_calls {
+                        pending.1 = true;
+                    }
+                }
+                if let Some(&(call_id, true)) =
+                    socket.pending_calls.iter().find(|pending| pending.1)
+                {
+                    let mut wire = Vec::new();
+                    if encode_muxed_frame_into(
+                        0,
+                        &Frame::Result {
+                            call_id,
+                            ok: false,
+                            json: socket.entry.plugin.descriptor().unavailable,
+                        },
+                        &mut wire,
+                    )
+                    .is_ok()
+                    {
+                        return Some(SocketReply::Withdrawal(PluginReply {
+                            plugin_id: socket.entry.plugin.descriptor().id,
+                            epoch: socket.epoch,
+                            wire: Bytes::from(wire),
+                        }));
+                    }
+                }
                 if !expired && socket.withdraw_before == 0 {
                     continue;
                 }
@@ -333,7 +373,7 @@ impl SocketPlugins {
     }
     /// Generation and lifecycle checks run before the public header is restored.
     #[must_use]
-    pub fn accept(&self, reply: SocketReply, encode: &mut Vec<u8>) -> Option<Bytes> {
+    pub fn accept(&mut self, reply: SocketReply, encode: &mut Vec<u8>) -> Option<Bytes> {
         let (reply, withdrawal) = match reply {
             SocketReply::Plugin(reply) => (reply, false),
             SocketReply::Withdrawal(reply) => (reply, true),
@@ -343,21 +383,28 @@ impl SocketPlugins {
         }
         let entry = self
             .entries
-            .iter()
+            .iter_mut()
             .find(|entry| entry.entry.plugin.descriptor().id == reply.plugin_id)?;
-        if (!withdrawal && entry.epoch != reply.epoch)
+        if (!withdrawal && entry.reply_epoch != reply.epoch)
             || reply.wire.len() > entry.entry.plugin.descriptor().max_frame_len
         {
             return None;
         }
         if !withdrawal
             && (!entry.entry.enabled.load(Ordering::Acquire)
-                || entry.entry.epoch.load(Ordering::Acquire) != reply.epoch)
+                || entry.entry.epoch.load(Ordering::Acquire) != entry.epoch)
         {
             return None;
         }
         let decoded = decode_muxed_frame(&reply.wire).ok()?;
         if decoded.stream_id == 0 {
+            if let Frame::Result { call_id, .. } = decoded.frame {
+                let index = entry
+                    .pending_calls
+                    .iter()
+                    .position(|pending| pending.0 == call_id && pending.1 == withdrawal)?;
+                entry.pending_calls.swap_remove(index);
+            }
             return Some(reply.wire);
         }
         let Frame::Event { sub_id, .. } = decoded.frame else {
@@ -375,28 +422,45 @@ impl SocketPlugins {
     fn start(&mut self, entry: Arc<Entry>) -> Option<usize> {
         let epoch = entry.epoch.load(Ordering::Acquire);
         let id = entry.plugin.descriptor().id;
-        let (registry, withdraw_before) = if let Some(index) = self
+        let previous_index = self
             .entries
             .iter()
-            .position(|socket| socket.entry.plugin.descriptor().id == id)
+            .position(|socket| socket.entry.plugin.descriptor().id == id);
+        if let Some(index) = previous_index
+            && self.entries[index].epoch == epoch
+            && !self.entries[index].requests.is_closed()
         {
-            if self.entries[index].epoch == epoch && !self.entries[index].requests.is_closed() {
-                return Some(index);
-            }
-            // Retain old view generations across an unrelated call's lazy
-            // restart. Only a new Subscribe may supersede their final event.
-            let previous = self.entries.swap_remove(index);
-            (Arc::clone(&previous.registry), self.generation)
-        } else {
-            (Arc::new(std::array::from_fn(|_| AtomicU64::new(0))), 0)
-        };
-        let (requests, receiver) = mpsc::channel(4);
-        // Registration and the final enabled check share the shutdown task lock.
-        // A concurrent switch either sees this task or prevents it from starting.
+            return Some(index);
+        }
+        // Check shutdown under the task lock before taking old calls/views out
+        // of the socket. A refused restart must preserve their final replies.
         let mut tasks = entry.tasks.lock().ok()?;
         if !entry.enabled.load(Ordering::Acquire) || entry.epoch.load(Ordering::Acquire) != epoch {
             return None;
         }
+        let generation = self
+            .generation
+            .checked_add(1)
+            .filter(|value| *value <= u32::MAX >> 1)?;
+        let (registry, withdraw_before, pending_calls) = if let Some(index) = previous_index {
+            let mut previous = self.entries.swap_remove(index);
+            let mut pending = std::mem::take(&mut previous.pending_calls);
+            for call in &mut pending {
+                call.1 = true;
+            }
+            (Arc::clone(&previous.registry), self.generation, pending)
+        } else {
+            (
+                Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+                0,
+                Vec::with_capacity(MAX_PENDING_CALLS),
+            )
+        };
+        // Workers and views share a never-reused socket generation. A buffered
+        // Result from an exited worker cannot answer a retry with the same id.
+        self.generation = generation;
+        let reply_epoch = u64::from(generation);
+        let (requests, receiver) = mpsc::channel(4);
         tasks.retain(|task| {
             task.handle
                 .lock()
@@ -405,7 +469,7 @@ impl SocketPlugins {
         let worker = entry.plugin.run(
             Arc::clone(&self.host),
             receiver,
-            ReplySender::new(self.replies.clone(), id, epoch),
+            ReplySender::new(self.replies.clone(), id, reply_epoch),
             Arc::clone(&registry),
         );
         let changed = self.runtime.inner.changed.clone();
@@ -421,9 +485,11 @@ impl SocketPlugins {
         self.entries.push(SocketEntry {
             entry,
             epoch,
+            reply_epoch,
             requests,
             registry,
             withdraw_before,
+            pending_calls,
             task,
         });
         Some(self.entries.len() - 1)
@@ -649,7 +715,7 @@ impl SocketPlugins {
             && entry.enabled.load(Ordering::Acquire)
             && let Some(index) = self.start(entry)
         {
-            let socket = &self.entries[index];
+            let socket = &mut self.entries[index];
             if let Frame::Subscribe { sub_id, .. } = decoded.frame {
                 if let Some(generation) = self
                     .generation
@@ -676,8 +742,17 @@ impl SocketPlugins {
                         }
                     }
                 }
-            } else {
+            } else if let Frame::Call { call_id, .. } = decoded.frame
+                && socket.pending_calls.len() < MAX_PENDING_CALLS
+                && !socket
+                    .pending_calls
+                    .iter()
+                    .any(|pending| pending.0 == call_id)
+            {
                 admitted = socket.requests.try_send(wire.clone()).is_ok();
+                if admitted {
+                    socket.pending_calls.push((call_id, false));
+                }
             }
         }
         if admitted {
