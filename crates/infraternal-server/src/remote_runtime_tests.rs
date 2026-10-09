@@ -16,6 +16,7 @@ use openssl::{
         extension::{BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName},
     },
 };
+use std::time::Duration;
 
 fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) {
     identities_for_name("localhost")
@@ -344,4 +345,37 @@ mod renewal_checks;
 pub(crate) fn server_material_for_name(name: &str) -> (Identity, crate::ca::CaMaterial) {
     let (server, _, _, material) = identities_for_name(name);
     (server, material)
+}
+
+/// Pre-authentication handshakes share one 64-slot budget across QUIC and
+/// TCP/TLS. Sixty-four anonymous TCP sockets that never send a `ClientHello`
+/// must not stop a certificate-holding host from completing its handshake
+/// [40][134], #78.
+#[tokio::test]
+async fn claude_review_idle_anonymous_sockets_cannot_starve_host_handshakes() {
+    let (server, host, root, _) = identities();
+    let (store, _pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let listeners = RemoteListeners::start(
+        "127.0.0.1:0".parse().unwrap(),
+        &server,
+        std::slice::from_ref(&root),
+        store,
+        RemoteHosts::default(),
+    )
+    .await
+    .unwrap();
+    let address = listeners.local_addr().unwrap();
+    let mut idle = Vec::new();
+    for _ in 0..64 {
+        idle.push(tokio::net::TcpStream::connect(address).await.unwrap());
+    }
+    // Let the accept loop hand every idle socket a handshake permit.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let client = remote_tls::client_config(&host, std::slice::from_ref(&root)).unwrap();
+    let dialed = remote_tls::dial(address, "localhost", &client).await;
+    drop(idle);
+    assert!(
+        dialed.is_ok(),
+        "64 idle anonymous sockets exhausted every host handshake slot"
+    );
 }

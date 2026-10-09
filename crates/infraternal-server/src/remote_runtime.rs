@@ -9,10 +9,10 @@ use infraternal_agent::{
     remote_tls::{self, Identity},
 };
 use openssl::x509::X509;
-use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, Semaphore, mpsc},
+    sync::{Mutex, mpsc},
     task::JoinSet,
 };
 use uuid::Uuid;
@@ -73,7 +73,11 @@ impl RemoteHosts {
             .get(&id)
             .map(|host| host.authority.clone())
     }
-    async fn admit(&self, authority: AuthorityGuard, link: RemoteLink) -> io::Result<()> {
+    pub(crate) async fn admit(
+        &self,
+        authority: AuthorityGuard,
+        link: RemoteLink,
+    ) -> io::Result<()> {
         if !authority.permits() {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
@@ -226,72 +230,15 @@ impl RemoteListeners {
         )
         .await?;
         let tls = Arc::new(remote_tls::server_config(identity, roots)?);
-        let admission = Arc::new(Semaphore::new(64));
+        let limits = crate::remote_accept::Limits::new();
         let mut tasks = JoinSet::new();
-        let quic = endpoint.clone();
-        let quic_hosts = hosts.clone();
-        let quic_store = store.clone();
-        let quic_admission = admission.clone();
-        tasks.spawn(async move {
-            let mut handshakes = JoinSet::new();
-            while let Some(incoming) = quic.accept().await {
-                while handshakes.try_join_next().is_some() {}
-                let Ok(permit) = quic_admission.clone().try_acquire_owned() else {
-                    incoming.refuse();
-                    continue;
-                };
-                let hosts = quic_hosts.clone();
-                let store = quic_store.clone();
-                handshakes.spawn(async move {
-                    let _permit = permit;
-                    let Ok(Ok(connection)) =
-                        tokio::time::timeout(Duration::from_secs(5), incoming).await
-                    else {
-                        return;
-                    };
-                    let admitted = tokio::time::timeout(Duration::from_secs(5), async {
-                        let fingerprint = remote_quic::peer_fingerprint(&connection)?;
-                        let authority = AuthorityGuard::admit(store, fingerprint).await?;
-                        let link = RemoteLink::quic(connection.clone()).await?;
-                        hosts.admit(authority, link).await
-                    })
-                    .await;
-                    if !matches!(admitted, Ok(Ok(()))) {
-                        connection.close(0u32.into(), b"");
-                    }
-                });
-            }
-        });
-        tasks.spawn(async move {
-            let mut handshakes = JoinSet::new();
-            while let Ok((socket, _)) = tcp.accept().await {
-                while handshakes.try_join_next().is_some() {}
-                let Ok(permit) = admission.clone().try_acquire_owned() else {
-                    continue;
-                };
-                let hosts = hosts.clone();
-                let store = store.clone();
-                let tls = tls.clone();
-                handshakes.spawn(async move {
-                    let _permit = permit;
-                    let Ok(connection) = remote_tls::accept(socket, &tls).await else {
-                        return;
-                    };
-                    let Ok(Ok(authority)) = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        AuthorityGuard::admit(store, connection.peer_fingerprint),
-                    )
-                    .await
-                    else {
-                        return;
-                    };
-                    let Ok(link) = RemoteLink::tcp(connection.channel).await else {
-                        return;
-                    };
-                    let _ = hosts.admit(authority, link).await;
-                });
-            }
-        });
+        tasks.spawn(crate::remote_accept::quic(
+            endpoint.clone(),
+            hosts.clone(),
+            store.clone(),
+            limits.clone(),
+        ));
+        tasks.spawn(crate::remote_accept::tcp(tcp, tls, hosts, store, limits));
         Ok(Self {
             tasks,
             endpoint,
