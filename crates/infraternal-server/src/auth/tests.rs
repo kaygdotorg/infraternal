@@ -3265,3 +3265,6 @@ mod rotation_tests;
 
 #[path = "ca_membership_tests.rs"]
 mod ca_membership_tests;
+
+#[path = "verified_passkey_tests.rs"]
+mod verified_passkey_tests;
