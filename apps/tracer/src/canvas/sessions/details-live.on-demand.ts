@@ -1,5 +1,6 @@
 /** The product's details source (#127): reads live host, connection and session data after the popover is requested. */
 import { ActionRefused, type MuxConnection } from "../../connection";
+import { hostPlatformFromOs } from "../../../../../packages/ui/src/host-icons";
 import type { DetailsSource, HostFactsSnapshot } from "../windows/details-source";
 import { detailsFacts } from "../windows/details-facts";
 import type { SessionInventory } from "./inventory";
@@ -24,6 +25,7 @@ export function createLiveDetails(options: {
         host: {
           name: rec.model.host,
           ...(host.user ? { user: host.user } : {}),
+          ...(facts ? { os: hostPlatformFromOs(facts.os) } : {}),
           address: location.hostname,
           reach: "Directly, over this connection",
           ...(facts ? { facts } : {}),

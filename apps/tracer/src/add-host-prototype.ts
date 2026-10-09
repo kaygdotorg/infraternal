@@ -24,6 +24,7 @@
 import {
   createSpinner,
   hostIconMarkup,
+  hostPlatformFromOs,
   hostSourceIconMarkup,
   installFocusRing,
   mountChipInput,
@@ -103,14 +104,7 @@ const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) =
 const reducedMotion = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 function platformOf(host: AddHostFixture): HostPlatform {
-  const os = host.operatingSystem.toLowerCase();
-  if (os.includes("ubuntu")) return "ubuntu";
-  if (os.includes("debian")) return "debian";
-  if (os.includes("proxmox")) return "proxmox";
-  if (os.includes("rhel") || os.includes("red hat")) return "redhat";
-  if (os.includes("nixos")) return "nixos";
-  if (os.includes("macos")) return "apple";
-  return "unknown";
+  return hostPlatformFromOs(host.operatingSystem);
 }
 
 

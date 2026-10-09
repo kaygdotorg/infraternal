@@ -52,10 +52,22 @@ export function openDetailsPopover(
     </header>
     <div class="canvas-popover-tabs"></div>
     <div class="canvas-popover-scroll"></div>`;
-  if (first.os) root.querySelector<HTMLElement>(".canvas-popover-logo")!.innerHTML = hostIconMarkup(first.os, "ui-host-mark");
-  else root.querySelector<HTMLElement>(".canvas-popover-logo")!.hidden = true;
-  root.querySelector<HTMLElement>(".canvas-popover-title")!.textContent = first.title;
-  root.querySelector<HTMLElement>(".canvas-popover-sub")!.textContent = first.subtitle;
+  const logo = root.querySelector<HTMLElement>(".canvas-popover-logo")!;
+  const title = root.querySelector<HTMLElement>(".canvas-popover-title")!;
+  const subtitle = root.querySelector<HTMLElement>(".canvas-popover-sub")!;
+  const updateHeader = (facts: DetailsFacts): void => {
+    root.setAttribute("aria-label", `Details for ${facts.title}`);
+    title.textContent = facts.title;
+    subtitle.textContent = facts.subtitle;
+    if (facts.os) {
+      logo.innerHTML = hostIconMarkup(facts.os, "ui-host-mark");
+      logo.hidden = false;
+    } else {
+      logo.replaceChildren();
+      logo.hidden = true;
+    }
+  };
+  updateHeader(first);
 
   const list = createKeyValueList(`${first.title} details`);
   const scroll = root.querySelector<HTMLElement>(".canvas-popover-scroll")!;
@@ -65,7 +77,10 @@ export function openDetailsPopover(
   let selected = first.sections[0]?.id ?? "";
   const show = (id: string, animate: boolean): void => {
     selected = id;
-    const section = input.read().sections.find((x) => x.id === id) ?? first.sections[0];
+    const facts = input.read();
+    updateHeader(facts);
+    list.root.setAttribute("aria-label", `${facts.title} details`);
+    const section = facts.sections.find((x) => x.id === id) ?? first.sections[0];
     list.set((section?.rows ?? []).filter((row) => row.value.trim() !== ""));
     // Resetting the scroll position forces a layout; only a popover that was scrolled needs it.
     if (scrolled) { scroll.scrollTop = 0; scrolled = false; }

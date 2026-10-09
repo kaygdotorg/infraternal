@@ -2,6 +2,18 @@
 
 export type HostPlatform = "ubuntu" | "debian" | "redhat" | "proxmox" | "nixos" | "apple" | "unknown";
 
+/** Maps an operating-system label from host facts to the shared mark set. */
+export function hostPlatformFromOs(os: string): HostPlatform {
+  const normalized = os.toLowerCase();
+  if (normalized.includes("proxmox")) return "proxmox";
+  if (normalized.includes("ubuntu")) return "ubuntu";
+  if (normalized.includes("debian")) return "debian";
+  if (normalized.includes("rhel") || normalized.includes("red hat")) return "redhat";
+  if (normalized.includes("nixos")) return "nixos";
+  if (normalized.includes("macos") || normalized.includes("mac os")) return "apple";
+  return "unknown";
+}
+
 // Simple Icons path data are CC0. Keep the short paths here so the host tree and
 // window pill use the same detected-platform marks without external requests.
 export const HOST_ICON_PATHS: Record<HostPlatform, string> = {
