@@ -13,6 +13,7 @@ default = ["ssh"]
 ssh = ["dep:infraternal-plugin-ssh"]
 
 [dependencies]
+infraternal-plugin-api.workspace = true
 infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
 argon2.workspace = true
 axum.workspace = true

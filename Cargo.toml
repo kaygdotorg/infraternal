@@ -19,6 +19,7 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
+infraternal-plugin-api = { version = "0.1.0", path = "crates/infraternal-plugin-api" }
 argon2 = "0.5"
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-openssl"] }
