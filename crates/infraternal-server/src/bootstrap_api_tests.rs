@@ -221,6 +221,107 @@ async fn confirmation_interrupt(component_off: bool) {
         "revoked bootstrap retained its socket during confirmation lookup"
     );
 }
+
+#[tokio::test]
+async fn a_client_request_during_a_pending_confirmation_keeps_the_batch() {
+    // A well-formed request that arrives while a confirmation lookup is pending
+    // (a replay, a retry of another host or a second confirmation) must wait its
+    // turn. Closing the socket drops the Batch, which cancels every host in it.
+    let (auth, _, cookie, _, _, original_server, _, _) = fixture(false).await;
+    original_server.abort();
+    let backend = Arc::new(ConfirmationLookup {
+        calls: AtomicUsize::new(0),
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    let challenge = uuid::Uuid::new_v4();
+    let api = Arc::new(Api {
+        auth: auth.clone(),
+        runner: Bootstrap::new(
+            Arc::new(PublicChallenge(challenge)),
+            backend.clone(),
+            BinaryPaths {
+                x86_64: "unused".into(),
+                aarch64: "unused".into(),
+            },
+        ),
+        sockets: Arc::new(Semaphore::new(16)),
+        ssh_key: Arc::new(UnavailableSshKey),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/v1/bootstrap/ws", get(upgrade))
+        .with_state(api.clone());
+    let serving = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (mut socket, _) = connect_async(request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    socket.send(ClientMessage::Text(serde_json::json!({"action":"start","targets":[{"id":"one","address":{"kind":"manual","value":"user@fixture"}}]}).to_string().into())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let response = socket.next().await.unwrap().unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(response.to_text().unwrap()).unwrap();
+            if event["step"] == "failed" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    socket.send(ClientMessage::Text(serde_json::json!({"action":"confirm-host-key","target":"one","challenge":challenge,"fingerprint":format!("SHA256:{}", "a".repeat(43))}).to_string().into())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), backend.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    socket
+        .send(ClientMessage::Text(
+            serde_json::json!({"action":"replay","after":0})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let busy = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let busy: serde_json::Value = serde_json::from_str(busy.to_text().unwrap()).unwrap();
+    assert_eq!(
+        busy["error"],
+        "host-key confirmation busy; retry after confirmation"
+    );
+    // A busy response must leave the actual lookup pending and able to answer.
+    backend.release.add_permits(1);
+    // The confirmation answers (confirmed or refused) on the same live socket.
+    let answered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(ClientMessage::Text(text))) => {
+                    let reply: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if reply.get("host_key_confirmed").is_some() || reply.get("error").is_some() {
+                        return true;
+                    }
+                }
+                Some(Ok(ClientMessage::Ping(_) | ClientMessage::Pong(_))) => {}
+                _ => return false,
+            }
+        }
+    })
+    .await;
+    let _ = socket.close(None).await;
+    serving.abort();
+    assert_eq!(
+        answered,
+        Ok(true),
+        "a queued client request closed the socket and cancelled the batch mid-confirmation"
+    );
+}
 struct NoSsh;
 impl SshTransport for NoSsh {
     fn open(

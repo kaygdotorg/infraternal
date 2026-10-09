@@ -314,8 +314,14 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                                         }
                                         incoming = socket.recv() => {
                                             match incoming {
-                                                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {},
-                                                _ => break 'connection,
+                                                Some(Ok(Message::Text(_))) => {
+                                                    // Refuse concurrent requests without retaining private inputs
+                                                    // or cancelling the batch that owns this confirmation.
+                                                    let busy = serde_json::to_string(&serde_json::json!({"error":"host-key confirmation busy; retry after confirmation"})).ok();
+                                                    if send_live(&mut socket,&api,&owner,token,&mut revocation,busy).await.is_err() { break 'connection; }
+                                                },
+                                                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_))) => {},
+                                                Some(Ok(Message::Close(_)) | Err(_)) | None => break 'connection,
                                             }
                                         }
                                         result = &mut confirmation => break result,
