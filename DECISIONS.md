@@ -1433,3 +1433,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      arrows and the drag-to-allow connector are drawn only inside the Mesh
      view. Terminal windows on other views never show arrows on hover, split
      or move.
+195. **Resizing windows (owner, 2026-10-09):** every window has four edges and
+     four corners of its own, and a resize always moves the edge or corner
+     being dragged; the opposite edge stays put. There is no shared divider
+     between neighbouring windows: other windows make room by moving, never
+     by changing their own size. Any window can be resized, including one
+     alone in its strip, between the minimum size and the widest option of
+     Settings → Window Sizes (D191), with the matching resize cursor on every
+     edge and corner.
