@@ -136,6 +136,20 @@ async fn mesh_snapshot_keystroke_latency_at_10000_nodes() {
     let session_id = uuid::Uuid::parse_str(opened["session_id"].as_str().unwrap())
         .unwrap()
         .into_bytes();
+    // The manager gives a detached shim its own scope. Reuse the authenticated
+    // fixture helper so this benchmark's requested CPU weight reaches the PTY.
+    let weighted = tokio::process::Command::new("python3")
+        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .args(["-c", "import sys,uuid;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import weight_fixture_shim;before,after=weight_fixture_shim(Path(sys.argv[1]),uuid.UUID(sys.argv[2]),'10000',diagnose=True);print(f'fixture_shim_cpu_weight_before={before} after={after}')"])
+        .arg(state_root.join("state"))
+        .arg(uuid::Uuid::from_bytes(session_id).to_string())
+        .output().await.unwrap();
+    assert!(
+        weighted.status.success(),
+        "fixture-owned shim scheduling must match the benchmark scope: {}",
+        String::from_utf8_lossy(&weighted.stderr)
+    );
+    print!("{}", String::from_utf8(weighted.stdout).unwrap());
     client_ws_send(
         &mut socket,
         1,
