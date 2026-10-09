@@ -63,6 +63,8 @@ Related documents: `segmented-selection.md` and `toast.md` in this folder.
 - **Keyboard actions never animate, and holding a key never floods.** Holding ⌘D dropped the frame rate to near zero; a keyboard split is instant, one per press. Mouse split keeps its animation. (owner, 2026-10-09)
 - **No tooltip appears on its own.** A screen-reader label ("shell, open in another window") surfaced as a tooltip in production without a hover. (owner, 2026-10-09)
 - **Sessions are named from what they do, never randomly.** A manual name stays forever. (owner, 2026-10-09, D128)
+- **Snap-fit, not springs.** A dragged connection follows the pointer 1:1 and snaps onto its target instantly with a short, crisp landing cue; elastic wobble on arrows is wrong. (owner, 2026-10-09, Mesh view)
+- **Text is crisp at rest, always.** Blurred button text ("Change access") is a bug, whatever transition caused it. (owner, 2026-10-09, again)
 
 ## 4. Layout and behaviour
 
