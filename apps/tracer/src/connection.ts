@@ -133,7 +133,10 @@ export class MuxConnection {
       return id;
     }
     if (!this.socket && !this.closed) this.connect();
-    else if (this.isWelcomed) handler.onWelcome(true);
+    // The caller learns its stream id from the return value, so the handler must not run before it has it: a terminal
+    // attached from inside this call sent AttachTerm on stream 0 (the control stream), and the server closed the
+    // socket (#128). One microtask later the handler runs, still before anything is painted.
+    else if (this.isWelcomed) queueMicrotask(() => { if (this.streams.get(id) === handler && this.isWelcomed) handler.onWelcome(true); });
     return id;
   }
 
