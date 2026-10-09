@@ -1,4 +1,5 @@
 //! Reproduce unknown nested JSON fields crossing the supposedly strict Mesh action boundary.
+#![cfg(feature = "mesh")]
 #![allow(clippy::unwrap_used)] // Test fixtures must fail immediately on serialization errors.
 use infraternal_server::mesh_api::{MeshApiError, parse_action};
 

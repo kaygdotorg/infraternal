@@ -485,6 +485,7 @@ async fn recovery_subscription_updates_every_signed_in_socket() {
     server.abort();
 }
 
+#[cfg(feature = "mesh")]
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // Keep one real socket's handshake, snapshot, edits, and invalidations ordered.
 async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
@@ -660,15 +661,19 @@ async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
     server.abort();
 }
 
+#[cfg(feature = "mesh")]
 #[path = "socket_tests/fresh_delete.rs"]
 mod fresh_delete;
 
+#[cfg(feature = "mesh")]
 #[path = "socket_tests/scale.rs"]
 mod scale;
 
+#[cfg(feature = "mesh")]
 #[path = "socket_tests/review_control.rs"]
 mod review_control;
 
+#[cfg(feature = "mesh")]
 #[path = "socket_tests/mesh_latency.rs"]
 mod mesh_latency;
 /// A fresh subscription and Pong fence expose both leaked state and queued extra events.
@@ -712,11 +717,14 @@ where
     ));
 }
 
+#[cfg(feature = "mesh")]
 #[path = "socket_tests/review_subscription_refusal.rs"]
 mod review_subscription_refusal;
 
+#[cfg(feature = "mesh")]
 #[path = "socket_tests/review_fresh_wait.rs"]
 mod review_fresh_wait;
 
+#[cfg(feature = "mesh")]
 #[path = "socket_tests/review_liveness.rs"]
 mod review_liveness;

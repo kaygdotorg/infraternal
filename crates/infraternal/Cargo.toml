@@ -5,9 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["mesh"]
+mesh = ["infraternal-server/mesh"]
+
 [dependencies]
 clap.workspace = true
-infraternal-server = { path = "../infraternal-server", version = "0.1.0" }
+infraternal-server = { path = "../infraternal-server", version = "0.1.0", default-features = false }
 sqlx.workspace = true
 tokio.workspace = true
 infraternal-shim.workspace = true

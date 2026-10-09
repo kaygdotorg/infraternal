@@ -3,7 +3,7 @@
 use crate::embedded::{AttachmentHandle, EmbeddedAgent, TerminalOutput, TerminalSize};
 use crate::{
     auth::Auth,
-    mesh_api::{MAX_MESH_FRAME_LEN, MeshApiError, MeshChange, MeshFilter, MeshService},
+    plugins::{Dispatch, PluginRuntime, SocketPlugins},
 };
 use axum::{
     Router,
@@ -17,20 +17,18 @@ use axum::{
 };
 use bytes::{Bytes, BytesMut};
 use futures_util::{FutureExt, SinkExt, Stream, StreamExt};
+use infraternal_plugin_api::{Operation, SocketHost};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
 };
 use rand::random;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use std::{
     collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Semaphore, mpsc};
@@ -59,63 +57,16 @@ const MAX_RESUME_ROWS: i64 = 4096;
 const MAX_ATTACHMENTS: usize = 32;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
 const OUTPUT_CHANNEL_CAPACITY: usize = 4;
-// Include queued watches in the per-socket subscription admission bound.
-const MAX_MESH_SUBSCRIPTIONS: usize = 32;
-// Trusted queue stream IDs encode a generation plus an error bit. Network Mesh
-// frames always use control stream zero; this marker never reaches the browser.
-const MAX_MESH_GENERATION: u32 = u32::MAX >> 1;
 // Cap a fragmented input frame before the decoder retains more bytes.
 const MAX_SOCKET_BUFFER: usize = MAX_FRAME_LEN + 10;
 const MAX_CREDIT: u64 = 8 * 1024 * 1024;
-
-/// Socket dispatch is the sole writer; workers read coherent ID/generation pairs.
-/// Zero means vacant. A nonzero generation occupies the high half, so `sub_id` zero
-/// remains usable. Release/acquire publishes replacement admission without locks.
-type MeshRegistry = Arc<[AtomicU64; MAX_MESH_SUBSCRIPTIONS]>;
-
-/// A stale queued watch or reply cannot acquire a replacement's generation.
-fn mesh_current(registry: &MeshRegistry, sub_id: u32, generation: u32) -> bool {
-    let stamp = (u64::from(generation) << 32) | u64::from(sub_id);
-    generation != 0
-        && registry
-            .iter()
-            .any(|entry| entry.load(Ordering::Acquire) == stamp)
-}
-
-/// End the old generation before either replacement admission or refusal.
-fn mesh_withdraw(registry: &MeshRegistry, sub_id: u32) {
-    for entry in registry.iter() {
-        let stamp = entry.load(Ordering::Acquire);
-        if stamp != 0 && stamp & u64::from(u32::MAX) == u64::from(sub_id) {
-            entry.store(0, Ordering::Release);
-            break;
-        }
-    }
-}
-
-/// The retained filter and its queue-only generation share one installed watch.
-#[derive(Clone)]
-struct MeshSubscription {
-    sub_id: u32,
-    filter: MeshFilter,
-    generation: u32,
-    liveness_deadline: Option<i64>,
-}
-
-/// The 32-watch bound makes replacement a bounded scan without hashing/allocation.
-fn mesh_remove(subscriptions: &mut Vec<MeshSubscription>, sub_id: u32) {
-    if let Some(index) = subscriptions.iter().position(|sub| sub.sub_id == sub_id) {
-        subscriptions.swap_remove(index);
-    }
-}
 
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
 pub(crate) struct WebSocketState {
     auth: Auth,
     pool: SqlitePool,
-    mesh: MeshService,
-    mesh_work: Arc<Semaphore>,
+    pub(crate) plugins: PluginRuntime,
     agent: EmbeddedAgent,
     #[cfg(test)]
     handshake_timeout: Duration,
@@ -130,20 +81,11 @@ pub(crate) struct WebSocketState {
 impl WebSocketState {
     /// Create bounded socket admission around the configured auth and agent services.
     pub(crate) fn new(auth: Auth, pool: SqlitePool, agent: EmbeddedAgent) -> Self {
-        let mesh = MeshService::new(pool.clone());
-        // Keep authority reads available while multiple sockets wait for a WAL
-        // writer. Production has eight slots; narrow fixtures retain one worker.
-        let mesh_capacity = pool
-            .options()
-            .get_max_connections()
-            .saturating_sub(2)
-            .clamp(1, 2);
-        let mesh_work = Arc::new(Semaphore::new(mesh_capacity as usize));
+        let plugins = crate::plugins::compiled(&pool);
         Self {
             auth,
             pool,
-            mesh,
-            mesh_work,
+            plugins,
             agent,
             #[cfg(test)]
             handshake_timeout: HANDSHAKE_TIMEOUT,
@@ -154,6 +96,17 @@ impl WebSocketState {
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             users: Arc::default(),
         }
+    }
+
+    /// Bind this socket to the generic host authority bridge without starting features.
+    pub(crate) fn plugin_socket(self: &Arc<Self>, user: &str, token: &str) -> SocketPlugins {
+        let host: Arc<dyn SocketHost> = Arc::new(PluginHost {
+            state: Arc::clone(self),
+            user: user.to_owned(),
+            hash: crate::auth::hash(token),
+            token: token.to_owned(),
+        });
+        SocketPlugins::new(self.plugins.clone(), host)
     }
 
     /// Keep production's terminal deadline fixed while allowing deadline tests to run quickly.
@@ -253,7 +206,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<&str> {
     Some(value)
 }
 
-// Mesh database work has independent bounded admission; this loop dispatches shared control and terminal frames.
+// Plugin work has independent bounded admission; this loop dispatches shared control and terminal frames.
 #[allow(clippy::too_many_lines)]
 async fn run_socket(
     socket: WebSocket,
@@ -337,94 +290,7 @@ async fn run_socket(
 
     let (output_tx, mut output_rx) =
         mpsc::channel::<(u32, TerminalOutput)>(OUTPUT_CHANNEL_CAPACITY);
-    // A single active request plus four queued requests preserves call ordering.
-    // Input and output bounds are independent of terminal queues and other sockets.
-    let (mesh_tx, mut mesh_rx) = mpsc::channel::<Bytes>(4);
-    let (mesh_reply_tx, mut mesh_reply_rx) = mpsc::channel::<Message>(4);
-    // Fixed slots bound admitted and queued watches without per-watch allocation.
-    let mesh_registry = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
-    let worker_registry = Arc::clone(&mesh_registry);
-    let mut mesh_generation = 0_u32;
-    let worker_state = Arc::clone(&state);
-    let worker_user = user_id.clone();
-    let worker_token = session_token.clone();
-    // Erasing only plugin operation futures shares the authority watchdog code
-    // across request/change/resync/expiry paths; this keeps the static size budget.
-    let mesh_worker = tokio::spawn(async move {
-        let mut mesh_updates = worker_state.mesh.subscribe();
-        let mut mesh_subscriptions = Vec::<MeshSubscription>::with_capacity(MAX_MESH_SUBSCRIPTIONS);
-        let mut encode = Vec::with_capacity(4096);
-        let sink = futures_util::sink::unfold(mesh_reply_tx, |tx, message| async move {
-            tx.send(message)
-                .await
-                .map_err(|_| axum::Error::new(std::io::Error::other("socket ended")))?;
-            Ok::<_, axum::Error>(tx)
-        });
-        tokio::pin!(sink);
-        loop {
-            mesh_subscriptions
-                .retain(|sub| mesh_current(&worker_registry, sub.sub_id, sub.generation));
-            let next_expiry = mesh_subscriptions
-                .iter()
-                .filter_map(|sub| sub.liveness_deadline)
-                .min();
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default();
-            let expiry_wait = next_expiry
-                .and_then(|expiry| u64::try_from(expiry).ok())
-                .map(|expiry| Duration::from_secs(expiry).saturating_sub(now));
-            let result = tokio::select! {
-                () = tokio::time::sleep(expiry_wait.unwrap_or_default()), if expiry_wait.is_some() => {
-                    while_authorized(&worker_state, &worker_user, &worker_token, true,
-                        async {
-                            let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
-                            send_mesh_resync(&worker_state, &worker_user,
-                                &mut mesh_subscriptions, &mut sink, &mut encode, true).await
-                        }.boxed()
-                    ).await
-                }
-                wire = mesh_rx.recv() => {
-                    let Some(wire) = wire else { break; };
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && let Frame::Subscribe { sub_id, .. } = decoded.frame
-                        && !mesh_current(&worker_registry, sub_id, decoded.stream_id >> 1) {
-                        continue;
-                    }
-                    while_authorized(&worker_state, &worker_user, &worker_token, true,
-                        async {
-                            let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
-                            handle_mesh_frame(wire, &worker_state, &worker_user, &worker_token,
-                                &mut mesh_subscriptions, &mut sink, &mut encode).await
-                        }.boxed()
-                    ).await
-                }
-                change = mesh_updates.recv(), if !mesh_subscriptions.is_empty() => {
-                    match change {
-                        Ok(change) => while_authorized(&worker_state, &worker_user, &worker_token, true,
-                            async {
-                                let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
-                                send_mesh_change(&worker_state, &worker_user, &change,
-                                    &mut mesh_subscriptions, &mut sink, &mut encode).await
-                            }.boxed()
-                        ).await,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =>
-                            while_authorized(&worker_state, &worker_user, &worker_token, true,
-                                async {
-                                    let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
-                                    send_mesh_resync(&worker_state, &worker_user,
-                                        &mut mesh_subscriptions, &mut sink, &mut encode, false).await
-                                }.boxed()
-                            ).await,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
-                    }
-                }
-            };
-            if result.is_err() {
-                break;
-            }
-        }
-    });
+    let mut plugins = state.plugin_socket(&user_id, &session_token);
     let mut output_open = true;
     let mut receive_deadline = None;
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
@@ -434,22 +300,11 @@ async fn run_socket(
         .unwrap_or_else(|()| tokio::time::Instant::now());
     loop {
         tokio::select! {
-            Some(mut message) = mesh_reply_rx.recv() => {
-                if let Message::Binary(wire) = &message
-                    && let Ok(decoded) = decode_muxed_frame(wire)
-                    && decoded.stream_id != CONTROL_STREAM {
-                    let Frame::Event { sub_id, .. } = decoded.frame else { break; };
-                    let current = mesh_current(&mesh_registry, sub_id, decoded.stream_id >> 1);
-                    if !current { continue; }
-                    if decoded.stream_id & 1 != 0 { mesh_withdraw(&mesh_registry, sub_id); }
-                    // Restore the public control header only after generation validation.
-                    // The event JSON stays opaque; no snapshot is parsed in dispatch.
-                    if encode_muxed_frame_into(CONTROL_STREAM, &decoded.frame, &mut encode).is_err() { break; }
-                    message = Message::Binary(Bytes::copy_from_slice(&encode));
-                }
+            Some(reply) = plugins.recv() => {
+                let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
                 if while_authorized(&state, &user_id, &session_token, true,
-                    send_message(&mut sink, message)
-                ).await.is_err() { break; }
+                    send_message(&mut sink, Message::Binary(wire))
+                ).await.is_err() {break;}
             }
             changed = recovery_events.changed(), if recovery_subscribed => {
                 if changed.is_err() { break; }
@@ -504,42 +359,14 @@ async fn run_socket(
                         }).await;
                         break;
                     }
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && decoded.stream_id == CONTROL_STREAM {
-                        let refusal = match decoded.frame {
-                            Frame::Call { call_id, action_id, .. } if action_id.starts_with("mesh.") =>
-                                Some(Frame::Result { call_id, ok: false, json: MeshApiError::Storage.wire_error() }),
-                            Frame::Subscribe { sub_id, .. } => Some(Frame::Event {
-                                sub_id, event_json: br#"{"type":"error","error":"mesh unavailable"}"#,
-                            }),
-                            _ => None,
-                        };
-                        if let Some(refusal) = refusal {
-                            let mut admitted = false;
-                            if let Frame::Subscribe { sub_id, .. } = decoded.frame {
-                                mesh_withdraw(&mesh_registry, sub_id);
-                                if wire.len() <= MAX_MESH_FRAME_LEN
-                                    && let Some(generation) = mesh_generation.checked_add(1)
-                                        .filter(|value| *value <= MAX_MESH_GENERATION) {
-                                    mesh_generation = generation;
-                                    // Stamping uses the established mux codec on a trusted queue.
-                                    // Public input was checked as control stream zero above.
-                                    if encode_muxed_frame_into(generation << 1, &decoded.frame, &mut encode).is_err() { break; }
-                                    let request = Bytes::copy_from_slice(&encode);
-                                    if let Some(slot) = mesh_registry.iter().find(|entry| entry.load(Ordering::Acquire) == 0) {
-                                        slot.store((u64::from(generation) << 32) | u64::from(sub_id), Ordering::Release);
-                                        admitted = mesh_tx.try_send(request).is_ok();
-                                        if !admitted { mesh_withdraw(&mesh_registry, sub_id); }
-                                    }
-                                }
-                            } else if wire.len() <= MAX_MESH_FRAME_LEN {
-                                admitted = mesh_tx.try_send(wire.clone()).is_ok();
-                            }
-                            if !admitted && while_authorized(&state, &user_id, &session_token, true,
-                                send_frame(&mut sink, CONTROL_STREAM, &refusal, &mut encode)
-                            ).await.is_err() { break; }
+                    match plugins.dispatch(&wire, &mut encode) {
+                        Dispatch::Queued => continue,
+                        Dispatch::Refused(wire) => {
+                            if while_authorized(&state, &user_id, &session_token, true,
+                                send_message(&mut sink,Message::Binary(wire))).await.is_err() {break;}
                             continue;
                         }
+                        Dispatch::Unhandled => {}
                     }
                     if while_authorized(&state, &user_id, &session_token, true, handle_client_frame(
                             wire,
@@ -570,7 +397,7 @@ async fn run_socket(
             }
         }
     }
-    mesh_worker.abort();
+    drop(plugins);
     drop(attachments);
     if loop_result.is_err() && session_is_live(&state, &user_id, &session_token).await {
         let _ = tokio::time::timeout(
@@ -692,169 +519,6 @@ where
     .await?;
     *last = RecoverySnapshot::Read(pending);
     Ok(())
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MeshSubscribeFilter {
-    topic: String,
-    #[serde(default)]
-    tag: Option<String>,
-}
-
-fn mesh_error_event(error: MeshApiError) -> Value {
-    let message = match error {
-        MeshApiError::InvalidInput => "invalid input",
-        MeshApiError::Denied => "forbidden",
-        MeshApiError::FreshRequired => "confirm with your passkey again",
-        MeshApiError::NotFound => "not found",
-        MeshApiError::Conflict => "conflict",
-        MeshApiError::Storage => "mesh unavailable",
-    };
-    json!({"type":"error","error":message})
-}
-
-async fn send_mesh_event<K>(
-    sink: &mut K,
-    sub_id: u32,
-    event: &Value,
-    encode: &mut Vec<u8>,
-    stream_id: u32,
-) -> Result<(), ()>
-where
-    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
-{
-    let event_json = serde_json::to_vec(event).map_err(|_| ())?;
-    send_frame(
-        sink,
-        stream_id,
-        &Frame::Event {
-            sub_id,
-            event_json: &event_json,
-        },
-        encode,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn send_mesh_change<K>(
-    state: &WebSocketState,
-    user_id: &str,
-    change: &MeshChange,
-    subscriptions: &mut Vec<MeshSubscription>,
-    sink: &mut K,
-    encode: &mut Vec<u8>,
-) -> Result<(), ()>
-where
-    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
-{
-    let current = subscriptions.clone();
-    for subscription in current {
-        let sub_id = subscription.sub_id;
-        let (event, ended) = match state
-            .mesh
-            .can_view_change(user_id, &subscription.filter, change)
-            .await
-        {
-            Ok(true) => {
-                if let Some(deadline) = change.liveness_deadline
-                    && let Some(watch) = subscriptions.iter_mut().find(|sub| sub.sub_id == sub_id)
-                {
-                    watch.liveness_deadline = Some(
-                        watch
-                            .liveness_deadline
-                            .map_or(deadline, |old| old.min(deadline)),
-                    );
-                }
-                (json!({"type":"changed","revision":change.revision}), false)
-            }
-            Ok(false) => continue,
-            Err(error) => {
-                mesh_remove(subscriptions, sub_id);
-                (mesh_error_event(error), true)
-            }
-        };
-        send_mesh_event(
-            sink,
-            sub_id,
-            &event,
-            encode,
-            (subscription.generation << 1) | u32::from(ended),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn send_mesh_resync<K>(
-    state: &WebSocketState,
-    user_id: &str,
-    subscriptions: &mut Vec<MeshSubscription>,
-    sink: &mut K,
-    encode: &mut Vec<u8>,
-    expired_only: bool,
-) -> Result<(), ()>
-where
-    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
-{
-    let now = unix_seconds()?;
-    let current = subscriptions.clone();
-    for subscription in current {
-        if expired_only
-            && subscription
-                .liveness_deadline
-                .is_none_or(|deadline| deadline > now)
-        {
-            continue;
-        }
-        let sub_id = subscription.sub_id;
-        let (retained, deadline) =
-            send_mesh_snapshot(state, user_id, sub_id, subscription, sink, encode, "resync")
-                .await?;
-        if retained {
-            if let Some(watch) = subscriptions.iter_mut().find(|sub| sub.sub_id == sub_id) {
-                watch.liveness_deadline = deadline;
-            }
-        } else {
-            mesh_remove(subscriptions, sub_id);
-        }
-    }
-    Ok(())
-}
-
-/// Initial and resync snapshots share permission/error delivery for one generation.
-async fn send_mesh_snapshot<K>(
-    state: &WebSocketState,
-    user_id: &str,
-    sub_id: u32,
-    subscription: MeshSubscription,
-    sink: &mut K,
-    encode: &mut Vec<u8>,
-    kind: &str,
-) -> Result<(bool, Option<i64>), ()>
-where
-    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
-{
-    let (event, retained, deadline) = match state
-        .mesh
-        .list_with_deadline(user_id, subscription.filter, unix_seconds()?)
-        .await
-    {
-        Ok((snapshot, deadline)) => (json!({"type":kind,"snapshot":snapshot}), true, deadline),
-        Err(error) => (mesh_error_event(error), false, None),
-    };
-    // The worker carries withdrawal as typed metadata, without inspecting JSON.
-    send_mesh_event(
-        sink,
-        sub_id,
-        &event,
-        encode,
-        (subscription.generation << 1) | u32::from(!retained),
-    )
-    .await?;
-    Ok((retained, deadline))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1247,148 +911,6 @@ async fn rollback_connection(pool: &SqlitePool, user_id: &str, welcome: &Welcome
 
 fn token_hash(token: &[u8; 32]) -> [u8; 32] {
     Sha256::digest(token).into()
-}
-
-#[allow(clippy::too_many_lines)]
-// Mesh work runs in its own ordered, bounded socket worker [D11]. Slow database
-// writes and subscriber reads must never park the terminal/control dispatch loop.
-async fn handle_mesh_frame<K>(
-    wire: Bytes,
-    state: &WebSocketState,
-    user_id: &str,
-    session_token: &str,
-    mesh_subscriptions: &mut Vec<MeshSubscription>,
-    sink: &mut K,
-    encode: &mut Vec<u8>,
-) -> Result<(), ()>
-where
-    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
-{
-    let decoded = decode_muxed_frame(&wire).map_err(|_| ())?;
-    let stream_id = decoded.stream_id;
-    match decoded.frame {
-        Frame::Subscribe {
-            sub_id,
-            filter_json,
-        } if stream_id != CONTROL_STREAM && stream_id & 1 == 0 => {
-            let generation = stream_id >> 1;
-            mesh_remove(mesh_subscriptions, sub_id);
-            match serde_json::from_slice::<MeshSubscribeFilter>(filter_json) {
-                Ok(request) if request.topic == "mesh" => {
-                    let filter = MeshFilter {
-                        tag: request.tag,
-                        cursor: None,
-                    };
-                    let subscription = MeshSubscription {
-                        sub_id,
-                        filter,
-                        generation,
-                        liveness_deadline: None,
-                    };
-                    // The worker cannot process updates while assembling this snapshot.
-                    // Dispatch drops superseded output; its registry bounds all admission.
-                    mesh_subscriptions.push(subscription.clone());
-                    let (retained, deadline) = send_mesh_snapshot(
-                        state,
-                        user_id,
-                        sub_id,
-                        subscription,
-                        sink,
-                        encode,
-                        "snapshot",
-                    )
-                    .await?;
-                    if retained {
-                        if let Some(watch) = mesh_subscriptions
-                            .iter_mut()
-                            .find(|sub| sub.sub_id == sub_id)
-                        {
-                            watch.liveness_deadline = deadline;
-                        }
-                    } else {
-                        mesh_remove(mesh_subscriptions, sub_id);
-                    }
-                    Ok(())
-                }
-                _ => {
-                    mesh_remove(mesh_subscriptions, sub_id);
-                    send_mesh_event(
-                        sink,
-                        sub_id,
-                        &mesh_error_event(MeshApiError::InvalidInput),
-                        encode,
-                        (generation << 1) | 1,
-                    )
-                    .await
-                }
-            }
-        }
-        Frame::Call {
-            call_id,
-            action_id,
-            input_json,
-        } if stream_id == CONTROL_STREAM && action_id.starts_with("mesh.") => {
-            let now = unix_seconds()?;
-            // Destructive policy and inventory edits need the same fresh passkey
-            // authority as account changes [28]; an unlocked socket alone is insufficient.
-            let requires_fresh = matches!(
-                action_id,
-                "mesh.node.delete"
-                    | "mesh.tag.delete"
-                    | "mesh.tag.member.remove"
-                    | "mesh.grant.move"
-                    | "mesh.grant.delete"
-                    | "mesh.role.define"
-                    | "mesh.role.assign"
-            );
-            let service = if requires_fresh {
-                state
-                    .mesh
-                    .with_fresh_authority(crate::auth::hash(session_token))
-            } else {
-                state.mesh.clone()
-            };
-            let value =
-                if requires_fresh && state.auth.fresh_session(session_token, now).await.is_err() {
-                    Err(MeshApiError::FreshRequired)
-                } else {
-                    service.execute(user_id, action_id, input_json, now).await
-                };
-            if !session_is_live(state, user_id, session_token).await {
-                return Err(());
-            }
-            match value {
-                Ok(value) => {
-                    let json = serde_json::to_vec(&value).map_err(|_| ())?;
-                    send_frame(
-                        sink,
-                        CONTROL_STREAM,
-                        &Frame::Result {
-                            call_id,
-                            ok: true,
-                            json: &json,
-                        },
-                        encode,
-                    )
-                    .await
-                }
-                Err(error) => {
-                    send_frame(
-                        sink,
-                        CONTROL_STREAM,
-                        &Frame::Result {
-                            call_id,
-                            ok: false,
-                            json: error.wire_error(),
-                        },
-                        encode,
-                    )
-                    .await
-                }
-            }
-        }
-        _ => Err(()),
-    }
 }
 
 // Each browser frame is validated here and routed without allocating a second terminal payload.
@@ -1990,3 +1512,67 @@ async fn require_socket_authority_tx(
 #[cfg(test)]
 #[path = "recovery_notification_bench.rs"]
 mod recovery_notification_bench;
+
+/// The host retains session secrets and authority interruption independently of feature work.
+struct PluginHost {
+    state: Arc<WebSocketState>,
+    user: String,
+    token: String,
+    hash: String,
+}
+impl SocketHost for PluginHost {
+    fn user_id(&self) -> &str {
+        &self.user
+    }
+    fn token_hash(&self) -> &str {
+        &self.hash
+    }
+    fn authorized<'a>(
+        &'a self,
+        operation: Operation<'a, Result<(), ()>>,
+    ) -> Operation<'a, Result<(), ()>> {
+        Box::pin(while_authorized_operation(
+            &self.state,
+            &self.user,
+            &self.token,
+            true,
+            operation,
+        ))
+    }
+    fn fresh(&self, now: i64) -> Operation<'_, bool> {
+        Box::pin(async move {
+            self.state
+                .auth
+                .fresh_session(&self.token, now)
+                .await
+                .is_ok()
+        })
+    }
+    fn live(&self) -> Operation<'_, bool> {
+        Box::pin(session_is_live(&self.state, &self.user, &self.token))
+    }
+    fn may_configure(&self) -> Operation<'_, bool> {
+        Box::pin(async move {
+            let Ok(mut tx) = self.state.pool.begin().await else {
+                return false;
+            };
+            let owner = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE id=? AND owner=1)",
+            )
+            .bind(&self.user)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap_or(false);
+            owner
+                && infraternal_plugin_api::fresh_session_tx(
+                    &mut tx,
+                    &self.hash,
+                    &self.user,
+                    unix_seconds().unwrap_or(i64::MAX),
+                    infraternal_plugin_api::FRESH_SECONDS,
+                )
+                .await
+                .unwrap_or(false)
+        })
+    }
+}

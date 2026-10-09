@@ -1,4 +1,5 @@
 //! Independent validation check for explicit null Mesh role scopes [D154, D187, #108].
+#![cfg(feature = "mesh")]
 use infraternal_server::mesh_api::{MeshApiError, parse_action};
 
 #[test]

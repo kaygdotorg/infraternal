@@ -1,4 +1,5 @@
 //! Independent strict-policy regression: explicit null is not an omitted all-ports policy [D164, #108].
+#![cfg(feature = "mesh")]
 use infraternal_server::mesh_api::{MeshApiError, parse_action};
 
 #[test]
