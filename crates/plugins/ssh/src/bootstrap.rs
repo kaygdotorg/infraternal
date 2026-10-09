@@ -6,7 +6,9 @@ use crate::{
     install::{BinaryPaths, Cleanup, Installation, JoinMaterial},
     model::{Destination, Event, Failure, MeshEvidence, Step, Target, identifier},
     probe::{CHECK_SCRIPT, Check},
-    transport::{Credentials, Input, Operation, Secret, SshSession, SshTransport},
+    transport::{
+        ConfirmationAuthority, Credentials, Input, Operation, Secret, SshSession, SshTransport,
+    },
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -202,6 +204,7 @@ impl Bootstrap {
                         running: false,
                         failed: false,
                         cleanup: None,
+                        last_failure: None,
                     },
                 )
                 .is_some()
@@ -271,6 +274,7 @@ impl Bootstrap {
             }
             state.running = true;
             state.failed = false;
+            state.last_failure = None;
             state.attempt += 1;
             (state.target.clone(), state.attempt)
         };
@@ -365,6 +369,7 @@ impl Bootstrap {
         if let Some(state) = states.get_mut(&target.id) {
             state.running = false;
             state.failed = result.is_err();
+            state.last_failure = result.as_ref().err().cloned();
         }
         // Keep state and completion event ordered: retry after failed cannot race
         // the final event from its predecessor.
@@ -523,6 +528,63 @@ impl Bootstrap {
         Ok(())
     }
 
+    /// Confirm only this failed attempt's public observation; the caller supplies
+    /// fresh authority, rechecked by the transport immediately before pin publication.
+    /// # Errors
+    /// Refuses foreign/running/successful hosts, stale observations and changed trust.
+    pub async fn confirm_host_key(
+        &self,
+        batch: &Batch,
+        owner: &str,
+        id: &str,
+        challenge: &str,
+        fingerprint: &str,
+        authority: &dyn ConfirmationAuthority,
+    ) -> Result<(), Failure> {
+        if batch.inner.authority.owner != owner || *batch.inner.cancel.borrow() {
+            return Err(Failure::unsupported("The bootstrap batch is unavailable."));
+        }
+        let target = {
+            let states = lock(&batch.inner.states);
+            let state = states
+                .get(id)
+                .ok_or_else(|| Failure::unsupported("This host is not in the batch."))?;
+            let failure = state.last_failure.as_ref().ok_or_else(|| {
+                Failure::unsupported("Retry the host check before confirming trust.")
+            })?;
+            if state.running
+                || !state.failed
+                || failure.kind != crate::model::FailureKind::HostKey
+                || failure
+                    .host_key_challenge
+                    .is_none_or(|value| value.to_string() != challenge)
+                || !failure
+                    .fingerprints
+                    .iter()
+                    .any(|value| value == fingerprint)
+            {
+                return Err(Failure::unsupported(
+                    "This SSH host-key observation is no longer available.",
+                ));
+            }
+            state.target.clone()
+        };
+        let resolved = self
+            .backend
+            .resolve(
+                &batch.inner.authority,
+                &target,
+                target
+                    .credential
+                    .as_deref()
+                    .or(batch.inner.credential.as_deref()),
+            )
+            .await?;
+        self.transport
+            .confirm_host_key(resolved.destination, challenge, fingerprint, authority)
+            .await
+    }
+
     /// Retry one failed host, keeping its trusted host identity in the backend.
     /// # Errors
     /// Refuses a foreign batch owner, unknown/running/successful host or excessive attempts.
@@ -593,6 +655,7 @@ struct HostState {
     running: bool,
     failed: bool,
     cleanup: Option<Cleanup>,
+    last_failure: Option<Failure>,
 }
 /// Shares history's lock: emit must not acquire `HostState` while completion holds
 /// it to order retries. Exactly one current metadata row per bounded target.
