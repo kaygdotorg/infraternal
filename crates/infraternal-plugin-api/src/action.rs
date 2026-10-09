@@ -92,6 +92,35 @@ impl JsonSchema {
         Self::object(std::iter::empty(), std::iter::empty())
     }
 
+    /// Create the stable result schema used for action state and next-step output.
+    #[must_use]
+    pub fn command_result() -> Self {
+        Self::object(
+            [
+                (
+                    "schema_version".to_owned(),
+                    Self::integer("Version of the CLI JSON result contract."),
+                ),
+                ("command".to_owned(), Self::string("Executed command path.")),
+                (
+                    "state".to_owned(),
+                    Self::string("Plain machine-readable command state."),
+                ),
+                ("message".to_owned(), Self::string("Short result summary.")),
+                (
+                    "next_step".to_owned(),
+                    Self::string("Optional recommended follow-up action."),
+                ),
+            ],
+            [
+                "schema_version".to_owned(),
+                "command".to_owned(),
+                "state".to_owned(),
+                "message".to_owned(),
+            ],
+        )
+    }
+
     /// Create an array schema for repeated values.
     #[must_use]
     pub fn array(items: Self, description: impl Into<String>) -> Self {
@@ -543,5 +572,17 @@ mod tests {
             [action],
         )]);
         assert!(matches!(registry, Err(RegistryError::InvalidSchema(_))));
+    }
+
+    #[test]
+    fn command_result_schema_has_required_stable_fields_and_optional_next_step() {
+        let schema = JsonSchema::command_result();
+        assert_eq!(schema.schema_type, super::JsonSchemaType::Object);
+        assert_eq!(
+            schema.required,
+            ["schema_version", "command", "state", "message"]
+        );
+        assert!(schema.properties.contains_key("next_step"));
+        assert_eq!(schema.additional_properties, Some(false));
     }
 }
