@@ -237,7 +237,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
     let mut after = 0;
     // A wholly idle socket has one session-expiry deadline, not a polling loop.
     let mut expiry = Box::pin(tokio::time::sleep(Duration::from_hours(30 * 24)));
-    loop {
+    'connection: loop {
         tokio::select! {
             biased;
             () = &mut expiry => break,
@@ -268,7 +268,29 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                     Request::ConfirmHostKey {target,challenge,fingerprint} => {
                         if let Some(batch)=&batch {
                             let proof=LiveConfirmation {auth:api.auth.clone(),owner:owner.clone(),token:Secret::new(token.as_bytes().to_vec())};
-                            match api.runner.confirm_host_key(batch,&owner,&target,&challenge,&fingerprint,&proof).await {
+                            let confirmed = {
+                                let confirmation = api.runner.confirm_host_key(batch,&owner,&target,&challenge,&fingerprint,&proof);
+                                tokio::pin!(confirmation);
+                                // Keep pending lookups inside the same live socket lifetime.
+                                // Revocation, expiry and disconnect must drop the lookup before publication.
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        () = &mut expiry => break 'connection,
+                                        change = revocation.changed() => {
+                                            if change.is_err() || !authorized(&api,token,&owner).await { break 'connection; }
+                                        }
+                                        incoming = socket.recv() => {
+                                            match incoming {
+                                                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {},
+                                                _ => break 'connection,
+                                            }
+                                        }
+                                        result = &mut confirmation => break result,
+                                    }
+                                }
+                            };
+                            match confirmed {
                                 Ok(())=>{
                                     let reply=serde_json::to_string(&serde_json::json!({"host_key_confirmed":{"target":target,"fingerprint":fingerprint}})).ok();
                                     if send_live(&mut socket,&api,&owner,token,&mut revocation,reply).await.is_err() {break;}

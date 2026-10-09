@@ -64,6 +64,145 @@ impl Backend for Rejected {
 fn impossible<'a>() -> Operation<'a, ()> {
     Box::pin(async { panic!("rejected admission has no remote identity") })
 }
+
+/// Resolves an initial check, then holds a later confirmation lookup until released.
+struct ConfirmationLookup {
+    calls: AtomicUsize,
+    entered: Semaphore,
+    release: Semaphore,
+}
+impl Backend for ConfirmationLookup {
+    fn resolve<'a>(
+        &'a self,
+        _: &'a Authority,
+        _: &'a Target,
+        _: Option<&'a str>,
+    ) -> Operation<'a, Resolved> {
+        Box::pin(async move {
+            if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                self.entered.add_permits(1);
+                self.release.acquire().await.unwrap().forget();
+            }
+            Ok(Resolved {
+                destination: Destination::parse("user@fixture").unwrap(),
+                credentials: Credentials::Network,
+                mesh: MeshEvidence::default(),
+            })
+        })
+    }
+    fn invitation<'a>(
+        &'a self,
+        _: &'a Authority,
+        _: &'a Target,
+        _: &'a Check,
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async { panic!("unconfirmed host trust must not enroll") })
+    }
+    fn connected_facts<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+        impossible()
+    }
+    fn terminal_canary<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+        impossible()
+    }
+    fn failed<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+        impossible()
+    }
+}
+
+/// Returns only a synthetic public observation; no SSH connection or pin publication occurs.
+struct PublicChallenge(uuid::Uuid);
+impl SshTransport for PublicChallenge {
+    fn open(
+        &self,
+        _: Destination,
+        _: Credentials,
+        _: MeshEvidence,
+    ) -> Operation<'_, Arc<dyn SshSession>> {
+        Box::pin(async move {
+            let mut failure = Failure::new(
+                infraternal_plugin_ssh::model::FailureKind::HostKey,
+                "The fixture host key needs confirmation.",
+            );
+            failure.host_key_challenge = Some(self.0);
+            failure
+                .fingerprints
+                .push(format!("SHA256:{}", "a".repeat(43)));
+            Err(failure)
+        })
+    }
+}
+
+#[tokio::test]
+async fn logout_interrupts_a_stalled_host_key_confirmation_lookup() {
+    let (auth, _, cookie, _, _, original_server, _, _) = fixture(false).await;
+    original_server.abort();
+    let backend = Arc::new(ConfirmationLookup {
+        calls: AtomicUsize::new(0),
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    let challenge = uuid::Uuid::new_v4();
+    let api = Arc::new(Api {
+        auth: auth.clone(),
+        runner: Bootstrap::new(
+            Arc::new(PublicChallenge(challenge)),
+            backend.clone(),
+            BinaryPaths {
+                x86_64: "unused".into(),
+                aarch64: "unused".into(),
+            },
+        ),
+        sockets: Arc::new(Semaphore::new(16)),
+        ssh_key: Arc::new(UnavailableSshKey),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/v1/bootstrap/ws", get(upgrade))
+        .with_state(api.clone());
+    let serving = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (mut socket, _) = connect_async(request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    socket.send(ClientMessage::Text(serde_json::json!({"action":"start","targets":[{"id":"one","address":{"kind":"manual","value":"user@fixture"}}]}).to_string().into())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let response = socket.next().await.unwrap().unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(response.to_text().unwrap()).unwrap();
+            if event["step"] == "failed" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    socket.send(ClientMessage::Text(serde_json::json!({"action":"confirm-host-key","target":"one","challenge":challenge,"fingerprint":format!("SHA256:{}", "a".repeat(43))}).to_string().into())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), backend.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    auth.logout(cookie.split_once('=').unwrap().1)
+        .await
+        .unwrap();
+    let retired = tokio::time::timeout(Duration::from_secs(2), async {
+        while api.sockets.available_permits() != 16 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    // Release the owned fixture lookup even on a failed assertion.
+    backend.release.add_permits(1);
+    let _ = socket.close(None).await;
+    serving.abort();
+    assert!(
+        retired.is_ok(),
+        "revoked bootstrap retained its socket during confirmation lookup"
+    );
+}
 struct NoSsh;
 impl SshTransport for NoSsh {
     fn open(
