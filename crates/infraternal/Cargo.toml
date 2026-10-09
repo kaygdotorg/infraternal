@@ -10,7 +10,7 @@ clap.workspace = true
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
-infraternal-server = { path = "../infraternal-server", version = "0.1.0" }
+infraternal-server = { path = "../infraternal-server", version = "0.1.0", default-features = false }
 sqlx.workspace = true
 tokio.workspace = true
 infraternal-shim.workspace = true
@@ -27,7 +27,7 @@ plugin-agent = []
 plugin-backup = ["dep:infraternal-plugin-backup"]
 plugin-mesh = ["dep:infraternal-mesh"]
 plugin-relay = ["dep:infraternal-plugin-relay"]
-plugin-server = []
+plugin-server = ["infraternal-server/cli-plugin"]
 plugin-ssh = ["dep:infraternal-plugin-ssh"]
 
 [lints]

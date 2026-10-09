@@ -2,6 +2,8 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod auth;
+#[cfg(feature = "cli-plugin")]
+pub mod cli;
 mod embedded;
 mod runtime;
 mod web_assets;

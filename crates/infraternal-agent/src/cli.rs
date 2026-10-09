@@ -10,10 +10,28 @@ pub fn plugin() -> PluginDefinition {
         "Manage the infraternal agent component on this node.",
         [
             ActionDefinition::new(
+                ["agent"],
+                "Run an infraternal agent over its inherited server connection.",
+                "Use this internal command only when a server launches an agent with a private socketpair.",
+                [
+                    "Receive the inherited socket file descriptor from the server.",
+                    "Run the agent for the lifetime of that connection.",
+                ],
+                JsonSchema::object(
+                    [
+                        ("fd".to_owned(), JsonSchema::integer("Inherited socket file descriptor.")),
+                        ("state".to_owned(), JsonSchema::string("Private agent state directory.")),
+                    ],
+                    std::iter::empty(),
+                ),
+                JsonSchema::command_result(),
+            )
+            .hidden(),
+            ActionDefinition::new(
                 ["agent", "up"],
-                "Start and connect the agent component on this node.",
+                "Start and connect the infraternal agent component on this node.",
                 "Use this command when this node should join a server as a managed node.",
-                ["The agent component command is not available yet."],
+                ["The infraternal agent component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
             )
@@ -21,7 +39,7 @@ pub fn plugin() -> PluginDefinition {
             .with_example("agent up", "Request agent setup for this node."),
             ActionDefinition::new(
                 ["agent", "down"],
-                "Stop the agent component on this node.",
+                "Stop the infraternal agent component on this node.",
                 "Use this command when this node should leave its managed-node role.",
                 ["The agent component command is not available yet."],
                 JsonSchema::empty_object(),
@@ -31,12 +49,15 @@ pub fn plugin() -> PluginDefinition {
             .with_safety(SafetyNotes {
                 destructive: false,
                 dry_run_first: false,
-                notes: vec!["Stopping the agent disconnects this node from its server.".to_owned()],
+                notes: vec![
+                    "Stopping the infraternal agent disconnects this node from its server."
+                        .to_owned(),
+                ],
             })
             .with_example("agent down", "Stop the agent component on this node."),
             ActionDefinition::new(
                 ["agent", "status"],
-                "Show the agent component state.",
+                "Show the infraternal agent component state.",
                 "Use this command to check whether this node is connected to a server.",
                 ["The agent component command is not available yet."],
                 JsonSchema::empty_object(),
@@ -59,8 +80,10 @@ mod tests {
     fn agent_actions_are_complete_and_unavailable_until_lifecycle_exists() {
         let plugin = plugin();
         assert_eq!(plugin.id, "agent");
-        assert_eq!(plugin.actions.len(), 3);
-        for action in plugin.actions {
+        assert_eq!(plugin.actions.len(), 4);
+        assert_eq!(plugin.actions[0].command, ["agent"]);
+        assert!(!plugin.actions[0].visible);
+        for action in plugin.actions.iter().skip(1) {
             assert_eq!(action.command[0], "agent");
             assert!(
                 action

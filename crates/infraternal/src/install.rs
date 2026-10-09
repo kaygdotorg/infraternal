@@ -232,7 +232,6 @@ mod tests {
             tls_key: Some(PathBuf::from("server.key")),
             behind_proxy: false,
             trusted_proxies: Vec::new(),
-            action: None,
         };
         let options = InstallArgs {
             system: false,

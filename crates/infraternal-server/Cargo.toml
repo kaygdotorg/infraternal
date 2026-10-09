@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["cli-plugin"]
+cli-plugin = []
+
 [lints]
 workspace = true
 

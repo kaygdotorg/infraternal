@@ -66,28 +66,34 @@ impl<T> CommandResult<T> {
 pub enum CommandState {
     /// The requested operation completed or a healthy state was found.
     Ready,
+    /// The requested service or component is currently active.
+    Running,
     /// The requested service or component is stopped.
     Stopped,
     /// This build does not yet provide the command handler.
     Unavailable,
     /// The command failed.
     Failed,
+    /// A truthful state cannot be established from available runtime data.
+    Unknown,
 }
 
 impl CommandState {
     const fn label(self) -> &'static str {
         match self {
             Self::Ready => "Ready",
+            Self::Running => "Running",
             Self::Stopped => "Stopped",
             Self::Unavailable => "Unavailable",
             Self::Failed => "Failed",
+            Self::Unknown => "Unknown",
         }
     }
 
     const fn color(self) -> &'static str {
         match self {
-            Self::Ready => "\u{1b}[32m",
-            Self::Stopped => "\u{1b}[36m",
+            Self::Ready | Self::Running => "\u{1b}[32m",
+            Self::Stopped | Self::Unknown => "\u{1b}[36m",
             Self::Unavailable => "\u{1b}[33m",
             Self::Failed => "\u{1b}[31m",
         }
@@ -416,6 +422,7 @@ fn scalar_text(value: &serde_json::Value) -> String {
 mod tests {
     //! Snapshots pretty output, terminal color, wrapping, and the stable JSON envelope.
 
+    use infraternal_plugin_api::{JsonSchema, JsonSchemaType};
     use serde_json::json;
 
     use super::{CommandResult, CommandState, RenderOptions, render_json, render_pretty};
@@ -519,5 +526,80 @@ mod tests {
         result.details = Some("No component manager is registered.".to_owned());
         let json = render_json(&result).expect("serialize result with details");
         assert!(json.contains("\"details\": \"No component manager is registered.\""));
+    }
+
+    #[test]
+    fn registered_action_output_schemas_accept_typed_json_envelopes() {
+        let registry = crate::cli::actions::registry().expect("action metadata");
+        for registered in registry.actions() {
+            let command = registered.action.command.join(" ");
+            let data = sample_data(&command);
+            let result = CommandResult::new(
+                command.clone(),
+                CommandState::Ready,
+                "Schema fixture result.",
+                data,
+            );
+            let value = serde_json::to_value(result).expect("serialize command result");
+            assert!(
+                matches_schema(&registered.action.output_schema, &value),
+                "result for `{command}` must conform to its registered output schema: {value}"
+            );
+        }
+    }
+
+    fn sample_data(command: &str) -> serde_json::Value {
+        match command {
+            "status" => json!({
+                "role": "node",
+                "components": [{"name": "server", "state": "Stopped"}]
+            }),
+            "up" => json!({"started": []}),
+            "skill" => json!({
+                "commands": [{"command": "status", "description": "Show status."}],
+                "skill": "# Status skill",
+                "files": ["infraternal-status.md"]
+            }),
+            "server" => json!({
+                "listen": "127.0.0.1:7443",
+                "public_origin": "https://localhost:7443"
+            }),
+            "server init" | "server install" => json!({
+                "service": "infraternal-server.service",
+                "enabled": true,
+                "dry_run": false
+            }),
+            "server features" => json!({
+                "features": [{"name": "mesh", "state": "disabled"}]
+            }),
+            "server setup-token" => json!({"token": "synthetic-test-value"}),
+            _ => json!({}),
+        }
+    }
+
+    fn matches_schema(schema: &JsonSchema, value: &serde_json::Value) -> bool {
+        match schema.schema_type {
+            JsonSchemaType::String => value.is_string(),
+            JsonSchemaType::Integer => value.as_i64().is_some(),
+            JsonSchemaType::Number => value.is_number(),
+            JsonSchemaType::Boolean => value.is_boolean(),
+            JsonSchemaType::Array => value.as_array().is_some_and(|items| {
+                schema.items.as_deref().is_some_and(|item_schema| {
+                    items.iter().all(|item| matches_schema(item_schema, item))
+                })
+            }),
+            JsonSchemaType::Object => value.as_object().is_some_and(|object| {
+                let has_required = schema.required.iter().all(|key| object.contains_key(key));
+                let has_allowed_keys = schema.additional_properties != Some(false)
+                    || object.keys().all(|key| schema.properties.contains_key(key));
+                let has_valid_values = object.iter().all(|(key, value)| {
+                    schema
+                        .properties
+                        .get(key)
+                        .is_some_and(|property| matches_schema(property, value))
+                });
+                has_required && has_allowed_keys && has_valid_values
+            }),
+        }
     }
 }
