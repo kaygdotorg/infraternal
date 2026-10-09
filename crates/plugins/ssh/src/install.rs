@@ -287,6 +287,22 @@ rm -rf "$base/.bootstrap-lock"
         Ok(())
     }
 
+    /// Publish the exact public manual readiness receipt before ordinary commit.
+    /// The target requires this nonce and an absent lock before reporting success.
+    /// # Errors
+    /// Refuses stale transaction state or failed receipt publication/cleanup.
+    pub async fn commit_manual(&self, receipt: uuid::Uuid) -> Result<(), Failure> {
+        let body = format!(
+            r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
+printf '%s\n' {} > "$base/.bootstrap-lock/ready"
+mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
+"#,
+            shell_quote(&receipt.simple().to_string())
+        );
+        self.session.run(&self.script(&body), Input::Empty).await?;
+        self.commit().await
+    }
+
     /// Restore the previous installation, or remove only this host-bound fresh installation.
     /// # Errors
     /// Reports an unreachable host/failed cleanup; callers retain that fact in progress.
@@ -335,6 +351,8 @@ fi
 kind=$(cat "$stage/kind")
 rm -rf "$stage"
 if [ "$kind" = fresh ]; then
+    # A manual receipt belongs only to this fresh transaction, never an upgrade.
+    rm -f "$base/.bootstrap-ready"
     rm -f "$base/.bootstrap-owner"
     rmdir "$base/bin" 2>/dev/null || :
     rmdir "$base" 2>/dev/null || :
