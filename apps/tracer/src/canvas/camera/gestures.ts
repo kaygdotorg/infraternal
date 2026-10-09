@@ -157,6 +157,9 @@ export function installGestures(cx: Ctx): void {
     host.dispatchEvent(forwarded);
   }, { passive: false, capture: true, signal });
   const onWheel = (e: WheelEvent): void => {
+    // A log view that can scroll the way the wheel goes scrolls itself (to read back); at its end the wheel is the canvas's.
+    const logs = (e.target as Element).closest<HTMLElement>(".cl-logs");
+    if (logs && !(e.ctrlKey || e.metaKey) && Math.abs(e.deltaY) > Math.abs(e.deltaX) && (e.deltaY < 0 ? logs.scrollTop > 0 : logs.scrollTop + logs.clientHeight < logs.scrollHeight - 1)) return;
     if (state.canvasLock) { if (cx.inputLock.state) { e.preventDefault(); return; } snapWheel(e); return; }
     const inCol = (e.target as Element).closest(".cl-col");
     if (!(e.ctrlKey || e.metaKey) && inCol && Math.abs(e.deltaY) > Math.abs(e.deltaX) && camera.lod === "live") {
