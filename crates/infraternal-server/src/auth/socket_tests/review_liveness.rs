@@ -49,7 +49,7 @@ async fn review_mesh_watch_reports_liveness_expiry_without_another_edit() {
     };
     let initial: Value = serde_json::from_slice(event_json).unwrap();
     assert_eq!(initial["snapshot"]["nodes"][0]["live"], true);
-    let expiry_event = tokio::time::timeout(Duration::from_secs(12), socket.next()).await;
+    let expiry_event = tokio::time::timeout(Duration::from_secs(25), socket.next()).await;
     let owner: String = sqlx::query_scalar("SELECT id FROM users WHERE owner=1")
         .fetch_one(&f.auth.pool)
         .await

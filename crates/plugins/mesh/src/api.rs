@@ -791,20 +791,25 @@ impl MeshService {
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
         let scope_requirements = require_each_scope(&scopes);
         authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
-        let changed = sqlx::query("UPDATE mesh_nodes SET last_seen=?,last_rtt_us=? WHERE id=?")
-            .bind(now)
-            .bind(
-                request
-                    .last_rtt_us
-                    .map(i64::try_from)
-                    .transpose()
-                    .map_err(|_| MeshApiError::InvalidInput)?,
-            )
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sql_error)?
-            .rows_affected();
+        // Admission time precedes the writer wait; older observations may commit
+        // later. Keep liveness monotonic, including the first NULL observation.
+        let changed = sqlx::query(
+            "UPDATE mesh_nodes SET last_seen=MAX(COALESCE(last_seen,?),?),last_rtt_us=? WHERE id=?",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(
+            request
+                .last_rtt_us
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| MeshApiError::InvalidInput)?,
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql_error)?
+        .rows_affected();
         if changed != 1 {
             return Err(MeshApiError::NotFound);
         }

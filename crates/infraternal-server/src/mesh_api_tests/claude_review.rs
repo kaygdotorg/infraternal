@@ -110,3 +110,34 @@ async fn claude_review_scoped_grant_cannot_target_node_in_unscoped_tag() {
     );
     assert_eq!(grants, 0);
 }
+/// Observations admitted out of order must not move liveness backwards.
+#[tokio::test]
+async fn claude_review_late_committing_observation_does_not_rewind_last_seen() {
+    let fixture = Fixture::new().await;
+    let service = &fixture.service;
+    let node = enroll(service, "edge-1", 9).await;
+    // `now` is captured before the writer wait, so a request admitted at
+    // NOW+5 can commit after one admitted at NOW+10.
+    for at in [NOW + 10, NOW + 5] {
+        call(
+            service,
+            OWNER,
+            "mesh.node.observe",
+            json!({"node_id":node,"last_rtt_us":100}),
+            at,
+        )
+        .await
+        .unwrap();
+    }
+    let snapshot = service
+        .list(OWNER, MeshFilter::default(), NOW + 38)
+        .await
+        .unwrap();
+    println!(
+        "last_seen={:?} live_at_now_plus_38={}",
+        snapshot.nodes[0].last_seen, snapshot.nodes[0].live
+    );
+    fixture.cleanup().await;
+    assert_eq!(snapshot.nodes[0].last_seen, Some(NOW + 10));
+    assert!(snapshot.nodes[0].live);
+}
