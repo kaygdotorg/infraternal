@@ -15,5 +15,6 @@ pub mod model;
 pub mod openssh;
 pub mod probe;
 pub mod process;
+mod prompt;
 pub mod transport;
 pub mod trust;

@@ -96,7 +96,7 @@ fn dynamic_public_trust_is_retained_without_becoming_file_only_admission() {
         command
             .as_std()
             .get_args()
-            .any(|argument| { argument == "knownhostscommand=/public/tool '%h' alias" })
+            .any(|argument| { argument == "knownhostscommand=/usr/bin/env -u SSH_AUTH_SOCK -u INFRATERNAL_SSH_ASKPASS_SOCKET -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE -- /public/tool '%h' alias" })
     );
     // Parsing retains syntax for the native engine; this test never executes it.
     assert!(config.trust_policy().unwrap().dynamic_trust);

@@ -6,7 +6,7 @@ use infraternal_plugin_ssh::{
     openssh::OpenSsh,
     transport::{Credentials, Input, Secret, SshTransport},
 };
-use std::{io::Read, path::PathBuf, time::Duration};
+use std::{io::Read, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
 #[tokio::test]
 #[ignore = "run through the rootless real-sshd fixture, selecting this test only"]
@@ -20,8 +20,23 @@ async fn one_physical_connection_erases_helpers_and_refuses_reconnect() {
         .read_to_end(&mut private)
         .unwrap();
     assert!(private.len() <= 65536);
+    let lookup = fixture.join("public-lookup");
+    let called = fixture.join("public-lookup-called");
+    std::fs::write(&lookup, format!("#!/bin/sh\n# Check helper isolation without recording environment values.\n[ -z \"${{SSH_AUTH_SOCK+x}}\" ] && [ -z \"${{INFRATERNAL_SSH_ASKPASS_SOCKET+x}}\" ] && [ -z \"${{SSH_ASKPASS+x}}\" ] || exit 1\nprintf 'lookup\\n' >> '{}'\ncat '{}'\n", called.display(), fixture.join("known_hosts").display())).unwrap();
+    std::fs::set_permissions(&lookup, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(fixture.join("lookup-config"), format!("# Isolated dynamic public host trust.\nHost *\n UserKnownHostsFile /dev/null\n GlobalKnownHostsFile /dev/null\n KnownHostsCommand {}\n", lookup.display())).unwrap();
+    let wrapper = fixture.join("lookup-ssh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec /usr/bin/ssh -F '{}' \"$@\"\n",
+            fixture.join("lookup-config").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
     let adapter = OpenSsh {
-        ssh: fixture.join("ssh"),
+        ssh: wrapper,
         ssh_agent: "/usr/bin/ssh-agent".into(),
         ssh_add: "/usr/bin/ssh-add".into(),
         ssh_keyscan: "/usr/bin/ssh-keyscan".into(),
@@ -41,6 +56,7 @@ async fn one_physical_connection_erases_helpers_and_refuses_reconnect() {
         )
         .await
         .unwrap();
+    assert!(std::fs::read_to_string(called).unwrap().lines().count() >= 1);
     let connection = "printf '%s\\n' \"$SSH_CONNECTION\"";
     let first = session.run(connection, Input::Empty).await.unwrap();
     let second = session.run(connection, Input::Empty).await.unwrap();

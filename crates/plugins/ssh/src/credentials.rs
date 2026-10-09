@@ -2,7 +2,8 @@
 
 use crate::{
     model::{Failure, FailureKind},
-    process::{Group, execute},
+    process::{Group, execute_prompt},
+    prompt::{PromptParent, serve},
     transport::{Credentials, Input, Secret, shell_quote},
 };
 use std::{
@@ -14,7 +15,6 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::AsyncWriteExt,
     net::UnixListener,
     process::{Child, Command},
     task::JoinHandle,
@@ -36,6 +36,7 @@ pub struct CredentialSession {
     password: bool,
     network: bool,
     prompt_helper: bool,
+    pub(crate) prompt_parent: PromptParent,
 }
 
 impl CredentialSession {
@@ -53,6 +54,7 @@ impl CredentialSession {
             password: false,
             network: matches!(credentials, Credentials::Network),
             prompt_helper: false,
+            prompt_parent: PromptParent::default(),
         };
         if matches!(credentials, Credentials::Automatic(_)) {
             return Err(Failure::install(
@@ -174,7 +176,13 @@ impl CredentialSession {
         .map_err(|_| Failure::install("The SSH prompt helper could not be written."))?;
         self.prompt_helper = true;
         if let Some((listener, secret)) = prompt {
-            self.askpass = Some(tokio::spawn(serve_prompt(listener, secret)));
+            self.askpass = Some(tokio::spawn(serve(
+                listener,
+                secret,
+                self.prompt_parent.clone(),
+                std::fs::canonicalize(&adapter.askpass_binary)
+                    .map_err(|_| Failure::install("The SSH prompt helper is unavailable."))?,
+            )));
         }
         Ok(())
     }
@@ -220,10 +228,11 @@ impl CredentialSession {
         let mut add = Command::new(&adapter.ssh_add);
         add.arg("-");
         self.configure_helpers(&mut add);
-        let output = execute(
+        let output = execute_prompt(
             &mut add,
             Input::Bytes(key.expose()),
             Duration::from_secs(10),
+            &self.prompt_parent,
         )
         .await?;
         if !output.success {
@@ -385,21 +394,6 @@ impl KeyHelper {
 impl Drop for KeyHelper {
     fn drop(&mut self) {
         self.group.retire();
-    }
-}
-
-async fn serve_prompt(listener: UnixListener, secret: Secret) {
-    // The enclosing 0700 directory is the authority boundary. Limit helper requests
-    // as a second bound; each accepted helper gets one reply and its socket closes.
-    for _ in 0..32 {
-        let Ok((mut stream, _)) = listener.accept().await else {
-            return;
-        };
-        let _ = tokio::time::timeout(Duration::from_secs(3), async {
-            stream.write_all(secret.expose()).await?;
-            stream.shutdown().await
-        })
-        .await;
     }
 }
 

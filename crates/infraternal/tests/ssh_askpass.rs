@@ -13,7 +13,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 #[tokio::test]
-async fn real_cli_askpass_handoff_and_helper_cleanup() {
+async fn real_cli_askpass_refuses_unregistered_parent_and_cleans_helper() {
     let parent = common::scratch();
     let root = parent.join(format!("a-{}", std::process::id()));
     let session = CredentialSession::prepare(
@@ -44,11 +44,10 @@ async fn real_cli_askpass_handoff_and_helper_cleanup() {
         .output()
         .await
         .expect("run real askpass CLI");
-    assert!(output.status.success());
-    let reply = Secret::new(output.stdout);
-    // Never format a private response on assertion failure.
-    assert!(reply.expose().eq(b"synthetic-prompt-reply"));
-    drop(reply);
+    // Knowing the private path is insufficient: this invocation has no owned
+    // SSH/ssh-add parent. The encrypted-key test exercises an authorized helper.
+    assert!(!output.status.success());
+    assert_eq!(output.stdout.len(), 0);
     drop(session);
     assert!(!directory.exists());
     std::fs::remove_dir(root).unwrap();

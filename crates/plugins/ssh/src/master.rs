@@ -4,6 +4,7 @@ use crate::{
     model::{Failure, FailureKind, MeshEvidence},
     openssh::classify,
     process::Group,
+    prompt::{PromptLease, PromptParent},
     transport::Secret,
 };
 use nix::{
@@ -36,6 +37,7 @@ struct Diagnostics {
 pub struct Master {
     // Drop retires the group before Child's Tokio reaper can release the pid.
     group: Group,
+    _prompt: PromptLease,
     child: Child,
     socket: PathBuf,
     diagnostics: Arc<Mutex<Diagnostics>>,
@@ -45,11 +47,12 @@ impl Master {
     /// Authenticate with one owned foreground master; socket readiness follows SSH authentication.
     /// # Errors
     /// Refuses authentication/trust, diagnostic overflow, timeout and invalid control sockets.
-    pub async fn start(
+    pub(crate) async fn start(
         mut command: Command,
         socket: PathBuf,
         timeout: Duration,
         mesh: MeshEvidence,
+        parent: &PromptParent,
     ) -> Result<Self, Failure> {
         command.as_std_mut().process_group(0);
         command
@@ -61,6 +64,7 @@ impl Master {
             .spawn()
             .map_err(|_| Failure::install("The SSH connection helper could not start."))?;
         let group = Group::owned(&child)?;
+        let prompt = parent.register(&child)?;
         let mut stderr = child
             .stderr
             .take()
@@ -103,6 +107,7 @@ impl Master {
         });
         let master = Self {
             group,
+            _prompt: prompt,
             child,
             socket,
             diagnostics,

@@ -95,3 +95,43 @@ async fn credential_helper_refuses_host_trust_and_permission_prompts() {
     std::fs::remove_dir(root).unwrap();
     assert!(refused, "credential responder accepted a host trust prompt");
 }
+
+#[tokio::test]
+async fn password_socket_refuses_an_unrelated_same_user_process() {
+    use tokio::io::AsyncReadExt;
+    let root = common::scratch().join(format!(
+        "c-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    let config = CredentialConfig {
+        scratch: root.clone(),
+        ssh_agent: "unused".into(),
+        ssh_add: "unused".into(),
+        askpass_binary: std::env::current_exe().unwrap(),
+    };
+    let session = CredentialSession::prepare(
+        &config,
+        Credentials::Password(Secret::new(b"synthetic-login-material".to_vec())),
+    )
+    .await
+    .unwrap();
+    let directory = std::fs::read_dir(&root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut stream = tokio::net::UnixStream::connect(directory.join("askpass.sock"))
+        .await
+        .unwrap();
+    let mut reply = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        stream.read_to_end(&mut reply),
+    )
+    .await
+    .unwrap();
+    drop(session);
+    std::fs::remove_dir(root).unwrap();
+    assert!(reply.is_empty(), "unrelated peer received login material");
+}

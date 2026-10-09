@@ -1,6 +1,6 @@
 //! Bounds bootstrap child input/output, deadlines and cancellation; arbitrary helper bytes never become diagnostics.
 
-use crate::{model::Failure, transport::Input};
+use crate::{model::Failure, prompt::PromptParent, transport::Input};
 use nix::{
     sys::{
         signal::{Signal, killpg},
@@ -43,6 +43,25 @@ pub async fn execute_bounded(
     timeout: Duration,
     stdout_limit: usize,
 ) -> Result<Output, Failure> {
+    execute_inner(command, input, timeout, stdout_limit, None).await
+}
+
+pub(crate) async fn execute_prompt(
+    command: &mut Command,
+    input: Input<'_>,
+    timeout: Duration,
+    parent: &PromptParent,
+) -> Result<Output, Failure> {
+    execute_inner(command, input, timeout, 4096, Some(parent)).await
+}
+
+async fn execute_inner(
+    command: &mut Command,
+    input: Input<'_>,
+    timeout: Duration,
+    stdout_limit: usize,
+    parent: Option<&PromptParent>,
+) -> Result<Output, Failure> {
     if stdout_limit > 65536 {
         return Err(Failure::install("The SSH helper output limit is invalid."));
     }
@@ -71,6 +90,7 @@ pub async fn execute_bounded(
         id: group,
         armed: true,
     };
+    let prompt_lease = parent.map(|parent| parent.register(&child)).transpose()?;
     let stdin = child
         .stdin
         .take()
@@ -118,6 +138,8 @@ pub async fn execute_bounded(
         observe_exit(group.id, &mut exits).await?;
         // Retire closed-pipe descendants before reaping releases the group id.
         group.retire();
+        // Revoke helper authority before the leader identity can be reused.
+        drop(prompt_lease);
         let status = child.wait().await;
         let status =
             status.map_err(|_| Failure::install("The SSH helper did not exit cleanly."))?;

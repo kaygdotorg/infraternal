@@ -92,6 +92,12 @@ impl PublicSshConfiguration {
                     .join(" ");
                 trust_paths.push(paths);
                 encoded
+            } else if name == "knownhostscommand" && value != "none" {
+                // OpenSSH retains native token/argument expansion. Only the lookup
+                // child loses login-helper access; authentication keeps its helpers.
+                format!(
+                    "/usr/bin/env -u SSH_AUTH_SOCK -u INFRATERNAL_SSH_ASKPASS_SOCKET -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE -- {value}"
+                )
             } else if matches!(name, "revokedhostkeys" | "hostkeyalias") {
                 quoted(&value)
             } else {

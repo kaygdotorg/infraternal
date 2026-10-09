@@ -82,6 +82,7 @@ impl OpenSsh {
                 socket,
                 session.timeout,
                 session.mesh,
+                &session.credentials.prompt_parent,
             )
             .await
             {
