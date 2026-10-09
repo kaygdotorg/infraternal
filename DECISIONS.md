@@ -1497,3 +1497,21 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        deny-by-default first, then NAT traversal and port mapping (D196),
        then TCP/443, then SSH, subnet routes and exit nodes. The UI is
        mocked up as the pieces land.
+198. **Every role and feature is a plugin you can switch and remove (owner,
+     2026-10-09; restates D3, D15, D16):** server, agent, relay, SSH, mesh,
+     backup and every later feature are plugins behind
+     `infraternal-plugin-api`:
+     - **Removable at build time:** each plugin is its own crate behind a
+       cargo feature; a build without it compiles and runs, and its UI
+       package drops out of the bundle.
+     - **Switchable at run time:** each can be turned on or off per node
+       (Settings, `infraternal <role> up|down|status`, API, MCP) without a
+       restart of the others; turning one off leaves no listener, timer or
+       background work behind.
+     - **Declared, not wired by hand:** a plugin declares its actions,
+       permissions, settings, defaults and which other roles it can turn on
+       (D197), and the core discovers them; no feature is special-cased in
+       the core.
+     - New work (mesh data plane, relay, backup, metrics) is built this way
+       from the start; existing code moves behind the interface as it is
+       touched.
