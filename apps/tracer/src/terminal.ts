@@ -240,6 +240,13 @@ export class TerminalClient {
   private connectionIsResume = false;
   private renderIdleTimer = 0;
   private rendererCursorBlinking = false;
+  /**
+   * Whether typing would reach this terminal now. A desktop terminal focuses itself, so it is always ready. On a
+   * phone the keyboard needs a tap: until the terminal's input has focus the cursor waits (steady, an underline) and
+   * after the keyboard goes away it waits again; a blinking cursor never promises a keyboard that will not come (D191).
+   */
+  private openingFocus = false;
+  private typingReady = !matchMedia("(pointer: coarse)").matches;
   private predictionCursorHidden = false;
   private lastThemeColorsMs = 0;
   private lastThemeRenderMs = 0;
@@ -256,6 +263,13 @@ export class TerminalClient {
     this.ghostty = terminal as unknown as GhosttyActivityControls;
     this.screen = config.screen ?? config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
+    // Ghostty focuses its input as it opens, and again on the next task. On a phone that focus is not a tap: no keyboard
+    // follows, yet the cursor would look live. The terminal starts unfocused there (after Ghostty's own second focus)
+    // and the first tap focuses it (D191).
+    if (matchMedia("(pointer: coarse)").matches) {
+      this.openingFocus = true;
+      window.setTimeout(() => { this.openingFocus = false; if (config.host.contains(document.activeElement)) (document.activeElement as HTMLElement).blur(); }, 0);
+    }
     this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal());
     this.pauseTerminal(); // Ghostty opens with one live loop; the client owns its activity window.
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
@@ -279,6 +293,8 @@ export class TerminalClient {
     window.visualViewport?.addEventListener("resize", this.onViewportChange);
     window.visualViewport?.addEventListener("scroll", this.onViewportChange);
     this.terminal.onResize(({ cols, rows }) => {
+      // The grid is readable from the page (specs, and anyone judging that a line did not rewrap).
+      config.host.dataset.cols = String(cols); config.host.dataset.rows = String(rows);
       this.prediction?.layoutChanged();
       this.wakeTerminal();
       const rect = config.host.getBoundingClientRect();
@@ -314,6 +330,12 @@ export class TerminalClient {
     });
     this.streamId = this.conn.openStream(this.streamHandler());
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
+    config.host.addEventListener("focusin", () => { if (!this.openingFocus) this.setTypingReady(true); });
+    config.host.addEventListener("focusout", (event) => {
+      // Focus moving between the host's own elements (its input and the host) keeps the terminal ready.
+      if (!this.openingFocus && !config.host.contains(event.relatedTarget as Node | null) && matchMedia("(pointer: coarse)").matches) this.setTypingReady(false);
+    });
+    this.paintTypingState();
   }
 
   /**
@@ -555,6 +577,20 @@ export class TerminalClient {
   /** Recomputes the grid from the host's box (the window was resized). */
   refit(): void {
     this.scheduleFit();
+  }
+
+  private setTypingReady(ready: boolean): void {
+    if (ready === this.typingReady || this.closed) return;
+    this.typingReady = ready;
+    this.paintTypingState();
+    this.wakeTerminal();
+  }
+
+  /** The cursor tells the truth: a bar that blinks when typing will land, a steady underline while it waits for a tap. */
+  private paintTypingState(): void {
+    this.config.host.dataset.typing = this.typingReady ? "ready" : "waiting";
+    this.terminal.options.cursorStyle = this.typingReady ? "bar" : "underline";
+    if (!this.typingReady) this.ghostty.renderer?.setCursorBlink(false);
   }
 
   /** Focuses Ghostty's actual input host so the mobile keyboard can stay open. */
@@ -1449,7 +1485,7 @@ export class TerminalClient {
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = window.setTimeout(() => this.pauseTerminal(), RENDER_IDLE_MS);
     this.rendererCursorBlinking = true;
-    this.ghostty.renderer?.setCursorBlink(true);
+    this.ghostty.renderer?.setCursorBlink(this.typingReady);
     this.ghostty.startRenderLoop();
   }
 

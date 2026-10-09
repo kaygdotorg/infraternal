@@ -229,6 +229,8 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
     await mobilePage.goto("/?theme=paper&bg=mesh");
     await waitForAttached(mobilePage);
     await expect(mobilePage.locator("#keybar")).toBeVisible();
+    // The key row exists only while a terminal has input focus (a phone needs a tap for that).
+    await mobilePage.locator(".terminal-host").first().tap();
     // The product screen is the canvas: on a phone the top bar keeps only the "+" (a new window) beside the pill.
     await expect(mobilePage.locator(".tabs .tab-add")).toBeVisible();
     for (const desktopOnly of [".tabs .cl-snap", ".tabs .cl-viewsbtn"]) await expect(mobilePage.locator(desktopOnly)).toBeHidden();

@@ -307,10 +307,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let committedFont = initialFont();
   let shownFont = committedFont;
   let fontRequest = 0;
-  // Plain (`none`): one solid colour with subtle dots. Soft (the default): the theme's gentle gradient. Mesh: the full
+  // Plain (`none`): one solid colour with subtle dots. Soft: the theme's gentle gradient. Plain is the default (D191); a saved choice stays. Mesh: the full
   // theme mesh. The dots sit on all three.
   const validBackground = (v: string | null): v is "none" | "soft" | "mesh" => v === "none" || v === "soft" || v === "mesh";
-  let background: string = validBackground(params.get("bg")) ? params.get("bg")! : validBackground(readLocal("tracer.background")) ? readLocal("tracer.background")! : "soft";
+  let background: string = validBackground(params.get("bg")) ? params.get("bg")! : validBackground(readLocal("tracer.background")) ? readLocal("tracer.background")! : "none";
   /** The terminal paints no background of its own where a window shows the canvas through it (and over the mesh). */
   const translucentTerminal = (): boolean => background === "mesh" || windowLevel > 1;
   /** Every terminal on the screen (they share the look), and the one that takes the keys. */
@@ -1284,6 +1284,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   /** Runs a palette action; returns true when the action closed the palette itself. */
   function runAction(action: string, source: "keyboard" | "pointer"): boolean {
     const [kind, value] = action.split(":");
+    // An appearance change is its own activity in a frame trace: a User Timing measure from the action to the second
+    // frame after it, named by what changed (theme, font, card, windows, bg).
+    if (kind === "theme" || kind === "font" || kind === "card" || kind === "windows" || kind === "bg") {
+      const start = performance.now();
+      requestAnimationFrame(() => requestAnimationFrame(() => performance.measure(`appearance:${kind}`, { start, detail: { value } })));
+    }
     if (kind === "account" && value === "recovery") {
       setPalette(false, source);
       options.onRecovery?.();

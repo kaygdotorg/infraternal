@@ -42,6 +42,7 @@ export const VIEW_ICON: Record<string, string> = { console: ICON.console, contai
 /** A shared or custom view has the generic layout icon. */
 export const viewIcon = (id: string): string => VIEW_ICON[id] ?? ICON.views;
 export const SECTION_ICON: Record<string, string> = {
+  windows: '<rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M8 9v6M16 9v6M8 12h8"/>',
   appearance: '<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/>',
   toolbar: '<rect x="3" y="14" width="18" height="6" rx="3"/><path d="M7 17h.01M12 17h.01M17 17h.01"/><path d="M8 9h8M10 5h4"/>',
   shortcuts: '<rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/>',

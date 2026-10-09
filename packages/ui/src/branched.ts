@@ -259,6 +259,7 @@ export function branchedMenu(
       host.removeEventListener("click", onClick);
     },
   };
-  layout(false);
+  // No first layout here: the observer above reports the host after the browser's own layout and before paint, so the
+  // first measurement costs no extra forced layout inside the mount task.
   return api;
 }

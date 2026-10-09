@@ -110,23 +110,40 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
   };
   pill.addEventListener("pointerup", release, { signal });
   pill.addEventListener("pointercancel", release, { signal });
+  // Any window in a strip resizes (D195), whatever it shows; a split pane shares its column's width.
+  if (rec.owner.view.layout === "tiled" && !rec.model.splitOf && !rec.owner.view.team) {
+    rec.stopResize = attachWindowResize(rec.card, resizeHost(cx, rec)).dispose;
+  }
   if (!isTerminal(rec)) return;
   // Arrows on demand (hover on the pill, the port to grant access) belong to the mesh.
   cx.mesh?.wireTerminal(rec);
-  if (!rec.model.splitOf && !rec.owner.view.team) {
-    rec.stopResize = attachWindowResize(rec.card, resizeHost(cx, rec)).dispose;
-  }
 }
 
+/**
+ * Every window has its own four edges and four corners: the grabbed edge follows the pointer and the opposite edge stays
+ * where it is on screen (D195). A column grows to the right and a window downward, so the other directions move the
+ * origin instead of the opposite edge:
+ * - west: the width changes and the whole view moves by the growth (`ViewRec.x`), so the right edge holds and the
+ *   neighbours make room by moving, never by resizing;
+ * - north: the window sits in a strip of fixed height, so its top is free space above it (`margin-top`) and the height
+ *   is what is left: the bottom holds. A window can grow upward only back to the strip's top.
+ * Shifts are taken from the sizes that were really written (rounded), so the held edge does not drift by a pixel.
+ * The width is limited by a minimum and by the widest of the Window Sizes options (D191): the viewport's 99%.
+ */
 function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
   const { camera } = cx;
   const cam = camera.cam;
+  let origin = { x: 0, w: 0 };
   return {
     // The pill has its own long-press (arrows on demand), so the resize hold starts on the rest of the header.
     holdOnPill: false,
     begin(): ResizeStart {
       const colEl = rec.card.root.parentElement as HTMLElement;
-      return { width: colEl.offsetWidth * cam.z - 28 * cam.z, height: rec.card.root.offsetHeight * cam.z, top: 0, minWidth: 300 * cam.z, minHeight: 160 * cam.z, maxWidth: 900 * cam.z, areaHeight: 4000 };
+      const width = colEl.offsetWidth * cam.z - 28 * cam.z;
+      origin = { x: rec.owner.x, w: Math.round(width / cam.z) };
+      const top = (parseFloat(rec.card.root.style.marginTop) || 0) * cam.z;
+      const widest = Math.max(480, Math.round(cx.viewport.clientWidth * 0.99));
+      return { width, height: rec.card.root.offsetHeight * cam.z, top, minWidth: 300 * cam.z, minHeight: 160 * cam.z, maxWidth: widest * cam.z, areaHeight: (colEl.clientHeight - 28) * cam.z };
     },
     apply(f: ResizeFrame): void {
       const colEl = rec.card.root.parentElement as HTMLElement;
@@ -134,18 +151,21 @@ function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
       colEl.dataset.w = String(w);
       colEl.dataset.user = "1";
       colEl.style.setProperty("--w", `${w}px`);
-      rec.card.root.style.height = `${Math.round(f.height / cam.z)}px`;
-      rec.card.root.style.flex = "none";
-      cx.view.geometry(rec.owner);
+      const root = rec.card.root;
+      root.style.height = `${Math.round(f.height / cam.z)}px`;
+      root.style.marginTop = f.top > 0 ? `${Math.round(f.top / cam.z)}px` : "";
+      root.style.flex = "none";
+      const c = rec.owner;
+      c.sx.set(origin.x + (f.shiftX ? origin.w - w : 0), true);
+      cx.view.geometry(c);
       cx.invalidate();
     },
     end(): void {
-      cx.view.settle(rec.owner.view.id);
+      const c = rec.owner;
+      c.view.x = c.x;
+      cx.view.settle(c.view.id);
       rec.binding?.refit();
       cx.store.changed();
-      // The view's stops moved with its width: with the canvas lock on the framing follows (centred stays centred).
-      const c = rec.owner;
-      if (cx.state.canvasLock && cx.state.currentView === c.view.id) cx.nav.goStop(c, cx.nav.nearestStop(c, cx.camera.cam.cx));
     },
   };
 }

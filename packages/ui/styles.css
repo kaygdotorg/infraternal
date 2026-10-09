@@ -290,8 +290,7 @@
 /* Window transparency (themes.ts WINDOW_LEVELS): Solid is the line above, with no alpha and no filter. The other
    levels read one fill token; only Frosted adds a backdrop blur, and only on windows that are on screen
    (canvas/memory.ts sets data-onscreen), because many large blurred windows cost frames and memory. */
-:root:not([data-window-level="solid"]) .ui-window { background: color-mix(in srgb, var(--bg) var(--ui-window-fill), transparent); }
-:root[data-window-level="frosted"] .ui-window[data-onscreen] { -webkit-backdrop-filter: blur(var(--ui-window-blur)); backdrop-filter: blur(var(--ui-window-blur)); }
+/* The fills and the Frosted blur are literal rules written from WINDOW_LEVELS (themes.ts `installLevelRules`). */
 /* Solid cards paint no blur at all. */
 :root[data-card="solid"] .ui-overlay-surface, :root[data-card="solid"] .ui-panel, :root[data-card="solid"] .ui-pill { -webkit-backdrop-filter: none; backdrop-filter: none; }
 .ui-window[data-active] { border-color: color-mix(in oklab, var(--accent) 50%, var(--overlay-line)); }

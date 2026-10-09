@@ -73,13 +73,14 @@ export function createCapsuleTabs(
     capsule.style.width = `${width}px`;
     capsule.style.transform = `translateX(${x}px)`;
   };
-  const render = (instant: boolean): void => {
+  const render = (instant: boolean, measure = true): void => {
     for (const button of buttons) {
       const on = button.dataset.tab === selected;
       button.setAttribute("aria-selected", String(on));
       button.tabIndex = on ? 0 : -1;
     }
     // A compact list changes tab widths when the label moves; measure after that layout.
+    if (!measure) return;
     if (compact && !instant) requestAnimationFrame(() => place(false)); else place(instant);
   };
   const select = (id: string, instant = false): void => {
@@ -109,8 +110,9 @@ export function createCapsuleTabs(
   };
   root.addEventListener("click", click);
   root.addEventListener("keydown", keydown);
-  render(true);
-  // First layout happens after mount; place the capsule without motion once it exists.
+  // The first placement waits for the observer, which reports after the browser's own layout: measuring here would
+  // force a layout inside the mount task.
+  render(true, false);
   const observer = new ResizeObserver(() => { if (performance.now() >= glideUntil) place(true); });
   observer.observe(root);
 
