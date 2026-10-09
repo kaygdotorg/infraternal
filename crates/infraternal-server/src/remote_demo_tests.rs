@@ -709,3 +709,6 @@ mod renewal_ack;
 
 #[path = "remote_renewal_cli_tests.rs"]
 mod renewal_cli;
+
+#[path = "remote_shipping_route_tests.rs"]
+mod shipping_route;
