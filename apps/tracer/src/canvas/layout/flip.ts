@@ -17,7 +17,13 @@ export interface Flip {
   targets(colsEl: HTMLElement): HTMLElement[];
 }
 
-export function createFlip(zoom: () => number, invalidate: () => void): Flip {
+/**
+ * `busy` is told when the first reflow spring starts and when the last one rests, so the stage can drop the glass blur
+ * while windows slide (a blurred window that moves is re-rasterised every frame: 110-170 ms of raster for one close
+ * with Frosted windows, against none without the blur).
+ */
+export function createFlip(zoom: () => number, invalidate: () => void, busy: (active: boolean) => void = () => undefined): Flip {
+  const live = new Set<Spring>();
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
   const springs = new WeakMap<HTMLElement, Spring>();
   return {
@@ -40,13 +46,15 @@ export function createFlip(zoom: () => number, invalidate: () => void): Flip {
         if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sw - 1) < 0.01 && Math.abs(sh - 1) < 0.01) continue;
         n.style.transformOrigin = "0 0";
         const spring = new Spring(1, (p) => {
-          if (p === 0) { n.style.transform = ""; n.style.transformOrigin = ""; invalidate(); return; }
+          if (p === 0) { n.style.transform = ""; n.style.transformOrigin = ""; invalidate(); if (live.delete(spring) && !live.size) busy(false); return; }
           n.style.transform = `translate(${dx * p}px, ${dy * p}px)${scale ? ` scale(${1 + (sw - 1) * p}, ${1 + (sh - 1) * p})` : ""}`;
           invalidate();
         }, cfg);
         // Progress p moves the element by dx * p: it rests when that is under a quarter of a device pixel.
         restAt(spring, Math.min(SCALE_REST * 4, quarterDevicePx() / Math.max(1, Math.abs(dx), Math.abs(dy)), scale ? SCALE_REST / Math.max(Math.abs(sw - 1), Math.abs(sh - 1), 0.001) : 1));
         springs.set(n, spring);
+        if (!live.size) busy(true);
+        live.add(spring);
         spring.set(0);
       }
     },

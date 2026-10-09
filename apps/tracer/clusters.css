@@ -309,4 +309,4 @@
    and windows that is most of the frame budget (a flight rasters about a thousand tiles). The blur radius and the
    levels' values are unchanged: the blur is back the moment the camera rests (about 140 ms after the last frame).
    `data-canvas-moving` is one attribute write per move, never per frame (camera/camera.ts). */
-.terminal-screen[data-canvas-moving] :is(.ui-window, .ui-pill, .ui-overlay-surface, .ui-panel) { -webkit-backdrop-filter: none; backdrop-filter: none; }
+.terminal-screen:is([data-canvas-moving], [data-canvas-flipping]) :is(.ui-window, .ui-pill, .ui-overlay-surface, .ui-panel) { -webkit-backdrop-filter: none; backdrop-filter: none; }

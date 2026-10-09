@@ -17,6 +17,12 @@
 @media (pointer: coarse) { .ui-icon { width: 18px; height: 18px; } }
 .terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
 
+/* The card tint is read by the element that carries it and by nothing inside it, so it does not inherit: a change then
+   restyles the glass surfaces and not their descendants too (themes.ts `installLevelRules` sets it per element). */
+@property --overlay { syntax: "*"; inherits: false; }
+@property --ui-overlay-halo { syntax: "*"; inherits: false; }
+@property --ui-overlay-blur { syntax: "*"; inherits: false; }
+
 /* The one material's blur and saturation: surfaces and pills read these two tokens, so tuning them
    here tunes every floating thing at once. */
 :root { --ui-overlay-blur: 16px; --ui-overlay-saturation: 160%; }
