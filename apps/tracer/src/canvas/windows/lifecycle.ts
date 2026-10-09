@@ -146,7 +146,8 @@ export function createWindows(cx: Ctx): WindowsModule {
       cx.view.geometry(c);
       cx.view.paintEmpty(c);
       cx.view.settle(c.view.id);
-      flip.play(before, true);
+      // Neighbours close the gap without overshoot (a critically damped spring): no value passes its final place.
+      flip.play(before, true, { visualDuration: 0.38, bounce: 0 });
       for (const w of c.wins.values()) w.binding?.refit();
       cx.tree.render();
       // The view's stops changed: the camera re-snaps (canvas lock) to the nearest one that still exists.
@@ -192,11 +193,12 @@ export function createWindows(cx: Ctx): WindowsModule {
     cx.view.settle(c.view.id);
     cx.tree.render();
     rec.binding?.refit();
-    if (direction === "right") {
-      flip.play(before);
-      // Canvas locked: glide so the window and its new neighbour are both on screen while the droplet divides.
-      if (state.canvasLock) cx.nav.focusWindow(rec);
-    }
+    if (direction === "right") flip.play(before);
+    // A split lands you in the new window: it becomes the active one and the camera brings it fully into view, at rest
+    // (the old window may then be partly off screen, as on a phone, where one window fills the screen). The keyboard
+    // only follows on a device that has one (a phone is never asked to open it).
+    cx.win.setActive(b);
+    cx.nav.focusWindow(b);
     if (!coarse.matches) b.binding?.focus();
     colEl.dataset.split = "";
     const { dropletSplit } = await loadDroplet();
