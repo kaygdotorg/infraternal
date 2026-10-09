@@ -1649,3 +1649,23 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        sandboxed helper with memory-safe decoders; HEIC and AVIF show a
        placeholder card with the original kept in history until a trusted
        decoder exists.
+206. **Shortcuts and the iteration loop (owner, 2026-10-09):**
+     - **Rebindable shortcuts:** every shortcut can be rebound and is
+       remembered per account; per-device overrides come later with their
+       own UX round (the model leaves room for them). Defaults never use
+       Option/Alt alone (it is Meta inside terminals and types characters
+       on macOS) nor Ctrl+Alt on Windows/Linux (it is AltGr on many
+       layouts). On macOS, split right and split down default to
+       ⌃⌥R / ⌃⌥D, with ⌘D / ⌘⇧D kept as alternates; elsewhere Ctrl+Shift+D
+       and Ctrl+Alt+Shift+D stay. Browser reload (⌘R/Ctrl+R) is never
+       taken. Keyboard actions never animate.
+     - **Merging (P1):** a branch merges and deploys when its review has no
+       P0/P1 findings; P2/P3 failing tests are fixed forward in the next run.
+     - **Reviews (P2):** one full review per branch, then delta reviews of
+       each repair's diff plus the earlier findings.
+     - **Testing (P3, P5):** production is the owner's test target; the
+       mockup is only for unbuilt UI and is rebased onto dev before every
+       publish.
+     - **UI authority (P4):** the orchestrator decides reversible UI details
+       on its recommendation and the owner vetoes afterwards; foundational
+       and security choices still wait for an explicit answer.
