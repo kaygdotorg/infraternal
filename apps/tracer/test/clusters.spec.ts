@@ -724,7 +724,7 @@ test("motion rule: the work of a view jump, a window step and a column step fini
   expect(costs.keyJumpMoved).toBeGreaterThan(500);
 });
 
-test("canvas backdrop: the dots stay on world multiples, a layer is about one screen at any zoom, and at most two exist while one fades into the next", async ({ page }) => {
+test("canvas backdrop: the dots stay on world multiples, a layer is a bounded box (only the screen's tiles are rastered) at any zoom, and at most two exist while one fades into the next", async ({ page }) => {
   await open(page, 1);
   const api = "__tracerClusters";
   const setCam = (x: number, y: number, z: number): Promise<void> => page.evaluate(([name, a, b, c]) => (window as unknown as Record<string, { setCamera(x: number, y: number, z: number): void }>)[name as string]!.setCamera(a as number, b as number, c as number), [api, x, y, z] as const);
@@ -744,9 +744,10 @@ test("canvas backdrop: the dots stay on world multiples, a layer is about one sc
     const r = await read();
     expect(r.shown.length, `layers at z=${z}`).toBeLessThanOrEqual(2);
     for (const l of r.shown) {
-      // One screen plus a tile of margin on each side: never the world, whatever the zoom.
-      expect(l.w).toBeLessThanOrEqual(r.vw + 2 * l.spacing + 1);
-      expect(l.h).toBeLessThanOrEqual(r.vh + 2 * l.spacing + 1);
+      // One screen scaled to cover it when the layer is shown at 0.6 of its painted zoom, plus a tile of margin on each side:
+      // never the world, whatever the zoom.
+      expect(l.w).toBeLessThanOrEqual(r.vw / 0.6 + 2 * l.spacing + 1);
+      expect(l.h).toBeLessThanOrEqual(r.vh / 0.6 + 2 * l.spacing + 1);
       // A dot sits at a world multiple of this level's gap: (screen x - camera origin) / zoom is a multiple of gap * 2^k.
       const step = 22 * 2 ** l.k;
       const world = (l.dotX - r.tx) / r.z;

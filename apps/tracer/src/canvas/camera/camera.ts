@@ -29,7 +29,7 @@ export type ZoomBand = "in" | "out";
 
 export interface CameraHooks {
   /** The world transform changed: where the world origin is on screen (viewport pixels) and the zoom. */
-  onTransform?(t: { tx: number; ty: number; z: number; vw: number; vh: number }): void;
+  onTransform?(t: { tx: number; ty: number; z: number; vw: number; vh: number; rest: boolean }): void;
   /** The counter-scale labels use to keep a readable size at any zoom (`--label-inv`); only called when it changes. */
   onLabelScale?(inv: string): void;
   onLod?(lod: Lod): void;
@@ -130,7 +130,7 @@ export class Camera {
     // At rest the translation lands on whole device pixels, so text is as crisp as it can be.
     if (atRest) { this.tx = this.snapPx(this.tx); this.ty = this.snapPx(this.ty); }
     world.style.transform = `translate3d(${this.tx}px, ${this.ty}px, 0) scale(${cam.z})`;
-    this.hooks.onTransform?.({ tx: this.tx, ty: this.ty, z: cam.z, vw: this.vw, vh: this.vh });
+    this.hooks.onTransform?.({ tx: this.tx, ty: this.ty, z: cam.z, vw: this.vw, vh: this.vh, rest: atRest });
     // The labels keep a readable size at any zoom. Written on the labels themselves (by the hook), not on the
     // world: a custom property that changes on a root restyles every element below it, on every frame of every zoom.
     const inv = String(clamp(1 / cam.z, 1, 3.2));
