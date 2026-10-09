@@ -1635,3 +1635,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        support; HEVC where the browser supports it. Encode latency is
        re-measured on physical Apple hardware when the owner's Mac is
        available (the VM measured 25–30 / 40–44 ms at 1080p60).
+205. **Binary size, image limits and unsafe formats (owner, 2026-10-09):**
+     - **Binary size (B1):** the binary may grow as features land; growth
+       is not a reason to block a feature. Every change still optimises and
+       strips aggressively (features off by default where D198 allows,
+       no duplicated dependencies, size-focused build settings), and each
+       job reports its size change with what it comes from.
+     - **Image limits (I3):** up to 4096 px on a side and 4 megapixels per
+       image, about 32 MB of images kept per terminal with the oldest
+       dropped first; a larger image shows a "too large, open original"
+       card.
+     - **Formats without a trusted decoder (I2a):** conversion runs in a
+       sandboxed helper with memory-safe decoders; HEIC and AVIF show a
+       placeholder card with the original kept in history until a trusted
+       decoder exists.
