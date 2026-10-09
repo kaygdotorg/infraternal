@@ -52,6 +52,11 @@ pub struct CommandOutput {
     pub stdout: Vec<u8>,
 }
 
+/// The exact live owner capability is rechecked immediately before public pin publication.
+pub trait ConfirmationAuthority: Send + Sync {
+    fn authorize(&self) -> Operation<'_, ()>;
+}
+
 /// Every implementation must enforce strict host keys and cancellation-safe child cleanup.
 pub trait SshTransport: Send + Sync {
     fn open(
@@ -60,6 +65,20 @@ pub trait SshTransport: Send + Sync {
         credentials: Credentials,
         mesh: MeshEvidence,
     ) -> Operation<'_, Arc<dyn SshSession>>;
+    /// Confirm only a previously observed first-contact key; default engines refuse.
+    fn confirm_host_key<'a>(
+        &'a self,
+        _: Destination,
+        _: &'a str,
+        _: &'a str,
+        _: &'a dyn ConfirmationAuthority,
+    ) -> Operation<'a, ()> {
+        Box::pin(async {
+            Err(Failure::unsupported(
+                "SSH host-key confirmation is unavailable.",
+            ))
+        })
+    }
 }
 
 /// A session owns ephemeral credentials and cleans them when its final owner drops it.
