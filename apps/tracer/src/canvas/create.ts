@@ -36,6 +36,7 @@ import { createViewList } from "./toolbar/viewlist";
 import { createFloatHandle } from "./windows/float-handle";
 import { createDetailsHandle } from "./windows/details-handle";
 import { createSharingHandle } from "./sharing";
+import { hideTips } from "../../../../packages/ui/src/tooltip";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
 import { createSessionHooks } from "./windows/session-hooks";
@@ -101,7 +102,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     onBand: () => cx.view.hideSummary(),
     onFrame: () => { cx.invalidate(); cx.memory.cull(); if (cx.details?.isOpen()) cx.details.close(true); },
     onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); },
-    onFlight: () => cx.view.hideSummary(),
+    onFlight: () => { cx.view.hideSummary(); hideTips(); },
   });
   (cx as { flip: Ctx["flip"] }).flip = createFlip(() => cx.camera.cam.z, () => cx.invalidate());
 
