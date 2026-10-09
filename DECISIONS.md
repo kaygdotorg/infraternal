@@ -1423,10 +1423,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      candidate is removed; the trait boundary stays so the engine remains
      replaceable.
 193. **Full screen a terminal (owner, 2026-10-09):** any terminal window can
-     go full screen: it fills the whole viewport with nothing else (no top
-     pill, toolbar, sidebar, other windows or canvas), and returns to exactly
-     where it was. Entered from the window's header pill, ⌘K and a shortcut;
-     left with the same shortcut, Esc (when the terminal does not need it) or
-     a small control that appears on hover/edge tap. The transition animates
-     (the window grows to the viewport), and the terminal refits once at the
-     end, never per frame. Mockup first (D162).
+     go full screen: it fills the viewport and shows nothing else except one
+     small exit (un-full-screen) control in the top-right corner, which is
+     always visible, on desktop and phone. On phones the key row is the only
+     other thing shown (while typing). Keep it simple: no extra gestures or
+     hidden chrome. It returns exactly where it was; the window grows to the
+     viewport and the terminal refits once at the end. Mockup first (D162).
+194. **Mesh arrows live only in the Mesh view (owner, 2026-10-09):** access
+     arrows and the drag-to-allow connector are drawn only inside the Mesh
+     view. Terminal windows on other views never show arrows on hover, split
+     or move.
