@@ -84,3 +84,10 @@ path = "fuzz_targets/ssh_host_record_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ssh_auth_once_decode"
+path = "fuzz_targets/ssh_auth_once_decode.rs"
+test = false
+doc = false
+bench = false
