@@ -144,6 +144,12 @@ async fn expired_handshake_releases_user_permits() {
             .await
             .unwrap();
         assert_server_hello(&mut socket).await;
+        // Hello precedes the next live-authority read. A transport Pong proves
+        // that read settled and the client-Hello wait is armed before advancing
+        // time; otherwise the oracle can cancel SQL and free a permit early.
+        let ping = Bytes::from_static(b"half-open-handshake-fence");
+        socket.send(Message::Ping(ping.clone())).await.unwrap();
+        assert!(matches!(socket.next().await, Some(Ok(Message::Pong(bytes))) if bytes == ping));
         held.push(socket);
     }
     // Admission remains full one millisecond before the production deadline.
