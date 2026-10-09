@@ -7,7 +7,6 @@ pub mod bootstrap;
 pub mod config;
 pub mod credentials;
 pub mod install;
-pub mod manual;
 pub mod master;
 pub mod model;
 pub mod openssh;
