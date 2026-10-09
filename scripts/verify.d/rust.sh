@@ -86,13 +86,13 @@ rust_check_cli_stub() {
     local output
     local exit_code=0
 
-    output="$("$binary" "$mode" 2>&1)" || exit_code=$?
-    if [[ "$exit_code" -ne 2 || "$output" != "not implemented" ]]; then
+    output="$("$binary" "$mode" --json 2>&1)" || exit_code=$?
+    if [[ "$exit_code" -ne 2 || "$output" != *'"schema_version": 1'* || "$output" != *'"state": "unavailable"'* ]]; then
         printf 'unexpected %s stub: exit=%s output=%s\n' "$mode" "$exit_code" "$output" >&2
         return 1
     fi
 
-    printf '%s subcommand: exit 2, %s\n' "$mode" "$output"
+    printf '%s subcommand: exit 2, versioned JSON unavailable result\n' "$mode"
 }
 
 rust_static_build_check() {

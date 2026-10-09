@@ -1,15 +1,27 @@
-//! Defines the single `infraternal server` and `infraternal agent` entry point [7][20].
+//! Defines the process entry point and dispatches public commands through shared output.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+mod cli;
 mod install;
 
-use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
+use std::{
+    io::{self, IsTerminal, Write},
+    net::SocketAddr,
+    path::PathBuf,
+    process::ExitCode,
+};
 
 use clap::{Args, Parser, Subcommand};
+use cli::output::{CommandResult, CommandState, RenderOptions, render_json, render_pretty};
+use serde::Serialize;
+use serde_json::json;
 
 #[derive(Debug, Parser)]
 #[command(name = "infraternal")]
 struct Cli {
+    /// Print the stable, versioned JSON result envelope.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -108,64 +120,9 @@ struct InstallArgs {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
-        Command::Server(args) => {
-            // Preserve the no-argument status used by the fast CLI smoke gate while
-            // requiring a configured listener before a real server can start.
-            if args.action.is_none() && std::env::args_os().len() == 2 {
-                eprintln!("not implemented");
-                return ExitCode::from(2);
-            }
-            // A tokio runtime only for the server arm. main() stays synchronous on purpose:
-            // the hidden __shim mode forks (double fork + setsid), and forking a process
-            // that already runs a multi-threaded runtime is unsound.
-            let Ok(runtime) = tokio::runtime::Runtime::new() else {
-                eprintln!("could not start the async runtime");
-                return ExitCode::FAILURE;
-            };
-            match args.action.as_ref() {
-                Some(ServerAction::Install(install_args)) => {
-                    match install::install(&args, install_args) {
-                        Ok(message) => {
-                            print!("{message}");
-                            ExitCode::SUCCESS
-                        }
-                        Err(error) => {
-                            eprintln!("server install failed: {error}");
-                            ExitCode::FAILURE
-                        }
-                    }
-                }
-                Some(ServerAction::SetupToken) => {
-                    match runtime.block_on(read_setup_token(&args.data)) {
-                        Ok(token) => {
-                            println!("{token}");
-                            ExitCode::SUCCESS
-                        }
-                        Err(error) => {
-                            eprintln!("setup token unavailable: {error}");
-                            ExitCode::FAILURE
-                        }
-                    }
-                }
-                None => {
-                    let config = match server_config(args) {
-                        Ok(config) => config,
-                        Err(error) => {
-                            eprintln!("invalid server configuration: {error}");
-                            return ExitCode::from(2);
-                        }
-                    };
-                    match runtime.block_on(infraternal_server::serve(config)) {
-                        Ok(()) => ExitCode::SUCCESS,
-                        Err(error) => {
-                            eprintln!("server failed: {error}");
-                            ExitCode::FAILURE
-                        }
-                    }
-                }
-            }
-        }
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Server(args) => run_server(args, cli.json),
         Command::Shim {
             session,
             uid,
@@ -183,17 +140,240 @@ fn main() -> ExitCode {
         },
         Command::Agent { fd, state } => {
             let Some(fd) = fd else {
-                eprintln!("not implemented");
+                print_result(
+                    &CommandResult::new(
+                        "agent",
+                        CommandState::Unavailable,
+                        "The infraternal agent needs a server connection to start.",
+                        json!({}),
+                    )
+                    .with_next_step(
+                        "Use `infraternal agent up` when component setup is available.",
+                    ),
+                    cli.json,
+                    false,
+                );
                 return ExitCode::from(2);
             };
             match infraternal_agent::run_embedded(fd, state) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
-                    eprintln!("infraternal agent failed: {error}");
+                    print_result(
+                        &CommandResult::new(
+                            "agent",
+                            CommandState::Failed,
+                            "The infraternal agent could not start.",
+                            json!({}),
+                        )
+                        .with_details(error.to_string()),
+                        cli.json,
+                        true,
+                    );
                     ExitCode::FAILURE
                 }
             }
         }
+    }
+}
+
+fn run_server(args: ServerArgs, json_output: bool) -> ExitCode {
+    // Keep the unconfigured server stub useful while allowing the global output switch either
+    // before or after the command name.
+    if args.action.is_none()
+        && std::env::args_os()
+            .filter(|argument| argument.to_str() != Some("--json"))
+            .count()
+            == 2
+    {
+        print_result(
+            &CommandResult::new(
+                "server",
+                CommandState::Unavailable,
+                "The server is not configured yet.",
+                json!({}),
+            )
+            .with_next_step("Run `infraternal server init` to configure a server."),
+            json_output,
+            false,
+        );
+        return ExitCode::from(2);
+    }
+    let Ok(runtime) = tokio::runtime::Runtime::new() else {
+        print_result(
+            &CommandResult::new(
+                "server",
+                CommandState::Failed,
+                "The server could not start its async runtime.",
+                json!({}),
+            ),
+            json_output,
+            true,
+        );
+        return ExitCode::FAILURE;
+    };
+    match args.action.as_ref() {
+        Some(ServerAction::Install(install_args)) => {
+            run_server_install(&args, install_args, json_output)
+        }
+        Some(ServerAction::SetupToken) => run_setup_token(&runtime, &args.data, json_output),
+        None => run_server_foreground(args, &runtime, json_output),
+    }
+}
+
+fn run_server_install(
+    args: &ServerArgs,
+    install_args: &InstallArgs,
+    json_output: bool,
+) -> ExitCode {
+    match install::install(args, install_args) {
+        Ok(message) => {
+            print_result(
+                &CommandResult::new(
+                    "server install",
+                    CommandState::Ready,
+                    if install_args.dry_run {
+                        "The server installation plan is ready."
+                    } else {
+                        "The server service was installed and enabled."
+                    },
+                    json!({"plan": message}),
+                ),
+                json_output,
+                false,
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            print_result(
+                &CommandResult::new(
+                    "server install",
+                    CommandState::Failed,
+                    "The server service could not be installed.",
+                    json!({}),
+                )
+                .with_details(error.to_string()),
+                json_output,
+                true,
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_setup_token(
+    runtime: &tokio::runtime::Runtime,
+    data_dir: &std::path::Path,
+    json_output: bool,
+) -> ExitCode {
+    match runtime.block_on(read_setup_token(data_dir)) {
+        Ok(token) => {
+            print_result(
+                &CommandResult::new(
+                    "server setup-token",
+                    CommandState::Ready,
+                    "A one-time setup capability is available.",
+                    json!({"token": token}),
+                ),
+                json_output,
+                false,
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            print_result(
+                &CommandResult::new(
+                    "server setup-token",
+                    CommandState::Failed,
+                    "The setup capability is not available.",
+                    json!({}),
+                )
+                .with_details(error),
+                json_output,
+                true,
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_server_foreground(
+    args: ServerArgs,
+    runtime: &tokio::runtime::Runtime,
+    json_output: bool,
+) -> ExitCode {
+    let config = match server_config(args) {
+        Ok(config) => config,
+        Err(error) => {
+            print_result(
+                &CommandResult::new(
+                    "server",
+                    CommandState::Failed,
+                    "The server configuration is invalid.",
+                    json!({}),
+                )
+                .with_details(error),
+                json_output,
+                true,
+            );
+            return ExitCode::from(2);
+        }
+    };
+    match runtime.block_on(infraternal_server::serve(config)) {
+        Ok(()) => {
+            print_result(
+                &CommandResult::new(
+                    "server",
+                    CommandState::Stopped,
+                    "The server stopped normally.",
+                    json!({}),
+                ),
+                json_output,
+                false,
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            print_result(
+                &CommandResult::new(
+                    "server",
+                    CommandState::Failed,
+                    "The server stopped after an error.",
+                    json!({}),
+                )
+                .with_details(error.to_string()),
+                json_output,
+                true,
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_result<T: Serialize>(result: &CommandResult<T>, json_output: bool, to_stderr: bool) {
+    let terminal = if to_stderr {
+        io::stderr().is_terminal()
+    } else {
+        io::stdout().is_terminal()
+    };
+    let output = if json_output {
+        render_json(result)
+    } else {
+        render_pretty(result, RenderOptions::detect(terminal))
+    };
+    let rendered = match output {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("Could not format command output.\nTechnical detail: {error}");
+            return;
+        }
+    };
+    let write_result = if to_stderr {
+        io::stderr().write_all(rendered.as_bytes())
+    } else {
+        io::stdout().write_all(rendered.as_bytes())
+    };
+    if let Err(error) = write_result {
+        eprintln!("Could not write command output.\nTechnical detail: {error}");
     }
 }
 

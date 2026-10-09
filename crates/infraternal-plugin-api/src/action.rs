@@ -117,6 +117,10 @@ impl JsonSchema {
                     "next_step".to_owned(),
                     Self::string("Optional recommended follow-up action."),
                 ),
+                (
+                    "details".to_owned(),
+                    Self::string("Technical detail associated with a failed command."),
+                ),
                 ("data".to_owned(), data),
             ],
             [
@@ -591,6 +595,7 @@ mod tests {
             ["schema_version", "command", "state", "message", "data"]
         );
         assert!(schema.properties.contains_key("next_step"));
+        assert!(schema.properties.contains_key("details"));
         assert_eq!(
             schema.properties["data"].schema_type,
             super::JsonSchemaType::Object
