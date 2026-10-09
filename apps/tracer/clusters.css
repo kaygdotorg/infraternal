@@ -2,7 +2,10 @@
    `.terminal-screen[data-clusters]` or to `cl-` classes; surfaces, pills, window cards,
    tooltips and the toast come from packages/ui and are not restyled. */
 
-.cl-viewport { position: absolute; inset: 0; overflow: hidden; overflow: clip; touch-action: none; -webkit-user-select: none; user-select: none; }
+/* The viewport clips the world to its box, with 12 px more at the top: a window flush with the top edge (a lone window,
+   the first row) carries its lock glyph on the frame line, and the shackle rises above that line. A clip-path rather
+   than overflow, because overflow clips at the box exactly and overflow-clip-margin is not in every browser. */
+.cl-viewport { position: absolute; inset: 0; overflow: visible; clip-path: inset(-12px 0 0 0); touch-action: none; -webkit-user-select: none; user-select: none; }
 .cl-viewport[data-panning] { cursor: grabbing; }
 .cl-world { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; }
 .cl-overlay { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; z-index: 12; }
