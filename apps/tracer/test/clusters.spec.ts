@@ -9,8 +9,6 @@ type Probe = {
   camera(): { cx: number; cy: number; z: number; lod: string; zoomBand: string; tx: number; ty: number };
   views(): Array<{ id: string; name: string; team: boolean; x: number; y: number; w: number; h: number; windows: string[] }>;
   grants(): Array<{ id: string; from: string; to: string }>;
-  reachFor(): string | undefined;
-  reachCount(): number;
   float(): { cols: number; rows: number; width: number; height: number } | undefined;
   canvasLock(): { on: boolean; index: number; stops: number; view: string };
   setScene(n: number): void;
@@ -83,24 +81,18 @@ test("fly in: a view click springs the camera in and the windows go live above 6
   await expect.poll(async () => { const c = await probe(page, (p) => p.camera()); const v = (await probe(page, (p) => p.views())).find((x) => x.id === "containers")!; return Math.abs(c.cy - (v.y + v.h / 2)) < 300; }, { timeout: 4000 }).toBe(true);
 });
 
-test("arrows on demand: none by default, hover shows reach, a drag asks and then adds the grant to Mesh", async ({ page }) => {
+test("D194: terminal windows draw no arrows and have no connector; arrows live only in the Mesh view", async ({ page }) => {
   await open(page, 3);
-  expect(await probe(page, (p) => p.reachCount())).toBe(0);
   const pill = page.locator('.ui-window[data-window-id="w-build-01"] .ui-window-pill');
   await pill.hover();
-  await expect.poll(() => probe(page, (p) => p.reachCount())).toBeGreaterThan(1);
-  const before = (await probe(page, (p) => p.grants())).length;
-  const port = (await page.locator('.ui-window[data-window-id="w-build-01"] .cl-port').boundingBox())!;
-  const target = (await page.locator('.ui-window[data-window-id="w-studio-mac"] .ui-window-body').boundingBox())!;
-  await page.mouse.move(port.x + 12, port.y + 12);
-  await page.mouse.down();
-  await page.mouse.move(target.x + 200, target.y + 200, { steps: 12 });
-  await expect(page.locator('.ui-window[data-window-id="w-studio-mac"][data-drop]')).toHaveCount(1);
-  await page.mouse.up();
-  await expect(page.locator(".ui-confirm-tip")).toContainText("Let build-01 reach studio-mac?");
-  await page.locator(".ui-confirm-yes").click();
-  await expect.poll(async () => (await probe(page, (p) => p.grants())).length).toBe(before + 1);
-  await expect(page.locator('.cl[data-view="mesh"] .cl-arrow')).toHaveCount(before + 1);
+  await page.waitForTimeout(600);
+  expect(await page.locator(".cl-reach .cl-arrow, .cl-edge, .ui-window[data-kind=\"terminal\"] .cl-port").count()).toBe(0);
+  // The arrows that exist are in the Mesh view, and the connector is on its cards.
+  expect(await page.locator('.cl[data-view="console"] .cl-arrow').count()).toBe(0);
+  await page.keyboard.press("Control+3");
+  await page.waitForTimeout(1000);
+  expect(await page.locator('.cl[data-view="mesh"] .cl-arrow').count()).toBeGreaterThan(0);
+  expect(await page.locator('.cl[data-view="mesh"] .ui-window[data-kind="node"] .cl-port').count()).toBeGreaterThan(0);
 });
 
 test("a window kind decides its controls, and a terminal splits", async ({ page }) => {
@@ -1020,7 +1012,9 @@ test("descenders: g j p q y fit inside the window pill, a Mesh node pill, the vi
 
 test("the window lock sits at the exact centre of its window and the title pill yields", async ({ page }) => {
   await open(page, 1);
-  const centreOff = (): Promise<number[]> => page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".ui-window")].map((w) => {
+  // Mesh node cards share the window material but do not control terminal input.
+  // Keep the strict lock geometry checks on the Console's terminal windows.
+  const centreOff = (): Promise<number[]> => page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.cl[data-view="console"] .ui-window')].map((w) => {
     const l = w.querySelector<HTMLElement>(".ui-window-lock")!.getBoundingClientRect(), r = w.getBoundingClientRect();
     return r.width === 0 || l.width === 0 ? 0 : Math.abs((l.left + l.width / 2) - (r.left + r.width / 2)) + (Math.abs(l.width - 44 * (r.width / w.offsetWidth)) > 1 ? 1000 : 0);
   }));

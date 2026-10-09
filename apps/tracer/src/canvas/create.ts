@@ -191,7 +191,6 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     cx,
     setViews(models) {
       cx.inputLock.reset();
-      cx.mesh?.hideReach(true);
       cx.view.clear();
       state.metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes());
       cx.camera.resized();

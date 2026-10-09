@@ -73,6 +73,10 @@ const STYLE = `
 .ui-confirm-tip button:focus { outline: none; }
 :root[data-focus-ring="on"] .ui-confirm-tip button:focus-visible { outline: 2px solid color-mix(in oklab, var(--fg) 55%, transparent); outline-offset: 2px; }
 @media (hover: hover) and (pointer: fine) { .ui-confirm-tip button:not(.ui-confirm-yes):hover { background: var(--hover); color: var(--fg); } }
+/* The overlay material gives its text a soft halo in the tint colour (styles.css), meant for text that sits straight on
+   a busy terminal. The confirmation is a near-opaque card of its own, where the halo is only a dark smear around the
+   glyphs (it read as blurred text on the confirm button and the grey effect line), so nothing inside it takes one. */
+.ui-confirm-tip, .ui-confirm-tip * { text-shadow: none; }
 .ui-confirm-tip .ui-confirm-yes { background: var(--fg); color: var(--bg); }
 .ui-confirm-tip .ui-confirm-yes svg { stroke-width: 2; }
 /* Named actions: the two buttons carry their words. */
@@ -121,6 +125,9 @@ export interface ConfirmTipOptions {
   message?: string;
   /** One secondary line explaining the consequence (the earlier name of `effect`). */
   detail?: string;
+  /** The same two lines with entity chips in them (`entityText`); they replace `title` and `effect` on screen, which stay the plain text. */
+  titleNode?: Node;
+  effectNode?: Node;
   confirmLabel: string;
   cancelLabel: string;
   onConfirm(): void;
@@ -154,13 +161,13 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   text.className = "ui-confirm-tip-text";
   const message = document.createElement("p");
   message.className = "ui-confirm-tip-message";
-  message.textContent = options.title ?? options.message ?? options.label;
+  if (options.titleNode) message.append(options.titleNode); else message.textContent = options.title ?? options.message ?? options.label;
   text.append(message);
   const effectText = options.effect ?? options.detail;
-  if (effectText) {
+  if (effectText || options.effectNode) {
     const detail = document.createElement("p");
     detail.className = "ui-confirm-tip-detail";
-    detail.textContent = effectText;
+    if (options.effectNode) detail.append(options.effectNode); else detail.textContent = effectText!;
     text.append(detail);
   }
 

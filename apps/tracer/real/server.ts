@@ -59,8 +59,17 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
   const later = (run: () => void): void => { if (delay > 0) setTimeout(run, delay); else run(); };
   const binary = process.env.INFRATERNAL_BIN ?? resolve(root, "target/x86_64-unknown-linux-musl/release/infraternal");
   const dist = resolve(process.env.TRACER_DIST ?? resolve(root, "apps/tracer/dist"));
+  // Session rendezvous sockets have a 107-byte path limit. Large fixture state
+  // may live under a long TMPDIR; keep runtime sockets in their own private root.
+  const runtimeRoot = process.env.INFRATERNAL_TEST_STATE_ROOT ?? tmpdir();
+  await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
+  const runtime = await mkdtemp(resolve(runtimeRoot, "r"));
+  const sessionSocket = resolve(runtime, "infraternal/sessions", "0".repeat(32) + ".sock");
+  if (Buffer.byteLength(sessionSocket) >= 108) {
+    await rm(runtime, { recursive: true, force: true });
+    throw new Error("real-server runtime path is too long; use a shorter INFRATERNAL_TEST_STATE_ROOT");
+  }
   const state = await mkdtemp(resolve(tmpdir(), "infraternal-real-"));
-  await mkdir(`${state}/runtime`, { mode: 0o700 });
   await cp(dist, `${state}/web`, { recursive: true });
   const reservation = createServer();
   await new Promise<void>((r) => reservation.listen(0, "127.0.0.1", r));
@@ -91,7 +100,7 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
 
   const child: ChildProcess = spawn(binary, ["server", "--listen", `127.0.0.1:${port}`, "--data", `${state}/data`, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`], {
     cwd: root, detached: true,
-    env: { ...process.env, XDG_RUNTIME_DIR: `${state}/runtime`, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
+    env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
     stdio: ["ignore", "ignore", "pipe"],
   });
   if (process.env.REAL_SERVER_LOG === "1") child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); else child.stderr?.resume();
@@ -152,6 +161,11 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
       front.close();
       tls.close();
       try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
+      // Reuse authenticated fixture teardown so detached shims cannot outlive
+      // the runtime directory that identifies them. Never scan unrelated PIDs.
+      const cleanup = spawn("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", resolve(runtime, "infraternal")], { cwd: root, stdio: "ignore" });
+      await once(cleanup, "exit");
+      await rm(runtime, { recursive: true, force: true });
       await rm(state, { recursive: true, force: true });
     },
   };

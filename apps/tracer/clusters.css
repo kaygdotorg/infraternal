@@ -64,7 +64,10 @@
 .ui-window[data-kind="node"] { cursor: default; }
 .ui-window-pill[data-grab] { cursor: grab; touch-action: none; }
 .ui-window-pill[data-grab]:active { cursor: grabbing; }
-.ui-window[data-drop] { border-color: var(--accent); }
+/* The landing cue on the node an arrow snaps onto: the border brightens to the accent at once (a 120 ms flash from the
+   foreground colour, ease-out). It stays for reduced motion, which keeps the colour and drops the movement. */
+.ui-window[data-drop] { border-color: var(--accent); animation: cl-land 120ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+@keyframes cl-land { from { border-color: var(--fg); } }
 
 /* The soft outline of where a dragged window will land. */
 .cl-slot {
@@ -118,7 +121,8 @@
 
 .cl-node-meta { display: grid; gap: 1px; padding: 4px 14px 10px; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .cl-node-detail { color: var(--fg); }
-.cl-node-sub { color: var(--ui-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Two lines at most: "188 ms, through fra-relay" is longer than a card is wide, and a cut-off figure reads as a wrong one. */
+.cl-node-sub { color: var(--ui-text-secondary); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
 /* Arrows pass under the cards, so a line that crosses a card is hidden by it instead of cutting through its text. */
 .cl-graph-arrows { position: absolute; left: 0; top: 0; z-index: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
 .cl-world[data-lod="thumb"] .cl-node-meta { opacity: 1; }
@@ -146,7 +150,8 @@
 .cl-arrow[data-dashed] .cl-arrow-line { stroke-dasharray: 5 5; }
 .cl-arrow[data-fresh], .cl-arrow[data-leaving] { opacity: 0; }
 .cl-arrow[data-live]:not([data-snapped]) .cl-arrow-line { opacity: 0.8; }
-.cl-arrow-label { fill: var(--ui-text-secondary); font: 450 12px var(--font-ui, "Geist Mono", ui-monospace, monospace); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+.cl-arrow-label { fill: var(--ui-text-secondary); font: 450 12px var(--font-ui, "Geist Mono", ui-monospace, monospace); paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
+.cl-arrow-label[display="none"] { display: none; }
 /* On-demand arrows: faint, and they fade in one after another. */
 .cl-reach .cl-arrow { opacity: 0.55; transition: opacity 240ms ease calc(var(--i, 0) * 50ms); }
 .cl-reach[data-open="false"] .cl-arrow { opacity: 0; transition-delay: 0ms; }
@@ -326,3 +331,6 @@
 /* A phone at full width: the canvas area runs edge to edge, so a window of 99% of the screen is centred with a hairline
    of margin, not cut by the 12 px gutters (D191). The top bar and the key tray keep their margins. */
 .terminal-screen[data-window-edge] .panes { left: env(safe-area-inset-left, 0px); right: env(safe-area-inset-right, 0px); }
+
+/* The summary card is a card of its own (counts and labels), so it takes no halo from the overlay material. */
+.cl-summary, .cl-summary * { text-shadow: none; }

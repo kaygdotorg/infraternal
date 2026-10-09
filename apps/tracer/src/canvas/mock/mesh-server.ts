@@ -114,20 +114,32 @@ export class FakeMeshServer implements MeshTransport {
   grantList(): Array<{ id: string; name: string; from: string; to: string; via?: string; both: boolean }> {
     return this.grants.map((g) => ({ id: `g${g.arrowId}`, name: g.name, from: g.from, to: g.to, both: g.both, ...(g.via ? { via: g.via } : {}) }));
   }
-  /** The list as the server would answer it right now (the mockup primes its adapter with it). */
-  listJson(): Record<string, unknown> {
+  /** Objects per page of a list (the server pages by size; a small inventory fits one page). */
+  pageSize = 400;
+  /** The whole list as the server holds it (the mockup primes its adapter with this). */
+  listJson(): Record<string, unknown> { return this.page(undefined, Infinity); }
+  /** One page: objects in the order nodes, tags, grants from `cursor.offset`; `next_cursor` while more remain. */
+  page(cursor: { revision: number; offset: number } | undefined, size: number): Record<string, unknown> {
     const nodes = [...this.nodes.values()].map((n) => ({
       node: { id: n.id, host: n.name, tags: [...this.tags].filter(([, m]) => m.has(n.id)).map(([t]) => t).sort() },
       live: n.live, last_seen: n.live ? 1_700_000_000 : null, last_rtt_us: n.rttUs ?? null,
       ...(this.includeExtras ? { os: n.os, address: n.address, path: n.path, ...(n.via ? { via: n.via } : {}), ...(n.behind ? { behind: true } : {}) } : {}),
     }));
     const end = (e: string): Record<string, unknown> => (e.startsWith("tag:") ? { Tag: e.slice(4) } : { Node: this.idOf(e) });
+    const tags = [...this.tags].map(([name, m]) => ({ name, members: [...m].sort((a, b) => a - b) }));
+    const grants = this.grants.map((g) => ({ name: g.name, arrow: { id: g.arrowId, from: end(g.from), to: end(g.to), both_ways: g.both, ports: "All" }, ...(this.includeExtras && g.via ? { via: g.via } : {}) }));
+    // A cursor from an older revision restarts at the beginning, like the server; a page never splits an object.
+    const from = cursor && cursor.revision === this.revision ? cursor.offset : 0;
+    const total = nodes.length + tags.length + grants.length;
+    const to = Math.min(total, from + size);
+    const slice = <T>(list: T[], base: number): T[] => list.slice(Math.max(0, from - base), Math.max(0, to - base));
     return {
       revision: this.revision,
       ...(this.includeAccess ? { access: { view: this.access.view, manage_grants: this.access.manageGrants } } : {}),
-      nodes,
-      tags: [...this.tags].map(([name, m]) => ({ name, members: [...m].sort((a, b) => a - b) })),
-      grants: this.grants.map((g) => ({ name: g.name, arrow: { id: g.arrowId, from: end(g.from), to: end(g.to), both_ways: g.both, ports: "All" }, ...(this.includeExtras && g.via ? { via: g.via } : {}) })),
+      nodes: slice(nodes, 0),
+      tags: slice(tags, nodes.length),
+      grants: slice(grants, nodes.length + tags.length),
+      ...(to < total ? { next_cursor: { revision: this.revision, offset: to } } : {}),
     };
   }
 
@@ -158,7 +170,7 @@ export class FakeMeshServer implements MeshTransport {
     const id = this.nextSub++;
     this.open.set(id, { onEvent, onOpen });
     // Like the server: a subscription starts with the list it would have answered.
-    queueMicrotask(() => { if (!this.muted && this.open.has(id) && this.state === "ready" && this.access.view) onEvent({ type: "snapshot", snapshot: this.listJson() }); });
+    queueMicrotask(() => { if (!this.muted && this.open.has(id) && this.state === "ready" && this.access.view) onEvent({ type: "snapshot", snapshot: this.page(undefined, this.pageSize) }); });
     return () => { this.open.delete(id); };
   }
 
@@ -167,9 +179,14 @@ export class FakeMeshServer implements MeshTransport {
   /** Answers the lists held back while in the `loading` state. */
   release(state: FakeMeshState = "ready"): void { this.state = state; const run = this.held; this.held = []; for (const r of run) r(); }
   /** The socket drops and comes back: events in between are lost, and every subscriber is told to resync. */
-  reconnect(lose: () => void = () => undefined): void { lose(); for (const l of [...this.ready]) queueMicrotask(l); for (const s of this.open.values()) queueMicrotask(s.onOpen); }
+  reconnect(lose: () => void = () => undefined): void {
+    lose();
+    for (const l of [...this.ready]) queueMicrotask(l);
+    // The connection sends every subscription again on a new socket, and the server answers each with its list.
+    for (const s of this.open.values()) queueMicrotask(() => { s.onOpen(); if (this.muted) return; if (this.state === "ready" && this.access.view) s.onEvent({ type: "snapshot", snapshot: this.page(undefined, this.pageSize) }); else if (this.state === "error") s.onEvent({ type: "error", error: "mesh unavailable" }); });
+  }
   /** The server fell behind a subscriber and pushes the whole list instead of the changes it missed. */
-  resync(): void { for (const s of this.open.values()) s.onEvent({ type: "resync", snapshot: this.listJson() }); }
+  resync(): void { for (const s of this.open.values()) s.onEvent({ type: "resync", snapshot: this.page(undefined, this.pageSize) }); }
   setAccess(access: { view: boolean; manageGrants: boolean }): void { this.access = access; this.bump(); }
 
   /** Changes a host the way a live mesh does (liveness, round trip) and tells the subscribers. */
@@ -227,7 +244,11 @@ export class FakeMeshServer implements MeshTransport {
   private answer(action: string, input: Record<string, unknown>): Record<string, unknown> {
     if (this.state === "error") throw new Error("connection lost");
     if (this.state === "denied" || !this.access.view) throw new ActionRefused(undefined, "forbidden");
-    if (action === ACTION.list) { this.strict(input, []); return this.listJson(); }
+    if (action === ACTION.list) {
+      for (const k of Object.keys(input)) if (k !== "cursor" && k !== "tag") throw new ActionRefused(undefined, "invalid input");
+      const c = input.cursor as { revision?: unknown; offset?: unknown } | undefined;
+      return this.page(c && typeof c.revision === "number" && typeof c.offset === "number" ? { revision: c.revision, offset: c.offset } : undefined, this.pageSize);
+    }
     if (!this.access.manageGrants) throw new ActionRefused(undefined, "forbidden");
     switch (action) {
       case ACTION.create: {

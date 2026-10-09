@@ -169,7 +169,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   }, { signal });
 
   // ---- live-looking content -------------------------------------------------------------------------
-  // A logs window keeps moving, so thumbnails are visibly live.
+  // Only visible logs tick. Keep the existing tail-follow controller and backlog;
+  // parked windows must not force layout or repaint while nobody can see them.
   let logSerial = LOG_BACKLOG;
   const streamTimer = window.setInterval(() => {
     if (document.hidden) return; // a hidden page does nothing
@@ -178,7 +179,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     for (let k = 0; k < burst; k++, logSerial++) {
       const line = logLine(logSerial, Date.now());
       for (const c of cx.views.values()) for (const w of c.wins.values()) {
-        if (!w.pushLog || !w.model.lines) continue;
+        if (!w.pushLog || !w.model.lines || !w.card.root.hasAttribute("data-onscreen")) continue;
         w.model.lines = [...w.model.lines.slice(-499), line];
         w.pushLog(line);
       }
@@ -216,7 +217,6 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     setRole: (r: Role) => { world.role = r; world.forcedRole = true; goScene(4); },
     canvasLock: () => ({ on: state.canvasLock, index: state.snapIdx, stops: (() => { const c = cx.views.get(state.currentView); return c ? cx.nav.stopsFor(c).lefts.length : 0; })(), view: state.currentView }),
     setCanvasLock: (on: boolean) => cx.nav.setCanvasLock(on),
-    reachFor: () => cx.mesh?.reachFor()?.model.id,
     /** The fake Mesh server and what the Mesh view has on screen (specs drive and read these). */
     mesh: {
       server: () => mesh.server,
@@ -228,7 +228,6 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       /** The saved canvas document (what a reload would restore). */
       document: () => cx.adapters.store.load(),
     },
-    reachCount: () => cx.mesh?.reachCount() ?? 0,
     sessions: () => ({ status: inventory.status(), hosts: inventory.hosts().map((host) => ({ host, sessions: inventory.list(host).map((s) => ({ id: s.id, name: s.name, state: s.state, activity: s.activity ?? null, pinned: s.pinned })) })) }),
     runSessionScene: (n: number) => sessionScenes.run(n),
   };

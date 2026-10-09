@@ -21,6 +21,8 @@ type FakeServer = {
   addNode(n: Record<string, unknown>): void;
   removeNode(name: string): void;
   reconnect(lose?: () => void): void;
+  resync(): void;
+  pageSize: number;
   churn(hz: number, perTick?: number): () => void;
   muted: boolean;
   setAccess(a: { view: boolean; manageGrants: boolean }): void;
@@ -35,14 +37,13 @@ type Probe = {
   setCamera(cx: number, cy: number, z: number): void;
   flyView(id: string): void;
   canvasLock(): { on: boolean; index: number; stops: number; view: string };
-  reachCount(): number;
   mesh: {
     server(): FakeServer;
     status(): string;
     pins(): Record<string, { x: number; y: number }>;
     stats(): Stats | undefined;
     document(): Promise<{ views: Array<{ id: string; layout: { type: string; pinned?: Record<string, { x: number; y: number }> } }> } | undefined>;
-    source(): { retry(): void; renameGrant(g: unknown, name: string): void; grants(): Grant[] };
+    source(): { data(): { nodes: { size: number } }; retry(): void; renameGrant(g: unknown, name: string): void; grants(): Grant[] };
   };
 };
 const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
@@ -108,7 +109,7 @@ test.describe("a large mesh", () => {
     expect(near.level).toBe("cards");
     expect(near.cards).toBeGreaterThan(5);
     expect(near.cards).toBeLessThan(250);
-    expect(near.arrows).toBeLessThanOrEqual(240);
+    expect(near.arrows).toBeLessThanOrEqual(150);
     expect((await nodeIds(page)).length).toBe(near.cards);
     expect(await page.locator("svg.cl-graph-arrows .cl-arrow").count()).toBe(near.arrows);
     expect(errors).toEqual([]);
@@ -209,7 +210,7 @@ for (const rate of [1, 4]) {
     // The DOM stays bounded whatever the size of the mesh (always checked)...
     expect(reached.chips).toBeGreaterThan(0);
     expect(panned.cards).toBeLessThan(250);
-    expect(panned.arrows).toBeLessThanOrEqual(240);
+    expect(panned.arrows).toBeLessThanOrEqual(150);
     // ...and, on a machine that is not busy with other work (the numbers above are printed either way), a pass of this
     // module's script (choosing what is in the DOM, and making it) stays far under a frame and the frames hold 60 fps.
     if (rate === 1 && load < 1.2) {
@@ -251,8 +252,8 @@ test.describe("live updates", () => {
     await expect.poll(() => sub(page, "build-01")).toBe("direct · 33 ms");
     await server(page, (s) => s.reconnect(() => { s.muted = true; s.patchNode("studio-mac", { rttMs: 9 }); s.muted = false; }));
     await expect.poll(() => sub(page, "studio-mac")).toBe("direct · 9 ms");
-    // One list for the gap and one for the reconnect: events are only ever a reason to ask again.
-    expect((await server(page, (s) => s.calls)).filter((c) => c.action === "mesh.list")).toHaveLength(2);
+    // One list for the gap; the reconnect is answered by the subscription's own snapshot, with no list asked for.
+    expect((await server(page, (s) => s.calls)).filter((c) => c.action === "mesh.list")).toHaveLength(1);
   });
 
   test("a change made elsewhere moves its arrow, and an answer that comes after its own event is not applied twice", async ({ page }) => {
@@ -266,6 +267,15 @@ test.describe("live updates", () => {
     await page.waitForTimeout(400);
     expect(await page.locator('.cl[data-view="mesh"] .cl-arrow').count()).toBe(before);
     expect(await probe(page, (p) => p.grants().length)).toBe(before);
+  });
+
+  test("a big inventory arrives in pages: a resync follows the server's continuations and shows all of it, once", async ({ page }) => {
+    await open(page, "&mesh=1000");
+    await server(page, (s) => { s.pageSize = 150; s.resync(); });
+    await expect.poll(async () => (await server(page, (s) => s.calls)).filter((c) => c.action === "mesh.list" && c.input.cursor !== undefined).length, { timeout: 15_000 }).toBeGreaterThanOrEqual(5);
+    expect(await probe(page, (p) => p.mesh.source().data().nodes.size)).toBe(1000);
+    // A page that is a lone page of a half-assembled list is never shown: the count stays whole throughout.
+    expect(await server(page, (s) => s.hostCount())).toBe(1000);
   });
 
   test("a host-heavy stream of status events does not reflow the graph (60 events a second on 1,000 hosts)", async ({ page }) => {
@@ -300,7 +310,7 @@ test.describe("editing arrows", () => {
     await expect(page.locator(".ui-toast, .toast").first()).toContainText("nix-cache can now reach edge-arm");
   });
 
-  test("a tail move sends the new source; removing sends a delete; adding from a terminal sends a create", async ({ page }) => {
+  test("a tail move sends the new source; removing sends a delete; allowing from a card sends a create", async ({ page }) => {
     await open(page);
     await intoMesh(page);
     await dragEnd(page, "g7", "tail", "studio-mac");
@@ -311,17 +321,15 @@ test.describe("editing arrows", () => {
     await page.locator(".ui-confirm-yes").click();
     await expect.poll(() => called(page, "mesh.grant.delete")).toEqual([{ name: "nix-cache to studio-mac" }]);
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveCount(0);
-    // Back in Console: a drag from the connector grants access.
-    await page.keyboard.press("Control+1");
-    await page.waitForTimeout(1500);
-    await page.locator('.ui-window[data-window-id="w-build-01"] .ui-window-pill').hover();
-    await expect.poll(() => probe(page, (p) => p.reachCount())).toBeGreaterThan(0);
-    const port = (await page.locator('.ui-window[data-window-id="w-build-01"] .cl-port').boundingBox())!;
-    const target = (await page.locator('.ui-window[data-window-id="w-studio-mac"] .ui-window-body').boundingBox())!;
-    await page.mouse.move(port.x + 12, port.y + 12);
+    // A drag from the connector on a card onto another card allows access (the connector exists only in this view, D194).
+    await page.locator('.ui-window[data-window-id="n-build-01"] .ui-window-pill').hover();
+    const port = await centre(page, '.ui-window[data-window-id="n-build-01"] .cl-port');
+    const target = await centre(page, '.ui-window[data-window-id="n-studio-mac"]');
+    await page.mouse.move(port.x, port.y);
     await page.mouse.down();
-    await page.mouse.move(target.x + 200, target.y + 200, { steps: 12 });
+    await page.mouse.move(target.x, target.y, { steps: 12 });
     await page.mouse.up();
+    await expect(page.locator(".ui-confirm-tip")).toContainText("Let build-01 reach studio-mac?");
     await page.locator(".ui-confirm-yes").click();
     await expect.poll(() => called(page, "mesh.grant.create")).toEqual([{ name: "build-01 to studio-mac", from: { Node: 1 }, to: { Node: 4 }, both_ways: false }]);
     await expect.poll(async () => (await server(page, (s) => s.grantList())).some((g) => g.from === "build-01" && g.to === "studio-mac")).toBe(true);
@@ -353,7 +361,7 @@ test.describe("editing arrows", () => {
     await server(page, (s) => s.failNext("mesh.grant.move", "refuse"));
     await dragEnd(page, "g3", "head", "edge-arm");
     await page.locator(".ui-confirm-yes").click();
-    await expect(page.locator(".ui-toast, .toast").first()).toContainText("You are not allowed to change who nix-cache can reach");
+    await expect(page.locator(".ui-toast, .toast").first()).toContainText("Could not change who nix-cache can reach. You may not be allowed to");
     await expect.poll(async () => (await grant("g3"))?.to).toBe("studio-mac");
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveAttribute("data-tip", "nix-cache can reach studio-mac");
     await page.waitForTimeout(3600);
@@ -367,22 +375,25 @@ test.describe("editing arrows", () => {
 
 // ---- who sees and edits what (D187) -----------------------------------------------------------------------------
 test.describe("access", () => {
-  test("arrows have handles, and terminals the connector, only for a person who may manage grants", async ({ page }) => {
+  test("arrows have handles, and cards the connector, only for a person who may manage grants; terminals never have either (D194)", async ({ page }) => {
     await open(page);
-    await expect(page.locator('.ui-window[data-kind="terminal"] .cl-port').first()).toBeAttached();
-    expect(await page.locator('.ui-window[data-kind="terminal"] .cl-port:not([hidden])').count()).toBeGreaterThan(0);
+    expect(await page.locator('.ui-window[data-kind="terminal"] .cl-port').count()).toBe(0);
     await intoMesh(page);
-    expect(await page.locator(".cl-arrow-handle").count()).toBeGreaterThan(0);
+    // The handles are made when the pointer comes near an arrow (a graph holds hundreds and almost none is grabbed).
+    expect(await page.locator(".cl-arrow-handle").count()).toBe(0);
+    const near = await centre(page, '.cl[data-view="mesh"] .cl-arrow[data-grant="g3"] .cl-arrow-hit');
+    await page.mouse.move(near.x, near.y);
+    await expect.poll(() => page.locator('.cl-arrow[data-grant="g3"] .cl-arrow-handle').count()).toBe(2);
     await server(page, (s) => s.setAccess({ view: true, manageGrants: false }));
     await expect.poll(() => page.locator(".cl-arrow-handle").count()).toBe(0);
-    expect(await page.locator('.ui-window[data-kind="terminal"] .cl-port:not([hidden])').count()).toBe(0);
-    expect(await page.locator('.ui-window[data-kind="terminal"] .cl-port').first().evaluate((n) => getComputedStyle(n).display)).toBe("none"); // really gone, not just marked
+    expect(await page.locator('.ui-window[data-kind="node"] .cl-port:not([hidden])').count()).toBe(0);
+    expect(await page.locator('.ui-window[data-kind="node"] .cl-port').first().evaluate((n) => getComputedStyle(n).display)).toBe("none"); // really gone, not just marked
     // Hover still names a grant, but nothing can be dragged.
     const hit = await centre(page, '.cl[data-view="mesh"] .cl-arrow[data-grant="g3"]');
     await page.mouse.move(hit.x, hit.y);
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveAttribute("data-tip", "nix-cache can reach studio-mac");
     await server(page, (s) => s.setAccess({ view: true, manageGrants: true }));
-    await expect.poll(() => page.locator(".cl-arrow-handle").count()).toBeGreaterThan(0);
+    await expect(page.locator('.cl-arrow[data-grant="g3"] .cl-arrow-hit')).toHaveCount(1); // editable again: the handles come with the pointer
   });
 
   test("the view appears when grants allow, goes when they are withdrawn, and is reachable by shortcut, sidebar, switcher and palette", async ({ page }) => {
@@ -419,7 +430,7 @@ test.describe("access", () => {
     expect(await probe(page, (p) => p.mesh.status())).toBe("ready");
     expect(await page.locator(".cl-arrow").count()).toBeGreaterThan(0);
     expect(await page.locator(".cl-arrow-handle").count()).toBe(0); // least privilege: nothing to drag without `access`
-    expect(await page.locator('.ui-window[data-kind="terminal"] .cl-port:not([hidden])').count()).toBe(0);
+    expect(await page.locator('.ui-window[data-kind="node"] .cl-port:not([hidden])').count()).toBe(0);
     expect(await sub(page, "build-01")).toBe("42 ms"); // no path was sent, so none is claimed
     await expect(page.locator('.ui-window[data-window-id="n-build-01"] .cl-node-detail')).toHaveText("tag:ci"); // no address was sent either
   });
@@ -434,11 +445,78 @@ test.describe("access", () => {
   });
 });
 
+/** The confirmation's two actions are icon buttons (cross, tick) that carry their name as label and warm tooltip, on bare glyphs: no halo behind them. */
+async function expectIconButtons(tip: ReturnType<Page["locator"]>, names: [string, string]): Promise<void> {
+  const buttons = tip.locator("button");
+  await expect(buttons).toHaveCount(2);
+  await expect(buttons).toHaveText(["", ""]);
+  for (const [i, name] of names.entries()) {
+    await expect(buttons.nth(i)).toHaveAttribute("aria-label", name);
+    await expect(buttons.nth(i)).toHaveAttribute("data-tip", name);
+    await expect(buttons.nth(i).locator("svg")).toHaveCount(1);
+  }
+  // Text is crisp at rest: nothing in the popover carries the material's halo around a button.
+  expect(await buttons.evaluateAll((bs) => bs.map((b) => getComputedStyle(b).textShadow))).toEqual(["none", "none"]);
+  // Nor does any text of the card: the halo is for text straight on glass, and on this card it is a smear around the glyphs.
+  expect(await tip.evaluate((root) => [root, ...root.querySelectorAll("*")].filter((e) => getComputedStyle(e).textShadow !== "none").length)).toBe(0);
+}
+
+// ---- snap-fit: an arrow end follows the pointer 1:1, snaps in one frame and holds still; no spring -----------------
+test("snap-fit: the dragged end is exact, lands in a single frame without wobble, and goes home fast without overshoot", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  const live = ".cl-arrow[data-live] .cl-arrow-line";
+  /** The path of the live arrow on each of the next `n` frames. */
+  const frames = (n: number): Promise<string[]> => page.evaluate(({ sel, n: count }) => new Promise<string[]>((res) => {
+    const out: string[] = [];
+    const tick = (): void => { out.push(document.querySelector(sel)?.getAttribute("d") ?? ""); if (out.length < count) requestAnimationFrame(tick); else res(out); };
+    requestAnimationFrame(tick);
+  }), { sel: live, n });
+  const mid = await centre(page, '.cl[data-view="mesh"] .cl-arrow[data-grant="g3"] .cl-arrow-hit');
+  await page.mouse.move(mid.x, mid.y);
+  const handle = await centre(page, '.cl-arrow[data-grant="g3"] .cl-arrow-handle[data-end="head"]');
+  await page.mouse.move(handle.x, handle.y);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + 10, handle.y + 110, { steps: 5 });
+  // Free: after a pointer move the very next frame already shows the final shape (it holds still, never trails).
+  await page.mouse.move(handle.x + 40, handle.y + 140);
+  const free = await frames(6);
+  expect(new Set(free).size, "free end follows the pointer with no lag").toBe(1);
+  // Snap: the frames after the move that enters the snap zone are all identical; there is no wobble.
+  const target = await centre(page, '.ui-window[data-window-id="n-edge-arm"]');
+  await page.mouse.move(target.x, target.y, { steps: 14 });
+  const snapped = await frames(24);
+  expect(new Set(snapped).size, "snapped arrow does not move").toBe(1);
+  expect(snapped[0]).not.toBe(free[0]);
+  await expect(page.locator('.ui-window[data-window-id="n-edge-arm"][data-drop]')).toHaveCount(1);
+  // The head presses once (120 ms) and leaves nothing on the element at rest, so it is never left on a fractional scale.
+  await page.waitForTimeout(200);
+  expect(await page.locator(".cl-arrow[data-live] .cl-arrow-head").evaluate((h) => (h as SVGElement).style.transform + getComputedStyle(h).transform)).toMatch(/^(none)?$/);
+  // Release over the target and cancel: the arrow comes home in at most 180 ms and never overshoots its home.
+  await page.mouse.up();
+  await expect(page.locator(".ui-confirm-tip")).toHaveAttribute("data-open", "true");
+  const home = await page.evaluate((sel) => document.querySelector(sel)?.getAttribute("d"), live);
+  expect(home).toBe(snapped[0]); // released over a target: it stays exactly where it snapped
+  // Time from the click itself (not from when the test asked to click) until the live arrow has been removed.
+  const back = page.evaluate(({ sel }) => new Promise<{ ms: number; ds: string[] }>((res) => {
+    document.addEventListener("click", () => {
+      const t0 = performance.now(), ds: string[] = [];
+      const tick = (): void => { const d = document.querySelector(sel)?.getAttribute("d"); if (d) ds.push(d); if (!d || performance.now() - t0 > 600) res({ ms: performance.now() - t0, ds }); else requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+    }, { capture: true, once: true });
+  }), { sel: live });
+  await page.locator(".ui-confirm-no").click();
+  const r = await back;
+  expect(r.ms, "the live arrow is gone within the glide plus a frame or two").toBeLessThan(260);
+  // Ease-out without overshoot: the end only ever moves toward home, so successive paths never reverse direction.
+  expect(r.ds.length).toBeGreaterThan(2);
+});
+
 // ---- copy: every message says what happens, in plain words (TASTE) ------------------------------------------------
 const noHosts = (t: string): string => t.replace(/nix-cache|edge-arm|studio-mac|build-01/g, "");
 const TECHNICAL = /→|\bgrants?\b|\bnodes?\b|\bedges?\b|\bACL\b|\bid\b|\bAPI\b/i;
 for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const) {
-  test(`copy ${label}: the remove and move confirmations, the toasts and the connector name their effect, with named buttons`, async ({ page }, testInfo) => {
+  test(`copy ${label}: the remove and move confirmations, the toasts and the connector name their effect, with icon buttons and warm tooltips`, async ({ page }, testInfo) => {
     await open(page, "", size);
     await intoMesh(page);
     // On a phone the first stop shows one column of cards: frame the arrows at a size where they can be grabbed.
@@ -447,7 +525,7 @@ for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const
     const move = page.locator(".ui-confirm-tip");
     await expect(move).toContainText("Let nix-cache reach edge-arm instead of studio-mac?");
     await expect(move).toContainText("nix-cache will lose its connection to studio-mac and gain one to edge-arm. You can change it back any time.");
-    await expect(move.locator("button")).toHaveText(["Cancel", "Change access"]);
+    await expectIconButtons(move, ["Cancel", "Change access"]);
     expect(noHosts(await move.innerText())).not.toMatch(TECHNICAL);
     await capture(page, `confirm-move-ink-${label}`, testInfo);
     await page.locator(".ui-confirm-no").click();
@@ -456,7 +534,7 @@ for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const
     const stop = page.locator(".ui-confirm-tip");
     await expect(stop).toContainText("Stop nix-cache reaching studio-mac?");
     await expect(stop).toContainText("nix-cache will lose its connection to studio-mac. You can allow it again any time.");
-    await expect(stop.locator("button")).toHaveText(["Keep it", "Stop access"]);
+    await expectIconButtons(stop, ["Keep it", "Stop access"]);
     expect(noHosts(await stop.innerText())).not.toMatch(TECHNICAL);
     await capture(page, `confirm-stop-ink-${label}`, testInfo);
     await page.locator(".ui-confirm-yes").click();
@@ -465,6 +543,32 @@ for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const
     expect(noHosts(await toast.innerText())).not.toMatch(TECHNICAL);
     await server(page, (s) => { s.failNext("mesh.grant.delete", "refuse"); });
     expect(await page.locator("[data-tip]").evaluateAll((ns) => ns.map((n) => (n as HTMLElement).dataset.tip!).filter((t) => /→|grant/i.test(t)))).toEqual([]);
+  });
+}
+
+// ---- the label of an arrow that goes through another host stays clear of the cards at every zoom -----------------
+for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const) {
+  test(`arrow label ${label}: "via fra-relay" never sits under a card, at any zoom, and is not louder than the cards' own text`, async ({ page }) => {
+    await open(page, "", size);
+    await intoMesh(page);
+    const overlaps = (): Promise<{ shown: boolean; hits: number; fs: number }> => page.evaluate(() => {
+      const t = document.querySelector('.cl-arrow[data-grant="g2"] .cl-arrow-label') as SVGTextElement | null;
+      if (!t || getComputedStyle(t).display === "none") return { shown: false, hits: 0, fs: 0 };
+      const r = t.getBoundingClientRect();
+      const hits = [...document.querySelectorAll('.ui-window[data-kind="node"]')].filter((n) => { const b = n.getBoundingClientRect(); return r.left < b.right && b.left < r.right && r.top < b.bottom && b.top < r.bottom; }).length;
+      return { shown: true, hits, fs: r.height };
+    });
+    const v = (await probe(page, (p) => p.views())).find((o) => o.id === "mesh")!;
+    for (const z of [0.5, 0.8, 1, 1.6]) {
+      await page.evaluate((a) => (window as unknown as { __tracerClusters: Probe }).__tracerClusters.setCamera(a.x, a.y, a.z), { x: v.x + v.w / 2, y: v.y + v.h / 2, z });
+      await page.waitForTimeout(500);
+      const o = await overlaps();
+      expect(o.hits, `zoom ${z}`).toBe(0);
+    }
+    // At the framing the person lands on, the label is there (the gap between the two cards is wide enough).
+    await probe(page, (p) => p.flyView("mesh"));
+    await page.waitForTimeout(1200);
+    expect((await overlaps()).hits).toBe(0);
   });
 }
 

@@ -1,4 +1,5 @@
 /** Curated UI and terminal palettes; one theme keeps both color systems coherent. */
+import { entityPaletteCss } from "./entity-palette";
 
 export type Ansi = [string, string, string, string, string, string, string, string];
 
@@ -173,6 +174,7 @@ function installLevelRules(): void {
     }
     if (glass.blur) css.push(`:root[data-window-level="${name}"] .ui-window[data-onscreen] { -webkit-backdrop-filter: blur(${glass.blur}px); backdrop-filter: blur(${glass.blur}px); }`);
   }
+  css.push(...entityPaletteCss());
   const sheet = new CSSStyleSheet();
   sheet.replaceSync(css.join("\n"));
   document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
