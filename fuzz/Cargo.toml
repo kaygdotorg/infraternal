@@ -51,6 +51,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "remote_renewal_decode"
+path = "fuzz_targets/remote_renewal_decode.rs"
+test = false
+doc = false
+bench = false
+
 # Fuzz targets are the one place where unwrap and expect are the point: a panic
 # is how libFuzzer reports a broken invariant (for example, a failed round trip).
 # Cargo cannot override one inherited lint, so the policy is repeated here.
