@@ -208,14 +208,21 @@ where
             .await
         {
             Ok(true) => {
-                if let Some(deadline) = change.liveness_deadline
-                    && let Some(watch) = subscriptions.iter_mut().find(|sub| sub.sub_id == sub_id)
-                {
-                    watch.liveness_deadline = Some(
-                        watch
-                            .liveness_deadline
-                            .map_or(deadline, |old| old.min(deadline)),
-                    );
+                let deadline = if let Some(deadline) = change.liveness_deadline {
+                    subscription
+                        .liveness_deadline
+                        .map_or(Some(deadline), |old| Some(old.min(deadline)))
+                } else {
+                    // Membership and role edits can reveal live hosts even when
+                    // this watch previously had no timer. Recompute its full view.
+                    state
+                        .mesh
+                        .watch_deadline(user_id, &subscription.filter, unix_seconds()?)
+                        .await
+                        .map_err(|_| ())?
+                };
+                if let Some(watch) = subscriptions.iter_mut().find(|sub| sub.sub_id == sub_id) {
+                    watch.liveness_deadline = deadline;
                 }
                 (json!({"type":"changed","revision":change.revision}), false)
             }

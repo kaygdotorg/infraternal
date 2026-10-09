@@ -735,3 +735,7 @@ mod plugin_lifecycle;
 #[cfg(not(feature = "mesh"))]
 #[path = "socket_tests/plugin_no_features.rs"]
 mod plugin_no_features;
+
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/claude_review_visible_liveness.rs"]
+mod claude_review_visible_liveness;

@@ -551,6 +551,41 @@ impl MeshService {
         }
     }
 
+    /// Find the next visible expiry without copying or paging inventory.
+    ///
+    /// # Errors
+    /// Refuses lost view authority or storage failure while rearming a watch.
+    pub async fn watch_deadline(
+        &self,
+        actor: &str,
+        filter: &MeshFilter,
+        now: i64,
+    ) -> Result<Option<i64>, MeshApiError> {
+        let mut tx = self.pool.begin().await.map_err(map_sql_error)?;
+        let access = view_access(&mut tx, actor).await?;
+        let all = access.all && filter.tag.is_none();
+        let tags = if let Some(tag) = &filter.tag {
+            if !access.all && !access.tags.contains(tag) {
+                return Err(MeshApiError::Denied);
+            }
+            BTreeSet::from([tag.clone()])
+        } else {
+            access.tags
+        };
+        let tags = serde_json::to_string(&tags).map_err(|_| MeshApiError::Storage)?;
+        // Match the complete view, including nodes beyond the first wire page.
+        // Inclusive liveness ends at last_seen + 31, exactly as snapshots do.
+        sqlx::query_scalar("SELECT MIN(n.last_seen) FROM mesh_nodes AS n WHERE n.last_seen BETWEEN ? AND ? AND (? OR EXISTS(SELECT 1 FROM mesh_tag_members AS m WHERE m.node_id=n.id AND m.tag_name IN (SELECT value FROM json_each(?))))")
+            .bind(now.saturating_sub(NODE_LIVE_SECONDS))
+            .bind(now)
+            .bind(all)
+            .bind(tags)
+            .fetch_one(&mut *tx)
+            .await
+            .map(|seen: Option<i64>| seen.and_then(|seen| seen.checked_add(NODE_LIVE_SECONDS + 1)))
+            .map_err(map_sql_error)
+    }
+
     /// Execute a validated action for an authenticated account.
     ///
     /// # Errors
