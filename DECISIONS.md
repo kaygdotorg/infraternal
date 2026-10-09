@@ -1669,3 +1669,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **UI authority (P4):** the orchestrator decides reversible UI details
        on its recommendation and the owner vetoes afterwards; foundational
        and security choices still wait for an explicit answer.
+207. **Stream what people already use first (owner, 2026-10-09):** streaming
+     apps that are already open and signed in on the owner's machines comes
+     before the server-held browser window, because it needs no onboarding.
+     An app window on a machine running the infraternal agent becomes a
+     canvas window through the D200 pipeline (macOS first, using D204). The
+     server-held browser window (#140, W1–W3) is parked for later
+     exploration.
