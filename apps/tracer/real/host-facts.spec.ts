@@ -66,10 +66,12 @@ test("the Host popover reports this server's OS release and kernel", async () =>
   await page.locator(".ui-window-pill").first().click();
   const popover = page.locator(".canvas-popover");
   await expect(popover).toBeVisible();
-  const systemRow = popover.locator(".ui-kv-row", { hasText: "System" });
-  const kernelRow = popover.locator(".ui-kv-row", { hasText: "Kernel" });
-  await expect(systemRow.locator(".ui-kv-value")).toHaveText(expectedSystem, { timeout: 15_000 });
-  await expect(kernelRow.locator(".ui-kv-value")).toHaveText(expectedKernel);
+  const valueByKey = (key: string) => popover
+    .locator(".ui-kv-key", { hasText: key })
+    .locator("xpath=..")
+    .locator(".ui-kv-value");
+  await expect(valueByKey("System")).toHaveText(expectedSystem, { timeout: 15_000 });
+  await expect(valueByKey("Kernel")).toHaveText(expectedKernel);
   await expect.poll(factsReadCount).toBeGreaterThan(0);
 
   const screenshot = process.env.HOST_FACTS_SCREENSHOT;
