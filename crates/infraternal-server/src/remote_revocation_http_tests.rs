@@ -311,22 +311,41 @@ async fn claude_review_anonymous_stalled_joins_cannot_block_owner_revocation() {
         .await
         .unwrap();
     let mut stalled = tokio::task::JoinSet::new();
-    for _ in 0..8 {
+    let body_started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let body_ready = std::sync::Arc::new(tokio::sync::Notify::new());
+    for source in 1..=8 {
+        let started = body_started.clone();
+        let ready = body_ready.clone();
+        let mut first_poll = true;
         let request = Request::builder()
             .method("POST")
             .uri("/remote/join")
             .header("content-type", "application/json")
-            .body(Body::from_stream(futures_util::stream::pending::<
-                std::result::Result<bytes::Bytes, std::io::Error>,
-            >()))
+            .extension(crate::runtime::ClientAddress(std::net::IpAddr::V4(
+                std::net::Ipv4Addr::new(192, 0, 2, source),
+            )))
+            .body(Body::from_stream(futures_util::stream::poll_fn(
+                move |_| {
+                    if std::mem::take(&mut first_poll)
+                        && started.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 7
+                    {
+                        ready.notify_one();
+                    }
+                    std::task::Poll::Pending::<
+                        Option<std::result::Result<bytes::Bytes, std::io::Error>>,
+                    >
+                },
+            )))
             .unwrap();
         let app = app.clone();
         stalled.spawn(async move { app.oneshot(request).await });
     }
-    // Let every anonymous request reach the admission middleware.
-    for _ in 0..64 {
-        tokio::task::yield_now().await;
-    }
+    // Distinct canonical sources bypass the per-source cap: observing each
+    // body proves all eight global anonymous slots are held before revocation.
+    tokio::time::timeout(std::time::Duration::from_secs(2), body_ready.notified())
+        .await
+        .expect("all distributed requests must hold anonymous body slots");
+    assert_eq!(body_started.load(std::sync::atomic::Ordering::SeqCst), 8);
     let status = request(
         &app,
         "/remote/revocations",
