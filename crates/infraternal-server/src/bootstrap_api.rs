@@ -127,6 +127,9 @@ async fn upgrade(
         Ok(identity) => identity,
         Err(status) => return status.into_response(),
     };
+    let Ok(activity) = api.runner.activity() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     let Ok(permit) = api.sockets.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -134,6 +137,8 @@ async fn upgrade(
     ws.max_message_size(32 * 1024)
         .max_frame_size(32 * 1024)
         .on_upgrade(move |socket| async move {
+            // Retire stream and admission before publishing this lifetime inactive.
+            let _activity = activity;
             let _permit = permit;
             run(socket, api, owner, token).await;
         })
@@ -166,12 +171,28 @@ async fn authenticate_headers<'a>(
 }
 
 async fn public_ssh_key(State(api): State<Arc<Api>>, headers: HeaderMap) -> Response {
-    let mut response = match authenticate_headers(&api, &headers).await {
-        Err(status) => status.into_response(),
-        Ok(_) => match api.ssh_key.public_key() {
-            Ok(public) => Json(public).into_response(),
-            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-        },
+    let mut response = match api.runner.activity() {
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Ok(_activity) => {
+            let mut enabled = api.runner.enabled_changes();
+            let is_enabled = *enabled.borrow();
+            let identity = if is_enabled {
+                tokio::select! {
+                    biased;
+                    _ = enabled.changed() => Err(StatusCode::SERVICE_UNAVAILABLE),
+                    result = authenticate_headers(&api, &headers) => result,
+                }
+            } else {
+                Err(StatusCode::SERVICE_UNAVAILABLE)
+            };
+            match identity {
+                Err(status) => status.into_response(),
+                Ok(_) => match api.ssh_key.public_key() {
+                    Ok(public) => Json(public).into_response(),
+                    Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                },
+            }
+        }
     };
     // No proxy/browser cache may retain even public identity or authorization state.
     response.headers_mut().insert(
@@ -213,11 +234,16 @@ async fn send_live(
     // restarting a partially buffered frame would duplicate sequence delivery.
     // Serialize before this shared async boundary: event and error types must
     // not instantiate the full WebSocket writer and revocation loop twice.
+    let mut enabled = api.runner.enabled_changes();
+    if !*enabled.borrow() {
+        return Err(());
+    }
     let writing = send(socket, encoded.ok_or(())?);
     tokio::pin!(writing);
     loop {
         tokio::select! {
             biased;
+            _ = enabled.changed() => return Err(()),
             change = revocation.changed() => {
                 if change.is_err() || !authorized(api, token, owner).await { return Err(()); }
             }
@@ -231,6 +257,10 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
     let Ok(token) = std::str::from_utf8(token.expose()) else {
         return;
     };
+    let mut enabled = api.runner.enabled_changes();
+    if !*enabled.borrow() {
+        return;
+    }
     let mut revocation = api.auth.revocation_events();
     let mut batch: Option<Batch> = None;
     let mut changed: Option<tokio::sync::watch::Receiver<u64>> = None;
@@ -240,6 +270,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
     'connection: loop {
         tokio::select! {
             biased;
+            _ = enabled.changed() => break,
             () = &mut expiry => break,
             _ = revocation.changed() => {
                 if !authorized(&api, token, &owner).await { break; }
@@ -276,6 +307,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                                 loop {
                                     tokio::select! {
                                         biased;
+                                        _ = enabled.changed() => break 'connection,
                                         () = &mut expiry => break 'connection,
                                         change = revocation.changed() => {
                                             if change.is_err() || !authorized(&api,token,&owner).await { break 'connection; }

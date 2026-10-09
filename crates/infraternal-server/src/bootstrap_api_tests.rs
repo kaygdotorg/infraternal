@@ -134,6 +134,15 @@ impl SshTransport for PublicChallenge {
 
 #[tokio::test]
 async fn logout_interrupts_a_stalled_host_key_confirmation_lookup() {
+    confirmation_interrupt(false).await;
+}
+
+#[tokio::test]
+async fn component_off_interrupts_a_stalled_host_key_confirmation_lookup() {
+    confirmation_interrupt(true).await;
+}
+
+async fn confirmation_interrupt(component_off: bool) {
     let (auth, _, cookie, _, _, original_server, _, _) = fixture(false).await;
     original_server.abort();
     let backend = Arc::new(ConfirmationLookup {
@@ -185,9 +194,18 @@ async fn logout_interrupts_a_stalled_host_key_confirmation_lookup() {
         .unwrap()
         .unwrap()
         .forget();
-    auth.logout(cookie.split_once('=').unwrap().1)
-        .await
-        .unwrap();
+    if component_off {
+        use infraternal_plugin_api::Plugin;
+        tokio::time::timeout(Duration::from_secs(2), api.runner.set_enabled(false))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(api.runner.status().active_work, 0);
+    } else {
+        auth.logout(cookie.split_once('=').unwrap().1)
+            .await
+            .unwrap();
+    }
     let retired = tokio::time::timeout(Duration::from_secs(2), async {
         while api.sockets.available_permits() != 16 {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -420,6 +438,15 @@ async fn admission_stream_is_ordered_and_logout_retires_an_idle_socket() {
 
 #[tokio::test]
 async fn revocation_interrupts_a_stalled_progress_send() {
+    progress_interrupt(false).await;
+}
+
+#[tokio::test]
+async fn component_off_interrupts_a_stalled_progress_send() {
+    progress_interrupt(true).await;
+}
+
+async fn progress_interrupt(component_off: bool) {
     let (auth, _, cookie, backend, address, serving, _, api) = fixture(true).await;
     let stream = tokio::net::TcpStream::connect(address).await.unwrap();
     nix::sys::socket::setsockopt(&stream, nix::sys::socket::sockopt::RcvBuf, &4096).unwrap();
@@ -446,9 +473,18 @@ async fn revocation_interrupts_a_stalled_progress_send() {
     // Do not read progress: the small real TCP windows stall the server sender.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(api.sockets.available_permits(), 15);
-    auth.logout(cookie.split_once('=').unwrap().1)
-        .await
-        .unwrap();
+    if component_off {
+        use infraternal_plugin_api::Plugin;
+        tokio::time::timeout(Duration::from_secs(2), api.runner.set_enabled(false))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(api.runner.status().active_work, 0);
+    } else {
+        auth.logout(cookie.split_once('=').unwrap().1)
+            .await
+            .unwrap();
+    }
     let retired = tokio::time::timeout(Duration::from_secs(2), async {
         while api.sockets.available_permits() != 16 {
             tokio::task::yield_now().await;
@@ -659,5 +695,53 @@ async fn host_key_confirmation_rechecks_the_exact_live_owner_capability() {
         .await
         .unwrap();
     assert!(proof.authorize().await.is_err());
+    serving.abort();
+}
+
+#[tokio::test]
+async fn component_off_retires_idle_sockets_and_refuses_new_admission() {
+    use axum::{body::Body, http::Request as HttpRequest};
+    use infraternal_plugin_api::{Plugin, PluginState};
+    use tower::ServiceExt;
+    let (auth, owner, cookie, _, address, serving, _, api) = fixture(false).await;
+    let (mut socket, _) = connect_async(request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    assert_eq!(api.sockets.available_permits(), 15);
+    tokio::time::timeout(Duration::from_secs(2), api.runner.set_enabled(false))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(api.sockets.available_permits(), 16);
+    assert_eq!(api.runner.status().state, PluginState::Off);
+    assert_eq!(api.runner.status().active_work, 0);
+    let response = router(auth.clone(), api.runner.clone())
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/v1/bootstrap/ssh-key")
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(
+        auth.bootstrap_owner(cookie.split_once('=').unwrap().1, now().unwrap())
+            .await
+            .is_ok_and(|current| current == owner)
+    );
+    let refused = matches!(connect_async(request(address, ORIGIN, Some(&cookie))).await, Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == StatusCode::SERVICE_UNAVAILABLE);
+    assert!(refused);
+    let _ = socket.close(None).await;
+    api.runner.set_enabled(true).await.unwrap();
+    let (mut replacement, _) = connect_async(request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    assert_eq!(api.sockets.available_permits(), 15);
+    api.runner.set_enabled(false).await.unwrap();
+    let _ = replacement.close(None).await;
     serving.abort();
 }
