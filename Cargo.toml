@@ -56,7 +56,7 @@ alacritty_terminal = "0.25"
 nix = { version = "0.30", features = ["fs", "term", "process", "signal", "user", "socket", "poll", "hostname"] }
 infraternal-shim = { version = "0.1.0", path = "crates/infraternal-shim" }
 infraternal-protocol = { version = "0.1.0", path = "crates/infraternal-protocol" }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "string"] }
 criterion = "0.7"
 
 [workspace.lints.rust]
