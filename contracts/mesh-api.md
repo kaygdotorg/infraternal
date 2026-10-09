@@ -156,8 +156,14 @@ replies and at most 32 Mesh subscriptions. At most two Mesh operations run
 across sockets, reserving deployed SQLite pool capacity for authority reads. Saturation returns `mesh unavailable`
 without waiting for queue capacity. Closing the socket cancels pending Mesh work.
 
-Reusing a `sub_id` replaces its existing Mesh filter. Closing the WebSocket
-ends its subscriptions; v1 has no separate unsubscribe frame.
+Reusing a `sub_id` ends its previous Mesh subscription at admission, before the
+replacement filter is checked. Every replacement refusal, including oversized
+input and queue or subscription saturation, leaves that ID unsubscribed. Earlier
+queued watches, in-flight snapshots and buffered events cannot revive it or
+publish after the refusal. Other subscription IDs remain active; a new
+`Subscribe` is required to retry the refused ID. The 32-subscription admission
+bound includes queued watches. Closing the WebSocket ends its subscriptions;
+v1 has no separate unsubscribe frame.
 
 JSON examples for each action, representative results and event forms are in
 `contracts/vectors/mesh/manifest.json`.

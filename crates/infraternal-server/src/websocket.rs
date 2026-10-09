@@ -27,7 +27,10 @@ use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Semaphore, mpsc};
@@ -56,9 +59,54 @@ const MAX_RESUME_ROWS: i64 = 4096;
 const MAX_ATTACHMENTS: usize = 32;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
 const OUTPUT_CHANNEL_CAPACITY: usize = 4;
+// Include queued watches in the per-socket subscription admission bound.
+const MAX_MESH_SUBSCRIPTIONS: usize = 32;
+// Trusted queue stream IDs encode a generation plus an error bit. Network Mesh
+// frames always use control stream zero; this marker never reaches the browser.
+const MAX_MESH_GENERATION: u32 = u32::MAX >> 1;
 // Cap a fragmented input frame before the decoder retains more bytes.
 const MAX_SOCKET_BUFFER: usize = MAX_FRAME_LEN + 10;
 const MAX_CREDIT: u64 = 8 * 1024 * 1024;
+
+/// Socket dispatch is the sole writer; workers read coherent ID/generation pairs.
+/// Zero means vacant. A nonzero generation occupies the high half, so `sub_id` zero
+/// remains usable. Release/acquire publishes replacement admission without locks.
+type MeshRegistry = Arc<[AtomicU64; MAX_MESH_SUBSCRIPTIONS]>;
+
+/// A stale queued watch or reply cannot acquire a replacement's generation.
+fn mesh_current(registry: &MeshRegistry, sub_id: u32, generation: u32) -> bool {
+    let stamp = (u64::from(generation) << 32) | u64::from(sub_id);
+    generation != 0
+        && registry
+            .iter()
+            .any(|entry| entry.load(Ordering::Acquire) == stamp)
+}
+
+/// End the old generation before either replacement admission or refusal.
+fn mesh_withdraw(registry: &MeshRegistry, sub_id: u32) {
+    for entry in registry.iter() {
+        let stamp = entry.load(Ordering::Acquire);
+        if stamp != 0 && stamp & u64::from(u32::MAX) == u64::from(sub_id) {
+            entry.store(0, Ordering::Release);
+            break;
+        }
+    }
+}
+
+/// The retained filter and its queue-only generation share one installed watch.
+#[derive(Clone)]
+struct MeshSubscription {
+    sub_id: u32,
+    filter: MeshFilter,
+    generation: u32,
+}
+
+/// The 32-watch bound makes replacement a bounded scan without hashing/allocation.
+fn mesh_remove(subscriptions: &mut Vec<MeshSubscription>, sub_id: u32) {
+    if let Some(index) = subscriptions.iter().position(|sub| sub.sub_id == sub_id) {
+        subscriptions.swap_remove(index);
+    }
+}
 
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
@@ -292,12 +340,16 @@ async fn run_socket(
     // Input and output bounds are independent of terminal queues and other sockets.
     let (mesh_tx, mut mesh_rx) = mpsc::channel::<Bytes>(4);
     let (mesh_reply_tx, mut mesh_reply_rx) = mpsc::channel::<Message>(4);
+    // Fixed slots bound admitted and queued watches without per-watch allocation.
+    let mesh_registry = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
+    let worker_registry = Arc::clone(&mesh_registry);
+    let mut mesh_generation = 0_u32;
     let worker_state = Arc::clone(&state);
     let worker_user = user_id.clone();
     let worker_token = session_token.clone();
     let mesh_worker = tokio::spawn(async move {
         let mut mesh_updates = worker_state.mesh.subscribe();
-        let mut mesh_subscriptions = HashMap::<u32, MeshFilter>::new();
+        let mut mesh_subscriptions = Vec::<MeshSubscription>::with_capacity(MAX_MESH_SUBSCRIPTIONS);
         let mut encode = Vec::with_capacity(4096);
         let sink = futures_util::sink::unfold(mesh_reply_tx, |tx, message| async move {
             tx.send(message)
@@ -307,9 +359,16 @@ async fn run_socket(
         });
         tokio::pin!(sink);
         loop {
+            mesh_subscriptions
+                .retain(|sub| mesh_current(&worker_registry, sub.sub_id, sub.generation));
             let result = tokio::select! {
                 wire = mesh_rx.recv() => {
                     let Some(wire) = wire else { break; };
+                    if let Ok(decoded) = decode_muxed_frame(&wire)
+                        && let Frame::Subscribe { sub_id, .. } = decoded.frame
+                        && !mesh_current(&worker_registry, sub_id, decoded.stream_id >> 1) {
+                        continue;
+                    }
                     while_authorized(&worker_state, &worker_user, &worker_token, true,
                         async {
                             let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
@@ -353,7 +412,19 @@ async fn run_socket(
         .unwrap_or_else(|()| tokio::time::Instant::now());
     loop {
         tokio::select! {
-            Some(message) = mesh_reply_rx.recv() => {
+            Some(mut message) = mesh_reply_rx.recv() => {
+                if let Message::Binary(wire) = &message
+                    && let Ok(decoded) = decode_muxed_frame(wire)
+                    && decoded.stream_id != CONTROL_STREAM {
+                    let Frame::Event { sub_id, .. } = decoded.frame else { break; };
+                    let current = mesh_current(&mesh_registry, sub_id, decoded.stream_id >> 1);
+                    if !current { continue; }
+                    if decoded.stream_id & 1 != 0 { mesh_withdraw(&mesh_registry, sub_id); }
+                    // Restore the public control header only after generation validation.
+                    // The event JSON stays opaque; no snapshot is parsed in dispatch.
+                    if encode_muxed_frame_into(CONTROL_STREAM, &decoded.frame, &mut encode).is_err() { break; }
+                    message = Message::Binary(Bytes::copy_from_slice(&encode));
+                }
                 if while_authorized(&state, &user_id, &session_token, true,
                     send_message(&mut sink, message)
                 ).await.is_err() { break; }
@@ -422,10 +493,29 @@ async fn run_socket(
                             _ => None,
                         };
                         if let Some(refusal) = refusal {
-                            if (wire.len() > MAX_MESH_FRAME_LEN || mesh_tx.try_send(wire.clone()).is_err())
-                                && while_authorized(&state, &user_id, &session_token, true,
-                                    send_frame(&mut sink, CONTROL_STREAM, &refusal, &mut encode)
-                                ).await.is_err() { break; }
+                            let mut admitted = false;
+                            if let Frame::Subscribe { sub_id, .. } = decoded.frame {
+                                mesh_withdraw(&mesh_registry, sub_id);
+                                if wire.len() <= MAX_MESH_FRAME_LEN
+                                    && let Some(generation) = mesh_generation.checked_add(1)
+                                        .filter(|value| *value <= MAX_MESH_GENERATION) {
+                                    mesh_generation = generation;
+                                    // Stamping uses the established mux codec on a trusted queue.
+                                    // Public input was checked as control stream zero above.
+                                    if encode_muxed_frame_into(generation << 1, &decoded.frame, &mut encode).is_err() { break; }
+                                    let request = Bytes::copy_from_slice(&encode);
+                                    if let Some(slot) = mesh_registry.iter().find(|entry| entry.load(Ordering::Acquire) == 0) {
+                                        slot.store((u64::from(generation) << 32) | u64::from(sub_id), Ordering::Release);
+                                        admitted = mesh_tx.try_send(request).is_ok();
+                                        if !admitted { mesh_withdraw(&mesh_registry, sub_id); }
+                                    }
+                                }
+                            } else if wire.len() <= MAX_MESH_FRAME_LEN {
+                                admitted = mesh_tx.try_send(wire.clone()).is_ok();
+                            }
+                            if !admitted && while_authorized(&state, &user_id, &session_token, true,
+                                send_frame(&mut sink, CONTROL_STREAM, &refusal, &mut encode)
+                            ).await.is_err() { break; }
                             continue;
                         }
                     }
@@ -593,6 +683,7 @@ async fn send_mesh_event<K>(
     sub_id: u32,
     event: &Value,
     encode: &mut Vec<u8>,
+    stream_id: u32,
 ) -> Result<(), ()>
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
@@ -600,7 +691,7 @@ where
     let event_json = serde_json::to_vec(event).map_err(|_| ())?;
     send_frame(
         sink,
-        CONTROL_STREAM,
+        stream_id,
         &Frame::Event {
             sub_id,
             event_json: &event_json,
@@ -615,34 +706,36 @@ async fn send_mesh_change<K>(
     state: &WebSocketState,
     user_id: &str,
     change: &MeshChange,
-    subscriptions: &mut HashMap<u32, MeshFilter>,
+    subscriptions: &mut Vec<MeshSubscription>,
     sink: &mut K,
     encode: &mut Vec<u8>,
 ) -> Result<(), ()>
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
-    let current: Vec<_> = subscriptions
-        .iter()
-        .map(|(sub_id, filter)| (*sub_id, filter.clone()))
-        .collect();
-    for (sub_id, filter) in current {
-        match state.mesh.can_view_change(user_id, &filter, change).await {
-            Ok(true) => {
-                send_mesh_event(
-                    sink,
-                    sub_id,
-                    &json!({"type":"changed","revision":change.revision}),
-                    encode,
-                )
-                .await?;
-            }
-            Ok(false) => {}
+    let current = subscriptions.clone();
+    for subscription in current {
+        let sub_id = subscription.sub_id;
+        let (event, ended) = match state
+            .mesh
+            .can_view_change(user_id, &subscription.filter, change)
+            .await
+        {
+            Ok(true) => (json!({"type":"changed","revision":change.revision}), false),
+            Ok(false) => continue,
             Err(error) => {
-                subscriptions.remove(&sub_id);
-                send_mesh_event(sink, sub_id, &mesh_error_event(error), encode).await?;
+                mesh_remove(subscriptions, sub_id);
+                (mesh_error_event(error), true)
             }
-        }
+        };
+        send_mesh_event(
+            sink,
+            sub_id,
+            &event,
+            encode,
+            (subscription.generation << 1) | u32::from(ended),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -651,36 +744,55 @@ where
 async fn send_mesh_resync<K>(
     state: &WebSocketState,
     user_id: &str,
-    subscriptions: &mut HashMap<u32, MeshFilter>,
+    subscriptions: &mut Vec<MeshSubscription>,
     sink: &mut K,
     encode: &mut Vec<u8>,
 ) -> Result<(), ()>
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
-    let current: Vec<_> = subscriptions
-        .iter()
-        .map(|(sub_id, filter)| (*sub_id, filter.clone()))
-        .collect();
-    let now = unix_seconds()?;
-    for (sub_id, filter) in current {
-        match state.mesh.list(user_id, filter, now).await {
-            Ok(snapshot) => {
-                send_mesh_event(
-                    sink,
-                    sub_id,
-                    &json!({"type":"resync","snapshot":snapshot}),
-                    encode,
-                )
-                .await?;
-            }
-            Err(error) => {
-                subscriptions.remove(&sub_id);
-                send_mesh_event(sink, sub_id, &mesh_error_event(error), encode).await?;
-            }
+    let current = subscriptions.clone();
+    for subscription in current {
+        let sub_id = subscription.sub_id;
+        if !send_mesh_snapshot(state, user_id, sub_id, subscription, sink, encode, "resync").await?
+        {
+            mesh_remove(subscriptions, sub_id);
         }
     }
     Ok(())
+}
+
+/// Initial and resync snapshots share permission/error delivery for one generation.
+async fn send_mesh_snapshot<K>(
+    state: &WebSocketState,
+    user_id: &str,
+    sub_id: u32,
+    subscription: MeshSubscription,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+    kind: &str,
+) -> Result<bool, ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let (event, retained) = match state
+        .mesh
+        .list(user_id, subscription.filter, unix_seconds()?)
+        .await
+    {
+        Ok(snapshot) => (json!({"type":kind,"snapshot":snapshot}), true),
+        Err(error) => (mesh_error_event(error), false),
+    };
+    // The worker carries withdrawal as typed metadata, without inspecting JSON.
+    send_mesh_event(
+        sink,
+        sub_id,
+        &event,
+        encode,
+        (subscription.generation << 1) | u32::from(!retained),
+    )
+    .await?;
+    Ok(retained)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1083,7 +1195,7 @@ async fn handle_mesh_frame<K>(
     state: &WebSocketState,
     user_id: &str,
     session_token: &str,
-    mesh_subscriptions: &mut HashMap<u32, MeshFilter>,
+    mesh_subscriptions: &mut Vec<MeshSubscription>,
     sink: &mut K,
     encode: &mut Vec<u8>,
 ) -> Result<(), ()>
@@ -1096,47 +1208,46 @@ where
         Frame::Subscribe {
             sub_id,
             filter_json,
-        } if stream_id == CONTROL_STREAM => {
-            mesh_subscriptions.remove(&sub_id);
-            if mesh_subscriptions.len() >= 32 {
-                return send_mesh_event(
-                    sink,
-                    sub_id,
-                    &mesh_error_event(MeshApiError::Storage),
-                    encode,
-                )
-                .await;
-            }
+        } if stream_id != CONTROL_STREAM && stream_id & 1 == 0 => {
+            let generation = stream_id >> 1;
+            mesh_remove(mesh_subscriptions, sub_id);
             match serde_json::from_slice::<MeshSubscribeFilter>(filter_json) {
                 Ok(request) if request.topic == "mesh" => {
                     let filter = MeshFilter {
                         tag: request.tag,
                         cursor: None,
                     };
-                    let now = unix_seconds()?;
-                    match state.mesh.list(user_id, filter.clone(), now).await {
-                        Ok(snapshot) => {
-                            mesh_subscriptions.insert(sub_id, filter);
-                            send_mesh_event(
-                                sink,
-                                sub_id,
-                                &json!({"type":"snapshot","snapshot":snapshot}),
-                                encode,
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            send_mesh_event(sink, sub_id, &mesh_error_event(error), encode).await
-                        }
+                    let subscription = MeshSubscription {
+                        sub_id,
+                        filter,
+                        generation,
+                    };
+                    // The worker cannot process updates while assembling this snapshot.
+                    // Dispatch drops superseded output; its registry bounds all admission.
+                    mesh_subscriptions.push(subscription.clone());
+                    if !send_mesh_snapshot(
+                        state,
+                        user_id,
+                        sub_id,
+                        subscription,
+                        sink,
+                        encode,
+                        "snapshot",
+                    )
+                    .await?
+                    {
+                        mesh_remove(mesh_subscriptions, sub_id);
                     }
+                    Ok(())
                 }
                 _ => {
-                    mesh_subscriptions.remove(&sub_id);
+                    mesh_remove(mesh_subscriptions, sub_id);
                     send_mesh_event(
                         sink,
                         sub_id,
                         &mesh_error_event(MeshApiError::InvalidInput),
                         encode,
+                        (generation << 1) | 1,
                     )
                     .await
                 }

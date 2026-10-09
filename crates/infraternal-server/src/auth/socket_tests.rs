@@ -711,3 +711,6 @@ where
         Frame::Pong { nonce: 118, .. }
     ));
 }
+
+#[path = "socket_tests/review_subscription_refusal.rs"]
+mod review_subscription_refusal;
