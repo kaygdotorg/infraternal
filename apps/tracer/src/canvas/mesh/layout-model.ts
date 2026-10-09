@@ -41,11 +41,11 @@ export function createLayoutModel(source: MeshSource): (m: Metrics) => MeshLayou
       const w = p.kind === "host" ? nodes.get(p.id) : undefined;
       const members = p.kind === "tag" ? tags[p.id.slice(4)] ?? [] : [];
       const fields = p.kind === "host" && w
-        ? { label: w.name, detail: w.address ?? (memberOf.get(w.name)?.map((t) => tagNodeId(t)).join(", ") || "no tags"), sub: subOf(w), state: w.state, ...(w.os ? { os: w.os } : {}) }
+        ? { label: w.name, detail: w.address ?? (memberOf.get(w.name)?.map((t) => tagNodeId(t)).join(", ") || "no tags"), sub: subOf(w), state: w.state, ...(w.os ? { os: w.os } : {}), ...(!w.address && memberOf.get(w.name)?.length ? { tagList: memberOf.get(w.name)!.map((t) => tagNodeId(t)) } : {}) }
         : { label: p.id, detail: `${members.length} member${members.length === 1 ? "" : "s"}`, sub: members.slice(0, 3).join(", ") };
       let n = objects.get(p.id);
       if (!n) { n = { id: p.id, kind: p.kind, x: p.x, y: p.y, ...fields } as NodeModel; objects.set(p.id, n); }
-      else { Object.assign(n, fields); n.x = p.x; n.y = p.y; if (!("os" in fields)) delete n.os; if (!("state" in fields)) delete n.state; }
+      else { Object.assign(n, fields); n.x = p.x; n.y = p.y; if (!("os" in fields)) delete n.os; if (!("state" in fields)) delete n.state; if (!("tagList" in fields)) delete n.tagList; }
       if (p.pinned) n.pinned = true; else delete n.pinned;
       out.push(n);
     }

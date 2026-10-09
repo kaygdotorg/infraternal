@@ -19,6 +19,7 @@ import { ICON, lineIcon } from "../views/icons";
 import { Arrow, DragArrow, anchors } from "./arrows";
 import { createGraph, type GraphController, type TopoArrow } from "./graph";
 import { createLayoutModel } from "./layout-model";
+import { createSay, tagChips } from "./entities";
 import { endName, grantSentence, type MeshSource } from "./source";
 
 export interface GraphViewModule {
@@ -51,6 +52,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     return n ? { x: n.x, y: n.y, w: state.metrics.nodeW, h: state.metrics.nodeH } : undefined;
   };
   /** A grant is shown by its name only (a sentence for one nobody named), never ports or ranges (D180). */
+  const say = createSay(source);
   const grantName = (g: Grant): string => grantSentence(g) + (g.via ? `, through ${g.via}` : "");
   /**
    * An arrow for a grant, not yet in the document: the graph module decides which arrows exist. Arrows are reused: one
@@ -159,7 +161,11 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     card.setStatus(nodeStatus(n));
     card.root.style.transform = `translate(${n.x}px,${n.y}px)`;
     const meta = card.body.firstElementChild as HTMLElement;
-    (meta.children[0] as HTMLElement).textContent = n.detail;
+    const detail = meta.children[0] as HTMLElement;
+    // Tags are chips (the colour of a tag is the same everywhere); rebuilt only when the list changes, never on a pan.
+    const tagKey = n.tagList?.join(" ") ?? "";
+    if (n.tagList) { if (detail.dataset.tags !== tagKey) { detail.replaceChildren(tagChips(n.tagList)); detail.dataset.tags = tagKey; } }
+    else { if (detail.dataset.tags !== undefined) delete detail.dataset.tags; detail.textContent = n.detail; }
     (meta.children[1] as HTMLElement).textContent = n.sub;
     const port = card.pill.nextElementSibling as HTMLElement | null;
     if (port?.classList.contains("cl-port")) { port.dataset.tip = `Drag onto another card to let ${endName(n.id)} reach it`; port.setAttribute("aria-label", `Let ${endName(n.id)} reach another card`); }
@@ -289,10 +295,11 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       if (!candidate || ev.type === "pointercancel") { retract(); return; }
       const to = candidate;
       const at = tipAt(toClient({ x: live.end().x + origin.x, y: live.end().y + origin.y }));
+      const ids = { a: n.id, b: to };
+      const title = say("Let {a} reach {b}?", ids), effect = say("{a} will be able to connect to {b}. You can stop it any time.", ids);
       mountConfirmTip(at.anchor, {
-        label: `Let ${endName(n.id)} reach ${endName(to)}`,
-        title: `Let ${endName(n.id)} reach ${endName(to)}?`,
-        effect: `${endName(n.id)} will be able to connect to ${endName(to)}. You can stop it any time.`,
+        label: say("Let {a} reach {b}", ids).plain,
+        title: title.plain, titleNode: title.node, effect: effect.plain, effectNode: effect.node,
         confirmLabel: "Allow access", cancelLabel: "Cancel",
         onConfirm: () => {
           const g = source.addGrant(n.id, to);
@@ -300,7 +307,8 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
           refreshGraph(c);
           pulseNew(c, g);
           for (const cl of views.values()) cx.view.geometry(cl);
-          cx.toast.show({ message: `${endName(n.id)} can now reach ${endName(to)}` });
+          const done = say("{a} can now reach {b}", ids);
+          cx.toast.show({ message: done.plain, messageNode: done.node });
           at.done();
         },
         onCancel: () => { retract(); at.done(); },
@@ -380,14 +388,14 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       if (candidate) {
         const next: Grant = end === "head" ? { ...g, to: candidate } : { ...g, from: candidate };
         // What changes for the person, in the words of the cards: who reaches what now, and who will not any more.
-        const [who, was, now] = end === "head" ? [g.from, g.to, candidate] : [candidate, g.to, g.to];
-        const moveTitle = end === "head" ? `Let ${endName(who)} reach ${endName(now)} instead of ${endName(was)}?` : `Let ${endName(candidate)} reach ${endName(g.to)} instead of ${endName(g.from)}?`;
-        const moveEffect = end === "head"
-          ? `${endName(g.from)} will lose its connection to ${endName(g.to)} and gain one to ${endName(candidate)}. You can change it back any time.`
-          : `${endName(g.from)} will lose its connection to ${endName(g.to)}, and ${endName(candidate)} will gain one. You can change it back any time.`;
+        const ids = { from: g.from, to: g.to, cand: candidate };
+        const moveTitle = say(end === "head" ? "Let {from} reach {cand} instead of {to}?" : "Let {cand} reach {to} instead of {from}?", ids);
+        const moveEffect = say(end === "head"
+          ? "{from} will lose its connection to {to} and gain one to {cand}. You can change it back any time."
+          : "{from} will lose its connection to {to}, and {cand} will gain one. You can change it back any time.", ids);
         const endTip = tipAt(toClient({ x: live.end().x + origin.x, y: live.end().y + origin.y }));
         mountConfirmTip(endTip.anchor, {
-          label: moveTitle, title: moveTitle, effect: moveEffect,
+          label: moveTitle.plain, title: moveTitle.plain, titleNode: moveTitle.node, effect: moveEffect.plain, effectNode: moveEffect.node,
           confirmLabel: "Change access", cancelLabel: "Cancel",
           onConfirm: () => {
             source.moveGrant(g, end === "head" ? { to: next.to } : { from: next.from });
@@ -397,7 +405,8 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
             entry.arrow.press();
             live.dispose();
             for (const cl of views.values()) cx.view.geometry(cl);
-            cx.toast.show({ message: `${endName(g.from)} can now reach ${endName(g.to)}` });
+            const done = say("{from} can now reach {to}", { from: g.from, to: g.to });
+            cx.toast.show({ message: done.plain, messageNode: done.node });
             endTip.done();
           },
           onCancel: () => { putBack(); endTip.done(); },
@@ -406,16 +415,18 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
         return;
       }
       // Dropped on empty canvas: offer to remove the grant.
+      const stopIds = { from: g.from, to: g.to };
+      const stopTitle = say("Stop {from} reaching {to}?", stopIds), stopEffect = say("{from} will lose its connection to {to}. You can allow it again any time.", stopIds);
       mountConfirmTip(at.anchor, {
-        label: `Stop ${endName(g.from)} reaching ${endName(g.to)}`, title: `Stop ${endName(g.from)} reaching ${endName(g.to)}?`,
-        effect: `${endName(g.from)} will lose its connection to ${endName(g.to)}. You can allow it again any time.`,
+        label: stopTitle.plain.replace(/\?$/, ""), title: stopTitle.plain, titleNode: stopTitle.node, effect: stopEffect.plain, effectNode: stopEffect.node,
         confirmLabel: "Stop access", cancelLabel: "Keep it",
         onConfirm: () => {
           source.removeGrant(g);
           live.dispose();
           refreshGraph(c); // the arrow fades out; the grants listed in the graph are the source's
           for (const cl of views.values()) cx.view.geometry(cl);
-          cx.toast.show({ message: `${endName(g.from)} can no longer reach ${endName(g.to)}` });
+          const gone = say("{from} can no longer reach {to}", stopIds);
+          cx.toast.show({ message: gone.plain, messageNode: gone.node });
         },
         onCancel: putBack,
       });

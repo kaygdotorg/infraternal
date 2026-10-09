@@ -39,6 +39,8 @@ export interface NodeModel {
   id: string; kind: "host" | "tag"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform;
   /** Live state of a host (a tag has none): drives the card's status icon. */
   state?: "online" | "behind" | "offline";
+  /** A host without an address shows its tags in the detail line, as chips. */
+  tagList?: string[];
   /** The person dragged this node, so it stays where it is while the rest are laid out automatically (D180). */
   pinned?: boolean;
 }
