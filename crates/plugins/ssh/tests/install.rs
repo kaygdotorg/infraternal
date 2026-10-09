@@ -88,7 +88,7 @@ impl Fixture {
         let binary = root.join("payload");
         executable(
             &binary,
-            "#!/bin/sh\n# Synthetic CLI contract, not an infraternal daemon.\n[ \"$1 $2\" = 'agent join' ] || exit 1\nshift 3\n[ \"$1\" = --state ] || exit 1\nmkdir -p \"$2\"\nprintf 'public-fixture-state\\n' > \"$2/proof\"\ncat >/dev/null\n",
+            "#!/bin/sh\n# Synthetic CLI contract, not an infraternal daemon.\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\n[ \"$4\" = join ] && [ \"$6\" = --enroll-only ] || exit 1\nmkdir -p \"$state\"\nprintf 'public-fixture-state\\n' > \"$state/proof\"\ncat >/dev/null\n",
         );
         Self {
             root,

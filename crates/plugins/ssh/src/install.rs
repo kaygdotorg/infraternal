@@ -198,7 +198,9 @@ stage="$base/.bootstrap-lock"
 # Retain the host's existing identity for immutable same-key re-enrollment.
 # The copy stays in its private host-local transaction, never crossing SSH.
 if [ -d "$base/state" ]; then cp -a "$base/state" "$stage/state"; fi
-"$stage/payload" agent join {} --state "$stage/state" >/dev/null 2>&1
+# Enrollment writes only the staged identity and returns before service activation.
+# Shim rendezvous belongs to the live service, outside identity replacement.
+"$stage/payload" agent --data "$stage/state" join {} --enroll-only >/dev/null 2>&1
 "#,
             shell_quote(&join.url)
         );
@@ -241,7 +243,7 @@ ln -s "$base/bin/live" "$base/bin/current.new"
 mv -Tf "$base/bin/current.new" "$base/bin/current"
 ln -s "$base/bin/current" "$launcher.new"
 mv -Tf "$launcher.new" "$launcher"
-printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\n[Service]\nExecStart="%s/bin/current" agent --state "%s/state"\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$wanted" > "$unit.new"
+printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\n[Service]\nExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$base" "$wanted" > "$unit.new"
 : > "$stage/replacing-unit"
 mv -f "$unit.new" "$unit"
 $manager daemon-reload
