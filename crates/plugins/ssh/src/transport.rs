@@ -103,3 +103,7 @@ impl<'de> serde::Deserialize<'de> for Secret {
         deserializer.deserialize_string(Input)
     }
 }
+
+#[cfg(test)]
+#[path = "transport_secret_tests.rs"]
+mod secret_tests;
