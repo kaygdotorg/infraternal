@@ -1462,3 +1462,38 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        other extras (D164 had exit nodes and subnet routes "later"); a
        public exposure of services, file drop, device posture checks and
        connection logs come later.
+197. **Mesh round 2: SSH, roles, DNS, exit nodes, routes (owner, 2026-10-09):**
+     - **SSH over the mesh (M1):** works exactly like NetBird SSH and Tailscale
+       SSH: the infraternal agent serves SSH on the mesh address only,
+       authenticates the connecting mesh identity against the arrows, and
+       needs no change to the host's sshd; plain `ssh host.internal` works.
+       A lone SSH server is one easy command (`infraternal mesh up --ssh`).
+     - **Every role runs on its own:** server, agent, relay, SSH, backup (and
+       mesh) are each usable independently with sensible defaults. Roles turn
+       each other on where it is obviously right: a host provisioned through
+       add-host gets the agent, which enables SSH and relay; backup checks the
+       free space and enables itself when there is enough.
+     - **CLI:** human-readable, intuitive commands for everything, each with
+       `--json` for scripts and AI agents.
+     - **Exit nodes (M2):** an administrator marks any node as an exit node;
+       arrows decide who may use it; clients pick one, with a "keep access to
+       my local network" switch.
+     - **Subnet routes (M3):** a node advertises networks; an administrator
+       approves each; traffic is masqueraded by default (keeping the real
+       address is an option); an approved network is a target for arrows in
+       the Mesh view; overlaps are refused with a plain explanation. The
+       Mesh view must make all of this pretty, simple to change and easy to
+       read.
+     - **Coexistence (M4):** our mesh runs side by side with NetBird and
+       Tailscale; opt-in migration paths come later.
+     - **Paths (M5):** whatever gives the least interruption and latency:
+       probe at start and on network changes, switch only on a clear,
+       sustained win, never lose bytes (D128), prefer direct when equal.
+     - **Mesh settings in the UI:** change the address range and the domain
+       suffix, add custom DNS records (name = value) for the whole mesh, and
+       forward every other query to an upstream resolver of the owner's
+       choice (a public resolver or their own, e.g. AdGuard).
+     - **Build order (M6):** WireGuard data plane with coordinator wiring and
+       deny-by-default first, then NAT traversal and port mapping (D196),
+       then TCP/443, then SSH, subnet routes and exit nodes. The UI is
+       mocked up as the pieces land.
