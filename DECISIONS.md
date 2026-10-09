@@ -1539,3 +1539,32 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        grilled and refined for the easiest UX before they are built. Per-arrow
        traffic and service discovery grow with a later metrics, graphs and
        logs component. The basics come first.
+200. **Remote desktops: native capture first (owner, 2026-10-09, VNC grill
+     V1–V8; extends D104–D107):**
+     - **Capture (V1):** where the infraternal agent runs on the machine, it
+       captures the screen natively (ScreenCaptureKit on macOS, PipeWire or
+       X11 on Linux) and encodes with the machine's hardware encoder; VNC
+       stays for machines without an agent (Proxmox/QEMU consoles,
+       appliances, third-party VNC servers). Both feed the same server-held
+       session (D104). Feasibility is researched first (#139).
+     - **Quality (V2):** latency first, adaptively: responsive on poor
+       connections matters more than fidelity; at LAN speeds both. Video
+       while things move, a sharp refresh once the screen settles. Encoder
+       libraries come to the owner as measured candidates.
+     - **Resolution (V3):** stream at the size the window needs (its
+       on-screen size × the device's density), adapting on resize and zoom;
+       full resolution in full screen.
+     - **Phone input (V4):** trackpad mode by default (drag moves a cursor,
+       tap clicks, two-finger scroll), direct touch one switch away; the key
+       row gains Esc, Ctrl, ⌘, arrows and more; clipboard sync both ways when
+       allowed.
+     - **Several viewers (V5):** one person controls input at a time; others
+       watch; taking control is one tap with a visible handover.
+     - **Apple Screen Sharing logins (V6):** Macs with our agent first
+       (native capture, no password); Apple's VNC login types later.
+     - **In the canvas (V7):** a desktop is a window type like a terminal
+       (frame, header pill, splits, full screen, lock, frame meter); off
+       screen it stops streaming and keeps only its last frame.
+     - **Order (V8):** native macOS capture, then Proxmox/QEMU over VNC, then
+       native Linux capture, then RDP (IronRDP). Browser windows reuse this
+       pipeline (#140).
