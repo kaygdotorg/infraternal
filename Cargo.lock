@@ -1316,6 +1316,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infraternal-agent",
+ "infraternal-plugin-remote",
  "infraternal-server",
  "infraternal-shim",
  "nix",
@@ -1335,12 +1336,13 @@ dependencies = [
 name = "infraternal-agent"
 version = "0.1.0"
 dependencies = [
+ "infraternal-plugin-api",
+ "infraternal-plugin-remote",
  "infraternal-protocol",
  "infraternal-shim",
  "nix",
  "openssl",
  "quinn",
- "rustls",
  "serde",
  "serde_json",
  "tokio",
@@ -1374,6 +1376,21 @@ name = "infraternal-plugin-api"
 version = "0.1.0"
 
 [[package]]
+name = "infraternal-plugin-remote"
+version = "0.1.0"
+dependencies = [
+ "infraternal-plugin-api",
+ "infraternal-protocol",
+ "openssl",
+ "quinn",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-openssl",
+]
+
+[[package]]
 name = "infraternal-plugin-ssh"
 version = "0.1.0"
 
@@ -1402,6 +1419,8 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infraternal-agent",
+ "infraternal-plugin-api",
+ "infraternal-plugin-remote",
  "infraternal-protocol",
  "nix",
  "openssl",

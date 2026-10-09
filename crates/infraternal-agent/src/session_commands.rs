@@ -16,6 +16,7 @@ pub(super) struct Sender {
     credits: watch::Sender<u64>,
 }
 pub(super) enum Receiver {
+    #[cfg(feature = "remote")]
     Native(mpsc::Receiver<Command>),
     Shared {
         raw: mpsc::Receiver<Ordered>,
@@ -88,6 +89,7 @@ impl Sender {
 impl Receiver {
     pub(super) async fn next(&mut self) -> Option<Command> {
         match self {
+            #[cfg(feature = "remote")]
             Self::Native(raw) => raw.recv().await,
             Self::Shared {
                 raw,

@@ -1,5 +1,6 @@
 //! Exercises host-bound invitations with real file-backed SQLite and concurrent transactions [64][133][134].
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(feature = "remote")]
 
 use infraternal_server::enrollment::{CertificateRecord, EnrollmentError, EnrollmentStore, Mode};
 use sha2::{Digest, Sha256};

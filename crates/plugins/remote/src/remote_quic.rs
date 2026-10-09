@@ -21,7 +21,7 @@ fn denied() -> io::Error {
 }
 
 /// Additive leg-B capability; leg-A `RESUME_NEXT` bit0 is independent.
-pub const REMOTE_WRITER_BINDING: u64 = 1 << 1;
+pub use infraternal_plugin_api::channel::REMOTE_WRITER_BINDING;
 
 /// Peer Hello has opted into durable writer binding. Raw mTLS alone cannot
 /// enable a new protocol action on a peer that only supports legacy v1.
@@ -149,7 +149,8 @@ pub fn client_config(
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| denied())?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
     config.transport_config(transport(
-        u32::try_from(crate::sessions::MAX_SESSIONS).map_err(|_| denied())?,
+        u32::try_from(infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS)
+            .map_err(|_| denied())?,
     ));
     Ok(config)
 }

@@ -5,7 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+remote = ["dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:openssl", "dep:tokio-openssl", "dep:quinn"]
+
 [dependencies]
+infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
+infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }
 infraternal-protocol.workspace = true
 infraternal-shim.workspace = true
 nix = { workspace = true, features = ["inotify"] }
@@ -14,10 +20,12 @@ uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-openssl.workspace = true
-tokio-openssl.workspace = true
-quinn.workspace = true
-rustls.workspace = true
+openssl = { workspace = true, optional = true }
+tokio-openssl = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", default-features = false, features = ["test-support"] }

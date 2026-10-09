@@ -1,0 +1,35 @@
+//! Abstracts an already-authenticated leg-B byte channel; inherited socket trust and remote mTLS admission stay with callers [9][64], #78.
+
+use std::{future::Future, io};
+
+/// A full-duplex channel with exactly one reader and one serialized writer.
+/// Implementations retain partial-read progress; cancellation of a partial write
+/// requires retiring the entire connection to avoid frame interleaving.
+pub trait Channel: Send + Sync {
+    /// Native QUIC channels carry raw frames for one externally bound writer.
+    /// TCP and inherited sockets retain the unchanged mux envelope.
+    fn native_stream_id(&self) -> Option<u32> {
+        None
+    }
+
+    /// Active incomplete-frame budget; inherited trusted channels have none.
+    /// Remote adapters supply five seconds. Wholly idle reads arm no timer.
+    fn frame_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+    /// Retire all directions after partial-frame expiry; remote adapters wake readers/writers.
+    fn retire(&self) {}
+    /// Read ready bytes; an empty result is EOF.
+    fn read(&self, bytes: &mut [u8]) -> impl Future<Output = io::Result<usize>> + Send;
+    /// Complete one already-encoded bounded frame.
+    fn write(&self, bytes: &[u8]) -> impl Future<Output = io::Result<()>> + Send;
+}
+
+/// Native writer binding capability; independent of the browser resume bit.
+pub const REMOTE_WRITER_BINDING: u64 = 1 << 1;
+/// Live certificate renewal capability on the authenticated control channel.
+pub const LIVE_RENEWAL: u64 = 1 << 2;
+/// Bound for a single decoded control reply or renewal proof.
+pub const MAX_CONTROL_JSON: usize = 32_768;
+/// Per-host terminal bound shared by local dispatch and native transport credit.
+pub const MAX_TERMINAL_STREAMS: usize = 128;

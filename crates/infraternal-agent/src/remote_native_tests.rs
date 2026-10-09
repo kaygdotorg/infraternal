@@ -1,12 +1,13 @@
 //! Tests native QUIC framing and cancellation against real quinn streams; mux identities never enter raw bytes [64][130], #78.
 
-use super::*;
+use crate::{channel::Channel, remote_native::*};
 use crate::{
     remote_quic,
     remote_tls::tests::{leaf, root},
     transport::{Receive, Transmit},
 };
 use infraternal_protocol::{Frame, decode_frame, encode_frame_into};
+use std::{io, time::Duration};
 
 struct Pair {
     server_endpoint: quinn::Endpoint,

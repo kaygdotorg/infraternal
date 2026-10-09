@@ -35,6 +35,18 @@ use tokio::{
 };
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "remote")]
+use crate::{
+    remote_http::EnrollmentService,
+    remote_runtime::{RemoteListeners, RemoteService},
+};
+#[cfg(not(feature = "remote"))]
+type EnrollmentService = ();
+#[cfg(not(feature = "remote"))]
+type RemoteService = ();
+#[cfg(not(feature = "remote"))]
+type RemoteListeners = ();
+
 /// A CIDR network whose peers are permitted to supply `X-Forwarded-For` [keywrap.md].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyNetwork {
@@ -180,15 +192,16 @@ pub enum ServerError {
 ///
 /// Returns a sanitized startup, storage, migration, TLS, or listener error.
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
-    serve_with_enrollment(config, None).await
+    serve_inner(config, None, None).await
 }
 
 /// Mount host enrollment using the trusted runtime's D168 signing source.
 /// # Errors
 /// Returns sanitized startup, storage, migration, TLS or listener failures.
+#[cfg(feature = "remote")]
 pub async fn serve_with_enrollment(
     config: ServerConfig,
-    enrollment: Option<crate::remote_http::EnrollmentService>,
+    enrollment: Option<EnrollmentService>,
 ) -> Result<(), ServerError> {
     serve_inner(config, enrollment, None).await
 }
@@ -196,6 +209,7 @@ pub async fn serve_with_enrollment(
 /// Serve enrollment, host transports and browser routing using trusted D168 sources.
 /// # Errors
 /// Returns sanitized configuration, storage, TLS or listener failures.
+#[cfg(feature = "remote")]
 pub async fn serve_with_remote(
     config: ServerConfig,
     remote: crate::remote_runtime::RemoteService,
@@ -205,8 +219,8 @@ pub async fn serve_with_remote(
 
 async fn serve_inner(
     config: ServerConfig,
-    enrollment: Option<crate::remote_http::EnrollmentService>,
-    remote: Option<crate::remote_runtime::RemoteService>,
+    enrollment: Option<EnrollmentService>,
+    remote: Option<RemoteService>,
 ) -> Result<(), ServerError> {
     init_logging();
     let (app, setup_token, _listeners) =
@@ -273,7 +287,7 @@ async fn build_router(
 async fn build_router_with_enrollment(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
-    enrollment: Option<crate::remote_http::EnrollmentService>,
+    enrollment: Option<EnrollmentService>,
 ) -> Result<(Router, Option<String>), ServerError> {
     let (app, setup, _) = build_router_core(config, supplied_agent, enrollment, None).await?;
     Ok((app, setup))
@@ -281,8 +295,9 @@ async fn build_router_with_enrollment(
 
 /// Assemble configured CA authority before any listener starts; unsafe copy
 /// storage refuses startup, while an absent configuration grants no authority.
+#[cfg(feature = "remote")]
 fn ca_router(
-    remote: Option<&crate::remote_runtime::RemoteService>,
+    remote: Option<&RemoteService>,
     auth: &Auth,
     pool: &SqlitePool,
 ) -> Result<Router, ServerError> {
@@ -298,58 +313,21 @@ fn ca_router(
         .map(Option::unwrap_or_default)
 }
 
-async fn build_router_core(
-    config: ServerConfig,
-    supplied_agent: Option<EmbeddedAgent>,
-    mut enrollment: Option<crate::remote_http::EnrollmentService>,
-    remote: Option<crate::remote_runtime::RemoteService>,
+/// Build the optional plugin adapter and retain listener ownership for the serving lifetime.
+#[cfg(feature = "remote")]
+async fn remote_router(
+    auth: Auth,
+    pool: SqlitePool,
+    mut enrollment: Option<EnrollmentService>,
+    remote: Option<RemoteService>,
 ) -> Result<
     (
         Router,
-        Option<String>,
-        Option<crate::remote_runtime::RemoteListeners>,
+        crate::remote_runtime::RemoteHosts,
+        Option<RemoteListeners>,
     ),
     ServerError,
 > {
-    validate_config(&config)?;
-
-    let pool = open_database(&config.data_dir).await?;
-    let origin =
-        url::Url::parse(&config.public_origin).map_err(|_| ServerError::InvalidConfiguration)?;
-    let rp_id = origin.host_str().ok_or(ServerError::InvalidConfiguration)?;
-    let auth = Auth::new(pool.clone(), rp_id, &config.public_origin)
-        .await
-        .map_err(ServerError::Auth)?;
-    let ca_api = ca_router(remote.as_ref(), &auth, &pool)?;
-    let now = unix_seconds()?;
-    websocket::recover_connections(&pool, now)
-        .await
-        .map_err(ServerError::Storage)?;
-    let mut setup_token = None;
-    auth.bootstrap(now, |banner| {
-        setup_token = banner.lines().nth(1).map(str::to_owned);
-    })
-    .await
-    .map_err(ServerError::Auth)?;
-
-    if setup_token.is_some() {
-        let mut setup_consumed = auth.subscribe_setup_consumed();
-        let data_dir = config.data_dir.clone();
-        tokio::spawn(async move {
-            if setup_consumed.changed().await.is_ok() {
-                remove_setup_token_socket_or_warn(&data_dir, "owner enrollment");
-            }
-        });
-    } else {
-        remove_setup_token_socket_or_warn(&config.data_dir, "owner already exists at startup");
-    }
-
-    let agent = if let Some(agent) = supplied_agent {
-        agent
-    } else {
-        let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
-        EmbeddedAgent::spawn(executable)
-    };
     let hosts = crate::remote_runtime::RemoteHosts::from_source(
         enrollment.as_ref().map(|service| service.source.clone()),
     );
@@ -381,18 +359,80 @@ async fn build_router_core(
             service.endpoint,
         )
     });
+    Ok((
+        remote_api.unwrap_or_else(crate::remote_http::unavailable_router),
+        hosts,
+        listeners,
+    ))
+}
+
+async fn build_router_core(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+    enrollment: Option<EnrollmentService>,
+    remote: Option<RemoteService>,
+) -> Result<(Router, Option<String>, Option<RemoteListeners>), ServerError> {
+    #[cfg(not(feature = "remote"))]
+    let _ = (enrollment, remote);
+    validate_config(&config)?;
+
+    let pool = open_database(&config.data_dir).await?;
+    let origin =
+        url::Url::parse(&config.public_origin).map_err(|_| ServerError::InvalidConfiguration)?;
+    let rp_id = origin.host_str().ok_or(ServerError::InvalidConfiguration)?;
+    let auth = Auth::new(pool.clone(), rp_id, &config.public_origin)
+        .await
+        .map_err(ServerError::Auth)?;
+    #[cfg(feature = "remote")]
+    let ca_api = ca_router(remote.as_ref(), &auth, &pool)?;
+    #[cfg(not(feature = "remote"))]
+    let ca_api = Router::new();
+    let now = unix_seconds()?;
+    websocket::recover_connections(&pool, now)
+        .await
+        .map_err(ServerError::Storage)?;
+    let mut setup_token = None;
+    auth.bootstrap(now, |banner| {
+        setup_token = banner.lines().nth(1).map(str::to_owned);
+    })
+    .await
+    .map_err(ServerError::Auth)?;
+
+    if setup_token.is_some() {
+        let mut setup_consumed = auth.subscribe_setup_consumed();
+        let data_dir = config.data_dir.clone();
+        tokio::spawn(async move {
+            if setup_consumed.changed().await.is_ok() {
+                remove_setup_token_socket_or_warn(&data_dir, "owner enrollment");
+            }
+        });
+    } else {
+        remove_setup_token_socket_or_warn(&config.data_dir, "owner already exists at startup");
+    }
+
+    let agent = if let Some(agent) = supplied_agent {
+        agent
+    } else {
+        let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
+        EmbeddedAgent::spawn(executable)
+    };
+    #[cfg(feature = "remote")]
+    let (remote_api, hosts, listeners) =
+        remote_router(auth.clone(), pool.clone(), enrollment, remote).await?;
+    #[cfg(feature = "remote")]
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent).with_remote_hosts(hosts);
+    #[cfg(not(feature = "remote"))]
+    let listeners = None;
+    #[cfg(not(feature = "remote"))]
+    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent);
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
         .merge(auth::router(auth))
         .merge(websocket::router(ws_state))
         .merge(ca_api);
-    let app = if let Some(remote_api) = remote_api {
-        app.merge(remote_api)
-    } else {
-        app.merge(crate::remote_http::unavailable_router())
-    };
+    #[cfg(feature = "remote")]
+    let app = app.merge(remote_api);
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
     } else {
@@ -1098,6 +1138,6 @@ mod reviewer_admission {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "remote"))]
 #[path = "remote_demo_tests.rs"]
 mod remote_demo_tests;

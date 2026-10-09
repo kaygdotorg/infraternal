@@ -1,13 +1,16 @@
 //! Reproduces a blocked fallback writer filling the shared reply queue; dispatcher admission must remain bounded [130], #78.
 
 use super::*;
+#[cfg(feature = "remote")]
 use std::sync::{Mutex, atomic::AtomicBool};
 
+#[cfg(feature = "remote")]
 struct StalledWriter {
     input: Mutex<(Vec<u8>, usize)>,
     greeted: AtomicBool,
     retired: AtomicBool,
 }
+#[cfg(feature = "remote")]
 impl Channel for StalledWriter {
     fn retire(&self) {
         self.retired.store(true, Ordering::Relaxed);
@@ -33,6 +36,7 @@ impl Channel for StalledWriter {
     }
 }
 
+#[cfg(feature = "remote")]
 #[tokio::test]
 async fn saturated_replies_retire_connection_without_awaiting_writer_capacity() {
     let mut wire = Vec::new();

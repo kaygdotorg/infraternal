@@ -1,6 +1,9 @@
 //! Relays control calls and resumable terminal streams through local socketpair or admitted remote infraternal agents [9][13][64].
 
+#[cfg(feature = "remote")]
 use crate::remote_link::RemoteLink;
+#[cfg(not(feature = "remote"))]
+type RemoteLink = ();
 use bytes::{Buf, Bytes, BytesMut};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
@@ -50,6 +53,7 @@ pub(crate) enum AgentError {
     Rejected,
     /// The remote peer did not negotiate live renewal.
     #[error("remote infraternal agent lacks live renewal")]
+    #[cfg(feature = "remote")]
     Unsupported,
 }
 
@@ -155,7 +159,7 @@ impl EmbeddedAgent {
     }
 
     /// Fail the unused embedded route in remote-only fixtures; fallback must not create local PTYs.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "remote"))]
     pub(crate) fn unavailable() -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         drop(receiver);
@@ -166,6 +170,7 @@ impl EmbeddedAgent {
     }
 
     /// Reuse the terminal actor for an enrolled host; only admitted listeners supply links.
+    #[cfg(feature = "remote")]
     pub(crate) fn remote(uid: u32) -> (Self, mpsc::Sender<RemoteLink>) {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (accepts, incoming) = mpsc::channel(1);
@@ -187,12 +192,13 @@ impl EmbeddedAgent {
     }
 
     /// A bounded control call shares the existing id allocator and reply dispatcher.
+    #[cfg(feature = "remote")]
     pub(crate) async fn control_call(
         &self,
         action: &'static str,
         json: Vec<u8>,
     ) -> Result<Vec<u8>, AgentError> {
-        if json.len() > infraternal_agent::remote_renewal::MAX_RENEWAL_JSON {
+        if json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON {
             return Err(AgentError::Rejected);
         }
         let (reply, result) = oneshot::channel();
@@ -282,6 +288,7 @@ impl EmbeddedAgent {
 }
 
 enum Command {
+    #[cfg(feature = "remote")]
     Control {
         action: &'static str,
         json: Vec<u8>,
@@ -325,6 +332,7 @@ enum Peer {
         reader: OwnedReadHalf,
         writer: OwnedWriteHalf,
     },
+    #[cfg(feature = "remote")]
     Remote(Box<RemoteLink>),
 }
 
@@ -333,6 +341,7 @@ enum Source {
         executable: PathBuf,
         initial: Option<UnixStream>,
     },
+    #[cfg(feature = "remote")]
     Remote {
         incoming: mpsc::Receiver<RemoteLink>,
         uid: u32,
@@ -347,6 +356,7 @@ impl Source {
                 executable,
                 initial,
             } => connect_agent(executable, initial.take()).await,
+            #[cfg(feature = "remote")]
             Self::Remote {
                 incoming,
                 uid,
@@ -415,15 +425,22 @@ impl Source {
     }
     async fn replacement(&mut self) -> Option<RemoteLink> {
         match self {
+            #[cfg(feature = "remote")]
             Self::Remote { incoming, .. } => incoming.recv().await,
             Self::Embedded { .. } => std::future::pending().await,
         }
     }
     fn closed(&self) -> bool {
-        matches!(self, Self::Remote { incoming, pending: None,.. } if incoming.is_closed() && incoming.is_empty())
+        match self {
+            Self::Embedded { .. } => false,
+            #[cfg(feature = "remote")]
+            Self::Remote {
+                incoming, pending, ..
+            } => pending.is_none() && incoming.is_closed() && incoming.is_empty(),
+        }
     }
     fn remote(&self) -> bool {
-        matches!(self, Self::Remote { .. })
+        !matches!(self, Self::Embedded { .. })
     }
 }
 
@@ -477,6 +494,7 @@ enum Incoming {
 
 enum PendingCall {
     Open(oneshot::Sender<Result<[u8; 16], AgentError>>),
+    #[cfg(feature = "remote")]
     Control(oneshot::Sender<Result<Vec<u8>, AgentError>>),
 }
 impl PendingCall {
@@ -485,6 +503,7 @@ impl PendingCall {
             Self::Open(reply) => {
                 let _ = reply.send(Err(error));
             }
+            #[cfg(feature = "remote")]
             Self::Control(reply) => {
                 let _ = reply.send(Err(error));
             }
@@ -559,7 +578,11 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
         };
         tokio::select! {
             replacement = source.replacement(), if source.remote() => {
+                #[cfg(feature = "remote")]
                 let Some(replacement) = replacement else { return; };
+                #[cfg(not(feature = "remote"))]
+                let Some(()) = replacement else { return; };
+                #[cfg(feature = "remote")]
                 if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
                 if let Some(old) = connection.take() { connection_lost(old,&mut attachments,&mut routes,&mut pending).await; }
             }
@@ -707,6 +730,7 @@ async fn process_command(
     pending: &mut HashMap<u32, PendingCall>,
 ) -> bool {
     match command {
+        #[cfg(feature = "remote")]
         Command::Control {
             action,
             json,
@@ -719,7 +743,7 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unsupported));
                 return true;
             }
-            if json.len() > infraternal_agent::remote_renewal::MAX_RENEWAL_JSON
+            if json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON
                 || pending
                     .values()
                     .any(|call| matches!(call, PendingCall::Control(_)))
@@ -744,6 +768,7 @@ async fn process_command(
             true
         }
         Command::Open { size, reply } => {
+            #[cfg(feature = "remote")]
             if let Peer::Remote(link) = &connection.peer
                 && link.admit_operation().await.is_err()
             {
@@ -791,6 +816,7 @@ async fn process_command(
             output,
             reply,
         } => {
+            #[cfg(feature = "remote")]
             if let Peer::Remote(link) = &connection.peer
                 && link.admit_operation().await.is_err()
             {
@@ -1056,11 +1082,16 @@ async fn process_incoming(
                 call.refuse(AgentError::Rejected);
                 return true;
             }
-            let PendingCall::Open(reply) = call else {
-                if let PendingCall::Control(reply) = call {
+            #[cfg(not(feature = "remote"))]
+            let PendingCall::Open(reply) = call;
+            #[cfg(feature = "remote")]
+            let reply = match call {
+                PendingCall::Open(reply) => reply,
+                #[cfg(feature = "remote")]
+                PendingCall::Control(reply) => {
                     let _ = reply.send(Ok(json));
+                    return true;
                 }
-                return true;
             };
             let session = serde_json::from_slice::<OpenResult>(&json);
             let result = session
@@ -1278,7 +1309,7 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                 let stream_id = decoded.stream_id;
                 let frame = match decoded.frame {
                     Frame::Result { call_id, ok, json }
-                        if json.len() <= infraternal_agent::remote_renewal::MAX_RENEWAL_JSON =>
+                        if json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON =>
                     {
                         Incoming::Result {
                             call_id,
@@ -1344,6 +1375,7 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                     .extend_from_slice(&connection.scratch[..count]);
                 count
             }
+            #[cfg(feature = "remote")]
             Peer::Remote(link) => link
                 .read(&mut connection.receive, &mut connection.scratch)
                 .await
@@ -1374,6 +1406,7 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
         tokio::time::timeout(Duration::from_secs(1), async {
             match peer {
                 Peer::Local { writer, .. } => writer.write_all(encode).await,
+                #[cfg(feature = "remote")]
                 Peer::Remote(link) => link.write(stream_id, frame, encode).await,
             }
         })

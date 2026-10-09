@@ -8,7 +8,13 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+remote = ["dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn"]
+
 [dependencies]
+infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
+infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }
 argon2.workspace = true
 axum.workspace = true
 axum-server.workspace = true
@@ -34,8 +40,8 @@ url.workspace = true
 uuid.workspace = true
 webauthn-rs.workspace = true
 openssl.workspace = true
-infraternal-agent = { path = "../infraternal-agent", version = "0.1.0" }
-quinn.workspace = true
+infraternal-agent = { path = "../infraternal-agent", version = "0.1.0", default-features = false }
+quinn = { workspace = true, optional = true }
 
 [dev-dependencies]
 hyper.workspace = true
@@ -47,3 +53,7 @@ hkdf.workspace = true
 tower.workspace = true
 http-body-util.workspace = true
 tokio-tungstenite.workspace = true
+
+[[example]]
+name = "remote_ca_bench"
+required-features = ["remote"]

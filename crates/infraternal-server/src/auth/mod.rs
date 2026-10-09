@@ -17,6 +17,7 @@ mod wraps;
 
 pub(crate) use crypto::hash;
 use crypto::{constant_prf_input, prf_salt, random, recovery_hash};
+#[cfg(feature = "remote")]
 pub(crate) use http::cookie as session_cookie_from_headers;
 pub use sessions::Session;
 use sessions::{insert_session, require_session_tx};

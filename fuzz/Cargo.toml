@@ -13,8 +13,8 @@ cargo-fuzz = true
 libfuzzer-sys.workspace = true
 infraternal-shim.workspace = true
 infraternal-protocol.workspace = true
-infraternal-agent = { version = "0.1.0", path = "../crates/infraternal-agent" }
-infraternal-server = { version = "0.1.0", path = "../crates/infraternal-server" }
+infraternal-agent = { version = "0.1.0", path = "../crates/infraternal-agent", default-features = false, features = ["remote"] }
+infraternal-server = { version = "0.1.0", path = "../crates/infraternal-server", default-features = false, features = ["remote"] }
 
 [[bin]]
 name = "shim_frame_decode"

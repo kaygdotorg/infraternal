@@ -229,9 +229,12 @@ fn finish(stream: tokio_openssl::SslStream<tokio::net::TcpStream>) -> io::Result
     })
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
+    #[cfg(test)]
     use super::*;
+    #[cfg(not(test))]
+    use super::{Identity, PKey, X509};
     use openssl::{
         asn1::Asn1Time,
         bn::BigNum,
@@ -241,9 +244,14 @@ pub(crate) mod tests {
             extension::{BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName},
         },
     };
+    #[cfg(test)]
     use tokio::net::TcpListener;
 
-    pub(crate) fn root() -> Identity {
+    /// Construct a disposable certificate fixture for real transport tests.
+    /// # Panics
+    /// Panics if the test certificate or its key cannot be constructed.
+    #[must_use]
+    pub fn root() -> Identity {
         let key = PKey::generate_ed25519().unwrap();
         let mut name = X509NameBuilder::new().unwrap();
         name.append_entry_by_text("CN", "test CA").unwrap();
@@ -269,7 +277,11 @@ pub(crate) mod tests {
             key,
         }
     }
-    pub(crate) fn leaf(ca: &Identity, server: bool) -> Identity {
+    /// Construct a disposable certificate fixture for real transport tests.
+    /// # Panics
+    /// Panics if the test certificate or its key cannot be constructed.
+    #[must_use]
+    pub fn leaf(ca: &Identity, server: bool) -> Identity {
         let key = PKey::generate_ed25519().unwrap();
         let mut name = X509NameBuilder::new().unwrap();
         name.append_entry_by_text("CN", "test leaf").unwrap();

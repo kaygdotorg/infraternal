@@ -54,6 +54,12 @@ struct Stream {
     commands: session_commands::Sender,
     _cancel: oneshot::Sender<()>,
 }
+
+#[cfg(feature = "remote")]
+use crate::remote_renewal::RenewalIdentity;
+// The private local-only dispatcher always supplies None in core builds.
+#[cfg(not(feature = "remote"))]
+type RenewalIdentity = ();
 enum Message {
     Shim(u32, Shim),
     Result(u32, u32, bool, Vec<u8>),
@@ -84,11 +90,11 @@ async fn writer(
             &Frame::Hello {
                 version: 1,
                 caps: (if socket.native_stream_id().is_some() {
-                    crate::remote_quic::REMOTE_WRITER_BINDING
+                    infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
                 } else {
                     0
                 }) | (if renewal {
-                    crate::remote_renewal::LIVE_RENEWAL
+                    infraternal_plugin_api::channel::LIVE_RENEWAL
                 } else {
                     0
                 }),
@@ -201,6 +207,7 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
 /// drops every attachment and launch task, but never terminates surviving shims.
 /// # Errors
 /// Refuses invalid greeting, unsafe state, wrong uid and malformed terminal frames.
+#[cfg(feature = "remote")]
 pub async fn run_authenticated(
     channel: &impl Channel,
     state: Option<PathBuf>,
@@ -212,11 +219,12 @@ pub async fn run_authenticated(
 /// Dispatch remote terminal and bounded certificate control actions on one authenticated channel.
 /// # Errors
 /// Refuses uid, greeting, state, framing or publication failure.
+#[cfg(feature = "remote")]
 pub async fn run_authenticated_with_renewal(
     channel: &impl Channel,
     state: Option<PathBuf>,
     execution_uid: u32,
-    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    renewal: Option<&RenewalIdentity>,
 ) -> io::Result<()> {
     if channel.native_stream_id().is_some_and(|writer| writer != 0)
         || execution_uid != nix::unistd::Uid::effective().as_raw()
@@ -231,7 +239,9 @@ pub async fn run_authenticated_with_renewal(
     run_channel(channel, state, Some(execution_uid), renewal).await
 }
 
+#[cfg(feature = "remote")]
 struct RetireChannel<'a, C: Channel>(&'a C);
+#[cfg(feature = "remote")]
 impl<C: Channel> Drop for RetireChannel<'_, C> {
     fn drop(&mut self) {
         self.0.retire();
@@ -243,7 +253,7 @@ async fn run_channel(
     socket: &impl Channel,
     state: Option<PathBuf>,
     execution_uid: Option<u32>,
-    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    renewal: Option<&RenewalIdentity>,
 ) -> io::Result<()> {
     let state = sessions::state(state)?;
     let manager = Manager::detect().await;
@@ -263,7 +273,7 @@ async fn run_channel(
             // authenticated peer. Established idle channels have no timer.
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 let hello = receive.next(socket).await?;
-                if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, caps, .. } if socket.native_stream_id().is_none() || caps & crate::remote_quic::REMOTE_WRITER_BINDING != 0) {
+                if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, caps, .. } if socket.native_stream_id().is_none() || caps & infraternal_plugin_api::channel::REMOTE_WRITER_BINDING != 0) {
                     return Err(sessions::invalid("remote control Hello required"));
                 }
                 Ok(())
@@ -313,8 +323,9 @@ async fn run_channel(
                     match decoded.frame {
                         Frame::Hello {version: 1, ..} if stream == 0 => {}
                         Frame::Ping {nonce, sent_us} if stream == 0 => reply(&control, Message::Pong(nonce, sent_us))?,
+                        #[cfg(feature = "remote")]
                         Frame::Call {call_id, action_id, input_json} if stream == 0 && matches!(action_id, "transport.csr" | "transport.certificate") && renewal.is_some() => {
-                            if !renewals.is_empty() || input_json.len() > crate::remote_renewal::MAX_RENEWAL_JSON {
+                            if !renewals.is_empty() || input_json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON {
                                 reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;
                             } else {
                                 let renewal = renewal.ok_or_else(|| sessions::invalid("missing renewal identity"))?.clone();
@@ -393,6 +404,7 @@ async fn run_channel(
 /// Refuses missing/reserved binding, a missing bounded `AttachTerm`, unknown shim,
 /// malformed post-attachment traffic and overload. Returning never stops the shim.
 #[allow(clippy::too_many_lines)]
+#[cfg(feature = "remote")]
 pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) -> io::Result<()> {
     let writer_id = channel
         .native_stream_id()
@@ -696,7 +708,7 @@ async fn terminal(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "remote"))]
 #[path = "daemon_remote_tests.rs"]
 mod remote_tests;
 

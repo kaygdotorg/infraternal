@@ -3268,11 +3268,13 @@ mod reviewer_tests;
 #[path = "rotation_tests.rs"]
 mod rotation_tests;
 
+#[cfg(feature = "remote")]
 #[path = "ca_membership_tests.rs"]
 mod ca_membership_tests;
 
 #[path = "verified_passkey_tests.rs"]
 mod verified_passkey_tests;
 
+#[cfg(feature = "remote")]
 #[path = "ca_administration_tests.rs"]
 mod ca_administration_tests;

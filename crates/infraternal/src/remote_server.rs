@@ -17,14 +17,24 @@ pub(crate) async fn serve(
     config: infraternal_server::ServerConfig,
     options: Options,
 ) -> Result<(), infraternal_server::ServerError> {
-    if let Some(listen) = options.remote_listen {
-        let startup = infraternal_server::RemoteStartup {
-            listen,
-            ca_dir: options.remote_ca_dir,
-        };
-        let remote = startup.cold_start(&config)?;
-        infraternal_server::serve_with_remote(config, remote).await
-    } else {
+    #[cfg(feature = "remote")]
+    {
+        if let Some(listen) = options.remote_listen {
+            let startup = infraternal_server::RemoteStartup {
+                listen,
+                ca_dir: options.remote_ca_dir,
+            };
+            let remote = startup.cold_start(&config)?;
+            infraternal_server::serve_with_remote(config, remote).await
+        } else {
+            infraternal_server::serve(config).await
+        }
+    }
+    #[cfg(not(feature = "remote"))]
+    {
+        if options.remote_listen.is_some() {
+            return Err(infraternal_server::ServerError::InvalidConfiguration);
+        }
         infraternal_server::serve(config).await
     }
 }

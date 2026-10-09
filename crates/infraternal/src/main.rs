@@ -3,6 +3,7 @@
 
 mod embedded_cli;
 mod install;
+#[cfg(feature = "remote")]
 mod remote;
 mod remote_server;
 
@@ -221,6 +222,7 @@ fn main() -> ExitCode {
 }
 
 /// Startup reads an invitation once; reconnects use only the private local identity.
+#[cfg(feature = "remote")]
 fn run_remote_agent(
     action: AgentAction,
     fd: Option<i32>,
@@ -398,4 +400,16 @@ fn run_shim(
         state,
         ring_capacity,
     })
+}
+
+/// A core-only node refuses remote activation before reading stdin or private identity.
+#[cfg(not(feature = "remote"))]
+fn run_remote_agent(
+    _action: AgentAction,
+    _fd: Option<i32>,
+    _state: Option<PathBuf>,
+    _data: Option<PathBuf>,
+) -> ExitCode {
+    eprintln!("remote support is unavailable in this build");
+    ExitCode::from(2)
 }

@@ -63,6 +63,7 @@ pub(crate) struct WebSocketState {
     auth: Auth,
     pool: SqlitePool,
     agent: EmbeddedAgent,
+    #[cfg(feature = "remote")]
     remote_hosts: crate::remote_runtime::RemoteHosts,
     #[cfg(test)]
     handshake_timeout: Duration,
@@ -81,6 +82,7 @@ impl WebSocketState {
             auth,
             pool,
             agent,
+            #[cfg(feature = "remote")]
             remote_hosts: crate::remote_runtime::RemoteHosts::default(),
             #[cfg(test)]
             handshake_timeout: HANDSHAKE_TIMEOUT,
@@ -93,6 +95,7 @@ impl WebSocketState {
         }
     }
 
+    #[cfg(feature = "remote")]
     pub(crate) fn with_remote_hosts(mut self, hosts: crate::remote_runtime::RemoteHosts) -> Self {
         self.remote_hosts = hosts;
         self
@@ -1268,7 +1271,22 @@ async fn open_terminal(
     Ok(session_id)
 }
 
+/// Core-only builds select the local host and refuse every remote selection.
+#[cfg(not(feature = "remote"))]
+fn terminal_agent(
+    state: &WebSocketState,
+    _user: &str,
+    host: Option<uuid::Uuid>,
+) -> std::future::Ready<Result<EmbeddedAgent, ()>> {
+    std::future::ready(if host.is_some() {
+        Err(())
+    } else {
+        Ok(state.agent.clone())
+    })
+}
+
 /// Host selection is a durable authority check; a missing remote host never falls back locally.
+#[cfg(feature = "remote")]
 async fn terminal_agent(
     state: &WebSocketState,
     user: &str,
@@ -1277,7 +1295,7 @@ async fn terminal_agent(
     let Some(host) = host else {
         return Ok(state.agent.clone());
     };
-    let allowed:bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
+    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
         .bind(host.as_bytes().as_slice()).bind(user).fetch_one(&state.pool).await.map_err(|_|())?;
     if !allowed {
         return Err(());

@@ -13,9 +13,9 @@ use std::{
 };
 
 /// Additive Hello capability: only peers with this bit receive renewal actions.
-pub const LIVE_RENEWAL: u64 = 1 << 2;
+pub use infraternal_plugin_api::channel::LIVE_RENEWAL;
 /// Bound before decoding JSON as well as after decoding the DER field.
-pub const MAX_RENEWAL_JSON: usize = 32_768;
+pub use infraternal_plugin_api::channel::MAX_CONTROL_JSON as MAX_RENEWAL_JSON;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

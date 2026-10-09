@@ -3,11 +3,16 @@
 pub mod channel;
 pub mod daemon;
 pub mod relay;
+#[cfg(feature = "remote")]
 pub mod remote_client;
-pub mod remote_native;
-pub mod remote_quic;
-pub mod remote_renewal;
-pub mod remote_tls;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::remote_native;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::remote_quic;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::remote_renewal;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::remote_tls;
 pub mod sessions;
 pub mod transport;
 
@@ -23,5 +28,9 @@ pub fn run_embedded(fd: i32, state: Option<std::path::PathBuf>) -> std::io::Resu
     runtime.block_on(daemon::run(fd, state))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "remote"))]
 mod transport_diagnostics;
+
+#[cfg(all(test, feature = "remote"))]
+#[path = "remote_native_tests.rs"]
+mod remote_native_tests;
