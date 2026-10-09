@@ -2,9 +2,10 @@
 use super::*;
 use crate::auth::http::Ingress;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn review3_unwrap_cannot_be_skipped() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let mut f = fixture().await;
     let app = router(f.auth.clone());
     let (_, headers, start) = http_post_json(&app, "login-start", json!({})).await;
@@ -57,9 +58,10 @@ async fn review3_unwrap_cannot_be_skipped() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn review3_identified_privacy_timing_and_binding_replays() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let mut f = fixture().await;
     let app = router(f.auth.clone());
     let mut known = Vec::new();
@@ -177,9 +179,10 @@ async fn review3_socket_with_timeouts(
     (f, addr, server, peer)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn review3_revoked_handshake_must_not_welcome() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, addr, server, _peer) = review3_socket().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
@@ -207,6 +210,7 @@ async fn review3_revoked_handshake_must_not_welcome() {
 
 async fn busy_revocation(mode: &str) {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, addr, server, mut peer) = review3_socket().await;
     let mut receive = BytesMut::new();
     let _ = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
@@ -269,6 +273,7 @@ async fn busy_revocation(mode: &str) {
                 .execute(&f.auth.pool)
                 .await
                 .unwrap();
+            tokio::time::advance(Duration::from_millis(25)).await;
         }
         _ => unreachable!(),
     }
@@ -306,10 +311,11 @@ async fn busy_revocation(mode: &str) {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)]
 async fn review3_pending_routes_and_idle_expiry_recovery() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (mut f, addr, server, _peer) = review3_socket().await;
     let app = router(f.auth.clone());
     let (_, headers, start) = http_post_json(&app, "login-start", json!({})).await;
@@ -371,13 +377,13 @@ async fn review3_pending_routes_and_idle_expiry_recovery() {
     println!(
         "pending cookie: eight protected HTTP actions and WebSocket upgrade denied; identity/wrap reads allowed"
     );
-    // Upgrade slides expiry, so set a real near-term deadline between upgrade and Hello.
+    // Upgrade slides expiry. Install a future deadline, then cross it explicitly.
     let active = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(addr, &active)).await.unwrap();
     assert_server_hello(&mut socket).await;
     let now = crate::websocket::now_seconds().unwrap();
     sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=?")
-        .bind(now + 2)
+        .bind(now + DAY)
         .bind(hash(&f.session))
         .execute(&f.auth.pool)
         .await
@@ -393,14 +399,23 @@ async fn review3_pending_routes_and_idle_expiry_recovery() {
     )
     .await;
     read_welcome(&mut socket).await;
-    let start = Instant::now();
+    // The stored wall-clock authority is expired before the virtual timer fires.
+    // CPU scheduling cannot consume a near-term session between Hello and Welcome.
+    sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=?")
+        .bind(now - 1)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let start = tokio::time::Instant::now();
+    tokio::time::advance(Duration::from_secs(u64::try_from(DAY).unwrap())).await;
     assert!(
         tokio::time::timeout(Duration::from_secs(3), socket.next())
             .await
             .is_ok()
     );
     println!(
-        "idle expiry close observed at {}ms (2-second deadline with second-resolution clock)",
+        "idle expiry close observed after {}ms of explicit virtual time",
         start.elapsed().as_millis()
     );
     // A second active cookie witnesses actual recovery replacement commit.
@@ -451,24 +466,25 @@ async fn review3_pending_routes_and_idle_expiry_recovery() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn review3_busy_logout() {
     busy_revocation("logout").await;
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn review3_busy_recovery() {
     busy_revocation("recovery").await;
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn review3_busy_expiry() {
     busy_revocation("expiry").await;
 }
 
 /// A tab's completion and cleanup must leave the replacement cookie's pending row untouched.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)]
 async fn review3_completion_and_cleanup_are_transaction_bound() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     for reverse in [false, true] {
         let mut f = fixture().await;
         let app = router(f.auth.clone());
@@ -593,10 +609,11 @@ async fn review3_completion_and_cleanup_are_transaction_bound() {
 }
 
 /// An unresponsive real Unix backend cannot monopolize a browser handler indefinitely.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)]
 async fn review3_backend_reply_has_a_deadline() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let connect_timeout = Duration::from_secs(2);
     let (f, addr, server, mut peer) =
         review3_socket_with_terminal_timeout(Some(connect_timeout)).await;
@@ -640,7 +657,8 @@ async fn review3_backend_reply_has_a_deadline() {
     let Frame::Call { call_id, .. } = decode_muxed_frame(&wire).unwrap().frame else {
         panic!("backend call")
     };
-    let start = Instant::now();
+    let start = tokio::time::Instant::now();
+    tokio::time::advance(connect_timeout).await;
     let result = tokio::time::timeout(Duration::from_secs(15), read_client_frame(&mut socket))
         .await
         .unwrap();
@@ -700,9 +718,10 @@ async fn review3_backend_reply_has_a_deadline() {
 }
 
 /// Resume must not rotate a capability after the authenticating session has been revoked.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn review3_revoked_resume_must_not_welcome() {
     let _guard = SERIAL.lock().await;
+    let clock = FrozenSocketTime::new().await;
     let (f, addr, server, _peer) =
         review3_socket_with_authority_read_timeout(Duration::from_millis(25)).await;
     let cookie = format!("__Host-infraternal={}", f.session);
@@ -761,6 +780,11 @@ async fn review3_revoked_resume_must_not_welcome() {
     )
     .unwrap();
     let _ = socket.send(Message::Binary(wire.into())).await;
+    // Authority is already revoked and Resume is queued: only closure is valid.
+    // Shutdown can need its bounded writer fallback, so let real time run in
+    // this negative phase. The read deadline only bounds a hang; no elapsed
+    // time is asserted, and any Welcome still fails the authority assertion.
+    drop(clock);
     let start = Instant::now();
     let next = tokio::time::timeout(Duration::from_secs(30), socket.next())
         .await
@@ -777,9 +801,10 @@ async fn review3_revoked_resume_must_not_welcome() {
 }
 
 /// Revocation interrupts the pre-Hello wait itself; a client need not send another frame.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn review3_waiting_handshake_loses_authority() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, addr, server, _peer) = review3_socket().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
@@ -797,9 +822,10 @@ async fn review3_waiting_handshake_loses_authority() {
 }
 
 /// A stored expiry transition between upgrade and Hello cannot mint connection state.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn review3_expired_handshake_must_not_welcome() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     let (f, addr, server, _peer) = review3_socket().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(addr, &cookie)).await.unwrap();
@@ -837,10 +863,11 @@ async fn review3_expired_handshake_must_not_welcome() {
     server.abort();
 }
 /// A pending live open accepts its reply; committed revocation rejects a later reply.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)]
 async fn review4_open_reply_and_revocation_preserve_authority() {
     let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
     for revoke in [false, true] {
         let (f, addr, server, mut peer) =
             review3_socket_with_terminal_timeout(Some(Duration::from_secs(2))).await;

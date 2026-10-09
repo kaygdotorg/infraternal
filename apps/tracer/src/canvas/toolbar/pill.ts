@@ -12,6 +12,7 @@ import { createConnectionIndicator } from "../../../../../packages/ui/src/connec
 import type { ViewId } from "../model/types";
 import type { Ctx } from "../context";
 import { ICON, lineIcon, viewIcon } from "../views/icons";
+import { restPx } from "../springs";
 
 export interface PillModule {
   readonly capsule: HTMLElement;
@@ -42,8 +43,8 @@ export function createPill(cx: Ctx): PillModule {
     const sep = stage.querySelector<HTMLElement>(".capsule-sep");
     if (sep) sep.style.display = "none";
     if (host) host.textContent = free ? "All views" : (c?.view.name ?? "");
-    const n = !c ? 0 : c.view.layout === "graph" ? c.view.nodes.length : c.wins.size;
-    const noun = !c ? "" : c.view.id === "console" ? "session" : c.view.layout === "graph" ? "node" : "window";
+    const n = !c ? 0 : c.view.layout === "graph" ? c.view.nodes.filter((v) => v.kind === "host").length : c.wins.size;
+    const noun = !c ? "" : c.view.id === "console" ? "session" : c.view.layout === "graph" ? "host" : "window";
     if (sess) sess.innerHTML = free || !c ? `· ${views.size}<span class="cl-noun"> views</span>` : `· ${n}<span class="cl-noun"> ${noun}${n === 1 ? "" : "s"}</span>${c.view.team ? " · team" : ""}`;
     capsule.removeAttribute("data-flow");
     cx.sharing?.paintUnlink();
@@ -56,6 +57,7 @@ export function createPill(cx: Ctx): PillModule {
   const setShift = (x: number, opacity = 1): void => { for (const part of parts()) { part.style.transform = x === 0 ? "" : `translateX(${x}px)`; part.style.opacity = opacity === 1 ? "" : String(opacity); } };
   const shiftSpring = (from: number, to: number, cfg: { visualDuration: number; bounce: number }, done?: () => void): void => {
     const sp = new Spring(from, (v) => { setShift(v, 1 - Math.min(1, Math.abs(v) / (capsule.offsetWidth * 0.6))); if (v === to) done?.(); }, cfg);
+    restPx(sp);
     sp.set(to);
   };
   capsule.addEventListener("click", (e) => { e.preventDefault(); e.stopImmediatePropagation(); if (swiped) { swiped = false; return; } cx.viewList.toggle(); }, { capture: true, signal });

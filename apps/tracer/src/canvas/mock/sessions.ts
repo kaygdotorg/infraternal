@@ -9,12 +9,13 @@ import type { WindowModel } from "../model/types";
 import { el } from "../dom";
 import { previewLine } from "../windows/preview";
 import { shellLines } from "./data";
+import { DEFAULT_SESSION, type MockInventory } from "./inventory";
 import { allowedHosts, type MockWorld } from "./world";
 
 /** The window that holds the live terminal in mockups. */
 export const LIVE_WINDOW = "w-build-01";
 
-export function createMockSessions(core: CoreScreen, world: MockWorld): SessionService & { dispose(): void } {
+export function createMockSessions(core: CoreScreen, world: MockWorld, inventory?: MockInventory): SessionService & { dispose(): void } {
   // The one live terminal (the real renderer) is parked here while no window holds it.
   const holder = el("div", "cl-holder");
   holder.setAttribute("aria-hidden", "true");
@@ -24,7 +25,8 @@ export function createMockSessions(core: CoreScreen, world: MockWorld): SessionS
   const listeners = new Set<() => void>();
   return {
     bind(model: WindowModel): SessionBinding {
-      const live = model.id === LIVE_WINDOW;
+      // The live terminal is the window's own session; a window pointed at another session shows that one's screen.
+      const live = model.id === LIVE_WINDOW && (!model.sessionId || model.sessionId === DEFAULT_SESSION[model.host]);
       return {
         mount(body) {
           if (live) { body.append(core.terminalHost); return; }
@@ -45,12 +47,19 @@ export function createMockSessions(core: CoreScreen, world: MockWorld): SessionS
         const c = options.container;
         return { id: `w-shell-${c}`, kind: "terminal", host, user: "root", os: s?.os ?? "ubuntu", session: `${c} · sh`, lines: shellLines("root", c, "sh") };
       }
+      if (options?.session && inventory) {
+        const rec = inventory.get(host, options.session);
+        if (rec) return { id: `w-${host}-${rec.id}`, kind: "terminal", host, user: s?.user ?? "kayg", os: s?.os ?? "unknown", session: rec.name, sessionId: rec.id, lines: rec.screen };
+      }
       if (options?.from) {
         const m = options.from;
         const n = ++splits;
+        const rec = inventory?.create?.(host);
+        if (rec) return { ...m, id: `${m.id}-s${n}`, session: rec.name, sessionId: rec.id, splitOf: m.id, lines: rec.screen };
         return { ...m, id: `${m.id}-s${n}`, session: `split ${n}`, splitOf: m.id, lines: shellLines(m.user ?? "kayg", m.host, "echo ready") };
       }
-      return { id: `w-${host}`, kind: "terminal", host, user: s?.user ?? "kayg", os: s?.os ?? "unknown", lines: s?.screen ?? [`kayg@${host}:~$ `] };
+      const first = inventory?.get(host, DEFAULT_SESSION[host] ?? "");
+      return { id: `w-${host}`, kind: "terminal", host, user: s?.user ?? "kayg", os: s?.os ?? "unknown", ...(first ? { session: first.name, sessionId: first.id } : {}), lines: s?.screen ?? [`kayg@${host}:~$ `] };
     },
     hosts(): HostEntry[] { return allowedHosts(world.role).map((name) => ({ id: name, name })); },
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },

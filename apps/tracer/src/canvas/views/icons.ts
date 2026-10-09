@@ -19,8 +19,24 @@ export const ICON = {
   chevron: '<path d="m9 6 6 6-6 6"/>',
   port: '<path d="M6 12h10m-4-4 4 4-4 4"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  retry: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
+  offline: '<path d="M3 3l18 18M8.5 8.6A7 7 0 0 0 5 14.5M12 7a6.5 6.5 0 0 1 5.8 3.5A4.5 4.5 0 0 1 17.5 19H9M6.5 19a4 4 0 0 1-1.3-7.2"/>',
   views: ICONS.views,
 } as const;
+/** The session manager's glyphs (windows/session-ui.ts), on the same grid. */
+export const SESSION_ICON = {
+  sessions: '<rect x="4" y="9.5" width="16" height="10.5" rx="2.5"/><path d="M7 6h10M9.5 2.75h5"/>',
+  end: '<rect x="7" y="7" width="10" height="10" rx="2"/>',
+  rename: '<path d="M4.5 19.5l.9-3.9L16.4 4.6a2 2 0 0 1 2.8 2.8L8.2 18.4z"/><path d="M14.5 6.5l3 3"/>',
+  pin: '<path d="M9 4.5h6l-.8 4.6 2.8 3.4H7l2.8-3.4z"/><path d="M12 12.5v7"/>',
+  users: '<circle cx="9" cy="9" r="3"/><path d="M3.5 19c0-3 2.4-5 5.5-5s5.5 2 5.5 5"/><path d="M16 6.3a3 3 0 0 1 0 5.4M17.5 14.4c1.8.6 3 2.3 3 4.6"/>',
+  again: '<path d="M5 12a7 7 0 1 1 2.1 5"/><path d="M5 18.5V13.5h5"/>',
+  laptop: '<rect x="5" y="5" width="14" height="10" rx="2"/><path d="M3 19h18"/>',
+  phone: '<rect x="8" y="3.5" width="8" height="17" rx="2.5"/><path d="M11 17.5h2"/>',
+  retry: '<path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19 5.5v5h-5"/>',
+  beside: '<rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M12 5v14"/><path d="M15 12h3M16.5 10.5v3"/>',
+} as const;
+
 export const lineIcon = (path: string): string => `<svg viewBox="0 0 24 24" class="is-line" aria-hidden="true">${path}</svg>`;
 export const VIEW_ICON: Record<string, string> = { console: ICON.console, containers: ICON.containers, mesh: ICON.node, settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/>' };
 /** A shared or custom view has the generic layout icon. */

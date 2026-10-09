@@ -35,10 +35,20 @@ export interface WindowModel {
 
 export interface ColumnModel { id: string; w: number; wins: WindowModel[] }
 
-export interface NodeModel { id: string; kind: "host" | "tag"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform }
+export interface NodeModel {
+  id: string; kind: "host" | "tag"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform;
+  /** Live state of a host (a tag has none): drives the card's status icon. */
+  state?: "online" | "behind" | "offline";
+  /** The person dragged this node, so it stays where it is while the rest are laid out automatically (D180). */
+  pinned?: boolean;
+}
 
-/** A mesh access rule, shown by name only (D180: edges reference grants by name, never the rules). */
-export interface Grant { id: string; from: string; to: string; via?: string }
+/**
+ * A mesh access rule, shown by name only (D180: edges reference grants by name, never the rules).
+ * `id` is the stable reference; `name` is what people read (and rename). `auto` means the name still says who may
+ * reach what, so the canvas renames the grant along when an end moves; a name a person chose is never touched.
+ */
+export interface Grant { id: string; from: string; to: string; via?: string; name?: string; auto?: boolean; /** Reaches both ways (D164: a double-headed arrow). */ both?: boolean }
 
 export interface ViewModel {
   id: ViewId;

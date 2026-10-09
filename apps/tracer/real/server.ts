@@ -32,6 +32,8 @@ export interface Bridge {
   acked: Map<number, bigint>;
   /** Close frames the client sent (stream detaches). */
   detached: number[];
+  /** Control-stream actions and subscriptions: what the browser asked (`up`) and what the server answered (`down`). */
+  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number }>;
   cookie: string;
 }
 
@@ -91,7 +93,7 @@ export async function startRealServer(): Promise<RealServer> {
   tls.on("upgrade", (request, socket, head) => {
     front.handleUpgrade(request, socket, head, (browser) => {
       const upstream = new WebSocket(backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
-      const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), detached: [], cookie: request.headers.cookie ?? "" };
+      const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), detached: [], control: [], cookie: request.headers.cookie ?? "" };
       bridges.push(bridge);
       const inbound = new WebSocketFrameDecoder();
       const outbound = new WebSocketFrameDecoder();
@@ -101,6 +103,8 @@ export async function startRealServer(): Promise<RealServer> {
         inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           if (f.type === "AttachTerm") bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
           if (f.type === "Close" && stream !== 0) bridge.detached.push(stream);
+          if (f.type === "Call") bridge.control.push({ dir: "up", type: "Call", detail: f.actionId, callId: f.callId });
+          if (f.type === "Subscribe") bridge.control.push({ dir: "up", type: "Subscribe", detail: (() => { try { return String((JSON.parse(text.decode(f.filterJson)) as { topic?: unknown }).topic); } catch { return "?"; } })() });
         });
         if (upstream.readyState === WebSocket.OPEN) upstream.send(bytes); else queued.push(bytes);
       });
@@ -111,6 +115,7 @@ export async function startRealServer(): Promise<RealServer> {
           if (f.type === "Output") bridge.output.set(stream, (bridge.output.get(stream) ?? "") + text.decode(f.bytes, { stream: true }));
           if (f.type === "Snapshot") bridge.output.set(stream, text.decode(f.bytes));
           if (f.type === "Ack") bridge.acked.set(stream, f.inSeqAcked);
+          if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
         });
         if (browser.readyState === WebSocket.OPEN) browser.send(bytes);
       });

@@ -1,6 +1,6 @@
 /** Mockup Settings panels: devices, account, users, grants and discovery, with test-double data. */
 import { renderDevices, renderFacts } from "../../../../../packages/ui/src/settings-panels";
-import type { SettingsSource } from "../views/settings-body";
+import type { SettingsSource } from "../views/settings-body.on-demand";
 import type { ViewId } from "../model/types";
 import type { MockWorld } from "./world";
 
@@ -20,8 +20,8 @@ export function createMockSettings(world: MockWorld): SettingsSource {
           { title: "Recovery key", rows: [{ key: "Status", value: "saved" }, { key: "Last checked", value: "6 days ago" }] },
         ]);
         case "users": return renderFacts(pane, "Users", [{ title: "People", rows: [{ key: "kayg", value: "owner" }, { key: "mira", value: "operator" }, { key: "ops", value: "viewer" }] }]);
-        case "grants": return renderFacts(pane, "Grants", [{ title: "Mesh", rows: [{ key: "Rules", value: String(world.grants.length) }, { key: "Via relay", value: String(world.grants.filter((g) => g.via).length) }] }]);
-        case "discovery": return renderFacts(pane, "Discovery sources", [{ title: "Sources", rows: [{ key: "NetBird", value: "on" }, { key: "Tailscale", value: "on" }, { key: "known_hosts", value: "on" }, { key: "SSH config", value: "on" }] }]);
+        case "grants": return renderFacts(pane, "Access", [{ title: "Mesh", rows: [{ key: "Rules", value: String(world.grants.length) }, { key: "Via relay", value: String(world.grants.filter((g) => g.via).length) }] }]);
+        case "discovery": return renderFacts(pane, "Found hosts", [{ title: "Sources", rows: [{ key: "NetBird", value: "on" }, { key: "Tailscale", value: "on" }, { key: "known_hosts", value: "on" }, { key: "SSH config", value: "on" }] }]);
         default: return undefined;
       }
     },

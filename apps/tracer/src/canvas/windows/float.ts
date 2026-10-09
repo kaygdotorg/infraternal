@@ -18,6 +18,7 @@ import type { Ctx, ViewRec, WinRec } from "../context";
 import { el, reduced } from "../dom";
 import type { Pt } from "../layout/geometry";
 import { ICON, iconFor } from "../views/icons";
+import { SCALE_REST, restAt } from "../springs";
 import { previewLine } from "./preview";
 
 export interface FloatModule {
@@ -193,6 +194,7 @@ export function createFloat(cx: Ctx): FloatModule {
       root.style.opacity = String(fade);
       if (v === 1) done();
     }, { visualDuration: 0.85, bounce: 0.05 });
+    restAt(progress, SCALE_REST);
     progress.set(1);
   };
 

@@ -6,7 +6,7 @@
  */
 import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
-import { renderSettingsBody } from "./settings-body";
+import { onDemand } from "../../on-demand";
 
 /** True for kinds whose window is a terminal session: the only kind that can split or take input. */
 export const isTerminal = (rec: WinRec): boolean => rec.model.kind === "terminal" && !rec.model.noAccess;
@@ -18,17 +18,30 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
   if (m.noAccess) {
     const box = el("div", "cl-noaccess");
     box.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/></svg><p class="cl-noaccess-title">No access</p><p class="cl-noaccess-hint"></p>';
-    (box.querySelector(".cl-noaccess-hint") as HTMLElement).textContent = `Your grants do not include ${m.host}. Ask ${rec.owner.view.from ?? "an admin"} or an admin for access.`;
+    (box.querySelector(".cl-noaccess-hint") as HTMLElement).textContent = `You do not have access to ${m.host}. Ask ${rec.owner.view.from ?? "an admin"} or an admin for access.`;
     body.append(box);
     return;
   }
   if (m.kind === "terminal") {
-    const binding = cx.adapters.sessions.bind(m, { view: rec.owner.view.id, changed: () => cx.store.changed() });
+    const binding = cx.adapters.sessions.bind(m, { view: rec.owner.view.id, changed: () => {
+      cx.store.changed();
+      // A session id the window just learned (a new shell was created on the server): the inventory knows it is open.
+      if (m.sessionId) cx.adapters.inventory?.attach(m.host, m.sessionId, m.session ? { name: m.session } : undefined);
+    } });
     rec.binding = binding;
     binding.mount(body);
     return;
   }
-  if (m.kind === "settings") { rec.cleanup = renderSettingsBody(cx, m.id.slice(2), body); return; }
+  if (m.kind === "settings") {
+    // The panels load the first time a Settings window is drawn (on demand); until then the window is empty for a frame or two.
+    let release: (() => void) | undefined, gone = false;
+    rec.cleanup = () => { gone = true; release?.(); };
+    void onDemand(() => import("./settings-body.on-demand")).then((mod) => {
+      if (gone) return;
+      release = mod.renderSettingsBody(cx, m.id.slice(2), body);
+    });
+    return;
+  }
   if (m.kind === "logs") {
     const pre = el("pre", "canvas-preview cl-preview cl-logs");
     pre.innerHTML = (m.lines ?? []).map((l) => {

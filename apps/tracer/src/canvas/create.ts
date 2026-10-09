@@ -13,6 +13,7 @@
 import { mountToast } from "../../../../packages/ui/src/toast";
 import type { CoreScreen } from "../core-screen";
 import { createMemory } from "./memory";
+import { warmDroplet } from "./layout/droplet-handle";
 import { createBackdrop, type Backdrop } from "./backdrop";
 import { Camera } from "./camera/camera";
 import { installGestures } from "./camera/gestures";
@@ -35,6 +36,7 @@ import { createViewList } from "./toolbar/viewlist";
 import { createFloat } from "./windows/float";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
+import { createSessionHooks } from "./windows/session-hooks";
 import { createVisibility } from "./windows/visibility";
 
 export interface CanvasOptions {
@@ -106,6 +108,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.win = createWindows(cx);
   cx.float = createFloat(cx);
   cx.inputLock = createInputLock(cx);
+  if (options.adapters.inventory) cx.sessionUi = createSessionHooks(cx);
   cx.visibility = createVisibility(cx);
   cx.pill = createPill(cx);
   cx.viewList = createViewList(cx);
@@ -126,14 +129,26 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     lastW = w; lastH = h;
     cx.camera.resized();
     backdrop?.measure();
+    const previousColW = state.metrics.colW;
     state.metrics = metricsFor(w, h, coarse.matches);
     world.style.setProperty("--clh", `${state.metrics.clh}px`);
+    // A column the person never resized follows the viewport (a rotation or a window resize changes the default
+    // width); a stale width would leave the window wider than the screen and the framing off to a side.
+    for (const c of cx.views.values()) {
+      if (c.view.layout !== "tiled") continue;
+      for (const colEl of c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")) {
+        if (colEl.dataset.user || colEl.dataset.w !== String(previousColW)) continue;
+        colEl.dataset.w = String(state.metrics.colW);
+        colEl.style.setProperty("--w", `${state.metrics.colW}px`);
+      }
+    }
     for (const c of cx.views.values()) cx.view.geometry(c);
     for (const c of cx.views.values()) for (const rec of c.wins.values()) rec.binding?.refit();
     if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true);
   });
   ro.observe(viewport);
   cx.camera.start();
+  warmDroplet();
 
   // A hidden page also releases its big surfaces (memory.ts) and must not lose the last edit.
   const onHide = (): void => { if (document.hidden) cx.store.flush(); };
@@ -163,6 +178,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.store.dispose();
       cx.toolbar.dispose();
       cx.tree.dispose();
+      cx.sessionUi?.dispose();
       cx.pill.dispose();
       cx.sharing?.dispose();
       cx.mesh?.dispose();

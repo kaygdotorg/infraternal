@@ -61,7 +61,7 @@ export function toDocument(views: readonly ViewModel[], metrics: Metrics, revisi
     views: views.map((v): DocView => ({
       id: v.id, kind: v.id, name: v.name, cell: { x: Math.round(v.x / CELL), y: Math.round(v.y / CELL) },
       layout: v.layout === "graph"
-        ? { type: "graph", pinned: Object.fromEntries(v.nodes.map((n) => [n.id, { x: Math.round(n.x), y: Math.round(n.y) }])) }
+        ? { type: "graph", pinned: Object.fromEntries(v.nodes.filter((n) => n.pinned).map((n) => [n.id, { x: Math.round(n.x), y: Math.round(n.y) }])) }
         : {
           type: "tiled",
           columns: v.cols.map((c): DocColumn => ({

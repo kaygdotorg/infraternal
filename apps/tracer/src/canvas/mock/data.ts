@@ -68,11 +68,12 @@ export const shellLines = (user: string, host: string, extra: string): string[] 
 
 
 /** Builds the views a person with this role sees. Hosts come from the test double. */
-export function buildViews(roleIn: Role, m: Metrics, meshSource: MeshSource, screens: Map<string, { os: HostPlatform; user: string; screen: string[] }>, omit: string[] = [], withIncident = false): ViewModel[] {
+export function buildViews(roleIn: Role, m: Metrics, meshSource: MeshSource, screens: Map<string, { os: HostPlatform; user: string; screen: string[] }>, omit: string[] = [], withIncident = false, sessionOf?: (host: string) => { id: string; name: string } | undefined): ViewModel[] {
   const role: Exclude<Role, "asha"> = roleIn === "asha" ? "viewer" : roleIn;
   const hostWin = (name: string, h?: number): WindowModel => {
     const s = screens.get(name);
-    return { id: `w-${name}`, kind: "terminal", host: name, user: s?.user ?? "kayg", os: s?.os ?? "unknown", ...(h ? { h } : {}), lines: s?.screen ?? [`kayg@${name}:~$ `] };
+    const named = sessionOf?.(name);
+    return { id: `w-${name}`, kind: "terminal", host: name, user: s?.user ?? "kayg", os: s?.os ?? "unknown", ...(named ? { session: named.name, sessionId: named.id } : {}), ...(h ? { h } : {}), lines: s?.screen ?? [`kayg@${name}:~$ `] };
   };
   const names = role === "viewer" ? VIEWER_HOSTS : role === "new" ? [] : HOST_NAMES.filter((n) => !omit.includes(n));
   const col = (id: string, wins: WindowModel[], w = m.colW): ColumnModel => ({ id, w, wins });

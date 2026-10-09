@@ -283,10 +283,17 @@
 .ui-window {
   position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0;
   /* Not clipped: the lock's shackle rises over the frame line. The body clips its own content. */
-  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  background: var(--bg);
   border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); box-shadow: var(--shadow);
   transition: border-color 180ms var(--ease-out, ease-out);
 }
+/* Window transparency (themes.ts WINDOW_LEVELS): Solid is the line above, with no alpha and no filter. The other
+   levels read one fill token; only Frosted adds a backdrop blur, and only on windows that are on screen
+   (canvas/memory.ts sets data-onscreen), because many large blurred windows cost frames and memory. */
+:root:not([data-window-level="solid"]) .ui-window { background: color-mix(in srgb, var(--bg) var(--ui-window-fill), transparent); }
+:root[data-window-level="frosted"] .ui-window[data-onscreen] { -webkit-backdrop-filter: blur(var(--ui-window-blur)); backdrop-filter: blur(var(--ui-window-blur)); }
+/* Solid cards paint no blur at all. */
+:root[data-card="solid"] .ui-overlay-surface, :root[data-card="solid"] .ui-panel, :root[data-card="solid"] .ui-pill { -webkit-backdrop-filter: none; backdrop-filter: none; }
 .ui-window[data-active] { border-color: color-mix(in oklab, var(--accent) 50%, var(--overlay-line)); }
 .ui-window-head { display: flex; flex: none; align-items: center; gap: 8px; padding: 8px 8px 0 8px; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .ui-window-pill {
@@ -305,16 +312,33 @@
 .ui-window-title { display: inline-flex; min-width: 0; overflow: hidden; }
 .ui-window-user { color: var(--ui-text-secondary); font-weight: var(--fw-secondary); }
 .ui-window-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ui-window-session { color: var(--fg-3); font-weight: var(--fw-secondary); }
+/* The title gives way before the actions do, and the session name before the host: it shrinks a hundred times faster. */
+.ui-window-title { flex: 0 1 auto; }
+.ui-window-session { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-3); font-weight: var(--fw-secondary); }
+/* In a narrow header the login goes first (it is the quietest part of the name). */
+.ui-window-head { container-type: inline-size; }
+@container (max-width: 560px) { .ui-window-user { display: none; } }
 .ui-window-session::before { content: "·"; margin-right: 8px; color: var(--fg-3); }
 .ui-window-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--ok); }
 .ui-window[data-status="connecting"] .ui-window-dot { background: var(--fg-3); }
 .ui-window[data-status="none"] .ui-window-dot { display: none; }
 .ui-window[data-status="offline"] .ui-window-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
-.ui-window-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+/* The header's actions are one pill (the shared material, without its blur: windows stay cheap) holding icon
+   buttons, the same height as the title pill and on the same line. The pill never shrinks (the title truncates
+   first). On touch the pill is as tall as the title pill (44 px) and each button is 44 px wide and reaches 44 px tall with a transparent hit area. */
+.ui-window-actions {
+  display: flex; flex: none; align-items: center; gap: 2px; margin-left: auto; height: var(--ui-control-h); padding: 0 3px;
+  border: 1px solid var(--overlay-line); border-radius: 999px; background: var(--overlay); box-shadow: none;
+}
+.ui-window-actions:empty { display: none; }
 .ui-window-action {
-  display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); border: 0; border-radius: 8px;
+  position: relative; display: grid; place-items: center; width: calc(var(--ui-control-h) - 6px); height: calc(var(--ui-control-h) - 6px); border: 0; border-radius: 50%;
   background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
+}
+@media (pointer: coarse) {
+  .ui-window-actions { gap: 0; }
+  .ui-window-action { width: 44px; }
+  .ui-window-action::after { content: ""; position: absolute; inset: -3px 0; } /* 44 px tall around the 38 px button; the buttons sit on a 44 px pitch */
 }
 .ui-window-action:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -671,6 +695,11 @@
   --ui-dot-color: var(--dot-color, color-mix(in oklab, var(--mesh-3) 40%, white));
   position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
 }
+/* The three backgrounds (Settings, Appearance). Soft is the defaults above: the theme's gentle gradient. Plain is one
+   solid colour with the dots in a quiet tint of the text colour. Mesh is the theme's full mesh gradient (the same
+   image the rest of the app paints), fixed to the screen, with the dots moving over it. */
+:root[data-bg="none"] .ui-canvas-backdrop { --ui-gradient-opacity: 0; --ui-dot-opacity: 0.2; --ui-dot-color: color-mix(in srgb, var(--fg) 60%, var(--bg)); }
+:root[data-bg="mesh"] .ui-canvas-backdrop { --ui-gradient-opacity: 1; --ui-dot-fill: var(--mesh-image, linear-gradient(115deg, var(--mesh-1), var(--mesh-2) 35%, var(--mesh-3) 70%, var(--mesh-4))) center / cover no-repeat; }
 .ui-canvas-backdrop-fill { position: absolute; inset: 0; opacity: var(--ui-gradient-opacity); background: var(--ui-dot-fill, linear-gradient(115deg, var(--mesh-1), var(--mesh-2) 35%, var(--mesh-3) 70%, var(--mesh-4))); }
 .ui-canvas-backdrop-layer[hidden] { display: none; }
 .ui-canvas-backdrop-layer {
@@ -710,3 +739,29 @@
 /* A chip used as a toggle (a view to share, a filter): pressed is a quiet accent fill, nothing else changes. */
 .ui-chip[aria-pressed] { padding-right: 10px; cursor: pointer; }
 .ui-chip[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+
+/* Item states (branched.ts `state` and `mark`, and the session manager): an item is open (filled dot), detached
+   (hollow dot) or exited (hollow square). A mark follows: new output is a quiet dot, a finished command a tick
+   or a cross, so the exit code beside it reads "✓ 0" or "✗ 1". One drawing, used by every list of such items. */
+.ui-state-dot { display: grid; flex: none; place-items: center; width: 18px; }
+.ui-state-dot::before { content: ""; box-sizing: border-box; width: 7px; height: 7px; border-radius: 50%; }
+.ui-state-dot[data-state="open"]::before { background: var(--fg-2); }
+.ui-state-dot[data-state="detached"]::before { box-shadow: inset 0 0 0 1.5px var(--fg-3); }
+.ui-state-dot[data-state="exited"]::before { width: 6px; height: 6px; border-radius: 1.5px; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
+.bm-leaf[aria-current] .ui-state-dot[data-state="open"]::before { background: var(--accent); }
+.ui-mark { flex: none; width: 12px; height: 12px; }
+.ui-mark.is-new { animation: ui-mark-in 180ms var(--ease-out, ease-out); }
+.ui-mark[data-mark="output"] { width: 6px; height: 6px; margin: 0 3px; border-radius: 50%; background: var(--accent); }
+.ui-mark[data-mark="ok"], .ui-mark[data-mark="fail"] { background: currentColor; -webkit-mask: var(--ui-mark-icon) center / contain no-repeat; mask: var(--ui-mark-icon) center / contain no-repeat; }
+.ui-mark[data-mark="ok"] { color: var(--ok); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E"); }
+.ui-mark[data-mark="fail"] { color: var(--danger); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M6.5 6.5l11 11M17.5 6.5l-11 11'/%3E%3C/svg%3E"); }
+/* In a branched menu the mark sits on the right, against the note beside it. */
+.bm-leaf .ui-mark { margin-left: auto; }
+.bm-leaf .ui-mark[data-mark="output"] { margin-right: 3px; }
+.bm-leaf .ui-mark + .bm-meta { margin-left: 6px; }
+@keyframes ui-mark-in { from { opacity: 0; transform: scale(0.5); } }
+@media (prefers-reduced-motion: reduce) { .ui-mark.is-new { animation: none; } }
+/* A long leaf name gives way to its marks and notes instead of wrapping onto a second line. */
+.bm-leaf .bm-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A caption between groups inside one section: the host above its sessions. It has no branch of its own. */
+.bm-subhead { display: flex; align-items: center; height: var(--row); padding: 0 8px; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1.2 var(--font-mono); letter-spacing: 0; }

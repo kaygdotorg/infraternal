@@ -1,7 +1,7 @@
 /**
  * The toolbar's canvas row (touch) and the desktop buttons beside the top pill: the same canvas actions in both
  * places (D177). Row items: search, views, previous and next window, canvas lock, overview, input lock, split
- * right and down, add host (only when the flow exists), sidebar. Items disable while the input lock is on, and
+ * right and down, sessions (only with an inventory), add host (only when the flow exists), sidebar. Items disable while the input lock is on, and
  * the splits when the active window is not a terminal.
  */
 import { ICONS, iconSvg } from "../../../../../packages/ui/src/icons";
@@ -11,6 +11,7 @@ import type { ToolbarItem, ToolbarRow } from "../../core-screen";
 import type { Ctx } from "../context";
 import { el } from "../dom";
 import { isTerminal } from "../views/body";
+import { SESSION_ICON } from "../views/icons";
 import { bindingText } from "./shortcuts";
 
 export interface ToolbarModule {
@@ -46,6 +47,12 @@ export function createToolbar(cx: Ctx): ToolbarModule {
   }
 
   const splitActive = (direction: "right" | "down"): void => { const w = state.activeWin; if (w && w.model.kind === "terminal") void cx.win.split(w, direction); };
+  /** The session manager of the active window, from its own action (the card places the popover under it). */
+  const openSessions = (): void => {
+    const w = state.activeWin;
+    const anchor = w?.card.header.querySelector<HTMLButtonElement>("[data-action='sessions']");
+    if (w && anchor && isTerminal(w)) cx.sessionUi?.toggleManager(w, anchor, "pointer");
+  };
   const items: ToolbarItem[] = [
     { id: "search", label: "Search and actions", icon: ICONS.search, onSelect: openPalette },
     { id: "views", label: "Views", icon: ICONS.views, onSelect: () => cx.viewList.toggle() },
@@ -56,6 +63,7 @@ export function createToolbar(cx: Ctx): ToolbarModule {
     { id: "input-lock", label: "Input lock", icon: ICONS.lock, onSelect: () => cx.inputLock.toggle() },
     { id: "split-right", label: "Split right", icon: ICONS.splitRight, onSelect: () => splitActive("right") },
     { id: "split-down", label: "Split down", icon: ICONS.splitDown, onSelect: () => splitActive("down") },
+    ...(cx.adapters.inventory ? [{ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: openSessions }] : []),
     ...(cx.adapters.addHost ? [{ id: "add", label: "Add host", icon: ICONS.plus, onSelect: () => cx.adapters.addHost?.() }] : []),
     { id: "sidebar", label: "Sidebar", icon: ICONS.sidebar, onSelect: () => stage.querySelector<HTMLButtonElement>("#sidebar-toggle")?.click() },
   ];
@@ -75,6 +83,7 @@ export function createToolbar(cx: Ctx): ToolbarModule {
     row.update("input-lock", { pressed: locked, disabled: !terminal && !locked, label: locked ? "Input lock on" : "Input lock off", icon: locked ? ICONS.lock : ICONS.unlock });
     row.update("split-right", { disabled: !terminal });
     row.update("split-down", { disabled: !terminal });
+    if (cx.adapters.inventory) row.update("sessions", { disabled: !terminal });
   };
   const offLock = cx.nav.onLockChange(update);
   update();

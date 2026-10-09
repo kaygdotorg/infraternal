@@ -1,9 +1,11 @@
-/** Builds the Mesh view's model from a mesh source: its nodes as laid out, at the origin until the canvas places it. */
+/**
+ * Builds the Mesh view's model. It starts empty: the nodes are laid out by the Mesh view's own code, which loads the
+ * first time the view is on screen (`mesh.on-demand.ts`) and fills the model in then.
+ */
 import type { Metrics } from "../layout/geometry";
 import type { ViewModel } from "../model/types";
 import type { MeshSource } from "./source";
 
-export function meshView(source: MeshSource, m: Metrics): ViewModel {
-  const { nodes, size } = source.layout(m);
-  return { id: "mesh", name: "Mesh", layout: "graph", cols: [], nodes, graph: size, x: 0, y: 0 };
+export function meshView(_source: MeshSource, _m: Metrics): ViewModel {
+  return { id: "mesh", name: "Mesh", layout: "graph", cols: [], nodes: [], x: 0, y: 0 };
 }

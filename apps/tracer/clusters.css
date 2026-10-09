@@ -95,7 +95,8 @@
 .cl-node-meta { display: grid; gap: 1px; padding: 4px 14px 10px; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .cl-node-detail { color: var(--fg); }
 .cl-node-sub { color: var(--ui-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cl-graph-arrows { position: absolute; left: 0; top: 0; z-index: 1; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+/* Arrows pass under the cards, so a line that crosses a card is hidden by it instead of cutting through its text. */
+.cl-graph-arrows { position: absolute; left: 0; top: 0; z-index: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
 .cl-world[data-lod="thumb"] .cl-node-meta { opacity: 1; }
 
 /* ---- arrows ------------------------------------------------------------------------------ */
@@ -113,7 +114,11 @@
 .cl-arrow:hover .cl-arrow-head { filter: none; }
 .cl-arrow[data-editing] { opacity: 0.25; }
 .cl-arrow-handle:active { cursor: grabbing; }
-@media (pointer: coarse) { .cl-arrow-handle { opacity: 0.85; pointer-events: all; } }
+/* Touch: no hover, so a tap on an arrow selects it and only then does it show its two handles (rings that leave the
+   arrowhead visible); a wider invisible line makes it easy to hit. */
+.cl-arrow[data-selected] .cl-arrow-handle { pointer-events: all; opacity: 1; }
+.cl-arrow-handle { fill: transparent; }
+@media (pointer: coarse) { .cl-arrow-hit { stroke-width: 30px; } }
 .cl-arrow[data-dashed] .cl-arrow-line { stroke-dasharray: 5 5; }
 .cl-arrow[data-fresh], .cl-arrow[data-leaving] { opacity: 0; }
 .cl-arrow[data-live]:not([data-snapped]) .cl-arrow-line { opacity: 0.8; }
@@ -270,3 +275,24 @@
 /* A Mesh node has no input to lock, so it has no lock and its title pill may use the whole header. */
 .ui-window[data-kind="node"] .ui-window-lock { display: none; }
 .ui-window[data-kind="node"] .ui-window-pill { max-width: none; }
+
+/* The transparency comparison (canvas/mock/transparency.ts): busy content under four card samples and four window samples. */
+.cl-compare { position: absolute; inset: 0; z-index: 30; display: grid; align-content: center; overflow: hidden; background: linear-gradient(115deg, color-mix(in srgb, var(--mesh-1) 46%, var(--bg)), color-mix(in srgb, var(--mesh-2) 46%, var(--bg)) 35%, color-mix(in srgb, var(--mesh-3) 46%, var(--bg)) 70%, color-mix(in srgb, var(--mesh-4) 46%, var(--bg))); }
+.cl-compare-busy { position: absolute; inset: 0; margin: 0; padding: 16px 20px; overflow: hidden; color: var(--fg-2); font: var(--fw-body) 14px/1.5 var(--font-mono, var(--font-face)); white-space: pre; opacity: 0.95; }
+.cl-compare-busy .cl-c-prompt { color: var(--accent); }
+.cl-compare-busy .cl-c-ok { color: var(--ok); }
+.cl-compare-busy .cl-c-bad { color: var(--danger); }
+.cl-compare-grid { position: relative; display: grid; gap: 12px; width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+.cl-compare-h { margin: 8px 4px 0; padding: 3px 10px; width: max-content; border-radius: 999px; background: var(--overlay-solid); color: var(--fg); font: var(--ui-type-eyebrow); letter-spacing: 0.04em; text-transform: uppercase; }
+.cl-compare-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+@media (max-width: 720px) { .cl-compare-row { grid-template-columns: repeat(2, 1fr); } }
+.cl-compare-card, .cl-compare-window { display: grid; align-content: start; gap: 4px; min-height: 120px; padding: 14px; border-radius: var(--r-lg, 18px); border: 1px solid var(--overlay-line); font: var(--ui-type-label); }
+.cl-compare-window { box-shadow: var(--shadow); color: var(--fg); }
+.cl-compare-sample { margin-top: 6px; }
+.cl-compare-window .cl-c-prompt { color: var(--accent); }
+.cl-compare-window .cl-c-dim { color: var(--fg-2); }
+.cl-compare-close { position: absolute; top: calc(10px + env(safe-area-inset-top)); right: var(--gutter, 12px); z-index: 2; }
+
+/* Input locked to a terminal: touch on the strip does nothing (the terminal scrolls itself, terminal-touch.ts), so a
+   finger outside it, or one that runs past its end, cannot scroll the column or chain to the canvas (#113). */
+.cl-viewport[data-input-lock] .cl-col { touch-action: none; overflow-y: hidden; }

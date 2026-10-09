@@ -15,12 +15,18 @@ import { boxOf, type Metrics } from "../layout/geometry";
 import { MemoryCanvasStore } from "../model/store";
 import type { ViewId } from "../model/types";
 import { el } from "../dom";
-import { CONTAINERS, INITIAL_GRANTS, buildViews, type Role } from "./data";
+import { CONTAINERS, buildViews, type Role } from "./data";
+import { offerMeshView } from "../mesh/offer";
+import { DEFAULT_SESSION, createMockInventory } from "./inventory";
 import { createMockMesh } from "./mesh";
 import { createMockSessions } from "./sessions";
+import { onDemand } from "../../on-demand";
+import { SESSION_SCENES } from "./session-scene-list";
+import type { SessionScenes } from "./session-scenes.on-demand";
 import { createMockSettings } from "./settings";
 import { createMockSharing } from "./shares";
 import { createMockWorld } from "./world";
+import { mountTransparencyCompare } from "./transparency";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
 
@@ -32,7 +38,8 @@ interface Scene { name: string; hint: string; enter(): void }
 export async function mountMockup(core: CoreScreen, options: MockupOptions = {}): Promise<MockupController> {
   const stage = core.stage;
   const world = await createMockWorld(options.role ?? "operator", Boolean(options.role));
-  const sessions = createMockSessions(core, world);
+  const inventory = await createMockInventory(world);
+  const sessions = createMockSessions(core, world, inventory);
   const mesh = createMockMesh(world);
   const events = new AbortController();
   const signal = events.signal;
@@ -41,19 +48,22 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     float: true,
     dots: new URLSearchParams(location.search).get("dots") !== "0",
     adapters: {
-      sessions, mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
+      sessions, inventory, mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       addHost: () => core.toast.show({ message: "Add host is its own mockup (proto=addhost)." }),
     },
   });
   const cx = canvas.cx;
   const { camera, state } = cx;
+  const stopOffer = offerMeshView(cx, mesh);
   let sceneIndex = 0;
 
   // ---- building the world for a scene ---------------------------------------------------------------
   const build = (): void => {
-    world.grants = INITIAL_GRANTS.map((g) => ({ ...g }));
-    canvas.setViews((m: Metrics) => buildViews(world.role, m, mesh, world.screens, world.omit, sceneIndex === 6 && world.role === "operator"));
+    mesh.reset(); // the scene starts from its own mesh (and its grants)
+    inventory.reset();
+    const named = (host: string): { id: string; name: string } | undefined => { const id = DEFAULT_SESSION[host]; const rec = id ? inventory.get(host, id) : undefined; return rec ? { id: rec.id, name: rec.name } : undefined; };
+    canvas.setViews((m: Metrics) => buildViews(world.role, m, mesh, world.screens, world.omit, sceneIndex === 6 && world.role === "operator", named));
     cx.sharing?.reset();
   };
 
@@ -91,7 +101,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       enter() { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("console", true); } },
     { name: "Open from a container", hint: "Click a container: the top pill morphs into a floating terminal; the camera stays here. Expand it to fly into Console, or close it. The terminal has Split; the list does not.",
       enter() { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("containers", true); } },
-    { name: "Access by grants", hint: "The views a person sees come from their grants. Palette: Mockup, sign in as viewer, operator or new user.",
+    { name: "Who sees what", hint: "The views a person sees come from the access they have. Palette: Mockup, sign in as viewer, operator or new user.",
       enter() { world.omit = []; if (world.role === "operator" && !world.forcedRole) world.role = "viewer"; build(); if (world.role === "operator") { free(); overview(true); } else cx.nav.flyView("console", true); } },
     { name: "Structure", hint: "Drag a window by its pill: the others reflow and it lands with a bounce. Drag a view by its label: it snaps to the grid and pushes a neighbour aside. Snap is off here.",
       enter() {
@@ -123,9 +133,20 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   };
 
   // ---- palette rows and actions that exist only in the mockup ---------------------------------------
+  // The scenes' code loads the first time one runs.
+  let scenesLoaded: Promise<SessionScenes> | undefined;
+  const sessionScenes = {
+    run: async (n: number): Promise<void> => {
+      scenesLoaded ??= onDemand(() => import("./session-scenes.on-demand")).then((m) => m.installSessionScenes({ cx, inventory, rebuild: () => { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("console", true); } }));
+      await (await scenesLoaded).run(n);
+    },
+    entries: (): PaletteEntry[] => SESSION_SCENES.map((scene, i) => ({ group: "Mockup", glyph: "▷", label: `Mockup: sessions scene ${i + 1}`, hint: scene.hint, action: `proto:sessions-scene:${i + 1}` })),
+    dispose: (): void => { void scenesLoaded?.then((loaded) => loaded.dispose()); },
+  };
   const removeProvider = core.addPaletteProvider(() => {
-    const out: PaletteEntry[] = [];
+    const out: PaletteEntry[] = [...sessionScenes.entries()];
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
+    out.push({ group: "Mockup", glyph: "◇", label: "Mockup: transparency", hint: "all card and window levels side by side", action: "proto:transparency" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: view as asha", hint: "receives shared layouts", action: "proto:role:asha" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: view as kayg", hint: "the owner", action: "proto:role:operator" });
@@ -137,7 +158,9 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     const action = (event as CustomEvent<{ action?: string }>).detail?.action ?? "";
     const [prefix, kind, value] = action.split(":");
     if (prefix !== "proto") return;
-    if (kind === "devicechip") showContinueChip();
+    if (kind === "sessions-scene" && value) { void sessionScenes.run(Number(value)); return; }
+    if (kind === "transparency") mountTransparencyCompare(core);
+    else if (kind === "devicechip") showContinueChip();
     else if (kind === "scene" && value) goScene(Number(value) - 1);
     else if (kind === "role" && value) { world.role = value as Role; world.forcedRole = true; goScene(4); window.setTimeout(showContinueChip, 900); }
     else if (kind === "later") core.toast.show({ message: "Remote desktop arrives later.", tone: "ok" });
@@ -166,6 +189,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   // ---- start ----------------------------------------------------------------------------------------
   const startScene = Math.min(scenes.length - 1, Math.max(0, ((options.scene ?? 1) | 0) - 1));
   goScene(startScene);
+  const sessionsScene = Number(new URLSearchParams(location.search).get("sessions")) || 0;
+  if (sessionsScene) window.setTimeout(() => { void sessionScenes.run(sessionsScene); }, 400);
 
   const probe = {
     scene: () => sceneIndex + 1,
@@ -185,7 +210,20 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     canvasLock: () => ({ on: state.canvasLock, index: state.snapIdx, stops: (() => { const c = cx.views.get(state.currentView); return c ? cx.nav.stopsFor(c).lefts.length : 0; })(), view: state.currentView }),
     setCanvasLock: (on: boolean) => cx.nav.setCanvasLock(on),
     reachFor: () => cx.mesh?.reachFor()?.model.id,
+    /** The fake Mesh server and what the Mesh view has on screen (specs drive and read these). */
+    mesh: {
+      server: () => mesh.server,
+      status: () => mesh.status(),
+      pins: () => mesh.pins(),
+      stats: () => cx.mesh?.graphStats(),
+      reset: () => { mesh.reset(); },
+      source: () => mesh,
+      /** The saved canvas document (what a reload would restore). */
+      document: () => cx.adapters.store.load(),
+    },
     reachCount: () => cx.mesh?.reachCount() ?? 0,
+    sessions: () => ({ status: inventory.status(), hosts: inventory.hosts().map((host) => ({ host, sessions: inventory.list(host).map((s) => ({ id: s.id, name: s.name, state: s.state, activity: s.activity ?? null, pinned: s.pinned })) })) }),
+    runSessionScene: (n: number) => sessionScenes.run(n),
   };
   (window as unknown as { __tracerClusters?: typeof probe }).__tracerClusters = probe;
 
@@ -195,9 +233,13 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       window.clearInterval(streamTimer);
       window.clearInterval(seedTimer);
       removeProvider();
+      sessionScenes.dispose();
+      inventory.dispose();
       mockupTag.remove();
       chip?.remove();
+      stopOffer();
       canvas.dispose();
+      mesh.dispose();
       sessions.dispose();
       delete (window as unknown as { __tracerClusters?: unknown }).__tracerClusters;
     },

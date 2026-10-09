@@ -6,6 +6,15 @@ export interface BranchLeaf {
   glyph?: string;
   meta?: string;
   disabled?: boolean;
+  /**
+   * What the leaf is, for items that live in states (a session is open, detached or exited): drawn by CSS
+   * as the leaf's marker in place of the text glyph, so every list of such items marks them the same way.
+   */
+  state?: "open" | "detached" | "exited";
+  /** A caption between groups of leaves inside one section (a host's name above its sessions): not selectable, no branch. */
+  heading?: boolean;
+  /** A quiet note after the label: new output (a dot), or the result of a finished command. */
+  mark?: "output" | "ok" | "fail";
 }
 
 export interface BranchSection {
@@ -26,6 +35,7 @@ export interface BranchedMenu {
   dispose(): void;
 }
 
+const MARK_NAME = { output: "new output", ok: "command finished", fail: "command failed" } as const;
 const RADIUS = 8;
 const STUB = 12;
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -86,20 +96,36 @@ function makeSection(section: BranchSection): HTMLElement {
   const list = el("ul", "bm-list");
   list.setAttribute("role", "group");
   for (const leaf of section.leaves) {
+    if (leaf.heading) {
+      const caption = el("li", "bm-row bm-subhead");
+      caption.setAttribute("role", "presentation");
+      caption.textContent = leaf.label;
+      list.append(caption);
+      continue;
+    }
     const row = el("li", "bm-row");
     row.setAttribute("role", "treeitem");
     const button = el("button", "bm-leaf");
     button.type = "button";
     button.dataset.id = leaf.id;
     button.disabled = Boolean(leaf.disabled);
-    button.setAttribute("aria-label", `${leaf.label}${leaf.meta ? `, ${leaf.meta}` : ""}`);
+    const spoken = [leaf.label, leaf.state, leaf.mark ? MARK_NAME[leaf.mark] : "", leaf.meta].filter(Boolean);
+    button.setAttribute("aria-label", spoken.join(", "));
     const glyph = el("span", "glyph");
-    glyph.textContent = leaf.glyph ?? "›_";
+    if (leaf.state) { glyph.className = "glyph ui-state-dot"; glyph.dataset.state = leaf.state; }
+    else glyph.textContent = leaf.glyph ?? "›_";
     const label = el("span", "bm-label");
     label.textContent = leaf.label;
     const leafMeta = el("span", "bm-meta");
     leafMeta.textContent = leaf.meta ?? "";
-    button.append(glyph, label, leafMeta);
+    button.append(glyph, label);
+    if (leaf.mark) {
+      const mark = el("span", "ui-mark");
+      mark.dataset.mark = leaf.mark;
+      mark.setAttribute("aria-hidden", "true");
+      button.append(mark);
+    }
+    button.append(leafMeta);
     row.append(button);
     list.append(row);
   }

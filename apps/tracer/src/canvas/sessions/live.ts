@@ -119,7 +119,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         if (this.wantsFocus) client.focus();
         if (first) options.onFirstClient?.(client);
       } catch {
-        if (!this.disposed) core.toast.show({ message: "Could not start the terminal.", tone: "error", duration: 5000 });
+        if (!this.disposed) core.toast.show({ message: "Could not open the terminal. Try again.", tone: "error", duration: 5000 });
       }
     }
 

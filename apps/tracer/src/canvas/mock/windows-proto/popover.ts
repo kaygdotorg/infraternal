@@ -63,7 +63,7 @@ function rows(section: Section, host: CanvasHost, session: CanvasSession): KeyVa
       { key: "Transport", value: host.connection.transport },
       { key: "Mesh", value: host.connection.mesh },
       { key: "Certificate", value: host.connection.certificate },
-      { key: "Round trip", value: host.connection.roundTrip },
+      { key: "Connection delay", value: host.connection.roundTrip },
       { key: "Traffic", value: host.connection.bytes },
       { key: "Reconnects", value: String(host.connection.reconnects) },
     ]);

@@ -3,7 +3,7 @@
  * is a window; these functions fill a window's body. Sections that already exist as shared
  * components (Toolbar, Shortcuts, About) are filled by their own `render`; the rest live here:
  * Appearance (theme, font, background and card transparency), Devices, Account and the
- * admin-only placeholders (Users, Grants, Discovery sources).
+ * admin-only placeholders (Users, Access, Found hosts).
  *
  * Rows are the shared kinds: a tappable row with a tick for the current choice, a key/value
  * list for facts, icon buttons with the warm tooltip, and the compact confirmation for a
@@ -13,13 +13,14 @@
 import { createCapsuleTabs } from "./capsule-tabs";
 import { createKeyValueList } from "./kv-list";
 import { mountConfirmTip } from "./tooltip";
+import { LEVEL_NAMES } from "./themes";
 
 export interface AppearanceApi {
   themes: Array<{ id: string; name: string; dark: boolean; bg: string; accent: string }>;
   fonts: Array<{ id: string; label: string; hint: string }>;
   /** The choices in force now. */
-  state(): { theme: string; font: string; glass: number; background: string };
-  /** Runs a palette action (`theme:ink`, `font:geist-mono`, `glass:2`, `bg:mesh`). */
+  state(): { theme: string; font: string; card: number; windows: number; background: string };
+  /** Runs a palette action (`theme:ink`, `font:geist-mono`, `card:2`, `bg:mesh`). */
   act(action: string): void;
   /** Called after any appearance change; returns a remover. */
   onChange(listener: () => void): () => void;
@@ -71,13 +72,18 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
   const font = choices("Font", api.fonts.map((f) => ({ id: f.id, label: f.label, hint: f.hint })), "font", () => api.state().font);
   const background = document.createElement("section");
   background.append(heading("Background"));
-  const bgTabs = createCapsuleTabs([{ id: "none", label: "Plain" }, { id: "mesh", label: "Mesh" }], api.state().background, (id) => api.act(`bg:${id}`), "Background");
+  const bgTabs = createCapsuleTabs([{ id: "none", label: "Plain" }, { id: "soft", label: "Soft" }, { id: "mesh", label: "Mesh" }], api.state().background, (id) => api.act(`bg:${id}`), "Background");
   background.append(bgTabs.root);
-  const glass = document.createElement("section");
-  glass.append(heading("Card transparency"));
-  const glassTabs = createCapsuleTabs([{ id: "1", label: "Solid" }, { id: "2", label: "Soft" }, { id: "3", label: "Clear" }, { id: "4", label: "Glass" }], String(api.state().glass), (id) => api.act(`glass:${id}`), "Card transparency");
-  glass.append(glassTabs.root);
-  root.append(theme, font, background, glass);
+  const levels = LEVEL_NAMES.map((label, i) => ({ id: String(i + 1), label }));
+  const card = document.createElement("section");
+  card.append(heading("Card transparency"));
+  const cardTabs = createCapsuleTabs(levels, String(api.state().card), (id) => api.act(`card:${id}`), "Card transparency");
+  card.append(cardTabs.root);
+  const windows = document.createElement("section");
+  windows.append(heading("Window transparency"));
+  const windowTabs = createCapsuleTabs(levels, String(api.state().windows), (id) => api.act(`windows:${id}`), "Window transparency");
+  windows.append(windowTabs.root);
+  root.append(theme, font, background, card, windows);
 
   const paint = (): void => {
     const s = api.state();
@@ -89,11 +95,12 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
       }
     }
     bgTabs.select(s.background, true);
-    glassTabs.select(String(s.glass), true);
+    cardTabs.select(String(s.card), true);
+    windowTabs.select(String(s.windows), true);
   };
   paint();
   const off = api.onChange(paint);
-  return () => { off(); bgTabs.dispose(); glassTabs.dispose(); root.remove(); };
+  return () => { off(); bgTabs.dispose(); cardTabs.dispose(); windowTabs.dispose(); root.remove(); };
 }
 
 export type DeviceKind = "phone" | "tablet" | "laptop" | "desktop";
@@ -153,8 +160,8 @@ export function renderDevices(container: HTMLElement, api: DevicesApi): () => vo
       };
       button("Jump to its view", ICON_JUMP, () => api.jump(d.view));
       if (!d.current) button("Sign out this device", ICON_OUT, (b) => mountConfirmTip(b, {
-        label: `Sign out ${d.name}`, message: `Sign out ${d.name}?`, detail: "It will need a passkey to sign in again.",
-        confirmLabel: "Sign out", cancelLabel: "Cancel", onConfirm: () => { api.signOut(d); paint(); },
+        label: `Sign out ${d.name}`, title: `Sign out ${d.name}?`, effect: "That device will be signed out and will need your passkey to sign in again.",
+        named: true, confirmLabel: "Sign out device", cancelLabel: "Keep signed in", onConfirm: () => { api.signOut(d); paint(); },
       }));
       list.append(li);
     }
