@@ -295,7 +295,12 @@ impl SshTransport for TrustedOpenSsh {
     }
 }
 
-fn public_record(line: &[u8], lookup: &str) -> Option<String> {
+/// Parse bounded keyscan syntax for the already validated lookup.
+/// Cryptographic key validation belongs to the selected SSH engine.
+/// Robustness tests call this exact production decoder.
+#[doc(hidden)]
+#[must_use]
+pub fn public_record(line: &[u8], lookup: &str) -> Option<String> {
     let text = std::str::from_utf8(line).ok()?;
     let fields: Vec<_> = text.split_whitespace().collect();
     if fields.len() != 3
