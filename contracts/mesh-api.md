@@ -142,6 +142,12 @@ storage errors produce sanitized `error` events (`invalid input`, `forbidden`,
 A server `error` ends that subscription. Clients withdraw publication before
 notifying the view; an earlier in-flight list cannot republish inventory or
 a replacement error afterward. A new watch is required to retry.
+Mesh database work runs separately from shared terminal/control dispatch. Each
+socket admits one active request and four queued requests, with four buffered
+replies and at most 32 Mesh subscriptions. At most two Mesh operations run
+across sockets, reserving deployed SQLite pool capacity for authority reads. Saturation returns `mesh unavailable`
+without waiting for queue capacity. Closing the socket cancels pending Mesh work.
+
 Reusing a `sub_id` replaces its existing Mesh filter. Closing the WebSocket
 ends its subscriptions; v1 has no separate unsubscribe frame.
 

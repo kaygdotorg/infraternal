@@ -66,6 +66,7 @@ pub(crate) struct WebSocketState {
     auth: Auth,
     pool: SqlitePool,
     mesh: MeshService,
+    mesh_work: Arc<Semaphore>,
     agent: EmbeddedAgent,
     #[cfg(test)]
     handshake_timeout: Duration,
@@ -81,10 +82,19 @@ impl WebSocketState {
     /// Create bounded socket admission around the configured auth and agent services.
     pub(crate) fn new(auth: Auth, pool: SqlitePool, agent: EmbeddedAgent) -> Self {
         let mesh = MeshService::new(pool.clone());
+        // Keep authority reads available while multiple sockets wait for a WAL
+        // writer. Production has eight slots; narrow fixtures retain one worker.
+        let mesh_capacity = pool
+            .options()
+            .get_max_connections()
+            .saturating_sub(2)
+            .clamp(1, 2);
+        let mesh_work = Arc::new(Semaphore::new(mesh_capacity as usize));
         Self {
             auth,
             pool,
             mesh,
+            mesh_work,
             agent,
             #[cfg(test)]
             handshake_timeout: HANDSHAKE_TIMEOUT,
@@ -194,7 +204,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<&str> {
     Some(value)
 }
 
-// This select loop keeps websocket writes, bounded agent output and inbound frames under one backpressure policy.
+// Mesh database work has independent bounded admission; this loop dispatches shared control and terminal frames.
 #[allow(clippy::too_many_lines)]
 async fn run_socket(
     socket: WebSocket,
@@ -212,8 +222,6 @@ async fn run_socket(
     let mut recovery_events = state.auth.recovery_events();
     let mut recovery_subscribed = false;
     let mut recovery_snapshot = RecoverySnapshot::Unread;
-    let mut mesh_updates = state.mesh.subscribe();
-    let mut mesh_subscriptions = HashMap::<u32, MeshFilter>::new();
     let mut revocations = state.auth.revocation_events();
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
@@ -280,6 +288,62 @@ async fn run_socket(
 
     let (output_tx, mut output_rx) =
         mpsc::channel::<(u32, TerminalOutput)>(OUTPUT_CHANNEL_CAPACITY);
+    // A single active request plus four queued requests preserves call ordering.
+    // Input and output bounds are independent of terminal queues and other sockets.
+    let (mesh_tx, mut mesh_rx) = mpsc::channel::<Bytes>(4);
+    let (mesh_reply_tx, mut mesh_reply_rx) = mpsc::channel::<Message>(4);
+    let worker_state = Arc::clone(&state);
+    let worker_user = user_id.clone();
+    let worker_token = session_token.clone();
+    let mesh_worker = tokio::spawn(async move {
+        let mut mesh_updates = worker_state.mesh.subscribe();
+        let mut mesh_subscriptions = HashMap::<u32, MeshFilter>::new();
+        let mut encode = Vec::with_capacity(4096);
+        let sink = futures_util::sink::unfold(mesh_reply_tx, |tx, message| async move {
+            tx.send(message)
+                .await
+                .map_err(|_| axum::Error::new(std::io::Error::other("socket ended")))?;
+            Ok::<_, axum::Error>(tx)
+        });
+        tokio::pin!(sink);
+        loop {
+            let result = tokio::select! {
+                wire = mesh_rx.recv() => {
+                    let Some(wire) = wire else { break; };
+                    while_authorized(&worker_state, &worker_user, &worker_token, true,
+                        async {
+                            let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
+                            handle_mesh_frame(wire, &worker_state, &worker_user, &worker_token,
+                                &mut mesh_subscriptions, &mut sink, &mut encode).await
+                        }
+                    ).await
+                }
+                change = mesh_updates.recv(), if !mesh_subscriptions.is_empty() => {
+                    match change {
+                        Ok(change) => while_authorized(&worker_state, &worker_user, &worker_token, true,
+                            async {
+                                let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
+                                send_mesh_change(&worker_state, &worker_user, &change,
+                                    &mut mesh_subscriptions, &mut sink, &mut encode).await
+                            }
+                        ).await,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =>
+                            while_authorized(&worker_state, &worker_user, &worker_token, true,
+                                async {
+                                    let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
+                                    send_mesh_resync(&worker_state, &worker_user,
+                                        &mut mesh_subscriptions, &mut sink, &mut encode).await
+                                }
+                            ).await,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
+                    }
+                }
+            };
+            if result.is_err() {
+                break;
+            }
+        }
+    });
     let mut output_open = true;
     let mut receive_deadline = None;
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
@@ -289,24 +353,16 @@ async fn run_socket(
         .unwrap_or_else(|()| tokio::time::Instant::now());
     loop {
         tokio::select! {
+            Some(message) = mesh_reply_rx.recv() => {
+                if while_authorized(&state, &user_id, &session_token, true,
+                    send_message(&mut sink, message)
+                ).await.is_err() { break; }
+            }
             changed = recovery_events.changed(), if recovery_subscribed => {
                 if changed.is_err() { break; }
                 if while_authorized(&state, &user_id, &session_token, false,
                     send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
                 ).await.is_err() { break; }
-            }
-            change = mesh_updates.recv(), if !mesh_subscriptions.is_empty() => {
-                let outcome = match change {
-                    Ok(change) => while_authorized(&state, &user_id, &session_token, true,
-                        send_mesh_change(&state, &user_id, &change, &mut mesh_subscriptions, &mut sink, &mut encode)
-                    ).await,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => while_authorized(
-                        &state, &user_id, &session_token, true,
-                        send_mesh_resync(&state, &user_id, &mut mesh_subscriptions, &mut sink, &mut encode)
-                    ).await,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
-                };
-                if outcome.is_err() { loop_result = Err(()); break; }
             }
             changed = revocations.changed() => {
                 if changed.is_err() { break; }
@@ -355,13 +411,30 @@ async fn run_socket(
                         }).await;
                         break;
                     }
+                    if let Ok(decoded) = decode_muxed_frame(&wire)
+                        && decoded.stream_id == CONTROL_STREAM {
+                        let refusal = match decoded.frame {
+                            Frame::Call { call_id, action_id, .. } if action_id.starts_with("mesh.") =>
+                                Some(Frame::Result { call_id, ok: false, json: MeshApiError::Storage.wire_error() }),
+                            Frame::Subscribe { sub_id, .. } => Some(Frame::Event {
+                                sub_id, event_json: br#"{"type":"error","error":"mesh unavailable"}"#,
+                            }),
+                            _ => None,
+                        };
+                        if let Some(refusal) = refusal {
+                            if (wire.len() > 65_536 || mesh_tx.try_send(wire.clone()).is_err())
+                                && while_authorized(&state, &user_id, &session_token, true,
+                                    send_frame(&mut sink, CONTROL_STREAM, &refusal, &mut encode)
+                                ).await.is_err() { break; }
+                            continue;
+                        }
+                    }
                     if while_authorized(&state, &user_id, &session_token, true, handle_client_frame(
                             wire,
                             &state,
                             &user_id,
                             &session_token,
                             &connection_id,
-                            &mut mesh_subscriptions,
                             &mut attachments,
                             &output_tx,
                             &mut sink,
@@ -385,6 +458,7 @@ async fn run_socket(
             }
         }
     }
+    mesh_worker.abort();
     drop(attachments);
     if loop_result.is_err() && session_is_live(&state, &user_id, &session_token).await {
         let _ = tokio::time::timeout(
@@ -1001,18 +1075,15 @@ fn token_hash(token: &[u8; 32]) -> [u8; 32] {
     Sha256::digest(token).into()
 }
 
-// Each browser frame is validated here and routed without allocating a second terminal payload.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments)]
-async fn handle_client_frame<K>(
+// Mesh work runs in its own ordered, bounded socket worker [D11]. Slow database
+// writes and subscriber reads must never park the terminal/control dispatch loop.
+async fn handle_mesh_frame<K>(
     wire: Bytes,
     state: &WebSocketState,
     user_id: &str,
     session_token: &str,
-    connection_id: &[u8; 16],
     mesh_subscriptions: &mut HashMap<u32, MeshFilter>,
-    attachments: &mut HashMap<u32, ClientAttachment>,
-    output_tx: &mpsc::Sender<(u32, TerminalOutput)>,
     sink: &mut K,
     encode: &mut Vec<u8>,
 ) -> Result<(), ()>
@@ -1021,23 +1092,21 @@ where
 {
     let decoded = decode_muxed_frame(&wire).map_err(|_| ())?;
     let stream_id = decoded.stream_id;
-    let passthrough = wire.clone();
-    // The surrounding watchdog authenticates every frame, including attach, input and credit.
     match decoded.frame {
-        Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
-            send_frame(
-                sink,
-                CONTROL_STREAM,
-                &Frame::Pong { nonce, sent_us },
-                encode,
-            )
-            .await
-        }
         Frame::Subscribe {
             sub_id,
             filter_json,
         } if stream_id == CONTROL_STREAM => {
             mesh_subscriptions.remove(&sub_id);
+            if mesh_subscriptions.len() >= 32 {
+                return send_mesh_event(
+                    sink,
+                    sub_id,
+                    &mesh_error_event(MeshApiError::Storage),
+                    encode,
+                )
+                .await;
+            }
             match serde_json::from_slice::<MeshSubscribeFilter>(filter_json) {
                 Ok(request) if request.topic == "mesh" => {
                     let filter = MeshFilter {
@@ -1072,6 +1141,101 @@ where
                     .await
                 }
             }
+        }
+        Frame::Call {
+            call_id,
+            action_id,
+            input_json,
+        } if stream_id == CONTROL_STREAM && action_id.starts_with("mesh.") => {
+            let now = unix_seconds()?;
+            // Destructive policy and inventory edits need the same fresh passkey
+            // authority as account changes [28]; an unlocked socket alone is insufficient.
+            let requires_fresh = matches!(
+                action_id,
+                "mesh.node.delete"
+                    | "mesh.tag.delete"
+                    | "mesh.tag.member.remove"
+                    | "mesh.grant.move"
+                    | "mesh.grant.delete"
+                    | "mesh.role.define"
+                    | "mesh.role.assign"
+            );
+            let value =
+                if requires_fresh && state.auth.fresh_session(session_token, now).await.is_err() {
+                    Err(MeshApiError::Denied)
+                } else {
+                    state
+                        .mesh
+                        .execute(user_id, action_id, input_json, now)
+                        .await
+                };
+            if !session_is_live(state, user_id, session_token).await {
+                return Err(());
+            }
+            match value {
+                Ok(value) => {
+                    let json = serde_json::to_vec(&value).map_err(|_| ())?;
+                    send_frame(
+                        sink,
+                        CONTROL_STREAM,
+                        &Frame::Result {
+                            call_id,
+                            ok: true,
+                            json: &json,
+                        },
+                        encode,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    send_frame(
+                        sink,
+                        CONTROL_STREAM,
+                        &Frame::Result {
+                            call_id,
+                            ok: false,
+                            json: error.wire_error(),
+                        },
+                        encode,
+                    )
+                    .await
+                }
+            }
+        }
+        _ => Err(()),
+    }
+}
+
+// Each browser frame is validated here and routed without allocating a second terminal payload.
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
+async fn handle_client_frame<K>(
+    wire: Bytes,
+    state: &WebSocketState,
+    user_id: &str,
+    session_token: &str,
+    connection_id: &[u8; 16],
+    attachments: &mut HashMap<u32, ClientAttachment>,
+    output_tx: &mpsc::Sender<(u32, TerminalOutput)>,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let decoded = decode_muxed_frame(&wire).map_err(|_| ())?;
+    let stream_id = decoded.stream_id;
+    let passthrough = wire.clone();
+    // The surrounding watchdog authenticates every frame, including attach, input and credit.
+    match decoded.frame {
+        Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
+            send_frame(
+                sink,
+                CONTROL_STREAM,
+                &Frame::Pong { nonce, sent_us },
+                encode,
+            )
+            .await
         }
         Frame::Call {
             call_id,
@@ -1132,66 +1296,6 @@ where
                             call_id,
                             ok: false,
                             json: br#"{"error":"terminal unavailable"}"#,
-                        },
-                        encode,
-                    )
-                    .await
-                }
-            }
-        }
-        Frame::Call {
-            call_id,
-            action_id,
-            input_json,
-        } if stream_id == CONTROL_STREAM && action_id.starts_with("mesh.") => {
-            let now = unix_seconds()?;
-            // Destructive policy and inventory edits need the same fresh passkey
-            // authority as account changes [28]; an unlocked socket alone is insufficient.
-            let requires_fresh = matches!(
-                action_id,
-                "mesh.node.delete"
-                    | "mesh.tag.delete"
-                    | "mesh.tag.member.remove"
-                    | "mesh.grant.move"
-                    | "mesh.grant.delete"
-                    | "mesh.role.define"
-                    | "mesh.role.assign"
-            );
-            let value =
-                if requires_fresh && state.auth.fresh_session(session_token, now).await.is_err() {
-                    Err(MeshApiError::Denied)
-                } else {
-                    state
-                        .mesh
-                        .execute(user_id, action_id, input_json, now)
-                        .await
-                };
-            if !session_is_live(state, user_id, session_token).await {
-                return Err(());
-            }
-            match value {
-                Ok(value) => {
-                    let json = serde_json::to_vec(&value).map_err(|_| ())?;
-                    send_frame(
-                        sink,
-                        CONTROL_STREAM,
-                        &Frame::Result {
-                            call_id,
-                            ok: true,
-                            json: &json,
-                        },
-                        encode,
-                    )
-                    .await
-                }
-                Err(error) => {
-                    send_frame(
-                        sink,
-                        CONTROL_STREAM,
-                        &Frame::Result {
-                            call_id,
-                            ok: false,
-                            json: error.wire_error(),
                         },
                         encode,
                     )

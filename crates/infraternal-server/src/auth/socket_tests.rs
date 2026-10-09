@@ -635,3 +635,6 @@ mod fresh_delete;
 
 #[path = "socket_tests/scale.rs"]
 mod scale;
+
+#[path = "socket_tests/review_control.rs"]
+mod review_control;
