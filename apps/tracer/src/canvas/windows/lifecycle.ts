@@ -4,12 +4,14 @@
  * - Opening adds a window in a new column at the end of the Console view; the others glide aside (FLIP).
  * - Closing never ends the session (D178): the binding is disposed, the session keeps running, detached. What
  *   remains in the column takes the freed height; an emptied column goes and its neighbours close the gap, all as
- *   one FLIP; the camera re-snaps to the nearest stop that still exists.
- * - Four actions (D212). A split divides the window's own space: `down` halves its height, `right` halves its width
- *   and needs the column to itself (a flat layout, not built yet, would let a stacked window divide sideways). A new
- *   window opens a full-size window beside it (`right`, a new column) or under it (`below`, which grows the column).
- *   Every action opens a new shell on the same host, no prompt. Splits play the droplet in their direction; new windows
- *   glide the others aside. Keyboard actions are instant. Splits are windows in the one structure: no nesting.
+ *   one FLIP; the camera re-snaps to the nearest stop that still exists. A window in a group re-tiles through the grid
+ *   (layout/grid.ts), which gives back exactly what its split took.
+ * - Four actions (D212). A split divides the window's own space: `down` halves its height, `right` halves its width.
+ *   Split right in a stacked column makes a group: the window's column halves and the windows around it span both
+ *   halves, so nothing else moves (layout/grid.ts holds the rules). A new window opens a full-size window beside it
+ *   (`right`, after its whole group) or under it (`below`, which grows the column). Every action opens a new shell on
+ *   the same host, no prompt. Splits play the droplet in their direction and the other windows glide (FLIP) on a mouse
+ *   action. Keyboard actions are instant. Splits are windows in the one structure: no nesting.
  *
  * Every layout change measures, changes, then plays (layout/flip.ts); the terminal refits once at the new size.
  */
@@ -18,7 +20,10 @@ import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
 import { loadDroplet } from "../layout/droplet-handle";
 import { COLUMN_GAP } from "../layout/geometry";
+import { columnEls, topItem } from "../layout/columns";
+import { groupOf, newRight, removeWin, runsOf, splitDown, splitRight, type Col } from "../layout/grid";
 import type { ViewId, WindowModel } from "../model/types";
+import { applyCols, freshColumnId, fromGrid, readColumns } from "../views/tracks";
 import { coarse, reduced } from "../dom";
 import { endActivity, setActivity } from "../../perf-activity";
 import { makeWindow, setActive } from "./frame";
@@ -33,8 +38,7 @@ export interface WindowsModule {
   close(rec: WinRec): void;
   /**
    * Divides a terminal window's own space into two windows (D212): `down` halves its height, `right` halves its
-   * width. A new shell takes the other half. `right` needs the window to have its column to itself: a window that
-   * shares its column cannot divide sideways without a flat layout, so it resolves false and says why (a toast).
+   * width. A new shell takes the other half. Works in a stacked column too: the windows around it span the new half.
    * `instant`: no motion at all (a keyboard action); the layout and the focus land in the same frame.
    */
   split(rec: WinRec, direction: "down" | "right", instant?: boolean): Promise<boolean>;
@@ -83,10 +87,10 @@ export function createWindows(cx: Ctx): WindowsModule {
     const before = flip.measure(flip.targets(c.colsEl));
     const rec = makeWindow(cx, c, m);
     c.wins.set(m.id, rec);
-    const colEl = cx.view.newCol({ id: `c${++state.serial}`, w, wins: [m] });
+    const colEl = cx.view.newCol({ id: freshColumnId(cx, c), w, wins: [m] });
     colEl.append(rec.card.root);
-    const kids = c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col");
-    c.colsEl.insertBefore(colEl, kids[index] ?? null);
+    const kids = columnEls(c.colsEl);
+    c.colsEl.insertBefore(colEl, (kids[index] && topItem(c.colsEl, kids[index]!)) ?? null);
     c.empty?.remove(); delete c.empty;
     cx.view.geometry(c);
     cx.view.settle(c.view.id);
@@ -102,7 +106,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   const placeOf = (rec: WinRec): Placed => {
     const root = rec.card.root;
     const colEl = root.parentElement as HTMLElement;
-    const cols = [...rec.owner.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")];
+    const cols = columnEls(rec.owner.colsEl);
     const above = root.previousElementSibling as HTMLElement | null;
     return { view: rec.owner.view.id, model: rec.model, colIndex: Math.max(0, cols.indexOf(colEl)), aboveId: above?.dataset.windowId, w: Number(colEl.dataset.w) || state.metrics.colW };
   };
@@ -112,7 +116,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     const inv = cx.adapters.inventory;
     if (!c || c.wins.has(at.model.id)) return;
     const above = at.aboveId ? c.wins.get(at.aboveId) : undefined;
-    const rec = above ? undefined : addColumn(c, at.model, Math.min(at.colIndex, c.colsEl.querySelectorAll(":scope > .cl-col").length), at.w);
+    const rec = above ? undefined : addColumn(c, at.model, Math.min(at.colIndex, columnEls(c.colsEl).length), at.w);
     if (above) void splitInto(above, "down", at.model);
     const shown = rec ?? c.wins.get(at.model.id);
     if (!shown) return;
@@ -135,9 +139,13 @@ export function createWindows(cx: Ctx): WindowsModule {
     if (state.activeWin === rec) setActive(cx, undefined);
     const root = rec.card.root;
     const finish = (): void => {
+      // The model as it stands with this window in it: a window in a group (or one that spans) re-tiles through the grid.
+      const colEl = root.parentElement as HTMLElement | null;
+      const cols = readColumns(cx, c);
+      const at = colEl ? columnEls(c.colsEl).indexOf(colEl) : -1;
+      const grouped = at >= 0 && (!!(rec.model.span && rec.model.span > 1) || !!groupOf(runsOf(cols), at));
       const before = flip.measure(flip.targets(c.colsEl));
       c.wins.delete(rec.model.id);
-      const colEl = root.parentElement as HTMLElement | null;
       const freed = root.offsetHeight + COLUMN_GAP;
       rec.stopResize?.();
       cx.visibility.unwatch(rec);
@@ -147,12 +155,13 @@ export function createWindows(cx: Ctx): WindowsModule {
       // The structure re-tiles: what remains in the column takes the freed height, an emptied column goes
       // and its neighbours close the gap. Everything animates as one move (a FLIP on the same spring as
       // every other layout move); the terminal refits once, at the new size.
-      if (colEl) {
+      if (grouped) applyCols(cx, c, fromGrid(c, removeWin(cols, rec.model.id, COLUMN_GAP)));
+      else if (colEl) {
         const rest = [...colEl.querySelectorAll<HTMLElement>(":scope > .ui-window")];
         if (!rest.length) {
           // A split half that empties gives its width back to the other half, so the layout returns to what it was.
-          const partner = colEl.dataset.half ? c.colsEl.querySelector<HTMLElement>(`:scope > .cl-col[data-half="${colEl.dataset.half}"]`) : null;
-          if (partner && partner !== colEl) {
+          const partner = colEl.dataset.half ? columnEls(c.colsEl).find((x) => x.dataset.half === colEl.dataset.half && x !== colEl) ?? null : null;
+          if (partner) {
             const w = (Number(partner.dataset.w) || state.metrics.colW) + COLUMN_GAP + (Number(colEl.dataset.w) || state.metrics.colW);
             partner.dataset.w = String(w); partner.style.setProperty("--w", `${w}px`); delete partner.dataset.half;
           }
@@ -188,18 +197,20 @@ export function createWindows(cx: Ctx): WindowsModule {
   };
 
   /**
-   * A window's column is its own when no other window stands in it: only then can its width divide between two
-   * columns without moving or resizing anything beside it (the footprint stays the same).
+   * A grid change (D212): measures the windows for the motion (none for a keyboard action), lets `change` decide the new
+   * model from what the DOM holds, writes it into the DOM, reads it back and plays the motion.
    */
-  const ownsColumn = (rec: WinRec): boolean => {
-    const colEl = rec.card.root.parentElement;
-    return !!colEl && colEl.querySelectorAll(":scope > .ui-window").length === 1;
+  const reshape = (c: ViewRec, instant: boolean, change: () => Col[]): void => {
+    const before = instant ? undefined : flip.measure(flip.targets(c.colsEl));
+    const next = change();
+    applyCols(cx, c, fromGrid(c, next));
+    cx.view.geometry(c);
+    if (before) flip.play(before);
   };
 
   const split = async (rec: WinRec, direction: "down" | "right", instant = false): Promise<boolean> => {
     if (!isTerminal(rec)) return false;
     // Refused before any shell is opened: a split that cannot divide must not leave a session behind.
-    if (direction === "right" && !ownsColumn(rec)) return false;
     await splitInto(rec, direction, cx.adapters.sessions.open(rec.model.host, { from: rec.model }), instant);
     return true;
   };
@@ -210,35 +221,23 @@ export function createWindows(cx: Ctx): WindowsModule {
     const c = rec.owner;
     const root = rec.card.root;
     const colEl = root.parentElement as HTMLElement;
-    const before = flip.measure(flip.targets(c.colsEl));
-    if (side === "right") {
-      const next = cx.view.newCol({ id: `c${++state.serial}`, w: Number(colEl.dataset.w) || state.metrics.colW, wins: [nm] });
-      const b = makeWindow(cx, c, nm);
-      c.wins.set(nm.id, b);
-      next.append(b.card.root);
-      colEl.after(next);
-    } else {
-      // The windows already there keep their heights: a window that flexes would shrink to its minimum next to a full
-      // size one. Their heights are pinned in pixels, in the model too, so a saved layout reopens the same way.
-      for (const w of colEl.querySelectorAll<HTMLElement>(":scope > .ui-window")) {
-        const h = w.offsetHeight;
-        w.style.height = `${h}px`; w.style.flex = "none";
-        const pinned = c.wins.get(w.dataset.windowId ?? "")?.model;
-        if (pinned) pinned.h = h;
+    // Below, the full-size window is one column height (the view's content height): the windows already there keep their
+    // heights, pinned in pixels, so the column grows and nothing shrinks to make room (D212).
+    const b = makeWindow(cx, c, side === "below" ? { ...nm, h: 1 } : nm);
+    c.wins.set(nm.id, b);
+    reshape(c, instant, () => {
+      const cols = readColumns(cx, c);
+      if (side === "right") return newRight(cols, rec.model.id, { id: nm.id, colId: freshColumnId(cx, c) }, Number(colEl.dataset.w) || state.metrics.colW);
+      const at = columnEls(c.colsEl).indexOf(colEl);
+      const run = runsOf(cols).find((r) => at >= r.from && at <= r.to);
+      for (let j = run?.from ?? at; j <= (run?.to ?? at); j++) for (const m of cols[j]?.wins ?? []) {
+        const el = c.wins.get(m.id)?.card.root;
+        if (el && (m.rows ?? 1) === 1) m.h = el.offsetHeight;
       }
-      // Full size: a ratio of the column's height (1), so it is saved as "one column height" and the column grows by it.
-      const b0: WindowModel = { ...nm, h: 1 };
-      const b = makeWindow(cx, c, b0);
-      c.wins.set(nm.id, b);
-      root.after(b.card.root);
-    }
-    cx.view.geometry(c);
-    cx.view.settle(c.view.id);
-    cx.tree.render();
-    const b = c.wins.get(nm.id)!;
+      return splitDown(cols, rec.model.id, { id: nm.id }, undefined, 1);
+    });
     rec.binding?.refit();
-    // A new window by mouse glides the others aside (FLIP), as a new column always has. A keyboard action is instant.
-    if (!instant) flip.play(before);
+    // A keyboard action is instant: the new window takes the keys in the same frame. A mouse action glides (above).
     land(b, instant);
     b.binding?.refit();
     cx.store.changed();
@@ -256,36 +255,24 @@ export function createWindows(cx: Ctx): WindowsModule {
   };
 
   /**
-   * Divides a window: `down` stacks the new window below in the same column, `right` gives it the other half of the
-   * column (the window shares its column with nothing, see `ownsColumn`). The droplet plays in the split's direction.
-   * Splits are windows in the one structure: no nesting, and the total footprint does not change.
+   * Divides a window: `down` stacks the new window below it (the same columns), `right` gives it the other half of its
+   * column, and the windows around it span both halves (D212). The droplet plays in the split's direction. Splits are
+   * windows in the one structure: no nesting, and the total footprint does not change.
    */
   const splitInto = async (rec: WinRec, direction: "down" | "right", nm: WindowModel, instant = false): Promise<void> => {
     const c = rec.owner;
     const root = rec.card.root;
-    const colEl = root.parentElement as HTMLElement;
     const b = makeWindow(cx, c, nm);
     c.wins.set(nm.id, b);
-    if (direction === "down") {
-      const half = Math.round((root.offsetHeight - COLUMN_GAP) / 2);
-      root.style.height = `${half}px`; root.style.flex = "none";
-      b.card.root.style.height = `${half}px`; b.card.root.style.flex = "none";
-      root.after(b.card.root);
-    } else {
-      // The column's width splits into two columns with the gap between them: the pair is exactly the old width.
-      const w = Number(colEl.dataset.w) || state.metrics.colW;
-      const first = Math.round((w - COLUMN_GAP) / 2);
-      colEl.dataset.w = String(first);
-      colEl.style.setProperty("--w", `${first}px`);
-      const next = cx.view.newCol({ id: `c${++state.serial}`, w: w - COLUMN_GAP - first, wins: [nm] });
-      // The two halves name each other: closing one of them gives its width back to the other (see `close`).
-      const pair = `p${++state.serial}`;
-      colEl.dataset.half = pair; next.dataset.half = pair;
-      next.append(b.card.root);
-      colEl.after(next);
-    }
-    cx.view.geometry(c);
-    cx.view.settle(c.view.id);
+    // The window's height before the split: a window in a group is its band, which the split halves.
+    const h0 = root.offsetHeight;
+    reshape(c, instant, () => {
+      const cols = readColumns(cx, c);
+      if (direction === "right") return splitRight(cols, rec.model.id, { id: nm.id, colId: freshColumnId(cx, c), pair: `p${++state.serial}` }, COLUMN_GAP);
+      const half = Math.round((h0 - COLUMN_GAP) / 2);
+      return splitDown(cols, rec.model.id, { id: nm.id }, half, half);
+    });
+    const colEl = root.parentElement as HTMLElement;
     cx.tree.render();
     rec.binding?.refit();
     land(b, instant);
@@ -358,7 +345,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     // The window carries the session's name from the first frame (the inventory knows it).
     const named = inv.get(host, sessionId)?.name;
     if (named && !model.session) model.session = named;
-    const rec = existing ?? addColumn(c, model, c.colsEl.querySelectorAll(":scope > .cl-col").length, state.metrics.colW, false, true);
+    const rec = existing ?? addColumn(c, model, columnEls(c.colsEl).length, state.metrics.colW, false, true);
     if (existing) pulse(rec);
     setActive(cx, rec);
     cx.nav.focusWindow(rec);
