@@ -353,3 +353,29 @@ for (const mode of ["fresh", "locked"] as const) {
   });
 }
 
+
+test("a canvas flow remains nonmodal", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await expect(wizard(page)).toHaveAttribute("aria-modal", "false");
+});
+
+test("Escape in the palette leaves the add-host flow open", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#palette-input")).toBeVisible();
+  await page.locator("#palette-input").focus();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#palette-input")).toBeHidden();
+  await expect(wizard(page)).toBeVisible();
+});
+
+
+test("Tab can leave a canvas flow", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await wizard(page).getByRole("button", { name: "Close", exact: true }).focus();
+  await page.keyboard.press("Shift+Tab");
+  expect(await wizard(page).evaluate((element) => element.contains(document.activeElement))).toBe(false);
+});

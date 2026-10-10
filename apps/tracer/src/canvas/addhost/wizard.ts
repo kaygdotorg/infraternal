@@ -137,7 +137,7 @@ export class Wizard {
     this.root.innerHTML = `
       <div class="ah-stage">
         <div class="ah-scrim"></div>
-        <section class="ah-float ui-overlay-surface" data-overlay-size="large" role="dialog" aria-modal="true" aria-label="Add hosts">
+        <section class="ah-float ui-overlay-surface" data-overlay-size="large" role="dialog" aria-modal="${this.root.classList.contains("ah-overlay")}" aria-label="Add hosts">
           <button class="ah-close" type="button" data-ah="close" aria-label="Close" data-tip="Close">${svg(ICON.close, "")}</button>
           <div class="ah-scroll" data-canvas-scroll><div class="ah-pages"></div></div>
           <footer class="ah-foot"></footer>
@@ -1025,8 +1025,8 @@ export class Wizard {
   private readonly onKeyDown = (event: KeyboardEvent): void => {
     if (this.closing) return;
     if (event.key === "Escape") { event.stopPropagation(); event.preventDefault(); this.requestClose(); return; }
-    // The card is modal: Tab stays inside it.
-    if (event.key === "Tab") {
+    // Only an overlay is modal; a canvas flow participates in ordinary focus order.
+    if (event.key === "Tab" && this.root.classList.contains("ah-overlay")) {
       const focusable = [...this.float.querySelectorAll<HTMLElement>("button:not([disabled]):not([hidden]), input:not([disabled]):not([tabindex='-1']), textarea:not([tabindex='-1']), summary, [tabindex='0']")]
         .filter((item) => item.offsetParent !== null);
       if (!focusable.length) return;
