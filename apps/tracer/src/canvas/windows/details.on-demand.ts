@@ -26,6 +26,7 @@ interface DetailsInput {
   windowId: string;
   /** Read at open and each time a tab is shown. */
   read: () => DetailsFacts;
+  action?: { label: string; run(anchor: HTMLElement): void };
 }
 
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -72,6 +73,15 @@ export function openDetailsPopover(
   const list = createKeyValueList(`${first.title} details`);
   const scroll = root.querySelector<HTMLElement>(".canvas-popover-scroll")!;
   scroll.append(list.root);
+  if (input.action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ui-button";
+    button.dataset.button = "secondary";
+    button.textContent = input.action.label;
+    button.addEventListener("click", () => input.action?.run(button));
+    root.append(button);
+  }
   let scrolled = false;
   scroll.addEventListener("scroll", () => { scrolled = true; }, { passive: true });
   let selected = first.sections[0]?.id ?? "";
@@ -178,7 +188,7 @@ export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
       open?.close("keyboard");
       if (!source.facts(rec)) return;
       let stop = (): void => {};
-      const popover = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => source.facts(rec)! }, how, () => {
+      const popover = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => source.facts(rec)!, ...(rec.model.hostId && cx.adapters.hostRemoval?.label() ? { action: { label: cx.adapters.hostRemoval.label()!, run: (anchor: HTMLElement) => cx.adapters.hostRemoval?.remove(rec.model.hostId!, rec.model.host, anchor) } } : {}) }, how, () => {
         stop();
         if (open === popover) open = undefined;
       });
