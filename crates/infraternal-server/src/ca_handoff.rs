@@ -128,3 +128,7 @@ fn receive(fd: &impl std::os::fd::AsFd) -> Result<CaMaterial, CaError> {
 #[cfg(test)]
 #[path = "ca_handoff_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ca_handoff_shipping_tests.rs"]
+mod shipping_tests;

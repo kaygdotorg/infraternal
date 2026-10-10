@@ -79,3 +79,127 @@ fn parser_property_corpus_is_bounded_and_never_accepts_trailing_bytes() {
     trailing.push(0);
     assert!(parse(&trailing).is_err());
 }
+
+#[test]
+fn exec_child() {
+    use std::os::unix::process::CommandExt;
+    let Ok(stage) = std::env::var("INFRATERNAL_HANDOFF_TEST_STAGE") else {
+        return;
+    };
+    if let Some(next) = stage.strip_prefix("send-") {
+        let source = source();
+        let socket = if matches!(next, "truncated" | "wrong-version") {
+            let mut frame = encode(&source.load().unwrap()).unwrap();
+            if next == "truncated" {
+                frame.truncate(HEADER - 1);
+            } else {
+                frame[4] = 2;
+            }
+            let (mut writer, reader) = UnixStream::pair().unwrap();
+            writer.write_all(&frame).unwrap();
+            drop(writer);
+            reader
+        } else {
+            prepare(&source).unwrap()
+        };
+        let issuer = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            source.issuer().unwrap().to_der().unwrap(),
+        );
+        let error = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "ca_handoff::tests::exec_child", "--nocapture"])
+            .env("INFRATERNAL_HANDOFF_TEST_STAGE", next)
+            // The certificate is public; private material exists only on stdin.
+            .env("INFRATERNAL_HANDOFF_TEST_PUBLIC_ISSUER", issuer)
+            .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                socket,
+            )))
+            .exec();
+        panic!("exec failed: {}", error.kind());
+    }
+    if stage == "foreign" {
+        let input = std::io::stdin();
+        assert!(receive(&input).is_err());
+        return;
+    }
+    let public = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        std::env::var("INFRATERNAL_HANDOFF_TEST_PUBLIC_ISSUER").unwrap(),
+    )
+    .unwrap();
+    let cold = MemoryCaSource::cold_start(X509::from_der(&public).unwrap());
+    if stage == "killed" {
+        let input = std::io::stdin();
+        let peer = getsockopt(&input, sockopt::PeerCredentials).unwrap();
+        assert_eq!(peer.pid(), nix::unistd::Pid::this().as_raw());
+        let mut partial = Zeroizing::new([0u8; 26]);
+        assert_eq!(nix::unistd::read(&input, &mut *partial).unwrap(), 26);
+        nix::sys::signal::kill(nix::unistd::Pid::this(), nix::sys::signal::Signal::SIGKILL)
+            .unwrap();
+        unreachable!();
+    }
+    if matches!(stage.as_str(), "truncated" | "wrong-version" | "cold") {
+        assert!(accept_stdin(&cold).is_err());
+        assert!(cold.load().is_err());
+        assert!(*cold.subscribe_locked().borrow());
+        return;
+    }
+    accept_stdin(&cold).unwrap();
+    assert!(crate::ca::CertificateAuthority::from_source(&cold).is_ok());
+    assert!(!*cold.subscribe_locked().borrow());
+}
+
+#[test]
+fn real_exec_retains_unlock_but_another_process_cannot_import_the_channel() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "ca_handoff::tests::exec_child", "--nocapture"])
+        .env("INFRATERNAL_HANDOFF_TEST_STAGE", "send-receive")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "real exec child failed");
+    let socket = prepare(&source()).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "ca_handoff::tests::exec_child", "--nocapture"])
+        .env("INFRATERNAL_HANDOFF_TEST_STAGE", "foreign")
+        .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+            socket,
+        )))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "foreign process refusal failed");
+}
+
+#[test]
+fn real_exec_failures_and_killed_receiver_never_unlock_a_cold_successor() {
+    use std::os::unix::process::ExitStatusExt;
+    for stage in ["send-truncated", "send-wrong-version", "send-killed"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "ca_handoff::tests::exec_child", "--nocapture"])
+            .env("INFRATERNAL_HANDOFF_TEST_STAGE", stage)
+            .output()
+            .unwrap();
+        if stage == "send-killed" {
+            assert_eq!(output.status.signal(), Some(9));
+        } else {
+            assert!(
+                output.status.success(),
+                "invalid frame imported during exec"
+            );
+        }
+    }
+    let issuer = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        source().issuer().unwrap().to_der().unwrap(),
+    );
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "ca_handoff::tests::exec_child", "--nocapture"])
+        .env("INFRATERNAL_HANDOFF_TEST_STAGE", "cold")
+        .env("INFRATERNAL_HANDOFF_TEST_PUBLIC_ISSUER", issuer)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "cold successor unexpectedly unlocked"
+    );
+}

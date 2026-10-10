@@ -144,3 +144,10 @@ path = "fuzz_targets/remote_removal_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "remote_ca_handoff_decode"
+path = "fuzz_targets/remote_ca_handoff_decode.rs"
+test = false
+doc = false
+bench = false

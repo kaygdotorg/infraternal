@@ -133,21 +133,37 @@ fn current_binary() -> io::Result<PathBuf> {
 }
 
 fn executable(binary: &Path) -> io::Result<()> {
+    // Parent components can escape a private ancestor after it was validated.
+    // Require a rooted path with no such escape before tracking protection.
+    if !binary.is_absolute()
+        || binary
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
     let owner = nix::unistd::Uid::effective().as_raw();
-    for (index, path) in binary.ancestors().enumerate() {
+    let ancestors: Vec<_> = binary.ancestors().collect();
+    let mut private = false;
+    for (index, path) in ancestors.iter().enumerate().rev() {
         let metadata = std::fs::symlink_metadata(path)?;
-        // Validate the original path before canonicalizing: a symlink in an
-        // untrusted directory could redirect even to a root-owned executable
-        // that prints stdin. Only the service UID and root may replace code.
+        // Validate the original path before canonicalizing. Root-to-leaf
+        // traversal tracks an owned private ancestor: directories beneath it
+        // cannot be reached by another local user, even with group-write bits.
+        // Files must still be immutable to group/other and never set-ID.
         if (metadata.uid() != owner && metadata.uid() != 0)
-            || metadata.mode() & 0o022 != 0
             || if index == 0 {
-                !metadata.is_file() || metadata.mode() & 0o111 == 0 || metadata.mode() & 0o6000 != 0
+                !metadata.is_file() || metadata.mode() & 0o111 == 0 || metadata.mode() & 0o6022 != 0
             } else {
                 !metadata.is_dir()
+                    || metadata.mode() & 0o002 != 0
+                    || (metadata.mode() & 0o020 != 0 && !private)
             }
         {
             return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        if index != 0 && metadata.uid() == owner && metadata.mode() & 0o777 == 0o700 {
+            private = true;
         }
     }
     Ok(())
@@ -268,3 +284,7 @@ pub(crate) fn replace(
         1,
     )
 }
+
+#[cfg(test)]
+#[path = "restart_tests.rs"]
+mod tests;
