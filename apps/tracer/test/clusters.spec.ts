@@ -1084,9 +1084,9 @@ test("window header actions are one pill: as tall as the title pill, on its line
   const geometry = (pg: Page, id: string) => pg.evaluate((windowId) => {
     const w = document.querySelector(`.ui-window[data-window-id="${windowId}"]`)!;
     const a = w.querySelector(".ui-window-actions")!.getBoundingClientRect(), t = w.querySelector(".ui-window-pill")!.getBoundingClientRect();
-    const buttons = [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => b.dataset.action);
-    const gaps = [...w.querySelectorAll(".ui-window-action")].map((b) => b.getBoundingClientRect()).map((r, i, all) => (i ? r.left - all[i - 1]!.right : 0)).slice(1);
-    return { aTop: a.top, aH: a.height, tTop: t.top, tH: t.height, buttons, gaps, tip: [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => b.dataset.tip) };
+    const buttons = [...w.querySelectorAll<HTMLElement>(".ui-window-action:not(.ui-window-more)")].map((b) => b.dataset.action);
+    const gaps = [...w.querySelectorAll(".ui-window-action:not(.ui-window-more)")].map((b) => b.getBoundingClientRect()).map((r, i, all) => (i ? r.left - all[i - 1]!.right : 0)).slice(1);
+    return { aTop: a.top, aH: a.height, tTop: t.top, tH: t.height, buttons, gaps, tip: [...w.querySelectorAll<HTMLElement>(".ui-window-action:not(.ui-window-more)")].map((b) => b.dataset.tip) };
   }, id);
   const d = await geometry(page, "w-nix-cache");
   expect(d.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);

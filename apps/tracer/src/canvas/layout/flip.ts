@@ -64,6 +64,9 @@ export function createFlip(zoom: () => number, tick: () => void): Flip {
       const { css, duration } = springEasing(cfg);
       for (const [n, a] of first) {
         if (!n.isConnected) continue;
+        // An element with no box before the change (a column of a group, which has none of its own) has no place to
+        // animate from: animating it from the origin is what made a dissolved group's columns jump across the view.
+        if (a.width === 0 && a.height === 0) continue;
         const b = n.getBoundingClientRect();
         const dx = (a.left - b.left) / z, dy = (a.top - b.top) / z;
         const sw = scale && b.width ? a.width / b.width : 1, sh = scale && b.height ? a.height / b.height : 1;
