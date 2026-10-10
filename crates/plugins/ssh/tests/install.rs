@@ -816,3 +816,45 @@ async fn refused_previous_service_stop_only_removes_staging() {
     assert!(!restart.exists());
     assert!(!fixture.base().join(".bootstrap-lock").exists());
 }
+
+/// A bounded command failure isolates step attribution from filesystem rollback.
+struct FailAt(std::sync::atomic::AtomicUsize, usize);
+impl SshSession for FailAt {
+    fn run<'a>(&'a self, _: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == self.1 {
+                Err(Failure::install("The authenticated SSH command failed."))
+            } else {
+                Ok(CommandOutput { stdout: Vec::new() })
+            }
+        })
+    }
+}
+#[tokio::test]
+async fn command_failure_names_upload_join_install_and_start_separately() {
+    let fixture = Fixture::new();
+    let upload = Installation::new(
+        Arc::new(FailAt(0.into(), 0)),
+        &fixture.target,
+        &fixture.join,
+    )
+    .unwrap();
+    let failed = upload.stage(&fixture.binary).await.unwrap_err();
+    assert_eq!(
+        serde_json::to_value(failed).unwrap()["failed_step"],
+        "upload"
+    );
+    for (call, step) in [(0, "join"), (1, "install"), (2, "start")] {
+        let transaction = Installation::new(
+            Arc::new(FailAt(0.into(), call)),
+            &fixture.target,
+            &fixture.join,
+        )
+        .unwrap();
+        let failed = transaction
+            .enroll_and_start(&fixture.join)
+            .await
+            .unwrap_err();
+        assert_eq!(serde_json::to_value(failed).unwrap()["failed_step"], step);
+    }
+}
