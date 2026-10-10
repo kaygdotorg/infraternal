@@ -3,7 +3,8 @@ import { tick } from "./tick";
 
 export interface ToastAction {
   label: string;
-  onSelect(): void;
+  /** Preserve pointer versus keyboard activation when an action opens another shared surface. */
+  onSelect(event?: MouseEvent): void;
 }
 
 export interface ToastMessage {
@@ -49,7 +50,7 @@ export function mountToast(parent: HTMLElement): ToastController {
   parent.append(host);
 
   let hideTimer = 0;
-  let selectAction: (() => void) | undefined;
+  let selectAction: ToastAction["onSelect"] | undefined;
   const dismiss = (): void => {
     window.clearTimeout(hideTimer);
     hideTimer = 0;
@@ -59,10 +60,10 @@ export function mountToast(parent: HTMLElement): ToastController {
       if (host.dataset.open === "false") host.hidden = true;
     }, 190);
   };
-  const onAction = (): void => {
+  const onAction = (event: MouseEvent): void => {
     const run = selectAction;
     dismiss();
-    run?.();
+    run?.(event);
   };
   action.addEventListener("click", onAction);
 
