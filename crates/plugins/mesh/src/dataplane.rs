@@ -66,5 +66,8 @@ pub struct Chunk {
     pub addresses: crate::policy::model::Addresses,
     pub default_policy: crate::dataplane::DefaultPolicy,
     pub upserted: BTreeMap<NodeId, PeerPolicy>,
+    /// Continuations union port grants into a staged peer; they never apply a partial policy.
+    #[serde(default)]
+    pub merged: BTreeMap<NodeId, PeerPolicy>,
     pub removed: Vec<NodeId>,
 }

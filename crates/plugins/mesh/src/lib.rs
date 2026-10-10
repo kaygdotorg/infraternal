@@ -15,3 +15,5 @@ pub use socket::{MeshPlugin, parse_subscription};
 
 /// Public-only configuration shared by the coordinator and node component.
 pub mod dataplane;
+
+pub mod configuration;
