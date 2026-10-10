@@ -35,7 +35,7 @@ static APPROXIMATE_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 pub fn approximate_snapshots_total() -> u64 {
     APPROXIMATE_SNAPSHOTS.load(Ordering::Relaxed)
 }
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
@@ -67,6 +67,8 @@ enum Message {
     Exited(u32, Vec<u8>, oneshot::Sender<()>),
     Pong(u64, u64),
     Close(u32, &'static str),
+    /// Final ended/not-found answer shared with #158.
+    Ended(u32),
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -174,6 +176,17 @@ async fn writer(
             }
             Message::Pong(nonce, sent_us) => {
                 tx.send(socket, 0, &Frame::Pong { nonce, sent_us }).await?;
+            }
+            Message::Ended(stream) => {
+                tx.send(
+                    socket,
+                    stream,
+                    &Frame::Close {
+                        code: infraternal_protocol::CLOSE_SESSION_GONE,
+                        reason: infraternal_protocol::SESSION_GONE_REASON,
+                    },
+                )
+                .await?;
             }
             Message::Close(stream, reason) => {
                 tx.send(socket, stream, &Frame::Close { code: 1, reason })
@@ -392,7 +405,8 @@ async fn run_channel(
                             if streams.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS || streams.contains_key(&stream) {
                                 return Err(sessions::invalid("terminal stream already attached or limit reached"));
                             }
-                            let path = registry.get(session_id).ok_or_else(|| sessions::invalid("unknown terminal session"))?.clone();
+                            let path = registry.get(session_id).cloned().unwrap_or_else(|| state.join("sessions")
+                                .join(format!("{}.sock", uuid::Uuid::from_bytes(*session_id).simple())));
                             let id = *session_id;
                             let (commands, rx) = session_commands::channel();
                             let (cancel, cancelled) = oneshot::channel();
@@ -577,6 +591,49 @@ async fn input_state(link: &mut Link) -> io::Result<u64> {
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim input state timed out"))?
 }
 
+/// Final event is ordered through the writer before ownership can be released.
+async fn exited(
+    tx: &mpsc::Sender<Message>,
+    stream: u32,
+    id: [u8; 16],
+    status: i32,
+    final_seq: u64,
+) -> io::Result<()> {
+    let json = serde_json::to_vec(
+        &serde_json::json!({"type":"terminal.exited", "session_id":uuid::Uuid::from_bytes(id), "status":status, "final_seq":final_seq}),
+    )?;
+    let (delivered, delivery) = oneshot::channel();
+    emit(tx, Message::Exited(stream, json, delivered)).await?;
+    delivery
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
+}
+
+/// An absent rendezvous is final; every other connection error remains transient.
+async fn relink(
+    path: &std::path::Path,
+    id: [u8; 16],
+    stream: u32,
+    tx: &mpsc::Sender<Message>,
+) -> io::Result<Option<Link>> {
+    match Link::connect(path.to_path_buf(), id, stream).await {
+        Ok(link) => Ok(Some(link)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            if let Some((status, seq)) = infraternal_shim::ended::read(path)? {
+                exited(tx, stream, id, status, seq).await?;
+            }
+            emit(tx, Message::Ended(stream)).await?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn terminal(
     path: PathBuf,
@@ -587,7 +644,30 @@ async fn terminal(
     mut commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
 ) -> io::Result<()> {
-    let mut session = Some(Link::connect(path.clone(), id, stream).await?);
+    // Install ownership before output requests can exhaust credit. Dropping this
+    // guard on cancellation/ordered exit releases only this window, even when
+    // several windows or daemon connections share a shim.
+    let Some(link) = relink(&path, id, stream, &tx).await? else {
+        return Ok(());
+    };
+    let mut owner = if link.session.supports_owner {
+        match sessions::own(path.clone(), id).await {
+            Ok(owner) => owner,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                relink(&path, id, stream, &tx).await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    let mut session = Some(link);
     if session
         .as_ref()
         .is_none_or(|s| s.session.caps & SEQUENCED_INPUT == 0)
@@ -703,7 +783,9 @@ async fn terminal(
             deadline = None;
         }
         if output.needs_snapshot() && session.is_none() {
-            let mut next = Link::connect(path.clone(), id, stream).await?;
+            let Some(mut next) = relink(&path, id, stream, &tx).await? else {
+                return Ok(());
+            };
             let written = input_state(&mut next).await?;
             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
             // A credit deadline discards only the daemon's pending frame,
@@ -714,6 +796,22 @@ async fn terminal(
             session = Some(next);
         }
         tokio::select! {
+            result = async {
+                if let Some(owner) = &mut owner {
+                    let mut byte = [0; 1];
+                    owner.peer.read(&mut byte).await
+                } else { std::future::pending().await }
+            } => {
+                if result? != 0 { return Err(sessions::invalid("unexpected ownership data")); }
+                // At the bound the shim writes the exit record before closing
+                // either link. Do not wait for more credit to report ended state.
+                if let Some((status, seq)) = infraternal_shim::ended::read(&path)? {
+                    exited(&tx, stream, id, status, seq).await?;
+                    emit(&tx, Message::Ended(stream)).await?;
+                    return Ok(());
+                }
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
             command = commands.next() => {
                 let Some(command) = command else { return Ok(()); };
                 match command {
@@ -722,7 +820,7 @@ async fn terminal(
                     other => {
                         let detached = session.is_none();
                         if detached {
-                            let mut next = Link::connect(path.clone(), id, stream).await?;
+                            let Some(mut next) = relink(&path, id, stream, &tx).await? else { return Ok(()); };
                                             input_state(&mut next).await?;
                             session = Some(next);
                         }
@@ -764,13 +862,7 @@ async fn terminal(
                     frame @ (Shim::Output(..) | Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => pending = Some(frame),
                     Shim::InputAck(seq) => emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?,
                     Shim::Exited(status, final_seq) => {
-                        let json = serde_json::to_vec(&serde_json::json!({"type":"terminal.exited", "session_id":uuid::Uuid::from_bytes(id), "status":status, "final_seq":final_seq}))?;
-                        // A reaped shim closes its socket immediately. Retire only
-                        // after the ordered exit reaches leg B: an EOF-derived
-                        // priority Close must never overtake this final event.
-                        let (delivered, delivery) = oneshot::channel();
-                        emit(&tx, Message::Exited(stream, json, delivered)).await?;
-                        delivery.await.map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+                        exited(&tx, stream, id, status, final_seq).await?;
                         return Ok(());
                     }
                     Shim::Error(1 | 2, _) => {
