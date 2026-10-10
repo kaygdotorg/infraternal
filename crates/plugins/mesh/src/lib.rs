@@ -1,4 +1,4 @@
-//! Houses the Mesh coordinator server feature and future node component under one plugin id [198,201].
+//! Houses the Mesh coordinator and Linux node component behind removable plugin features [198,201].
 
 #[cfg(feature = "server")]
 pub mod api;
@@ -44,3 +44,6 @@ pub mod node_actions;
 
 #[cfg(feature = "server")]
 pub mod settings;
+
+#[cfg(feature = "server")]
+pub mod node_coordination;

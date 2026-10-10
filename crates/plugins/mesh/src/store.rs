@@ -126,10 +126,17 @@ impl Store {
     /// Compile a consistent current configuration and persist every new allocation before delivery.
     /// # Errors
     /// Refuses absent server identity, invalid inventory, allocation exhaustion or storage errors.
-    pub async fn config(&self, node: NodeId) -> Result<Config, &'static str> {
-        let (coordinator, endpoints, default, revision) = self.load().await?;
-        let mut config = configuration::compile(&coordinator, node, default, &endpoints)
-            .map_err(|_| "Mesh configuration unavailable.")?;
+    pub async fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
+        use crate::{api::MeshApiError, policy::model::MeshError};
+        let (coordinator, endpoints, default, revision) =
+            self.load().await.map_err(|_| MeshApiError::Storage)?;
+        let mut config =
+            configuration::compile(&coordinator, node, default, &endpoints).map_err(|error| {
+                match error {
+                    MeshError::UnknownNode => MeshApiError::NotFound,
+                    _ => MeshApiError::Storage,
+                }
+            })?;
         config.version = revision;
         Ok(config)
     }
