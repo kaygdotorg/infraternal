@@ -31,7 +31,7 @@ test("clicks and shortcuts draw no focus ring; Tab does", async ({ page }) => {
   await page.keyboard.press("Escape");
   expect((await focusedOutline(page)).ring).toBe(false);
 
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   expect(await focusedOutline(page)).toEqual({ id: "palette-input", ring: false });
   await page.keyboard.press("Escape");
   expect((await focusedOutline(page)).ring).toBe(false);

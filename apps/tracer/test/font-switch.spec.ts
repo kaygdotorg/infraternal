@@ -39,7 +39,7 @@ test("a font chosen in Settings, Appearance reaches the interface, a window body
   await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft");
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(1000);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("settings: appearance");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(1500);
@@ -56,7 +56,7 @@ test("a font choice reaches the interface, a window body and the live terminal",
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(1500);
   for (const font of FONTS) {
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await page.keyboard.type(font.label);
     await page.keyboard.press("Enter");
     await expect.poll(() => page.evaluate(() => document.documentElement.dataset.font), { timeout: 15_000 }).toBe(font.id);
@@ -73,7 +73,7 @@ test("the chosen font survives a reload", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft");
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("JetBrains Mono");
   await page.keyboard.press("Enter");
   await expectFont(page, FONTS[1]!, "palette");

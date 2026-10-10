@@ -64,7 +64,7 @@ const nodeIds = (page: Page): Promise<string[]> => page.locator('.ui-window[data
 const centre = async (page: Page, sel: string): Promise<{ x: number; y: number }> => { const b = (await page.locator(sel).first().boundingBox())!; return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
 const sub = (page: Page, host: string): Promise<string> => page.locator(`.ui-window[data-window-id="n-${host}"] .cl-node-sub`).innerText();
 async function intoMesh(page: Page): Promise<void> {
-  await page.keyboard.press("Control+3");
+  await page.keyboard.press("Control+Shift+Digit3");
   await page.waitForTimeout(1000);
 }
 /** Drags an arrow's end (`head` or `tail`) off its node and onto `to` (or onto empty canvas below), then lets go. */
@@ -401,11 +401,11 @@ test.describe("access", () => {
     const ids = (): Promise<string[]> => probe(page, (p) => p.views().map((v) => v.id));
     expect(await ids()).toContain("mesh");
     // ⌘3, the sidebar tree, the view switcher and the palette all reach it.
-    await page.keyboard.press("Control+3");
+    await page.keyboard.press("Control+Shift+Digit3");
     await expect.poll(() => probe(page, (p) => p.canvasLock().view)).toBe("mesh");
-    await page.keyboard.press("Control+1");
+    await page.keyboard.press("Control+Shift+Digit1");
     await expect.poll(() => probe(page, (p) => p.canvasLock().view)).toBe("console");
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await page.keyboard.type("Go to Mesh");
     await expect(page.locator(".palette-result, [role='option']").filter({ hasText: "Go to Mesh" }).first()).toBeVisible();
     await page.keyboard.press("Enter");
@@ -416,7 +416,7 @@ test.describe("access", () => {
     await server(page, (s) => s.setAccess({ view: false, manageGrants: false }));
     await expect.poll(ids).not.toContain("mesh");
     await expect.poll(() => probe(page, (p) => p.canvasLock().view)).toBe("console"); // it was open: the camera goes home
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await page.keyboard.type("Go to Mesh");
     await expect(page.locator(".palette-result, [role='option']").filter({ hasText: "Go to Mesh" })).toHaveCount(0);
     await page.keyboard.press("Escape");
@@ -439,7 +439,7 @@ test.describe("access", () => {
     await open(page, "&mesh=denied");
     expect(await probe(page, (p) => p.views().map((v) => v.id))).not.toContain("mesh");
     expect(await probe(page, (p) => p.mesh.status())).toBe("unavailable");
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await page.keyboard.type("Mesh");
     await expect(page.locator(".palette-result, [role='option']").filter({ hasText: "Go to Mesh" })).toHaveCount(0);
   });

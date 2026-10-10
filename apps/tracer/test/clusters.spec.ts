@@ -34,7 +34,7 @@ test("the six scenes load from the palette and the mockup tag, without a page er
   page.on("pageerror", (e) => errors.push(e.message));
   await open(page, 1);
   await expect(page.locator(".cl-mockup")).toHaveText(/mockup/i);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("mockup: scene");
   await expect(page.getByText("Mockup: scene 4 – open from a container")).toBeVisible();
   await page.keyboard.press("Escape");
@@ -66,7 +66,7 @@ test("overview: three views, thumbnails, a hover summary, and the views listed i
   await expect(page.locator("#tree .bm-sec")).toHaveCount(4);
   await page.locator("#sidebar-toggle").click();
   expect((await probe(page, (p) => p.canvasLock())).on).toBe(false);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("go to");
   await expect(page.locator(".palette-result, [role='option']").filter({ hasText: "Go to Mesh" }).first()).toBeVisible();
   await page.keyboard.press("Control+a");
@@ -83,7 +83,7 @@ test("fly in: a view click springs the camera in and the windows go live above 6
   // Flying in turns snap on.
   expect((await probe(page, (p) => p.canvasLock())).on).toBe(true);
   // Control+2 is the same camera spring to the second view.
-  await page.keyboard.press("Control+2");
+  await page.keyboard.press("Control+Shift+Digit2");
   await expect.poll(async () => { const c = await probe(page, (p) => p.camera()); const v = (await probe(page, (p) => p.views())).find((x) => x.id === "containers")!; return Math.abs(c.cy - (v.y + v.h / 2)) < 300; }, { timeout: 4000 }).toBe(true);
 });
 
@@ -95,7 +95,7 @@ test("D194: terminal windows draw no arrows and have no connector; arrows live o
   expect(await page.locator(".cl-reach .cl-arrow, .cl-edge, .ui-window[data-kind=\"terminal\"] .cl-port").count()).toBe(0);
   // The arrows that exist are in the Mesh view, and the connector is on its cards.
   expect(await page.locator('.cl[data-view="console"] .cl-arrow').count()).toBe(0);
-  await page.keyboard.press("Control+3");
+  await page.keyboard.press("Control+Shift+Digit3");
   await page.waitForTimeout(1000);
   expect(await page.locator('.cl[data-view="mesh"] .cl-arrow').count()).toBeGreaterThan(0);
   expect(await page.locator('.cl[data-view="mesh"] .ui-window[data-kind="node"] .cl-port').count()).toBeGreaterThan(0);
@@ -136,7 +136,7 @@ test("split right divides the window beside it, split down stacks below it, from
   expect(Math.abs(a1.w - (a0.w - 12) / 2)).toBeLessThan(2);
   expect(Math.abs(created.w - a1.w)).toBeLessThan(2);
   // Split down from the shortcut (Ctrl+Alt+Shift+D here; the default is platform dependent).
-  await page.keyboard.press("Control+Alt+Shift+D");
+  await page.keyboard.press("Control+Shift+E");
   await expect.poll(count).toBe(n0 + 2);
   await page.waitForTimeout(1200);
   // The newest window (highest serial) is the one the last split made; it sits below its parent, not at the top of a column.
@@ -146,7 +146,7 @@ test("split right divides the window beside it, split down stacks below it, from
   });
   expect(below.y).toBeGreaterThan(a1.y + 20);
   // Split right from the palette and the shortcut.
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("split right");
   await expect(page.locator(".palette .result", { hasText: "Split right" })).toBeVisible();
   await page.keyboard.press("Enter");
@@ -202,7 +202,7 @@ test("the dots sit on the gradient: the gradient shows everywhere, the dot layer
 
 test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to another node and asks before moving; dropping on empty canvas asks to remove", async ({ page }) => {
   await open(page, 6);
-  await page.keyboard.press("Control+3"); // fly into Mesh
+  await page.keyboard.press("Control+Shift+Digit3"); // fly into Mesh
   await page.waitForTimeout(900);
   const grantsOf = () => probe(page, (p) => p.grants());
   const centre = async (sel: string) => { const b = (await page.locator(sel).first().boundingBox())!; return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
@@ -259,7 +259,7 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
 
 test("mesh: dragging an arrow's end shows the real arrow, snaps within the radius onto the node's edge, and lets go beyond it", async ({ page }) => {
   await open(page, 6);
-  await page.keyboard.press("Control+3");
+  await page.keyboard.press("Control+Shift+Digit3");
   await page.waitForTimeout(900);
   const centre = async (sel: string) => { const b = (await page.locator(sel).first().boundingBox())!; return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
   const mid = await centre('.cl[data-view="mesh"] .cl-arrow[data-grant="g3"] .cl-arrow-hit');
@@ -313,7 +313,7 @@ test("scrolling past the ends of a view never leaves it, and the pill always nam
   });
   const NAMES: Record<string, string> = { console: "Console", containers: "Containers", mesh: "Mesh", settings: "Settings" };
   await page.mouse.move(640, 400);
-  for (const key of ["Control+1", "Control+2", "Control+3", "Control+4"]) {
+  for (const key of ["Control+Shift+Digit1", "Control+Shift+Digit2", "Control+Shift+Digit3", "Control+Shift+Digit4"]) {
     await page.keyboard.press(key);
     await page.waitForTimeout(1300);
     const start = await state();
@@ -364,7 +364,7 @@ test("container shell: the camera stays, the pill morphs into a floating termina
 test("the palette opens a shell by name from anywhere: in Console the camera flies to it", async ({ page }) => {
   await open(page, 2);
   await expect.poll(async () => (await probe(page, (p) => p.camera())).z, { timeout: 5000 }).toBeGreaterThan(0.9);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("build");
   await expect(page.getByText("Open shell on build-01")).toBeVisible();
   await expect(page.getByText("arrives later").first()).toBeVisible();
@@ -386,7 +386,7 @@ test("access by grants: a viewer sees only Console with two hosts; an operator s
   await open(page, 5);
   expect((await probe(page, (p) => p.views())).map((v) => v.id)).toEqual(["console", "settings"]);
   expect((await probe(page, (p) => p.views())).find((v) => v.id === "console")!.windows).toHaveLength(2);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("sign in as");
   await page.getByText("Mockup: sign in as a operator").click();
   await expect.poll(async () => (await probe(page, (p) => p.views())).length).toBe(4);
@@ -642,7 +642,7 @@ test("toolbar: a long press edits it in place (hide with a badge, a tray brings 
     await page.locator(".keyedit-done").tap();
     await expect(page.locator("#terminal-screen")).not.toHaveAttribute("data-toolbar-edit", "");
     // Settings, Toolbar: the layout comes from the account until "Customise for this device".
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await page.keyboard.type("settings: toolbar");
     await page.keyboard.press("Enter");
     await expect(page.locator(".ui-ts-tag")).toHaveText("Account layout");
@@ -655,7 +655,7 @@ test("toolbar: a long press edits it in place (hide with a badge, a tray brings 
 
 test("shortcuts: Settings lists the registry, a row rebinds with a conflict warning, and the new key works everywhere", async ({ page }) => {
   await open(page, 3);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("settings: shortcuts");
   await page.keyboard.press("Enter");
   await expect(page.locator(".ui-ss-row")).not.toHaveCount(0);
@@ -845,7 +845,7 @@ test("settings is a view: a gear after a divider, one window per section, admin 
   expect((await probe(page, (p) => p.canvasLock())).on).toBe(true);
   await expect(page.locator(".ui-settings")).toHaveCount(0); // the overlay shell is gone
   // The palette goes straight to a section's window.
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("settings: devices");
   await page.keyboard.press("Enter");
   await expect(page.locator('.ui-window[data-window-id="s-devices"][data-active]')).toHaveCount(1, { timeout: 4000 });
@@ -880,7 +880,7 @@ test("devices: the name edits in place, a sign-out asks first, and a device swit
   await expect(tip.locator(".ui-confirm-no")).toHaveText("Keep signed in");
   await page.locator(".ui-confirm-yes").click();
   await expect(page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device')).toHaveCount(before - 1);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("simulate device switch");
   await page.keyboard.press("Enter");
   await expect(page.locator(".cl-continue[data-open='true']")).toContainText("Continue from");
@@ -893,7 +893,7 @@ async function sharedPair(browser: Browser, publish: boolean): Promise<{ kayg: P
   const kayg = await context.newPage();
   await open(kayg, 7);
   // Share the Incident view with asha from the palette.
-  await kayg.keyboard.press("Control+k");
+  await kayg.keyboard.press("Control+Shift+K");
   await kayg.keyboard.type("share layout");
   await kayg.keyboard.press("Enter");
   await expect(kayg.locator(".cl-share")).toBeVisible();
@@ -1164,7 +1164,7 @@ test("toolbar and keyboard: no terminal focused means one row and no dots, a too
     // A terminal takes focus: the key row appears, two rows, dots. (The controls above left the canvas free and zoomed out.)
     await page.evaluate(() => { const p = (window as unknown as { __tracerClusters: { setCanvasLock(on: boolean): void } }).__tracerClusters; p.setCanvasLock(true); });
     await page.evaluate(() => document.querySelector<HTMLElement>('[data-cv="views"]')!.click());
-    await page.keyboard.press("Control+1");
+    await page.keyboard.press("Control+Shift+Digit1");
     await page.waitForTimeout(1200);
     await page.touchscreen.tap(200, 500);
     await expect.poll(async () => (await state()).rows).toBe("2");

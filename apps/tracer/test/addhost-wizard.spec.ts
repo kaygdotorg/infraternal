@@ -51,7 +51,7 @@ test("the toolbar button and the palette open the wizard", async ({ page }) => {
   await expect(wizard(page)).toBeVisible();
   await page.keyboard.press("Escape");
   await gone(page);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("add hosts");
   await page.keyboard.press("Enter");
   await expect(wizard(page)).toBeVisible();
@@ -374,7 +374,7 @@ test("a canvas flow remains nonmodal", async ({ page }) => {
 test("Escape in the palette leaves the add-host flow open", async ({ page }) => {
   await open(page);
   await openWizard(page);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette-input")).toBeVisible();
   await page.locator("#palette-input").focus();
   await page.keyboard.press("Escape");

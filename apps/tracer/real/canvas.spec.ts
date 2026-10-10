@@ -118,7 +118,7 @@ test("signing in shows the canvas with a Console view and one real shell", async
 });
 
 test("windows are sessions on one WebSocket: open from the palette, type in each, nothing crosses", async () => {
-  await page.keyboard.press("Control+K");
+  await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("open shell on");
   await page.locator("#palette-results [role=option]").first().click();
   await expect(windows(page)).toHaveCount(2);
@@ -259,7 +259,7 @@ test("memory on a phone: windows off screen hold no canvas, and the layer memory
   // Four windows, one column each: on a phone only one column is on screen at a time.
   const have = await windows(page).count();
   for (let i = have; i < 4; i++) {
-    await page.keyboard.press("Control+K");
+    await page.keyboard.press("Control+Shift+K");
     await page.locator("#palette-input").fill("open shell on");
     await page.locator("#palette-results [role=option]").first().click();
     await page.waitForTimeout(500);
