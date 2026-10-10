@@ -113,9 +113,9 @@ ASAN_OPTIONS=detect_odr_violation=0 \
   systemd-run --user --scope -p CPUWeight=30 cargo +nightly-2026-10-01 fuzz run release_verify -- -max_total_time=300 -max_len=70000 -rss_limit_mb=2048
 ```
 
-Set the job's scratch `CARGO_TARGET_DIR` for every command. The existing native
-shim exports duplicate sanitizer symbols, so the fuzz invocation disables only
-ASan's ODR startup check; memory instrumentation remains enabled. The script tests
+Set the job's scratch `CARGO_TARGET_DIR` for every command. The explicit
+ASan option matches the fuzz runner's generated command; memory instrumentation
+remains enabled. The script tests
 copy the scripts and trust file into an isolated fixture, generate a throwaway
 key, and use a loopback bucket/signer. Production key injection is unavailable.
 `RELEASE_TEST_ORIGIN` exists solely for an explicit loopback HTTP stand-in;
