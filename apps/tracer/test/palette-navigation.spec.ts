@@ -20,7 +20,7 @@ async function openPalette(page: Page, width: number, height: number): Promise<v
   await page.context().request.post("/__mock/open-terminal");
   await page.goto("/?mock=1");
   await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeVisible();
 }
 
@@ -157,7 +157,7 @@ async function openMobilePalette(browser: Browser, page: Page): Promise<{ contex
   const mobilePage = await context.newPage();
   await mobilePage.goto("/?mock=1");
   await expect.poll(() => mobilePage.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
-  await mobilePage.keyboard.press("Control+k");
+  await mobilePage.keyboard.press("Control+Shift+K");
   await expect(mobilePage.locator("#palette")).toBeVisible();
   await trackPaletteRows(mobilePage);
   return { context, page: mobilePage };

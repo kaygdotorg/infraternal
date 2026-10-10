@@ -44,9 +44,9 @@ test("view flights settle quickly: pointer about 350 ms, key about 180 ms", asyn
   await page.locator("#capsule").click(); await page.waitForTimeout(700);
   results.pointerBack = await settle(page, async () => { await page.locator(".cl-viewlist li, .cl-viewrow").nth(0).click(); });
   await page.waitForTimeout(800);
-  results.key = await settle(page, async () => { await page.keyboard.press("Control+3"); });
+  results.key = await settle(page, async () => { await page.keyboard.press("Control+Shift+Digit3"); });
   await page.waitForTimeout(800);
-  results.key2 = await settle(page, async () => { await page.keyboard.press("Control+1"); });
+  results.key2 = await settle(page, async () => { await page.keyboard.press("Control+Shift+Digit1"); });
   console.log(`FLIGHT ${JSON.stringify(results)}`);
   expect(results.pointer!).toBeLessThan(550);
   expect(results.pointerBack!).toBeLessThan(550);

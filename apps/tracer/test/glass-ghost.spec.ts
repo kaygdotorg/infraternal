@@ -75,13 +75,13 @@ interface Surface { name: string; phone?: boolean; open(page: Page): Promise<str
 const surfaces: Surface[] = [
   { name: "view switcher", async open(page) { await page.locator("#capsule").click(); await page.waitForSelector(".cl-viewlist"); return ".cl-viewlist"; },
     async close(page) { await page.keyboard.press("Escape"); } },
-  { name: "palette", async open(page) { await page.keyboard.press("Control+k"); await page.waitForSelector(".palette:not([hidden])"); return ".palette"; },
+  { name: "palette", async open(page) { await page.keyboard.press("Control+Shift+K"); await page.waitForSelector(".palette:not([hidden])"); return ".palette"; },
     async close(page) { await page.keyboard.press("Escape"); } },
   { name: "sidebar", async open(page) { await page.locator("#sidebar-toggle").click(); await page.waitForSelector(".sidebar:not([hidden])"); return ".sidebar"; },
     async close(page) { await page.locator("#sidebar-toggle").click(); } },
-  { name: "share dialog", async open(page) { await page.keyboard.press("Control+k"); await page.keyboard.type("share layout"); await page.keyboard.press("Enter"); await page.waitForSelector(".cl-share"); return ".cl-share"; },
+  { name: "share dialog", async open(page) { await page.keyboard.press("Control+Shift+K"); await page.keyboard.type("share layout"); await page.keyboard.press("Enter"); await page.waitForSelector(".cl-share"); return ".cl-share"; },
     async close(page) { await page.keyboard.press("Escape"); } },
-  { name: "toast", async open(page) { await page.keyboard.press("Control+k"); await page.keyboard.type("add hosts"); await page.keyboard.press("Enter"); await page.waitForSelector(".ui-toast:not([hidden])"); return ".ui-toast"; } },
+  { name: "toast", async open(page) { await page.keyboard.press("Control+Shift+K"); await page.keyboard.type("add hosts"); await page.keyboard.press("Enter"); await page.waitForSelector(".ui-toast:not([hidden])"); return ".ui-toast"; } },
   { name: "top pill", async open() { return "#capsule"; } },
   { name: "toolbar tray", phone: true, async open() { return ".keytray"; } },
 ];

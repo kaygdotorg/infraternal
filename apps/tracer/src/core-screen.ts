@@ -6,7 +6,7 @@ import { Spring } from "../../../packages/ui/src/spring";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
-import { bindShortcut, bindingLabel, keyCaps, PALETTE_KEYS, registerShortcuts } from "../../../packages/ui/src/shortcuts";
+import { bindShortcut, bindingLabel, keyCaps, PALETTE_KEYS, paletteAlternate, paletteCombo, platformCombo, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
 import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
@@ -237,7 +237,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   app.innerHTML = SCREEN;
   // The modifier names are read per mount, not in the template: "Option" is the Mac key, "Alt" elsewhere.
   for (const mod of ["ctrl", "alt"] as const) get<HTMLElement>(`[data-mod="${mod}"]`).setAttribute("aria-label", modifierName(mod));
-  // The palette key is written per platform (⌘K on a Mac keyboard, Ctrl K elsewhere): one keycap per part.
+  // The palette key is written per platform (⌘K on a Mac keyboard, Ctrl+Shift+K elsewhere): one keycap per part.
   get<HTMLElement>("#capsule-keys").replaceChildren(...keyCaps(shortcutLabel(PALETTE_KEYS)).map((cap) => { const kbd = document.createElement("kbd"); kbd.className = "capsule-kbd"; kbd.textContent = cap; return kbd; }));
   const stage = get<HTMLElement>("#terminal-screen");
   // The canvas preview never draws the status line, from the first frame (the canvas chunk loads a
@@ -697,13 +697,16 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       { id: "back", label: "Back to the terminal", keys: "Shift+F6" },
     ] }),
     registerShortcuts({ id: "global", title: "Everywhere", area: "global", shortcuts: [
-      { id: "palette", label: "Open the command palette", keys: PALETTE_KEYS },
+      { id: "palette", label: "Open the command palette", keys: PALETTE_KEYS, combo: paletteCombo(), alternates: [paletteAlternate()] },
       // ⌘/ on a Mac and Ctrl+Shift+/ elsewhere work inside a focused terminal, where "?" is typed into the shell; "?" stays
       // as the alternate outside text fields.
-      { id: "shortcuts", label: "Show these shortcuts", keys: "?", combo: isMacPlatform() ? { code: "Slash", mod: true } : { code: "Slash", mod: true, shift: true }, alternates: [{ code: "Slash", shift: true }] },
+      { id: "shortcuts", label: "Show these shortcuts", keys: "?", combo: platformCombo({ code: "Slash", key: "/", mod: true, shift: false }, { code: "Slash", key: "/", mod: true, shift: true }), alternates: [{ code: "Slash", key: "?" }] },
       { id: "close", label: "Close the open panel", keys: "Esc" },
     ] }),
   ];
+  // The palette's chords come from the registry too (D222). A locked window owns every key, but a Mac's ⌘K still opens
+  // the palette, since a terminal never receives ⌘; a declined press goes through to the terminal (Ctrl+K stays the shell's).
+  removeShortcuts.push(bindShortcut("palette", () => setPalette(palette.hidden, "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
   // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
   // screen has the panel, as before.
   if (options.canvas) removeShortcuts.push(bindShortcut("shortcuts", (event) => {
@@ -724,15 +727,6 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       }
       event.preventDefault();
       event.stopPropagation();
-      return;
-    }
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-      // A locked window owns every key. Terminals never receive ⌘K, so it still opens the palette
-      // on macOS; Ctrl+K belongs to the terminal (kill-line, clear) and goes through.
-      if (stage.hasAttribute("data-locked") && !(isMacPlatform() && event.metaKey)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      setPalette(palette.hidden, "keyboard");
       return;
     }
     if (event.key === "Escape") {

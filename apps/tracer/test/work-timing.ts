@@ -77,23 +77,23 @@ async function measure(label: string, action: () => Promise<void>, setup?: () =>
   for (let index = 0; index < N; index++) { const before = await metrics(); await page.waitForTimeout(160); samples.push(delta(before, await metrics())); }
   results["(idle 160 ms, noise floor)"] = { samples, long: 0 };
 }
-await measure("palette: open (Ctrl+K)", () => page.keyboard.press("Control+k"), closeAll);
+await measure("palette: open (Ctrl+K)", () => page.keyboard.press("Control+Shift+K"), closeAll);
 await measure("palette: filter (one keystroke)", () => page.locator("#palette-input").pressSequentially("t"), async () => { await page.locator("#palette-input").fill(""); });
 await closeAll();
 let theme = "paper";
 await measure("theme switch (Enter on the row)", () => page.keyboard.press("Enter"), async () => {
   theme = theme === "paper" ? "ink" : "paper";
-  await closeAll(); await page.keyboard.press("Control+k"); await page.locator("#palette-input").fill(`theme ${theme}`);
+  await closeAll(); await page.keyboard.press("Control+Shift+K"); await page.locator("#palette-input").fill(`theme ${theme}`);
 });
 let font = "geist";
 await measure("font switch, warm (Enter on the row)", () => page.keyboard.press("Enter"), async () => {
   font = font === "geist" ? "maple" : "geist";
-  await closeAll(); await page.keyboard.press("Control+k"); await page.locator("#palette-input").fill(font); await page.waitForTimeout(150);
+  await closeAll(); await page.keyboard.press("Control+Shift+K"); await page.locator("#palette-input").fill(font); await page.waitForTimeout(150);
 });
 {
   const samples: Sample[] = [];
   for (const name of ["jetbrains", "commit", "monaspace", "plex", "cascadia", "fira", "source"]) {
-    await closeAll(); await page.keyboard.press("Control+k"); await page.locator("#palette-input").fill(name); await page.waitForTimeout(250);
+    await closeAll(); await page.keyboard.press("Control+Shift+K"); await page.locator("#palette-input").fill(name); await page.waitForTimeout(250);
     await resetLong();
     const before = await metrics();
     await page.keyboard.press("ArrowDown"); // selecting the row previews the font: fetch, decode, apply

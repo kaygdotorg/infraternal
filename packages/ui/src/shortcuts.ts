@@ -10,7 +10,7 @@
  *   });
  *
  * One shortcut per action: `keys` is a single string, or one string per platform
- * (`{ mac: "⌘K", other: "Ctrl+K" }`), and only the one that works here is ever shown.
+ * (`{ mac: "⌘K", other: "Ctrl+Shift+K" }`), and only the one that works here is ever shown.
  */
 import { isMacPlatform, shortcutLabel, type PlatformKeys } from "./platform";
 import { readLocal, writeLocal } from "./local-pref";
@@ -68,7 +68,14 @@ export const GLOBAL_AREA = "global";
  * The command palette key, written once. Every surface that names it (the top pill, the view popover,
  * the palette hints, the shortcuts panel) takes it from here so Mac and PC always agree.
  */
-export const PALETTE_KEYS: PlatformKeys = { mac: "⌘K", other: "Ctrl+K" };
+export const PALETTE_KEYS: PlatformKeys = { mac: "⌘K", other: "Ctrl+Shift+K" };
+
+/**
+ * The palette's default chords (D222). Plain Ctrl+K on PC is the terminal's (kill line, clear), so the palette takes
+ * Ctrl+Shift+K there; a Mac keeps ⌘K, which never reaches a terminal. ⌘⇧P and Ctrl+Shift+P are the alternates.
+ */
+export const paletteCombo = (): Combo => platformCombo({ code: "KeyK", key: "k", mod: true, shift: false }, { code: "KeyK", key: "k", mod: true, shift: true });
+export const paletteAlternate = (): Combo => ({ code: "KeyP", key: "p", mod: true, shift: true });
 
 const registered = new Map<string, ShortcutSection>();
 

@@ -124,7 +124,7 @@ test("setup: two sessions with different screens, the second left running withou
   const a = windows(page).first();
   await a.locator(".terminal-host").click({ position: { x: 40, y: 40 } });
   await page.keyboard.type("clear; seq 1 14; echo FIRST-MARK\n", { delay: 5 });
-  await page.keyboard.press("Control+K");
+  await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("open shell on");
   await page.locator("#palette-results [role=option]").first().click();
   await expect(windows(page)).toHaveCount(2);
@@ -196,7 +196,7 @@ test("the sidebar's session list and the palette open a detached session", async
         await arm(page);
         await page.locator(`#tree .bm-leaf[data-id$='/${target}']`).click();
       } else {
-        await page.keyboard.press("Control+K");
+        await page.keyboard.press("Control+Shift+K");
         await page.locator("#palette-input").fill("shell");
         await expect(page.locator(`#palette-results .result[data-action$='/${target}']`)).toBeVisible();
         await arm(page);

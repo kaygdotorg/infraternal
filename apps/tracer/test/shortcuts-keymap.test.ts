@@ -86,3 +86,12 @@ test("key caps split the plus key correctly", () => {
   expect(keyCaps("⌘+")).toEqual(["⌘", "+"]);
   expect(keyCaps("Ctrl+Shift+]")).toEqual(["Ctrl", "Shift", "]"]);
 });
+
+test("a Mac chord without Shift does not fire with Shift held: ⌘D is not ⌘⇧D (the Mac defaults pin shift:false)", () => {
+  setPlatform("MacIntel");
+  const splitRight = platformCombo({ code: "KeyD", key: "d", mod: true, shift: false }, { code: "KeyD", key: "d", mod: true, shift: true });
+  expect(matchesCombo(press({ key: "d", code: "KeyD", meta: true }), splitRight)).toBe(true);
+  expect(matchesCombo(press({ key: "D", code: "KeyD", meta: true, shift: true }), splitRight)).toBe(false);
+  const newRight = platformCombo({ code: "Enter", key: "Enter", mod: true, shift: false }, { code: "Enter", key: "Enter", mod: true, shift: true });
+  expect(matchesCombo(press({ key: "Enter", code: "Enter", meta: true, shift: true }), newRight)).toBe(false);
+});

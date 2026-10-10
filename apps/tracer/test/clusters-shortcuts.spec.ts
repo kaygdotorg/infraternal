@@ -50,7 +50,7 @@ test.describe("Close window", () => {
     expect(n0).toBeGreaterThanOrEqual(11);
     const states0 = await sessionStates(page);
     for (let i = 0; i < 10; i++) {
-      await chord(page, ["Control", "Alt", "KeyW"]);
+      await chord(page, ["Control", "Shift", "KeyX"]);
       // Read at once, with no wait: an instant close has no motion, so the count is already the count after the press.
       expect(await windows(page)).toBe(n0 - (i + 1));
     }
@@ -71,10 +71,10 @@ test.describe("Close window", () => {
     await boot(page);
     await fill(page, 3);
     const n0 = await windows(page);
-    await page.keyboard.down("Control"); await page.keyboard.down("Alt");
-    await page.keyboard.down("KeyW");
-    for (let i = 0; i < 6; i++) await page.keyboard.down("KeyW");
-    await page.keyboard.up("KeyW"); await page.keyboard.up("Alt"); await page.keyboard.up("Control");
+    await page.keyboard.down("Control"); await page.keyboard.down("Shift");
+    await page.keyboard.down("KeyX");
+    for (let i = 0; i < 6; i++) await page.keyboard.down("KeyX");
+    await page.keyboard.up("KeyX"); await page.keyboard.up("Shift"); await page.keyboard.up("Control");
     await page.waitForTimeout(300);
     expect(await windows(page)).toBe(n0 - 1);
   });
@@ -83,17 +83,17 @@ test.describe("Close window", () => {
     await boot(page);
     await fill(page, 2);
     const first = await activeId(page);
-    await chord(page, ["Control", "Alt", "KeyW"]);
+    await chord(page, ["Control", "Shift", "KeyX"]);
     const next = await activeId(page);
     expect(next).not.toBe(first);
     expect(next, "a neighbour takes the focus").not.toBeNull();
-    await chord(page, ["Control", "Alt", "KeyW"]);
+    await chord(page, ["Control", "Shift", "KeyX"]);
     expect(await page.locator(`${VIEW} .ui-window[data-window-id="${next}"]`).count()).toBe(0);
   });
 
   test("Close window is in ⌘K with its label", async ({ page }) => {
     await boot(page);
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await expect(page.locator("#palette")).toBeVisible();
     await page.locator("#palette-input").fill("Close window");
     await expect(page.locator("#palette-results .result", { hasText: "Close window" }).first()).toBeVisible();
@@ -108,7 +108,7 @@ test.describe("the shortcuts panel (?)", () => {
     await boot(page);
     await page.mouse.click(720, 880); // the canvas background: a press outside any field
     await page.waitForTimeout(300);
-    await page.keyboard.press("Shift+Slash");
+    await page.keyboard.press("?");
     await expect(page.locator(".ui-shortcuts")).toBeVisible({ timeout: 5000 });
     // "Show these shortcuts" has ⌘/ or Ctrl+Shift+/ as its primary, and "?" as its alternate on the same row.
     const row = page.locator(".ui-shortcuts-row", { hasText: "Show these shortcuts" });
@@ -120,7 +120,7 @@ test.describe("the shortcuts panel (?)", () => {
     expect(opacity).toBeLessThan(1);
     const close = page.locator(".ui-shortcuts-row", { hasText: "Close window" });
     await expect(close.locator("kbd").first()).toHaveText("Ctrl");
-    await expect(close.locator("kbd:not(.ui-shortcuts-alt)")).toHaveText(["Ctrl", "Alt", "W"]);
+    await expect(close.locator("kbd:not(.ui-shortcuts-alt)")).toHaveText(["Ctrl", "Shift", "X"]);
     await page.keyboard.press("Escape");
   });
 
@@ -128,7 +128,7 @@ test.describe("the shortcuts panel (?)", () => {
     await boot(page);
     await page.mouse.click(720, 880);
     await page.waitForTimeout(300);
-    await page.keyboard.press("Shift+Slash");
+    await page.keyboard.press("?");
     await expect(page.locator(".ui-shortcuts")).toBeVisible({ timeout: 5000 });
     const titles = () => page.locator(".ui-shortcuts-title").allTextContents();
     expect((await titles())[0]).toBe("Canvas");
