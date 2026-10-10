@@ -52,7 +52,9 @@ serialization buffer. It is not allocated once per session or per host.
   `fuzz/fuzz_targets/remote_ca_handoff_decode.rs` is compiled by workspace Clippy;
   the property corpus executes in the CA suite. No private frame corpus is saved.
 - CA suite: 42 passed, 0 failed, 7 explicitly ignored diagnostics; remote server
-  suite: 49 passed, 0 failed, 10 explicitly ignored diagnostics. The shipping
+  suite: 49 passed, 0 failed, 10 explicitly ignored diagnostics. The separate
+  infraternal-agent remote suite passed 22 tests (2 ignored); see
+  [its transcript](agent-remote-suite.log). The shipping
   handoff test is explicitly executed separately. See [suite output](ca-remote-suites.log).
 - Private-directory and lexical parent-escape regressions failed before their
   fixes. Their original output is attached. No global permission check was

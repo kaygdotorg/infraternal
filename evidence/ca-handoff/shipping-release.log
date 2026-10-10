@@ -1,0 +1,14 @@
+# Records the weighted shipping-release integration and latency measurement for #154.
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p1533525-i39241741.scope; invocation ID: cc2c0d4434b24b28aac187985240414e
+Linux infraternal-dev 6.12.111+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.111-1 (2026-09-28) x86_64 GNU/Linux
+8
+5.93 13.18 15.33 5/3006 1533529
+
+running 1 test
+METRIC name=ca_handoff_restart n=25 retained_nodes=10000 users=50 real_pty_sessions=128 reattached_sessions=128 p50_ms=30.736 max_ms=39.541 refused_window_bracket_p50_ms=23.795 refused_window_bracket_max_ms=29.478 refused_samples=212 probe_interval_ms=1 cold_start_locked=true invalid_frame_locked=true non_owner_refused=true resumed_pty_input=true
+test ca_handoff::shipping_tests::shipping_restart_reload_rollback_and_cold_start ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 304 filtered out; finished in 6.58s
+
+6.10 12.97 15.24 6/3014 1534679

@@ -1,0 +1,5 @@
+# Records final stripped static artifacts and the unchanged production baselines for #154.
+/home/kayg/.cache/codex-scratch/ca-handoff/target/x86_64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+target=x86_64-unknown-linux-musl base_bytes=19896992 final_bytes=19938720 delta_bytes=41728 PT_INTERP=absent sha256=4b0c7d508986b3502e362022265e0907185ae2f3cffe4af2327dceb7ea8e0848
+/home/kayg/.cache/codex-scratch/ca-handoff/target/aarch64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
+target=aarch64-unknown-linux-musl base_bytes=17729832 final_bytes=17769176 delta_bytes=39344 PT_INTERP=absent sha256=9540d81a929f12eb63ba6cd1cce3fdf229b8088805aa89b868a40715bba559c6
