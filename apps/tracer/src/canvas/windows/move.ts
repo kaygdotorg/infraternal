@@ -13,12 +13,8 @@ import { columnRect, columnEls } from "../layout/columns";
 import { COLUMN_GAP } from "../layout/geometry";
 import { freshColumnId, fromGrid, applyCols, readColumns } from "../views/tracks";
 import { groupOf, runsOf, settle } from "../layout/grid";
-import { onDemand } from "../../on-demand";
+import { droppedGrid, warmDropGrid } from "../layout/drop-grid-handle";
 
-/** The grouped-move code loads on the first grouped grab (D188); it is in the on-demand chunk, not the canvas one. */
-type DropGrid = typeof import("../layout/drop-grid.on-demand");
-let dropGrid: DropGrid | undefined;
-const loadDropGrid = (): Promise<DropGrid> => dropGrid ? Promise.resolve(dropGrid) : onDemand(() => import("../layout/drop-grid.on-demand")).then((m) => (dropGrid = m));
 import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
 import { endActivity, setActivity } from "../../perf-activity";
 
@@ -43,7 +39,7 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
     const cols0 = readColumns(cx, c);
     const grid0 = (rec.model.span ?? 1) > 1 || !!groupOf(runsOf(cols0), columnEls(c.colsEl).indexOf(colEl)) ? { cols: cols0, w: Number(colEl.dataset.w) || state.metrics.colW, h: root.offsetHeight } : undefined;
     // The landing module loads while the person is still dragging, so it is there when the window is dropped.
-    if (grid0) void loadDropGrid().catch(() => undefined);
+    if (grid0) warmDropGrid();
     colEl.insertBefore(slot, root);
     const fixedH = root.style.height;
     root.classList.add("is-lifted");
@@ -115,6 +111,7 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
         root.classList.remove("is-lifted");
         // Through the grid when the window was in one (D212): where it landed is read from the slot and the windows around it.
         // Not loaded yet (a drop before the module arrived): the window goes back where it was, which is always valid.
+        const dropGrid = droppedGrid();
         const landedAt = grid0 && dropGrid ? dropGrid.landing({ cols0: grid0.cols, gap: COLUMN_GAP, id: rec.model.id, root, h: grid0.h, w: grid0.w, view: c.colsEl, newId: () => freshColumnId(cx, c), slot }) : undefined;
         slot.replaceWith(root);
         if (grid0) applyCols(cx, c, fromGrid(c, landedAt ?? settle(grid0.cols)));

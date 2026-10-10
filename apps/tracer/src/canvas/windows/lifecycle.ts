@@ -21,7 +21,8 @@ import type { Ctx, ViewRec, WinRec } from "../context";
 import { loadDroplet } from "../layout/droplet-handle";
 import { COLUMN_GAP } from "../layout/geometry";
 import { columnEls, topItem } from "../layout/columns";
-import { newRight, removeWin, runsOf, splitDown, splitRight, type Col } from "../layout/grid";
+import { newRight, runsOf, splitDown, splitRight, type Col } from "../layout/grid";
+import { droppedGrid, loadDropGrid } from "../layout/drop-grid-handle";
 import type { ViewId, WindowModel } from "../model/types";
 import { applyCols, freshColumnId, fromGrid, readColumns } from "../views/tracks";
 import { coarse, reduced } from "../dom";
@@ -155,7 +156,13 @@ export function createWindows(cx: Ctx): WindowsModule {
       // The structure re-tiles: what remains in the column takes the freed height, an emptied column goes
       // and its neighbours close the gap. Everything animates as one move (a FLIP on the same spring as
       // every other layout move); the terminal refits once, at the new size.
-      if (grouped) applyCols(cx, c, fromGrid(c, removeWin(cols, rec.model.id, COLUMN_GAP)));
+      if (grouped) {
+        // The removal (fills, then columns and bands that nothing crosses) lives in the grid's on-demand module, loaded
+        // when the view first held a group. A close that finds it not yet loaded applies the same change as soon as it has.
+        const dropGrid = droppedGrid();
+        const apply = (m: typeof import("../layout/drop-grid.on-demand")): void => { applyCols(cx, c, fromGrid(c, m.removeWin(cols, rec.model.id, COLUMN_GAP))); cx.view.geometry(c); };
+        if (dropGrid) apply(dropGrid); else void loadDropGrid().then(apply);
+      }
       else if (colEl) {
         const rest = [...colEl.querySelectorAll<HTMLElement>(":scope > .ui-window")];
         if (!rest.length) {
