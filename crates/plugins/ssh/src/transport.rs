@@ -83,6 +83,10 @@ pub trait SshTransport: Send + Sync {
 
 /// A session owns ephemeral credentials and cleans them when its final owner drops it.
 pub trait SshSession: Send + Sync {
+    /// Exact public host lookup used by this authenticated connection, when app-managed.
+    fn trust_lookup(&self) -> Option<String> {
+        None
+    }
     /// Public method evidence becomes available only after trusted authentication.
     fn authentication(&self) -> Option<Authentication> {
         None
