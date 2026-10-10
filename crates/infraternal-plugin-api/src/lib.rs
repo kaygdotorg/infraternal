@@ -431,6 +431,22 @@ pub trait AgentPlugin: Send {
     fn take_events(&mut self) -> Vec<(&'static str, Vec<u8>)> {
         Vec::new()
     }
+    /// Opt into generic component CLI commands generated from public actions.
+    fn has_cli(&self) -> bool {
+        false
+    }
+    /// A write may present a declared read action's current status afterwards.
+    fn human_status_action(&self, _action_id: &str) -> Option<&'static str> {
+        None
+    }
+    /// Render public output inside the plugin, keeping feature fields out of core adapters.
+    /// # Errors
+    /// Rejects malformed public JSON.
+    fn format_human(&self, _action_id: &str, output: &[u8]) -> Result<String, PluginError> {
+        let value: serde_json::Value =
+            serde_json::from_slice(output).map_err(|_| PluginError::Rejected)?;
+        serde_json::to_string_pretty(&value).map_err(|_| PluginError::Rejected)
+    }
     /// Validate and execute one declared action.
     /// # Errors
     /// Returns a bounded plugin error for a rejected action, unknown action, or oversized body.
@@ -506,6 +522,75 @@ impl PluginRegistry {
         }
         Ok(events)
     }
+    /// Pure CLI declarations; constructing commands never invokes an action.
+    #[must_use]
+    pub fn cli_descriptors(&self) -> Vec<&'static PluginDescriptor> {
+        self.plugins
+            .iter()
+            .filter(|plugin| plugin.has_cli())
+            .map(|plugin| plugin.descriptor())
+            .collect()
+    }
+    /// Resolve an optional public read after a successful operator write.
+    /// # Errors
+    /// Refuses unknown, machine-only, or non-read follow-up actions.
+    pub fn human_status_action(
+        &self,
+        action_id: &str,
+    ) -> Result<Option<&'static str>, PluginError> {
+        let plugin = self.public_plugin(action_id)?;
+        let Some(id) = plugin.human_status_action(action_id) else {
+            return Ok(None);
+        };
+        if !plugin
+            .descriptor()
+            .actions
+            .iter()
+            .any(|action| action.id == id && action.effect == Effect::Read)
+        {
+            return Err(PluginError::Rejected);
+        }
+        Ok(Some(id))
+    }
+    /// Format a bounded public reply with the implementation's pure presenter.
+    /// # Errors
+    /// Refuses private control actions, oversized replies and malformed presentation data.
+    pub fn format_human(&self, action_id: &str, output: &[u8]) -> Result<String, PluginError> {
+        if output.len() > MAX_ACTION_BYTES {
+            return Err(PluginError::MessageTooLarge);
+        }
+        self.public_plugin(action_id)?
+            .format_human(action_id, output)
+    }
+    fn public_plugin(&self, action_id: &str) -> Result<&dyn AgentPlugin, PluginError> {
+        self.plugins
+            .iter()
+            .find(|plugin| {
+                plugin
+                    .descriptor()
+                    .actions
+                    .iter()
+                    .any(|action| action.id == action_id)
+            })
+            .map(std::convert::AsRef::as_ref)
+            .ok_or(PluginError::UnknownAction)
+    }
+    /// Dispatch only public node actions from a local operator surface.
+    /// # Errors
+    /// Machine control actions remain available only through the admitted channel adapter.
+    pub fn call_public(&mut self, action_id: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
+        if !self.plugins.iter().any(|plugin| {
+            plugin
+                .descriptor()
+                .actions
+                .iter()
+                .any(|action| action.id == action_id)
+        }) {
+            return Err(PluginError::UnknownAction);
+        }
+        self.call(action_id, input)
+    }
+
     /// Executes one declared action while bounding both directions of its JSON body.
     /// # Errors
     /// Returns a bounded error for an unknown action, oversized message, or plugin rejection.

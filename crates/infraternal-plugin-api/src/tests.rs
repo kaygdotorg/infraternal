@@ -157,3 +157,84 @@ fn notifications_are_declared_json_bounded_and_drained_once() {
         assert_eq!(registry.events().unwrap(), Vec::<Vec<u8>>::new());
     }
 }
+
+#[test]
+fn public_dispatch_cannot_call_a_machine_control_action() {
+    struct Controlled;
+    const CONTROL: &[ActionDef] = &[ActionDef {
+        id: "example.control",
+        ..ACTIONS[0]
+    }];
+    impl AgentPlugin for Controlled {
+        fn descriptor(&self) -> &'static PluginDescriptor {
+            &DESCRIPTOR
+        }
+        fn control_actions(&self) -> &'static [ActionDef] {
+            CONTROL
+        }
+        fn call(&mut self, _: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
+            Ok(input.to_vec())
+        }
+    }
+    let mut registry = PluginRegistry::default();
+    registry
+        .register(Box::new(Controlled))
+        .expect("valid declarations");
+    assert_eq!(
+        registry.call_public("example.read", b"{}"),
+        Ok(b"{}".to_vec())
+    );
+    assert_eq!(
+        registry.call_public("example.control", b"{}"),
+        Err(PluginError::UnknownAction)
+    );
+    assert_eq!(registry.call("example.control", b"{}"), Ok(b"{}".to_vec()));
+}
+
+#[test]
+fn operator_presentation_cannot_follow_a_private_control_action() {
+    struct Presented(Option<&'static str>);
+    impl AgentPlugin for Presented {
+        fn descriptor(&self) -> &'static PluginDescriptor {
+            &DESCRIPTOR
+        }
+        fn control_actions(&self) -> &'static [ActionDef] {
+            CONTROL_ACTIONS
+        }
+        fn has_cli(&self) -> bool {
+            true
+        }
+        fn human_status_action(&self, _: &str) -> Option<&'static str> {
+            self.0
+        }
+        fn call(&mut self, _: &str, _: &[u8]) -> Result<Vec<u8>, PluginError> {
+            panic!("presentation must never execute actions")
+        }
+    }
+    for (followup, expected) in [
+        (None, Ok(None)),
+        (Some("example.read"), Ok(Some("example.read"))),
+        (Some("example.configure"), Err(PluginError::Rejected)),
+    ] {
+        let mut registry = PluginRegistry::default();
+        registry.register(Box::new(Presented(followup))).unwrap();
+        assert_eq!(registry.cli_descriptors().len(), 1);
+        assert_eq!(registry.human_status_action("example.read"), expected);
+        assert_eq!(
+            registry.human_status_action("example.configure"),
+            Err(PluginError::UnknownAction)
+        );
+        assert_eq!(
+            registry.format_human("example.read", b"{}"),
+            Ok("{}".to_owned())
+        );
+        assert_eq!(
+            registry.format_human("example.configure", b"{}"),
+            Err(PluginError::UnknownAction)
+        );
+        assert_eq!(
+            registry.format_human("example.read", &vec![b' '; crate::MAX_ACTION_BYTES + 1]),
+            Err(PluginError::MessageTooLarge)
+        );
+    }
+}
