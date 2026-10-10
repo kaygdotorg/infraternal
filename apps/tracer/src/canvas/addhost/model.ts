@@ -158,6 +158,16 @@ export function parseTarget(raw: string): ParsedTarget | undefined {
 }
 
 /**
+ * How a typed target relates to the listed hosts. `named` is the listed host it names (by id or address). `prefixed`
+ * is true when other hosts' names start with the same text: while the person is still typing, such a token waits
+ * for a delimiter instead of chipping at the first match.
+ */
+export function matchListed<T extends { id: string; address: string }>(target: ParsedTarget, hosts: readonly T[]): { named: T | undefined; prefixed: boolean } {
+  const named = hosts.find((host) => host.id === target.host || host.address === target.host);
+  return { named, prefixed: hosts.some((host) => host !== named && host.id.startsWith(target.host)) };
+}
+
+/**
  * Reads hosts out of pasted `ssh_config` text and returns them as `user@host[:port]` strings. Wildcard and
  * negated patterns are skipped, `Match` blocks are ignored, and only HostName, User and Port are read:
  * the server's own OpenSSH applies the rest of the person's configuration when it connects.
