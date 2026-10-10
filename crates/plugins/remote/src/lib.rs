@@ -20,6 +20,44 @@ pub mod remote_renewal;
 #[cfg(feature = "transport")]
 pub mod remote_tls;
 
+/// Remove one enrolled host under a purpose-bound fresh owner passkey proof.
+pub const REMOVE: ActionDef = ActionDef {
+    id: "remote.host.remove",
+    summary: "Remove host",
+    instructions: &[
+        "Select an enrolled host on the existing server.",
+        "Preview removal; it revokes host access and forgets application SSH trust.",
+        "Confirm the named host with a fresh owner passkey.",
+        "By default uninstall the owned infraternal agent through its current channel.",
+        "If the host is unreachable, remove server access and report what remains on the host.",
+    ],
+    input: SchemaRef("remote.host.remove"),
+    output: SchemaRef("remote.host.removed"),
+    target: Target::Node,
+    effect: Effect::Destructive,
+    permission: Permission::One("remote.manage"),
+    dry_run: DryRun::Required,
+    opens: None,
+};
+/// Internal node handoff; only an authenticated server can request its exact installation.
+pub const UNINSTALL: ActionDef = ActionDef {
+    id: "remote.host.uninstall",
+    summary: "Uninstall the owned infraternal agent",
+    instructions: &[
+        "Validate this installation's host identity and owned artifacts.",
+        "Transmit acceptance before handing cleanup to an independent service.",
+    ],
+    input: SchemaRef("remote.host.uninstall"),
+    output: SchemaRef("remote.host.uninstall.result"),
+    target: Target::Node,
+    effect: Effect::Destructive,
+    permission: Permission::One("remote.manage"),
+    dry_run: DryRun::Required,
+    opens: None,
+};
+#[cfg(feature = "agent")]
+pub mod uninstall;
+
 /// Enroll one node; this action cannot create a server.
 pub const JOIN: ActionDef = ActionDef {
     id: "remote.host.join",
@@ -118,7 +156,7 @@ pub const CA_ADMINISTRATORS: ActionDef = ActionDef {
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "remote",
     api: API_VERSION,
-    actions: &[JOIN, RUN, SERVE, BOOTSTRAP_CA, CA_ADMINISTRATORS],
+    actions: &[JOIN, RUN, SERVE, BOOTSTRAP_CA, CA_ADMINISTRATORS, REMOVE],
     // Settings retain the source declarations; these adapters have no socket dispatcher.
     settings: Some(SchemaRef(
         r#"{"type":"object","properties":{"enabled":{"type":"boolean","description":"Enable remote host transport on this node","default":false},"listen":{"type":["string","null"],"description":"Server transport socket address","default":null},"ca-directory":{"type":["string","null"],"description":"Retained public certificate-authority trust","default":null},"identity-directory":{"type":["string","null"],"description":"Private enrolled node identity","default":null}},"additionalProperties":false}"#,
@@ -166,4 +204,12 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     max_frame_len: 0,
     unavailable: &[],
     unavailable_event: &[],
+};
+
+/// Private authenticated server-to-node handoff; absent from the browser action catalogue.
+/// A browser cannot bypass purpose-bound removal by invoking the uninstall transport action.
+#[cfg(feature = "agent")]
+pub const NODE_DESCRIPTOR: PluginDescriptor = PluginDescriptor {
+    actions: &[UNINSTALL],
+    ..DESCRIPTOR
 };
