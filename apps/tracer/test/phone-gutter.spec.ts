@@ -29,7 +29,8 @@ const resting = (page: Page) => page.evaluate(() => {
 });
 
 const view = async (page: Page, name: string) => {
-  await page.keyboard.press("Control+k");
+  // D222: off a Mac the palette is Ctrl+Shift+K; plain Ctrl+K belongs to the terminal.
+      await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type(`Go to ${name}`);
   await page.keyboard.press("Enter");
   await page.waitForTimeout(900);
@@ -56,12 +57,14 @@ for (const [w, h] of [[393, 852], [375, 667]] as const) {
       await view(page, "Console");
       await check("console again");
       // A split of the active window (D212), then a close: the resting window keeps the gutter both times.
-      await page.keyboard.press("Control+k");
+      // D222: off a Mac the palette is Ctrl+Shift+K; plain Ctrl+K belongs to the terminal.
+      await page.keyboard.press("Control+Shift+K");
       await page.keyboard.type("Split right");
       await page.keyboard.press("Enter");
       await page.waitForTimeout(900);
       await check("after split");
-      await page.keyboard.press("Control+k");
+      // D222: off a Mac the palette is Ctrl+Shift+K; plain Ctrl+K belongs to the terminal.
+      await page.keyboard.press("Control+Shift+K");
       await page.keyboard.type("Close window");
       await page.keyboard.press("Enter");
       await page.waitForTimeout(900);
@@ -77,7 +80,8 @@ for (const [w, h] of [[393, 852], [375, 667]] as const) {
       const state = () => page.evaluate(() => ["#sidebar-toggle", "#capsule", ".top > .tabs > .tab-add"].map((s) => ({ s, op: getComputedStyle(document.querySelector(s)!).opacity, pe: getComputedStyle(document.querySelector(s)!).pointerEvents })));
       const rest = (await state()).map((c) => c.op);
       expect(rest).toEqual(["1", "1", "0.8"]); // the "+" rests at its own 0.8 opacity (style.css .tab)
-      await page.keyboard.press("Control+k");
+      // D222: off a Mac the palette is Ctrl+Shift+K; plain Ctrl+K belongs to the terminal.
+      await page.keyboard.press("Control+Shift+K");
       // Every control the palette covers on a phone: all three (the palette grows from the top pill over the bar).
       await expect.poll(async () => (await state()).map((c) => c.op), { timeout: 2000 }).toEqual(["0", "0", "0"]);
       for (const c of await state()) expect(c.pe, c.s).toBe("none");
@@ -95,7 +99,8 @@ test("desktop 1440x900: opening the palette leaves the buttons it does not cover
   await page.goto(URL);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(900);
-  await page.keyboard.press("Control+k");
+  // D222: off a Mac the palette is Ctrl+Shift+K; plain Ctrl+K belongs to the terminal.
+      await page.keyboard.press("Control+Shift+K");
   await page.waitForTimeout(600);
   const baseline = await page.evaluate(() => ["#sidebar-toggle", "#capsule", ".top > .tabs > .tab-add"].map((s) => getComputedStyle(document.querySelector(s)!).opacity));
   expect(baseline).toEqual(["1", "1", "0.8"]);
@@ -124,7 +129,8 @@ test("phone 393x852 ink: Settings at rest, and the palette open on the phone, ar
     await view(page, "Settings");
     await page.waitForTimeout(700);
     await page.screenshot({ path: `${captures}/phone-393x852-ink-settings-rest.png` });
-    await page.keyboard.press("Control+k");
+    // D222: off a Mac the palette is Ctrl+Shift+K; plain Ctrl+K belongs to the terminal.
+      await page.keyboard.press("Control+Shift+K");
     await page.waitForTimeout(600);
     await page.screenshot({ path: `${captures}/phone-393x852-ink-palette-open.png` });
   } finally {
