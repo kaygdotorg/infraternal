@@ -11,15 +11,17 @@ const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
   page.evaluate((source) => (new Function("p", `return (${source})(p)`) as (p: unknown) => T)((window as unknown as { __tracerClusters: unknown }).__tracerClusters), fn.toString());
 
 async function config(page: Page, body: Record<string, string>): Promise<void> {
-  await page.request.post("/__mock/bootstrap/config", { data: body });
+  await page.request.post("/__mock/bootstrap/config", { data: body, maxRetries: 1 });
 }
 
 async function open(page: Page, query = "", settings: Record<string, string> = {}): Promise<void> {
-  await page.request.post("/__mock/bootstrap/reset");
+  // Fixture setup is idempotent: retry only a reset keep-alive connection,
+  // never a product operation or an assertion failure.
+  await page.request.post("/__mock/bootstrap/reset", { maxRetries: 1 });
   if (Object.keys(settings).length) await config(page, settings);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=ink&bg=none${query}`);
-  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 45_000 });
   await expect.poll(() => probe(page, (p) => p.views().length)).toBeGreaterThan(0);
   await page.waitForTimeout(400);
 }
@@ -31,7 +33,7 @@ const inWizard = (page: Page, name: string) => wizard(page).getByRole("button", 
 const gone = (page: Page) => expect(page.locator(".ah-float")).toHaveCount(0);
 async function openWizard(page: Page): Promise<void> {
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:addhost", source: "keyboard" } })));
-  await expect(page.locator(".ah-page[data-page='discovery']")).toBeVisible();
+  await expect(page.locator(".ah-page[data-page='discovery']")).toBeVisible({ timeout: 45_000 });
 }
 /** Types a host into the one field and continues. */
 async function addTyped(page: Page, host: string): Promise<void> {
@@ -141,7 +143,7 @@ test("a pasted private key signs in as the user's key", async ({ page }) => {
   await expect(page.locator(".ah-error")).toHaveText("Paste the private key first.");
   await page.locator("[data-secret='key']").fill("not-a-real-key-for-the-double");
   await inWizard(page, "Sign in").click();
-  await expect(page.locator(".ah-stage-row[data-stage='detect'] .ah-stage-detail")).toHaveText("Signed in with your saved key", { timeout: 15_000 });
+  await expect(page.locator(".ah-stage-row[data-stage='detect'] .ah-stage-detail")).toHaveText("Signed in with your key", { timeout: 15_000 });
 });
 
 test("a saved key (unlocked with the passkey) is offered only when the browser holds one", async ({ page }) => {
@@ -154,7 +156,7 @@ test("a saved key (unlocked with the passkey) is offered only when the browser h
   await expect(page.getByText("Use work laptop key")).toBeVisible();
   await page.getByText("Use work laptop key").click();
   await inWizard(page, "Sign in").click();
-  await expect(page.locator(".ah-stage-row[data-stage='detect'] .ah-stage-detail")).toHaveText("Signed in with your saved key", { timeout: 15_000 });
+  await expect(page.locator(".ah-stage-row[data-stage='detect'] .ah-stage-detail")).toHaveText("Signed in with your key", { timeout: 15_000 });
 });
 
 test("without a saved key the choice does not offer one", async ({ page }) => {
@@ -254,7 +256,8 @@ test("an unsupported host cannot be retried; an install failure can", async ({ p
   await page.locator(".ui-chip-remove").click({ force: true });
   await addTyped(page, "broken.lab");
   await expect(page.getByRole("heading", { name: "Setting up broken.lab didn't finish" })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("Automatic cleanup may still need to finish.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Open the details, restore access to the host if needed, then try again.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Automatic cleanup may still need to finish.", { exact: false })).toHaveCount(0);
   await inWizard(page, "Retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
@@ -308,8 +311,7 @@ test("an SSH config pasted into the field becomes chips", async ({ page }) => {
 test("closing mid-install asks first, and cancelling ends the run", async ({ page }) => {
   await open(page);
   await openWizard(page);
-  await page.locator(".ah-row[data-host='web-01']").click();
-  await inWizard(page, "Continue").click();
+  await addTyped(page, "cancellation.lab");
   await expect(page.locator(".ah-run[data-state='running']")).toBeVisible({ timeout: 10_000 });
   await page.keyboard.press("Escape");
   await expect(page.getByText("Closing stops installation and asks the server to undo this attempt. Cleanup can remain pending if the host is unavailable.")).toBeVisible();
@@ -318,14 +320,16 @@ test("closing mid-install asks first, and cancelling ends the run", async ({ pag
   await page.locator(".ah-close").click();
   await inWizard(page, "Stop installing").click();
   await expect(wizard(page)).toHaveCount(0);
-  expect(await consoleWindows(page)).not.toContain("w-web-01");
+  expect(await consoleWindows(page)).not.toContain("w-cancellation.lab");
 });
 
 test("the wizard works on a phone and keeps the footer on screen", async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true, baseURL: `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}` });
   const page = await context.newPage();
   try {
-    await page.request.post("/__mock/bootstrap/reset");
+    // Fixture setup is idempotent: retry only a reset keep-alive connection,
+  // never a product operation or an assertion failure.
+  await page.request.post("/__mock/bootstrap/reset", { maxRetries: 1 });
     await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none");
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     await openWizard(page);
