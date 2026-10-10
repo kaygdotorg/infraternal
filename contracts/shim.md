@@ -90,7 +90,7 @@ the PTY output stream since the session started.
 | 0x1B | agent → shim | `SelectWriter` | u32 nonzero writer identity (cap bit 1; see additive section) |
 | 0x1C | shim → agent | `SnapshotWithFlags` | u64 seq, u8 flags, bytes VT (cap bit 2; see additive section) |
 | 0x20 | shim → agent  | `Exited`   | i32 status or −signal, u64 final_seq |
-| 0x21 | agent → shim  | `ExitAck`  | (empty). The shim deletes its socket and exits. |
+| 0x21 | agent → shim  | `ExitAck`  | (empty). Optional acknowledgement after `Exited`; closes this peer. |
 | 0x7F | both          | `Error`    | u16 code, utf-8 message |
 
 Rules:
@@ -106,8 +106,15 @@ Rules:
   reconnect, it sends `ReadFrom(last_seq)`. Thus, no byte is lost or sent two
   times while the bytes are in the ring (DECISIONS 41: no lost bytes on
   resume).
-- **Exit is kept.** The shim keeps `Exited` until it gets `ExitAck`, so an
-  agent restart cannot lose the exit status.
+- **Exit delivery and retirement (owner brief #151).** After PTY drain, the
+  shim flushes `Exited` to attached data viewers, then removes its socket and
+  exits without requiring `ExitAck`. With no data viewer it retires within one
+  second; discovery/control peers cannot hold it alive. `ExitAck` remains
+  accepted but cannot skip another viewer's ordered exit. Retired shells are
+  not resumable after an infraternal agent restart: startup reconciles only live
+  shims. D178 preserves detached shells while they are running. This owner
+  amendment replaces the earlier retained-exit lifetime rule; opcodes and frame
+  layouts remain frozen.
 
 ## 5. Budgets (from DECISIONS 41)
 
