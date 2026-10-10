@@ -85,7 +85,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
 
   const state: CanvasState = {
     metrics: metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes()),
-    activeWin: undefined, currentView: "console", canvasLock: true, snapIdx: 0, movingWindow: false, serial: 0,
+    activeWin: undefined, currentView: "console", canvasLock: true, snapIdx: 0, movingWindow: false, serial: 0, recent: new Map(),
   };
   let frameQueued = 0;
   const cx = {

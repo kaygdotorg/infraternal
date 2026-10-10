@@ -17,6 +17,7 @@ import type { WindowModel } from "../model/types";
 import { ICON, SESSION_ICON, iconFor } from "../views/icons";
 import { isTerminal, makeBody } from "../views/body";
 import { beginMove } from "./move";
+import { RecentList } from "../recency";
 
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   const actions: WindowAction[] = [];
@@ -58,6 +59,14 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   return rec;
 }
 
+/** A window made active counts as used: it moves to the front of its view's recency list (#121). */
+function recordUse(state: Ctx["state"], rec: WinRec): void {
+  const view = rec.owner.view.id;
+  let list = state.recent.get(view);
+  if (!list) state.recent.set(view, (list = new RecentList<string>()));
+  list.touch(rec.model.id);
+}
+
 /** Makes `rec` the active window (or none): accent hairline, the binding's focus state, the pill, the toolbar and the tree. */
 export function setActive(cx: Ctx, rec: WinRec | undefined): void {
   const { state } = cx;
@@ -66,6 +75,7 @@ export function setActive(cx: Ctx, rec: WinRec | undefined): void {
   prev?.card.setActive(false);
   prev?.binding?.setActive(false);
   state.activeWin = rec;
+  if (rec) recordUse(state, rec);
   rec?.card.setActive(true);
   rec?.binding?.setActive(true);
   cx.pill.paint();
