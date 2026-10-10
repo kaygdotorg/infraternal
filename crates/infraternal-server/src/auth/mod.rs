@@ -5,8 +5,7 @@
 //! owner creation, recovery replacement, passkey limits and capability redemption.
 
 mod binding;
-#[cfg(test)]
-mod cookies;
+pub(crate) mod cookies;
 mod crypto;
 mod devices;
 mod http;
