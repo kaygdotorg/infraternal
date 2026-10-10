@@ -17,3 +17,6 @@ pub use memory::MemoryPolicy;
 
 #[cfg(all(test, feature = "agent"))]
 mod tests;
+
+#[cfg(all(test, feature = "agent"))]
+mod session_counts_tests;

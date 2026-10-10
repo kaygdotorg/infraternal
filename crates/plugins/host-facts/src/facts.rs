@@ -46,7 +46,7 @@ const ACTIONS: &[ActionDef] = &[
             r#"{"type":"object","properties":{"includeLive":{"type":"boolean"}},"additionalProperties":false}"#,
         ),
         output: infraternal_plugin_api::SchemaRef(
-            r#"{"type":"object","properties":{"os":{"type":"string"},"version":{"type":"string"},"kernel":{"type":"string"},"architecture":{"type":"string"},"model":{"type":"string"},"cpuModel":{"type":"string"},"logicalCpus":{"type":"integer"},"memory":{"type":"object"},"rootDisk":{"type":"object"},"uptimeSeconds":{"type":"integer"},"loadAverage":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"mode":{"enum":["embedded","remote"]},"executionUid":{"type":"integer"},"engines":{"type":"array","items":{"enum":["Docker","Podman"]}},"init":{"type":"string"},"virtualization":{"type":"string"},"shell":{"type":"string"},"locale":{"type":"string"}},"required":["os","version","kernel","architecture","logicalCpus","mode","executionUid","engines"],"additionalProperties":false}"#,
+            r#"{"type":"object","properties":{"os":{"type":"string"},"version":{"type":"string"},"kernel":{"type":"string"},"architecture":{"type":"string"},"model":{"type":"string"},"cpuModel":{"type":"string"},"logicalCpus":{"type":"integer"},"sessionCount":{"type":"integer","minimum":0},"backgroundSessionCount":{"type":"integer","minimum":0},"memory":{"type":"object"},"rootDisk":{"type":"object"},"uptimeSeconds":{"type":"integer"},"loadAverage":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"mode":{"enum":["embedded","remote"]},"executionUid":{"type":"integer"},"engines":{"type":"array","items":{"enum":["Docker","Podman"]}},"init":{"type":"string"},"virtualization":{"type":"string"},"shell":{"type":"string"},"locale":{"type":"string"}},"required":["os","version","kernel","architecture","logicalCpus","mode","executionUid","engines"],"additionalProperties":false}"#,
         ),
         instructions: &[
             "Choose the host whose identity is needed.",
@@ -158,6 +158,12 @@ pub struct HostFacts {
     /// CPU marketing/model string, when exposed by the OS.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_model: Option<String>,
+    /// Live shims authenticated by this host; absent from bootstrap-only collection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_count: Option<usize>,
+    /// Sessions with no attached window; a reconnecting window still owns its attachment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_session_count: Option<usize>,
     /// Current memory counters, omitted from a static-only response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<Capacity>,
@@ -238,6 +244,7 @@ pub struct HostFactsPlugin {
     enabled: bool,
     static_facts: Option<HostFacts>,
     memory_policy: super::MemoryPolicy,
+    context: Option<infraternal_plugin_api::admission::NodeContext>,
 }
 
 impl HostFactsPlugin {
@@ -249,6 +256,7 @@ impl HostFactsPlugin {
             enabled: true,
             static_facts: Some(collect_static_facts(mode)),
             memory_policy: super::MemoryPolicy::default(),
+            context: None,
         }
     }
 
@@ -262,6 +270,10 @@ impl HostFactsPlugin {
 impl AgentPlugin for HostFactsPlugin {
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
+    }
+
+    fn update_context(&mut self, context: infraternal_plugin_api::admission::NodeContext) {
+        self.context = Some(context);
     }
 
     fn admit(
@@ -294,6 +306,10 @@ impl AgentPlugin for HostFactsPlugin {
                 }
                 let include_live = decode_read_request(input).map_err(|_| PluginError::Rejected)?;
                 let mut facts = self.static_facts.clone().ok_or(PluginError::Rejected)?;
+                if let Some(context) = self.context {
+                    facts.session_count = Some(context.session_count);
+                    facts.background_session_count = Some(context.background_session_count);
+                }
                 if include_live {
                     refresh_live_facts(&mut facts);
                 }
@@ -471,6 +487,8 @@ pub fn collect_static_facts(mode: AgentMode) -> HostFacts {
         kernel: bound_label(&kernel).unwrap_or_default(),
         model: model.and_then(|value| bound_label(&value)),
         cpu_model: cpu_model.and_then(|value| bound_label(&value)),
+        session_count: None,
+        background_session_count: None,
         memory: None,
         root_disk: None,
         uptime_seconds: None,
