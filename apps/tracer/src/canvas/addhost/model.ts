@@ -52,7 +52,7 @@ const NETWORK_NAMES: Record<NetworkProvider, string> = { netbird: "NetBird", tai
 export function authLabel(info: AuthenticationInfo): string {
   if (info.method === "network") return info.network && info.network !== "other" ? `network access (${NETWORK_NAMES[info.network]})` : "network access";
   if (info.method === "server-key") return "this server's key";
-  if (info.method === "user-key") return "your saved key";
+  if (info.method === "user-key") return "your key";
   return "your password";
 }
 
@@ -116,7 +116,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined): Guid
     };
     case "auth": return failure.choose_method ? {
       title: `Couldn't sign in to ${name}`,
-      happened: "Your network access, this server's key and your saved key didn't get in.",
+      happened: "The sign-in methods tried so far didn't get in.",
       next: "Choose another way to sign in, or give this server's key to the host.",
       fix: "choose-method",
     } : {
@@ -133,8 +133,8 @@ export function guideFor(name: string, failure: FailureDetail | undefined): Guid
     };
     case "install": return {
       title: `Setting up ${name} didn't finish`,
-      happened: "Installation stopped before this host was ready. Automatic cleanup may still need to finish.",
-      next: "Open the details, restore access to the host if needed, then try again to finish cleanup before another attempt.",
+      happened: "Setup stopped before this host was ready.",
+      next: "Open the details, restore access to the host if needed, then try again.",
       fix: "retry",
     };
     default: return {
