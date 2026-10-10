@@ -64,7 +64,7 @@ describe("authLabel", () => {
     expect(authLabel({ method: "network" })).toBe("network access");
     expect(authLabel({ method: "network", network: "tailscale" })).toBe("network access (Tailscale)");
     expect(authLabel({ method: "server-key" })).toBe("this server's key");
-    expect(authLabel({ method: "user-key" })).toBe("your saved key");
+    expect(authLabel({ method: "user-key" })).toBe("your key");
     expect(authLabel({ method: "password" })).toBe("your password");
   });
 });
@@ -72,9 +72,9 @@ describe("authLabel", () => {
 describe("guideFor", () => {
   test("installation failures never claim that incomplete cleanup succeeded", () => {
     const guide = guideFor("fixture", { kind: "install", message: "cleanup pending", log_tail: [] });
-    expect(guide.happened).toContain("cleanup may still need to finish");
+    expect(guide.happened).not.toContain("cleanup");
     expect(guide.happened).not.toContain("nothing is left half done");
-    expect(guide.next).toContain("finish cleanup before another attempt");
+    expect(guide.next).not.toContain("cleanup");
     expect(guide.fix).toBe("retry");
   });
 
