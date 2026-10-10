@@ -18,6 +18,15 @@ import { WebSocketFrameDecoder, encodeMuxedFrame, type WireFrame } from "../../.
 import { startRealServer, type RealServer } from "./server";
 
 const ENABLED = process.env.REAL_SCALE === "1";
+/** `REAL_REMOTE_ORIGIN` + `REAL_REMOTE_TOKEN`: the server runs elsewhere (another machine, standalone TLS), the browser here. */
+const REMOTE = process.env.REAL_REMOTE_ORIGIN;
+/** `REAL_SCALE_GPU=1`: the browser is the new headless Chromium with the machine's GPU (no software rasteriser), and the trace adds the GPU and compositor threads. */
+const GPU = process.env.REAL_SCALE_GPU === "1";
+/** The shortcuts of the page's platform: the app's "mod" is Command on a Mac and Control elsewhere (and the split keys differ, see canvas/toolbar/shortcuts.ts). */
+const MAC = process.platform === "darwin";
+const MOD = MAC ? "Meta" : "Control";
+const SPLIT_RIGHT = MAC ? "Control+Alt+R" : "Control+Shift+D";
+const SPLIT_DOWN = MAC ? "Control+Alt+D" : "Control+Shift+Alt+D";
 const N = Number(process.env.REAL_SCALE_N ?? 54);
 const LABEL = process.env.REAL_SCALE_LABEL ?? "run";
 test.skip(!ENABLED, "set REAL_SCALE=1 to run the many-session benchmark");
@@ -32,8 +41,23 @@ let cookies = "";
 
 test.beforeAll(async () => {
   if (!ENABLED) return;
-  server = await startRealServer({ lean: true });
-  const browser = await chromium.launch({ args: ["--disable-renderer-backgrounding", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+  server = REMOTE
+    ? { origin: REMOTE, backend: "", bridges: [], token: process.env.REAL_REMOTE_TOKEN ?? "", binary: "", dispose: async () => undefined }
+    : await startRealServer({ lean: true });
+  const browser = await chromium.launch(GPU
+    ? { channel: "chromium", args: ["--disable-renderer-backgrounding"] }
+    : { args: ["--disable-renderer-backgrounding", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+  if (GPU) {
+    const info = await (await browser.newBrowserCDPSession()).send("SystemInfo.getInfo" as never) as { gpu: { devices: Array<{ vendorString: string; deviceString: string }>; auxAttributes?: Record<string, unknown> }; featureStatus?: Record<string, unknown> };
+    console.log(`GPUINFO ${JSON.stringify({ devices: info.gpu.devices.map((d) => `${d.vendorString} ${d.deviceString}`), featureStatus: info.featureStatus, glRenderer: info.gpu.auxAttributes?.glRenderer, glVendor: info.gpu.auxAttributes?.glVendor })}`);
+    const probe = await browser.newPage();
+    console.log(`GPUINFO webgl ${await probe.evaluate(() => { const gl = document.createElement("canvas").getContext("webgl"); const ext = gl?.getExtension("WEBGL_debug_renderer_info"); return gl && ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : "none"; })}`);
+    await probe.goto("chrome://gpu").catch(() => undefined);
+    await probe.waitForTimeout(2500);
+    const text = await probe.evaluate(() => { const walk = (n: Node, out: string[]): void => { if (n.nodeType === 3) out.push(n.textContent ?? ""); const e = n as Element; (e.shadowRoot ? [...e.shadowRoot.childNodes] : []).forEach((c) => walk(c, out)); n.childNodes.forEach((c) => walk(c, out)); }; const o: string[] = []; walk(document.body, o); return o.join(" "); }).catch(() => "");
+    console.log(`GPUINFO chrome://gpu ${(text.match(/(Canvas|Compositing|Rasterization|Video Decode|WebGL|WebGL2|WebGPU|Skia Graphite)\s*:\s*[A-Za-z ,.]+/g) ?? []).slice(0, 12).join(" | ")}`);
+    await probe.close();
+  }
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
   page = await context.newPage();
   page.on("console", (m) => { if (m.text().startsWith("CLOSE-REASON")) console.log(m.text()); });
@@ -88,7 +112,7 @@ async function feed(cookie: string, sessionHex: string, command: string): Promis
 }
 
 type Ev = { name: string; ph: string; dur?: number; tdur?: number; ts: number; pid: number; tid: number; args?: Record<string, any> };
-interface Stat { mainCpuMsPerSec: number; maxTaskMs: number; frames: number; p50: number; p95: number; maxInterval: number; bmfCpuP50: number; bmfCpuP95: number; top: string; extra?: unknown }
+interface Stat { threads?: string; hz?: number; mainCpuMsPerSec: number; maxTaskMs: number; frames: number; p50: number; p95: number; maxInterval: number; bmfCpuP50: number; bmfCpuP95: number; top: string; extra?: unknown }
 const PROFILE = process.env.REAL_SCALE_PROFILE === "1";
 /** Self time per function from the sampling profiler (readable build: `TRACER_NO_MINIFY=1 bun run build`). */
 async function printProfile(cdp: CDPSession, name: string, wall: number): Promise<void> {
@@ -124,7 +148,7 @@ async function measure(cdp: CDPSession, name: string, act: () => Promise<void>):
   (cdp as unknown as { on(n: string, f: typeof onData): void }).on("Tracing.dataCollected", onData);
   await page.evaluate(() => { const w = window as unknown as { __f: number[]; __stop: boolean }; w.__f = []; w.__stop = false; let last = performance.now(); const tick = (t: number): void => { w.__f.push(t - last); last = t; if (!w.__stop) requestAnimationFrame(tick); }; requestAnimationFrame(tick); });
   if (PROFILE) { await cdp.send("Profiler.enable"); await cdp.send("Profiler.setSamplingInterval", { interval: 400 }); await cdp.send("Profiler.start"); }
-  await cdp.send("Tracing.start", { categories: "toplevel,devtools.timeline,disabled-by-default-devtools.timeline", transferMode: "ReportEvents" });
+  await cdp.send("Tracing.start", { categories: `toplevel,devtools.timeline,disabled-by-default-devtools.timeline${GPU ? ",cc,viz,gpu" : ""}`, transferMode: "ReportEvents" });
   const t0 = Date.now();
   const opened0 = server.bridges.length;
   await act();
@@ -151,6 +175,23 @@ async function measure(cdp: CDPSession, name: string, act: () => Promise<void>):
     frames: frames.length, p50: +pct(frames, 0.5).toFixed(1), p95: +pct(frames, 0.95).toFixed(1), maxInterval: +Math.max(0, ...frames).toFixed(1),
     bmfCpuP50: +pct(bmf, 0.5).toFixed(1), bmfCpuP95: +pct(bmf, 0.95).toFixed(1), top,
   };
+  if (GPU) {
+    // Where the work went: CPU per second on each thread (the page's main thread, the compositor, the GPU process, raster workers).
+    const busy: Record<string, number> = {};
+    for (const e of events) if (e.ph === "X" && e.name === "ThreadControllerImpl::RunTask") { const n = names[`${e.pid}:${e.tid}`] ?? "?"; busy[n] = (busy[n] ?? 0) + D(e); }
+    stat.threads = Object.entries(busy).filter(([, v]) => v / wall > 1).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k} ${(v / wall).toFixed(0)}`).join(" | ");
+    stat.hz = +(1000 / (stat.p50 || 16.7)).toFixed(0);
+    // What the GPU process, the compositor and the raster workers spent their time on (the leaf-most events, by name).
+    const per: Record<string, Record<string, number>> = {};
+    const cnt: Record<string, number> = {};
+    for (const e of events) if (e.ph === "X" && e.name !== "ThreadControllerImpl::RunTask" && e.name !== "RunTask" && (e.tdur ?? e.dur ?? 0) > 0) {
+      const n = names[`${e.pid}:${e.tid}`] ?? "?"; const grp = /Gpu|Viz|Compositor|Raster|TileWorker/.test(n) ? n.replace(/\d+$/, "") : "";
+      if (!grp) continue;
+      (per[grp] ??= {})[e.name] = ((per[grp] ??= {})[e.name] ?? 0) + D(e);
+      if (e.name === "RasterTask" || e.name === "DrawFrame" || e.name === "Display::DrawAndSwap") cnt[e.name] = (cnt[e.name] ?? 0) + 1;
+    }
+    (stat as Stat & { gpuTop?: string }).gpuTop = Object.entries(per).map(([g, m]) => `${g}: ${Object.entries(m).filter(([k]) => !/^(Scheduler::|GpuChannel|GPUTask|CommandBuffer|Graphics.Pipeline|DisplayScheduler|Display::|ProxyImpl|MainFrame)/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 9).map(([k, v]) => `${k.slice(0, 56)} ${(v / wall).toFixed(0)}`).join(", ")}`).join(" || ") + ` || counts ${JSON.stringify(cnt)}`;
+  }
   stat.extra = { socketsOpened: server.bridges.length - opened0, closedBy: server.bridges.slice(opened0).map((b) => `${b.closedBy ?? (b.closed ? "?" : "open")} ${b.serverClose ?? ""}`.trim()) };
   console.log(`SCALE ${LABEL} n=${N} ${name} ${JSON.stringify(stat)}`);
   return stat;
@@ -186,7 +227,7 @@ test(`${N} real sessions: what scales with the session count`, async () => {
       const at = await index();
       if (process.env.REAL_SCALE_DEBUG === "1") console.log(`step ${step} at ${at}`);
       if (at >= 0 && at % 5 === 2 && !typed.has(at)) { typed.add(at); await page.keyboard.type((printers++ % 2 ? "top -b -d 1" : "while :; do seq 1 40; sleep 1; done") + "\n", { delay: 2 }); }
-      await page.keyboard.press("Control+Shift+ArrowLeft"); // the last window is active: walk back
+      await page.keyboard.press(`${MOD}+Shift+ArrowLeft`); // the last window is active: walk back
       await page.waitForTimeout(260);
     }
   }
@@ -194,6 +235,7 @@ test(`${N} real sessions: what scales with the session count`, async () => {
   const sessions = [...new Set(server.bridges.flatMap((b) => [...b.attached.values()].flat()))];
   printing = sessions; cookies = cookie; // every session is stopped at the end (cheap, and no shell is left behind)
   await page.waitForTimeout(3000);
+  if (process.env.REAL_SCALE_CSS) await page.addStyleTag({ content: process.env.REAL_SCALE_CSS }); // an experiment: take a look away and see what the zoom stops costing
   const cdp = await page.context().newCDPSession(page);
   const results: Record<string, Stat> = {};
   const status: Record<string, number> = {};
@@ -212,16 +254,16 @@ test(`${N} real sessions: what scales with the session count`, async () => {
   const kd = await page.evaluate(() => (window as unknown as { __kd: number[] }).__kd);
   console.log(`SCALE ${LABEL} n=${N} typing-keydown-event-durations ${JSON.stringify({ n: kd.length, p50: pct(kd, 0.5), max: Math.max(0, ...kd) })}`);
 
-  await page.keyboard.press("Control+Shift+G"); // canvas lock off: free pan and zoom
+  await page.keyboard.press(`${MOD}+Shift+G`); // canvas lock off: free pan and zoom
   await page.waitForTimeout(600);
   if (want("pan")) results.pan = await measure(cdp, "pan", () => wheelDrive((ph) => ({ deltaX: (ph < 0.5 ? -1 : 1) * 24, deltaY: (ph < 0.5 ? -1 : 1) * 9 })));
   await page.waitForTimeout(500);
   if (want("zoom")) results.zoom = await measure(cdp, "zoom", () => wheelDrive((ph) => ({ deltaY: (ph < 0.5 ? 1 : -1) * 14, ctrlKey: true })));
   await page.waitForTimeout(500);
-  await page.keyboard.press("Control+Shift+G");
+  await page.keyboard.press(`${MOD}+Shift+G`);
   await page.waitForTimeout(800);
-  if (want("step")) results.step = await measure(cdp, "window-step", async () => { for (let i = 0; i < 6; i++) { await page.keyboard.press("Control+Shift+ArrowRight"); await page.waitForTimeout(450); } });
-  if (want("split")) results.split = await measure(cdp, "split", async () => { for (let i = 0; i < 3; i++) { await page.keyboard.press(i % 2 ? "Control+Shift+Alt+D" : "Control+Shift+D"); await page.waitForTimeout(1000); } });
+  if (want("step")) results.step = await measure(cdp, "window-step", async () => { for (let i = 0; i < 6; i++) { await page.keyboard.press(`${MOD}+Shift+ArrowRight`); await page.waitForTimeout(450); } });
+  if (want("split")) results.split = await measure(cdp, "split", async () => { for (let i = 0; i < 3; i++) { await page.keyboard.press(i % 2 ? SPLIT_DOWN : SPLIT_RIGHT); await page.waitForTimeout(1000); } });
   if (process.env.REAL_SCALE_TRACE === "1") { const log = await page.evaluate(() => (window as unknown as { __wsLog: string[] }).__wsLog); const tally: Record<string, number> = {}; for (const l of log) tally[l] = (tally[l] ?? 0) + 1; console.log(`WSLOG ${JSON.stringify(Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 12))}`); }
   expect(Object.keys(results)).toHaveLength(only.length || 6);
 });
