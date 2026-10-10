@@ -62,6 +62,11 @@ impl CaMaterial {
         Self { key, issuer }
     }
 
+    /// Borrow the signer only for the private exec channel; never serialize to storage.
+    pub(crate) fn handoff_key(&self) -> &PKey<Private> {
+        &self.key
+    }
+
     /// Public trust remains usable while the signing source is locked [168].
     pub(crate) fn issuer(&self) -> &X509 {
         &self.issuer
