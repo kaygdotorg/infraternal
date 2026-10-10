@@ -1,6 +1,11 @@
 /** Implements the borrowed browser codec, mux envelope, and WebSocket stream decoder from contracts/wire.md. */
 
 export const MAX_FRAME_LEN = 4 * 1024 * 1024;
+/**
+ * `Close` code on a terminal stream: the session no longer exists on its host. The answer is final, so the viewer
+ * never attaches to that session again; every other stream close may be retried (contracts/wire.md §4, #158).
+ */
+export const CLOSE_SESSION_GONE = 4404;
 const MAX_U32 = 0xffff_ffff;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const MAX_VARINT_BYTES = 5;
