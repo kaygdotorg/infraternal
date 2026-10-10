@@ -69,12 +69,16 @@
   letter-spacing: var(--ui-button-letter-spacing, normal);
   transition: var(--ui-button-transition, transform 140ms var(--ease-out, ease), background-color 160ms ease, color 120ms ease);
 }
-.ui-button[data-button="primary"] { background: var(--ui-button-background, var(--fg)); color: var(--ui-button-color, var(--bg)); }
+/* A solid fill carries no text halo: the glass halo (above) would glow into the fill around every glyph, the
+   "blurred or doubled" label of the disabled and enabled primary alike (TASTE: button text is crisp in every state). */
+.ui-button[data-button="primary"] { background: var(--ui-button-background, var(--fg)); color: var(--ui-button-color, var(--bg)); text-shadow: none; }
 .ui-button[data-button="secondary"] { background: var(--ui-button-background, none); color: var(--ui-button-color, var(--fg-2, var(--fg))); }
 .ui-button[data-button]:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
 .ui-button[data-button]:disabled { cursor: default; }
 /* Disabled solid buttons remain opaque over content beneath their surface. */
-.ui-button[data-button="primary"]:disabled { background: var(--ui-button-disabled-background, color-mix(in oklab, var(--fg) 30%, var(--bg))); color: var(--ui-button-disabled-color, color-mix(in oklab, var(--bg) 85%, var(--fg))); }
+/* Lower emphasis comes from colour alone. The label keeps at least 3:1 against its fill in both themes: the fill is a
+   quiet tint of the foreground, and the label a stronger one (measured in test/top-centre.spec.ts). */
+.ui-button[data-button="primary"]:disabled { background: var(--ui-button-disabled-background, color-mix(in oklab, var(--fg) 12%, var(--bg))); color: var(--ui-button-disabled-color, color-mix(in oklab, var(--fg) 58%, var(--bg))); }
 @media (hover: hover) and (pointer: fine) { .ui-button[data-button="secondary"]:hover:not(:disabled) { color: var(--ui-button-hover-color, var(--fg)); } }
 .ui-source-icon { display: block; width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
