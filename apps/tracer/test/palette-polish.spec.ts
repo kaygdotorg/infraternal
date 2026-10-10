@@ -77,6 +77,9 @@ for (const [w, h] of [[393, 852], [375, 667]] as const) {
     // The list now ends at the palette's own bottom edge, and is taller than the old 54vh cap.
     expect(Math.abs(m.palBottom - m.resBottom)).toBeLessThanOrEqual(2);
     expect(m.resHeight).toBeGreaterThan(m.vh * 0.54);
+    // No title is ever squeezed out by its hint: every row's label keeps room to read (the "Settings" row lost its title on a phone).
+    const labels = await page.locator("#palette-results .result-label").evaluateAll((els) => els.map((el) => ({ text: el.textContent, w: el.getBoundingClientRect().width, scroll: (el as HTMLElement).scrollWidth })));
+    for (const l of labels) expect(l.w, `label "${l.text}" has room`).toBeGreaterThanOrEqual(Math.min(l.scroll, 60) - 1);
     await page.screenshot({ path: resolve(CAPTURES, `touch-${w}x${h}.png`) });
     await ctx.close();
   });
