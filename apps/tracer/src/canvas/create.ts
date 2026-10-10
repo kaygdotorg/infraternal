@@ -85,7 +85,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
 
   const state: CanvasState = {
     metrics: metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes()),
-    activeWin: undefined, currentView: "console", canvasLock: true, snapIdx: 0, movingWindow: false, serial: 0,
+    activeWin: undefined, currentView: "console", canvasLock: true, snapIdx: 0, movingWindow: false, serial: 0, recent: new Map(),
   };
   let frameQueued = 0;
   const cx = {
@@ -96,13 +96,16 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       frameQueued = requestAnimationFrame(() => { frameQueued = 0; cx.mesh?.updateOverlay(); });
     },
   } as unknown as Ctx;
+  // While the camera moves at a thumbnail scale the terminals hold their drawing (terminal.ts `setFrozen`).
+  let terminalsFrozen = false;
+  const freezeTerminals = (frozen: boolean): void => { if (frozen === terminalsFrozen) return; terminalsFrozen = frozen; options.adapters.sessions.freeze?.(frozen); };
   (cx as { camera: Camera }).camera = new Camera(viewport, world, {
     onTransform: (t) => backdrop?.update(t),
     onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--label-inv", inv); },
     onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
-    onFrame: () => { cx.invalidate(); cx.memory.cull(); if (cx.details?.isOpen()) cx.details.close(true); },
-    onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); },
+    onFrame: () => { cx.invalidate(); cx.memory.cull(); if (cx.details?.isOpen()) cx.details.close(true); if (cx.camera.isMoving && cx.camera.lod === "thumb") freezeTerminals(true); },
+    onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); freezeTerminals(false); },
     onFlight: () => { cx.view.hideSummary(); hideTips(); },
   });
   (cx as { flip: Ctx["flip"] }).flip = createFlip(() => cx.camera.cam.z, () => cx.invalidate());

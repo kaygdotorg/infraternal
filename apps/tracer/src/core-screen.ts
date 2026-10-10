@@ -101,6 +101,11 @@ export interface CoreScreen {
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
   /** Adds palette rows computed each time the palette opens (state-dependent actions); returns a remover. */
   addPaletteProvider(provider: () => PaletteEntry[]): () => void;
+  /**
+   * Opens the palette limited to `entries` only (a view's windows from its hover card, #121). The same search and
+   * keys apply; the next open (⌘K, the capsule) shows the whole palette again.
+   */
+  showPalette(entries: PaletteEntry[]): void;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
   setRecoveryPending(readyAt: number | undefined): void;
@@ -245,7 +250,20 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     overlayQueued = false;
     stage.toggleAttribute("data-overlay", stage.querySelector(OVERLAYS) !== null || document.querySelector(".ui-confirm-tip") !== null);
   };
-  const overlayWatch = new MutationObserver(() => { if (!overlayQueued) { overlayQueued = true; queueMicrotask(syncOverlay); } });
+  // Only a change to one of the floating things can change the answer. The terminals add and remove nodes all the time
+  // (every window, every output), and re-running `querySelector` over the whole screen for each of those was the top
+  // item of the main thread with 54 terminals open (90-120 ms of every second).
+  const OVERLAY_NODE = ".sidebar, .palette, .ui-toast, .ah-float, .canvas-popover, .ui-settings, .ui-shortcuts, .ui-confirm-tip";
+  const relevantNode = (n: Node): boolean => n.nodeType === 1 && ((n as Element).matches(OVERLAY_NODE) || (n as Element).querySelector(OVERLAY_NODE) !== null);
+  const overlayWatch = new MutationObserver((records) => {
+    if (overlayQueued) return;
+    for (const r of records) {
+      const hit = r.type === "attributes"
+        ? (r.target as Element).matches(OVERLAY_NODE)
+        : [...r.addedNodes, ...r.removedNodes].some(relevantNode);
+      if (hit) { overlayQueued = true; queueMicrotask(syncOverlay); return; }
+    }
+  });
   overlayWatch.observe(document.body, { childList: true }); // the anchored confirmation lives on the body
   overlayWatch.observe(stage, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
   // The footer (who is signed in, settings, the build) is part of the canvas preview.
@@ -517,9 +535,17 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     return Math.max(1, visibleCount);
   };
 
+  /** Rows of a scoped open (`showPalette`); undefined is the whole palette. They are indexed only while open. */
+  let scopedEntries: PaletteEntry[] | undefined;
+  const indexScoped = (on: boolean): void => {
+    for (const entry of scopedEntries ?? []) {
+      if (on) indexEntry(entry, 2000);
+      else { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); rowCache.delete(entry); }
+    }
+  };
   const renderPalette = (query = ""): void => {
     const needle = query.trim().toLocaleLowerCase();
-    visibleEntries = entries.filter((entry) => paletteSearchText.get(entry)?.includes(needle) ?? false);
+    visibleEntries = (scopedEntries ?? entries).filter((entry) => paletteSearchText.get(entry)?.includes(needle) ?? false);
     selected = Math.min(selected, Math.max(0, visibleEntries.length - 1));
     visibleOptions = [];
     // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
@@ -621,12 +647,15 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (instant) window.setTimeout(() => sidebar.classList.remove("instant"), 0);
   };
 
-  const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer"): void => {
+  const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer", only?: PaletteEntry[]): void => {
     // The source of the last open or close decides its motion (a key-triggered open is the shorter one).
     palette.dataset.openKind = source;
     if (open) {
       shortcuts.close(true);
       settings?.close("keyboard");
+      indexScoped(false);
+      scopedEntries = only;
+      indexScoped(true);
       // Fill the list while the palette is still display:none (no layout runs for it), then show it and
       // focus the field: the browser lays the palette out once, for the focus, not once per step.
       refreshEntries();
@@ -637,6 +666,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       scrim.hidden = false;
       paletteInput.focus({ preventScroll: true });
     } else {
+      indexScoped(false);
+      scopedEntries = undefined;
       palette.hidden = true;
       scrim.hidden = true;
       paletteInput.removeAttribute("aria-activedescendant");
@@ -1384,6 +1415,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       providers.add(provider);
       return () => { providers.delete(provider); };
     },
+    showPalette(only) { setPalette(true, "pointer", only); },
     toast,
     act(action) { runAction(action, "pointer"); },
     appearance: () => ({ theme: currentThemeId, font: committedFont.id, card: cardLevel, windows: windowLevel, background }),

@@ -55,6 +55,8 @@ export interface ConnectionIndicator {
   dispose(): void;
 }
 
+/** Three breaths of 1.7 s (see styles.css). */
+const BREATH_MS = 5100;
 const SETTLE_MS: Partial<Record<ConnectionIndicatorState, number>> = { resumed: 1800, approximate: 3200 };
 
 const GLYPHS = `
@@ -103,6 +105,7 @@ export function createConnectionIndicator(options: ConnectionIndicatorOptions = 
   let settle = 0;
   let sentence = "";
   let touch = false;
+  let lastBreath = -Infinity;
 
   const effective = (): ConnectionIndicatorState => (base === "connected" && slow ? "slow" : base);
   const render = (): void => {
@@ -111,8 +114,10 @@ export function createConnectionIndicator(options: ConnectionIndicatorOptions = 
     const changed = next !== shown;
     shown = next;
     root.dataset.state = next;
-    // The breath plays once per entry into "slow" (the animation is finite): start it again from its beginning.
-    if (changed && next === "slow") for (const a of root.querySelectorAll(".ui-conn-pulse")) for (const anim of a.getAnimations()) anim.currentTime = 0;
+    // The breath plays once per entry into "slow" (the animation is finite): start it again by switching to its twin
+    // (`getAnimations()` would flush style for the whole document, and a page with many terminals samples round trips
+    // all the time, so the state can flap), and not more often than the breath lasts.
+    if (changed && next === "slow" && performance.now() - lastBreath > BREATH_MS) { lastBreath = performance.now(); root.dataset.breath = root.dataset.breath === "1" ? "0" : "1"; }
     // The glyph a state uses: slow and connected are two colourings of the same dot.
     if (text !== sentence) {
       sentence = text;

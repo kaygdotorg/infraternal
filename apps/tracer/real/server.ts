@@ -26,6 +26,8 @@ export interface Bridge {
   closed: boolean;
   /** Which side ended the socket first, and its close code. */
   closedBy?: string;
+  /** The reason of the last `Close` frame the server sent on this socket (stream 0 or a terminal stream). */
+  serverClose?: string;
   /** AttachTerm frames by client stream id: the session each stream attached to (hex). */
   attached: Map<number, string[]>;
   /** Terminal output text by client stream id. */
@@ -58,6 +60,8 @@ const text = new TextDecoder();
  */
 export async function startRealServer(options: {
   latencyMs?: number;
+  /** The bridge does not decode or keep the server's output (benchmarks with busy terminals). */
+  lean?: boolean;
   address?: string;
   port?: number;
   hostname?: string;
@@ -68,6 +72,9 @@ export async function startRealServer(options: {
   /** Seeds controlled public host trust before any bootstrap operation. */
   prepareData?: (directory: string) => Promise<void>;
 } = {}): Promise<RealServer> {
+  // `lean`: the recording of every output frame made this single-threaded relay slower than the server's one-second
+  // write limit allows under busy terminals, and the server then closed the socket.
+  const lean = options.lean ?? process.env.REAL_BRIDGE_LEAN === "1";
   const delay = options.latencyMs ?? Number(process.env.REAL_ONE_WAY_MS ?? 0);
   const later = (run: () => void): void => { if (delay > 0) setTimeout(run, delay); else run(); };
   const binary = process.env.INFRATERNAL_BIN ?? resolve(root, "target/x86_64-unknown-linux-musl/release/infraternal");
@@ -120,9 +127,9 @@ export async function startRealServer(options: {
   const child: ChildProcess = spawn(binary, ["server", "--listen", `127.0.0.1:${port}`, "--data", state, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`, ...(options.remoteListen ? ["--remote-listen", options.remoteListen, "--remote-ca-dir", `${state}/ca`] : [])], {
     cwd: root, detached: true,
     env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", process.env.REAL_SERVER_LOG === "1" ? "pipe" : "ignore", "pipe"],
   });
-  if (process.env.REAL_SERVER_LOG === "1") child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); else child.stderr?.resume();
+  if (process.env.REAL_SERVER_LOG === "1") { child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); child.stdout?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); } else child.stderr?.resume();
 
   const bridges: Bridge[] = [];
   const front = new WebSocketServer({ noServer: true });
@@ -150,11 +157,12 @@ export async function startRealServer(options: {
       upstream.on("open", () => { for (const q of queued.splice(0)) { if (!bridge.closed) upstream.send(q.bytes, { binary: q.binary }); } });
       upstream.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
-        if (protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+        if (!lean && protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack" && f.type !== "Ping") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
           if (f.type === "Output") bridge.output.set(stream, (bridge.output.get(stream) ?? "") + text.decode(f.bytes, { stream: true }));
           if (f.type === "Snapshot") bridge.output.set(stream, text.decode(f.bytes));
           if (f.type === "Ack") bridge.acked.set(stream, f.inSeqAcked);
+          if (f.type === "Close") bridge.serverClose = `s${stream === 0 ? 0 : "n"} ${typeof (f as { reason?: unknown }).reason === "string" ? (f as { reason: string }).reason : JSON.stringify((f as { reason?: unknown }).reason)}`;
           if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
         });
         later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary }); });

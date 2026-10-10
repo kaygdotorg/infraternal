@@ -67,6 +67,7 @@ test("memory: a hidden page releases its surfaces and a shown page draws them ag
   await page.waitForTimeout(1500);
   const canvasPixels = (): Promise<number> => page.evaluate(() => [...document.querySelectorAll("canvas")].reduce((a, c) => a + c.width * c.height, 0));
   const shown = async (): Promise<number> => (await page.evaluate(() => [...document.querySelectorAll(".ui-canvas-backdrop-layer")].filter((l) => !(l as HTMLElement).hidden).length));
+  await expect.poll(canvasPixels, { timeout: 10_000 }).toBeGreaterThan(0); // the terminal draws once the page has settled; a loaded host takes longer than 1.5 s
   const before = { canvas: await canvasPixels(), layers: await shown() };
   expect(before.canvas).toBeGreaterThan(0);
   expect(before.layers).toBeGreaterThan(0);

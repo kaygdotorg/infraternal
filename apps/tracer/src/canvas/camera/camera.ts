@@ -5,7 +5,8 @@
  * - A frame writes `transform` on the world layer and nothing else that is per frame: the backdrop gets the new
  *   offset through `onTransform`, the labels' counter-scale is written only when it changes, and the level of
  *   detail and zoom band flip with hysteresis so a zoom does not flicker between them.
- * - `will-change` is set only while the camera moves and is cleared at rest, so text is raster-crisp at rest.
+ * - `will-change` is set only while the camera moves and is cleared at rest, so text is raster-crisp at rest. The world
+ *   carries `data-moving` for the same span, so CSS can give what is expensive to repaint its own layer while it moves.
  * - At rest the translation is snapped to whole device pixels (crisp text).
  * - A flight is a spring per axis; a new target keeps the current velocity, so a flight is always interruptible.
  *   A flight a gesture drives may take its time; one a key triggers is the short version (`keyFlight`).
@@ -83,6 +84,8 @@ export class Camera {
   private readonly springLz: Spring;
   private restTimer = 0;
   private moving = false;
+  /** Whether the camera is moving (a gesture or a flight is writing frames; false once it has come to rest). */
+  get isMoving(): boolean { return this.moving; }
   /** Whether `will-change: transform` is on the world right now. */
   private hinted = false;
   private ready = false;
@@ -145,6 +148,7 @@ export class Camera {
     const nextBand: ZoomBand = this.band === "in" ? (cam.z < 0.76 ? "out" : "in") : (cam.z > 0.82 ? "in" : "out");
     if (nextBand !== this.band) { this.band = nextBand; world.dataset.zoom = nextBand; this.hooks.onBand?.(nextBand); }
     if (!atRest) {
+      if (!this.moving) world.dataset.moving = "";
       this.moving = true;
       // `will-change: transform` makes the browser raster the layer at its own size (scale 1) so a move never blurs it.
       // Zoomed far out that is the whole visible world at full size: a mesh of a thousand hosts is 7,800 px wide, and
@@ -162,6 +166,7 @@ export class Camera {
     this.box = undefined;
     window.clearTimeout(this.restTimer);
     this.moving = false;
+    delete this.world.dataset.moving;
     this.hinted = false;
     endActivity("pan"); endActivity("zoom"); endActivity("flight");
     this.world.style.willChange = "";

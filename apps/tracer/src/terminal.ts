@@ -1084,7 +1084,7 @@ export class TerminalClient {
   }
 
   private scheduleFit(): void {
-    if (this.fitQueued || this.closed || this.suspended) return;
+    if (this.fitQueued || this.closed || this.suspended || this.frozen) return;
     this.fitQueued = true;
     requestAnimationFrame(() => {
       this.fitQueued = false;
@@ -1261,16 +1261,7 @@ export class TerminalClient {
     this.surfaceReleased = true;
     // The renderer would size the canvas again on its next frame (a blinking cursor is enough), so its drawing
     // calls are silenced until the surface is restored.
-    const renderer = this.ghostty.renderer as unknown as Record<string, unknown> | undefined;
-    if (renderer) {
-      this.silenced = {};
-      for (const name of ["render", "renderLine", "renderCursor", "resize"]) {
-        const original = renderer[name];
-        if (typeof original !== "function") continue;
-        this.silenced[name] = original;
-        renderer[name] = () => undefined;
-      }
-    }
+    this.silenceRenderer();
     canvas.width = 0;
     canvas.height = 0;
   }
@@ -1280,15 +1271,60 @@ export class TerminalClient {
     const renderer = this.ghostty.renderer;
     if (!renderer || !this.surfaceReleased || this.closed) return;
     this.surfaceReleased = false;
-    const target = renderer as unknown as Record<string, unknown>;
-    for (const [name, original] of Object.entries(this.silenced ?? {})) target[name] = original;
-    this.silenced = undefined;
+    // Frozen (the camera is moving): the picture comes back when the camera rests, in `setFrozen(false)`.
+    if (this.frozen) { this.restorePending = true; return; }
+    this.unsilenceRenderer();
     renderer.resize(this.terminal.cols, this.terminal.rows);
     this.repaintAll();
   }
 
   private surfaceReleased = false;
   private silenced: Record<string, unknown> | undefined;
+  private frozen = false;
+  private restorePending = false;
+
+  /** Replaces the renderer's drawing calls with no-ops (the canvas keeps what it shows). */
+  private silenceRenderer(): void {
+    const renderer = this.ghostty.renderer as unknown as Record<string, unknown> | undefined;
+    if (!renderer || this.silenced) return;
+    this.silenced = {};
+    for (const name of ["render", "renderLine", "renderCursor", "resize"]) {
+      const original = renderer[name];
+      if (typeof original !== "function") continue;
+      this.silenced[name] = original;
+      renderer[name] = () => undefined;
+    }
+  }
+
+  private unsilenceRenderer(): void {
+    const target = this.ghostty.renderer as unknown as Record<string, unknown> | undefined;
+    if (target) for (const [name, original] of Object.entries(this.silenced ?? {})) target[name] = original;
+    this.silenced = undefined;
+  }
+
+  /**
+   * Holds the drawing while the camera moves across a canvas of many terminals (#121): at a small scale the zoom or the
+   * flight redrew every visible terminal's canvas again and again (with the draw calls made no-ops, a zoom with 54 real
+   * terminals on a GPU went from 83 ms to 34 ms at p95 and the GPU process from 418 to 255 ms/s). The canvas keeps the
+   * pixels it shows, so there is nothing to copy and nothing to swap: no extra memory, and the picture is the same one when
+   * the camera rests. Output keeps flowing into the terminal's state (credit returns as usual); what arrived is drawn once
+   * when the freeze ends. The active terminal is never frozen by the caller.
+   */
+  setFrozen(frozen: boolean): void {
+    if (frozen === this.frozen || this.closed) return;
+    this.frozen = frozen;
+    if (this.suspended) return; // already not drawing, and its surface is restored by `setSuspended`
+    if (frozen) {
+      window.clearTimeout(this.renderIdleTimer);
+      this.pauseTerminal();
+      this.silenceRenderer();
+      return;
+    }
+    if (!this.surfaceReleased) this.unsilenceRenderer();
+    if (this.restorePending) { this.restorePending = false; this.surfaceReleased = true; this.restoreSurface(); } else this.repaintAll();
+    this.scheduleFit();
+    this.wakeTerminal();
+  }
 
   private repaintAll(): void {
     const renderer = this.ghostty.renderer;
@@ -1524,7 +1560,7 @@ export class TerminalClient {
 
   /** Keeps Ghostty drawing only through active input/output and its settling window. */
   private wakeTerminal(): void {
-    if (this.closed || this.suspended) return;
+    if (this.closed || this.suspended || this.frozen) return;
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = window.setTimeout(() => this.pauseTerminal(), RENDER_IDLE_MS);
     this.rendererCursorBlinking = true;

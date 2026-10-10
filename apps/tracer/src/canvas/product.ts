@@ -12,7 +12,7 @@
  * This module is a lazy chunk, loaded after sign-in and never on the sign-in path.
  */
 import { onDemand } from "../on-demand";
-import { MuxConnection } from "../connection";
+import { ConnectionPool, MuxConnection } from "../connection";
 import type { CoreScreen } from "../core-screen";
 import type { TerminalClient, TerminalHooks } from "../terminal";
 import { createAddHost } from "./addhost";
@@ -59,8 +59,10 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // The details source is loaded on a pill press, so keep the last sample for its first read.
   let roundTrip: number | undefined;
   const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); });
+  // More windows than one socket takes (the server allows 32 attachments per socket) open on further sockets.
+  const pool = new ConnectionPool(connection);
   const sessions = createLiveSessions({
-    core, connection, host: options.host,
+    core, connection, pool, host: options.host,
     ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
     ...(options.firstHooks ? { firstHooks: options.firstHooks } : {}),
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
@@ -124,6 +126,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       mesh.dispose();
       inventory.dispose();
       sessions.dispose();
+      pool.dispose();
       connection.dispose();
     },
   };

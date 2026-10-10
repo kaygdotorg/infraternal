@@ -11,6 +11,10 @@
    than overflow, because overflow clips at the box exactly and overflow-clip-margin is not in every browser. */
 .cl-viewport { position: absolute; inset: 0; overflow: visible; clip-path: inset(-12px 0 0 0); touch-action: none; -webkit-user-select: none; user-select: none; }
 .cl-viewport[data-panning] { cursor: grabbing; }
+/* While the camera moves each window is a layer of its own: it is rastered once at its size and the compositor only scales it,
+   where one shared layer was rastered again as the zoom changed (the windows' shadows, headers and borders: on a GPU the raster
+   workers took 233 ms of every second of a zoom with 54 windows, 119 with this). The hint goes at rest, so nothing is soft there. */
+.cl-world[data-moving] .ui-window { will-change: transform; }
 .cl-world { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; }
 .cl-overlay { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; z-index: 12; }
 
@@ -176,11 +180,18 @@
 
 /* ---- hover summary (desktop, zoomed out) ------------------------------------------------- */
 .cl-summary {
-  position: fixed; z-index: 1001; min-width: 220px; max-width: 300px; padding: 12px 14px 8px; border-radius: 14px; pointer-events: none;
+  position: fixed; z-index: 1001; min-width: 220px; max-width: 300px; box-sizing: border-box; padding: 12px; border-radius: 14px; pointer-events: none;
+  overflow-y: auto; overscroll-behavior: contain;
   opacity: 0; transform: scale(0.96); transition: opacity 150ms ease-out, transform 180ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 .cl-summary[hidden] { display: none; }
-.cl-summary[data-open="true"] { opacity: 1; transform: none; }
+.cl-summary[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
+.cl-summary-rows { display: grid; gap: 2px; }
+/* A window row in the card: the view list's row, taller when its detail wraps (values wrap, never truncate). */
+.cl-summary-pick { height: auto; min-height: var(--ui-row-h, 32px); padding: 6px 8px; }
+.cl-summary-pick .cl-viewrow-name { flex: 0 1 auto; max-width: 55%; overflow-wrap: anywhere; font-weight: 500; }
+.cl-summary-pick .cl-viewrow-meta { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; text-align: right; }
+.cl-summary-all { margin-top: 6px; }
 .cl-summary-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .cl-summary-icon { display: grid; color: var(--fg-2); }
 .cl-summary-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
