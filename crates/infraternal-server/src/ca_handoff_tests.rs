@@ -246,3 +246,37 @@ fn failed_null_open_or_duplication_closes_private_stdin() {
         );
     }
 }
+
+#[test]
+fn serialized_seed_frame_is_locked_and_excluded_from_core_dumps() {
+    let frame = encode(&source().load().unwrap()).unwrap();
+    let pointer = frame.as_ptr() as usize;
+    let maps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+    let mut selected = false;
+    for line in maps.lines() {
+        if let Some((start, end)) = line
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .split_once('-')
+            && let (Ok(start), Ok(end)) = (
+                usize::from_str_radix(start, 16),
+                usize::from_str_radix(end, 16),
+            )
+        {
+            selected = start <= pointer && pointer < end;
+        }
+        if selected && line.starts_with("VmFlags:") {
+            assert!(
+                line.split_whitespace().any(|flag| flag == "lo"),
+                "seed frame must be mlocked"
+            );
+            assert!(
+                line.split_whitespace().any(|flag| flag == "dd"),
+                "seed frame must be MADV_DONTDUMP"
+            );
+            return;
+        }
+    }
+    panic!("frame mapping missing from smaps");
+}

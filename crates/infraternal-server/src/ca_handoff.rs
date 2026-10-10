@@ -2,6 +2,7 @@
 
 use crate::ca::{CaError, CaKeySource, CaMaterial};
 use crate::ca_memory::MemoryCaSource;
+use infraternal_shim::locked_bytes::LockedBytes;
 use nix::sys::socket::{getsockopt, setsockopt, sockopt};
 use openssl::{
     pkey::{Id, PKey},
@@ -36,25 +37,33 @@ pub fn prepare(source: &dyn CaKeySource) -> Result<UnixStream, CaError> {
     Ok(receiver)
 }
 
-fn encode(material: &CaMaterial) -> Result<Zeroizing<Vec<u8>>, CaError> {
+fn encode(material: &CaMaterial) -> Result<LockedBytes, CaError> {
     let key = material.handoff_key();
     if key.id() != Id::ED25519 {
         return Err(CaError);
     }
-    let seed = Zeroizing::new(key.raw_private_key().map_err(|_| CaError)?);
-    let issuer = material.issuer().to_der().map_err(|_| CaError)?;
-    if seed.len() != 32 || issuer.len() > MAX_ISSUER {
+    // OpenSSL's export API necessarily returns one transient allocator copy.
+    // Copy immediately into protected pages and zeroize that unavoidable copy.
+    let raw = Zeroizing::new(key.raw_private_key().map_err(|_| CaError)?);
+    if raw.len() != 32 {
         return Err(CaError);
     }
-    let mut frame = Zeroizing::new(Vec::with_capacity(HEADER + issuer.len()));
-    frame.extend_from_slice(MAGIC);
-    frame.extend_from_slice(
+    let mut seed = LockedBytes::new(32).map_err(|_| CaError)?;
+    seed.copy_from_slice(&raw);
+    drop(raw);
+    let issuer = material.issuer().to_der().map_err(|_| CaError)?;
+    if issuer.len() > MAX_ISSUER {
+        return Err(CaError);
+    }
+    let mut frame = LockedBytes::new(HEADER + issuer.len()).map_err(|_| CaError)?;
+    frame[..8].copy_from_slice(MAGIC);
+    frame[8..10].copy_from_slice(
         &u16::try_from(issuer.len())
             .map_err(|_| CaError)?
             .to_be_bytes(),
     );
-    frame.extend_from_slice(&seed);
-    frame.extend_from_slice(&issuer);
+    frame[10..HEADER].copy_from_slice(&seed);
+    frame[HEADER..].copy_from_slice(&issuer);
     Ok(frame)
 }
 
@@ -130,7 +139,7 @@ fn receive(fd: &impl std::os::fd::AsFd) -> Result<CaMaterial, CaError> {
         &nix::sys::time::TimeVal::new(2, 0),
     )
     .map_err(|_| CaError)?;
-    let mut bytes = Zeroizing::new(vec![0; HEADER + MAX_ISSUER + 1]);
+    let mut bytes = LockedBytes::new(HEADER + MAX_ISSUER + 1).map_err(|_| CaError)?;
     let mut used = 0;
     loop {
         if used == bytes.len() {
