@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { afterEach, describe, expect, test } from "bun:test";
 import { createRealProvisioning, parseDiscovered, parseInstallCommand, parseServerKey } from "./real";
+import { ProvisioningRun } from "../../provisioning-client";
 import { ServiceError } from "./service";
 
 const realFetch = globalThis.fetch;
@@ -34,7 +35,7 @@ describe("a server that lacks an endpoint", () => {
     expect(await service.serverKey()).toBeUndefined();
     expect(await service.discover()).toEqual([]);
     expect(await service.installCommand("h")).toBeUndefined();
-    await expect(service.mintCredential({ kind: "password", text: "x" })).rejects.toMatchObject({ kind: "unavailable" });
+    expect(await service.mintCredential({ kind: "password", text: "fixture-input" }, "host", "host")).toMatch(/^[0-9a-f-]{36}$/);
   });
   test("404 discovery is an empty list; 500 discovery is an error to show", async () => {
     answer(404, "{}");
@@ -42,17 +43,83 @@ describe("a server that lacks an endpoint", () => {
     answer(500, "{}");
     await expect(createRealProvisioning().discover()).rejects.toBeInstanceOf(ServiceError);
   });
-  test("a locked session says to unlock, never leaks the request", async () => {
-    answer(401, "{}");
-    const error = await createRealProvisioning().mintCredential({ kind: "password", text: "hunter2" }).catch((caught: unknown) => caught);
-    expect((error as Error).message).toBe("Unlock with your passkey, then try again.");
-    expect(String(error)).not.toContain("hunter2");
+  test("private sign-in stays local until a target-bound socket start", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => { calls++; throw new Error("unexpected HTTP"); }) as unknown as typeof fetch;
+    const service = createRealProvisioning();
+    const reference = await service.mintCredential({ kind: "password", text: "fixture-input" }, "one", "one");
+    expect(calls).toBe(0);
+    const run = service.open({ onEvent() {} }, { url: "ws://fixture.invalid" });
+    run.start([{ id: "one", address: { kind: "manual", value: "one" }, credential: reference }]);
+    Socket.last.open();
+    const command = JSON.parse(Socket.last.sent[0]!);
+    expect(command.auth_once[0].target).toBe("one");
+    expect(command.auth_once[0].auth.password === "fixture-input").toBe(true);
+    expect("credential" in command.targets[0]).toBe(false);
+    expect(() => run.start([{ id: "one", address: { kind: "manual", value: "one" }, credential: reference }])).toThrow("expired");
+    run.close();
   });
-  test("the secret goes only in the request body, never in the URL", async () => {
-    let seen: { url: string; body: string } | undefined;
-    globalThis.fetch = (async (url: string, init?: RequestInit) => { seen = { url: String(url), body: String(init?.body) }; return new Response(JSON.stringify({ reference: "ref-1" }), { headers: { "content-type": "application/json" } }); }) as unknown as typeof fetch;
-    expect(await createRealProvisioning().mintCredential({ kind: "private-key", text: "KEYTEXT", passphrase: "PASS" })).toBe("ref-1");
-    expect(seen!.url).toBe("/v1/bootstrap/credential");
-    expect(JSON.parse(seen!.body)).toEqual({ kind: "private-key", secret: "KEYTEXT", passphrase: "PASS" });
+  test("a wrong target consumes the reference without sending private input", async () => {
+    const service = createRealProvisioning();
+    const reference = await service.mintCredential({ kind: "password", text: "fixture-input" }, "one", "one");
+    const run = service.open({ onEvent() {} }, { url: "ws://fixture.invalid" });
+    expect(() => run.start([{ id: "two", address: { kind: "manual", value: "two" }, credential: reference }])).toThrow("another host");
+    expect(Socket.last.sent.length).toBe(0);
+    run.close();
+  });
+  test("a local reference cannot change SSH address while keeping the target id", async () => {
+    const service = createRealProvisioning();
+    const reference = await service.mintCredential({ kind: "password", text: "fixture-input" }, "one", "one:22");
+    const run = service.open({ onEvent() {} }, { url: "ws://fixture.invalid" });
+    expect(() => run.start([{ id: "one", address: { kind: "manual", value: "two:22" }, credential: reference }])).toThrow("another host");
+    expect(Socket.last.sent.length).toBe(0);
+    run.close();
+  });
+  test("closing before open discards queued sign-in even if a late open fires", () => {
+    const run = new ProvisioningRun({ onEvent() {} }, { url: "ws://fixture.invalid", takeAuth: () => ({ password: "fixture-input" }) });
+    run.start([{ id: "one", address: { kind: "manual", value: "one" } }]);
+    run.close();
+    Socket.last.open();
+    expect(Socket.last.sent.length).toBe(0);
+  });
+  test("pre-open commands stay bounded and events after close cannot revive a run", () => {
+    let events = 0;
+    const run = new ProvisioningRun({ onEvent() { events++; } }, { url: "ws://fixture.invalid" });
+    for (let i = 0; i < 8; i++) run.replay();
+    expect(() => run.replay()).toThrow("busy");
+    run.close();
+    Socket.last.message({ sequence: 1, target: "one", attempt: 1, step: "done", message: "ready", elapsed_ms: 1, log_tail: [] });
+    expect(events).toBe(0);
+  });
+  test("trust waits for the exact acknowledgement, and ignores another target", async () => {
+    const run = new ProvisioningRun({ onEvent() {} }, { url: "ws://fixture.invalid" });
+    Socket.last.open();
+    let confirmed = false;
+    const promise = run.confirmHostKey("one", "challenge", "SHA256:fixture").then(() => { confirmed = true; });
+    Socket.last.message({ host_key_confirmed: { target: "two", fingerprint: "SHA256:fixture" } });
+    await Promise.resolve();
+    expect(confirmed).toBe(false);
+    Socket.last.message({ host_key_confirmed: { target: "one", fingerprint: "SHA256:fixture" } });
+    await promise;
+    expect(confirmed).toBe(true);
+    run.close();
   });
 });
+
+/** Socket events remain explicit so the cancellation test can deliver open after close. */
+class Socket extends EventTarget {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static last: Socket;
+  readyState = 0;
+  sent: string[] = [];
+  constructor(_url: string) { super(); Socket.last = this; }
+  send(text: string): void { this.sent.push(text); }
+  close(): void { this.readyState = 3; }
+  open(): void { this.readyState = 1; this.dispatchEvent(new Event("open")); }
+  message(value: unknown): void { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(value) })); }
+}
+const realSocket = globalThis.WebSocket;
+import { beforeEach } from "bun:test";
+beforeEach(() => { globalThis.WebSocket = Socket as unknown as typeof WebSocket; });
+afterEach(() => { globalThis.WebSocket = realSocket; });

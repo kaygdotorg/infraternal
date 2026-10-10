@@ -17,10 +17,10 @@
  * D183 paths, by host (a typed host name matches the same patterns):
  * - network: edge-arm (Tailscale), o1 and mon-02 (NetBird), remoternal (Tailscale)
  * - dedicated server key: every other host that signs in
- * - saved key / password: a credential minted at `POST /v1/bootstrap/credential` and passed in `start`
+ * - saved key / password: one-use `auth_once` inputs on the bootstrap socket
  * - `needs-key*` / nix-cache: every automatic method refused (auth + choose_method) until a credential is given
  * - `refused*`: one refusal without `choose_method`; the retry signs in
- * - `newkey*`: unknown host key (host-key + fingerprint) until trusted at `POST /v1/bootstrap/host-key`
+ * - `newkey*`: unknown host key (host-key + fingerprint) until confirmed on the same bootstrap socket
  * - `unsupported*`: reported after sign-in, never succeeds; `broken*`: install fails, the retry works
  * HTTP side (`handleBootstrapHttp`): the proposed endpoints of #87 (ssh-key, discovery, credential, host-key,
  * install-command) plus `/__mock/bootstrap/*` switches the specs use to reach empty and error states.
@@ -55,7 +55,7 @@ interface BootstrapEvent {
   message: string;
   elapsed_ms: number;
   log_tail: string[];
-  failure?: { kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; choose_method?: boolean };
+  failure?: { kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; choose_method?: boolean };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -109,18 +109,14 @@ function fixtureFor(address: { kind: string; value: string }): AddHostFixture | 
 
 interface Failure { phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[] }
 
-/** Host keys the person trusted through `POST /v1/bootstrap/host-key`, until `reset`. */
+/** Host keys the person trusted on the same bootstrap socket, until `reset`. */
 const trusted = new Set<string>();
-/** Minted one-connection credentials: opaque reference -> kind. Never the secret. */
-const credentials = new Map<string, "private-key" | "password">();
-let minted = 0;
 let sshKeyMode: "ok" | "locked" | "missing" = "ok";
 let discoveryMode: "ok" | "empty" | "error" | "hang" | "off" = "ok";
 let installMode: "ok" | "off" = "ok";
 
 export function resetBootstrapDouble(): void {
   trusted.clear();
-  credentials.clear();
   sshKeyMode = "ok";
   discoveryMode = "ok";
   installMode = "ok";
@@ -203,7 +199,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       if (!failure) return;
       emit(target, "failed", failure.message, {
         kind: failure.kind, message: failure.message, log_tail: [failure.evidence],
-        ...(failure.fingerprints ? { fingerprints: failure.fingerprints } : {}), ...(failure.choose ? { choose_method: true } : {}),
+        ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id } : {}), ...(failure.choose ? { choose_method: true } : {}),
       });
       target.state = "failed";
       target.fixed = true;
@@ -246,13 +242,9 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
         return send({ error: "invalid bootstrap request" });
       }
       const mode = entry.mode === "root" ? "root" : "rootless";
-      // A credential is an opaque reference minted once; it is consumed here and never echoed back.
-      const reference = typeof entry.credential === "string" ? entry.credential : typeof command.credential === "string" ? command.credential : undefined;
-      if (reference !== undefined && !credentials.has(reference)) return send({ error: "invalid bootstrap request" });
-      // Start validates every target before scheduling anything; root needs explicit consent.
+      const auth = Array.isArray(command.auth_once) ? command.auth_once.find((item) => item?.target === entry.id)?.auth : undefined;
+      const credential = auth?.password ? "password" as const : auth?.key ? "private-key" as const : undefined;
       if (mode === "root" && entry.root_consent !== true) return refuse("Root access needs your explicit consent.");
-      const credential = reference ? credentials.get(reference) : undefined;
-      if (reference) credentials.delete(reference);
       parsed.push({
         id: entry.id, name: hostNameOf(address as { kind: string; value: string }), credential,
         fixture: fixtureFor({ kind: address.kind, value: address.value }), mode, attempt: 1, state: "queued",
@@ -295,12 +287,17 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("not an object");
       command = value as Record<string, unknown>;
     } catch { return send({ error: "invalid bootstrap request" }); }
-    const known = { start: ["action", "targets", "credential"], retry: ["action", "target"], replay: ["action", "after"] } as const;
+    const known = { start: ["action", "targets", "credential", "auth_once"], "confirm-host-key": ["action", "target", "challenge", "fingerprint"], retry: ["action", "target"], replay: ["action", "after"] } as const;
     const action = command.action;
-    if (action !== "start" && action !== "retry" && action !== "replay") return send({ error: "invalid bootstrap request" });
+    if (action !== "start" && action !== "retry" && action !== "replay" && action !== "confirm-host-key") return send({ error: "invalid bootstrap request" });
     // Unknown fields are rejected, as the contract says.
     if (Object.keys(command).some((key) => !(known[action] as readonly string[]).includes(key))) return send({ error: "invalid bootstrap request" });
-    if (action === "start") start(command); else if (action === "retry") retry(command); else replay(command);
+    if (action === "confirm-host-key") {
+      const target = typeof command.target === "string" ? targets.get(command.target) : undefined;
+      if (!target || target.state !== "failed" || command.challenge !== target.id || command.fingerprint !== fingerprintOf(target.name)) return refuse("Check the host key again.");
+      trusted.add(target.name);
+      send({ host_key_confirmed: { target: target.id, fingerprint: command.fingerprint } });
+    } else if (action === "start") start(command); else if (action === "retry") retry(command); else replay(command);
   });
 
   // Disconnect cancels outstanding work; hosts that were running free their slot.
@@ -379,27 +376,6 @@ export async function handleBootstrapHttp(request: IncomingMessage, response: Se
     // came would pin the test proxy's connection.
     else if (discoveryMode === "hang") setTimeout(() => json(response, 200, { hosts: discoveryRows() }), 5000);
     else json(response, 200, { hosts: discoveryMode === "empty" ? [] : discoveryRows() });
-    return true;
-  }
-  if (path === "/v1/bootstrap/credential" && request.method === "POST") {
-    const body = await bodyOf(request);
-    // The secret is read for shape only: never stored, never logged, never echoed.
-    if (!body || (body.kind !== "private-key" && body.kind !== "password") || typeof body.secret !== "string" || !body.secret) { json(response, 400, { error: "invalid bootstrap request" }); return true; }
-    const reference = `${body.kind === "password" ? "pw" : "key"}-${++minted}`;
-    credentials.set(reference, body.kind);
-    json(response, 200, { reference });
-    return true;
-  }
-  if (path === "/v1/bootstrap/host-key" && request.method === "POST") {
-    const body = await bodyOf(request);
-    const value = typeof body?.host === "string" ? body.host : "";
-    const name = hostNameOf({ kind: "manual", value });
-    const discovered = addHostFixtures.some((host) => host.id === value);
-    const key = discovered ? value : name;
-    if (!body || typeof body.fingerprint !== "string" || body.fingerprint !== fingerprintOf(key)) { json(response, 409, { error: "fingerprint does not match the observed key" }); return true; }
-    trusted.add(key);
-    response.statusCode = 204;
-    response.end();
     return true;
   }
   if (path === "/v1/bootstrap/install-command" && request.method === "POST") {

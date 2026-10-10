@@ -107,7 +107,13 @@ test("a batch shows every host's own progress and opens every host", async ({ pa
 
 test("all automatic methods refused: asked to choose, and a password is sent once and never kept", async ({ page }) => {
   const requests: Array<{ url: string; body: string }> = [];
+  const privateFrames: boolean[] = [];
   page.on("request", (request) => requests.push({ url: request.url(), body: request.postData() ?? "" }));
+  page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+    if (!String(payload).startsWith("{")) return;
+    const command = JSON.parse(String(payload));
+    if (command.auth_once) privateFrames.push(command.auth_once.some((entry: { auth?: { password?: string } }) => entry.auth?.password === "correct horse battery staple"));
+  }));
   await open(page);
   await openWizard(page);
   await addTyped(page, "kayg@needs-key.lab");
@@ -118,8 +124,9 @@ test("all automatic methods refused: asked to choose, and a password is sent onc
   await inWizard(page, "Sign in").click();
   await expect(page.locator(".ah-stage-row[data-stage='detect'] .ah-stage-detail")).toHaveText("Signed in with your password", { timeout: 15_000 });
   await expect.poll(() => consoleWindows(page)).toContain("w-needs-key.lab");
-  // The secret went in exactly one request body, to the credential endpoint, and in no URL.
-  expect(requests.filter((item) => item.body.includes(secret)).map((item) => new URL(item.url).pathname)).toEqual(["/v1/bootstrap/credential"]);
+  // Private input is sent once on the authenticated socket; no HTTP credential store exists.
+  expect(privateFrames).toEqual([true]);
+  expect(requests.some((item) => item.body.includes(secret))).toBe(false);
   expect(requests.some((item) => item.url.includes("correct") || item.url.includes("horse"))).toBe(false);
   expect(await page.evaluate(() => document.body.innerHTML.includes("correct horse") || JSON.stringify({ ...localStorage, ...sessionStorage }).includes("correct horse"))).toBe(false);
 });

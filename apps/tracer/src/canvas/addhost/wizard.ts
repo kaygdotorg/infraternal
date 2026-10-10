@@ -765,17 +765,19 @@ export class Wizard {
       let reference: string;
       if (this.chosen === "saved" && this.savedKey) {
         const text = await this.savedKey.unwrap();
-        reference = await this.deps.service.mintCredential({ kind: "private-key", text });
+        if (!this.alive || this.closing) return;
+        reference = await this.deps.service.mintCredential({ kind: "private-key", text }, job.target, this.addressText(job.entry));
       } else {
         const secrets = this.takeSecrets();
         if (this.chosen === "password") {
           if (!secrets.password) { this.showError("Type the password first."); return; }
-          reference = await this.deps.service.mintCredential({ kind: "password", text: secrets.password });
+          reference = await this.deps.service.mintCredential({ kind: "password", text: secrets.password }, job.target, this.addressText(job.entry));
         } else {
           if (!secrets.key.trim()) { this.showError("Paste the private key first."); return; }
-          reference = await this.deps.service.mintCredential({ kind: "private-key", text: secrets.key, ...(secrets.passphrase ? { passphrase: secrets.passphrase } : {}) });
+          reference = await this.deps.service.mintCredential({ kind: "private-key", text: secrets.key, ...(secrets.passphrase ? { passphrase: secrets.passphrase } : {}) }, job.target, this.addressText(job.entry));
         }
       }
+      if (!this.alive || this.closing) { this.deps.service.dispose?.(); return; }
       this.retryJob(job, reference);
     } catch (error: unknown) {
       this.showError(error instanceof ServiceError ? error.message : "That sign-in couldn't be sent. Try again.");
@@ -882,6 +884,7 @@ export class Wizard {
     this.clearTimers();
     // Closing a run is the cancel; hosts already done are enrolled and stay.
     this.closeAllRuns();
+    this.deps.service.dispose?.();
     this.root.removeEventListener("click", this.onClick);
     this.root.removeEventListener("change", this.onChange);
     document.removeEventListener("keydown", this.onKeyDown, true);
@@ -907,6 +910,7 @@ export class Wizard {
     this.closing = true;
     this.clearTimers();
     this.closeAllRuns();
+    this.deps.service.dispose?.();
     this.root.removeEventListener("click", this.onClick);
     this.root.removeEventListener("change", this.onChange);
     document.removeEventListener("keydown", this.onKeyDown, true);

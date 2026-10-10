@@ -9,9 +9,8 @@
  * method that returns `undefined` or rejects with a `ServiceError` whose text is shown as is; the wizard
  * never fakes success.
  *
- * Secrets: nothing here keeps a key or a password. `mintCredential` sends one secret to the server over
- * the page's own authenticated connection and hands back an opaque, one-use reference. Only that reference
- * travels in provisioning requests (contract: "credential is an opaque reference, never key/password bytes").
+ * Secrets: local one-use references are bound to a target; their private inputs travel only on the
+ * authenticated bootstrap socket and are discarded when the run ends.
  */
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import type { HostSource } from "../../../../../packages/ui/src/source-icons";
@@ -44,7 +43,7 @@ export interface ServerKey {
   locked: boolean;
 }
 
-/** What the person typed once for one connection. It never leaves `mintCredential`. */
+/** What the person typed once for one connection. It is consumed once by the authenticated bootstrap socket. */
 export type OneTimeSecret =
   | { kind: "private-key"; text: string; passphrase?: string }
   | { kind: "password"; text: string };
@@ -78,8 +77,10 @@ export interface ProvisioningService {
   savedKey(): Promise<SavedKey | undefined>;
   /** Opens one provisioning batch (one socket). The caller closes it. */
   open(handlers: ProvisioningHandlers, options?: ProvisioningOptions): ProvisioningRun;
-  /** Sends one secret for one connection; resolves to its opaque reference. */
-  mintCredential(secret: OneTimeSecret): Promise<string>;
+  /** Keeps one secret briefly for one target; resolves to a local one-use reference. */
+  mintCredential(secret: OneTimeSecret, target: string, address: string): Promise<string>;
+  /** Discards private inputs when the flow is disposed. */
+  dispose?(): void;
   /** Pins an observed host key after the person compared its fingerprint. Never called without a click. */
   trustHostKey(host: string, fingerprint: string): Promise<void>;
   /** The install command for a host that cannot be reached from here, or undefined if unavailable. */
