@@ -30,6 +30,11 @@ export interface SessionBinding {
    * (its terminal is not ready yet), and the caller then disposes it and binds a new one.
    */
   retarget?(model: WindowModel): boolean;
+  /**
+   * Starts a new shell on the same host in this binding, after its session ended (the ended state's one action).
+   * The renderer stays; the new session's id arrives through `changed`, as for any new shell.
+   */
+  openNew?(): void;
   /** The window's box changed; the renderer refits to the new cell grid. */
   refit(): void;
   /** The window closed. The session is not ended. */

@@ -6,6 +6,9 @@
  * the canvas document re-attaches to the session it names. Closing a window detaches its stream and never ends
  * the session (D178).
  *
+ * A session the host no longer has is final (the server's Close 4404, #158): its terminal stops attaching and the
+ * window shows the ended state, with one action that starts a new shell on the same host in the same window.
+ *
  * Costs, because several terminals live on one page:
  * - A binding starts its terminal when the window first exists, but a window that is off screen or in another
  *   view is suspended (`setVisible(false)`): no drawing and no canvas backing store, so a phone holds about one
@@ -40,6 +43,8 @@ export interface LiveSessionsOptions {
   onFirstClient?: (client: TerminalClient) => void;
   /** Called when the window shows a session (restored or new). */
   onSessionCreated?: (sessionId: string) => void;
+  /** The host no longer has a window's session (#158): the inventory marks it ended and the window paints that. */
+  onSessionGone?: (host: string, sessionId: string) => void;
 }
 
 export interface LiveSessions extends SessionService {
@@ -149,6 +154,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         onAttached: (resumed, terminal) => { this.mark("attached"); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
         onPaintedOutput: (bytes, at, sequence) => { if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
+        // The ghost of the last screen sits in the host element, which the ended state hides.
+        onSessionGone: () => options.onSessionGone?.(this.model.host, this.model.sessionId ?? ""),
         onSessionCreated: (id) => {
           this.model.sessionId = id;
           this.changed();
@@ -215,6 +222,11 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     }
 
     refit(): void { this.client?.refit(); }
+
+    openNew(): void {
+      this.painted = false;
+      this.client?.openNewSession();
+    }
 
     dispose(): void {
       this.keepScreen();

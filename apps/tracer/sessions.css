@@ -92,6 +92,11 @@
 .ui-window-body:has(.cl-sx-strip) .cl-preview { padding-bottom: 72px; }
 /* On a phone the pill sits at the start edge, clear of the corner the mock badge keeps. */
 @media (pointer: coarse) { .cl-sx-strip { left: 12px; transform: none; } }
+/* An ended session (#158) has no screen left to read: the empty terminal is hidden (no cursor that invites typing),
+   and the pill sits in the middle of the window, on every device. */
+.ui-window-body:has(.cl-sx-strip[data-result="ended"]) .terminal-host { visibility: hidden; }
+.cl-sx-strip[data-result="ended"] { left: 50%; top: 50%; bottom: auto; transform: translate(-50%, -50%); animation: cl-sx-strip-in 200ms var(--ease-out, ease-out); }
+@keyframes cl-sx-strip-in { from { opacity: 0; } }
 @media (hover: hover) and (pointer: fine) { .cl-sx-dismiss:hover { background: var(--hover); color: var(--fg); } }
 
 /* Sized for another device (D183): the screen is scaled to fit, and a quiet badge offers the size back. */

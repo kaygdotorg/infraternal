@@ -34,6 +34,11 @@ export interface SessionRecord {
   frecency: number;
   activity?: SessionActivity;
   exit?: { code: number };
+  /**
+   * The host no longer has this session (#158): it ended while nothing showed it, so there is no exit code or final
+   * screen to keep. Shown as exited ("Session ended"); the window offers a new shell on the same host.
+   */
+  gone?: boolean;
   /** The screen to show when no live renderer does (an exited session's final screen, a detached preview). */
   screen: string[];
 }
