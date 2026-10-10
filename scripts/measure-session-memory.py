@@ -8,6 +8,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, required=True)
 parser.add_argument('--sessions', type=int, default=200)
 parser.add_argument('--samples', type=int, default=31)
+parser.add_argument('--owners', action='store_true', help='also sample 200 independent ownership links across filled history')
 parser.add_argument('--facts-only', action='store_true', help='measure registry control latency without filling history')
 args = parser.parse_args()
 binary = str(args.binary.resolve())
@@ -19,6 +20,7 @@ root.mkdir(mode=0o700)
 client=None
 children=[]
 shells=[]
+owners=[]
 def birth(pid):
  # Cleanup may run after an early child failure; never signal a reused PID.
  try: return Path(f'/proc/{pid}/stat').read_bytes().rsplit(b') ',1)[1].split()[19]
@@ -93,6 +95,15 @@ try:
  if args.facts_only: raise SystemExit(0)
  time.sleep(1)
  report(f'empty-{count}')
+ if args.owners:
+  # Each negotiated owner is independent of probes and output cursors. Confirm
+  # installation before sampling; no PTY output is read through this link.
+  for id,p in children:
+   peer=connect(id); owners.append(peer)
+   send(peer,b'\x02'+struct.pack('<Q',8))
+   send(peer,b'\x19')
+   assert frame(peer)==b'\x1a'+bytes(16)
+  report(f'owned-empty-{count}')
  pid=children[0][1].pid
  print(json.dumps(dict(phase='shim-attribution',threads=len(list(Path(f'/proc/{pid}/task').iterdir())))),flush=True)
  smaps=Path(f'/proc/{pid}/smaps').read_text()
@@ -120,7 +131,12 @@ try:
     assert data[0]==0x11, data[0]
     tail=(tail+data[9:])[-256:]
  report(f'scrollback-{count}')
+ if owners:
+  for peer in owners: peer.close()
+  owners.clear()
+  report(f'released-scrollback-{count}')
 finally:
+ for peer in owners: peer.close()
  if client is not None: client.kill()
  for pid,born in shells: retire(pid,born)
  for id,p in children:
