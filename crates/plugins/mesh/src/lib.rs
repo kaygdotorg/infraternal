@@ -17,3 +17,6 @@ pub use socket::{MeshPlugin, parse_subscription};
 pub mod dataplane;
 
 pub mod configuration;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod netlink;

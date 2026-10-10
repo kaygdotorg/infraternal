@@ -1,0 +1,28 @@
+# Isolated parser fuzzing uses the production netlink source without the crypto or database engines.
+[package]
+name = "infraternal-mesh-netlink-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+nix = { version = "0.30", features = ["socket", "time"] }
+zeroize = "1.9"
+
+[[bin]]
+name = "netlink"
+path = "fuzz_targets/netlink.rs"
+test = false
+doc = false
+bench = false
+
+[lints.rust]
+unsafe_code = "forbid"

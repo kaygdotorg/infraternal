@@ -1,0 +1,4 @@
+# Generated fuzz discoveries and crash artifacts stay outside version control.
+/corpus/
+/artifacts/
+/target/
