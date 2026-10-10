@@ -75,6 +75,9 @@ impl Store {
             return Err("Mesh membership was removed; authorized enrollment is required.");
         }
         let id = if let Some(row) = existing {
+            // Temporary discovery absence is not an endpoint removal [166].
+            // Keep the last known direct coordinate until an observed replacement arrives.
+            let endpoint = endpoint.or_else(|| row.get::<Option<String>, _>("endpoint"));
             let id: i64 = row.get("id");
             if row.get::<Option<String>, _>("dataplane_host").as_deref() == Some(host)
                 && row.get::<Vec<u8>, _>("public_key") == key.0

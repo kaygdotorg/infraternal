@@ -180,3 +180,38 @@ async fn required_server_membership_cannot_be_deleted() {
     ));
     assert!(store.config(server).await.is_ok());
 }
+
+#[tokio::test]
+async fn absent_discovery_preserves_the_last_known_endpoint() {
+    let pool = pool().await;
+    let store = Store::new(pool);
+    let (server, _) = store.attach("server", key(1), None, true).await.unwrap();
+    let address = "192.0.2.1:51820".parse().unwrap();
+    let (node, _) = store
+        .attach("host", key(2), Some(address), false)
+        .await
+        .unwrap();
+    let before = store.config(server).await.unwrap();
+    let (_, changed) = store.attach("host", key(2), None, false).await.unwrap();
+    assert!(
+        !changed,
+        "unavailable discovery must not erase the endpoint or publish a removal"
+    );
+    let after = store.config(server).await.unwrap();
+    assert_eq!(after.version, before.version);
+    assert_eq!(after.peers[&node].peer.endpoint, Some(address));
+    let replacement = "192.0.2.2:51821".parse().unwrap();
+    assert!(
+        store
+            .attach("host", key(2), Some(replacement), false)
+            .await
+            .unwrap()
+            .1
+    );
+    assert_eq!(
+        store.config(server).await.unwrap().peers[&node]
+            .peer
+            .endpoint,
+        Some(replacement)
+    );
+}
