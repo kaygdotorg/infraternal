@@ -11,6 +11,10 @@
    than overflow, because overflow clips at the box exactly and overflow-clip-margin is not in every browser. */
 .cl-viewport { position: absolute; inset: 0; overflow: visible; clip-path: inset(-12px 0 0 0); touch-action: none; -webkit-user-select: none; user-select: none; }
 .cl-viewport[data-panning] { cursor: grabbing; }
+/* While the camera moves each window is a layer of its own: it is rastered once at its size and the compositor only scales it,
+   where one shared layer was rastered again as the zoom changed (the windows' shadows, headers and borders: on a GPU the raster
+   workers took 233 ms of every second of a zoom with 54 windows, 119 with this). The hint goes at rest, so nothing is soft there. */
+.cl-world[data-moving] .ui-window { will-change: transform; }
 .cl-world { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; }
 .cl-overlay { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; z-index: 12; }
 
