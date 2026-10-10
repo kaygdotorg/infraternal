@@ -9,6 +9,7 @@
  */
 import { allShortcuts, bindShortcut, bindingOf, comboLabel, matchesCombo, onBindingsChange, platformCombo, registerShortcuts, type Combo } from "../../../../../packages/ui/src/shortcuts";
 import { isTypingTarget } from "../../../../../packages/ui/src/shortcuts-view";
+import { bindTerminalFont } from "../../terminal-font-shortcuts";
 import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
 
@@ -56,6 +57,7 @@ export function installShortcuts(cx: Ctx): () => void {
   // One press, one window: a repeat is ignored, and the window closes before the next press can see it.
   const closeActive = (e: KeyboardEvent): void => { if (e.repeat) return; const w = state.activeWin; if (w && !cx.inputLock.state && w.model.kind !== "node" && w.model.kind !== "settings") cx.win.closeKey(w); };
   const removeBindings = [
+    ...bindTerminalFont(() => cx.adapters.activeTerminal?.()),
     bindShortcut("canvas-lock", () => cx.nav.setCanvasLock(!state.canvasLock)),
     bindShortcut("input-lock", () => cx.inputLock.toggle()),
     bindShortcut("split-right", (e) => windowKey(e, (w) => cx.win.split(w, "right", true))),

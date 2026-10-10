@@ -171,3 +171,24 @@ for (const [name, platform, chords] of [["mac", MAC, MAC_CHORDS], ["windows", WI
     await page.keyboard.press("Escape");
   });
 }
+
+// The font size belongs to a live terminal client, which the single-terminal screen runs (the clusters mockup draws previews).
+for (const [name, platform, mod] of [["Windows", WINDOWS, "Control"], ["Mac", MAC, "Meta"]] as const) {
+  test(`${name}: keyboard font size steps the terminal text and resets it (D222)`, async ({ page }) => {
+    await page.addInitScript((value: string) => { Object.defineProperty(navigator, "platform", { get: () => value }); }, platform);
+    await page.request.post("/__mock/reset").catch(() => page.request.post("/__mock/reset"));
+    await page.request.post("/__mock/open-terminal");
+    await page.goto("/?mock=1&theme=ink&bg=none");
+    await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
+    await page.locator(".terminal-host").first().click();
+    const size = (): Promise<string | null> => page.evaluate(() => document.querySelector<HTMLElement>(".terminal-host")?.dataset.fontSize ?? null);
+    await chord(page, [mod, "Equal"]);
+    expect(await size(), "larger").toBe("15");
+    await chord(page, [mod, "Equal"]);
+    expect(await size(), "larger again").toBe("16");
+    await chord(page, [mod, "Minus"]);
+    expect(await size(), "smaller").toBe("15");
+    await chord(page, [mod, "Digit0"]);
+    expect(await size(), "reset to the default").toBe("14");
+  });
+}

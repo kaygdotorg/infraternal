@@ -6,6 +6,7 @@ import { Spring } from "../../../packages/ui/src/spring";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
+import { bindTerminalFont, TERMINAL_FONT_SHORTCUTS } from "./terminal-font-shortcuts";
 import { bindShortcut, bindingLabel, keyCaps, PALETTE_KEYS, paletteAlternate, paletteCombo, platformCombo, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
@@ -702,10 +703,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       // as the alternate outside text fields.
       { id: "shortcuts", label: "Show these shortcuts", keys: "?", combo: platformCombo({ code: "Slash", key: "/", mod: true, shift: false }, { code: "Slash", key: "/", mod: true, shift: true }), alternates: [{ code: "Slash", key: "?" }] },
       { id: "close", label: "Close the open panel", keys: "Esc" },
+      ...TERMINAL_FONT_SHORTCUTS,
     ] }),
   ];
   // The palette's chords come from the registry too (D222). A locked window owns every key, but a Mac's ⌘K still opens
   // the palette, since a terminal never receives ⌘; a declined press goes through to the terminal (Ctrl+K stays the shell's).
+  // The font chords act on the one terminal here; on the canvas the canvas binds them to its active window.
+  if (!options.canvas) removeShortcuts.push(...bindTerminalFont(() => client));
   removeShortcuts.push(bindShortcut("palette", () => setPalette(palette.hidden, "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
   // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
   // screen has the panel, as before.
