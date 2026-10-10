@@ -232,6 +232,10 @@ test("a mesh policy block says possible, not certain", async ({ page }) => {
   await openWizard(page);
   await page.locator(".ah-row[data-host='pve01']").click();
   await inWizard(page, "Continue").click();
+  // This discovered host uses a root SSH login; consent still precedes its attempt.
+  await expect(page.getByRole("heading", { name: "Install as root on pve01?" })).toBeVisible();
+  await page.locator(".ah-consent").click();
+  await inWizard(page, "Install as root").click();
   await expect(page.getByRole("heading", { name: "This server can't connect to pve01" })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("A network access rule may be blocking it")).toBeVisible();
 });
