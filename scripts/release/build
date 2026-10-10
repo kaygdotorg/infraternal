@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Builds both checksum-pinned Zig/musl payloads and packages the workspace version [20,213].
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/common"
+[[ $# == 0 ]] || { printf 'usage: scripts/release/build\n' >&2; exit 2; }
+cd "$release_root"
+export CARGO_TARGET_DIR="$release_target"
+export INFRATERNAL_RELEASE_BUILD=1
+scripts/auth-toolchain
+export PATH="$release_target/auth-tools/zig:$PATH"
+destination="$release_target/releases/$release_version"
+[[ ! -e "$destination" ]] || { printf 'release bundle already exists\n' >&2; exit 1; }
+staging="$(mktemp -d "$release_scratch/build.XXXXXX")"
+trap 'rm -rf -- "$staging"' EXIT
+scripts/package-release "$staging/bundle"
+printf '%s\n' "$release_version" > "$staging/bundle/VERSION"
+(cd "$staging/bundle" && sha256sum VERSION infraternal infraternal-aarch64-musl infraternal-x86_64-musl > SHA256SUMS)
+mkdir -p "$(dirname -- "$destination")"
+mv -T -- "$staging/bundle" "$destination"
