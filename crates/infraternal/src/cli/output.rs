@@ -185,7 +185,9 @@ fn render_data(output: &mut String, data: &serde_json::Value, options: RenderOpt
 
     let scalars = fields
         .iter()
-        .filter(|(_, value)| !value.is_object() && !value.is_array())
+        .filter(|(_, value)| {
+            !value.is_object() && !value.is_array() && !is_empty_pretty_value(value)
+        })
         .collect::<Vec<_>>();
     if !scalars.is_empty() {
         output.push('\n');
@@ -208,10 +210,9 @@ fn render_data(output: &mut String, data: &serde_json::Value, options: RenderOpt
         }
     }
 
-    for (key, value) in fields
-        .iter()
-        .filter(|(_, value)| value.is_object() || value.is_array())
-    {
+    for (key, value) in fields.iter().filter(|(_, value)| {
+        (value.is_object() || value.is_array()) && !is_empty_pretty_value(value)
+    }) {
         output.push('\n');
         output.push_str(&humanize(key));
         output.push('\n');
@@ -220,17 +221,24 @@ fn render_data(output: &mut String, data: &serde_json::Value, options: RenderOpt
                 render_table(output, &rows, 2, options.usable_width());
             } else {
                 for item in items {
-                    render_wrapped(output, &scalar_text(item), 2, options.usable_width());
+                    if !is_empty_pretty_value(item) {
+                        render_wrapped(output, &scalar_text(item), 2, options.usable_width());
+                    }
                 }
             }
         } else if let Some(nested) = value.as_object() {
             let label_width = nested
-                .keys()
+                .iter()
+                .filter(|(_, value)| !is_empty_pretty_value(value))
+                .map(|(key, _)| key)
                 .map(|key| humanize(key).chars().count())
                 .max()
                 .unwrap_or(8)
                 .min(22);
-            for (nested_key, nested_value) in nested {
+            for (nested_key, nested_value) in nested
+                .iter()
+                .filter(|(_, value)| !is_empty_pretty_value(value))
+            {
                 render_key_value(
                     output,
                     &humanize(nested_key),
@@ -240,6 +248,23 @@ fn render_data(output: &mut String, data: &serde_json::Value, options: RenderOpt
                     options.usable_width(),
                 );
             }
+        }
+    }
+}
+
+/// Empty containers and blank strings have no useful human representation.
+/// Keep them in JSON, but omit their labels in the human renderer.
+fn is_empty_pretty_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => value.trim().is_empty(),
+        serde_json::Value::Array(items) => {
+            items.is_empty() || items.iter().all(is_empty_pretty_value)
+        }
+        serde_json::Value::Object(fields) => {
+            fields.is_empty() || fields.values().all(is_empty_pretty_value)
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
         }
     }
 }
@@ -508,6 +533,47 @@ mod tests {
                 "  connectivity.\n"
             )
         );
+    }
+
+    #[test]
+    fn pretty_snapshot_omits_empty_skill_write_sections() {
+        let result = CommandResult::new(
+            "skill",
+            CommandState::Ready,
+            "Wrote 1 command skill files.",
+            json!({
+                "commands": [],
+                "skill": "",
+                "files": ["infraternal-status.md"]
+            }),
+        )
+        .with_next_step("Open a generated Markdown file to review its command contract.");
+        let output = render_pretty(
+            &result,
+            RenderOptions {
+                terminal: false,
+                color: false,
+                width: 80,
+            },
+        )
+        .expect("render skill write result");
+
+        assert_eq!(
+            output,
+            concat!(
+                "Infraternal skill\n\n",
+                "Overview\n",
+                "  State      Ready\n",
+                "  Summary    Wrote 1 command skill files.\n\n",
+                "Files\n",
+                "  infraternal-status.md\n\n",
+                "Next step\n",
+                "  Open a generated Markdown file to review its command contract.\n"
+            )
+        );
+        let json_output = render_json(&result).expect("render JSON skill write result");
+        assert!(json_output.contains("\"commands\": []"));
+        assert!(json_output.contains("\"skill\": \"\""));
     }
 
     #[test]
