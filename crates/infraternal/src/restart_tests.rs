@@ -369,3 +369,51 @@ fn early_hangup_is_queued_until_control_installs_its_handler() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
+    const NAME: &str = "restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome";
+    if std::env::var_os("INFRATERNAL_RESTART_LOG_TEST").is_some() {
+        infraternal_server::configure_logging(false);
+        let directory = Directory::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut control = Control::start(&directory.0).unwrap();
+            let (received, sent) = tokio::join!(
+                control.requested(None),
+                request(&directory.0, Some(Path::new("/usr/bin/bash")))
+            );
+            assert!(received.is_ok());
+            assert!(!sent.unwrap());
+        });
+        return;
+    }
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_RESTART_LOG_TEST", "1")
+        .env("RUST_LOG", "infraternal=info")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let logs = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        logs.contains(&format!("request_pid=Some({pid})")),
+        "restart log must include authenticated peer PID: {logs}"
+    );
+    assert!(logs.contains(&format!(
+        "request_uid=Some({})",
+        nix::unistd::Uid::effective().as_raw()
+    )));
+    assert!(logs.contains("/usr/bin/bash"));
+    assert!(logs.contains("cold"));
+    assert!(!logs.contains("seed") && !logs.contains("key_bytes") && !logs.contains("key_length"));
+}

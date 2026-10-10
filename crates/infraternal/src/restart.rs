@@ -94,43 +94,71 @@ impl Control {
         loop {
             let mut socket = tokio::select! {
                 _ = self.reload.recv() => {
-                    match current_binary().and_then(crate::restart_binary::Opened::open) {
-                        Ok(binary) => return Ok(Replacement::new(binary, source)),
+                    let target = match current_binary() {
+                        Ok(target) => target,
                         Err(error) => {
-                            eprintln!("Server reload request refused ({})", error.kind());
+                            record_request("SIGHUP", None, None, "refused");
+                            tracing::warn!(error_kind = ?error.kind(), "server reload target unavailable");
+                            continue;
+                        }
+                    };
+                    match crate::restart_binary::Opened::open(target.clone()) {
+                        Ok(binary) => {
+                            let replacement = Replacement::new(binary, source);
+                            record_request("SIGHUP", None, Some(&replacement.binary.path), replacement.outcome());
+                            return Ok(replacement);
+                        }
+                        Err(error) => {
+                            record_request("SIGHUP", None, Some(&target), "refused");
+                            tracing::warn!(error_kind = ?error.kind(), "server reload request refused");
                             continue;
                         }
                     }
                 },
                 accepted = self.listener.accept() => accepted?.0,
             };
-            if !socket
-                .peer_cred()
-                .is_ok_and(|peer| peer.uid() == nix::unistd::Uid::effective().as_raw())
+            let peer = socket.peer_cred().ok();
+            if peer
+                .as_ref()
+                .is_none_or(|peer| peer.uid() != nix::unistd::Uid::effective().as_raw())
             {
+                record_request("socket", peer.as_ref(), None, "refused");
                 continue;
             }
             let request =
                 tokio::time::timeout(Duration::from_secs(2), read_request(&mut socket)).await;
-            if let Ok(Ok(binary)) = request {
-                let Ok(binary) = crate::restart_binary::Opened::open(binary) else {
-                    let _ = socket.write_all(b"REFUSED\n").await;
-                    continue;
-                };
-                let replacement = Replacement::new(binary, source);
-                let reply = if replacement.input.is_some() {
-                    b"RESTARTING\n".as_slice()
-                } else {
-                    b"RESTARTING COLD (CA locked)\n".as_slice()
-                };
-                if let Err(error) = socket.write_all(reply).await {
-                    // A vanished requester must not cancel the live server or
-                    // export a socket to a successor that was never acknowledged.
-                    eprintln!("Server restart requester disconnected ({})", error.kind());
-                    continue;
-                }
-                return Ok(replacement);
+            let Ok(Ok(binary)) = request else {
+                record_request("socket", peer.as_ref(), None, "refused");
+                continue;
+            };
+            let Ok(opened) = crate::restart_binary::Opened::open(binary.clone()) else {
+                record_request("socket", peer.as_ref(), Some(&binary), "refused");
+                let _ = socket.write_all(b"REFUSED\n").await;
+                continue;
+            };
+            let replacement = Replacement::new(opened, source);
+            let reply = if replacement.input.is_some() {
+                b"RESTARTING\n".as_slice()
+            } else {
+                b"RESTARTING COLD (CA locked)\n".as_slice()
+            };
+            if let Err(error) = socket.write_all(reply).await {
+                record_request(
+                    "socket",
+                    peer.as_ref(),
+                    Some(&replacement.binary.path),
+                    "reply_failed",
+                );
+                tracing::warn!(error_kind = ?error.kind(), "server restart requester disconnected");
+                continue;
             }
+            record_request(
+                "socket",
+                peer.as_ref(),
+                Some(&replacement.binary.path),
+                replacement.outcome(),
+            );
+            return Ok(replacement);
         }
     }
 }
@@ -219,6 +247,9 @@ pub(crate) struct Replacement {
     input: Option<std::os::unix::net::UnixStream>,
 }
 impl Replacement {
+    fn outcome(&self) -> &'static str {
+        if self.input.is_some() { "warm" } else { "cold" }
+    }
     pub(crate) fn new(
         binary: crate::restart_binary::Opened,
         source: Option<&dyn infraternal_server::ca::CaKeySource>,
@@ -312,7 +343,9 @@ pub(crate) fn replace(
     json: bool,
 ) -> std::process::ExitCode {
     shutdown_runtime(runtime);
-    let _error = replacement.exec();
+    let target = replacement.binary.path.clone();
+    let error = replacement.exec();
+    tracing::error!(target = ?target, error_kind = ?error.kind(), outcome = "cold", "server replacement exec failed");
     super::output::refuse(
         json,
         infraternal_plugin_remote::RESTART.id,
@@ -338,4 +371,18 @@ pub(crate) fn queue_reload() -> io::Result<()> {
     mask.add(nix::sys::signal::Signal::SIGHUP);
     nix::sys::signal::sigprocmask(nix::sys::signal::SigmaskHow::SIG_BLOCK, Some(&mask), None)?;
     Ok(())
+}
+
+/// Peer identity comes only from `SO_PEERCRED`; SIGHUP has no such credentials.
+/// Debug path formatting escapes newline/control characters in human logs.
+fn record_request(
+    origin: &str,
+    peer: Option<&tokio::net::unix::UCred>,
+    target: Option<&Path>,
+    outcome: &str,
+) {
+    let pid = peer.and_then(tokio::net::unix::UCred::pid);
+    let uid = peer.map(tokio::net::unix::UCred::uid);
+    tracing::info!(service_pid = std::process::id(), request_pid = ?pid, request_uid = ?uid, target = ?target,
+        outcome, origin, "server_restart_request");
 }

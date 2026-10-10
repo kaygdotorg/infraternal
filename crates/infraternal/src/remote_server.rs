@@ -56,14 +56,23 @@ pub(crate) async fn serve(
                 .cold_start(&config)
             })
             .transpose()?;
-        if let (Ok(inherited), Some(authority)) = (
+        let warm = if let (Ok(inherited), Some(authority)) = (
             inherited,
             remote
                 .as_ref()
                 .and_then(|remote| remote.ca_administration.as_ref()),
         ) {
-            let _ = inherited.install(&authority.memory_source());
-        }
+            inherited.install(&authority.memory_source()).is_ok()
+        } else {
+            false
+        };
+        // Correlate the successor's actual retained-trust installation result
+        // with the predecessor's request record using the unchanged service PID.
+        tracing::info!(
+            service_pid = std::process::id(),
+            outcome = if warm { "warm" } else { "cold" },
+            "server_ca_startup"
+        );
         let source = remote
             .as_ref()
             .map(|remote| remote.enrollment.source.clone());
@@ -80,10 +89,7 @@ pub(crate) async fn serve(
             Err(error) => {
                 // The private convenience endpoint is not a dependency of the
                 // HTTP server or retained public CA verification.
-                eprintln!(
-                    "Server restart control unavailable; continuing without its socket ({})",
-                    error.kind()
-                );
+                tracing::warn!(error_kind = ?error.kind(), "server restart control unavailable; continuing without its socket");
                 return serving.await.map(|()| Outcome::Stopped);
             }
         };
@@ -95,7 +101,7 @@ pub(crate) async fn serve(
                     match replacement {
                         Ok(replacement) => return Ok(Outcome::Restart(replacement)),
                         Err(error) => {
-                            eprintln!("Server restart control failed ({})", error.kind());
+                            tracing::warn!(error_kind = ?error.kind(), "server restart control failed; continuing to serve");
                             // Keep serving; back off if accept repeatedly fails.
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
