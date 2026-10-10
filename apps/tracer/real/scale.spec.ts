@@ -202,24 +202,26 @@ test(`${N} real sessions: what scales with the session count`, async () => {
   const info = await page.evaluate(() => ({ windows: document.querySelectorAll(".ui-window").length, canvases: document.querySelectorAll("canvas").length, nodes: document.querySelectorAll("*").length }));
   console.log(`SCALE ${LABEL} n=${N} setup ${JSON.stringify({ ...info, printers, load: (await import("node:os")).loadavg()[0] })}`);
 
-  results.idle = await measure(cdp, "idle", () => page.waitForTimeout(6000));
+  const only = (process.env.REAL_SCALE_ONLY ?? "").split(",").filter(Boolean);
+  const want = (n: string): boolean => only.length === 0 || only.includes(n);
+  if (want("idle")) results.idle = await measure(cdp, "idle", () => page.waitForTimeout(6000));
 
   // Keystroke to paint: the browser's own Event Timing duration for each keydown (processing, then the next paint).
   await page.evaluate(() => { const w = window as unknown as { __kd: number[] }; w.__kd = []; new PerformanceObserver((l) => { for (const e of l.getEntries()) if (e.name === "keydown") w.__kd.push(e.duration); }).observe({ type: "event", durationThreshold: 16, buffered: false } as PerformanceObserverInit); });
-  results.typing = await measure(cdp, "typing", async () => { await page.keyboard.type("echo scale-typing-0123456789", { delay: 60 }); await page.waitForTimeout(300); });
+  if (want("typing")) results.typing = await measure(cdp, "typing", async () => { await page.keyboard.type("echo scale-typing-0123456789", { delay: 60 }); await page.waitForTimeout(300); });
   const kd = await page.evaluate(() => (window as unknown as { __kd: number[] }).__kd);
   console.log(`SCALE ${LABEL} n=${N} typing-keydown-event-durations ${JSON.stringify({ n: kd.length, p50: pct(kd, 0.5), max: Math.max(0, ...kd) })}`);
 
   await page.keyboard.press("Control+Shift+G"); // canvas lock off: free pan and zoom
   await page.waitForTimeout(600);
-  results.pan = await measure(cdp, "pan", () => wheelDrive((ph) => ({ deltaX: (ph < 0.5 ? -1 : 1) * 24, deltaY: (ph < 0.5 ? -1 : 1) * 9 })));
+  if (want("pan")) results.pan = await measure(cdp, "pan", () => wheelDrive((ph) => ({ deltaX: (ph < 0.5 ? -1 : 1) * 24, deltaY: (ph < 0.5 ? -1 : 1) * 9 })));
   await page.waitForTimeout(500);
-  results.zoom = await measure(cdp, "zoom", () => wheelDrive((ph) => ({ deltaY: (ph < 0.5 ? 1 : -1) * 14, ctrlKey: true })));
+  if (want("zoom")) results.zoom = await measure(cdp, "zoom", () => wheelDrive((ph) => ({ deltaY: (ph < 0.5 ? 1 : -1) * 14, ctrlKey: true })));
   await page.waitForTimeout(500);
   await page.keyboard.press("Control+Shift+G");
   await page.waitForTimeout(800);
-  results.step = await measure(cdp, "window-step", async () => { for (let i = 0; i < 6; i++) { await page.keyboard.press("Control+Shift+ArrowRight"); await page.waitForTimeout(450); } });
-  results.split = await measure(cdp, "split", async () => { for (let i = 0; i < 3; i++) { await page.keyboard.press(i % 2 ? "Control+Shift+Alt+D" : "Control+Shift+D"); await page.waitForTimeout(1000); } });
+  if (want("step")) results.step = await measure(cdp, "window-step", async () => { for (let i = 0; i < 6; i++) { await page.keyboard.press("Control+Shift+ArrowRight"); await page.waitForTimeout(450); } });
+  if (want("split")) results.split = await measure(cdp, "split", async () => { for (let i = 0; i < 3; i++) { await page.keyboard.press(i % 2 ? "Control+Shift+Alt+D" : "Control+Shift+D"); await page.waitForTimeout(1000); } });
   if (process.env.REAL_SCALE_TRACE === "1") { const log = await page.evaluate(() => (window as unknown as { __wsLog: string[] }).__wsLog); const tally: Record<string, number> = {}; for (const l of log) tally[l] = (tally[l] ?? 0) + 1; console.log(`WSLOG ${JSON.stringify(Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 12))}`); }
-  expect(Object.keys(results)).toHaveLength(6);
+  expect(Object.keys(results)).toHaveLength(only.length || 6);
 });
