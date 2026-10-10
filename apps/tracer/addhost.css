@@ -134,6 +134,9 @@
 
 /* ── Field: the shared chip field, at the sign-in field's metrics ─────── */
 .ah-field { position: relative; --ui-chip-field-inset: calc(14px + var(--ah-icon) + 10px); }
+/* The hint keeps its line when hidden (opacity, not display), so the list below never jumps as it appears. */
+.ah-hint { min-height: 20px; margin: 6px 4px 0; color: var(--fg-2); font-size: 13px; line-height: 20px; opacity: 0; transition: opacity 180ms ease; }
+.ah-hint[data-show="true"] { opacity: 1; }
 .ah-field-icon { position: absolute; z-index: 1; top: 16px; left: 14px; color: var(--fg-3); pointer-events: none; }
 .ah-secret {
   display: block;

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, test } from "bun:test";
 import { foldEvent, pendingTarget, type BootstrapEvent, type FailureKind } from "../../provisioning-client";
-import { authLabel, failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, stagesOf } from "./model";
+import { authLabel, failureLine, guideFor, looksLikeSshConfig, matchListed, parseSshConfig, parseTarget, stagesOf } from "./model";
 
 const event = (step: BootstrapEvent["step"], extra: Partial<BootstrapEvent> = {}): BootstrapEvent => ({ sequence: 1, target: "h", attempt: 1, step, message: `${step} message`, elapsed_ms: 1, log_tail: [], ...extra });
 const fold = (...events: BootstrapEvent[]) => events.reduce(foldEvent, pendingTarget());
@@ -160,4 +160,40 @@ test("only a completed canonical host identity becomes terminal authority", () =
   expect((fold(event("done", { host_id: "worker" } as Partial<BootstrapEvent>)) as { hostId?: string }).hostId).toBeUndefined();
   const ready = fold(event("done", { host_id: id } as Partial<BootstrapEvent>));
   expect((foldEvent(ready, event("check", { attempt: 2 })) as { hostId?: string }).hostId).toBeUndefined();
+});
+
+describe("parseTarget", () => {
+  test("accepts user@host, host, user@host:port, IPv4 and bracketed IPv6 with an optional port", () => {
+    expect(parseTarget("kayg@o2")).toEqual({ user: "kayg", host: "o2", port: undefined });
+    expect(parseTarget("o2")).toEqual({ user: undefined, host: "o2", port: undefined });
+    expect(parseTarget("kayg@o2:2222")).toEqual({ user: "kayg", host: "o2", port: 2222 });
+    expect(parseTarget("10.0.0.2")).toEqual({ user: undefined, host: "10.0.0.2", port: undefined });
+    expect(parseTarget("root@[fd00::2]:22")).toEqual({ user: "root", host: "[fd00::2]", port: 22 });
+  });
+
+  test("rejects partial and malformed tokens, so they wait or show the hint", () => {
+    for (const token of ["kayg@", "@o2", "my host", "o2:0", "o2:70000", "kayg@@o2", ""]) expect(parseTarget(token)).toBeUndefined();
+  });
+});
+
+describe("matchListed", () => {
+  const hosts = [{ id: "o2", address: "10.0.0.2" }, { id: "o2-prod", address: "10.0.1.2" }, { id: "web-01", address: "10.0.0.9" }];
+
+  test("a name that is exactly one host's id or address names that host", () => {
+    expect(matchListed(parseTarget("web-01")!, hosts)).toEqual({ named: hosts[2], prefixed: false });
+    expect(matchListed(parseTarget("10.0.0.9")!, hosts)).toEqual({ named: hosts[2], prefixed: false });
+  });
+
+  test("a name that is also the start of another host's name is named but still prefixed", () => {
+    // Typing `o2` must not chip the first host before `o2-prod` is ruled out, so it waits for a delimiter.
+    expect(matchListed(parseTarget("o2")!, hosts)).toEqual({ named: hosts[0], prefixed: true });
+  });
+
+  test("a partial name that starts several hosts names none and waits", () => {
+    expect(matchListed(parseTarget("o")!, hosts)).toEqual({ named: undefined, prefixed: true });
+  });
+
+  test("a new name that starts no host is neither named nor waiting", () => {
+    expect(matchListed(parseTarget("kayg@o9")!, hosts)).toEqual({ named: undefined, prefixed: false });
+  });
 });
