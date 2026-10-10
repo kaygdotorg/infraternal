@@ -70,8 +70,10 @@ byte budgets; stream IDs retain their u32 protocol range.
   process birth clock; zombies have no executable link. Secure socket ownership/
   mode checks and caller execution-UID checks remain in the existing connection path.
 - Exit delivery is ordered through the writer acknowledgement. No-viewer shells
-  retire without waiting for a discovery peer; delayed credit retains a bounded
-  final frame and the closed connection instead of reconnecting to a dead socket.
+  retire without waiting for a discovery peer. The SB-01 round-2 correction
+  retains independent window ownership across credit detach, with a one-shot
+  ten-minute exit ceiling and a typed recorded status after retirement. See
+  [round2.md](round2.md) for invariants and measured evidence.
 - Memory settings reject unknown/duplicate fields, oversized input, overflow and
   percentages above 100 before replacing the policy. Refusal decoding is bounded
   to the existing 32 KiB control budget. Unknown reasons become generic guidance;
@@ -79,7 +81,8 @@ byte budgets; stream IDs retain their u32 protocol range.
 - Server routing preserves existing session freshness, revocation and host
   ownership checks before and after opening. Internal IO/database errors remain
   generic; no shell content, credentials or diagnostic text enters refusal copy.
-- No new dependency, terminal engine, timer or UI material is introduced. Shared
+- No new dependency, terminal engine or UI material is introduced. Running
+  idle shells have no retention timer; exited owned shims have one deadline. Shared
   toast actions preserve pointer/keyboard activation for the existing picker.
   Production screenshots are review artifacts; visual quality requires the
   orchestrator's independent review.
