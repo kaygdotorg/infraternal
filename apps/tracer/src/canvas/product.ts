@@ -1,6 +1,6 @@
 /**
  * The product canvas: the canvas on real sessions. After sign-in the screen shows the Console view, whose windows
- * are terminal sessions on the embedded host (remote hosts join as #78 lands), several at once over the one
+ * are terminal sessions on the embedded host or admitted remote hosts, several at once over the one
  * WebSocket. The layout persists through the store adapter (local storage until the server sync of #98).
  *
  * Only real things are offered: the Console view, and the Settings view with the sections that exist today
@@ -69,11 +69,15 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
     .then((m) => m.createLiveDetails({ host: options.host, connection, inventory, roundTrip: () => roundTrip }));
-  // The add-host wizard on the real provisioning API, in a flow window. A host that finishes enrolling needs a
-  // remote-host session binding (#78) before a shell can open on it; until `sessions.hosts()` lists remote hosts
-  // the sink has nothing to open, and the wizard's own "ready" toast is the whole result.
+  // A ready result carries the admitted UUID; labels are only presentation.
   const addHost = createAddHost(core, {
-    service: createRealProvisioning(), sink: { enrolled: () => undefined },
+    service: createRealProvisioning(), sink: { enrolled(hosts) {
+      for (const host of hosts) {
+        if (!host.hostId) { core.toast.show({ message: "The host did not return its connection identity. Add it again.", tone: "error", duration: 5000 }); continue; }
+        sessions.registerHost({ id: host.hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os, ...(host.address ? { address: host.address } : {}) });
+        canvas.cx.win.open(host.hostId);
+      }
+    } },
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
   });
   const saved = await store.load();
@@ -87,9 +91,15 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   });
   canvas.setViews((m) => {
     const doc = saved?.views.find((v) => v.id === "console");
-    const resolve = (target: DocTarget): Partial<WindowModel> | undefined => (target.type === "session"
-      ? { host: options.host.name, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(options.host.user ? { user: options.host.user } : {}) }
-      : undefined);
+    const resolve = (target: DocTarget): Partial<WindowModel> | undefined => {
+      if (target.type !== "session") return undefined;
+      if (target.hostId) {
+        sessions.registerHost({ id: target.hostId, name: target.host, ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) });
+        return { host: target.host, hostId: target.hostId, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) };
+      }
+      // Historical documents represent only the embedded host. Unknown labels are never rebound locally.
+      return target.host === options.host.name ? { host: options.host.name, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(options.host.user ? { user: options.host.user } : {}) } : undefined;
+    };
     let cols = doc && doc.layout.type === "tiled" ? columnsFromDocument(doc.layout, m, resolve) : [];
     // First run, or nothing left to restore: one new shell.
     if (!cols.length) cols = [{ id: "c1", w: m.colW, wins: [sessions.open(options.host.name)] }];
