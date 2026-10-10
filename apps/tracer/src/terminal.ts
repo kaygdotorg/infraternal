@@ -1,4 +1,5 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
+import { isCanonicalUuid } from "./identifiers";
 import { plainCloseReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
@@ -1590,10 +1591,6 @@ function asRecord(value: unknown): Record<string, unknown> {
 function requireString(value: unknown): string {
   if (typeof value !== "string") throw new Error("result string is missing");
   return value;
-}
-
-function isCanonicalUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 }
 
 function uuidBytes(value: string): Uint8Array {
