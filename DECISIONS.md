@@ -1761,3 +1761,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      architecture, and clang with a separate musl sysroot; both mean more
      toolchains to keep in step. There is exactly one Zig in the build: no
      second copy from the system or nixpkgs.
+214. **Terminal connections: lowest latency, no arbitrary caps (owner,
+     2026-10-10, replaces D183's "one connection"):** "do whatever is most
+     performant/least latency because arbitrary caps make no sense."
+     - The number of WebSockets per page is a measured choice, not a rule.
+       The interim is a pool of 28 terminals per socket. The candidates are
+       one socket with server-side priority for the active terminal, a pool,
+       and the active terminal on its own interactive lane. They are measured
+       on the India↔Germany link: typing echo p99 in the active terminal while
+       other terminals flood, plus memory and handshakes. The lowest typing
+       latency wins.
+     - The server's fixed limit of 32 attachments per socket goes. Resource
+       bounds replace it: bytes buffered per connection and streams per
+       person, sized from measured memory. A limit must protect a resource
+       and say which one; a round count protects nothing.
