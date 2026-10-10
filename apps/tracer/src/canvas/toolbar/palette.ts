@@ -10,8 +10,10 @@
 import { ICONS } from "../../../../../packages/ui/src/icons";
 import { shortcutLabel } from "../../../../../packages/ui/src/platform";
 import type { PaletteEntry } from "../../core-screen";
-import type { Ctx } from "../context";
+import type { Ctx, ViewRec, WinRec } from "../context";
 import type { ViewId } from "../model/types";
+import { recentRows } from "../recency";
+import { windowLabel } from "../windows/label";
 import { SETTINGS_SECTIONS } from "../views/settings";
 import { ICON, SECTION_ICON, SESSION_ICON, viewIcon } from "../views/icons";
 import { byFrecency } from "../sessions/inventory";
@@ -26,6 +28,20 @@ export function openSettings(cx: Ctx, section: string): void {
   if (!rec) return;
   cx.win.setActive(rec);
   cx.nav.focusWindow(rec);
+}
+
+/** The rows of one view's windows, for the palette opened from the view's hover card ("All N windows", #121). */
+export function viewWindowEntries(cx: Ctx, c: ViewRec): PaletteEntry[] {
+  return [...c.wins.values()].map((rec) => {
+    const m = rec.model;
+    const [name, detail] = windowLabel(m, cx.adapters.inventory);
+    return { group: c.view.name, glyph: "›_", icon: m.kind === "terminal" ? ICON.terminal : viewIcon(c.view.id), label: name, hint: detail, action: `canvas:win:${m.id}` };
+  });
+}
+
+/** The windows a view's hover card lists: the five used most recently, filled in window order (see recency.ts). */
+export function viewRecentWindows(cx: Ctx, c: ViewRec, n: number): WinRec[] {
+  return recentRows(cx.state.recent.get(c.view.id), c.wins, n);
 }
 
 export function installPalette(cx: Ctx): () => void {
@@ -89,6 +105,10 @@ export function installPalette(cx: Ctx): () => void {
     else if (kind === "close") { if (active && active.model.kind !== "node" && active.model.kind !== "settings") cx.win.closeKey(active); }
     else if (kind === "canvaslock") cx.nav.setCanvasLock(value === "on");
     else if (kind === "inputlock") cx.inputLock.toggle();
+    else if (kind === "win" && value) {
+      const rec = [...views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === value);
+      if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); }
+    }
     else if (kind === "open" && value) cx.win.open(value);
     else if (kind === "session" && value) { const [host, sid] = value.split("/"); if (host && sid) cx.win.openSession(host, sid); }
     else if (kind === "sessions") {
