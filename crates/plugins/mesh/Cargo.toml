@@ -10,7 +10,7 @@ default = ["server"]
 server = []
 
 [dependencies]
-infraternal-plugin-api.workspace = true
+infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
 infraternal-protocol.workspace = true
 infraternal-mesh = { version = "0.1.0", path = "../../infraternal-mesh" }
 bytes.workspace = true

@@ -2,6 +2,8 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod auth;
+#[cfg(feature = "cli-plugin")]
+pub mod cli;
 mod embedded;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
 #[cfg(feature = "mesh")]

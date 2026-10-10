@@ -5,23 +5,40 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["plugin-host-facts", "mesh"]
-plugin-host-facts = ["infraternal-agent/plugin-host-facts"]
-mesh = ["infraternal-server/mesh"]
-
 [dependencies]
 clap.workspace = true
-infraternal-server = { path = "../infraternal-server", version = "0.1.0", default-features = false }
-sqlx.workspace = true
-tokio.workspace = true
+infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+infraternal-server = { path = "../infraternal-server", version = "0.1.0", default-features = false, optional = true }
+tokio = { workspace = true, optional = true }
 infraternal-shim.workspace = true
-infraternal-agent = { path = "../infraternal-agent", version = "0.1.0", default-features = false }
+infraternal-agent = { path = "../infraternal-agent", version = "0.1.0", default-features = false, optional = true }
+infraternal-mesh = { path = "../infraternal-mesh", version = "0.1.0", optional = true }
+infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
+infraternal-plugin-relay = { path = "../plugins/relay", version = "0.1.0", optional = true }
+infraternal-plugin-backup = { path = "../plugins/backup", version = "0.1.0", optional = true }
 thiserror.workspace = true
+
+infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1.0", optional = true }
+infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true }
+
+[features]
+default = ["plugin-host-facts", "plugin-agent", "plugin-backup", "plugin-mesh", "plugin-relay", "plugin-server", "plugin-ssh"]
+plugin-agent = ["dep:infraternal-agent"]
+plugin-backup = ["dep:infraternal-plugin-backup"]
+plugin-mesh = ["dep:infraternal-mesh", "dep:infraternal-plugin-mesh", "infraternal-server?/mesh"]
+# Preserve the production feature name without enabling a server role.
+mesh = ["plugin-mesh"]
+plugin-host-facts = ["plugin-agent", "dep:infraternal-plugin-host-facts", "infraternal-agent/plugin-host-facts"]
+plugin-relay = ["dep:infraternal-plugin-relay"]
+plugin-server = ["dep:infraternal-server", "infraternal-server/cli-plugin", "dep:tokio"]
+plugin-ssh = ["dep:infraternal-plugin-ssh"]
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 nix.workspace = true
+tokio.workspace = true
 vt100.workspace = true

@@ -157,13 +157,27 @@ export async function startRealServer(options: { latencyMs?: number; lean?: bool
     if (Date.now() > deadline) throw new Error("server startup failed");
     await new Promise((r) => setTimeout(r, 50));
   }
-  const setup = spawn(binary, ["server", "setup-token", "--data", `${state}/data`], { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
+  const setup = spawn(binary, ["server", "setup-token", "--data", `${state}/data`, "--json"], { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
   let token = "";
   setup.stdout.on("data", (b) => { token += b; });
-  await once(setup, "exit");
+  const [setupCode] = await once(setup, "exit");
+  // The CLI is human-oriented by default; machine callers use the D202 envelope.
+  // Keep the one-time setup capability in memory, and never echo a bad response.
+  if (setupCode !== 0) throw new Error("setup capability unavailable");
+  let setupResult: unknown;
+  try { setupResult = JSON.parse(token); }
+  catch { throw new Error("invalid setup capability response"); }
+  const setupData = typeof setupResult === "object" && setupResult !== null && "data" in setupResult
+    ? setupResult.data : undefined;
+  const setupToken = typeof setupData === "object" && setupData !== null && "token" in setupData
+    ? setupData.token : undefined;
+  if (typeof setupToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(setupToken)) {
+    throw new Error("invalid setup capability response");
+  }
+  token = "";
 
   return {
-    origin, backend, bridges, token: token.trim(), binary,
+    origin, backend, bridges, token: setupToken, binary,
     async dispose() {
       front.close();
       tls.close();

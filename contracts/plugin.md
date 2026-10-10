@@ -171,8 +171,17 @@ The pure descriptor declares all 16 frozen Mesh action ids, summaries,
 step-by-step instructions, input/output contract type references, permission
 requirements and effects, plus topics, settings schema, role dependencies
 and defaults. Type references identify the Rust types in `api.rs` and the
-frozen Mesh contract; version 1 does not generate new CLI or MCP adapters.
-Discovery reads these declarations even while the feature is disabled.
+frozen Mesh contract. The CLI adapts these declarations into its shared action
+registry: action ids become command paths, instructions become help and skills,
+and effects retain destructive dry-run guidance. Generated skills include the
+original input/output references and exact permission alternatives. Node-side
+host-facts descriptors use the same adapter with host-scoped authority.
+Hosted CLI commands return the shared unavailable result until an authenticated
+CLI device-session transport exists; the server UI keeps the working handlers.
+MCP generation is not implemented. Discovery reads these declarations even while
+the feature is disabled. The plugin API's `socket-host` Cargo feature contains
+its async reply queues and transactional freshness helper; pure descriptors,
+node-side routing and CLI contracts do not pull Tokio or SQLx.
 
 Control-stream calls are:
 

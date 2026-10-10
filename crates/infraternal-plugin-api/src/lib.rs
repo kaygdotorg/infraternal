@@ -1,8 +1,17 @@
 //! Descriptors and bounded socket interfaces for compiled plugins [15,16,28,198,201].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+pub mod action;
+
+pub use action::{
+    ActionAvailability, ActionContract, ActionDefinition, ActionEffect, ActionExample,
+    ActionPermission, ActionRegistry, ActionTarget, CliHandler, DryRun, JsonSchema, JsonSchemaType,
+    PluginDefinition, RegisteredAction, RegistryError, SafetyNotes,
+};
+
 pub mod routing;
 
+#[cfg(feature = "socket-host")]
 use bytes::Bytes;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -14,6 +23,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+#[cfg(feature = "socket-host")]
 use tokio::sync::mpsc;
 
 /// The interface version compiled into every descriptor.
@@ -30,7 +40,7 @@ pub enum Effect {
     Destructive,
 }
 /// One public action definition; schemas refer to the frozen contract types.
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct ActionDef {
     pub id: &'static str,
     pub summary: &'static str,
@@ -41,7 +51,7 @@ pub struct ActionDef {
     pub effect: Effect,
 }
 /// Read visibility may follow any management action without introducing a view-only role [187].
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Permission {
     One(&'static str),
     Any(&'static [&'static str]),
@@ -106,18 +116,21 @@ pub fn subscription_withdraw(registry: &SubscriptionRegistry, sub_id: u32) {
     }
 }
 /// The transport treats event JSON as opaque, retaining plugin lifecycle identity.
+#[cfg(feature = "socket-host")]
 pub struct PluginReply {
     pub plugin_id: &'static str,
     pub epoch: u64,
     pub wire: Bytes,
 }
 /// The host stamps lifecycle identity; plugin code cannot replace it on the hosted queue.
+#[cfg(feature = "socket-host")]
 #[derive(Clone)]
 pub struct ReplySender {
     tx: mpsc::Sender<PluginReply>,
     plugin_id: &'static str,
     epoch: u64,
 }
+#[cfg(feature = "socket-host")]
 impl ReplySender {
     /// Bind a host-owned queue to one immutable plugin generation.
     #[must_use]
@@ -143,6 +156,7 @@ impl ReplySender {
     }
 }
 /// Compiled implementations own their work and expose only declared entry points.
+#[cfg(feature = "socket-host")]
 pub trait Plugin: Send + Sync {
     fn descriptor(&self) -> &'static PluginDescriptor;
     fn run(
@@ -158,6 +172,7 @@ pub trait Plugin: Send + Sync {
 ///
 /// # Errors
 /// Returns database errors without exposing them to a caller's wire response.
+#[cfg(feature = "socket-host")]
 pub async fn fresh_session_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     token_hash: &str,
@@ -252,3 +267,60 @@ pub enum PluginError {
 
 #[cfg(test)]
 mod tests;
+
+/// Adapt hosted action metadata into the shared CLI registry without duplicating routes.
+///
+/// Hosted actions require the server's authenticated transport. The CLI currently
+/// has no device-session adapter, so these paths report unavailable rather than
+/// bypassing permissions or changing a fresh process's non-durable plugin state.
+impl PluginDescriptor {
+    /// Register the descriptor with its original hosted schemas and authority.
+    #[must_use]
+    pub fn cli_plugin(&self, target: ActionTarget) -> PluginDefinition {
+        PluginDefinition::new(
+            self.id,
+            format!("{} plugin actions.", self.id),
+            self.actions.iter().map(|source| {
+                let permission = match source.permission {
+                    Permission::One(permission) => permission.to_owned(),
+                    Permission::Any(permissions) => permissions.first().copied().unwrap_or("").to_owned(),
+                };
+                let effect = match source.effect {
+                    Effect::Read => ActionEffect::Read,
+                    Effect::Write => ActionEffect::Write,
+                    Effect::Destructive => ActionEffect::Destructive,
+                };
+                let destructive = effect == ActionEffect::Destructive;
+                let mut action = ActionDefinition::new(
+                    source.id.split('.'),
+                    source.summary,
+                    format!("Use this action through an authenticated {} plugin session.", self.id),
+                    source.instructions.iter().copied(),
+                    JsonSchema::object(
+                        [("input_file".to_owned(), JsonSchema::string(format!(
+                            "File containing the action JSON body described by {}.", source.input
+                        )))],
+                        std::iter::empty(),
+                    ),
+                    JsonSchema::command_result(),
+                    ActionContract::new(target, effect, permission, if destructive {
+                        DryRun::Required
+                    } else {
+                        DryRun::Unsupported
+                    }),
+                ).not_available_yet().with_safety(SafetyNotes {
+                    destructive,
+                    dry_run_first: destructive,
+                    notes: vec!["An authenticated CLI device-session adapter is not available yet; use the server UI. The hosted descriptor below defines the exact wire schemas and permission alternatives.".to_owned()],
+                });
+                if let Permission::Any(permissions) = source.permission {
+                    action.contract.permission = ActionPermission::Any {
+                        any: permissions.iter().map(|permission| (*permission).to_owned()).collect(),
+                    };
+                }
+                action.hosted = Some(*source);
+                action
+            }),
+        )
+    }
+}

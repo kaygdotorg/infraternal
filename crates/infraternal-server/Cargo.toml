@@ -9,7 +9,8 @@ license.workspace = true
 workspace = true
 
 [features]
-default = ["mesh"]
+default = ["mesh", "cli-plugin"]
+cli-plugin = []
 mesh = ["dep:infraternal-plugin-mesh"]
 
 [dependencies]
@@ -33,7 +34,7 @@ tracing-subscriber.workspace = true
 futures-util.workspace = true
 nix.workspace = true
 infraternal-protocol.workspace = true
-infraternal-plugin-api.workspace = true
+infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
 infraternal-plugin-mesh = { version = "0.1.0", path = "../plugins/mesh", optional = true, default-features = false, features = ["server"] }
 url.workspace = true
 uuid.workspace = true
