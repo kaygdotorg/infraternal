@@ -3,11 +3,17 @@
  * follow the binding live. Fixed keys: Escape flies out to all views (or closes the float), Command or Ctrl with
  * 1 to 9 flies to a view.
  */
-import { allShortcuts, bindShortcut, bindingOf, comboLabel, onBindingsChange, registerShortcuts } from "../../../../../packages/ui/src/shortcuts";
+import { allShortcuts, bindShortcut, bindingOf, comboLabel, onBindingsChange, registerShortcuts, type Combo } from "../../../../../packages/ui/src/shortcuts";
 import { isTypingTarget } from "../../../../../packages/ui/src/shortcuts-view";
 import { isMacPlatform } from "../../../../../packages/ui/src/platform";
-import type { Ctx } from "../context";
+import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
+
+/**
+ * The chord of a new-window action (D212): Control+Option+key on a Mac, where Control is its own modifier; elsewhere
+ * `mod` is Control, so the same chord is Control+Alt+key. Command is never used here: it stays the split key on a Mac.
+ */
+const newWindowChord = (code: string): Combo => (isMacPlatform() ? { code, ctrl: true, alt: true } : { code, mod: true, alt: true });
 
 /** The current key combination of a shortcut as text ("" when unbound). */
 export const bindingText = (id: string): string => {
@@ -21,29 +27,35 @@ export function installShortcuts(cx: Ctx): () => void {
   const removeRegistry = registerShortcuts({ id: "canvas", title: "Canvas", area: "canvas", shortcuts: [
     { id: "canvas-lock", label: "Canvas lock", keys: "", combo: { code: "KeyG", mod: true, shift: true } },
     { id: "input-lock", label: "Input lock", keys: "", combo: { code: "KeyL", mod: true, shift: true } },
-    // Mac: Control+Option+R (right) and Control+Option+D (down), with Command+D and Command+Shift+D as alternates (D206).
-    // Elsewhere plain Control+D is the terminal's end-of-input, so the defaults add Shift (right) and Alt+Shift (down);
-    // both can be rebound in Settings, Shortcuts.
-    { id: "split-right", label: "Split right", keys: "", combo: isMacPlatform() ? { code: "KeyR", ctrl: true, alt: true } : { code: "KeyD", mod: true, shift: true }, ...(isMacPlatform() ? { alternates: [{ code: "KeyD", mod: true }] } : {}) },
-    { id: "split-down", label: "Split down", keys: "", combo: isMacPlatform() ? { code: "KeyD", ctrl: true, alt: true } : { code: "KeyD", mod: true, shift: true, alt: true }, ...(isMacPlatform() ? { alternates: [{ code: "KeyD", mod: true, shift: true }] } : {}) },
+    // Four window actions (D212). Split right and split down divide this window's own space; new window right and
+    // new window below open a full-size window beside or under it. The usual terminal bindings: Command+D and
+    // Command+Shift+D on a Mac, Control+Shift+D and Control+Shift+Alt+D elsewhere (`mod` is Control there). The new
+    // window chords are Control+Option+R and Control+Option+D on a Mac, Control+Alt+R and Control+Alt+D elsewhere.
+    // All four can be rebound in Settings, Shortcuts.
+    { id: "split-right", label: "Split right", keys: "", combo: isMacPlatform() ? { code: "KeyD", mod: true } : { code: "KeyD", mod: true, shift: true } },
+    { id: "split-down", label: "Split down", keys: "", combo: isMacPlatform() ? { code: "KeyD", mod: true, shift: true } : { code: "KeyD", mod: true, shift: true, alt: true } },
+    { id: "new-window-right", label: "New window right", keys: "", combo: newWindowChord("KeyR") },
+    { id: "new-window-below", label: "New window below", keys: "", combo: newWindowChord("KeyD") },
     { id: "next-window", label: "Next window", keys: "", combo: { code: "ArrowRight", mod: true, shift: true } },
     { id: "previous-window", label: "Previous window", keys: "", combo: { code: "ArrowLeft", mod: true, shift: true } },
     { id: "overview", label: "All views (overview)", keys: "Esc" },
     { id: "pan", label: "Next window or column", keys: "Scroll" },
     { id: "views", label: "Go to view 1 to 3", keys: { mac: "⌘1–3", other: "Ctrl+1–3" } },
   ] });
-  // A key never animates and one press is one split: auto-repeat is ignored, so holding the key cannot queue work.
-  const splitActive = (direction: "right" | "down", e: KeyboardEvent): void => {
+  // A key never animates and one press is one action: auto-repeat is ignored, so holding the key cannot queue work.
+  // A keyboard action is instant (TASTE): it lands on the new window in the same frame.
+  const windowKey = (e: KeyboardEvent, run: (w: WinRec) => unknown): void => {
     if (e.repeat) return;
     const w = state.activeWin;
-    // A keyboard split never animates (TASTE): instant, one per press (auto-repeat is ignored above).
-    if (!cx.inputLock.state && w && isTerminal(w)) void cx.win.split(w, direction, undefined, true);
+    if (!cx.inputLock.state && w && isTerminal(w)) void run(w);
   };
   const removeBindings = [
     bindShortcut("canvas-lock", () => cx.nav.setCanvasLock(!state.canvasLock)),
     bindShortcut("input-lock", () => cx.inputLock.toggle()),
-    bindShortcut("split-right", (e) => splitActive("right", e)),
-    bindShortcut("split-down", (e) => splitActive("down", e)),
+    bindShortcut("split-right", (e) => windowKey(e, (w) => cx.win.split(w, "right", true))),
+    bindShortcut("split-down", (e) => windowKey(e, (w) => cx.win.split(w, "down", true))),
+    bindShortcut("new-window-right", (e) => windowKey(e, (w) => cx.win.newWindow(w, "right", true))),
+    bindShortcut("new-window-below", (e) => windowKey(e, (w) => cx.win.newWindow(w, "below", true))),
     bindShortcut("next-window", () => { if (!cx.inputLock.state) cx.win.step(1, true); }),
     bindShortcut("previous-window", () => { if (!cx.inputLock.state) cx.win.step(-1, true); }),
   ];

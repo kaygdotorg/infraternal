@@ -17,18 +17,22 @@ import type { WindowModel } from "../model/types";
 import { ICON, SESSION_ICON, iconFor } from "../views/icons";
 import { isTerminal, makeBody } from "../views/body";
 import { beginMove } from "./move";
+import { coarse } from "../dom";
 
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   const actions: WindowAction[] = [];
   const rec: WinRec = {} as WinRec;
   // The window's kind decides what it can do: only a terminal has a split control.
   const readOnly = Boolean(c.view.team);
-  if (m.kind === "terminal" && !m.noAccess && !readOnly) {
+  // On a touch device the header keeps only Close (TASTE: phone headers carry two actions at most); splits and the
+  // session manager are in the canvas row while a terminal is focused, and in ⌘K.
+  const header = !coarse.matches;
+  if (m.kind === "terminal" && !m.noAccess && !readOnly && header) {
     actions.push({ id: "split-right", label: "Split right", icon: ICON.splitRight, onSelect: () => { void cx.win.split(rec, "right"); } });
     actions.push({ id: "split-down", label: "Split down", icon: ICON.splitDown, onSelect: () => { void cx.win.split(rec, "down"); } });
   }
   // The session manager sits beside the splits when the canvas has an inventory (D127); a team layout's windows are read-only.
-  if (m.kind === "terminal" && !m.noAccess && cx.adapters.inventory) {
+  if (m.kind === "terminal" && !m.noAccess && cx.adapters.inventory && header) {
     actions.push({ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: (e) => cx.sessionUi?.toggleManager(rec, e.currentTarget as HTMLElement, e.detail === 0 ? "keyboard" : "pointer") });
   }
   if (m.kind !== "node" && m.kind !== "settings" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });

@@ -5,9 +5,11 @@
  * - Closing never ends the session (D178): the binding is disposed, the session keeps running, detached. What
  *   remains in the column takes the freed height; an emptied column goes and its neighbours close the gap, all as
  *   one FLIP; the camera re-snaps to the nearest stop that still exists.
- * - A split always opens a new shell on the same host, no prompt. `down` stacks the new window in the same
- *   column; `right` opens it in a new column of the same width. The view is laid out first and then the droplet
- *   plays in the split's direction. Splits are windows in the one structure: no nesting.
+ * - Four actions (D212). A split divides the window's own space: `down` halves its height, `right` halves its width
+ *   and needs the column to itself (a flat layout, not built yet, would let a stacked window divide sideways). A new
+ *   window opens a full-size window beside it (`right`, a new column) or under it (`below`, which grows the column).
+ *   Every action opens a new shell on the same host, no prompt. Splits play the droplet in their direction; new windows
+ *   glide the others aside. Keyboard actions are instant. Splits are windows in the one structure: no nesting.
  *
  * Every layout change measures, changes, then plays (layout/flip.ts); the terminal refits once at the new size.
  */
@@ -29,9 +31,19 @@ export interface WindowsModule {
   /** Adds a window in a new column at `index` of a tiled view; the others glide aside. */
   addColumn(c: ViewRec, m: WindowModel, index: number, w?: number, silent?: boolean, opaque?: boolean): WinRec;
   close(rec: WinRec): void;
-  /** Splits a terminal window: a new shell beside or below it, or (with `session`) an existing session of the host. */
-  /** `instant`: no motion at all (a keyboard split); the layout and the focus land in the same frame. */
-  split(rec: WinRec, direction?: "down" | "right", session?: string, instant?: boolean): Promise<void>;
+  /**
+   * Divides a terminal window's own space into two windows (D212): `down` halves its height, `right` halves its
+   * width. A new shell takes the other half. `right` needs the window to have its column to itself: a window that
+   * shares its column cannot divide sideways without a flat layout, so it resolves false and says why (a toast).
+   * `instant`: no motion at all (a keyboard action); the layout and the focus land in the same frame.
+   */
+  split(rec: WinRec, direction: "down" | "right", instant?: boolean): Promise<boolean>;
+  /**
+   * Opens a new full-size window next to a terminal window (D212): `right` in a new column of the same width, `below`
+   * under it, which grows the column and leaves the others as they were. Opening never divides anything. With
+   * `session`, the window shows that existing session of the host (the session manager's "beside") instead of a shell.
+   */
+  newWindow(rec: WinRec, side: "right" | "below", instant?: boolean, session?: string): Promise<void>;
   /** Points a terminal window at another session of its host; the old one keeps running (detached). */
   attach(rec: WinRec, sessionId: string): void;
   /** Brings a window's name and screen in line with its session in the inventory (a rename, a run again). */
@@ -137,7 +149,15 @@ export function createWindows(cx: Ctx): WindowsModule {
       // every other layout move); the terminal refits once, at the new size.
       if (colEl) {
         const rest = [...colEl.querySelectorAll<HTMLElement>(":scope > .ui-window")];
-        if (!rest.length) colEl.remove();
+        if (!rest.length) {
+          // A split half that empties gives its width back to the other half, so the layout returns to what it was.
+          const partner = colEl.dataset.half ? c.colsEl.querySelector<HTMLElement>(`:scope > .cl-col[data-half="${colEl.dataset.half}"]`) : null;
+          if (partner && partner !== colEl) {
+            const w = (Number(partner.dataset.w) || state.metrics.colW) + COLUMN_GAP + (Number(colEl.dataset.w) || state.metrics.colW);
+            partner.dataset.w = String(w); partner.style.setProperty("--w", `${w}px`); delete partner.dataset.half;
+          }
+          colEl.remove();
+        }
         else if (rest.length === 1) { rest[0]!.style.height = ""; rest[0]!.style.flex = ""; }
         else {
           const total = rest.reduce((sum, w) => sum + w.offsetHeight, 0) + (rest.length - 1) * COLUMN_GAP;
@@ -167,18 +187,86 @@ export function createWindows(cx: Ctx): WindowsModule {
     spring.set(1);
   };
 
-  const split = async (rec: WinRec, direction: "down" | "right" = "down", session?: string, instant = false): Promise<void> => {
-    if (!isTerminal(rec)) return;
-    const nm = session ? { ...cx.adapters.sessions.open(rec.model.host, { session }), splitOf: rec.model.id } : cx.adapters.sessions.open(rec.model.host, { from: rec.model });
-    await splitInto(rec, direction, nm, instant);
+  /**
+   * A window's column is its own when no other window stands in it: only then can its width divide between two
+   * columns without moving or resizing anything beside it (the footprint stays the same).
+   */
+  const ownsColumn = (rec: WinRec): boolean => {
+    const colEl = rec.card.root.parentElement;
+    return !!colEl && colEl.querySelectorAll(":scope > .ui-window").length === 1;
   };
 
-  /** Puts a window for model `nm` beside or below `rec` and plays the droplet. Splits are windows in the one structure: no nesting. */
-  const splitInto = async (rec: WinRec, direction: "down" | "right", nm: WindowModel, instant = false): Promise<void> => {
+  const split = async (rec: WinRec, direction: "down" | "right", instant = false): Promise<boolean> => {
+    if (!isTerminal(rec)) return false;
+    // Refused before any shell is opened: a split that cannot divide must not leave a session behind.
+    if (direction === "right" && !ownsColumn(rec)) {
+      cx.toast.show({ message: "Split right needs a window with its column to itself", duration: 4000 });
+      return false;
+    }
+    await splitInto(rec, direction, cx.adapters.sessions.open(rec.model.host, { from: rec.model }), instant);
+    return true;
+  };
+
+  const newWindow = async (rec: WinRec, side: "right" | "below", instant = false, session?: string): Promise<void> => {
+    if (!isTerminal(rec)) return;
+    const nm = session ? { ...cx.adapters.sessions.open(rec.model.host, { session }), splitOf: rec.model.id } : cx.adapters.sessions.open(rec.model.host, { from: rec.model });
     const c = rec.owner;
     const root = rec.card.root;
     const colEl = root.parentElement as HTMLElement;
     const before = flip.measure(flip.targets(c.colsEl));
+    if (side === "right") {
+      const next = cx.view.newCol({ id: `c${++state.serial}`, w: Number(colEl.dataset.w) || state.metrics.colW, wins: [nm] });
+      const b = makeWindow(cx, c, nm);
+      c.wins.set(nm.id, b);
+      next.append(b.card.root);
+      colEl.after(next);
+    } else {
+      // The windows already there keep their heights: a window that flexes would shrink to its minimum next to a full
+      // size one. Their heights are pinned in pixels, in the model too, so a saved layout reopens the same way.
+      for (const w of colEl.querySelectorAll<HTMLElement>(":scope > .ui-window")) {
+        const h = w.offsetHeight;
+        w.style.height = `${h}px`; w.style.flex = "none";
+        const pinned = c.wins.get(w.dataset.windowId ?? "")?.model;
+        if (pinned) pinned.h = h;
+      }
+      // Full size: a ratio of the column's height (1), so it is saved as "one column height" and the column grows by it.
+      const b0: WindowModel = { ...nm, h: 1 };
+      const b = makeWindow(cx, c, b0);
+      c.wins.set(nm.id, b);
+      root.after(b.card.root);
+    }
+    cx.view.geometry(c);
+    cx.view.settle(c.view.id);
+    cx.tree.render();
+    const b = c.wins.get(nm.id)!;
+    rec.binding?.refit();
+    // A new window by mouse glides the others aside (FLIP), as a new column always has. A keyboard action is instant.
+    if (!instant) flip.play(before);
+    land(b, instant);
+    b.binding?.refit();
+    cx.store.changed();
+  };
+
+  /**
+   * Brings a new window in: it becomes the active one, the camera brings it fully into view and it takes the keys.
+   * A keyboard action lands in the same frame. The keyboard only follows on a device that has one (a phone is never
+   * asked to open it).
+   */
+  const land = (b: WinRec, instant: boolean): void => {
+    cx.win.setActive(b);
+    cx.nav.focusWindow(b, instant);
+    if (!coarse.matches) b.binding?.focus();
+  };
+
+  /**
+   * Divides a window: `down` stacks the new window below in the same column, `right` gives it the other half of the
+   * column (the window shares its column with nothing, see `ownsColumn`). The droplet plays in the split's direction.
+   * Splits are windows in the one structure: no nesting, and the total footprint does not change.
+   */
+  const splitInto = async (rec: WinRec, direction: "down" | "right", nm: WindowModel, instant = false): Promise<void> => {
+    const c = rec.owner;
+    const root = rec.card.root;
+    const colEl = root.parentElement as HTMLElement;
     const b = makeWindow(cx, c, nm);
     c.wins.set(nm.id, b);
     if (direction === "down") {
@@ -187,7 +275,15 @@ export function createWindows(cx: Ctx): WindowsModule {
       b.card.root.style.height = `${half}px`; b.card.root.style.flex = "none";
       root.after(b.card.root);
     } else {
-      const next = cx.view.newCol({ id: `c${++state.serial}`, w: Number(colEl.dataset.w) || state.metrics.colW, wins: [nm] });
+      // The column's width splits into two columns with the gap between them: the pair is exactly the old width.
+      const w = Number(colEl.dataset.w) || state.metrics.colW;
+      const first = Math.round((w - COLUMN_GAP) / 2);
+      colEl.dataset.w = String(first);
+      colEl.style.setProperty("--w", `${first}px`);
+      const next = cx.view.newCol({ id: `c${++state.serial}`, w: w - COLUMN_GAP - first, wins: [nm] });
+      // The two halves name each other: closing one of them gives its width back to the other (see `close`).
+      const pair = `p${++state.serial}`;
+      colEl.dataset.half = pair; next.dataset.half = pair;
       next.append(b.card.root);
       colEl.after(next);
     }
@@ -195,16 +291,9 @@ export function createWindows(cx: Ctx): WindowsModule {
     cx.view.settle(c.view.id);
     cx.tree.render();
     rec.binding?.refit();
-    if (direction === "right" && !instant) flip.play(before);
-    // A split lands you in the new window: it becomes the active one and the camera brings it fully into view, at rest
-    // (the old window may then be partly off screen, as on a phone, where one window fills the screen). The keyboard
-    // only follows on a device that has one (a phone is never asked to open it).
-    cx.win.setActive(b);
-    cx.nav.focusWindow(b, instant);
-    if (!coarse.matches) b.binding?.focus();
+    land(b, instant);
     if (instant) {
       // A keyboard action never animates (TASTE): the new window is simply there, refit once, with no silhouette.
-      rec.binding?.refit();
       b.binding?.refit();
       cx.store.changed();
       return;
@@ -313,7 +402,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   return {
     make: (c, m) => makeWindow(cx, c, m),
     setActive: (rec) => setActive(cx, rec),
-    addColumn, close, split, attach, syncSession, openSession, open, pulse, flat,
+    addColumn, close, split, newWindow, attach, syncSession, openSession, open, pulse, flat,
     step(dir, instant = false) {
       const list = flat();
       if (!list.length) return;
