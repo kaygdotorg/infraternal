@@ -55,6 +55,8 @@ export interface TerminalHooks {
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
   onDisconnected?: (forced: boolean) => void;
+  /** Final output has painted; clean exits may close their window. */
+  onExited?: (status: number) => void;
   onInput?: (data: string, at: number, sequence: bigint) => boolean | void;
   onTrace?: (keyId: string, hop: TerminalTraceHop, at: number) => void;
   onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint) => void;
@@ -237,6 +239,8 @@ export class TerminalClient {
   /** Off screen: no drawing and no canvas backing store (see `setSuspended`). */
   private suspended = false;
   private closed = false;
+  private pendingExit: { status: number; finalSeq: bigint } | undefined;
+  private exitReported = false;
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
@@ -545,7 +549,7 @@ export class TerminalClient {
 
   /** Injects probe input through Ghostty's normal input event path. */
   injectInput(data: string): void {
-    if (this.closed || this.inputPaused) throw new Error("terminal input is paused");
+    if (this.closed || this.pendingExit || this.inputPaused) throw new Error("terminal input is paused");
     this.terminal.input(data, true);
   }
 
@@ -671,6 +675,7 @@ export class TerminalClient {
   private streamHandler(): StreamHandler {
     return {
       onSocketOpen: (resuming) => {
+        if (this.closed || this.pendingExit) return;
         this.connectionIsResume = this.sessionId !== undefined;
         if (this.sessionId && resuming) {
           this.attachRequested = true;
@@ -680,6 +685,7 @@ export class TerminalClient {
         }
       },
       onWelcome: (resumed) => {
+        if (this.closed || this.pendingExit) return;
         // A connection the server does not know starts every writer at zero, like a page reload.
         if (!resumed && this.hasAttached) this.restartCursors();
         if (!this.sessionId) this.openSession();
@@ -690,7 +696,7 @@ export class TerminalClient {
       },
       onFrame: (frame, message, receivedAt) => this.handleTerminalFrame(frame, message, receivedAt),
       onDisconnected: (forced) => {
-        if (this.closed) return;
+        if (this.closed || this.exitReported) return;
         this.attached = false;
         this.attachRequested = false;
         this.openCallSent = false;
@@ -735,7 +741,17 @@ export class TerminalClient {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");
-          } else if (notice.type !== "terminal.exited") {
+          } else if (notice.type === "terminal.exited") {
+            if (!Number.isSafeInteger(notice.status) || !Number.isSafeInteger(notice.final_seq) || (notice.final_seq as number) < 0) throw new Error("invalid exit");
+            const status = notice.status as number;
+            if (status < -2147483648 || status > 2147483647) throw new Error("invalid status");
+            const finalSeq = BigInt(notice.final_seq as number);
+            // Exit follows every final Output/Snapshot on this ordered stream.
+            if (finalSeq !== this.receivedOutSeq) throw new Error("exit cursor mismatch");
+            if (this.pendingExit && (this.pendingExit.status !== status || this.pendingExit.finalSeq !== finalSeq)) throw new Error("changed exit");
+            this.pendingExit = { status, finalSeq };
+            this.finishExit();
+          } else {
             throw new Error("unknown terminal notice");
           }
         } catch {
@@ -785,7 +801,7 @@ export class TerminalClient {
   }
 
   private tryAttach(): void {
-    if (!this.attachRequested || !this.sessionId || this.attached || this.closed || !this.conn.isOpen) return;
+    if (!this.attachRequested || !this.sessionId || this.attached || this.closed || this.exitReported || !this.conn.isOpen) return;
     if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
     this.attachRequested = false;
     this.attached = true;
@@ -835,6 +851,8 @@ export class TerminalClient {
     this.attachRequested = false;
     this.openCallSent = false;
     this.hasAttached = false;
+    this.pendingExit = undefined;
+    this.exitReported = false;
     this.snapshotWriteInFlight = false;
     this.outputWriteInFlight = false;
     this.sessionId = uuidBytes(sessionId);
@@ -881,7 +899,7 @@ export class TerminalClient {
 
   private handleInput(data: string): void {
     pulseActivity("typing", 400);
-    if (this.closed || !data) return;
+    if (this.closed || this.pendingExit || !data) return;
     const ctrl = this.inputModifiers.ctrl !== "off";
     const alt = this.inputModifiers.alt !== "off";
     if (this.inputModifiers.ctrl === "armed") this.inputModifiers.ctrl = "off";
@@ -1063,7 +1081,17 @@ export class TerminalClient {
       else this.prediction?.hostWritten(region.subarray(0, region.byteLength));
       return;
     }
+    this.finishExit();
     this.tryAttach();
+  }
+
+  /** Wait for paint callbacks so a clean exit never discards its final bytes. */
+  private finishExit(): void {
+    const exit = this.pendingExit;
+    if (!exit || this.exitReported || this.lastOutSeq < exit.finalSeq || this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
+    this.exitReported = true;
+    this.setStatus(exit.status === 0 ? "Shell exited." : `Shell exited with status ${exit.status}. Open a new shell to continue.`);
+    this.config.hooks?.onExited?.(exit.status);
   }
 
   private returnCredit(bytes: number): void {
