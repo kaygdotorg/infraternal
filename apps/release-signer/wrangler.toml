@@ -1,0 +1,15 @@
+# infraternal release signer (D184, D223). Deployed only by the owner, never by CI or agents:
+# whoever can change this Worker's code could read SIGNING_KEY.
+name = "infraternal-release-signer"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[[r2_buckets]]
+binding = "BUILDS"
+bucket_name = "infraternal-builds"
+
+# Set in the dashboard or with `wrangler secret put` — never in this file:
+#   SIGNING_KEY  (secret)  Ed25519 private key, PKCS#8 PEM, exported from 1Password
+#   CALLER_TOKEN (secret)  shared with the release pipeline
+#   PUBLIC_KEY   (text)    the signing key's "ssh-ed25519 AAAA…" line
+#   NOTIFY_URL   (text, optional)
