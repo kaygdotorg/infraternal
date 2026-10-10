@@ -4,6 +4,7 @@
 //! forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+pub mod ended;
 pub mod frame;
 mod pty;
 pub mod ring;
