@@ -796,3 +796,7 @@ mod remote_tests;
 #[cfg(test)]
 #[path = "daemon_readiness_tests.rs"]
 mod readiness_tests;
+
+#[cfg(test)]
+#[path = "stream_memory_tests.rs"]
+mod stream_memory_tests;

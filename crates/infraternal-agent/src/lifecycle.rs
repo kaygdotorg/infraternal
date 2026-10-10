@@ -110,9 +110,7 @@ mod tests {
 
     #[tokio::test]
     async fn window_ownership_and_process_identity_bound_live_counts() {
-        let path = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/session-bounds")
-            .join(format!("l{}", uuid::Uuid::new_v4()));
+        let path = PathBuf::from("../../target").join(format!("l{}", uuid::Uuid::new_v4()));
         fs::write(&path, b"").unwrap();
         let (peer, _remote) = tokio::net::UnixStream::pair().unwrap();
         let session = Session {
