@@ -61,10 +61,14 @@ impl CredentialSession {
                 "Automatic SSH authentication requires its ordered adapter.",
             ));
         }
-        match std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&adapter.scratch)
-        {
+        // Configured test adapters may use a short owned fixture root. A long
+        // data prefix must never constrain the kernel's Unix-socket address.
+        let scratch = if adapter.scratch.as_os_str().len() + 48 >= 108 {
+            runtime_root()
+        } else {
+            adapter.scratch.clone()
+        };
+        match std::fs::DirBuilder::new().mode(0o700).create(&scratch) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(_) => {
@@ -73,7 +77,7 @@ impl CredentialSession {
                 ));
             }
         }
-        let root = std::fs::symlink_metadata(&adapter.scratch)
+        let root = std::fs::symlink_metadata(&scratch)
             .map_err(|_| Failure::install("The private SSH helper root is unavailable."))?;
         if !root.is_dir()
             || root.permissions().mode() & 0o077 != 0
@@ -83,8 +87,7 @@ impl CredentialSession {
                 "The SSH helper root must be a private owned directory.",
             ));
         }
-        let directory = adapter
-            .scratch
+        let directory = scratch
             // 96 random bits keep helper socket paths within Linux sun_path.
             .join(format!(
                 "ssh-{}",
@@ -428,4 +431,22 @@ pub fn askpass_reply() -> std::io::Result<()> {
         return Err(std::io::Error::other("SSH prompt unavailable"));
     }
     std::io::stdout().write_all(secret.expose())
+}
+
+/// Use a short runtime root for sockets; persistent data paths never enter `sun_path`.
+/// The lazy helper preparation checks ownership, permissions and symlinks before use.
+#[must_use]
+pub fn runtime_root() -> PathBuf {
+    let uid = nix::unistd::geteuid().as_raw();
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.as_os_str().len() <= 40)
+        .unwrap_or_else(|| {
+            if uid == 0 {
+                PathBuf::from("/run")
+            } else {
+                PathBuf::from(format!("/run/user/{uid}"))
+            }
+        });
+    runtime.join(format!("if-ssh-{uid}"))
 }

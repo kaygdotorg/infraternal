@@ -142,7 +142,7 @@ pub(crate) fn default_runner(
                 ssh_keyscan: "ssh-keyscan".into(),
                 ssh_keygen: "ssh-keygen".into(),
                 askpass_binary: executable.clone(),
-                scratch: data_dir.join("ssh"),
+                scratch: infraternal_plugin_ssh::credentials::runtime_root(),
                 command_timeout: Duration::from_secs(30),
             },
             data_dir.join("ssh-trust"),
