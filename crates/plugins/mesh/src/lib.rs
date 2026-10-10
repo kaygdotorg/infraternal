@@ -20,3 +20,6 @@ pub mod configuration;
 
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod netlink;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod wireguard;
