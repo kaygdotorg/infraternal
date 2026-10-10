@@ -11,11 +11,12 @@ workspace = true
 [features]
 default = ["mesh", "ssh"]
 mesh = ["dep:infraternal-plugin-mesh"]
-remote = ["dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn"]
+remote = ["dep:infraternal-shim", "infraternal-shim/ca-handoff", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn"]
 
 ssh = ["dep:infraternal-plugin-ssh"]
 
 [dependencies]
+infraternal-shim = { path = "../infraternal-shim", version = "0.1.0", optional = true, default-features = false }
 infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }

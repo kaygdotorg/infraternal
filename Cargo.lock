@@ -1491,6 +1491,7 @@ dependencies = [
  "infraternal-plugin-remote",
  "infraternal-plugin-ssh",
  "infraternal-protocol",
+ "infraternal-shim",
  "nix",
  "openssl",
  "quinn",
