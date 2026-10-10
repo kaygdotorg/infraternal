@@ -2,6 +2,8 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 mod embedded_cli;
+#[cfg(feature = "remote")]
+mod host_remove;
 mod install;
 mod output;
 #[cfg(feature = "remote")]
@@ -26,6 +28,21 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Print one compiled plugin action as step-by-step instructions.
+    Skill { action: String },
+    #[cfg(feature = "remote")]
+    #[command(about=infraternal_plugin_remote::REMOVE.summary, long_about=infraternal_plugin_remote::REMOVE.help())]
+    RemoveHost {
+        host: uuid::Uuid,
+        #[arg(long)]
+        server: String,
+        /// Complete a previously issued fresh passkey challenge using private stdin.
+        #[arg(long)]
+        finish: bool,
+        /// Revoke server access while keeping the installation on the host.
+        #[arg(long)]
+        retain: bool,
+    },
     /// Run the trusted control plane.
     Server(ServerArgs),
     /// Run the per-host infraternal agent.
@@ -140,12 +157,41 @@ struct InstallArgs {
     name: String,
 }
 
+fn run_skill(action: &str, json: bool) -> ExitCode {
+    let definition = infraternal_server::compiled_plugins()
+        .iter()
+        .flat_map(|plugin| plugin.actions)
+        .find(|definition| definition.id == action);
+    if let Some(definition) = definition {
+        output::report(
+            json,
+            definition.id,
+            "instructions",
+            &definition.help(),
+            "Follow the declared action steps.",
+        );
+        ExitCode::SUCCESS
+    } else {
+        output::refuse(
+            json,
+            "skill",
+            "This action is not available in this build",
+            "Inspect the compiled plugin actions.",
+            1,
+        )
+    }
+}
+
 fn main() -> ExitCode {
     // Installation slots and symlinks must not rename the daemon or its shims
     // in ps/journald. Apply before the embedded dispatcher bypasses clap.
     #[cfg(target_os = "linux")]
     if nix::sys::prctl::set_name(c"infraternal").is_err() {
         return ExitCode::FAILURE;
+    }
+    #[cfg(feature = "remote")]
+    if let Some(result) = remote::uninstall_if_requested() {
+        return result;
     }
     if let Some(result) = embedded_cli::run_if_requested() {
         return result;
@@ -172,6 +218,14 @@ fn main() -> ExitCode {
     };
     let json = cli.json;
     match cli.command {
+        Command::Skill { action } => run_skill(&action, json),
+        #[cfg(feature = "remote")]
+        Command::RemoveHost {
+            host,
+            server,
+            finish,
+            retain,
+        } => host_remove::run(&server, host, finish, retain, json),
         Command::Server(args) => run_server(args, json),
         #[cfg(feature = "ssh")]
         Command::SshAskpass => ssh_askpass::run(),
@@ -418,7 +472,10 @@ fn run_remote_agent(
         output::refuse(
             json,
             operation,
-            "Remote infraternal agent operation failed",
+            result.as_ref().err().map_or(
+                "Remote infraternal agent operation failed",
+                remote::public_error,
+            ),
             "Check the enrolled identity and existing server trust.",
             1,
         )
