@@ -13,9 +13,29 @@ const MAX_OS_RELEASE_LINE_BYTES: usize = 1_024;
 const MAX_OS_LABEL_BYTES: usize = 256;
 const MAX_PROC_FILE_BYTES: usize = 64 * 1_024;
 const READ_ACTION: &str = "host.facts.read";
+const MEMORY_ACTION: &str = "host.memory.configure";
 const CONFIGURE_ACTION: &str = "host.facts.configure";
 
 const ACTIONS: &[ActionDef] = &[
+    ActionDef {
+        target: infraternal_plugin_api::Target::Node,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
+        id: MEMORY_ACTION,
+        summary: "Configure memory headroom for new terminal sessions",
+        input: infraternal_plugin_api::SchemaRef(
+            r#"{"type":"object","required":["terminalMemoryFloorMiB","terminalMemoryFloorPercent"],"properties":{"terminalMemoryFloorMiB":{"type":"integer","minimum":0,"maximum":17592186044415},"terminalMemoryFloorPercent":{"type":"integer","minimum":0,"maximum":100}},"additionalProperties":false}"#,
+        ),
+        output: infraternal_plugin_api::SchemaRef(
+            r#"{"type":"object","properties":{"terminalMemoryFloorMiB":{"type":"integer"},"terminalMemoryFloorPercent":{"type":"integer"}},"additionalProperties":false}"#,
+        ),
+        instructions: &[
+            "Choose the host to configure.",
+            "Set both the absolute MiB floor and percentage of total RAM; the larger floor applies.",
+        ],
+        effect: Effect::Write,
+        permission: infraternal_plugin_api::Permission::One(CONFIGURE_ACTION),
+    },
     ActionDef {
         target: infraternal_plugin_api::Target::Node,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
@@ -67,7 +87,7 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     api: infraternal_plugin_api::API_VERSION,
     actions: ACTIONS,
     settings: Some(infraternal_plugin_api::SchemaRef(
-        r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean","default":true}},"additionalProperties":false}"#,
+        r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean","default":true},"terminalMemoryFloorMiB":{"type":"integer","minimum":0,"default":256},"terminalMemoryFloorPercent":{"type":"integer","minimum":0,"maximum":100,"default":5}},"additionalProperties":false}"#,
     )),
     topics: &[],
     roles: &[infraternal_plugin_api::RoleDef {
@@ -217,6 +237,7 @@ pub struct HostFactsPlugin {
     mode: AgentMode,
     enabled: bool,
     static_facts: Option<HostFacts>,
+    memory_policy: super::MemoryPolicy,
 }
 
 impl HostFactsPlugin {
@@ -227,6 +248,7 @@ impl HostFactsPlugin {
             mode,
             enabled: true,
             static_facts: Some(collect_static_facts(mode)),
+            memory_policy: super::MemoryPolicy::default(),
         }
     }
 
@@ -242,8 +264,30 @@ impl AgentPlugin for HostFactsPlugin {
         &DESCRIPTOR
     }
 
+    fn admit(
+        &self,
+        action_id: &str,
+        context: infraternal_plugin_api::admission::NodeContext,
+    ) -> Result<(), infraternal_plugin_api::admission::OpenRefusal> {
+        if self.enabled && action_id == "terminal.open" {
+            self.memory_policy
+                .admit(collect_memory(), context.session_count)
+        } else {
+            Ok(())
+        }
+    }
+
     fn call(&mut self, action_id: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
         match action_id {
+            MEMORY_ACTION => {
+                if !self.enabled {
+                    return Err(PluginError::Rejected);
+                }
+                let policy =
+                    super::MemoryPolicy::decode(input).map_err(|_| PluginError::Rejected)?;
+                self.memory_policy = policy;
+                serde_json::to_vec(&policy).map_err(|_| PluginError::Rejected)
+            }
             READ_ACTION => {
                 if !self.enabled {
                     return Err(PluginError::Rejected);
@@ -447,8 +491,7 @@ pub fn refresh_live_facts(facts: &mut HostFacts) {
     facts.root_disk = root_capacity();
     #[cfg(target_os = "linux")]
     {
-        let meminfo = read_limited("/proc/meminfo", 8 * 1_024);
-        facts.memory = meminfo.as_deref().and_then(memory_from_meminfo);
+        facts.memory = collect_memory();
         facts.uptime_seconds = read_limited("/proc/uptime", 256)
             .and_then(|value| value.split_ascii_whitespace().next().map(str::to_owned))
             .and_then(|value| value.split('.').next().and_then(|whole| whole.parse().ok()));
@@ -458,6 +501,26 @@ pub fn refresh_live_facts(facts: &mut HostFacts) {
     }
     #[cfg(target_os = "macos")]
     collect_macos_live(facts);
+}
+
+// Admission samples memory only: disk and identity work are unnecessary on this path.
+fn collect_memory() -> Option<Capacity> {
+    #[cfg(target_os = "linux")]
+    {
+        read_limited("/proc/meminfo", 8 * 1_024)
+            .as_deref()
+            .and_then(memory_from_meminfo)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut facts = collect_static_facts(AgentMode::Embedded);
+        collect_macos_live(&mut facts);
+        facts.memory
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 fn read_limited(path: &str, limit: usize) -> Option<String> {
