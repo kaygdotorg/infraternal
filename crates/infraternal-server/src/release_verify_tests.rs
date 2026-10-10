@@ -106,6 +106,16 @@ fn openssh_signatures_preserve_descriptor_and_reject_every_byte_mutation() {
     for size in 0..fixture.sig.len() {
         assert!(fixture.verify(&fixture.sums, &fixture.sig[..size]).is_err());
     }
+    let original = std::fs::read(fixture.root.join("payload")).unwrap();
+    for index in 0..original.len() {
+        let mut changed = original.clone();
+        changed[index] ^= 1;
+        std::fs::write(fixture.root.join("payload"), changed).unwrap();
+        assert_eq!(
+            fixture.verify(&fixture.sums, &fixture.sig),
+            Err(ReleaseError::Digest)
+        );
+    }
     std::fs::write(fixture.root.join("payload"), b"tampered").unwrap();
     assert_eq!(
         fixture.verify(&fixture.sums, &fixture.sig),

@@ -15,6 +15,7 @@ async fn bounded_body_status_and_existing_destination_are_refused() {
         (1, "200 OK", "payload", 6, false),
         (2, "404 Not Found", "", 7, false),
         (3, "302 Found", "", 7, false),
+        (4, "200 OK", "payload", 7, false),
     ] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = format!("http://{}/payload", listener.local_addr().unwrap());
@@ -26,6 +27,9 @@ async fn bounded_body_status_and_existing_destination_are_refused() {
             socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         });
         let destination = root.join(index.to_string());
+        if index == 4 {
+            std::fs::write(&destination, b"retained").unwrap();
+        }
         let result = download(&address, &destination, maximum).await;
         if let Err(error) = &result {
             assert_ne!(error.reason(), "");
@@ -33,6 +37,9 @@ async fn bounded_body_status_and_existing_destination_are_refused() {
         assert_eq!(result.is_ok(), accepted);
         if accepted {
             assert_eq!(std::fs::read(&destination).unwrap(), body.as_bytes());
+        }
+        if index == 4 {
+            assert_eq!(std::fs::read(&destination).unwrap(), b"retained");
         }
         server.await.unwrap();
     }
