@@ -1422,10 +1422,13 @@ dependencies = [
  "infraternal-mesh",
  "infraternal-plugin-api",
  "infraternal-protocol",
+ "nix",
+ "openssl",
  "serde",
  "serde_json",
  "sqlx",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

@@ -8,6 +8,7 @@ license.workspace = true
 [features]
 default = ["server"]
 server = []
+agent = ["dep:nix", "dep:openssl", "dep:zeroize"]
 
 [dependencies]
 infraternal-plugin-api.workspace = true
@@ -19,6 +20,10 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+
+nix = { workspace = true, optional = true, features = ["net"] }
+openssl = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
 
 [lints]
 workspace = true
