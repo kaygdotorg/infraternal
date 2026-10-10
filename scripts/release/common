@@ -22,7 +22,7 @@ request() {
     local token="$1"; shift
     # curl reads its authorization header from a pipe, never argv or a file.
     # Restrict config metacharacters before writing any secret to that pipe.
-    [[ "$token" != *[!a-zA-Z0-9_.-]* ]] || { printf 'unsupported token encoding\n' >&2; return 1; }
+    [[ "$token" != *[!a-zA-Z0-9_.~+/=-]* ]] || { printf 'unsupported token encoding\n' >&2; return 1; }
     { if [[ -n "$token" ]]; then printf 'header = "Authorization: Bearer %s"\n' "$token"; fi; } |
         curl --config - --silent --show-error --fail --connect-timeout 10 --max-time 180 \
             --user-agent "infraternal-release/$release_version" "$@"

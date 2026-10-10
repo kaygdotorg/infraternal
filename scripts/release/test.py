@@ -60,7 +60,7 @@ class ReleaseScripts(unittest.TestCase):
                     self.respond(200 if self.object_name() in store else 404)
                 def do_PUT(self):
                     requests.append(('PUT', self.path))
-                    if self.headers.get('Authorization') != 'Bearer fixture-cloudflare' or not self.headers.get('User-Agent'):
+                    if self.headers.get('Authorization') != 'Bearer fixture-cloudflare+/~=' or not self.headers.get('User-Agent'):
                         self.respond(401)
                         return
                     name = self.object_name()
@@ -71,7 +71,7 @@ class ReleaseScripts(unittest.TestCase):
                     self.respond(200, json.dumps({"success": True, "result": {"key": "releases/" + name}}).encode())
                 def do_POST(self):
                     requests.append(('POST', self.path))
-                    if self.headers.get('Authorization') != 'Bearer fixture-caller' or not self.headers.get('User-Agent'):
+                    if self.headers.get('Authorization') != 'Bearer fixture-caller+/~=' or not self.headers.get('User-Agent'):
                         self.respond(401)
                         return
                     body = self.rfile.read(int(self.headers['Content-Length']))
@@ -99,7 +99,7 @@ class ReleaseScripts(unittest.TestCase):
             server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
             worker = threading.Thread(target=server.serve_forever, daemon=True)
             worker.start()
-            env = dict(os.environ, CARGO_TARGET_DIR=str(target), CLOUDFLARE_ACCOUNT_ID='fixture', CLOUDFLARE_API_TOKEN='fixture-cloudflare', RELEASE_CALLER_TOKEN='fixture-caller', RELEASE_TEST_ORIGIN=f'http://127.0.0.1:{server.server_port}')
+            env = dict(os.environ, CARGO_TARGET_DIR=str(target), CLOUDFLARE_ACCOUNT_ID='fixture', CLOUDFLARE_API_TOKEN='fixture-cloudflare+/~=', RELEASE_CALLER_TOKEN='fixture-caller+/~=', RELEASE_TEST_ORIGIN=f'http://127.0.0.1:{server.server_port}')
             def run(script, requested=version):
                 return subprocess.run([str(repo / 'scripts/release' / script), requested], env=env, capture_output=True, text=True)
             try:
