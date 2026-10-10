@@ -1,6 +1,7 @@
 //! Shares one descriptor between server socket work and node component lifecycle [15,16,28,198,201].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod channel;
+pub mod node_channel;
 pub mod routing;
 
 use bytes::Bytes;
@@ -79,6 +80,10 @@ pub struct PluginDescriptor {
 /// The host retains bearer material; plugins receive only its database hash.
 pub trait SocketHost: Send + Sync {
     fn user_id(&self) -> &str;
+    /// Public node actions may share a namespace with a server feature.
+    fn node_action_declared(&self, _id: &str) -> bool {
+        false
+    }
     fn token_hash(&self) -> &str;
     /// # Errors
     /// Refuses when socket authority ends or the supplied operation fails.
@@ -153,6 +158,13 @@ impl ReplySender {
 /// Compiled implementations own their work and expose only declared entry points.
 pub trait Plugin: Send + Sync {
     fn descriptor(&self) -> &'static PluginDescriptor;
+    /// Optional event-driven work for an admitted node. The runtime owns cancellation.
+    fn node_connected(
+        &self,
+        _channel: Arc<dyn node_channel::NodeChannel>,
+    ) -> Option<Operation<'static, ()>> {
+        None
+    }
     fn run(
         &self,
         host: Arc<dyn SocketHost>,
@@ -410,6 +422,15 @@ pub const MAX_ACTION_BYTES: usize = 8 * 1024;
 pub trait AgentPlugin: Send {
     /// Static action and settings metadata.
     fn descriptor(&self) -> &'static PluginDescriptor;
+    /// Machine-only control actions are omitted from human API/MCP/CLI discovery.
+    /// They still share the same action definitions and bounded dispatcher.
+    fn control_actions(&self) -> &'static [ActionDef] {
+        &[]
+    }
+    /// Drain declared public lifecycle notifications after an action; never private state.
+    fn take_events(&mut self) -> Vec<(&'static str, Vec<u8>)> {
+        Vec::new()
+    }
     /// Validate and execute one declared action.
     /// # Errors
     /// Returns a bounded plugin error for a rejected action, unknown action, or oversized body.
@@ -430,22 +451,61 @@ impl PluginRegistry {
     /// Rejects unsupported API versions, duplicate ids, or actions outside the plugin namespace.
     pub fn register(&mut self, plugin: Box<dyn AgentPlugin>) -> Result<(), PluginError> {
         let descriptor = plugin.descriptor();
-        if descriptor.api != API_VERSION
+        let controls = PluginDescriptor {
+            actions: plugin.control_actions(),
+            ..*descriptor
+        };
+        let mut seen = HashSet::new();
+        if descriptor.validate().is_err()
+            || controls.validate().is_err()
+            || descriptor.api != API_VERSION
             || self.plugin_ids.contains(descriptor.id)
-            || descriptor.actions.iter().any(|action| {
-                !action.id.starts_with(&format!("{}.", descriptor.id))
-                    || self.action_ids.contains(action.id)
-            })
+            || descriptor
+                .actions
+                .iter()
+                .chain(plugin.control_actions())
+                .any(|action| {
+                    !seen.insert(action.id)
+                        || !action.id.starts_with(&format!("{}.", descriptor.id))
+                        || self.action_ids.contains(action.id)
+                })
         {
             return Err(PluginError::InvalidDescriptor);
         }
         self.plugin_ids.insert(descriptor.id);
-        self.action_ids
-            .extend(descriptor.actions.iter().map(|action| action.id));
+        self.action_ids.extend(
+            descriptor
+                .actions
+                .iter()
+                .chain(plugin.control_actions())
+                .map(|action| action.id),
+        );
         self.plugins.push(plugin);
         Ok(())
     }
 
+    /// Drain only declared bounded events, rejecting a plugin's invalid notification.
+    /// # Errors
+    /// Rejects undeclared identifiers, invalid JSON or oversized envelopes.
+    pub fn events(&mut self) -> Result<Vec<Vec<u8>>, PluginError> {
+        let mut events = Vec::new();
+        for plugin in &mut self.plugins {
+            let descriptor = plugin.descriptor();
+            for (id, body) in plugin.take_events() {
+                if body.len() > 1024 || !descriptor.events.iter().any(|event| event.id == id) {
+                    return Err(PluginError::Rejected);
+                }
+                let value: serde_json::Value =
+                    serde_json::from_slice(&body).map_err(|_| PluginError::Rejected)?;
+                let envelope=serde_json::to_vec(&serde_json::json!({"type":"plugin.event","plugin":descriptor.id,"id":id,"value":value})).map_err(|_|PluginError::Rejected)?;
+                if envelope.len() > 1024 {
+                    return Err(PluginError::MessageTooLarge);
+                }
+                events.push(envelope);
+            }
+        }
+        Ok(events)
+    }
     /// Executes one declared action while bounding both directions of its JSON body.
     /// # Errors
     /// Returns a bounded error for an unknown action, oversized message, or plugin rejection.
@@ -458,6 +518,7 @@ impl PluginRegistry {
                 .descriptor()
                 .actions
                 .iter()
+                .chain(plugin.control_actions())
                 .any(|action| action.id == action_id)
         });
         let Some(plugin) = plugin else {
