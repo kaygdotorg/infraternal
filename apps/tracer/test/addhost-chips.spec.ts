@@ -175,3 +175,19 @@ for (const size of SIZES) {
     });
   }
 }
+
+test("a token typed while the host list is still loading chips when the list arrives", async ({ page }) => {
+  // The double answers discovery late (its "hang" mode, 5 s): the person types before any host is listed.
+  await page.request.post("/__mock/bootstrap/reset");
+  await page.request.post("/__mock/bootstrap/config", { data: { discovery: "hang" } });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none");
+  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  await openWizard(page);
+  await field(page).click();
+  await page.keyboard.type("remoternal", { delay: 5 });
+  await expect(page.locator(".ah-note.ah-loading")).toBeVisible();
+  await expect(chips(page)).toHaveCount(1, { timeout: 15_000 });
+  await expect(chips(page).first()).toHaveAttribute("data-chip", "remoternal");
+  await expect(page.locator(".ah-row[data-host='remoternal'] input")).toBeChecked();
+});

@@ -48,6 +48,11 @@ export interface ChipInputController {
   /** Ends the current token as if Enter were pressed; returns true when it became a chip. */
   commit(): boolean;
   clearToken(): void;
+  /**
+   * Tries the unfinished token again without a delimiter. A consumer whose `resolve` depends on data that arrived
+   * after the person typed (a host list still loading) calls it when that data lands.
+   */
+  recheck(): void;
   dispose(): void;
 }
 
@@ -147,13 +152,17 @@ export function mountChipInput(host: HTMLElement, options: ChipInputOptions): Ch
     return true;
   }
 
+  /** The unambiguous-token rule: a token that resolves without a delimiter commits as it is typed. */
+  function tryUnambiguous(): void {
+    if (input.value && !/\s/.test(input.value) && commitToken(input.value, false)) input.value = "";
+    options.onToken?.(input.value.trim());
+  }
+
   const onInput = (): void => {
     const value = input.value;
     // A delimiter typed ends the tokens before it; whatever does not resolve stays to be fixed.
     if (/[\s,]/.test(value)) settle(value);
-    // An unambiguous token commits without a delimiter.
-    if (input.value && !/\s/.test(input.value) && commitToken(input.value, false)) input.value = "";
-    options.onToken?.(input.value.trim());
+    tryUnambiguous();
   };
 
   /** Commits every complete token in `value`, keeping the unresolved ones (and an open tail) in the field. */
@@ -219,6 +228,7 @@ export function mountChipInput(host: HTMLElement, options: ChipInputOptions): Ch
     has: (id) => chips.has(id),
     commit: commitPending,
     clearToken() { input.value = ""; options.onToken?.(""); },
+    recheck: tryUnambiguous,
     dispose() {
       input.removeEventListener("input", onInput);
       input.removeEventListener("keydown", onKeyDown);
