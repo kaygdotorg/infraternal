@@ -181,7 +181,9 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
   };
 
   /** Staggered, host-dependent pace so a batch looks like separate machines. */
-  const pace = (target: Target, phase: number): number => 420 + ((target.id.length * 97 + phase * 53) % 380);
+  // Cancellation owns a deliberately pending fixture; it must not turn into a
+  // successful install while a loaded browser is opening the confirmation.
+  const pace = (target: Target, phase: number): number => target.name === "cancellation.lab" && phase === 1 ? 60_000 : 420 + ((target.id.length * 97 + phase * 53) % 380);
 
   function schedule(target: Target): void {
     target.state = "queued";
