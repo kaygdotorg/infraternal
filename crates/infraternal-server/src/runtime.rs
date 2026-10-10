@@ -15,7 +15,6 @@ use axum::{
     serve::ListenerExt,
 };
 use axum_server::tls_openssl::OpenSSLConfig;
-use infraternal_plugin_api::PluginDescriptor;
 use serde_json::json;
 use sqlx::{
     SqlitePool,
@@ -35,6 +34,18 @@ use tokio::{
     sync::{Mutex, Semaphore},
 };
 use tracing_subscriber::EnvFilter;
+
+#[cfg(feature = "remote")]
+use crate::{
+    remote_http::EnrollmentService,
+    remote_runtime::{RemoteListeners, RemoteService},
+};
+#[cfg(not(feature = "remote"))]
+type EnrollmentService = ();
+#[cfg(not(feature = "remote"))]
+type RemoteService = ();
+#[cfg(not(feature = "remote"))]
+type RemoteListeners = ();
 
 /// A CIDR network whose peers are permitted to supply `X-Forwarded-For` [keywrap.md].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,24 +192,39 @@ pub enum ServerError {
 ///
 /// Returns a sanitized startup, storage, migration, TLS, or listener error.
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
-    serve_with_plugin_descriptors(config, &[]).await
+    serve_inner(config, None, None).await
 }
 
-/// Start the control plane with the plugin action catalog compiled into its infraternal agent.
-///
-/// Descriptors stay in one source of truth, while the server can refuse undeclared actions and
-/// authorize declared permissions before any request reaches the embedded infraternal agent.
-///
+/// Mount host enrollment using the trusted runtime's D168 signing source.
 /// # Errors
-///
-/// Returns a configuration, storage, migration, authentication, TLS, setup-token socket, or listener error.
-pub async fn serve_with_plugin_descriptors(
+/// Returns sanitized startup, storage, migration, TLS or listener failures.
+#[cfg(feature = "remote")]
+pub async fn serve_with_enrollment(
     config: ServerConfig,
-    plugin_descriptors: &'static [&'static PluginDescriptor],
+    enrollment: Option<EnrollmentService>,
 ) -> Result<(), ServerError> {
-    init_logging();
-    let (app, setup_token) =
-        build_router_with_plugin_descriptors(config.clone(), None, plugin_descriptors).await?;
+    serve_inner(config, enrollment, None).await
+}
+
+/// Serve enrollment, host transports and browser routing using trusted D168 sources.
+/// # Errors
+/// Returns sanitized configuration, storage, TLS or listener failures.
+#[cfg(feature = "remote")]
+pub async fn serve_with_remote(
+    config: ServerConfig,
+    remote: crate::remote_runtime::RemoteService,
+) -> Result<(), ServerError> {
+    serve_inner(config, Some(remote.enrollment.clone()), Some(remote)).await
+}
+
+async fn serve_inner(
+    config: ServerConfig,
+    enrollment: Option<EnrollmentService>,
+    remote: Option<RemoteService>,
+) -> Result<(), ServerError> {
+    configure_logging(false);
+    let (app, setup_token, _listeners) =
+        build_router_core(config.clone(), None, enrollment, remote).await?;
     if let Some(token) = setup_token {
         start_setup_token_socket(&config.data_dir, token)?;
     }
@@ -212,7 +238,8 @@ pub async fn serve_with_plugin_descriptors(
     if let Some(tls) = config.tls {
         let tls_config = OpenSSLConfig::from_pem_file(tls.certificate, tls.private_key)
             .map_err(|_| ServerError::TlsConfiguration)?;
-        axum_server::bind_openssl(config.listen, tls_config)
+        axum_server::Server::bind(config.listen)
+            .acceptor(crate::server_tls::acceptor(tls_config))
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .map_err(ServerError::Listener)
@@ -253,18 +280,113 @@ async fn build_router(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
 ) -> Result<(Router, Option<String>), ServerError> {
-    build_router_with_plugin_descriptors(config, supplied_agent, &[]).await
+    build_router_with_enrollment(config, supplied_agent, None).await
 }
 
-async fn build_router_with_plugin_descriptors(
+#[cfg(test)]
+async fn build_router_with_enrollment(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
-    plugin_descriptors: &'static [&'static PluginDescriptor],
+    enrollment: Option<EnrollmentService>,
 ) -> Result<(Router, Option<String>), ServerError> {
+    let (app, setup, _) = build_router_core(config, supplied_agent, enrollment, None).await?;
+    Ok((app, setup))
+}
+
+/// Assemble configured CA authority before any listener starts; unsafe copy
+/// storage refuses startup, while an absent configuration grants no authority.
+#[cfg(feature = "remote")]
+fn ca_router(
+    remote: Option<&RemoteService>,
+    auth: &Auth,
+    pool: &SqlitePool,
+    hosts: crate::remote_runtime::RemoteHosts,
+    store: crate::enrollment::EnrollmentStore,
+) -> Result<Router, ServerError> {
+    remote
+        .and_then(|service| service.ca_administration.as_ref())
+        .map(|configuration| {
+            configuration
+                .with_runtime(auth.clone(), pool.clone(), hosts, store)
+                .map(|authority| crate::ca_http::router(auth.clone(), authority))
+                .map_err(|_| ServerError::TlsConfiguration)
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+/// Build the optional plugin adapter and retain listener ownership for the serving lifetime.
+#[cfg(feature = "remote")]
+async fn remote_router(
+    auth: Auth,
+    pool: SqlitePool,
+    mut enrollment: Option<EnrollmentService>,
+    remote: Option<RemoteService>,
+) -> Result<
+    (
+        Router,
+        Router,
+        crate::remote_runtime::RemoteHosts,
+        Option<RemoteListeners>,
+    ),
+    ServerError,
+> {
+    let hosts = crate::remote_runtime::RemoteHosts::from_source(
+        enrollment.as_ref().map(|service| service.source.clone()),
+    );
+    let enrollment_store = crate::enrollment::EnrollmentStore::new(pool.clone());
+    let ca_api = ca_router(
+        remote.as_ref(),
+        &auth,
+        &pool,
+        hosts.clone(),
+        enrollment_store.clone(),
+    )?;
+    let listeners = if let Some(remote) = remote.filter(|remote| remote.identity.is_some()) {
+        Some(
+            crate::remote_runtime::RemoteListeners::start(
+                remote.enrollment.endpoint.endpoint,
+                &remote.identity.ok_or(ServerError::TlsConfiguration)?,
+                &remote.roots,
+                enrollment_store.clone(),
+                hosts.clone(),
+            )
+            .await
+            .map_err(ServerError::Listener)?,
+        )
+    } else {
+        None
+    };
+    if let (Some(service), Some(listeners)) = (&mut enrollment, &listeners) {
+        service.endpoint.endpoint = listeners.local_addr().map_err(ServerError::Listener)?;
+    }
+    let remote_api = enrollment.map(|service| {
+        crate::remote_http::router_with_store(
+            auth.clone(),
+            pool.clone(),
+            enrollment_store,
+            service.source,
+            service.endpoint,
+        )
+    });
+    Ok((
+        ca_api,
+        remote_api.unwrap_or_else(crate::remote_http::unavailable_router),
+        hosts,
+        listeners,
+    ))
+}
+
+async fn build_router_core(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+    enrollment: Option<EnrollmentService>,
+    remote: Option<RemoteService>,
+) -> Result<(Router, Option<String>, Option<RemoteListeners>), ServerError> {
+    #[cfg(not(feature = "remote"))]
+    let _ = (enrollment, remote);
     validate_config(&config)?;
-    if let Some(web_root) = &config.web_root
-        && !web_root.is_dir()
-    {
+    if config.web_root.as_ref().is_some_and(|root| !root.is_dir()) {
         return Err(ServerError::WebRoot);
     }
 
@@ -275,6 +397,8 @@ async fn build_router_with_plugin_descriptors(
     let auth = Auth::new(pool.clone(), rp_id, &config.public_origin)
         .await
         .map_err(ServerError::Auth)?;
+    #[cfg(not(feature = "remote"))]
+    let ca_api = Router::new();
     let now = unix_seconds()?;
     websocket::recover_connections(&pool, now)
         .await
@@ -304,15 +428,30 @@ async fn build_router_with_plugin_descriptors(
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
         EmbeddedAgent::spawn(executable)
     };
+    #[cfg(feature = "remote")]
+    let (ca_api, remote_api, hosts, listeners) =
+        remote_router(auth.clone(), pool.clone(), enrollment, remote).await?;
+    #[cfg(feature = "remote")]
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
         .await
         .map_err(|_| ServerError::InvalidConfiguration)?
-        .with_plugin_descriptors(plugin_descriptors);
+        .with_plugin_descriptors(infraternal_agent::plugins::descriptors())
+        .with_remote_hosts(hosts);
+    #[cfg(not(feature = "remote"))]
+    let listeners = None;
+    #[cfg(not(feature = "remote"))]
+    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
+        .await
+        .map_err(|_| ServerError::InvalidConfiguration)?
+        .with_plugin_descriptors(infraternal_agent::plugins::descriptors());
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
         .merge(auth::router(auth))
-        .merge(websocket::router(ws_state));
+        .merge(websocket::router(ws_state))
+        .merge(ca_api);
+    #[cfg(feature = "remote")]
+    let app = app.merge(remote_api);
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
     } else {
@@ -326,6 +465,7 @@ async fn build_router_with_plugin_descriptors(
     Ok((
         app.layer(from_fn_with_state(admission, source_admission)),
         setup_token,
+        listeners,
     ))
 }
 
@@ -429,7 +569,7 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
     Ok(pool)
 }
 
-fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
+pub(crate) fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
     if config.behind_proxy == config.trusted_proxies.is_empty() {
         return Err(ServerError::InvalidConfiguration);
     }
@@ -446,10 +586,15 @@ fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
     {
         return Err(ServerError::InvalidConfiguration);
     }
+    if let Some(web_root) = &config.web_root
+        && !web_root.is_dir()
+    {
+        return Err(ServerError::WebRoot);
+    }
     Ok(())
 }
 
-fn unix_seconds() -> Result<i64, ServerError> {
+pub(crate) fn unix_seconds() -> Result<i64, ServerError> {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -459,12 +604,20 @@ fn unix_seconds() -> Result<i64, ServerError> {
     .map_err(|_| ServerError::Clock)
 }
 
-fn init_logging() {
+/// Select human diagnostics by default or JSON lines for machine callers.
+/// Repeated initialization leaves the process-wide subscriber selected by its caller.
+pub fn configure_logging(json: bool) {
+    use std::io::IsTerminal;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(filter)
-        .try_init();
+    let formatter = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter);
+    if json {
+        let _ = formatter.json().with_ansi(false).try_init();
+    } else {
+        let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        let _ = formatter.with_ansi(color).try_init();
+    }
 }
 
 async fn health(State(pool): State<SqlitePool>) -> Response {
@@ -478,7 +631,14 @@ async fn health(State(pool): State<SqlitePool>) -> Response {
     }
 }
 
-/// Per-source auth admission runs before JSON extraction and trusts forwarding data only from configured peers.
+/// Canonical client address from the listener and explicitly trusted proxy policy.
+/// Plugins may bound work by it; untrusted forwarding headers never set this value.
+#[derive(Clone, Copy)]
+pub(crate) struct ClientAddress(
+    #[cfg_attr(not(feature = "remote"), allow(dead_code))] pub(crate) IpAddr,
+);
+
+/// Per-source auth admission trusts forwarding data only from configured peers.
 #[derive(Clone)]
 struct SourceAdmission {
     behind_proxy: bool,
@@ -493,28 +653,22 @@ struct SourceBucket {
 
 async fn source_admission(
     State(policy): State<SourceAdmission>,
-    request: Request<axum::body::Body>,
+    mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let path = request.uri().path();
-    // Exact-Origin checking still runs in auth; source admission cannot deny revocation.
-    if !path.starts_with("/auth/") || path == "/auth/logout" {
-        return next.run(request).await;
-    }
-    let device = matches!(
-        path.trim_start_matches("/auth/"),
-        "device-start" | "device-redeem"
-    );
     let Some(peer) = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|address| address.0.ip())
     else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "request address unavailable",
-        )
-            .into_response();
+        if request.uri().path().starts_with("/auth/") && request.uri().path() != "/auth/logout" {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "request address unavailable",
+            )
+                .into_response();
+        }
+        return next.run(request).await;
     };
     let source = if policy.behind_proxy
         && policy
@@ -534,6 +688,17 @@ async fn source_admission(
     } else {
         peer
     };
+    request.extensions_mut().insert(ClientAddress(source));
+    let path = request.uri().path();
+    // Resolve trusted client metadata once for every plugin, before auth's own
+    // request-rate policy. Plugin-specific admission remains in its router.
+    if !path.starts_with("/auth/") || path == "/auth/logout" {
+        return next.run(request).await;
+    }
+    let device = matches!(
+        path.trim_start_matches("/auth/"),
+        "device-start" | "device-redeem"
+    );
     let Ok(now) = unix_seconds() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -1011,3 +1176,7 @@ mod reviewer_admission {
         );
     }
 }
+
+#[cfg(all(test, feature = "remote"))]
+#[path = "remote_demo_tests.rs"]
+mod remote_demo_tests;

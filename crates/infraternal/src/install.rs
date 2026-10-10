@@ -133,6 +133,14 @@ fn render_unit(
         command.push(OsString::from("--tls-key"));
         command.push(absolute(key)?.into_os_string());
     }
+    if let Some(listen) = args.remote.remote_listen {
+        command.push(OsString::from("--remote-listen"));
+        command.push(OsString::from(listen.to_string()));
+    }
+    if let Some(directory) = &args.remote.remote_ca_dir {
+        command.push(OsString::from("--remote-ca-dir"));
+        command.push(absolute(directory)?.into_os_string());
+    }
     if args.behind_proxy {
         command.push(OsString::from("--behind-proxy"));
         for proxy in &args.trusted_proxies {
@@ -224,6 +232,7 @@ mod tests {
     #[test]
     fn dry_run_prints_a_process_surviving_user_unit() {
         let args = ServerArgs {
+            remote: super::super::remote_server::Options::default(),
             listen: SocketAddr::from(([127, 0, 0, 1], 47361)),
             data: PathBuf::from("./state"),
             public_origin: Some("https://localhost:47361".to_owned()),

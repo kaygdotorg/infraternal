@@ -4,19 +4,25 @@ use super::*;
 /// Minimal descriptor catalog for the real socket tests of generic host-facts authorization.
 const HOST_FACTS_ACTIONS: &[infraternal_plugin_api::ActionDef] = &[
     infraternal_plugin_api::ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
         id: "host.facts.read",
         summary: "Read host facts",
-        input: "{}",
-        output: "{}",
+        input: infraternal_plugin_api::SchemaRef("{}"),
+        output: infraternal_plugin_api::SchemaRef("{}"),
         instructions: &["Read or configure this host through its authenticated infraternal agent."],
         effect: infraternal_plugin_api::Effect::Read,
         permission: infraternal_plugin_api::Permission::One("host.facts.read"),
     },
     infraternal_plugin_api::ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
         id: "host.facts.configure",
         summary: "Configure host facts",
-        input: "{}",
-        output: "{}",
+        input: infraternal_plugin_api::SchemaRef("{}"),
+        output: infraternal_plugin_api::SchemaRef("{}"),
         instructions: &["Read or configure this host through its authenticated infraternal agent."],
         effect: infraternal_plugin_api::Effect::Write,
         permission: infraternal_plugin_api::Permission::One("host.facts.configure"),
@@ -24,10 +30,15 @@ const HOST_FACTS_ACTIONS: &[infraternal_plugin_api::ActionDef] = &[
 ];
 const HOST_FACTS_DESCRIPTOR: infraternal_plugin_api::PluginDescriptor =
     infraternal_plugin_api::PluginDescriptor {
+        defaults: &[],
+        dependencies: &[],
+        can_enable_components: &[],
+        events: &[],
+        streams: &[],
         id: "host",
         api: infraternal_plugin_api::API_VERSION,
         actions: HOST_FACTS_ACTIONS,
-        settings: "{}",
+        settings: Some(infraternal_plugin_api::SchemaRef("{}")),
         topics: &[],
         roles: &[infraternal_plugin_api::RoleDef {
             id: "node",

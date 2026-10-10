@@ -1,0 +1,272 @@
+# Static-size and local transport measurement evidence for #78; see remote-agents-run7-size.md for scope and limitations.
+Running as unit: run-p2751984-i11139731.scope; invocation ID: b4ebceb155004538ad229a2fe5e8eb42
+   Compiling cfg-if v1.0.5
+   Compiling pin-project-lite v0.2.17
+   Compiling libc v0.2.190
+   Compiling memchr v2.8.3
+   Compiling serde_core v1.0.229
+   Compiling itoa v1.0.18
+   Compiling bytes v1.12.1
+   Compiling futures-core v0.3.34
+   Compiling zerofrom v0.1.8
+   Compiling stable_deref_trait v1.2.1
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.16.2
+   Compiling yoke v0.8.3
+   Compiling log v0.4.34
+   Compiling tracing-core v0.1.36
+   Compiling futures-sink v0.3.34
+   Compiling zerovec v0.11.8
+   Compiling typenum v1.20.1
+   Compiling zerocopy v0.8.60
+   Compiling slab v0.4.12
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling tracing v0.1.44
+   Compiling zerotrie v0.2.5
+   Compiling subtle v2.6.1
+   Compiling tinystr v0.8.4
+   Compiling generic-array v0.14.7
+   Compiling potential_utf v0.1.6
+   Compiling utf8_iter v1.0.4
+   Compiling icu_locale_core v2.3.0
+   Compiling openssl-sys v0.9.117
+   Compiling num-traits v0.2.19
+   Compiling icu_collections v2.3.0
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.4
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling http v1.5.0
+   Compiling percent-encoding v2.3.2
+   Compiling equivalent v1.0.2
+   Compiling icu_properties_data v2.3.0
+   Compiling tokio v1.53.2
+   Compiling serde v1.0.229
+   Compiling icu_normalizer_data v2.3.0
+   Compiling digest v0.10.7
+   Compiling bitflags v2.13.2
+   Compiling form_urlencoded v1.2.2
+   Compiling futures-task v0.3.34
+   Compiling hashbrown v0.17.1
+   Compiling cpufeatures v0.2.17
+   Compiling futures-io v0.3.34
+   Compiling getrandom v0.3.4
+   Compiling futures-util v0.3.34
+   Compiling icu_provider v2.3.1
+   Compiling scopeguard v1.2.0
+   Compiling minimal-lexical v0.2.1
+   Compiling http-body v1.1.0
+   Compiling indexmap v2.14.2
+   Compiling nom v7.1.3
+   Compiling lock_api v0.4.14
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling zmij v1.0.23
+   Compiling rand_core v0.9.5
+   Compiling ppv-lite86 v0.2.21
+   Compiling deranged v0.5.8
+   Compiling powerfmt v0.2.1
+   Compiling idna_adapter v1.2.2
+   Compiling num-conv v0.2.2
+   Compiling time-core v0.1.9
+   Compiling idna v1.1.0
+   Compiling getrandom v0.4.3
+   Compiling foreign-types-shared v0.1.1
+   Compiling rusticata-macros v4.1.0
+   Compiling foreign-types v0.3.2
+   Compiling rand_chacha v0.9.0
+   Compiling thiserror v1.0.69
+   Compiling thiserror v2.0.21
+   Compiling serde_json v1.0.151
+   Compiling httparse v1.10.1
+   Compiling getrandom v0.2.17
+   Compiling futures-channel v0.3.34
+   Compiling time v0.3.55
+   Compiling arrayvec v0.7.8
+   Compiling tower-service v0.3.3
+   Compiling data-encoding v2.11.1
+   Compiling parking_lot_core v0.9.12
+   Compiling rand_core v0.6.4
+   Compiling url v2.5.8
+   Compiling rand v0.9.5
+   Compiling num-integer v0.1.47
+   Compiling base64 v0.21.7
+   Compiling foldhash v0.1.5
+   Compiling lazy_static v1.5.1
+   Compiling fnv v1.0.7
+   Compiling httpdate v1.0.3
+   Compiling atomic-waker v1.1.2
+   Compiling allocator-api2 v0.2.21
+   Compiling base64urlsafedata v0.5.5
+   Compiling crossbeam-utils v0.8.23
+   Compiling num-bigint v0.4.8
+   Compiling uuid v1.27.0
+   Compiling parking_lot v0.12.5
+   Compiling hashbrown v0.15.5
+   Compiling either v1.18.0
+   Compiling mime v0.3.17
+   Compiling crc-catalog v2.5.0
+   Compiling ryu v1.0.23
+   Compiling parking v2.2.1
+   Compiling base64 v0.22.1
+   Compiling tower-layer v0.3.3
+   Compiling asn1-rs v0.6.2
+   Compiling serde_urlencoded v0.7.1
+   Compiling event-listener v5.4.2
+   Compiling hashlink v0.10.0
+   Compiling crc v3.4.0
+   Compiling futures-intrusive v0.5.0
+   Compiling crossbeam-queue v0.3.14
+   Compiling memoffset v0.9.1
+   Compiling half v2.7.1
+   Compiling spin v0.9.9
+   Compiling http-body-util v0.1.5
+   Compiling sha1 v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling libsqlite3-sys v0.30.1
+   Compiling sync_wrapper v1.0.2
+   Compiling regex-syntax v0.8.11
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling tungstenite v0.29.0
+   Compiling serde_cbor_2 v0.13.0
+   Compiling flume v0.11.1
+   Compiling tokio-util v0.7.19
+   Compiling tokio-stream v0.1.19
+   Compiling nix v0.30.1
+   Compiling oid-registry v0.7.1
+   Compiling der-parser v9.0.0
+   Compiling sqlx-core v0.8.6
+   Compiling h2 v0.4.19
+   Compiling webauthn-rs-proto v0.5.5
+   Compiling rand_chacha v0.3.1
+   Compiling x509-parser v0.16.0
+   Compiling hex-conservative v0.2.3
+   Compiling futures-executor v0.3.34
+   Compiling atoi v2.0.0
+   Compiling unicase v2.10.0
+   Compiling base64ct v1.8.3
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling hex v0.4.3
+   Compiling tinyvec v1.13.3
+   Compiling regex-automata v0.4.18
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstream v1.0.0
+   Compiling password-hash v0.5.0
+   Compiling unicode-normalization v0.1.25
+   Compiling sqlx-sqlite v0.8.6
+   Compiling mime_guess v2.0.5
+   Compiling bitcoin_hashes v0.14.101
+   Compiling rand v0.8.8
+   Compiling tokio-tungstenite v0.29.0
+   Compiling arc-swap v1.9.2
+   Compiling tower v0.5.3
+   Compiling fs-err v3.3.2
+   Compiling axum-core v0.5.6
+   Compiling sharded-slab v0.1.7
+   Compiling vte v0.15.0
+   Compiling tracing-serde v0.2.0
+   Compiling blake2 v0.10.6
+   Compiling serde_path_to_error v0.1.20
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.10
+   Compiling nu-ansi-term v0.50.3
+   Compiling http-range-header v0.4.2
+   Compiling strsim v0.11.1
+   Compiling clap_lex v1.1.1
+   Compiling matchit v0.8.4
+   Compiling infraternal-protocol v0.1.0 (/home/kayg/.cache/codex-scratch/remote-agents/run7/dev/crates/infraternal-protocol)
+   Compiling tower-http v0.6.11
+   Compiling clap_builder v4.6.7
+   Compiling argon2 v0.5.3
+   Compiling infraternal-shim v0.1.0 (/home/kayg/.cache/codex-scratch/remote-agents/run7/dev/crates/infraternal-shim)
+   Compiling hyper v1.11.1
+   Compiling bip39 v2.2.2
+   Compiling matchers v0.2.0
+   Compiling infraternal-agent v0.1.0 (/home/kayg/.cache/codex-scratch/remote-agents/run7/dev/crates/infraternal-agent)
+   Compiling tracing-subscriber v0.3.23
+   Compiling hyper-util v0.1.21
+   Compiling axum v0.8.9
+   Compiling sqlx v0.8.6
+   Compiling clap v4.6.7
+   Compiling openssl v0.10.81
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling tokio-openssl v0.6.5
+   Compiling webauthn-rs-core v0.5.5
+   Compiling axum-server v0.8.0
+   Compiling webauthn-rs v0.5.5
+   Compiling infraternal-server v0.1.0 (/home/kayg/.cache/codex-scratch/remote-agents/run7/dev/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/.cache/codex-scratch/remote-agents/run7/dev/crates/infraternal)
+    Finished `release` profile [optimized] target(s) in 3m 08s
+    Analyzing target/x86_64-unknown-linux-musl/release/infraternal
+
+ File  .text     Size Crate
+ 7.0%  31.9%   3.4MiB [Unknown]
+ 3.8%  17.4%   1.9MiB openssl_sys
+ 2.1%   9.7%   1.0MiB std
+ 1.1%   4.9% 545.0KiB infraternal_server
+ 1.0%   4.6% 503.6KiB h2
+ 0.6%   2.9% 319.1KiB tokio
+ 0.5%   2.2% 240.2KiB clap_builder
+ 0.4%   1.9% 208.2KiB infraternal_shim
+ 0.4%   1.7% 188.8KiB axum
+ 0.3%   1.4% 159.7KiB hyper
+ 0.3%   1.4% 159.3KiB serde_json
+ 0.3%   1.4% 155.6KiB webauthn_rs_core
+ 0.3%   1.3% 146.6KiB regex_syntax
+ 0.3%   1.3% 141.7KiB sqlx_core
+ 0.3%   1.3% 139.0KiB sqlx_sqlite
+ 0.2%   1.1% 121.0KiB regex_automata
+ 0.2%   1.0% 107.3KiB infraternal
+ 0.2%   0.9%  96.3KiB serde_cbor_2
+ 0.2%   0.8%  88.9KiB infraternal_agent
+ 0.2%   0.7%  82.0KiB libsqlite3_sys
+ 0.2%   0.7%  81.2KiB serde_core
+ 0.2%   0.7%  77.6KiB http
+ 0.1%   0.6%  71.4KiB tracing_subscriber
+ 0.1%   0.6%  62.7KiB x509_parser
+ 0.1%   0.4%  49.5KiB url
+ 0.1%   0.4%  48.3KiB futures_util
+ 0.1%   0.4%  41.6KiB hyper_util
+ 0.1%   0.3%  37.5KiB tower_http
+ 0.1%   0.3%  28.8KiB flume
+ 0.0%   0.2%  22.3KiB idna
+ 0.0%   0.2%  20.3KiB tungstenite
+ 0.0%   0.2%  19.7KiB argon2
+ 0.0%   0.2%  18.6KiB webauthn_rs_proto
+ 0.0%   0.2%  17.8KiB openssl
+ 0.0%   0.1%  15.2KiB axum_server
+ 0.0%   0.1%  15.1KiB matchit
+ 0.0%   0.1%  14.3KiB serde
+ 0.0%   0.1%  13.8KiB hashbrown
+ 0.0%   0.1%  12.4KiB password_hash
+ 0.0%   0.1%  12.3KiB sha2
+ 0.0%   0.1%  12.2KiB asn1_rs
+ 0.0%   0.1%  11.2KiB tower
+ 0.0%   0.1%  10.8KiB icu_normalizer
+ 0.0%   0.1%  10.4KiB base64
+ 0.0%   0.1%   9.9KiB bytes
+ 0.0%   0.1%   9.5KiB smallvec
+ 0.0%   0.1%   8.9KiB http_body_util
+ 0.0%   0.1%   8.5KiB der_parser
+ 0.0%   0.1%   8.0KiB tracing
+ 0.0%   0.1%   7.8KiB infraternal_protocol
+ 0.0%   0.1%   7.3KiB tracing_core
+ 0.0%   0.1%   7.1KiB rand_chacha
+ 0.0%   0.1%   6.9KiB blake2
+ 0.0%   0.1%   6.8KiB httpdate
+ 0.0%   0.1%   6.7KiB base64ct
+ 0.0%   0.1%   6.7KiB webauthn_rs
+ 0.0%   0.1%   6.2KiB memchr
+ 0.0%   0.1%   6.1KiB vte
+ 0.0%   0.0%   5.2KiB sha1
+ 0.0%   0.0%   5.0KiB mime
+ 0.2%   0.8%  92.9KiB And 56 more crates. Use -n N to show more.
+22.0% 100.0%  10.8MiB .text section size, the file size is 48.9MiB
+
+Note: numbers above are a result of guesswork. They are not 100% correct and never will be.

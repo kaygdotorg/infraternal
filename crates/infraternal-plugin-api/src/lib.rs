@@ -1,6 +1,6 @@
-//! Descriptors and bounded socket interfaces for compiled plugins [15,16,28,198,201].
+//! Shares one descriptor between server socket work and node component lifecycle [15,16,28,198,201].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
-
+pub mod channel;
 pub mod routing;
 
 use bytes::Bytes;
@@ -30,37 +30,45 @@ pub enum Effect {
     Destructive,
 }
 /// One public action definition; schemas refer to the frozen contract types.
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct ActionDef {
     pub id: &'static str,
     pub summary: &'static str,
     pub instructions: &'static [&'static str],
-    pub input: &'static str,
-    pub output: &'static str,
+    pub input: SchemaRef,
+    pub output: SchemaRef,
     pub permission: Permission,
     pub effect: Effect,
+    pub target: Target,
+    pub dry_run: DryRun,
+    pub opens: Option<&'static str>,
 }
 /// Read visibility may follow any management action without introducing a view-only role [187].
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub enum Permission {
     One(&'static str),
     Any(&'static [&'static str]),
 }
 /// A server feature and a node component share an id but cannot create each other.
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct RoleDef {
     pub id: &'static str,
     pub requires: &'static [&'static str],
     pub default_enabled: bool,
 }
 /// Pure metadata: inspecting a disabled plugin starts no work.
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct PluginDescriptor {
     pub id: &'static str,
     pub api: u16,
     pub actions: &'static [ActionDef],
     pub topics: &'static [&'static str],
-    pub settings: &'static str,
+    pub settings: Option<SchemaRef>,
+    pub events: &'static [EventDef],
+    pub streams: &'static [StreamDef],
+    pub defaults: &'static [SettingDefault],
+    pub dependencies: &'static [Dependency],
+    pub can_enable_components: &'static [&'static str],
     pub roles: &'static [RoleDef],
     pub max_frame_len: usize,
     #[serde(skip)]
@@ -167,6 +175,232 @@ pub async fn fresh_session_tx(
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>MAX(?,unixepoch()) AND fresh>MAX(?,unixepoch())-? AND fresh<=MAX(?,unixepoch()))")
         .bind(token_hash).bind(user).bind(now).bind(now).bind(fresh_seconds).bind(now).fetch_one(&mut **tx).await
+}
+
+/// A contract type name or inline settings schema, serialized as the existing string.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(transparent)]
+pub struct SchemaRef(pub &'static str);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum Target {
+    Global,
+    Node,
+    Host,
+    Session,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum DryRun {
+    Unsupported,
+    Supported,
+    Required,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct EventDef {
+    pub id: &'static str,
+    pub schema: SchemaRef,
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct StreamDef {
+    pub id: &'static str,
+    pub schema: SchemaRef,
+    pub resumable: bool,
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+pub enum DefaultValue {
+    Null,
+    Bool(bool),
+    Unsigned(u64),
+    Text(&'static str),
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SettingDefault {
+    pub id: &'static str,
+    pub value: DefaultValue,
+}
+
+/// A confirmed server is a prerequisite, never an implicit node component [201].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum Dependency {
+    ExistingServer,
+    Component(&'static str),
+}
+
+impl PluginDescriptor {
+    /// Check declaration invariants before exposing a plugin through any adapter.
+    /// # Errors
+    /// Refuses incompatible versions, duplicate actions, missing instructions,
+    /// destructive calls without a required dry run, or implicit server creation.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.api != API_VERSION || self.id.is_empty() {
+            return Err("The plugin definition is unavailable.");
+        }
+        if self.can_enable_components.contains(&"server")
+            || self.dependencies.contains(&Dependency::Component("server"))
+        {
+            return Err("A node component cannot create a server.");
+        }
+        for (index, action) in self.actions.iter().enumerate() {
+            if !action.id.starts_with(self.id)
+                || action.id.as_bytes().get(self.id.len()) != Some(&b'.')
+                || self.actions[..index]
+                    .iter()
+                    .any(|other| other.id == action.id)
+                || action.summary.is_empty()
+                || action.instructions.is_empty()
+                || action.instructions.iter().any(|step| step.is_empty())
+                || action.input.0.is_empty()
+                || action.output.0.is_empty()
+                || match action.permission {
+                    Permission::One(permission) => permission.is_empty(),
+                    Permission::Any(permissions) => {
+                        permissions.is_empty()
+                            || permissions.iter().any(|permission| permission.is_empty())
+                    }
+                }
+                || action.effect == Effect::Destructive && action.dry_run != DryRun::Required
+            {
+                return Err("The plugin action definition is unavailable.");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum PluginState {
+    On,
+    Stopping,
+    Off,
+}
+impl PluginState {
+    /// Shared plain state labels for human adapters [202].
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::On => "On",
+            Self::Stopping => "Stopping",
+            Self::Off => "Off",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct PluginStatus {
+    pub state: PluginState,
+    pub active_work: usize,
+}
+
+/// Node lifecycle is distinct from server socket work; both use the same descriptor [201].
+/// Trusted core authorizes control calls before invoking a node's plugin.
+/// Disable returns only after owned work, sockets and timers have retired [198].
+pub trait ComponentPlugin: Send + Sync {
+    fn descriptor(&self) -> &'static PluginDescriptor;
+    fn status(&self) -> PluginStatus;
+    fn set_enabled(&self, enabled: bool) -> PluginOperation<'_, ()>;
+}
+
+/// Control failures contain fixed public text, never transport data or login material.
+pub type PluginOperation<'a, T> = Operation<'a, Result<T, &'static str>>;
+
+impl ActionDef {
+    /// Render the declared steps for operator help without a second copy of the instructions.
+    #[must_use]
+    pub fn help(&self) -> String {
+        use std::fmt::Write;
+        let mut help = self.summary.to_owned();
+        for (index, step) in self.instructions.iter().enumerate() {
+            // Formatting into an owned String cannot fail; only static metadata is included.
+            let _ = write!(help, "\n{}. {step}", index + 1);
+        }
+        help
+    }
+}
+
+#[cfg(test)]
+mod component_tests {
+    use super::*;
+    const ACTION: ActionDef = ActionDef {
+        id: "fixture.read",
+        summary: "Read status",
+        instructions: &["Read the current status."],
+        input: SchemaRef("fixture.empty"),
+        output: SchemaRef("fixture.status"),
+        target: Target::Node,
+        effect: Effect::Read,
+        permission: Permission::One("fixture.read"),
+        dry_run: DryRun::Unsupported,
+        opens: None,
+    };
+    const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
+        id: "fixture",
+        api: API_VERSION,
+        actions: &[ACTION],
+        events: &[],
+        streams: &[],
+        settings: None,
+        defaults: &[],
+        dependencies: &[Dependency::ExistingServer],
+        can_enable_components: &["ssh"],
+        topics: &[],
+        roles: &[],
+        max_frame_len: 0,
+        unavailable: &[],
+        unavailable_event: &[],
+    };
+    #[test]
+    fn component_declarations_cannot_create_servers() {
+        assert!(DESCRIPTOR.validate().is_ok());
+        let invalid = PluginDescriptor {
+            can_enable_components: &["server"],
+            ..DESCRIPTOR
+        };
+        assert!(invalid.validate().is_err());
+        let invalid = PluginDescriptor {
+            dependencies: &[Dependency::Component("server")],
+            ..DESCRIPTOR
+        };
+        assert!(invalid.validate().is_err());
+    }
+    #[test]
+    fn destructive_actions_require_a_dry_run_and_every_action_has_instructions() {
+        const DESTRUCTIVE: [ActionDef; 1] = [ActionDef {
+            effect: Effect::Destructive,
+            ..ACTION
+        }];
+        const MISSING: [ActionDef; 1] = [ActionDef {
+            instructions: &[],
+            ..ACTION
+        }];
+        const REQUIRED: [ActionDef; 1] = [ActionDef {
+            effect: Effect::Destructive,
+            dry_run: DryRun::Required,
+            ..ACTION
+        }];
+        assert!(
+            PluginDescriptor {
+                actions: &DESTRUCTIVE,
+                ..DESCRIPTOR
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            PluginDescriptor {
+                actions: &MISSING,
+                ..DESCRIPTOR
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            PluginDescriptor {
+                actions: &REQUIRED,
+                ..DESCRIPTOR
+            }
+            .validate()
+            .is_ok()
+        );
+    }
 }
 
 /// Maximum encoded node-side plugin action body.

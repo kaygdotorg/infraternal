@@ -75,6 +75,8 @@ pub(crate) struct WebSocketState {
     pub(crate) plugins: PluginRuntime,
     agent: EmbeddedAgent,
     plugin_descriptors: &'static [&'static PluginDescriptor],
+    #[cfg(feature = "remote")]
+    remote_hosts: crate::remote_runtime::RemoteHosts,
     #[cfg(test)]
     handshake_timeout: Duration,
     #[cfg(test)]
@@ -99,6 +101,8 @@ impl WebSocketState {
             plugins,
             agent,
             plugin_descriptors: &[],
+            #[cfg(feature = "remote")]
+            remote_hosts: crate::remote_runtime::RemoteHosts::default(),
             #[cfg(test)]
             handshake_timeout: HANDSHAKE_TIMEOUT,
             #[cfg(test)]
@@ -136,6 +140,12 @@ impl WebSocketState {
             .flat_map(|descriptor| descriptor.actions)
             .find(|action| action.id == action_id)
             .copied()
+    }
+
+    #[cfg(feature = "remote")]
+    pub(crate) fn with_remote_hosts(mut self, hosts: crate::remote_runtime::RemoteHosts) -> Self {
+        self.remote_hosts = hosts;
+        self
     }
 
     /// Keep production's terminal deadline fixed while allowing deadline tests to run quickly.
@@ -997,25 +1007,28 @@ where
             action_id: action_id @ ("terminal.open" | "ssh.session.open"),
             input_json,
         } if stream_id == CONTROL_STREAM => {
-            let size = if action_id == "ssh.session.open" {
-                // The tracer defaults to the embedded host. Explicit remote
-                // hosts require the inventory/plugin path; never silently run
-                // a requested remote command on the local server host [9].
+            let request = if action_id == "ssh.session.open" {
                 serde_json::from_slice::<BrowserTerminalOpen>(input_json)
                     .ok()
-                    .filter(|input| input.host_id.is_none())
-                    .map(|_| TerminalOpen {
-                        cols: 80,
-                        rows: 24,
-                        px_w: 0,
-                        px_h: 0,
+                    .map(|input| {
+                        (
+                            TerminalOpen {
+                                cols: 80,
+                                rows: 24,
+                                px_w: 0,
+                                px_h: 0,
+                            },
+                            input.host_id,
+                        )
                     })
             } else {
-                serde_json::from_slice::<TerminalOpen>(input_json).ok()
+                serde_json::from_slice::<TerminalOpen>(input_json)
+                    .ok()
+                    .map(|size| (size, None))
             };
-            let result = match size {
-                Some(size) if size.valid() => {
-                    open_terminal(state, user_id, session_token, size).await
+            let result = match request {
+                Some((size, host)) if size.valid() => {
+                    open_terminal(state, user_id, session_token, size, host).await
                 }
                 _ => Err(()),
             };
@@ -1134,11 +1147,26 @@ where
             if !session_is_live(state, user_id, session_token).await {
                 return Err(());
             }
+            let host: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT remote_host_id FROM terminal_sessions WHERE id=? AND user_id=?",
+            )
+            .bind(session.as_slice())
+            .bind(user_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|_| ())?;
+            let agent = terminal_agent(
+                state,
+                user_id,
+                host.as_deref()
+                    .map(uuid::Uuid::from_slice)
+                    .transpose()
+                    .map_err(|_| ())?,
+            )
+            .await?;
             let attachment = tokio::time::timeout(
                 BACKEND_TIMEOUT,
-                state
-                    .agent
-                    .attach(session, last_out_seq, input_acked, writer_stream),
+                agent.attach(session, last_out_seq, input_acked, writer_stream),
             )
             .await
             .map_err(|_| ())?
@@ -1337,14 +1365,16 @@ async fn open_terminal(
     user_id: &str,
     session_token: &str,
     size: TerminalOpen,
+    host: Option<uuid::Uuid>,
 ) -> Result<[u8; 16], ()> {
     #[cfg(test)]
     let connect_timeout = state.terminal_connect_timeout;
     #[cfg(not(test))]
     let connect_timeout = TERMINAL_CONNECT_TIMEOUT;
+    let agent = terminal_agent(state, user_id, host).await?;
     let session_id = tokio::time::timeout(
         connect_timeout,
-        state.agent.open(TerminalSize {
+        agent.open(TerminalSize {
             cols: size.cols,
             rows: size.rows,
             px_w: size.px_w,
@@ -1358,12 +1388,14 @@ async fn open_terminal(
         return Err(());
     }
     let now = unix_seconds()?;
-    let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) SELECT ?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch()")
+    let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND (? IS NULL OR EXISTS (SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL))")
         .bind(session_id.as_slice())
         .bind(user_id)
         .bind(now)
         .bind(now)
+        .bind(host.map(|id| id.as_bytes().to_vec()))
         .bind(crate::auth::hash(session_token)).bind(user_id)
+        .bind(host.map(|id| id.as_bytes().to_vec())).bind(host.map(|id| id.as_bytes().to_vec())).bind(user_id)
         .execute(&state.pool)
         .await
         .map_err(|_| ())?;
@@ -1371,6 +1403,38 @@ async fn open_terminal(
         return Err(());
     }
     Ok(session_id)
+}
+
+/// Core-only builds select the local host and refuse every remote selection.
+#[cfg(not(feature = "remote"))]
+fn terminal_agent(
+    state: &WebSocketState,
+    _user: &str,
+    host: Option<uuid::Uuid>,
+) -> std::future::Ready<Result<EmbeddedAgent, ()>> {
+    std::future::ready(if host.is_some() {
+        Err(())
+    } else {
+        Ok(state.agent.clone())
+    })
+}
+
+/// Host selection is a durable authority check; a missing remote host never falls back locally.
+#[cfg(feature = "remote")]
+async fn terminal_agent(
+    state: &WebSocketState,
+    user: &str,
+    host: Option<uuid::Uuid>,
+) -> Result<EmbeddedAgent, ()> {
+    let Some(host) = host else {
+        return Ok(state.agent.clone());
+    };
+    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
+        .bind(host.as_bytes().as_slice()).bind(user).fetch_one(&state.pool).await.map_err(|_|())?;
+    if !allowed {
+        return Err(());
+    }
+    state.remote_hosts.actor(host).await.ok_or(())
 }
 
 /// Writer identity survives reconnect and supervision; output remains session-wide.

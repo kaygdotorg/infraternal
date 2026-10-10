@@ -1,0 +1,48 @@
+# Records authorised o1 pin, failed direct reachability and verified rootless cleanup; no terminal proof claimed (#78).
+host_key_ed25519_sha256=SHA256:uMAQHBbZ/cuo8T3nCMhAu30Y2XPSenXqlLYkSiJF9ww
+Running as unit: run-p2929778-i11317525.scope; invocation ID: e1932d92a9a646fdbdb5de82ea90bc3d
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/remote-agents/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.40s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/remote-agents/target/debug/deps/infraternal_server-1a408e36adb2d6d0)
+
+running 1 test
+remote_host_artifact target=aarch64-unknown-linux-musl sha256=e1669f13f7a7b99ee41c6f7efac9916fdee2f23f332cf131a97272447d806645 uid=1002 host_load=0.40 0.21 0.15 1/743 388143
+
+thread 'runtime::remote_demo_tests::real_host::o1_rootless_join_terminal_and_cleanup' (2930946) panicked at crates/infraternal-server/src/remote_demo_tests.rs:303:9:
+remote host did not register
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+remote_host_cleanup processes=0 data_absent=true state_absent=true
+test runtime::remote_demo_tests::real_host::o1_rootless_join_terminal_and_cleanup ... FAILED
+
+failures:
+
+failures:
+    runtime::remote_demo_tests::real_host::o1_rootless_join_terminal_and_cleanup
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 134 filtered out; finished in 19.11s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`
+
+Isolated rootless TCP probe with dev listeners on both task ports:
+4701 unreachable 3006
+7443 unreachable 3003
+
+Current opt-in harness rejects unreachable ports before issuing an invitation:
+Running as unit: run-p2999347-i11387094.scope; invocation ID: 6694fc3d33874b74b82f12044927fb2c
+
+running 1 test
+remote_host_artifact target=aarch64-unknown-linux-musl sha256=e1669f13f7a7b99ee41c6f7efac9916fdee2f23f332cf131a97272447d806645 uid=1002 host_load=0.11 0.19 0.17 1/742 389168
+
+thread 'runtime::remote_demo_tests::real_host::o1_rootless_join_terminal_and_cleanup' (2999351) panicked at crates/infraternal-server/src/remote_host_tests.rs:160:5:
+o1 cannot reach dev TCP4701/7443; fix test-network reachability before enrollment
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+remote_host_cleanup processes=0 data_absent=true state_absent=true
+test runtime::remote_demo_tests::real_host::o1_rootless_join_terminal_and_cleanup ... FAILED
+
+failures:
+
+failures:
+    runtime::remote_demo_tests::real_host::o1_rootless_join_terminal_and_cleanup
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 134 filtered out; finished in 13.86s
+

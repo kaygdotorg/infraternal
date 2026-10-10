@@ -1,13 +1,16 @@
-//! Inherited leg-B dispatcher and bounded session registry for the tracer bullet [9][13][41].
+//! Shared inherited and authenticated remote leg-B dispatcher and bounded session registry for the tracer bullet [9][13][41].
 //!
-//! Each terminal owns one pending output frame. Commands have eight slots;
+//! Each terminal owns one pending output frame. Input/Resize commands have eight slots;
+//! shared-stream Credit is accumulated in constant space without occupying that FIFO;
 //! a full queue retires only that stream, cancelling its shim link. Unacknowledged
-//! input is replayed on attachment using shim-owned per-writer cursors. The writer has eight slots
-//! and awaits capacity, applying transport backpressure. Starved sessions close
+//! input is replayed on attachment using shim-owned per-writer cursors. Bulk output has eight slots
+//! and awaits capacity. Control replies use a separate eight-slot lane, selected
+//! first at frame boundaries; reply overload retires the channel without stalling dispatch. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
 //! A closed shim or failed terminal task closes only its mux stream.
 use crate::{
+    channel::Channel,
     relay,
     sessions::{self, Manager, Reader, Session},
     transport::{Receive, Socket, Transmit},
@@ -38,6 +41,9 @@ use tokio::{
     task::JoinSet,
 };
 
+#[path = "session_commands.rs"]
+mod session_commands;
+
 enum Command {
     Input(u64, Vec<u8>),
     Credit(u32),
@@ -45,9 +51,15 @@ enum Command {
 }
 // Dropping cancellation retires a stalled handshake as well as queued commands.
 struct Stream {
-    commands: mpsc::Sender<Command>,
+    commands: session_commands::Sender,
     _cancel: oneshot::Sender<()>,
 }
+
+#[cfg(feature = "remote")]
+use crate::remote_renewal::RenewalIdentity;
+// The private local-only dispatcher always supplies None in core builds.
+#[cfg(not(feature = "remote"))]
+type RenewalIdentity = ();
 enum Message {
     Shim(u32, Shim),
     Result(u32, u32, bool, Vec<u8>),
@@ -63,19 +75,46 @@ struct Open {
     rows: u16,
 }
 
-async fn writer(socket: &Socket, mut messages: mpsc::Receiver<Message>) -> io::Result<()> {
+async fn writer(
+    socket: &impl Channel,
+    mut messages: mpsc::Receiver<Message>,
+    mut control: Option<mpsc::Receiver<Message>>,
+    greeting: bool,
+    renewal: bool,
+) -> io::Result<()> {
     let mut tx = Transmit::default();
-    tx.send(
-        socket,
-        0,
-        &Frame::Hello {
-            version: 1,
-            caps: 0,
-            client_info: "infraternal agent",
-        },
-    )
-    .await?;
-    while let Some(message) = messages.recv().await {
+    if greeting {
+        tx.send(
+            socket,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: (if socket.native_stream_id().is_some() {
+                    infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
+                } else {
+                    0
+                }) | (if renewal {
+                    infraternal_plugin_api::channel::LIVE_RENEWAL
+                } else {
+                    0
+                }),
+                client_info: "infraternal agent",
+            },
+        )
+        .await?;
+    }
+    // Only dispatch owns the control sender. Its closure ends this channel;
+    // bulk events retain their FIFO order, including notice before Snapshot.
+    while let Some(message) = tokio::select! {
+        biased;
+        message = async {
+            match control.as_mut() {
+                Some(receiver) => receiver.recv().await,
+                None => std::future::pending().await,
+            }
+        } => message,
+        message = messages.recv() => message,
+    } {
         match message {
             Message::Shim(stream, frame) => {
                 let wire = match &frame {
@@ -131,6 +170,17 @@ async fn writer(socket: &Socket, mut messages: mpsc::Receiver<Message>) -> io::R
     }
     Ok(())
 }
+// Shared dispatch must never await the capacity consumed by a stalled writer.
+// Unacknowledged input remains with the shim and can be replayed on reconnect.
+fn reply(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
+    tx.try_send(message).map_err(|error| match error {
+        mpsc::error::TrySendError::Full(_) => {
+            io::Error::new(io::ErrorKind::WouldBlock, "control reply queue full")
+        }
+        mpsc::error::TrySendError::Closed(_) => io::ErrorKind::BrokenPipe.into(),
+    })
+}
+
 async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
     tx.send(message)
         .await
@@ -147,9 +197,71 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     if fd != 3 {
         return Err(sessions::invalid("embedded leg B requires fd 3"));
     }
-    let state = sessions::state(state)?;
     let socket = Socket::inherited(fd)?;
-    let mut plugins = crate::plugins::registry(crate::plugins::ExecutionMode::Embedded)
+    run_channel(&socket, state, None, None).await
+}
+
+/// Dispatch an admitted remote server connection through the same session and shim path.
+/// The dialer must authenticate the server and supply the locally enrolled uid;
+/// neither browser JSON nor an untrusted peer can select that identity. Returning
+/// drops every attachment and launch task, but never terminates surviving shims.
+/// # Errors
+/// Refuses invalid greeting, unsafe state, wrong uid and malformed terminal frames.
+#[cfg(feature = "remote")]
+pub async fn run_authenticated(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    execution_uid: u32,
+) -> io::Result<()> {
+    run_authenticated_with_renewal(channel, state, execution_uid, None).await
+}
+
+/// Dispatch remote terminal and bounded certificate control actions on one authenticated channel.
+/// # Errors
+/// Refuses uid, greeting, state, framing or publication failure.
+#[cfg(feature = "remote")]
+pub async fn run_authenticated_with_renewal(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    execution_uid: u32,
+    renewal: Option<&RenewalIdentity>,
+) -> io::Result<()> {
+    if channel.native_stream_id().is_some_and(|writer| writer != 0)
+        || execution_uid != nix::unistd::Uid::effective().as_raw()
+    {
+        return Err(sessions::invalid(
+            "enrolled uid differs from infraternal agent uid",
+        ));
+    }
+    // Cancellation retires the authenticated channel as well as its task set;
+    // a caller cannot reuse it with detached readers or unfinished wire writes.
+    let _retire = RetireChannel(channel);
+    run_channel(channel, state, Some(execution_uid), renewal).await
+}
+
+#[cfg(feature = "remote")]
+struct RetireChannel<'a, C: Channel>(&'a C);
+#[cfg(feature = "remote")]
+impl<C: Channel> Drop for RetireChannel<'_, C> {
+    fn drop(&mut self) {
+        self.0.retire();
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_channel(
+    socket: &impl Channel,
+    state: Option<PathBuf>,
+    execution_uid: Option<u32>,
+    renewal: Option<&RenewalIdentity>,
+) -> io::Result<()> {
+    let state = sessions::state(state)?;
+    let mode = if execution_uid.is_some() {
+        crate::plugins::ExecutionMode::Remote
+    } else {
+        crate::plugins::ExecutionMode::Embedded
+    };
+    let mut plugins = crate::plugins::registry(mode)
         .map_err(|_| sessions::invalid("invalid compiled plugin registry"))?;
     let manager = Manager::detect().await;
     let exe = std::env::current_exe()?;
@@ -160,10 +272,25 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
         drop(session);
     }
     let (tx, rx) = mpsc::channel(8);
+    let (control, control_rx) = mpsc::channel(8);
     let dispatch = async {
         let mut receive = Receive::default();
+        if execution_uid.is_some() {
+            // The whole greeting has one deadline, including an entirely silent
+            // authenticated peer. Established idle channels have no timer.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let hello = receive.next(socket).await?;
+                if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, caps, .. } if socket.native_stream_id().is_none() || caps & infraternal_plugin_api::channel::REMOTE_WRITER_BINDING != 0) {
+                    return Err(sessions::invalid("remote control Hello required"));
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        }
         let mut streams: HashMap<u32, Stream> = HashMap::new();
         let mut jobs: JoinSet<(u32, io::Result<()>)> = JoinSet::new();
+        let mut renewals = JoinSet::new();
         let mut opens: JoinSet<(u32, u32, io::Result<Session>)> = JoinSet::new();
         loop {
             tokio::select! {
@@ -174,9 +301,14 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                     if streams.get(&stream).is_some_and(|entry| entry.commands.is_closed()) {
                         streams.remove(&stream);
                         if result.is_err() {
-                            emit(&tx, Message::Close(stream, "terminal shim disconnected")).await?;
+                            reply(&control, Message::Close(stream, "terminal shim disconnected"))?;
                         }
                     }
+                }
+                result = renewals.join_next(), if !renewals.is_empty() => {
+                    let (call_id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| sessions::invalid("missing renewal task"))?.map_err(io::Error::other)?;
+                    let (ok, json) = match result { Ok(json) => (true, json), Err(_) => (false, b"{}".to_vec()) };
+                    reply(&control, Message::Result(0, call_id, ok, json))?;
                 }
                 result = opens.join_next(), if !opens.is_empty() => {
                     let (stream, call_id, result) = result.ok_or_else(|| sessions::invalid("missing launch task"))?.map_err(io::Error::other)?;
@@ -184,24 +316,37 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                         Ok(session) => {
                             let json = serde_json::to_vec(&serde_json::json!({"session_id": uuid::Uuid::from_bytes(session.id)}))?;
                             registry.insert(session.id, session.path.clone());
-                            emit(&tx, Message::Result(stream, call_id, true, json)).await?;
+                            reply(&control, Message::Result(stream, call_id, true, json))?;
                         }
-                        Err(_) => emit(&tx, Message::Result(stream, call_id, false, b"{\"error\":\"terminal open refused\"}".to_vec())).await?,
+                        Err(_) => reply(&control, Message::Result(stream, call_id, false, b"{\"error\":\"terminal open refused\"}".to_vec()))?,
                     }
                 }
-                decoded = receive.next(&socket) => {
+                decoded = receive.next(socket) => {
                     let decoded = decoded?;
                     let stream = decoded.stream_id;
+                    if execution_uid.is_some() && (stream % 2 != 0 || matches!(decoded.frame, Frame::Hello { .. })) {
+                        return Err(sessions::invalid("invalid remote stream or duplicate Hello"));
+                    }
                     match decoded.frame {
                         Frame::Hello {version: 1, ..} if stream == 0 => {}
-                        Frame::Ping {nonce, sent_us} if stream == 0 => emit(&tx, Message::Pong(nonce, sent_us)).await?,
-                        Frame::Call {call_id, action_id: "terminal.open", input_json} => {
+                        Frame::Ping {nonce, sent_us} if stream == 0 => reply(&control, Message::Pong(nonce, sent_us))?,
+                        #[cfg(feature = "remote")]
+                        Frame::Call {call_id, action_id, input_json} if stream == 0 && matches!(action_id, "transport.csr" | "transport.certificate") && renewal.is_some() => {
+                            if !renewals.is_empty() || input_json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON {
+                                reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;
+                            } else {
+                                let renewal = renewal.ok_or_else(|| sessions::invalid("missing renewal identity"))?.clone();
+                                let action = action_id.to_owned(); let input = input_json.to_vec();
+                                renewals.spawn_blocking(move || (call_id, renewal.action(&action, &input)));
+                            }
+                        }
+                        Frame::Call {call_id, action_id: "terminal.open", input_json} if execution_uid.is_none() || stream == 0 => {
                             let input = serde_json::from_slice::<Open>(input_json);
-                            if let Ok(input) = input && registry.len() + opens.len() < sessions::MAX_SESSIONS {
+                            if let Ok(input) = input && execution_uid.is_none_or(|uid| input.uid == uid) && registry.len() + opens.len() < sessions::MAX_SESSIONS {
                                 let exe = exe.clone(); let state = state.clone();
                                 opens.spawn(async move { (stream, call_id, sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await) });
                             } else {
-                                emit(&tx, Message::Result(stream, call_id, false, b"{\"error\":\"invalid terminal open or session limit\"}".to_vec())).await?;
+                                reply(&control, Message::Result(stream, call_id, false, b"{\"error\":\"invalid terminal open or session limit\"}".to_vec()))?;
                             }
                         }
                         Frame::Call {call_id, action_id, input_json} if stream == 0 => {
@@ -216,7 +361,7 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                             }
                             let path = registry.get(session_id).ok_or_else(|| sessions::invalid("unknown terminal session"))?.clone();
                             let id = *session_id;
-                            let (commands, rx) = mpsc::channel(8);
+                            let (commands, rx) = session_commands::channel();
                             let (cancel, cancelled) = oneshot::channel();
                             streams.insert(stream, Stream { commands, _cancel: cancel });
                             let tx = tx.clone();
@@ -240,12 +385,12 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                             // Retire overload before accepting this command. Drop the
                             // cancellation sender to release even a stalled handshake;
                             // shim-owned accepted/written cursors make input replay safe.
-                            let overloaded = streams.get(&stream).is_some_and(|entry| {
+                            let overloaded = streams.get_mut(&stream).is_some_and(|entry| {
                                 matches!(entry.commands.try_send(command), Err(mpsc::error::TrySendError::Full(_)))
                             });
                             if overloaded {
                                 streams.remove(&stream);
-                                emit(&tx, Message::Close(stream, "terminal command queue full; reattach and replay unacknowledged input")).await?;
+                                reply(&control, Message::Close(stream, "terminal command queue full; reattach and replay unacknowledged input"))?;
                             }
                             // Frames already in flight after a stream closes are
                             // ignored; the terminal task emits its own Close.
@@ -253,9 +398,82 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
                     }
                 }
             }
+            // A coalesced request burst can consume all slots in one poll,
+            // before the outer select polls an otherwise ready writer. Give
+            // it one scheduling turn at the batch boundary, never wait for
+            // capacity. A genuinely stalled writer still refuses the next reply.
+            if control.capacity() == 0 {
+                tokio::task::yield_now().await;
+            }
         }
     };
-    tokio::select! { result = dispatch => result, result = writer(&socket, rx) => result }
+    tokio::select! { result = dispatch => result, result = writer(socket, rx, Some(control_rx), true, renewal.is_some()) => result }
+}
+
+/// Run one authenticated, capability-bound native terminal using the common shim relay.
+/// The connection supervisor must cancel this future when server authority is lost;
+/// this function never opens a PTY, accepts a Call or creates its own writer identity.
+/// # Errors
+/// Refuses missing/reserved binding, a missing bounded `AttachTerm`, unknown shim,
+/// malformed post-attachment traffic and overload. Returning never stops the shim.
+#[allow(clippy::too_many_lines)]
+#[cfg(feature = "remote")]
+pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) -> io::Result<()> {
+    let writer_id = channel
+        .native_stream_id()
+        .filter(|id| *id != 0 && id & 1 == 0)
+        .ok_or_else(|| sessions::invalid("native terminal writer binding required"))?;
+    let _retire = RetireChannel(channel);
+    let state = sessions::state(state)?;
+    let mut receive = Receive::default();
+    let (id, cursor, input) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let first = receive.next(channel).await?;
+        match first.frame {
+            Frame::AttachTerm {
+                session_id,
+                last_out_seq,
+                last_in_seq,
+            } => Ok((*session_id, last_out_seq, last_in_seq)),
+            _ => Err(sessions::invalid("native terminal AttachTerm required")),
+        }
+    })
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    let path = state
+        .join("sessions")
+        .join(format!("{}.sock", uuid::Uuid::from_bytes(id).simple()));
+    let (tx, rx) = mpsc::channel(8);
+    let (commands, command_rx) = mpsc::channel(8);
+    let dispatch = async {
+        loop {
+            let decoded = receive.next(channel).await?;
+            let command = match decoded.frame {
+                Frame::Input { in_seq, bytes } => Command::Input(in_seq, bytes.to_vec()),
+                Frame::Credit { bytes } => Command::Credit(bytes),
+                Frame::Resize {
+                    cols,
+                    rows,
+                    px_w,
+                    px_h,
+                } => Command::Resize(cols, rows, px_w, px_h),
+                Frame::Close { .. } => return Ok(()),
+                _ => return Err(sessions::invalid("unexpected native terminal request")),
+            };
+            // This dispatcher belongs to one native stream. Awaiting its bounded
+            // queue propagates QUIC flow control without parking control or any
+            // sibling stream. Ordinary coalesced Credit bursts must not retire
+            // an authenticated attachment while its shim handshake is pending.
+            commands
+                .send(command)
+                .await
+                .map_err(|_| sessions::invalid("native terminal command queue unavailable"))?;
+        }
+    };
+    tokio::select! {
+        result = dispatch => result,
+        result = writer(channel, rx, None, false, false) => result,
+        result = terminal(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx) => result,
+    }
 }
 
 /// One shim connection reuses transmit and cancellation-safe receive storage.
@@ -319,7 +537,7 @@ async fn terminal(
     stream: u32,
     cursor: u64,
     last_input: u64,
-    mut commands: mpsc::Receiver<Command>,
+    mut commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
 ) -> io::Result<()> {
     let mut session = Some(Link::connect(path.clone(), id, stream).await?);
@@ -441,7 +659,7 @@ async fn terminal(
             session = Some(next);
         }
         tokio::select! {
-            command = commands.recv() => {
+            command = commands.next() => {
                 let Some(command) = command else { return Ok(()); };
                 match command {
                     Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?; if session.is_none() && bytes > 0 { output.retry_recovery(); } deadline = None; }
@@ -502,3 +720,11 @@ async fn terminal(
         }
     }
 }
+
+#[cfg(all(test, feature = "remote"))]
+#[path = "daemon_remote_tests.rs"]
+mod remote_tests;
+
+#[cfg(test)]
+#[path = "daemon_readiness_tests.rs"]
+mod readiness_tests;

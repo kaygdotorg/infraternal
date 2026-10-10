@@ -26,6 +26,23 @@ pub(super) fn constant_prf_input() -> String {
 static ARGON_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 pub(super) async fn recovery_hash(words: String) -> Result<String> {
     let permit = ARGON_SLOTS.try_acquire().map_err(|_| Error::Throttled)?;
+    hash_with_permit(words, permit).await
+}
+/// Fixtures wait for bounded work rather than turning scheduler contention into
+/// a credential failure. Production admission above deliberately remains retryable.
+#[cfg(test)]
+pub(super) async fn recovery_hash_fixture(words: String) -> Result<String> {
+    // Parallel fixture creation must leave one production verifier slot free;
+    // otherwise a recovery test can receive 429 before reaching its pause hook.
+    static FIXTURES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _fixture = FIXTURES.acquire().await.map_err(|_| Error::Invalid)?;
+    let permit = ARGON_SLOTS.acquire().await.map_err(|_| Error::Invalid)?;
+    hash_with_permit(words, permit).await
+}
+async fn hash_with_permit(
+    words: String,
+    permit: tokio::sync::SemaphorePermit<'static>,
+) -> Result<String> {
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let salt =
@@ -96,6 +113,24 @@ mod verifier_tests {
             Err(Error::Throttled)
         ));
         assert!(matches!(recovery_hash(secret).await, Err(Error::Throttled)));
+    }
+
+    #[tokio::test]
+    async fn fixture_waits_while_production_hashing_refuses_capacity() {
+        let _guard = super::super::tests::SERIAL.lock().await;
+        let slots = ARGON_SLOTS.acquire_many(2).await.unwrap();
+        let mut fixture = tokio::spawn(recovery_hash_fixture(random()));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut fixture)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            recovery_hash(random()).await,
+            Err(Error::Throttled)
+        ));
+        drop(slots);
+        assert!(fixture.await.unwrap().is_ok());
     }
 
     #[tokio::test]

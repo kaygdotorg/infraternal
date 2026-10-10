@@ -31,7 +31,7 @@ use tokio::{
 };
 
 /// Session admission bound, also bounding startup concurrency and process tasks.
-pub const MAX_SESSIONS: usize = 128;
+pub use infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS as MAX_SESSIONS;
 const HANDSHAKE: Duration = Duration::from_secs(2);
 
 struct Watch(Inotify);

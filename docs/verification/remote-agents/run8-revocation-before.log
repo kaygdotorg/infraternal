@@ -1,0 +1,25 @@
+Running as unit: run-p3528038-i11915785.scope; invocation ID: f0e41c22694341fe8256134afaa59992
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/remote-agents/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.72s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/remote-agents/target/debug/deps/infraternal_server-1a408e36adb2d6d0)
+
+running 2 tests
+test remote_runtime::tests::revocation::review_expired_identity_must_refuse_new_attachment_on_existing_transport ... 
+thread 'remote_runtime::tests::revocation::review_expired_identity_must_refuse_new_attachment_on_existing_transport' (3528826) panicked at crates/infraternal-server/src/remote_revocation_tests.rs:163:5:
+expired ledger identity retained terminal attachment authority
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test remote_runtime::tests::revocation::review_revocation_must_cancel_input_on_existing_tls_transport ... 
+thread 'remote_runtime::tests::revocation::review_revocation_must_cancel_input_on_existing_tls_transport' (3528828) panicked at crates/infraternal-server/src/remote_revocation_tests.rs:131:5:
+revoked host received terminal input on its existing mutual-TLS connection
+FAILED
+
+failures:
+
+failures:
+    remote_runtime::tests::revocation::review_expired_identity_must_refuse_new_attachment_on_existing_transport
+    remote_runtime::tests::revocation::review_revocation_must_cancel_input_on_existing_tls_transport
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 139 filtered out; finished in 0.08s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`

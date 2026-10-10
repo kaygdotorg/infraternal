@@ -17,10 +17,17 @@ const CONFIGURE_ACTION: &str = "host.facts.configure";
 
 const ACTIONS: &[ActionDef] = &[
     ActionDef {
+        target: infraternal_plugin_api::Target::Node,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
         id: READ_ACTION,
         summary: "Read host identity and current resource use",
-        input: r#"{"type":"object","properties":{"includeLive":{"type":"boolean"}},"additionalProperties":false}"#,
-        output: r#"{"type":"object","properties":{"os":{"type":"string"},"version":{"type":"string"},"kernel":{"type":"string"},"architecture":{"type":"string"},"model":{"type":"string"},"cpuModel":{"type":"string"},"logicalCpus":{"type":"integer"},"memory":{"type":"object"},"rootDisk":{"type":"object"},"uptimeSeconds":{"type":"integer"},"loadAverage":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"mode":{"enum":["embedded","remote"]},"executionUid":{"type":"integer"},"engines":{"type":"array","items":{"enum":["Docker","Podman"]}},"init":{"type":"string"},"virtualization":{"type":"string"},"shell":{"type":"string"},"locale":{"type":"string"}},"required":["os","version","kernel","architecture","logicalCpus","mode","executionUid","engines"],"additionalProperties":false}"#,
+        input: infraternal_plugin_api::SchemaRef(
+            r#"{"type":"object","properties":{"includeLive":{"type":"boolean"}},"additionalProperties":false}"#,
+        ),
+        output: infraternal_plugin_api::SchemaRef(
+            r#"{"type":"object","properties":{"os":{"type":"string"},"version":{"type":"string"},"kernel":{"type":"string"},"architecture":{"type":"string"},"model":{"type":"string"},"cpuModel":{"type":"string"},"logicalCpus":{"type":"integer"},"memory":{"type":"object"},"rootDisk":{"type":"object"},"uptimeSeconds":{"type":"integer"},"loadAverage":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"mode":{"enum":["embedded","remote"]},"executionUid":{"type":"integer"},"engines":{"type":"array","items":{"enum":["Docker","Podman"]}},"init":{"type":"string"},"virtualization":{"type":"string"},"shell":{"type":"string"},"locale":{"type":"string"}},"required":["os","version","kernel","architecture","logicalCpus","mode","executionUid","engines"],"additionalProperties":false}"#,
+        ),
         instructions: &[
             "Choose the host whose identity is needed.",
             "Read its facts; include live counters only when needed.",
@@ -29,10 +36,17 @@ const ACTIONS: &[ActionDef] = &[
         permission: infraternal_plugin_api::Permission::One(READ_ACTION),
     },
     ActionDef {
+        target: infraternal_plugin_api::Target::Node,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
         id: CONFIGURE_ACTION,
         summary: "Enable or disable host facts collection",
-        input: r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}"#,
-        output: r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}"#,
+        input: infraternal_plugin_api::SchemaRef(
+            r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}"#,
+        ),
+        output: infraternal_plugin_api::SchemaRef(
+            r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}"#,
+        ),
         instructions: &[
             "Choose the host to configure.",
             "Set enabled to true or false for host facts collection.",
@@ -44,10 +58,17 @@ const ACTIONS: &[ActionDef] = &[
 
 /// Static plugin metadata; the settings default keeps collection on unless configured off.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
+    defaults: &[],
+    dependencies: &[],
+    can_enable_components: &[],
+    events: &[],
+    streams: &[],
     id: "host",
     api: infraternal_plugin_api::API_VERSION,
     actions: ACTIONS,
-    settings: r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean","default":true}},"additionalProperties":false}"#,
+    settings: Some(infraternal_plugin_api::SchemaRef(
+        r#"{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean","default":true}},"additionalProperties":false}"#,
+    )),
     topics: &[],
     roles: &[infraternal_plugin_api::RoleDef {
         id: "node",

@@ -6,8 +6,8 @@ fn connection() -> (AgentConnection, UnixStream) {
     let (reader, writer) = socket.into_split();
     (
         AgentConnection {
-            reader,
-            writer,
+            peer: Peer::Local { reader, writer },
+            execution_uid: nix::unistd::Uid::effective().as_raw(),
             pid: None,
             receive: BytesMut::new(),
             scratch: vec![0; 4096],
@@ -322,12 +322,7 @@ async fn real_agent_open_uses_uid_and_character_dimensions() {
 async fn real_agent_canonical_uuid_result_is_accepted() {
     let (mut link, _peer) = connection();
     let (reply, result) = oneshot::channel();
-    let mut pending = HashMap::from([(
-        1,
-        PendingCall {
-            reply: PendingReply::Open(reply),
-        },
-    )]);
+    let mut pending = HashMap::from([(1, PendingCall::Open(reply))]);
     assert!(
         process_incoming(
             Incoming::Result {

@@ -4,19 +4,27 @@ use crate::{
 };
 
 const ACTIONS: &[ActionDef] = &[ActionDef {
+    target: crate::Target::Node,
+    dry_run: crate::DryRun::Unsupported,
+    opens: None,
     id: "example.read",
     summary: "Read example state",
-    input: "{}",
-    output: "{}",
+    input: crate::SchemaRef("{}"),
+    output: crate::SchemaRef("{}"),
     instructions: &["Read example state."],
     effect: Effect::Read,
     permission: crate::Permission::One("example.read"),
 }];
 const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
+    defaults: &[],
+    dependencies: &[],
+    can_enable_components: &[],
+    events: &[],
+    streams: &[],
     id: "example",
     api: API_VERSION,
     actions: ACTIONS,
-    settings: "{}",
+    settings: Some(crate::SchemaRef("{}")),
     topics: &[],
     roles: &[crate::RoleDef {
         id: "node",

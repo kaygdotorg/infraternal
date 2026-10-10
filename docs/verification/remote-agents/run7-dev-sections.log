@@ -1,0 +1,48 @@
+# Static-size and local transport measurement evidence for #78; see remote-agents-run7-size.md for scope and limitations.
+There are 38 section headers, starting at offset 0x30d9a38:
+
+Section Headers:
+  [Nr] Name              Type            Address          Off    Size   ES Flg Lk Inf Al
+  [ 0]                   NULL            0000000000000000 000000 000000 00      0   0  0
+  [ 1] .dynsym           DYNSYM          0000000000000270 000270 000018 18   A  4   1  8
+  [ 2] .gnu.hash         GNU_HASH        0000000000000288 000288 00001c 00   A  1   0  8
+  [ 3] .hash             HASH            00000000000002a4 0002a4 000010 04   A  1   0  4
+  [ 4] .dynstr           STRTAB          00000000000002b4 0002b4 000001 00   A  0   0  1
+  [ 5] .rela.dyn         RELA            00000000000002b8 0002b8 0f92e8 18   A  1   0  8
+  [ 6] .gcc_except_table PROGBITS        00000000000f95a0 0f95a0 03c328 00   A  0   0  4
+  [ 7] .rodata           PROGBITS        0000000000136000 136000 161ad0 00 AMS  0   0 4096
+  [ 8] .eh_frame_hdr     PROGBITS        0000000000297ad0 297ad0 028244 00   A  0   0  4
+  [ 9] .eh_frame         PROGBITS        00000000002bfd18 2bfd18 0eb554 00   A  0   0  8
+  [10] .text             PROGBITS        00000000003ac280 3ab280 ac4bc7 00  AX  0   0 64
+  [11] .init             PROGBITS        0000000000e70e47 e6fe47 000008 00  AX  0   0  1
+  [12] .fini             PROGBITS        0000000000e70e4f e6fe4f 000003 00  AX  0   0  1
+  [13] .tdata            PROGBITS        0000000000e71e58 e6fe58 0000d0 00 WAT  0   0  8
+  [14] .tbss             NOBITS          0000000000e71f28 e6ff28 000175 00 WAT  0   0  8
+  [15] .fini_array       FINI_ARRAY      0000000000e71f28 e6ff28 000008 08  WA  0   0  8
+  [16] .init_array       INIT_ARRAY      0000000000e71f30 e6ff30 000008 08  WA  0   0  8
+  [17] .data.rel.ro      PROGBITS        0000000000e71f40 e6ff40 0bc1f8 00  WA  0   0 32
+  [18] .dynamic          DYNAMIC         0000000000f2e138 f2c138 000140 10  WA  4   0  8
+  [19] .got              PROGBITS        0000000000f2e278 f2c278 000ba0 00  WA  0   0  8
+  [20] .got.plt          PROGBITS        0000000000f2ee18 f2ce18 000018 00  WA  0   0  8
+  [21] .relro_padding    NOBITS          0000000000f2ee30 f2ce30 0001d0 00  WA  0   0  1
+  [22] .data             PROGBITS        0000000000f2fe40 f2ce40 00c990 00  WA  0   0 32
+  [23] .bss              NOBITS          0000000000f3c7e0 f397d0 005050 00  WA  0   0 32
+  [24] .debug_info       PROGBITS        0000000000000000 f397d0 a0424a 00      0   0  1
+  [25] .debug_abbrev     PROGBITS        0000000000000000 193da1a 08e669 00      0   0  1
+  [26] .debug_aranges    PROGBITS        0000000000000000 19cc090 007f50 00      0   0 16
+  [27] .debug_ranges     PROGBITS        0000000000000000 19d3fe0 193660 00      0   0 16
+  [28] .debug_line       PROGBITS        0000000000000000 1b67640 3feb8d 00      0   0  1
+  [29] .debug_str        PROGBITS        0000000000000000 1f661cd 28b07c 01  MS  0   0  1
+  [30] .comment          PROGBITS        0000000000000000 21f1249 00011a 01  MS  0   0  1
+  [31] .debug_frame      PROGBITS        0000000000000000 21f1368 007c58 00      0   0  8
+  [32] .debug_loc        PROGBITS        0000000000000000 21f8fc0 c2b573 00      0   0  1
+  [33] .debug_pubnames   PROGBITS        0000000000000000 2e24533 021e6c 00      0   0  1
+  [34] .debug_pubtypes   PROGBITS        0000000000000000 2e4639f 0153d0 00      0   0  1
+  [35] .symtab           SYMTAB          0000000000000000 2e5b770 0bd348 18     37 25447  8
+  [36] .shstrtab         STRTAB          0000000000000000 2f18ab8 00017b 00      0   0  1
+  [37] .strtab           STRTAB          0000000000000000 2f18c33 1c0e04 00      0   0  1
+Key to Flags:
+  W (write), A (alloc), X (execute), M (merge), S (strings), I (info),
+  L (link order), O (extra OS processing required), G (group), T (TLS),
+  C (compressed), x (unknown), o (OS specific), E (exclude),
+  D (mbind), l (large), p (processor specific)

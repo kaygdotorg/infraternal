@@ -1,0 +1,12 @@
+# Public local boundary measurement for #78; debug build, not complete phase-1 acceptance.
+7.32 8.21 11.56 13/861 1982204
+Running as unit: run-p1982205-i10369952.scope; invocation ID: 093c9741b47b4d6ebeb7c7f0be076714
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running unittests src/lib.rs (target/debug/deps/infraternal_agent-241f2bbdd7e8c1a2)
+
+running 1 test
+reply_lane_diagnostic channels=1000 message_bytes=72 baseline_rss_kib=6496 one_lane_rss_kib=11116 two_lane_rss_kib=14008 added_control_rss_kib_at1000=2892 added_control_rss_bytes_per_channel=2961 create_and_first_enqueue_us_at1000=6778 load=8.01 8.34 11.58 12/870 1982266
+test daemon::readiness_tests::reply_lane_memory_at_1000_channels ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.03s
+

@@ -1,0 +1,11 @@
+Running as unit: run-p3852089-i12239834.scope; invocation ID: 5ef87f937e724b75a1a7025e2a37195e
+
+running 1 test
+remote_cold_start normal_cli=true signing_locked=true restart_to_terminal_us=241607 command_roundtrip_us=2682 contiguous_output_bytes=340 lost=0 duplicated=0 load=1.63 1.75 2.22 5/921 3852116
+remote_cold_start enrollment_refused=true invitation_retained=true ca_private_key_persisted=false
+remote_revocation normal_cli=true signing_locked=true http_commit_us=1408 commit_to_browser_refusal_us=1057 shims_alive=2 new_session_refused=true retained_attachment_probe_ms=300 additional_input_acked=0
+infraternal agent failed: unexpected end of file
+test runtime::remote_demo_tests::cold_start::normal_cli_cold_start_keeps_enrolled_remote_terminal_while_signing_locked ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 147 filtered out; finished in 0.94s
+

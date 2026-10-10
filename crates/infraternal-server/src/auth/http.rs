@@ -102,7 +102,7 @@ struct Revoke {
     id: String,
 }
 
-fn cookie(headers: &HeaderMap) -> super::Result<&str> {
+pub(crate) fn cookie(headers: &HeaderMap) -> super::Result<&str> {
     let cookies = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())

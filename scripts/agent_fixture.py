@@ -206,6 +206,21 @@ class Binary:
             # travels exclusively over the fixture socket and is never logged.
             raise AssertionError(f'daemon exit {self.child.returncode}: {self.child.stderr.read().decode()}') from error
 
+    def inherit_scope_priority(self, weight=None):
+        """Apply this test's CPU weight only to its own transient shim scope."""
+        weight = fixture_cpu_weight() if weight is None else weight
+        if weight is None:
+            return
+        assert weight.isdecimal() and 1 <= int(weight) <= 10000
+        control = ['systemctl'] + ([] if os.geteuid() == 0 else ['--user'])
+        unit = f'infraternal-session-{self.id.hex}.scope'
+        loaded = subprocess.run(control + ['show', unit, '-p', 'LoadState', '--value'],
+                                capture_output=True, text=True, timeout=20)
+        if loaded.returncode or loaded.stdout.strip() != 'loaded':
+            return  # Detached launch already inherits the fixture's cgroup.
+        subprocess.run(control + ['set-property', '--runtime', unit, f'CPUWeight={weight}'],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20)
+
     def open(self, cols=80, rows=24):
         action = b'terminal.open'
         self.send(0, 0x30, struct.pack('<I', 1) + varint(len(action)) + action +
@@ -244,6 +259,29 @@ class Binary:
         self.send(1, 0x10, struct.pack('<Q', seq) + data)
         self.entered += len(data)
         return seq
+
+    def ping(self, nonce, sent_us):
+        """Wait for the correlated control reply within the original socket budget."""
+        expected = struct.pack('<QQ', nonce, sent_us)
+        self.send(0, 0x08, expected)
+        timeout = self.sock.gettimeout()
+        assert timeout is not None, 'control probe requires a bounded socket'
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, 'control reply exceeded the socket budget'
+                self.sock.settimeout(remaining)
+                frame = self.read()
+                if frame[:2] == (0, 0x09):
+                    assert frame[2] == expected, 'Pong did not match the request'
+                    return
+                # Retry handshakes can publish Ack or recovery metadata before
+                # a later Ping. Preserve their cursor/event validation and reject
+                # Close, rather than assuming Pong is the very next mux frame.
+                self.process(frame=frame)
+        finally:
+            self.sock.settimeout(timeout)
 
     def process(self, credit=True, frame=None):
         stream, kind, body = self.read() if frame is None else frame

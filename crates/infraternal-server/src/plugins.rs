@@ -19,18 +19,24 @@ fn parse_control<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, ()> 
 /// Core lifecycle actions share their labels and skill instructions with discovery [16,202].
 const CONTROL_ACTIONS: &[ActionDef] = &[
     ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
         id: "plugins.list",
         summary: "List compiled features",
         instructions: &[
             "Sign in to the server.",
             "Read feature actions, settings, defaults and current states.",
         ],
-        input: "Empty",
-        output: "PluginInventory",
+        input: infraternal_plugin_api::SchemaRef("Empty"),
+        output: infraternal_plugin_api::SchemaRef("PluginInventory"),
         permission: Permission::One("authenticated"),
         effect: Effect::Read,
     },
     ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Required,
+        opens: None,
         id: "plugins.set_enabled",
         summary: "Switch a server feature",
         instructions: &[
@@ -38,8 +44,8 @@ const CONTROL_ACTIONS: &[ActionDef] = &[
             "Confirm with your passkey.",
             "Choose a compiled feature and its enabled state.",
         ],
-        input: "PluginSetting",
-        output: "PluginState",
+        input: infraternal_plugin_api::SchemaRef("PluginSetting"),
+        output: infraternal_plugin_api::SchemaRef("PluginState"),
         permission: Permission::One("server.configure"),
         effect: Effect::Destructive,
     },
@@ -215,7 +221,7 @@ impl PluginRuntime {
     /// Discovery uses the plugin's action definitions, including while it is off.
     #[must_use]
     pub fn list(&self) -> Value {
-        json!({"actions":CONTROL_ACTIONS,"plugins": self.inner.entries.iter().map(|entry| json!({"descriptor":({let mut descriptor=serde_json::to_value(entry.plugin.descriptor()).unwrap_or(Value::Null); descriptor["settings"]=serde_json::from_str(entry.plugin.descriptor().settings).unwrap_or(Value::Null); descriptor}),"enabled":entry.enabled.load(Ordering::Acquire)})).collect::<Vec<_>>()})
+        json!({"actions":CONTROL_ACTIONS,"plugins": self.inner.entries.iter().map(|entry| json!({"descriptor":({let mut descriptor=serde_json::to_value(entry.plugin.descriptor()).unwrap_or(Value::Null); descriptor["settings"]=entry.plugin.descriptor().settings.and_then(|schema| serde_json::from_str(schema.0).ok()).unwrap_or(Value::Null); descriptor}),"enabled":entry.enabled.load(Ordering::Acquire)})).collect::<Vec<_>>()})
     }
     /// Stop and join every worker before returning disabled. Enabling remains lazy.
     ///
