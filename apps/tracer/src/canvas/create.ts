@@ -42,6 +42,7 @@ import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
 import { createSessionHooks } from "./windows/session-hooks";
 import { setPerfProbe } from "../perf-activity";
+import { loadGroups } from "./layout/groups-handle";
 import { createVisibility } from "./windows/visibility";
 
 export interface CanvasOptions {
@@ -65,6 +66,9 @@ export interface CanvasController {
 
 export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasController {
   const { stage } = core;
+  // The grouped layout's chunk starts at mount, for every canvas (the product and the test double both come through here).
+  // A key press that splits a stacked window must act at once, and an idle callback does not come on a busy canvas (D212).
+  void loadGroups().catch(() => undefined);
   stage.dataset.canvas = "on";
   stage.dataset.clusters = "";
   core.panes.querySelector(".pane-card")?.remove();
