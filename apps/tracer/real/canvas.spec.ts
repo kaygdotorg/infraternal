@@ -81,6 +81,30 @@ async function type(page: Page, window: number, command: string): Promise<void> 
   await page.keyboard.type(command + "\n", { delay: 5 });
 }
 
+test("the bootstrap socket keeps text routing and stays outside protocol diagnostics", async () => {
+  const before = server.bridges.length;
+  const response = await page.evaluate(() => new Promise<{ text: boolean; refused: boolean }>((resolve) => {
+    const socket = new WebSocket(`${location.origin.replace("https:", "wss:")}/v1/bootstrap/ws`);
+    const finish = (text: boolean, refused: boolean): void => {
+      clearTimeout(timer);
+      socket.close();
+      resolve({ text, refused });
+    };
+    const timer = setTimeout(() => finish(false, false), 5_000);
+    socket.onopen = () => socket.send(JSON.stringify({ action: "retry", target: "one" }));
+    socket.onmessage = ({ data }) => {
+      if (typeof data !== "string") { finish(false, false); return; }
+      try {
+        const message = JSON.parse(data) as { error?: { message?: string } };
+        finish(true, message.error?.message === "Start a host batch first.");
+      } catch { finish(true, false); }
+    };
+    socket.onerror = () => finish(false, false);
+  }));
+  expect(response).toEqual({ text: true, refused: true });
+  expect(server.bridges.length).toBe(before);
+});
+
 test("signing in shows the canvas with a Console view and one real shell", async () => {
   await expect(page.locator('.cl[data-view="console"]')).toBeVisible();
   await expect(windows(page)).toHaveCount(1);

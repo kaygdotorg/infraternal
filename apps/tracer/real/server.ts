@@ -109,38 +109,41 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
   const front = new WebSocketServer({ noServer: true });
   tls.on("upgrade", (request, socket, head) => {
     front.handleUpgrade(request, socket, head, (browser) => {
-      const upstream = new WebSocket(backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
+      const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
       const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), detached: [], control: [], cookie: request.headers.cookie ?? "" };
-      bridges.push(bridge);
+      // Bootstrap frames can contain private sign-in inputs. Only protocol sockets enter diagnostics.
+      const protocol = request.url === "/v1/ws";
+      if (protocol) bridges.push(bridge);
       const inbound = new WebSocketFrameDecoder();
       const outbound = new WebSocketFrameDecoder();
-      const queued: Buffer[] = [];
-      browser.on("message", (data) => {
+      const queued: Array<{ bytes: Buffer; binary: boolean }> = [];
+      browser.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
-        inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+        if (protocol && binary) inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Input" && f.type !== "Credit" && f.type !== "Pong") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} up s${stream} ${f.type}`);
           if (f.type === "AttachTerm") bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
           if (f.type === "Close" && stream !== 0) bridge.detached.push(stream);
           if (f.type === "Call") bridge.control.push({ dir: "up", type: "Call", detail: f.actionId, callId: f.callId });
           if (f.type === "Subscribe") bridge.control.push({ dir: "up", type: "Subscribe", detail: (() => { try { return String((JSON.parse(text.decode(f.filterJson)) as { topic?: unknown }).topic); } catch { return "?"; } })() });
         });
-        later(() => { if (upstream.readyState === WebSocket.OPEN) upstream.send(bytes); else queued.push(bytes); });
+        later(() => { if (bridge.closed) return; if (upstream.readyState === WebSocket.OPEN) upstream.send(bytes, { binary }); else queued.push({ bytes, binary }); });
       });
-      upstream.on("open", () => { for (const q of queued.splice(0)) upstream.send(q); });
-      upstream.on("message", (data) => {
+      upstream.on("open", () => { for (const q of queued.splice(0)) { if (!bridge.closed) upstream.send(q.bytes, { binary: q.binary }); } });
+      upstream.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
-        outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+        if (protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack" && f.type !== "Ping") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
           if (f.type === "Output") bridge.output.set(stream, (bridge.output.get(stream) ?? "") + text.decode(f.bytes, { stream: true }));
           if (f.type === "Snapshot") bridge.output.set(stream, text.decode(f.bytes));
           if (f.type === "Ack") bridge.acked.set(stream, f.inSeqAcked);
           if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
         });
-        later(() => { if (browser.readyState === WebSocket.OPEN) browser.send(bytes); });
+        later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary }); });
       });
-      upstream.on("close", (code) => { bridge.closed = true; bridge.closedBy = `server ${code}`; browser.close(); });
+      const eraseQueue = (): void => { for (const entry of queued.splice(0)) entry.bytes.fill(0); };
+      upstream.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy = `server ${code}`; browser.close(); });
       upstream.on("error", () => browser.close());
-      browser.on("close", (code) => { bridge.closed = true; bridge.closedBy ??= `browser ${code}`; upstream.close(); });
+      browser.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy ??= `browser ${code}`; upstream.close(); });
     });
   });
 
