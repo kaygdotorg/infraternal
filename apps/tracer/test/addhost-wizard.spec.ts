@@ -379,6 +379,8 @@ test("Escape in the palette leaves the add-host flow open", async ({ page }) => 
   await page.locator("#palette-input").focus();
   await page.keyboard.press("Escape");
   await expect(page.locator("#palette-input")).toBeHidden();
+  // A closing flow is still in the DOM while its exit runs, so wait out the exit before asserting it stayed.
+  await page.waitForTimeout(800);
   await expect(wizard(page)).toBeVisible();
 });
 

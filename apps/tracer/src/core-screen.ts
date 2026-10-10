@@ -737,7 +737,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     }
     if (event.key === "Escape") {
       if (settings?.isOpen || shortcuts.isOpen) return; // the open overlay takes this Escape itself
-      if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); }
+      // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
+      // capture phase, after this window listener) stays open. The capture order is what makes stopping necessary.
+      if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); event.stopPropagation(); }
       else if (!sidebar.hidden) { setSidebar(false, true); event.preventDefault(); }
     }
   };
