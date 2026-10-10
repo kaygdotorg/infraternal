@@ -513,9 +513,9 @@ function canonicalUuid(value: unknown, name: string): string {
   return result;
 }
 
-/** Shares the existing ceremony/crypto implementation with recovery; binary handling stays here. */
+/** Shares existing ceremony and crypto implementations with account-key workflows; binary handling stays here. */
 export const recoveryAuth = {
-  post, creationOptions, prfInputFrom, credentialOutputs, prfFrom, credentialPrf,
+  post, creationOptions, requestOptions, copyBytes, base64url, decodeBase64url, toArrayBuffer, prfInputFrom, credentialOutputs, prfFrom, credentialPrf,
   credentialProof, wrapDek, unwrapDek, requiredString, canonicalUuid,
   generateRecoveryWords, recoverySecrets, unwrapRecoveryDek,
 };
