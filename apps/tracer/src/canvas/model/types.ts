@@ -29,11 +29,21 @@ export interface WindowModel {
   lines?: string[];
   /** Set on a window made by a split: it shares its column with the window it came from and is not resized on its own. */
   splitOf?: string;
+  /**
+   * Columns this window covers, from its own (D212). Absent means one. A window that covers more than one column makes its
+   * columns a group, drawn as one grid with the bands below.
+   */
+  span?: number;
+  /** Row bands this window covers, from `row` (D212). Absent means one. */
+  rows?: number;
+  /** The band this window starts in, inside its group (D212). Only set for a window in a group; a plain column stacks its windows. */
+  row?: number;
   /** The window's host is not covered by the viewer's grants (a shared layout connects through your own access). */
   noAccess?: boolean;
 }
 
-export interface ColumnModel { id: string; w: number; wins: WindowModel[] }
+/** A column. `half` names the two halves of one split (D212): closing one returns its width to the other. Runtime only. */
+export interface ColumnModel { id: string; w: number; half?: string; wins: WindowModel[] }
 
 export interface NodeModel {
   id: string; kind: "host" | "tag"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform;

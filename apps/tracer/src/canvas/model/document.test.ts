@@ -86,3 +86,33 @@ test("a version 1 document from before D212 loads, with its split pair and a ful
   const again: unknown = JSON.parse(JSON.stringify(toDocument([{ ...console_, cols }], m, 8).views[0]!.layout));
   expect(again).toEqual(JSON.parse(JSON.stringify(old.views[0]!.layout)));
 });
+
+test("a grouped view saves its spans and bands and loads back to the same grid (D212)", () => {
+  const grouped: ViewModel = {
+    ...console_,
+    cols: [
+      { id: "g1", w: 300, wins: [
+        { id: "a", kind: "terminal", host: "h1", sessionId: "s1", session: "one", span: 2 },
+        { id: "b", kind: "terminal", host: "h1", sessionId: "s2", session: "two", h: 0.4 },
+        { id: "c", kind: "terminal", host: "h1", sessionId: "s3", session: "three", span: 2 },
+      ] },
+      { id: "g2", w: 300, wins: [{ id: "d", kind: "terminal", host: "h2", sessionId: "s4", session: "four" }] },
+    ],
+  };
+  const doc = parseDocument(JSON.parse(JSON.stringify(toDocument([grouped], m, 2))));
+  expect(doc).toBeDefined();
+  const layout = doc!.views[0]!.layout;
+  if (layout.type !== "tiled") throw new Error("tiled expected");
+  const saved = layout.columns.map((c) => c.windows.map((w) => [w.id, w.span, w.rows, w.row]));
+  // "a" spans both columns on band 0, so "d" lands on band 1: the bands are the ones the grid derives.
+  expect(saved).toEqual([[["a", 2, undefined, 0], ["b", undefined, undefined, 1], ["c", 2, undefined, 2]], [["d", undefined, undefined, 1]]]);
+  const back = columnsFromDocument(layout, m, (t) => (t.type === "session" ? { host: t.host, sessionId: t.id, ...(t.name ? { session: t.name } : {}) } : undefined));
+  expect(back.map((c) => c.wins.map((w) => [w.id, w.span ?? 1, w.row]))).toEqual([[["a", 2, 0], ["b", 1, 1], ["c", 2, 2]], [["d", 1, 1]]]);
+});
+
+test("a plain view is saved without spans or bands, exactly as before D212", () => {
+  const json = JSON.stringify(toDocument([console_], m, 1));
+  expect(json).not.toContain("\"span\"");
+  expect(json).not.toContain("\"rows\"");
+  expect(json).not.toContain("\"row\"");
+});

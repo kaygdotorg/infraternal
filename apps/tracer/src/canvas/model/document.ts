@@ -14,6 +14,7 @@
  * returns nothing when the input is not a document of this format, so a damaged store can never break the canvas.
  */
 import { CELL, type Metrics } from "../layout/geometry";
+import { runsOf, settle } from "../layout/grid";
 import type { ColumnModel, ViewModel, WindowModel } from "./types";
 
 export const FORMAT = "infraternal.canvas";
@@ -31,6 +32,12 @@ export interface DocWindow {
   target: DocTarget;
   /** The window's height as a share of its column; absent when the column shares equally. */
   height?: number;
+  /** Columns covered from its own column (D212); absent means one. Old documents never have it. */
+  span?: number;
+  /** Row bands covered (D212); absent means one. */
+  rows?: number;
+  /** The band it starts in, saved only for a window in a group (D212); a plain column stacks by list order. */
+  row?: number;
 }
 export interface DocColumn { id: string; weight: number; windows: DocWindow[] }
 export type DocLayout =
@@ -45,7 +52,7 @@ export interface CanvasDocument {
   views: DocView[];
 }
 
-const MAX_VIEWS = 64, MAX_COLUMNS = 64, MAX_WINDOWS = 256, MAX_TEXT = 200;
+const MAX_VIEWS = 64, MAX_COLUMNS = 64, MAX_WINDOWS = 256, MAX_TEXT = 200, MAX_BANDS = 64;
 
 /** Turns a runtime window into its stable reference. Windows that cannot be referenced (node cards) are left out. */
 function targetOf(w: WindowModel): DocTarget | undefined {
@@ -53,6 +60,29 @@ function targetOf(w: WindowModel): DocTarget | undefined {
   if (w.kind === "settings") return { type: "settings", section: w.id.slice(2) };
   if (w.kind === "containers" || w.kind === "logs") return { type: w.kind, host: w.host };
   return undefined;
+}
+
+/**
+ * The saved form of a view's columns (D212). Spans and bands are written only when they say something: a plain window
+ * is saved exactly as it always was, so a document without groups does not change. `row` is written only inside a group,
+ * where the list order alone cannot place a window that spans columns.
+ */
+function docColumns(cols: readonly ColumnModel[], metrics: Metrics): DocColumn[] {
+  const settled = settle(cols);
+  const grouped = runsOf(settled).filter((r) => r.to > r.from);
+  const inGroup = (j: number): boolean => grouped.some((r) => j >= r.from && j <= r.to);
+  return cols.map((c, j): DocColumn => ({
+    id: c.id, weight: Number((c.w / metrics.colW).toFixed(3)),
+    windows: c.wins.flatMap((w, k): DocWindow[] => {
+      const target = targetOf(w);
+      if (!target) return [];
+      const s = settled[j]!.wins[k]!;
+      return [{
+        id: w.id, target, ...(w.h ? { height: w.h } : {}),
+        ...(s.span > 1 ? { span: s.span } : {}), ...(s.rows > 1 ? { rows: s.rows } : {}), ...(inGroup(j) ? { row: s.row } : {}),
+      }];
+    }),
+  }));
 }
 
 export function toDocument(views: readonly ViewModel[], metrics: Metrics, revision: number): CanvasDocument {
@@ -64,13 +94,7 @@ export function toDocument(views: readonly ViewModel[], metrics: Metrics, revisi
         ? { type: "graph", pinned: Object.fromEntries(v.nodes.filter((n) => n.pinned).map((n) => [n.id, { x: Math.round(n.x), y: Math.round(n.y) }])) }
         : {
           type: "tiled",
-          columns: v.cols.map((c): DocColumn => ({
-            id: c.id, weight: Number((c.w / metrics.colW).toFixed(3)),
-            windows: c.wins.flatMap((w): DocWindow[] => {
-              const target = targetOf(w);
-              return target ? [{ id: w.id, target, ...(w.h ? { height: w.h } : {}) }] : [];
-            }),
-          })),
+          columns: docColumns(v.cols, metrics),
         },
     })),
   };
@@ -88,7 +112,10 @@ export function columnsFromDocument(layout: Extract<DocLayout, { type: "tiled" }
     for (const w of c.windows) {
       const live = resolve(w.target);
       if (!live) continue;
-      const base: WindowModel = { id: w.id, kind: w.target.type === "session" ? "terminal" : w.target.type, host: "host" in w.target ? w.target.host : "", ...(w.height ? { h: w.height } : {}) };
+      const base: WindowModel = {
+        id: w.id, kind: w.target.type === "session" ? "terminal" : w.target.type, host: "host" in w.target ? w.target.host : "", ...(w.height ? { h: w.height } : {}),
+        ...(w.span && w.span > 1 ? { span: w.span } : {}), ...(w.rows && w.rows > 1 ? { rows: w.rows } : {}), ...(w.row !== undefined ? { row: w.row } : {}),
+      };
       wins.push({ ...base, ...live, id: w.id });
     }
     if (wins.length) cols.push({ id: c.id, w: Math.round(c.weight * metrics.colW), wins });
@@ -136,7 +163,11 @@ export function parseDocument(input: unknown): CanvasDocument | undefined {
         const target = isObject(w) ? parseTarget(w.target) : undefined;
         if (!isObject(w) || !text(w.id) || !target || (w.height !== undefined && !finite(w.height, 0.05, 10000))) return undefined;
         if (++count > MAX_WINDOWS) return undefined;
-        windows.push({ id: w.id, target, ...(typeof w.height === "number" ? { height: w.height } : {}) });
+        if ((w.span !== undefined && !finite(w.span, 1, MAX_COLUMNS)) || (w.rows !== undefined && !finite(w.rows, 1, MAX_BANDS)) || (w.row !== undefined && !finite(w.row, 0, MAX_BANDS))) return undefined;
+        windows.push({
+          id: w.id, target, ...(typeof w.height === "number" ? { height: w.height } : {}),
+          ...(typeof w.span === "number" ? { span: Math.floor(w.span) } : {}), ...(typeof w.rows === "number" ? { rows: Math.floor(w.rows) } : {}), ...(typeof w.row === "number" ? { row: Math.floor(w.row) } : {}),
+        });
       }
       columns.push({ id: c.id, weight: c.weight, windows });
     }
