@@ -144,3 +144,10 @@ path = "fuzz_targets/remote_removal_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "release_verify"
+path = "fuzz_targets/release_verify.rs"
+test = false
+doc = false
+bench = false
