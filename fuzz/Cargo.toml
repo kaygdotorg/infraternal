@@ -11,6 +11,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+axum.workspace = true
 libfuzzer-sys.workspace = true
 infraternal-plugin-api.workspace = true
 infraternal-shim.workspace = true
@@ -49,6 +50,13 @@ bench = false
 [[bin]]
 name = "mesh_api_json"
 path = "fuzz_targets/mesh_api_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_cookie"
+path = "fuzz_targets/auth_cookie.rs"
 test = false
 doc = false
 bench = false

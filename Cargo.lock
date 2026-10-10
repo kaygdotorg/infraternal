@@ -1325,6 +1325,7 @@ dependencies = [
 name = "infraternal-fuzz"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "infraternal-plugin-api",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
