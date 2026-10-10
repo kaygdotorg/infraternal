@@ -1,4 +1,4 @@
-//! SQLite-backed Mesh inventory, named grants, action authorization, and change revisions [154,163,164,187].
+//! SQLite-backed Mesh inventory, named grants, action authorization, and change revisions [154,163,164,166,187].
 
 use infraternal_mesh::{
     model::{Node, NodeId, PublicKey},
@@ -869,6 +869,19 @@ impl MeshService {
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
         let scope_requirements = require_each_scope(&scopes);
         authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
+        let server: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mesh_nodes WHERE id=? AND dataplane_host='server')",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sql_error)?;
+        if server {
+            return Err(MeshApiError::Denied);
+        }
+        // Member removal and its reconnect refusal are one writer transaction.
+        // Public unbound inventory has no host capability to retire.
+        sqlx::query("INSERT INTO mesh_dataplane_removed(host) SELECT dataplane_host FROM mesh_nodes WHERE id=? AND dataplane_host IS NOT NULL ON CONFLICT(host) DO NOTHING").bind(id).execute(&mut *tx).await.map_err(map_sql_error)?;
         let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM mesh_grants WHERE (from_kind='node' AND from_value=?) OR (to_kind='node' AND to_value=?)")
             .bind(id.to_string()).bind(id.to_string()).fetch_one(&mut *tx).await.map_err(map_sql_error)?;
         sqlx::query("DELETE FROM mesh_grants WHERE (from_kind='node' AND from_value=?) OR (to_kind='node' AND to_value=?)")
