@@ -1899,3 +1899,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        work too: ⌘W closes the window, and any key that isn't ours (for
        example Ctrl+W, Ctrl+T on PC) goes straight into the terminal, as in a
        native terminal. Automatic, with no setting.
+223. **Website and builds on Cloudflare (owner, 2026-10-10; implements
+     D184, D220):** infraternal.com (/releases, /docs, /changelog) is served
+     by Cloudflare Pages. builds.infraternal.com is a Cloudflare R2 bucket on
+     a custom domain, holding the signed release artifacts, checksums and
+     signatures. Binaries go to R2, not Pages, because of the size limit per
+     Pages file. The owner owns infraternal.com, and its DNS is on Cloudflare.
+     Downloads never depend on the owner's homelab. Signing (D184) keeps the
+     artifacts trustworthy wherever they are hosted. Deploying either site
+     needs a Cloudflare token scoped to that job (Pages; R2 for one bucket).
+     The owner provides it, and it never enters the repo, logs or argv.
