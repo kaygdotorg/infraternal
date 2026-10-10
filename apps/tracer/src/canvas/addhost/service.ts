@@ -89,6 +89,9 @@ export interface ProvisioningService {
 
 /** What the canvas receives when hosts finish enrolling (the hook the composition root implements). */
 export interface EnrolledHost {
+  /** The admitted remote host UUID returned by the server. */
+  hostId?: string;
+  address?: string;
   /** Stable key in the wizard: the discovered id or the typed host. */
   id: string;
   name: string;

@@ -1,3 +1,4 @@
+/** Tests bounded SSH target parsing and the progress model used by the add-host flow. */
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, test } from "bun:test";
 import { foldEvent, pendingTarget, type BootstrapEvent, type FailureKind } from "../../provisioning-client";
@@ -141,4 +142,14 @@ describe("plain words", () => {
       for (const text of [guide.title, guide.happened, guide.next, failureLine({ kind, message: "m", log_tail: [] })]) expect(text).not.toMatch(/→|·|\bSSH\b|TCP|mesh policy|enum|\bAPI\b/);
     }
   });
+});
+
+
+test("only a completed canonical host identity becomes terminal authority", () => {
+  const id = "11111111-2222-3333-4444-555555555555";
+  expect((fold(event("done", { host_id: id } as Partial<BootstrapEvent>)) as { hostId?: string }).hostId).toBe(id);
+  expect((fold(event("connect", { host_id: id } as Partial<BootstrapEvent>)) as { hostId?: string }).hostId).toBeUndefined();
+  expect((fold(event("done", { host_id: "worker" } as Partial<BootstrapEvent>)) as { hostId?: string }).hostId).toBeUndefined();
+  const ready = fold(event("done", { host_id: id } as Partial<BootstrapEvent>));
+  expect((foldEvent(ready, event("check", { attempt: 2 })) as { hostId?: string }).hostId).toBeUndefined();
 });

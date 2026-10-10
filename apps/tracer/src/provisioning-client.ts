@@ -17,6 +17,8 @@
  * - Private sign-in inputs travel once on this authenticated socket; queued inputs are discarded on close.
  */
 
+import { isCanonicalUuid } from "./identifiers";
+
 export type BootstrapStep = "check" | "install" | "facts" | "connect" | "done" | "failed";
 export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install";
 export type BootstrapMode = "rootless" | "root";
@@ -68,6 +70,8 @@ export interface BootstrapEvent {
   failure?: FailureDetail;
   /** Present on the event that reports a successful sign-in. */
   authentication?: AuthenticationInfo;
+  /** The server-owned admitted host UUID, present only after successful installation. */
+  host_id?: string;
 }
 
 /** A refused command (`{"error":{...}}`) or malformed request (`{"error":"..."}`). No attempt is created. */
@@ -140,6 +144,7 @@ function parseEvent(value: Record<string, unknown>): BootstrapEvent | undefined 
   if (typeof sequence !== "number" || typeof target !== "string" || typeof attempt !== "number" || typeof step !== "string" || !STEPS.includes(step)
     || typeof message !== "string" || typeof elapsed !== "number") return undefined;
   const event: BootstrapEvent = { sequence, target, attempt, step: step as BootstrapStep, message, elapsed_ms: elapsed, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
+  if (value.step === "done" && isCanonicalUuid(value.host_id)) event.host_id = value.host_id;
   const failure = parseFailure(value.failure);
   if (failure) event.failure = failure;
   const authentication = parseAuthentication(value.authentication);
@@ -255,6 +260,7 @@ export class ProvisioningRun {
 /** What a screen needs to draw one target, folded from its events. */
 export interface TargetView {
   state: "pending" | "running" | "done" | "failed";
+  hostId?: string;
   attempt: number;
   /** Index into `PHASES` of the latest phase entered (a failure keeps the phase it happened in). */
   phase: number;
@@ -276,7 +282,7 @@ export function foldEvent(view: TargetView, event: BootstrapEvent): TargetView {
   // The sign-in method sticks for the attempt, so a later failure still knows it got past authentication.
   const base: TargetView = { ...(fresh ? { ...pendingTarget(), attempt: event.attempt } : view) };
   if (event.authentication) base.authentication = event.authentication;
-  if (event.step === "done") return { ...base, state: "done", phase: PHASES.length, message: event.message, failure: undefined, elapsedMs: event.elapsed_ms };
+  if (event.step === "done") return { ...base, ...(isCanonicalUuid(event.host_id) ? { hostId: event.host_id } : {}), state: "done", phase: PHASES.length, message: event.message, failure: undefined, elapsedMs: event.elapsed_ms };
   if (event.step === "failed") return { ...base, state: "failed", message: event.message, failure: event.failure, elapsedMs: event.elapsed_ms };
   // Rollback and warnings may emit extra install events; the phase never moves backwards.
   return { ...base, state: "running", phase: Math.max(base.phase, phase), message: event.message, failure: undefined, elapsedMs: event.elapsed_ms };
