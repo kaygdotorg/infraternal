@@ -218,22 +218,9 @@ async fn upgrade(
         })
 }
 
-/// The auth route's cookie parser is intentionally private; this socket uses the same strict cookie shape.
+/// Socket upgrades use exactly the same cookie shape and request-wide uniqueness as HTTP auth.
 fn session_cookie(headers: &HeaderMap) -> Option<&str> {
-    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
-    let mut values = cookies
-        .split(';')
-        .filter_map(|cookie| cookie.trim().strip_prefix("__Host-infraternal="));
-    let value = values.next()?;
-    if values.next().is_some()
-        || value.len() != 43
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-    {
-        return None;
-    }
-    Some(value)
+    crate::auth::cookies::capability(headers, "__Host-infraternal=")
 }
 
 // Plugin work has independent bounded admission; this loop dispatches shared control and terminal frames.
@@ -1662,3 +1649,7 @@ impl SocketHost for PluginHost {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "websocket_cookie_tests.rs"]
+mod cookie_tests;
