@@ -4,10 +4,14 @@
  *
  * - The consumer resolves text to a chip (`resolve`). A token becomes a chip as
  *   soon as it is unambiguous (`resolve(token, false)` returns a chip), or when
- *   a delimiter ends it: space, comma or Enter (`resolve(token, true)`).
- * - Paste splits on spaces, commas and new lines; every token that resolves
- *   becomes a chip, and the rest stays in the field to fix.
- * - Backspace in an empty field first selects the last chip, then removes it.
+ *   it is ended: by space, comma, Tab or Enter (`resolve(token, true)`), or by
+ *   the consumer calling `commit()` (for example when a Continue button is
+ *   pressed). A token that does not resolve stays in the field to be fixed.
+ * - Paste splits on spaces, commas and new lines. Pasted tokens are complete
+ *   (the paste ends them), so every one that resolves becomes a chip, the last
+ *   included; the rest stays in the field.
+ * - Backspace in an empty field turns the last chip back into editable text, so
+ *   a mistake is fixed in place. One press is enough (TASTE: no arming step).
  * - Chips wrap inside the field; the field's height follows a spring so the
  *   layout below glides instead of jumping. At rest the height is `auto`.
  * - Chips enter and leave with a short spring (scale + fade), interruptible.
@@ -26,7 +30,7 @@ export interface ChipInputOptions {
   resolve(token: string, delimited: boolean): Chip | undefined;
   /** Called after chips change (added or removed), with the current chips. */
   onChange?(chips: Chip[]): void;
-  /** Called on every keystroke with the unfinished token. */
+  /** Called on every change of the unfinished token, with the trimmed text. */
   onToken?(token: string): void;
   /** Called on Enter with no token left to commit. */
   onSubmit?(): void;
@@ -41,7 +45,7 @@ export interface ChipInputController {
   add(chip: Chip): void;
   remove(id: string): void;
   has(id: string): boolean;
-  /** Tries to commit the current token; returns true when it became a chip. */
+  /** Ends the current token as if Enter were pressed; returns true when it became a chip. */
   commit(): boolean;
   clearToken(): void;
   dispose(): void;
@@ -69,7 +73,6 @@ export function mountChipInput(host: HTMLElement, options: ChipInputOptions): Ch
   host.append(field);
 
   const chips = new Map<string, { chip: Chip; element: HTMLElement }>();
-  let armed: string | undefined;
 
   // Height glide: measure before and after a change, spring between, then go back to auto.
   let gliding = false;
@@ -96,12 +99,6 @@ export function mountChipInput(host: HTMLElement, options: ChipInputOptions): Ch
     input.placeholder = chips.size ? "" : options.placeholder;
     options.onChange?.([...chips.values()].map((entry) => entry.chip));
   };
-  const disarm = (): void => {
-    if (!armed) return;
-    chips.get(armed)?.element.removeAttribute("data-armed");
-    armed = undefined;
-  };
-
   function add(chip: Chip): void {
     if (chips.has(chip.id)) return;
     const element = document.createElement("span");
@@ -127,7 +124,6 @@ export function mountChipInput(host: HTMLElement, options: ChipInputOptions): Ch
     const entry = chips.get(id);
     if (!entry) return;
     chips.delete(id);
-    if (armed === id) armed = undefined;
     const drop = (): void => glide(() => entry.element.remove());
     if (reduced()) drop();
     else entry.element.animate([{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(0.86)" }], { duration: 120, easing: "ease-out", fill: "forwards" }).onfinish = drop;
@@ -143,38 +139,66 @@ export function mountChipInput(host: HTMLElement, options: ChipInputOptions): Ch
     return true;
   }
 
+  /** Ends the token in the field: it becomes a chip, or stays as text to fix. */
+  function commitPending(): boolean {
+    if (!input.value.trim() || !commitToken(input.value, true)) return false;
+    input.value = "";
+    options.onToken?.("");
+    return true;
+  }
+
   const onInput = (): void => {
-    disarm();
     const value = input.value;
-    // A delimiter typed or pasted ends tokens; whatever does not resolve stays to be fixed.
-    if (/[\s,]/.test(value)) {
-      const parts = value.split(/[\s,]+/);
-      const tail = /[\s,]$/.test(value) ? "" : parts.pop() ?? "";
-      const rest = parts.filter((part) => part && !commitToken(part, true));
-      input.value = [...rest, tail].filter(Boolean).join(" ") + (rest.length && !tail ? " " : "");
-    }
+    // A delimiter typed ends the tokens before it; whatever does not resolve stays to be fixed.
+    if (/[\s,]/.test(value)) settle(value);
     // An unambiguous token commits without a delimiter.
     if (input.value && !/\s/.test(input.value) && commitToken(input.value, false)) input.value = "";
+    options.onToken?.(input.value.trim());
+  };
+
+  /** Commits every complete token in `value`, keeping the unresolved ones (and an open tail) in the field. */
+  function settle(value: string): void {
+    const parts = value.split(/[\s,]+/);
+    const tail = /[\s,]$/.test(value) ? "" : parts.pop() ?? "";
+    const rest = parts.filter((part) => part && !commitToken(part, true));
+    input.value = [...rest, tail].filter(Boolean).join(" ") + (rest.length && !tail ? " " : "");
+  }
+
+  const onPaste = (event: ClipboardEvent): void => {
+    // A consumer that handled the paste (an SSH config) has prevented the default already.
+    if (event.defaultPrevented) return;
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    // One token pastes as ordinary text; the input handler sees it like typing.
+    if (!/[\s,]/.test(text.trim())) return;
+    event.preventDefault();
+    // A single-line input would drop the line breaks, so the pasted list is rebuilt with spaces.
+    // Its last token is ended too: a paste is a complete list, not the start of one.
+    const before = input.value.slice(0, input.selectionStart ?? input.value.length);
+    const after = input.value.slice(input.selectionEnd ?? input.value.length);
+    const list = text.split(/[\s,]+/).filter(Boolean).join(" ");
+    const joined = [before, list].filter(Boolean).join(before && !/[\s,]$/.test(before) ? " " : "");
+    settle(`${joined} ${after}`.replace(/^\s+/, ""));
     options.onToken?.(input.value.trim());
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.key === "Enter") {
       event.preventDefault();
-      if (input.value.trim()) {
-        if (commitToken(input.value, true)) { input.value = ""; options.onToken?.(""); }
-      } else options.onSubmit?.();
+      if (input.value.trim()) commitPending();
+      else options.onSubmit?.();
       return;
     }
-    if (event.key === "Backspace" && input.selectionStart === 0 && input.selectionEnd === 0) {
-      const last = [...chips.keys()].at(-1);
+    // Tab ends the token but never traps focus: it is not prevented.
+    if (event.key === "Tab") { commitPending(); return; }
+    if (event.key === "Backspace" && input.value === "" && input.selectionStart === 0) {
+      const last = [...chips.values()].at(-1);
       if (!last) return;
       event.preventDefault();
-      if (armed === last) remove(last);
-      else { disarm(); armed = last; chips.get(last)!.element.dataset.armed = "true"; }
-      return;
+      // The last chip goes back to text, ready to edit; a chip's text is what it was typed as.
+      remove(last.chip.id);
+      input.value = last.chip.label;
+      options.onToken?.(input.value.trim());
     }
-    if (event.key !== "Shift") disarm();
   };
 
   const onFieldDown = (event: PointerEvent): void => {
@@ -183,6 +207,7 @@ export function mountChipInput(host: HTMLElement, options: ChipInputOptions): Ch
 
   input.addEventListener("input", onInput);
   input.addEventListener("keydown", onKeyDown);
+  input.addEventListener("paste", onPaste);
   field.addEventListener("pointerdown", onFieldDown);
 
   return {
@@ -192,16 +217,12 @@ export function mountChipInput(host: HTMLElement, options: ChipInputOptions): Ch
     add,
     remove,
     has: (id) => chips.has(id),
-    commit() {
-      if (!commitToken(input.value, true)) return false;
-      input.value = "";
-      options.onToken?.("");
-      return true;
-    },
+    commit: commitPending,
     clearToken() { input.value = ""; options.onToken?.(""); },
     dispose() {
       input.removeEventListener("input", onInput);
       input.removeEventListener("keydown", onKeyDown);
+      input.removeEventListener("paste", onPaste);
       field.removeEventListener("pointerdown", onFieldDown);
       field.remove();
     },
