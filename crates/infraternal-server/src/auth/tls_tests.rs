@@ -113,13 +113,11 @@ impl Drop for Client {
 }
 
 #[tokio::test]
-#[ignore = "#149 failing native HTTP/2 regression; enable after the cookie reader fix"]
 async fn standalone_tls_registration_session_split_cookies() {
     registration_session(false).await;
 }
 
 #[tokio::test]
-#[ignore = "#149 paired proxy regression; enable after the cookie reader fix"]
 async fn proxy_tls_registration_session_split_cookies() {
     registration_session(true).await;
 }
