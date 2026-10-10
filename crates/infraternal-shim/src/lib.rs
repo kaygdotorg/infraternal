@@ -18,3 +18,6 @@ mod session;
 mod terminal;
 mod terminal_native;
 pub use session::{Config, run};
+
+#[cfg(feature = "ca-handoff")]
+pub mod locked_bytes;
