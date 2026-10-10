@@ -26,3 +26,6 @@ pub mod wireguard;
 
 #[cfg(feature = "server")]
 pub mod store;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod iptables;
