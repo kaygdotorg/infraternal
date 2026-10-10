@@ -46,6 +46,14 @@ type EnrollmentService = ();
 type RemoteService = ();
 #[cfg(not(feature = "remote"))]
 type RemoteListeners = ();
+#[cfg(feature = "ssh")]
+type BootstrapFactory = crate::bootstrap_runtime::BootstrapFactory;
+#[cfg(not(feature = "ssh"))]
+type BootstrapFactory = ();
+#[cfg(feature = "ssh")]
+type KeyInitialization = crate::bootstrap_runtime::KeyInitialization;
+#[cfg(not(feature = "ssh"))]
+type KeyInitialization = ();
 
 /// A CIDR network whose peers are permitted to supply `X-Forwarded-For` [keywrap.md].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,7 +200,7 @@ pub enum ServerError {
 ///
 /// Returns a sanitized startup, storage, migration, TLS, or listener error.
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
-    serve_inner(config, None, None).await
+    serve_inner(config, None, None, None, None).await
 }
 
 /// Mount host enrollment using the trusted runtime's D168 signing source.
@@ -203,7 +211,7 @@ pub async fn serve_with_enrollment(
     config: ServerConfig,
     enrollment: Option<EnrollmentService>,
 ) -> Result<(), ServerError> {
-    serve_inner(config, enrollment, None).await
+    serve_inner(config, enrollment, None, None, None).await
 }
 
 /// Serve enrollment, host transports and browser routing using trusted D168 sources.
@@ -214,17 +222,44 @@ pub async fn serve_with_remote(
     config: ServerConfig,
     remote: crate::remote_runtime::RemoteService,
 ) -> Result<(), ServerError> {
-    serve_inner(config, Some(remote.enrollment.clone()), Some(remote)).await
+    serve_inner(
+        config,
+        Some(remote.enrollment.clone()),
+        Some(remote),
+        None,
+        None,
+    )
+    .await
+}
+
+/// Preserve one startup path for independent remote and SSH components.
+#[cfg(feature = "ssh")]
+pub(crate) async fn serve_with_bootstrap(
+    config: ServerConfig,
+    factory: Option<BootstrapFactory>,
+) -> Result<(), ServerError> {
+    serve_with_key_setup(config, factory, None).await
+}
+
+#[cfg(feature = "ssh")]
+pub(crate) async fn serve_with_key_setup(
+    config: ServerConfig,
+    factory: Option<BootstrapFactory>,
+    key_setup: Option<KeyInitialization>,
+) -> Result<(), ServerError> {
+    serve_inner(config, None, None, factory, key_setup).await
 }
 
 async fn serve_inner(
     config: ServerConfig,
     enrollment: Option<EnrollmentService>,
     remote: Option<RemoteService>,
+    factory: Option<BootstrapFactory>,
+    key_setup: Option<KeyInitialization>,
 ) -> Result<(), ServerError> {
     configure_logging(false);
     let (app, setup_token, _listeners) =
-        build_router_core(config.clone(), None, enrollment, remote).await?;
+        build_router_core(config.clone(), None, enrollment, remote, factory, key_setup).await?;
     if let Some(token) = setup_token {
         start_setup_token_socket(&config.data_dir, token)?;
     }
@@ -289,7 +324,8 @@ async fn build_router_with_enrollment(
     supplied_agent: Option<EmbeddedAgent>,
     enrollment: Option<EnrollmentService>,
 ) -> Result<(Router, Option<String>), ServerError> {
-    let (app, setup, _) = build_router_core(config, supplied_agent, enrollment, None).await?;
+    let (app, setup, _) =
+        build_router_core(config, supplied_agent, enrollment, None, None, None).await?;
     Ok((app, setup))
 }
 
@@ -377,14 +413,30 @@ async fn remote_router(
     ))
 }
 
+#[cfg(all(test, feature = "ssh"))]
+async fn build_router_with_key_setup(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+    factory: Option<BootstrapFactory>,
+    key_setup: Option<KeyInitialization>,
+) -> Result<(Router, Option<String>), ServerError> {
+    let (app, setup, _) =
+        build_router_core(config, supplied_agent, None, None, factory, key_setup).await?;
+    Ok((app, setup))
+}
+
 async fn build_router_core(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
     enrollment: Option<EnrollmentService>,
     remote: Option<RemoteService>,
+    factory: Option<BootstrapFactory>,
+    key_setup: Option<KeyInitialization>,
 ) -> Result<(Router, Option<String>, Option<RemoteListeners>), ServerError> {
     #[cfg(not(feature = "remote"))]
     let _ = (enrollment, remote);
+    #[cfg(not(feature = "ssh"))]
+    let _ = (factory, key_setup);
     validate_config(&config)?;
     if config.web_root.as_ref().is_some_and(|root| !root.is_dir()) {
         return Err(ServerError::WebRoot);
@@ -422,6 +474,12 @@ async fn build_router_core(
         remove_setup_token_socket_or_warn(&config.data_dir, "owner already exists at startup");
     }
 
+    // Compose SSH from this exact migrated pool and live revocation scope [23,138,168].
+    #[cfg(feature = "ssh")]
+    let (bootstrap, ssh_key) =
+        crate::bootstrap_runtime::initialize(&config.data_dir, &auth, &pool, factory, key_setup)
+            .await?;
+
     let agent = if let Some(agent) = supplied_agent {
         agent
     } else {
@@ -447,11 +505,15 @@ async fn build_router_core(
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
-        .merge(auth::router(auth))
+        .merge(auth::router(auth.clone()))
         .merge(websocket::router(ws_state))
         .merge(ca_api);
     #[cfg(feature = "remote")]
     let app = app.merge(remote_api);
+    #[cfg(feature = "ssh")]
+    let app = app.merge(crate::bootstrap_api::router_with_ssh_key(
+        auth, bootstrap, ssh_key,
+    ));
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
     } else {
@@ -570,6 +632,12 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
 }
 
 pub(crate) fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
+    if crate::compiled_plugins()
+        .iter()
+        .any(|descriptor| descriptor.validate().is_err())
+    {
+        return Err(ServerError::InvalidConfiguration);
+    }
     if config.behind_proxy == config.trusted_proxies.is_empty() {
         return Err(ServerError::InvalidConfiguration);
     }
@@ -811,6 +879,44 @@ mod tests {
         let ipv6 = ProxyNetwork::from_str("2001:db8::/32").expect("valid IPv6 network");
         assert!(ipv6.contains("2001:db8:1::1".parse().expect("valid IP")));
         assert!(ProxyNetwork::from_str("10.0.0.1/33").is_err());
+    }
+
+    /// The ordinary runtime, rather than a standalone plugin router, must expose admission.
+    #[cfg(feature = "ssh")]
+    #[tokio::test]
+    async fn production_router_exposes_bootstrap_owner_admission() {
+        use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
+        let data_dir =
+            PathBuf::from("target").join(format!("bootstrap-route-{}", uuid::Uuid::new_v4()));
+        let (socket, _peer) = tokio::net::UnixStream::pair().expect("fixture socket");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(socket),
+        )
+        .await
+        .expect("ordinary runtime router");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let serving = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("fixture serving");
+        });
+        let mut request = format!("ws://{address}/v1/bootstrap/ws")
+            .into_client_request()
+            .expect("WebSocket handshake");
+        request.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            "https://localhost:47361".parse().expect("fixture Origin"),
+        );
+        let result = connect_async(request).await;
+        serving.abort();
+        let _ = serving.await;
+        std::fs::remove_dir_all(data_dir).expect("remove fixture storage");
+        let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = result else {
+            panic!("unauthenticated bootstrap must be refused");
+        };
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -1180,3 +1286,7 @@ mod reviewer_admission {
 #[cfg(all(test, feature = "remote"))]
 #[path = "remote_demo_tests.rs"]
 mod remote_demo_tests;
+
+#[cfg(all(test, feature = "ssh"))]
+#[path = "key_runtime_tests.rs"]
+mod key_runtime_tests;

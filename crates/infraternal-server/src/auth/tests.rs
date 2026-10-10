@@ -42,7 +42,7 @@ use tokio_tungstenite::{
 };
 use tower::ServiceExt;
 
-pub(super) static SERIAL: Mutex<()> = Mutex::const_new(());
+pub(crate) static SERIAL: Mutex<()> = Mutex::const_new(());
 #[path = "socket_clock.rs"]
 mod socket_clock;
 use socket_clock::FrozenSocketTime;

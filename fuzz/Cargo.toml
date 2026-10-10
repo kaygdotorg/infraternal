@@ -11,6 +11,8 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+serde_json.workspace = true
+infraternal-plugin-ssh = { version = "0.1.0", path = "../crates/plugins/ssh" }
 infraternal-agent = { version = "0.1.0", path = "../crates/infraternal-agent", default-features = false, features = ["remote"] }
 infraternal-server = { version = "0.1.0", path = "../crates/infraternal-server", default-features = false, features = ["remote"] }
 libfuzzer-sys.workspace = true
@@ -104,6 +106,34 @@ bench = false
 [[bin]]
 name = "remote_ca_unlock_decode"
 path = "fuzz_targets/remote_ca_unlock_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_check_decode"
+path = "fuzz_targets/ssh_check_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_public_config_decode"
+path = "fuzz_targets/ssh_public_config_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_host_record_parse"
+path = "fuzz_targets/ssh_host_record_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_auth_once_decode"
+path = "fuzz_targets/ssh_auth_once_decode.rs"
 test = false
 doc = false
 bench = false

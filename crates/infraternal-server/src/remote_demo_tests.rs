@@ -259,6 +259,8 @@ async fn fixture_at_with_lock(
         Some(EmbeddedAgent::unavailable()),
         Some(service.enrollment.clone()),
         Some(service),
+        None,
+        None,
     )
     .await
     .unwrap();

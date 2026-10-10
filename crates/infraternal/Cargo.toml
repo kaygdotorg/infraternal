@@ -7,11 +7,14 @@ license.workspace = true
 
 [features]
 remote = ["infraternal-agent/remote", "infraternal-server/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "infraternal-plugin-remote/server", "dep:base64", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:tokio-openssl", "dep:url"]
-default = ["plugin-host-facts", "mesh", "remote"]
+default = ["plugin-host-facts", "mesh", "remote", "ssh"]
 plugin-host-facts = ["infraternal-agent/plugin-host-facts"]
 mesh = ["infraternal-server/mesh"]
 
+ssh = ["dep:infraternal-plugin-ssh", "infraternal-server/ssh"]
+
 [dependencies]
+infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
 
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }
 clap = { workspace = true, features = ["string"] }

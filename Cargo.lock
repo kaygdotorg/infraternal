@@ -1329,6 +1329,7 @@ dependencies = [
  "hyper-util",
  "infraternal-agent",
  "infraternal-plugin-remote",
+ "infraternal-plugin-ssh",
  "infraternal-server",
  "infraternal-shim",
  "nix",
@@ -1371,10 +1372,12 @@ dependencies = [
  "infraternal-plugin-api",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
+ "infraternal-plugin-ssh",
  "infraternal-protocol",
  "infraternal-server",
  "infraternal-shim",
  "libfuzzer-sys",
+ "serde_json",
 ]
 
 [[package]]
@@ -1443,6 +1446,18 @@ dependencies = [
 [[package]]
 name = "infraternal-plugin-ssh"
 version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "infraternal-plugin-api",
+ "nix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "url",
+ "uuid",
+ "zeroize",
+]
 
 [[package]]
 name = "infraternal-protocol"
@@ -1472,6 +1487,7 @@ dependencies = [
  "infraternal-plugin-api",
  "infraternal-plugin-mesh",
  "infraternal-plugin-remote",
+ "infraternal-plugin-ssh",
  "infraternal-protocol",
  "nix",
  "openssl",

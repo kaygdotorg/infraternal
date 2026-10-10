@@ -7,6 +7,8 @@ mod output;
 #[cfg(feature = "remote")]
 mod remote;
 mod remote_server;
+#[cfg(feature = "ssh")]
+mod ssh_askpass;
 
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
@@ -37,6 +39,10 @@ enum Command {
         #[command(subcommand)]
         action: Option<AgentAction>,
     },
+    #[cfg(feature = "ssh")]
+    /// Internal OpenSSH prompt responder; stdout is the private credential pipe.
+    #[command(name = "__ssh-askpass", hide = true)]
+    SshAskpass,
     /// Internal session owner; not a public CLI interface.
     #[command(name = "__shim", hide = true)]
     Shim {
@@ -156,6 +162,8 @@ fn main() -> ExitCode {
     let json = cli.json;
     match cli.command {
         Command::Server(args) => run_server(args, json),
+        #[cfg(feature = "ssh")]
+        Command::SshAskpass => ssh_askpass::run(),
         Command::Shim {
             session,
             uid,

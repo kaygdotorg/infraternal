@@ -57,3 +57,24 @@ pub use remote_startup::RemoteStartup;
 pub use runtime::{ProxyNetwork, ServerConfig, ServerError, TlsFiles, configure_logging, serve};
 #[cfg(feature = "remote")]
 pub use runtime::{serve_with_enrollment, serve_with_remote};
+
+#[cfg(feature = "ssh")]
+pub mod bootstrap_api;
+#[cfg(feature = "ssh")]
+pub mod bootstrap_runtime;
+#[cfg(feature = "ssh")]
+pub mod ssh_key;
+
+/// Inspect every compiled server component without starting it [198].
+#[must_use]
+pub fn compiled_plugins() -> &'static [&'static infraternal_plugin_api::PluginDescriptor] {
+    COMPILED_PLUGINS
+}
+static COMPILED_PLUGINS: &[&infraternal_plugin_api::PluginDescriptor] = &[
+    #[cfg(feature = "ssh")]
+    &infraternal_plugin_ssh::manifest::DESCRIPTOR,
+    #[cfg(feature = "remote")]
+    &infraternal_plugin_remote::DESCRIPTOR,
+    #[cfg(feature = "mesh")]
+    &infraternal_plugin_mesh::descriptor::DESCRIPTOR,
+];
