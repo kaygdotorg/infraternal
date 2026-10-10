@@ -259,6 +259,25 @@ async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim handshake timed out"))?
 }
 
+/// The rendezvous socket a session's shim listens on, derived from its id alone.
+#[must_use]
+pub fn rendezvous(state: &Path, id: [u8; 16]) -> PathBuf {
+    state
+        .join("sessions")
+        .join(format!("{}.sock", uuid::Uuid::from_bytes(id).simple()))
+}
+
+/// True when a connect to a rendezvous proves that no shim is there: the
+/// socket file is missing, or it is a stale file nothing listens on. Every
+/// other failure (a timeout, a wrong identity) may be transient.
+#[must_use]
+pub fn gone(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+    )
+}
+
 /// Discover socket identities with bounded parallel handshakes; refuse excess.
 /// # Errors
 /// Returns directory errors, resource overflow or a live shim handshake failure.
