@@ -13,8 +13,9 @@ test("already-added and missing-payload diagnostics reach the wizard through the
     const events: BootstrapEvent[] = [];
     new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
     socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 1, target: "host", attempt: 1, step: "failed", message: "Install failed", elapsed_ms: 1,
-      failure: { kind: "install", message: "This host is already added.", log_tail: [], already_added: true, missing_binary: { architecture: "aarch64", path: "/release/infraternal-aarch64-musl" } } }) }));
+      failure: { kind: "install", message: "This host is already added.", log_tail: [], already_added: true, failed_step: "get-arm64-binary", missing_binary: { architecture: "aarch64", path: "/release/infraternal-aarch64-musl" } } }) }));
     expect(events[0]?.failure?.already_added).toBe(true);
+    expect(events[0]?.failure?.failed_step).toBe("get-arm64-binary");
     expect(events[0]?.failure?.missing_binary).toEqual({ architecture: "aarch64", path: "/release/infraternal-aarch64-musl" });
   } finally { globalThis.WebSocket = original; }
 });

@@ -55,7 +55,7 @@ export interface FailureDetail {
   host_key_challenge?: string;
   already_added?: boolean;
   missing_binary?: { architecture: string; path: string };
-  failed_step?: "connect" | "upload" | "install" | "join" | "start";
+  failed_step?: "get-arm64-binary" | "get-x86-64-binary" | "connect" | "upload" | "install" | "join" | "start";
   host_key_type?: string;
   host_key_changed?: boolean;
   /** Every automatic sign-in method was refused: the person must choose one (D183). Only on `auth`. */
@@ -130,7 +130,7 @@ function parseFailure(value: unknown): FailureDetail | undefined {
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;
-  if (["connect", "upload", "install", "join", "start"].includes(String(value.failed_step))) failure.failed_step = value.failed_step as NonNullable<FailureDetail["failed_step"]>;
+  if (["get-arm64-binary", "get-x86-64-binary", "connect", "upload", "install", "join", "start"].includes(String(value.failed_step))) failure.failed_step = value.failed_step as NonNullable<FailureDetail["failed_step"]>;
   if (typeof value.host_key_type === "string") failure.host_key_type = value.host_key_type;
   if (value.host_key_changed === true) failure.host_key_changed = true;
   if (value.already_added === true) failure.already_added = true;
