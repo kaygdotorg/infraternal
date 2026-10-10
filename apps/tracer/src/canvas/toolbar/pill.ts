@@ -25,7 +25,7 @@ export function createPill(cx: Ctx): PillModule {
   const { stage, signal, state, views, camera } = cx;
   const capsule = stage.querySelector<HTMLElement>("#capsule")!;
   const conn = createConnectionIndicator({ announce: false });
-  stage.querySelector("#capsule .capsule-kbd")?.before(conn.root);
+  stage.querySelector("#capsule-keys")?.before(conn.root);
   conn.set("connected");
   // The round-trip time the core screen writes into its own pill is mirrored into the connection icon.
   const rttWatch = new MutationObserver(() => { const m = /(\d+)\s*ms/.exec(stage.querySelector("#rtt")?.textContent ?? ""); conn.setRoundTrip(m ? Number(m[1]) : undefined); });

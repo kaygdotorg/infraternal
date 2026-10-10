@@ -33,6 +33,7 @@ import { createWindowCard, type WindowCard } from "../../../../../../packages/ui
 import { hostIconMarkup, type HostPlatform } from "../../../../../../packages/ui/src/host-icons";
 import type { ToastController } from "../../../../../../packages/ui/src/toast";
 import { registerShortcuts } from "../../../../../../packages/ui/src/shortcuts";
+import { shortcutLabel } from "../../../../../../packages/ui/src/platform";
 import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResize, type WindowResizeHost } from "../../../../../../packages/ui/src/window-resize";
 import { previewLine } from "../../windows/preview";
 import { openDetailsPopover, type DetailsPopover } from "../../windows/details.on-demand";
@@ -238,7 +239,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     return [{
       group: "Actions", glyph: "", icon: isLocked ? UNLOCK_ICON : LOCK_ICON,
       label: isLocked ? "Unlock window" : "Lock window",
-      hint: "Ctrl+Shift+L",
+      hint: shortcutLabel("Ctrl+Shift+L"),
       action: isLocked ? "proto:unlock" : "proto:lock",
     }];
   });

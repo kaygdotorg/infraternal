@@ -3,7 +3,7 @@
  * pill morph). Escape or a press outside closes it. The last row opens the palette ("Search everything").
  */
 import { createPillMorph, type PillMorph } from "../../../../../packages/ui/src/pill-morph";
-import { keyCaps } from "../../../../../packages/ui/src/shortcuts";
+import { keyCaps, PALETTE_KEYS } from "../../../../../packages/ui/src/shortcuts";
 import { isMacPlatform } from "../../../../../packages/ui/src/platform";
 import type { Ctx } from "../context";
 import { el } from "../dom";
@@ -53,7 +53,7 @@ export function createViewList(cx: Ctx): ViewList {
     const foot = el("button", "cl-viewrow cl-viewrow-search");
     foot.type = "button";
     foot.innerHTML = '<span class="cl-viewrow-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="9" cy="9" r="5.5"/><path d="m13 13 3.5 3.5"/></svg></span><span class="cl-viewrow-name">Search everything</span><span class="cl-viewrow-keys"></span>';
-    for (const cap of keyCaps({ mac: "⌘K", other: "Ctrl+K" })) (foot.querySelector(".cl-viewrow-keys") as HTMLElement).append(el("kbd", "", cap));
+    for (const cap of keyCaps(PALETTE_KEYS)) (foot.querySelector(".cl-viewrow-keys") as HTMLElement).append(el("kbd", "", cap));
     foot.addEventListener("click", () => { close(true); document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: isMacPlatform(), ctrlKey: !isMacPlatform(), bubbles: true })); });
     panel.append(list, foot);
     morph = createPillMorph({ pill: capsule, stage, panel, content: [list, foot], width: 340, onClosed: () => { abort?.abort(); } });
