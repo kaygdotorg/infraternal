@@ -272,7 +272,8 @@ async fn canary(actor: &EmbeddedAgent) -> Result<(), Failure> {
             bytes: command.as_bytes(),
         },
     ] {
-        encode_muxed_frame_into(2, &frame, &mut wire).map_err(|_| unavailable())?;
+        // Input is leg A (odd); the attachment maps it onto its even leg-B stream.
+        encode_muxed_frame_into(1, &frame, &mut wire).map_err(|_| unavailable())?;
         handle
             .send_frame(bytes::Bytes::copy_from_slice(&wire))
             .await
@@ -536,3 +537,7 @@ mod tests {
         assert!(prior);
     }
 }
+
+#[cfg(test)]
+#[path = "bootstrap_canary_tests.rs"]
+mod canary_tests;
