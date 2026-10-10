@@ -232,9 +232,17 @@ export function createViews(cx: Ctx): ViewsModule {
   function geometry(c: ViewRec): void {
     // Columns are the truth: read them back from the DOM so drags, resizes and moves persist, then make the DOM agree with
     // what was read (a group's grid, its bands and placements; D212).
-    if (c.view.layout === "tiled") {
+    if (c.view.layout === "tiled" && c.colsEl.querySelector(".cl-group")) {
       c.view.cols = readColumns(cx, c);
       arrange(cx, c, c.view.cols);
+    } else if (c.view.layout === "tiled") {
+      // No group in the view: the plain read the product always did, with no style reads (plain columns pay nothing for
+      // the grid, D212). A group that a change has just dissolved was already taken apart by `arrange` in that change.
+      c.view.cols = [...c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")].map((colEl) => ({
+        id: colEl.dataset.id ?? `c${++state.serial}`,
+        w: Number(colEl.dataset.w) || state.metrics.colW,
+        wins: [...colEl.querySelectorAll<HTMLElement>(":scope > .ui-window")].map((n) => c.wins.get(n.dataset.windowId ?? "")?.model).filter((m): m is WindowModel => !!m),
+      })).filter((col) => col.wins.length > 0 || c.colsEl.querySelector(".cl-slot"));
     }
     const size = contentSize(c.view, state.metrics);
     const box = boxOf(c.view, state.metrics);

@@ -68,18 +68,21 @@ function targetOf(w: WindowModel): DocTarget | undefined {
  * where the list order alone cannot place a window that spans columns.
  */
 function docColumns(cols: readonly ColumnModel[], metrics: Metrics): DocColumn[] {
-  const settled = settle(cols);
-  const grouped = runsOf(settled).filter((r) => r.to > r.from);
+  // A view with no span, band or row has no grid: its windows are saved in list order and nothing is settled. Every save
+  // runs this, and a plain view should pay nothing for the grid (D212).
+  const plain = cols.every((col) => col.wins.every((w) => (w.span ?? 1) === 1 && (w.rows ?? 1) === 1 && w.row === undefined));
+  const settled = plain ? undefined : settle(cols);
+  const grouped = settled ? runsOf(settled).filter((r) => r.to > r.from) : [];
   const inGroup = (j: number): boolean => grouped.some((r) => j >= r.from && j <= r.to);
   return cols.map((c, j): DocColumn => ({
     id: c.id, weight: Number((c.w / metrics.colW).toFixed(3)),
     windows: c.wins.flatMap((w, k): DocWindow[] => {
       const target = targetOf(w);
       if (!target) return [];
-      const s = settled[j]!.wins[k]!;
+      const s = settled?.[j]?.wins[k];
       return [{
         id: w.id, target, ...(w.h ? { height: w.h } : {}),
-        ...(s.span > 1 ? { span: s.span } : {}), ...(s.rows > 1 ? { rows: s.rows } : {}), ...(inGroup(j) ? { row: s.row } : {}),
+        ...(s && s.span > 1 ? { span: s.span } : {}), ...(s && s.rows > 1 ? { rows: s.rows } : {}), ...(s && inGroup(j) ? { row: s.row } : {}),
       }];
     }),
   }));
