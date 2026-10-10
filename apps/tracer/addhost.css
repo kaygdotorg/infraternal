@@ -1,9 +1,9 @@
 /**
- * The add-host wizard (mock only). It lives inside the canvas's one window card (packages/ui
+ * The add-host wizard for the production and preview canvas. It lives inside the canvas's one window card (packages/ui
  * window-card), the same card and header a terminal uses, with its content centred both ways.
  * This file styles the wizard only: the window, its header pill and the canvas are not here.
- * Vocabulary is borrowed exactly: the sign-in card's pill primary and text
- * secondary buttons, 12 px field and weights (body 450, names 500, titles 600,
+ * Buttons use packages/ui with instance variables; fields use the common 12 px
+ * radius and weights (body 450, names 500, titles 600,
  * secondary 400 in --fg-2); the palette's 8 px rows. Type follows one scale per
  * platform (docs/design/TASTE.md): desktop 13 / 12 / 11 px, touch 16 / 15 / 13 px.
  * Icons are 16 px on desktop and 18 px on touch with a 1.5 stroke. Rings appear
@@ -249,42 +249,25 @@
 .ah-float.is-overflowing .ah-foot { padding-top: 18px; box-shadow: 0 -1px 0 var(--line); }
 @media (max-width: 600px) { .ah-foot { padding: 22px 22px 22px; } }
 .ah-count { color: var(--fg-2); font-size: 13px; }
+/* Button states, material and motion belong to packages/ui; these are instance values. */
 .ah-primary {
-  display: inline-flex;
-  min-width: 140px;
-  height: var(--ah-control);
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
+  --ui-button-min-width: 140px;
+  --ui-button-height: var(--ah-control);
+  --ui-button-padding: 0 20px;
+  --ui-button-radius: 999px;
+  --ui-button-font: var(--fw-title) 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-button-letter-spacing: -0.01em;
+  --ui-button-transition: transform 140ms var(--ease-out), background-color 160ms ease;
   margin-left: auto;
-  padding: 0 20px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--fg);
-  color: var(--bg);
-  font: var(--fw-title) 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  letter-spacing: -0.01em;
-  cursor: pointer;
-  transition: transform 140ms var(--ease-out), background-color 160ms ease;
 }
 .ah-primary .ah-icon { width: 18px; height: 18px; }
-.ah-primary:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
-/* Solid, not translucent: a disabled button over scrolled content must not show it through. */
-.ah-primary:disabled { background: color-mix(in oklab, var(--fg) 30%, var(--bg)); color: color-mix(in oklab, var(--bg) 85%, var(--fg)); cursor: default; }
 .ah-secondary {
-  height: var(--ah-control);
+  --ui-button-height: var(--ah-control);
+  --ui-button-padding: 0 8px;
+  --ui-button-font: var(--fw-label) 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-button-transition: color 120ms ease, transform 140ms var(--ease-out);
   margin-left: -8px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 8px;
-  background: none;
-  color: var(--fg-2);
-  font: var(--fw-label) 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  cursor: pointer;
-  transition: color 120ms ease, transform 140ms var(--ease-out);
 }
-@media (hover: hover) and (pointer: fine) { .ah-secondary:hover { color: var(--fg); } }
-.ah-secondary:active { transform: scale(var(--ui-press-scale)); }
 @media (max-width: 480px) {
   .ah-foot:has(.ah-secondary) { flex-direction: column-reverse; align-items: stretch; }
   .ah-foot:has(.ah-secondary) :is(.ah-primary, .ah-secondary) { width: 100%; margin: 0; }

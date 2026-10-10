@@ -299,7 +299,7 @@ export class Wizard {
     });
     for (const entry of this.selected) this.chips.add(this.chipFor(entry));
     this.renderList(page);
-    this.setFoot(`<span class="ah-count" aria-live="polite"></span><button class="ah-primary" type="button" data-ah="continue"><span>Continue</span></button>`);
+    this.setFoot(`<span class="ah-count" aria-live="polite"></span><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="continue"><span>Continue</span></button>`);
     this.updateCount();
   }
 
@@ -441,7 +441,7 @@ export class Wizard {
       <p class="ah-text">A root infraternal agent can manage packages, services and containers, and can read every file on the host. ${directRoot ? "To install as a user, go Back and change the SSH sign-in user." : "You can also install as a user now and switch to root later."}</p>
       <label class="ah-consent check"><input type="checkbox" data-consent /><span>I trust infraternal with root on ${escapeHtml(subject)}</span></label>`;
     for (const input of page.querySelectorAll<HTMLInputElement>(".ah-consent input")) springCheckbox(input);
-    this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button>${directRoot ? "" : '<button class="ah-secondary" type="button" data-ah="as-user">Install as user</button>'}<button class="ah-primary" type="button" data-ah="as-root" disabled>${svg(ICON.shieldCheck)}<span>Install as root</span></button>`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back">Back</button>${directRoot ? "" : '<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="as-user">Install as user</button>'}<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="as-root" disabled>${svg(ICON.shieldCheck)}<span>Install as root</span></button>`);
   }
 
   // ── Runs and jobs ──────────────────────────────────────────────────────────
@@ -485,7 +485,7 @@ export class Wizard {
     page.innerHTML = `${this.hero(ICON.shield)}<h1 class="ah-title">${this.authorityInitialized ? "Unlock" : "Set up"} host connections</h1>
       <p class="ah-lede">${this.authorityInitialized ? "Confirm with your administrator passkey to let this server connect new hosts." : "Host connections have not been set up yet. Confirm with your administrator passkey to create the certificate authority for your hosts."}</p>
       <p class="ah-text">Your account key stays in your browser. New hosts receive a certificate valid for seven days.</p>`;
-    this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-primary" type="button" data-ah="unlock-authority">${svg(ICON.shieldCheck)}<span>Confirm with passkey</span></button>`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="unlock-authority">${svg(ICON.shieldCheck)}<span>Confirm with passkey</span></button>`);
   }
 
   private async unlockAuthority(): Promise<void> {
@@ -650,8 +650,8 @@ export class Wizard {
     const failed = this.jobs.some((job) => job.view.state === "failed");
     const done = this.jobs.some((job) => job.view.state === "done");
     this.setFoot(failed
-      ? `<button class="ah-secondary" type="button" data-ah="${done ? "finish" : "back"}">${done ? "Close" : "Back"}</button>`
-      : `<button class="ah-primary" type="button" data-ah="finish"><span>Done</span></button>`);
+      ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="${done ? "finish" : "back"}">${done ? "Close" : "Back"}</button>`
+      : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="finish"><span>Done</span></button>`);
   }
 
   private paint(job: Job, page: HTMLElement | undefined = this.current): void {
@@ -725,8 +725,8 @@ export class Wizard {
       <p class="ah-lede">${escapeHtml(guide.happened)}</p>
       <p class="ah-text">${escapeHtml(guide.next)}</p>
       <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(this.detailsOf(job))}</pre></details>`;
-    const install = guide.fix === "install-command" ? `<button class="ah-secondary" type="button" data-ah="install">Install from the host</button>` : "";
-    this.setFoot(`<button class="ah-secondary" type="button" data-ah="back-progress">Back</button>${install}${guide.fix === "none" ? "" : `<button class="ah-primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>Retry</span></button>`}`);
+    const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${guide.fix === "none" ? "" : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>Retry</span></button>`}`);
   }
 
   private renderHostKey(page: HTMLElement): void {
@@ -740,7 +740,7 @@ export class Wizard {
     const list = createKeyValueList("Host key fingerprints");
     list.set(prints.map((print, index) => ({ key: prints.length > 1 ? `Key ${index + 1}` : "Fingerprint", value: print })));
     page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
-    this.setFoot(`<button class="ah-secondary" type="button" data-ah="back-progress">Back</button><button class="ah-primary" type="button" data-ah="trust-key">${svg(ICON.shieldCheck)}<span>Trust this key</span></button>`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="trust-key">${svg(ICON.shieldCheck)}<span>Trust this key</span></button>`);
   }
 
   private renderChoose(page: HTMLElement): void {
@@ -775,7 +775,7 @@ export class Wizard {
 
   private chooseFoot(method: string): string {
     const label = method === "server" ? "Try again" : "Sign in";
-    return `<button class="ah-secondary" type="button" data-ah="back-progress">Back</button><button class="ah-primary" type="button" data-ah="submit-method"><span>${label}</span></button>`;
+    return `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="submit-method"><span>${label}</span></button>`;
   }
 
   private selectMethod(value: string): void {
@@ -862,7 +862,7 @@ export class Wizard {
     page.innerHTML = `${this.hero(ICON.terminal)}<h1 class="ah-title">Install from ${name}</h1>
       <p class="ah-lede">Run this on the host. It connects out to this server, so the server never needs to reach it.</p>
       <div class="ah-install" aria-live="polite"></div>`;
-    this.setFoot(`<button class="ah-secondary" type="button" data-ah="back-install">Back</button><button class="ah-primary" type="button" data-ah="finish"><span>Done</span></button>`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-install">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="finish"><span>Done</span></button>`);
     this.install = { state: "loading" };
     this.paintInstall();
     const host = job ? this.addressText(job.entry) : "";
@@ -920,7 +920,7 @@ export class Wizard {
     const running = this.jobs.some((job) => job.view.state === "pending" || job.view.state === "running");
     if (!running) { this.dismiss(); return; }
     // Cancellation asks for rollback; losing SSH can leave cleanup pending.
-    this.setFoot(`<span class="ah-count">Closing stops installation and asks the server to undo this attempt. Cleanup can remain pending if the host is unavailable.</span><button class="ah-secondary" type="button" data-ah="keep">Keep installing</button><button class="ah-primary" type="button" data-ah="cancel-install">Stop installing</button>`);
+    this.setFoot(`<span class="ah-count">Closing stops installation and asks the server to undo this attempt. Cleanup can remain pending if the host is unavailable.</span><button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="keep">Keep installing</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="cancel-install">Stop installing</button>`);
   }
 
   private dismiss(after?: () => void): void {
