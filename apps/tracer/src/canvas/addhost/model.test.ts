@@ -70,6 +70,14 @@ describe("authLabel", () => {
 });
 
 describe("guideFor", () => {
+  test("installation failures never claim that incomplete cleanup succeeded", () => {
+    const guide = guideFor("fixture", { kind: "install", message: "cleanup pending", log_tail: [] });
+    expect(guide.happened).toContain("cleanup may still need to finish");
+    expect(guide.happened).not.toContain("nothing is left half done");
+    expect(guide.next).toContain("finish cleanup before another attempt");
+    expect(guide.fix).toBe("retry");
+  });
+
   test("each failure kind names its fix", () => {
     const f = (kind: FailureKind, extra = {}) => guideFor("h", { kind, message: "m", log_tail: [], ...extra });
     expect(f("unreachable").fix).toBe("install-command");

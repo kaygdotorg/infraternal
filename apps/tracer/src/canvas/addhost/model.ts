@@ -133,8 +133,8 @@ export function guideFor(name: string, failure: FailureDetail | undefined): Guid
     };
     case "install": return {
       title: `Setting up ${name} didn't finish`,
-      happened: "Changes on the host were undone, so nothing is left half done.",
-      next: "Open the details, then try again.",
+      happened: "Installation stopped before this host was ready. Automatic cleanup may still need to finish.",
+      next: "Open the details, restore access to the host if needed, then try again to finish cleanup before another attempt.",
       fix: "retry",
     };
     default: return {
