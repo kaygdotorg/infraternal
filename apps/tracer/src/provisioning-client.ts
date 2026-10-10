@@ -133,6 +133,10 @@ function parseFailure(value: unknown): FailureDetail | undefined {
   if (["connect", "upload", "install", "join", "start"].includes(String(value.failed_step))) failure.failed_step = value.failed_step as NonNullable<FailureDetail["failed_step"]>;
   if (typeof value.host_key_type === "string") failure.host_key_type = value.host_key_type;
   if (value.host_key_changed === true) failure.host_key_changed = true;
+  if (value.already_added === true) failure.already_added = true;
+  if (isRecord(value.missing_binary) && typeof value.missing_binary.architecture === "string" && typeof value.missing_binary.path === "string") {
+    failure.missing_binary = { architecture: value.missing_binary.architecture, path: value.missing_binary.path };
+  }
   if (value.choose_method === true && value.kind === "auth") failure.choose_method = true;
   return failure;
 }
