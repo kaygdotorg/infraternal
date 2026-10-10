@@ -335,7 +335,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       if (act === "end") { this.confirmEnd(target.closest<HTMLElement>(".cl-sx-act")!, li, host, s); return; }
       if (act === "dismiss") { this.remove(li, () => dismissSession(host, s)); return; }
       if (act === "again") { this.popover.close(how); inventory.runAgain(host, s.id); this.choose(s, how, false); return; }
-      if (act === "beside") { this.popover.close(how); void cx.win.split(this.rec, "right", s.id); return; }
+      if (act === "beside") { this.popover.close(how); void cx.win.newWindow(this.rec, "right", false, s.id); return; }
       if (target.closest(".cl-sx-name-input")) return;
       if (li.hasAttribute("data-swiped")) { li.dispatchEvent(new CustomEvent("sx-close")); return; }
       this.choose(s, how, true);

@@ -67,3 +67,66 @@ test("remote affinity survives reload and invalid UUIDs cannot become local refe
   bad.views[0].layout.columns[0].windows[0].target.hostId = "not-a-uuid";
   expect(parseDocument(bad)).toBeUndefined();
 });
+
+/**
+ * A document saved before D212, written by hand in the v1 shape, still loads unchanged: no field was added, so the
+ * four window actions need no migration. A split pair is two columns with weights that add up to the old column, and a
+ * full-size window is a window with `height` 1 (one column height).
+ */
+test("a version 1 document from before D212 loads, with its split pair and a full-size window", () => {
+  const old = {
+    format: FORMAT, version: VERSION, revision: 7,
+    views: [{
+      id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 },
+      layout: {
+        type: "tiled",
+        columns: [
+          { id: "c1", weight: 0.5, windows: [{ id: "w1", target: { type: "session", id: "s1", host: "build-01", name: "zsh" } }] },
+          { id: "c2", weight: 0.5, windows: [{ id: "w2", target: { type: "session", id: "s2", host: "build-01" } }] },
+          { id: "c3", weight: 1, windows: [{ id: "w3", target: { type: "session", id: "s3", host: "edge-arm" }, height: 1 }, { id: "s-appearance", target: { type: "settings", section: "appearance" } }] },
+        ],
+      },
+    }],
+  };
+  const doc = parseDocument(old);
+  expect(doc).toBeDefined();
+  const layout = doc!.views[0]!.layout;
+  if (layout.type !== "tiled") throw new Error("tiled");
+  const cols = columnsFromDocument(layout, m, (t) => (t.type === "session" ? { host: t.host, sessionId: t.id, ...(t.name ? { session: t.name } : {}) } : t.type === "settings" ? { host: "" } : undefined));
+  expect(cols.map((c) => [c.id, c.w, c.wins.map((w) => w.id)])).toEqual([["c1", Math.round(0.5 * m.colW), ["w1"]], ["c2", Math.round(0.5 * m.colW), ["w2"]], ["c3", m.colW, ["w3", "s-appearance"]]]);
+  expect(cols[2]!.wins[0]!.h).toBe(1);
+  // Saving it again writes the same shape back.
+  const again: unknown = JSON.parse(JSON.stringify(toDocument([{ ...console_, cols }], m, 8).views[0]!.layout));
+  expect(again).toEqual(JSON.parse(JSON.stringify(old.views[0]!.layout)));
+});
+
+test("a grouped view saves its spans and bands and loads back to the same grid (D212)", () => {
+  // The model as the canvas holds it at a save: a group's windows carry their settled spans and bands.
+  const grouped: ViewModel = {
+    ...console_,
+    cols: [
+      { id: "g1", w: 300, wins: [
+        { id: "a", kind: "terminal", host: "h1", sessionId: "s1", session: "one", span: 2, row: 0 },
+        { id: "b", kind: "terminal", host: "h1", sessionId: "s2", session: "two", h: 0.4, row: 1 },
+        { id: "c", kind: "terminal", host: "h1", sessionId: "s3", session: "three", span: 2, row: 2 },
+      ] },
+      { id: "g2", w: 300, wins: [{ id: "d", kind: "terminal", host: "h2", sessionId: "s4", session: "four", row: 1 }] },
+    ],
+  };
+  const doc = parseDocument(JSON.parse(JSON.stringify(toDocument([grouped], m, 2))));
+  expect(doc).toBeDefined();
+  const layout = doc!.views[0]!.layout;
+  if (layout.type !== "tiled") throw new Error("tiled expected");
+  const saved = layout.columns.map((c) => c.windows.map((w) => [w.id, w.span, w.rows, w.row]));
+  // "a" spans both columns on band 0, so "d" lands on band 1: the bands are the ones the grid derives.
+  expect(saved).toEqual([[["a", 2, undefined, 0], ["b", undefined, undefined, 1], ["c", 2, undefined, 2]], [["d", undefined, undefined, 1]]]);
+  const back = columnsFromDocument(layout, m, (t) => (t.type === "session" ? { host: t.host, sessionId: t.id, ...(t.name ? { session: t.name } : {}) } : undefined));
+  expect(back.map((c) => c.wins.map((w) => [w.id, w.span ?? 1, w.row]))).toEqual([[["a", 2, 0], ["b", 1, 1], ["c", 2, 2]], [["d", 1, 1]]]);
+});
+
+test("a plain view is saved without spans or bands, exactly as before D212", () => {
+  const json = JSON.stringify(toDocument([console_], m, 1));
+  expect(json).not.toContain("\"span\"");
+  expect(json).not.toContain("\"rows\"");
+  expect(json).not.toContain("\"row\"");
+});

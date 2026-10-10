@@ -65,9 +65,12 @@ export function installPalette(cx: Ctx): () => void {
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free pan and zoom, in place", action: "canvas:canvaslock:off" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "All views", hint: "fit every view · Esc", action: "canvas:overview" });
     if (state.activeWin && isTerminal(state.activeWin)) {
-      out.push({ group: "Canvas", glyph: "▥", icon: ICONS.splitRight, label: "Split right", hint: `new window beside · ${bindingText("split-right")}`, action: "canvas:split:right" });
-      out.push({ group: "Canvas", glyph: "▤", icon: ICONS.splitDown, label: "Split down", hint: `new window below · ${bindingText("split-down")}`, action: "canvas:split:down" });
+      out.push({ group: "Canvas", glyph: "▥", icon: ICONS.splitRight, label: "Split right", hint: `divides this window · ${bindingText("split-right")}`, action: "canvas:split:right" });
+      out.push({ group: "Canvas", glyph: "▤", icon: ICONS.splitDown, label: "Split down", hint: `divides this window · ${bindingText("split-down")}`, action: "canvas:split:down" });
+      out.push({ group: "Canvas", glyph: "▥", icon: ICONS.newRight, label: "New window right", hint: `full size, beside · ${bindingText("new-window-right")}`, action: "canvas:new:right" });
+      out.push({ group: "Canvas", glyph: "▤", icon: ICONS.newBelow, label: "New window below", hint: `full size, under · ${bindingText("new-window-below")}`, action: "canvas:new:below" });
     }
+    if (state.activeWin) out.push({ group: "Canvas", glyph: "▢", icon: ICONS.close, label: "Close window", hint: `the session keeps running · ${bindingText("close-window")}`, action: "canvas:close" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.lock, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
     // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
     for (const host of cx.adapters.sessions.hosts()) {
@@ -98,6 +101,8 @@ export function installPalette(cx: Ctx): () => void {
     else if (kind === "share") void cx.sharing?.open();
     else if (kind === "unlink") cx.sharing?.unlinkCurrent();
     else if (kind === "split") { if (active && isTerminal(active)) void cx.win.split(active, value === "right" ? "right" : "down"); }
+    else if (kind === "new") { if (active && isTerminal(active)) void cx.win.newWindow(active, value === "right" ? "right" : "below"); }
+    else if (kind === "close") { if (active && active.model.kind !== "node" && active.model.kind !== "settings") cx.win.closeKey(active); }
     else if (kind === "canvaslock") cx.nav.setCanvasLock(value === "on");
     else if (kind === "inputlock") cx.inputLock.toggle();
     else if (kind === "win" && value) {

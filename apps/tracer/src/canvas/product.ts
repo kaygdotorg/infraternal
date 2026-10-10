@@ -21,7 +21,8 @@ import type { ProvisioningService } from "./addhost/service";
 import { createWindowFlowHost } from "./addhost/window-host";
 import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
-import { columnsFromDocument, type DocTarget } from "./model/document";
+import { columnsFromDocument, docHasGroups, type DocTarget } from "./model/document";
+import { loadGroups } from "./layout/groups-handle";
 import { LocalCanvasStore } from "./model/store";
 import type { ViewModel, WindowModel } from "./model/types";
 import { createMeshApi } from "./mesh/api";
@@ -90,6 +91,9 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
   const savedMesh = saved?.views.find((v) => v.id === "mesh");
   const mesh = createMeshApi({ transport: connectionTransport(connection), pins: savedMesh?.layout.type === "graph" ? savedMesh.layout.pinned : {} });
+  // A saved layout with a group needs the grouped module before its views are built (D212). Any other canvas starts the
+  // fetch in createCanvas and does not wait for it.
+  if (saved && docHasGroups(saved)) await loadGroups();
   const canvas = createCanvas(core, {
     adapters: { sessions, inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, addHost: () => addHost.open() },
     float: false,

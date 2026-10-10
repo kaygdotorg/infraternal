@@ -54,7 +54,13 @@ test("overview: three views, thumbnails, a hover summary, and the views listed i
   expect(camera.z).toBeLessThan(0.6);
   expect(camera.lod).toBe("thumb");
   await page.locator('.cl[data-view="console"] .cl-label').hover();
-  await expect(page.locator(".cl-summary[data-open='true']")).toContainText("build-01");
+  // The card lists the view's five most recent windows by name (fewer when the view has fewer), and "All" only above five.
+  const shown = (await probe(page, (p) => p.views())).find((v) => v.id === "console")!.windows.length;
+  const summary = page.locator(".cl-summary[data-open='true']");
+  await expect(summary.locator(".cl-summary-pick")).toHaveCount(Math.min(5, shown));
+  await expect(summary.locator(".cl-summary-pick .cl-viewrow-name").first()).not.toHaveText("");
+  if (shown > 5) await expect(summary.locator(".cl-summary-all")).toHaveText(/All \d+ windows/);
+  else await expect(summary.locator(".cl-summary-all")).toHaveCount(0);
   await page.mouse.move(700, 880);
   await page.locator("#sidebar-toggle").click();
   await expect(page.locator("#tree .bm-sec")).toHaveCount(4);
@@ -109,7 +115,7 @@ test("a window kind decides its controls, and a terminal splits", async ({ page 
   await expect(page.locator('.cl[data-view="console"] .ui-window')).toHaveCount(before + 1);
 });
 
-test("split right opens a new column beside the window, split down stacks below it, from the header, the shortcuts and the palette", async ({ page }) => {
+test("split right divides the window beside it, split down stacks below it, from the header, the shortcuts and the palette", async ({ page }) => {
   await open(page, 3);
   const id = "w-studio-mac";
   const rect = (sel: string) => page.locator(sel).first().evaluate((n) => { const r = n.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; });
@@ -126,7 +132,9 @@ test("split right opens a new column beside the window, split down stacks below 
   const a1 = await rect(`.ui-window[data-window-id="${id}"]`);
   expect(created.x).toBeGreaterThan(a1.x + a1.w - 1); // beside it
   expect(Math.abs(created.y - a1.y)).toBeLessThan(2); // same top
-  expect(Math.abs(a1.w - a0.w)).toBeLessThan(2); // the old window keeps its width
+  // D212: split right divides the window's own space, so the old window and the new one share its width (no new column).
+  expect(Math.abs(a1.w - (a0.w - 12) / 2)).toBeLessThan(2);
+  expect(Math.abs(created.w - a1.w)).toBeLessThan(2);
   // Split down from the shortcut (Ctrl+Alt+Shift+D here; the default is platform dependent).
   await page.keyboard.press("Control+Alt+Shift+D");
   await expect.poll(count).toBe(n0 + 2);
@@ -1082,9 +1090,9 @@ test("window header actions are one pill: as tall as the title pill, on its line
   const geometry = (pg: Page, id: string) => pg.evaluate((windowId) => {
     const w = document.querySelector(`.ui-window[data-window-id="${windowId}"]`)!;
     const a = w.querySelector(".ui-window-actions")!.getBoundingClientRect(), t = w.querySelector(".ui-window-pill")!.getBoundingClientRect();
-    const buttons = [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => b.dataset.action);
-    const gaps = [...w.querySelectorAll(".ui-window-action")].map((b) => b.getBoundingClientRect()).map((r, i, all) => (i ? r.left - all[i - 1]!.right : 0)).slice(1);
-    return { aTop: a.top, aH: a.height, tTop: t.top, tH: t.height, buttons, gaps, tip: [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => b.dataset.tip) };
+    const buttons = [...w.querySelectorAll<HTMLElement>(".ui-window-action:not(.ui-window-more)")].map((b) => b.dataset.action);
+    const gaps = [...w.querySelectorAll(".ui-window-action:not(.ui-window-more)")].map((b) => b.getBoundingClientRect()).map((r, i, all) => (i ? r.left - all[i - 1]!.right : 0)).slice(1);
+    return { aTop: a.top, aH: a.height, tTop: t.top, tH: t.height, buttons, gaps, tip: [...w.querySelectorAll<HTMLElement>(".ui-window-action:not(.ui-window-more)")].map((b) => b.dataset.tip) };
   }, id);
   const d = await geometry(page, "w-nix-cache");
   expect(d.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);
@@ -1097,7 +1105,9 @@ test("window header actions are one pill: as tall as the title pill, on its line
   try {
     const p = t.page;
     const pd = await geometry(p, "w-build-01");
-    expect(pd.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);
+    // TASTE "Phone window headers carry two actions": on a touch device the header holds Close only; the splits and the
+    // session manager are in the canvas row while a terminal is focused, and in ⌘K.
+    expect(pd.buttons).toEqual(["close"]);
     expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(0.5);
     expect(Math.abs(pd.aTop - pd.tTop)).toBeLessThan(0.5);
     const hits = await p.evaluate(() => {
@@ -1109,7 +1119,8 @@ test("window header actions are one pill: as tall as the title pill, on its line
         return at(cx - 21, cy) && at(cx + 21, cy) && at(cx, cy - 21) && at(cx, cy + 21);
       });
     });
-    expect(hits).toEqual([true, true, true, true]);
+    // Only Close is in the phone header, so one 44 px target.
+    expect(hits).toEqual([true]);
   } finally { await t.close(); }
 });
 
