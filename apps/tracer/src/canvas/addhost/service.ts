@@ -71,6 +71,9 @@ export class ServiceError extends Error {
 export interface ProvisioningService {
   /** Hosts this server can reach and the person may add. Empty when discovery is off or finds nothing. */
   discover(): Promise<DiscoveredHost[]>;
+  /** Checks whether signing is ready before SSH; absent only in adapters that supply their own authority. */
+  authorityStatus?(): Promise<{ initialized: boolean; locked: boolean }>;
+  unlockAuthority?(): Promise<void>;
   /** The dedicated server key, or undefined when this server has none to show (no custody yet). */
   serverKey(): Promise<ServerKey | undefined>;
   /** The passkey-wrapped key this browser holds, if any. */

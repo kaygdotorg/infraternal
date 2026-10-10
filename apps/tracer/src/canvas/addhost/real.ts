@@ -4,6 +4,7 @@
  * Local references live for at most a minute, are bound to a target, and are consumed before sending.
  * Discovery, public SSH keys and install commands use their existing same-origin endpoints.
  */
+import { onDemand } from "../../on-demand";
 import type { HostSource } from "../../../../../packages/ui/src/source-icons";
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { ProvisioningRun, type ProvisioningHandlers, type ProvisioningOptions, type OneUseAuth } from "../../provisioning-client";
@@ -77,6 +78,8 @@ export function createRealProvisioning(): ProvisioningService {
   const observations = new Map<string, { run: ProvisioningRun; target: string; challenge: string; fingerprints: string[] }>();
   const prune = (): void => { for (const [key, value] of secrets) if (value.expires <= Date.now()) secrets.delete(key); };
   return {
+    authorityStatus: () => onDemand(() => import("./authority.on-demand")).then((module) => module.authorityStatus()),
+    unlockAuthority: () => onDemand(() => import("./authority.on-demand")).then((module) => module.unlockAuthority()),
     async discover() {
       const response = await call("/v1/bootstrap/discovery");
       // No discovery on this server: the person types or pastes hosts instead. Not an error.
