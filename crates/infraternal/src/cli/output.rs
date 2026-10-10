@@ -273,16 +273,31 @@ fn object_rows(items: &[serde_json::Value]) -> Option<Vec<Vec<String>>> {
     if items.is_empty() || items.iter().any(|item| !item.is_object()) {
         return None;
     }
-    let mut columns = std::collections::BTreeSet::new();
-    for item in items {
-        if let Some(fields) = item.as_object() {
-            columns.extend(fields.keys().cloned());
-        }
+    let visible_rows = items
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .filter(|fields| {
+            !fields.is_empty() && fields.values().any(|value| !is_empty_pretty_value(value))
+        })
+        .collect::<Vec<_>>();
+    if visible_rows.is_empty() {
+        return None;
     }
-    let mut rows = Vec::with_capacity(items.len() + 1);
+    let mut columns = std::collections::BTreeSet::new();
+    for fields in &visible_rows {
+        columns.extend(
+            fields
+                .iter()
+                .filter(|(_, value)| !is_empty_pretty_value(value))
+                .map(|(key, _)| key.clone()),
+        );
+    }
+    if columns.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::with_capacity(visible_rows.len() + 1);
     rows.push(columns.iter().map(|key| humanize(key)).collect());
-    for item in items {
-        let fields = item.as_object()?;
+    for fields in visible_rows {
         rows.push(
             columns
                 .iter()
