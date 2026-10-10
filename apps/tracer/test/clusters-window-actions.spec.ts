@@ -207,14 +207,18 @@ test.describe("mouse", () => {
 test.describe("the rules that hold across actions", () => {
   test.setTimeout(120_000);
 
-  test("split right in a stacked column is refused and says why, and opens no shell", async ({ page }) => {
+  test("split right in a stacked column divides only that window's column: a group, the footprint unchanged (D212)", async ({ page }) => {
     await boot(page);
     // Stack the active window (split down), so its column is no longer its own.
     await press(page, ["Control", "Shift", "Alt", "KeyD"]);
     const stacked = await layout(page);
-    expect(stacked.heights[(await activeAt(page)).col]!.length).toBeGreaterThan(1);
+    const at = await activeAt(page);
+    expect(stacked.heights[at.col]!.length).toBeGreaterThan(1);
     await press(page, ["Control", "Shift", "KeyD"]);
-    expect((await layout(page)).windows).toBe(stacked.windows);
+    const after = await layout(page);
+    expect(after.windows).toBe(stacked.windows + 1);
+    expect(after.total, "the footprint does not change").toBe(stacked.total);
+    expect(await page.locator(`${VIEW} .cl-group`).count(), "the stacked column and its new half form one group").toBe(1);
   });
 
   test("closing a split half gives its width back, so the layout returns to what it was", async ({ page }) => {

@@ -5,6 +5,7 @@
  * counted here. The numbers are printed so the report carries them.
  */
 import { expect, test, type Page } from "playwright/test";
+import { loadavg, cpus } from "node:os";
 
 const VIEW = '.cl[data-view="console"]';
 const BUDGET_MS = 8;
@@ -59,3 +60,42 @@ test("one window action with 54 windows costs at most 8 ms of layout work", asyn
   // code measures 1.5 to 2.5 times higher. `D212_BUDGET=1` turns the assertion on; the numbers are printed either way.
   if (process.env.D212_BUDGET === "1") for (const action of actions) expect(median(results[action]!), `${action} median`).toBeLessThanOrEqual(BUDGET_MS);
 });
+
+/**
+ * D212 at 57 windows: a split right and a split down inside a stacked group, and the new window right after it (the whole
+ * group is one grid, so these are the costs the group adds). Host load is recorded with each run, since a shared host
+ * measures higher than a quiet one (see the note above).
+ */
+test("the group actions cost at most 8 ms of layout work with 57 windows", async ({ page }) => {
+  test.setTimeout(300_000);
+  await boot(page);
+  await page.evaluate(() => {
+    for (let i = 0; i < 56; i++) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:new:right", source: "pointer" } }));
+  });
+  await page.waitForTimeout(800);
+  const n = await page.evaluate((view) => document.querySelectorAll(`${view} .ui-window`).length, VIEW);
+  expect(n).toBeGreaterThanOrEqual(57);
+  const load = { before: loadavg()[0]!.toFixed(2), cpus: cpus().length };
+  const measure = (action: string): Promise<number> => page.evaluate((a) => {
+    const t = performance.now();
+    window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: a, source: "pointer" } }));
+    return performance.now() - t;
+  }, action);
+  const results: Record<string, number[]> = { "canvas:split:right (in a group)": [], "canvas:split:down (in a group)": [] };
+  for (let round = 0; round < 5; round++) {
+    // A fresh stacked column for each round: split down the active window, then split right the window just made.
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:new:right", source: "pointer" } })));
+    await page.waitForTimeout(500);
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:split:down", source: "pointer" } })));
+    // A split leaves the new window active, so the next action acts on the window that was just made.
+    results["canvas:split:right (in a group)"]!.push(await measure("canvas:split:right"));
+    await page.waitForTimeout(900);
+    results["canvas:split:down (in a group)"]!.push(await measure("canvas:split:down"));
+    await page.waitForTimeout(900);
+  }
+  const median = (xs: number[]): number => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)]!;
+  const summary = Object.fromEntries(Object.entries(results).map(([a, xs]) => [a, { median: Number(median(xs).toFixed(2)), max: Number(Math.max(...xs).toFixed(2)) }]));
+  console.log(`d212 group layout work at ${n}+ windows (ms, median / max over 5 rounds), load ${JSON.stringify(load)} after ${loadavg()[0]!.toFixed(2)}:`, JSON.stringify(summary));
+  if (process.env.D212_BUDGET === "1") for (const [a, xs] of Object.entries(results)) expect(median(xs), `${a} median`).toBeLessThanOrEqual(BUDGET_MS);
+});
+
