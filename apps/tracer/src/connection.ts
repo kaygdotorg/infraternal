@@ -439,9 +439,10 @@ export class MuxConnection {
 
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer !== 0) return;
-    // Equal jitter: half the step is fixed, half random, so many pages dropped together do not return in step.
+    // Jitter only lengthens a step (by up to half), so the first retry is never sooner than 50 ms and pages dropped
+    // together do not return in step.
     const step = Math.min(RECONNECT_CEILING_MS, RECONNECT_FIRST_MS * 2 ** Math.min(this.retryAttempt, 10));
-    const delay = step / 2 + Math.random() * (step / 2);
+    const delay = step + Math.random() * (step / 2);
     this.retryAttempt += 1;
     this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, delay);
   }
