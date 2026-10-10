@@ -58,3 +58,23 @@ and safety notes for AI agents. `infraternal skill --write DIR` writes one
 `infraternal-<command-path>.md` file per visible action. `--json` wraps the
 list, Markdown skill, or written filenames in the same versioned result
 envelope. Hidden internal actions are not listed or written.
+
+## Hosted plugin actions
+
+The production Mesh and host-facts descriptors register in the same action
+registry as node lifecycle commands. For example, `infraternal mesh node rename
+--help` and `infraternal skill host facts read` use the plugin's own descriptions
+and instructions. Skills include the original wire schema references and exact
+permission alternatives; destructive actions retain required dry-run guidance.
+The `mesh` Cargo feature remains an alias for `plugin-mesh`.
+
+The authenticated CLI device-session transport is not implemented yet. Hosted
+action routes return the shared unavailable result and direct users to the server
+UI; they cannot bypass authorization or change a temporary local collector.
+Their real server handlers, durable switches and subscription topics continue to
+run through the generic plugin host. `infraternal server init` remains the only
+CLI service-creation path.
+
+With no default features the CLI keeps the action contracts and registry, while
+Tokio and SQLx in the plugin API are enabled only by `socket-host`. Node-side
+plugin descriptors and bounded action routing do not need those dependencies.

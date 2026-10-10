@@ -10,6 +10,9 @@
  * - A flight is a spring per axis; a new target keeps the current velocity, so a flight is always interruptible.
  *   A flight a gesture drives may take its time; one a key triggers is the short version (`keyFlight`).
  *   Reduced motion jumps (with a short fade) instead of flying.
+ * - `data-lod` flips mid-gesture and only changes non-inherited properties; `data-hit` (which windows take the pointer)
+ *   follows it at rest, because `pointer-events` is inherited and flipping it on the windows restyles every element
+ *   under them (2,249 elements, 38-47 ms in one frame of a zoom with 55 windows).
  * - Nothing runs while the camera is still: the springs and the rest timer stop on their own.
  *
  * The camera knows nothing about views, windows or sessions. The canvas hands it a viewport, a world layer and a
@@ -17,6 +20,7 @@
  * on those hooks.
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
+import { endActivity, setActivity } from "../../perf-activity";
 
 export interface Cam { cx: number; cy: number; z: number }
 import type { Pt, Rect } from "../layout/geometry";
@@ -29,8 +33,8 @@ export type ZoomBand = "in" | "out";
 
 export interface CameraHooks {
   /** The world transform changed: where the world origin is on screen (viewport pixels) and the zoom. */
-  onTransform?(t: { tx: number; ty: number; z: number; vw: number; vh: number }): void;
-  /** The counter-scale labels use to keep a readable size at any zoom (`--inv`); only called when it changes. */
+  onTransform?(t: { tx: number; ty: number; z: number; vw: number; vh: number; rest: boolean }): void;
+  /** The counter-scale labels use to keep a readable size at any zoom (`--label-inv`); only called when it changes. */
   onLabelScale?(inv: string): void;
   onLod?(lod: Lod): void;
   onBand?(band: ZoomBand): void;
@@ -51,8 +55,14 @@ const KEY_FLIGHT = { visualDuration: 0.08, bounce: 0 };
 const REST_DELAY = 140;
 export const MIN_ZOOM = 0.08;
 export const MAX_ZOOM = 2;
-/** Below this zoom the world is not given `will-change: transform` while it moves (see `apply`). */
-const WILL_CHANGE_MIN_ZOOM = 0.5;
+/**
+ * Below this zoom the world is not given `will-change: transform` while it moves (see `apply`). With the hint the
+ * browser keeps the raster it has and only scales it, so a zoom through the thumbnail band (0.3 to 0.7) re-rasters
+ * nothing until it rests; without it every frame of the zoom re-rasters the visible windows at the new scale (measured
+ * with 21 windows: a third less raster work per frame with the hint). A phone has too little memory to hold a world
+ * that large (D183), so only a fine pointer takes the lower limit.
+ */
+const willChangeMinZoom = (): number => (matchMedia("(pointer: fine)").matches ? 0.25 : 0.5);
 
 export class Camera {
   readonly cam: Cam = { cx: 0, cy: 0, z: 1 };
@@ -77,12 +87,11 @@ export class Camera {
   private hinted = false;
   private ready = false;
   /** The screen around the canvas: its glass (the pills, the sidebar) blurs the canvas behind it, which moves with the camera. */
-  private readonly stage: Element | null;
   private flightKind: "gesture" | "key" = "gesture";
 
   constructor(private readonly viewport: HTMLElement, private readonly world: HTMLElement, private readonly hooks: CameraHooks = {}) {
-    this.stage = world.closest("[data-clusters]");
     world.dataset.lod = this.lod;
+    world.dataset.hit = this.lod;
     world.dataset.zoom = this.band;
     // The springs paint nothing until `start()`: their first update would run the hooks before the canvas is built.
     this.springCx = new Spring(0, (v) => { this.cam.cx = v; this.apply(); }, FLIGHT);
@@ -104,7 +113,13 @@ export class Camera {
     this.resized();
     // Reading the size inside apply() forces a layout on every frame of a flight, right after the frame's own style
     // writes. The observer delivers the size after layout for free, before the next paint.
-    new ResizeObserver(() => this.resized()).observe(this.viewport);
+    new ResizeObserver(() => {
+      const { vw, vh } = this;
+      this.resized();
+      // A camera at rest has its transform written for the old size: write it again for the new one (a flight does it
+      // on its next frame). Without this a viewport that settles after start left the world offset by half the change.
+      if ((vw !== this.vw || vh !== this.vh) && !this.moving) this.apply(true);
+    }).observe(this.viewport);
     this.apply(true);
   }
 
@@ -120,7 +135,7 @@ export class Camera {
     // At rest the translation lands on whole device pixels, so text is as crisp as it can be.
     if (atRest) { this.tx = this.snapPx(this.tx); this.ty = this.snapPx(this.ty); }
     world.style.transform = `translate3d(${this.tx}px, ${this.ty}px, 0) scale(${cam.z})`;
-    this.hooks.onTransform?.({ tx: this.tx, ty: this.ty, z: cam.z, vw: this.vw, vh: this.vh });
+    this.hooks.onTransform?.({ tx: this.tx, ty: this.ty, z: cam.z, vw: this.vw, vh: this.vh, rest: atRest });
     // The labels keep a readable size at any zoom. Written on the labels themselves (by the hook), not on the
     // world: a custom property that changes on a root restyles every element below it, on every frame of every zoom.
     const inv = String(clamp(1 / cam.z, 1, 3.2));
@@ -130,13 +145,11 @@ export class Camera {
     const nextBand: ZoomBand = this.band === "in" ? (cam.z < 0.76 ? "out" : "in") : (cam.z > 0.82 ? "in" : "out");
     if (nextBand !== this.band) { this.band = nextBand; world.dataset.zoom = nextBand; this.hooks.onBand?.(nextBand); }
     if (!atRest) {
-      // One attribute write at the start of a move (not per frame): CSS may drop costly effects while the camera moves.
-      if (!this.moving) this.stage?.toggleAttribute("data-canvas-moving", true);
       this.moving = true;
       // `will-change: transform` makes the browser raster the layer at its own size (scale 1) so a move never blurs it.
       // Zoomed far out that is the whole visible world at full size: a mesh of a thousand hosts is 7,800 px wide, and
       // a zoom out then rasters about ten times the tiles it needs. Out there the browser rasters at the zoom instead.
-      const hint = cam.z >= WILL_CHANGE_MIN_ZOOM;
+      const hint = cam.z >= willChangeMinZoom();
       if (hint !== this.hinted) { this.hinted = hint; world.style.willChange = hint ? "transform" : ""; }
       window.clearTimeout(this.restTimer);
       this.restTimer = window.setTimeout(() => this.rest(), REST_DELAY);
@@ -146,11 +159,14 @@ export class Camera {
 
   /** The camera came to rest: raster-crisp text, then the rest hook. */
   rest(): void {
+    this.box = undefined;
     window.clearTimeout(this.restTimer);
     this.moving = false;
-    this.stage?.toggleAttribute("data-canvas-moving", false);
     this.hinted = false;
+    endActivity("pan"); endActivity("zoom"); endActivity("flight");
     this.world.style.willChange = "";
+    // Which windows take the pointer follows the level of detail only once the camera rests (see clusters.css).
+    if (this.world.dataset.hit !== this.lod) this.world.dataset.hit = this.lod;
     this.apply(true);
     this.hooks.onRest?.();
   }
@@ -200,6 +216,7 @@ export class Camera {
   /** Flies the camera (interruptible: a new target keeps the current velocity). */
   flyTo(target: () => Cam, instant = false): void {
     this.target = target;
+    setActivity("flight");
     this.hooks.onFlight?.();
     const t = target();
     if (instant) { this.set(t); return; }
@@ -218,18 +235,31 @@ export class Camera {
 
   /** Re-reads the viewport size and re-aims a flight in progress. Called by the canvas on every resize. */
   resized(): void {
+    this.box = undefined;
     this.vw = this.viewport.clientWidth; this.vh = this.viewport.clientHeight;
+  }
+
+  /**
+   * The viewport's box, read when the camera is at rest and kept while it moves. A gesture asks for it on every wheel or
+   * pointer event, and a read in the middle of a gesture makes the browser lay out and restyle the whole canvas first
+   * (6 ms a frame with a thousand cards). The viewport does not move while the camera does; a resize or a rest reads it
+   * again.
+   */
+  private box: DOMRect | undefined;
+  private rect(): DOMRect {
+    this.box ??= this.viewport.getBoundingClientRect();
+    return this.box;
   }
 
   /** A point of the screen as a point of the world. */
   toWorld(clientX: number, clientY: number): Pt {
-    const r = this.viewport.getBoundingClientRect();
+    const r = this.rect();
     return { x: (clientX - r.left - this.tx) / this.cam.z, y: (clientY - r.top - this.ty) / this.cam.z };
   }
 
   /** A point of the world as a point of the screen. */
   toClient(p: Pt): Pt {
-    const r = this.viewport.getBoundingClientRect();
+    const r = this.rect();
     return { x: r.left + this.tx + p.x * this.cam.z, y: r.top + this.ty + p.y * this.cam.z };
   }
 
@@ -242,7 +272,7 @@ export class Camera {
 
   /** Zooms about a screen point (a pinch or ctrl-wheel): the world point under it stays under it. */
   zoomAt(clientX: number, clientY: number, z: number): void {
-    const r = this.viewport.getBoundingClientRect();
+    const r = this.rect();
     const wp = this.toWorld(clientX, clientY);
     const next = clamp(z, MIN_ZOOM, MAX_ZOOM);
     this.drive({ z: next, cx: wp.x - (clientX - r.left - this.vw / 2) / next, cy: wp.y - (clientY - r.top - this.vh / 2) / next });

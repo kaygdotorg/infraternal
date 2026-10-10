@@ -162,6 +162,8 @@ async fn review3_socket_with_timeouts(
         f.auth.pool.clone(),
         EmbeddedAgent::from_test_socket(socket),
     )
+    .await
+    .unwrap()
     .with_handshake_timeout(Duration::from_secs(30))
     .with_authority_read_timeout(authority_read_timeout);
     let state = if let Some(timeout) = terminal_timeout {

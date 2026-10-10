@@ -49,7 +49,14 @@ struct InstallArgs {
 }
 
 fn main() -> ExitCode {
-    let registry = match cli::actions::registry() {
+    // Global JSON is a flag; plugin ownership selects lazy metadata, while
+    // root help and core discovery need all compiled definitions. Parsing and
+    // execution still come solely from the resulting action registry.
+    let requested_root = std::env::args().skip(1).find(|arg| arg != "--json");
+    let requested_root = requested_root
+        .as_deref()
+        .filter(|arg| !arg.starts_with('-'));
+    let registry = match cli::actions::registry_for(requested_root) {
         Ok(registry) => registry,
         Err(error) => {
             print_result(
@@ -409,9 +416,13 @@ fn run_unavailable(action: &ActionDefinition, json_output: bool) -> ExitCode {
             format!("The {command} command has no handler in this build."),
         )
     };
+    let next_step = if action.hosted.is_some() {
+        "Use the server UI with an authenticated session to run this plugin action."
+    } else {
+        "Run `infraternal status` to review this node's current components."
+    };
     print_result(
-        &CommandResult::new(command, state, message, data)
-            .with_next_step("Run `infraternal status` to review this node's current components."),
+        &CommandResult::new(command, state, message, data).with_next_step(next_step),
         json_output,
         state == CommandState::Failed,
     );
@@ -694,7 +705,16 @@ fn run_server_foreground(
         "listen": config.listen.to_string(),
         "public_origin": config.public_origin,
     });
-    match runtime.block_on(infraternal_server::serve(config)) {
+    // Pass only compiled node providers to the generic server host; server-only
+    // builds must not advertise a collector absent from their embedded process.
+    #[cfg(feature = "plugin-agent")]
+    let descriptors = infraternal_agent::plugins::descriptors();
+    #[cfg(not(feature = "plugin-agent"))]
+    let descriptors = &[];
+    match runtime.block_on(infraternal_server::serve_with_plugin_descriptors(
+        config,
+        descriptors,
+    )) {
         Ok(()) => {
             print_result(
                 &CommandResult::new(

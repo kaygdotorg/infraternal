@@ -92,10 +92,12 @@ export function createNav(cx: Ctx): Nav {
       const cols = [...c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")];
       let left = 0;
       for (const col of cols) { if (col === colEl) break; left += (Number(col.dataset.w) || state.metrics.colW) + COLUMN_GAP; }
-      const st = stopsFor(c);
-      const target = cx.view.contentRect(c).x + left;
-      let best = 0;
-      st.lefts.forEach((l, i) => { if (Math.abs(l - target) < Math.abs(st.lefts[best]! - target)) best = i; });
+      // The stop that frames this column: stops are centred on their column (when the viewport is wider than it), so the
+      // column's centre is compared with the stops' centres. Comparing its left edge with a stop's left edge picked the
+      // NEXT column's stop on a wide viewport, which left the window at the screen's left edge, or off it, with its
+      // neighbour out of view (#141).
+      const colW = Number(colEl.dataset.w) || state.metrics.colW;
+      const best = nearest(stopsFor(c), cx.view.contentRect(c).x + left + colW / 2);
       goStop(c, best, instant);
       scrollToWindow(colEl, rec.card.root, instant);
     },

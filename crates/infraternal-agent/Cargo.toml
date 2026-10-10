@@ -5,7 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["plugin-host-facts"]
+plugin-host-facts = ["dep:infraternal-plugin-host-facts"]
+
 [dependencies]
+infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1.0", default-features = false, features = ["agent"], optional = true }
 infraternal-protocol.workspace = true
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 infraternal-shim.workspace = true

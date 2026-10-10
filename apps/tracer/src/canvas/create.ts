@@ -26,7 +26,6 @@ import { SIZE_EVENT, edgeToEdge, readSizes } from "./window-sizes";
 import { createMesh } from "./mesh";
 import { createDocumentSync } from "./model/sync";
 import type { ViewModel } from "./model/types";
-import { createSharing } from "./sharing";
 import { createPill } from "./toolbar/pill";
 import { installPalette } from "./toolbar/palette";
 import { createToolbar } from "./toolbar/row";
@@ -35,9 +34,13 @@ import { createTree } from "./toolbar/tree";
 import { createViews } from "./views/world";
 import { createViewList } from "./toolbar/viewlist";
 import { createFloatHandle } from "./windows/float-handle";
+import { createDetailsHandle } from "./windows/details-handle";
+import { createSharingHandle } from "./sharing";
+import { hideTips } from "../../../../packages/ui/src/tooltip";
 import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
 import { createSessionHooks } from "./windows/session-hooks";
+import { setPerfProbe } from "../perf-activity";
 import { createVisibility } from "./windows/visibility";
 
 export interface CanvasOptions {
@@ -82,7 +85,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
 
   const state: CanvasState = {
     metrics: metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes()),
-    activeWin: undefined, currentView: "console", canvasLock: true, snapIdx: 0, movingWindow: false, serial: 0,
+    activeWin: undefined, currentView: "console", canvasLock: true, snapIdx: 0, movingWindow: false, serial: 0, recent: new Map(),
   };
   let frameQueued = 0;
   const cx = {
@@ -95,12 +98,12 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   } as unknown as Ctx;
   (cx as { camera: Camera }).camera = new Camera(viewport, world, {
     onTransform: (t) => backdrop?.update(t),
-    onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--inv", inv); },
+    onLabelScale: (inv) => { for (const c of cx.views.values()) c.label.style.setProperty("--label-inv", inv); },
     onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
-    onFrame: () => { cx.invalidate(); cx.memory.cull(); },
+    onFrame: () => { cx.invalidate(); cx.memory.cull(); if (cx.details?.isOpen()) cx.details.close(true); },
     onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); },
-    onFlight: () => cx.view.hideSummary(),
+    onFlight: () => { cx.view.hideSummary(); hideTips(); },
   });
   (cx as { flip: Ctx["flip"] }).flip = createFlip(() => cx.camera.cam.z, () => cx.invalidate());
 
@@ -110,6 +113,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.view = createViews(cx);
   cx.win = createWindows(cx);
   cx.float = createFloatHandle(cx);
+  if (options.adapters.details) cx.details = createDetailsHandle(cx, options.adapters.details);
   cx.inputLock = createInputLock(cx);
   if (options.adapters.inventory) cx.sessionUi = createSessionHooks(cx);
   cx.visibility = createVisibility(cx);
@@ -117,7 +121,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.viewList = createViewList(cx);
   cx.tree = createTree(cx);
   if (options.adapters.mesh) cx.mesh = createMesh(cx, options.adapters.mesh);
-  if (options.adapters.sharing) cx.sharing = createSharing(cx, options.adapters.sharing);
+  if (options.adapters.sharing) cx.sharing = createSharingHandle(cx, options.adapters.sharing);
   cx.toolbar = createToolbar(cx);
   installGestures(cx);
   const removeShortcuts = installShortcuts(cx);
@@ -176,11 +180,17 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   document.addEventListener("visibilitychange", onHide, { signal: events.signal });
   window.addEventListener("pagehide", () => cx.store.flush(), { signal: events.signal });
 
+  // What the frame meter records when a frame drops (counts and names only; read at drop time, never per frame).
+  setPerfProbe(() => {
+    let windows = 0;
+    for (const c of cx.views.values()) windows += c.wins.size;
+    return { view: state.currentView, zoom: Math.round(cx.camera.cam.z * 1000) / 1000, lod: cx.camera.lod, band: cx.camera.band, windows, windowsInView: cx.views.get(state.currentView)?.wins.size ?? 0, canvasLock: state.canvasLock };
+  });
+
   return {
     cx,
     setViews(models) {
       cx.inputLock.reset();
-      cx.mesh?.hideReach(true);
       cx.view.clear();
       state.metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes());
       cx.camera.resized();
@@ -193,6 +203,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     flush: () => cx.store.flush(),
     dispose() {
       events.abort();
+      setPerfProbe(undefined);
       ro.disconnect();
       removePalette();
       removeShortcuts();
@@ -204,6 +215,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.sharing?.dispose();
       cx.mesh?.dispose();
       cx.float.dispose();
+      cx.details?.dispose();
       cx.visibility.dispose();
       cx.view.clear();
       cx.view.dispose();
@@ -214,4 +226,3 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     },
   };
 }
-

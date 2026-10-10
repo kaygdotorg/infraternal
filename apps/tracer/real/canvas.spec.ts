@@ -250,6 +250,9 @@ test("memory on a phone: windows off screen hold no canvas, and the layer memory
       return { w: c.width, h: c.height, onScreen };
     });
   });
+  // Focusing a window must never scroll the screen around the canvas (it moved the canvas by a column and kept far
+  // terminals alive).
+  expect(await page.evaluate(() => document.querySelector("#terminal-screen")!.scrollLeft), "the screen never scrolls").toBe(0);
   const bytes = (c: { w: number; h: number }): number => c.w * c.h * 4;
   const total = canvases.reduce((sum, c) => sum + bytes(c), 0);
   console.log(`MEMORY canvases ${JSON.stringify(canvases)} total=${(total / 1e6).toFixed(1)}MB`);

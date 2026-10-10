@@ -44,6 +44,11 @@ export interface WindowCardOptions {
   status?: WindowStatus;
   actions?: WindowAction[];
   label?: string; // accessible name of the whole window
+  /**
+   * A card with no lock (default true). The lock's reveal watches every card on every pointer move (a layout read per
+   * card), so a canvas that shows hundreds of cards which can never be locked (the Mesh's nodes) turns it off.
+   */
+  lockable?: boolean;
   /** Runs after the user (or `setLocked`) changes the lock; the card has already updated itself. */
   onLockChange?(locked: boolean, source: LockSource): void;
 }
@@ -104,11 +109,13 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
 
   const body = document.createElement("div");
   body.className = "ui-window-body";
+  const lockable = options.lockable !== false;
   const lock = createLockToggle({
     onToggle(next, source) { setLocked(next, source === "keyboard"); options.onLockChange?.(next, source); },
   });
-  root.append(header, body, lock.root);
-  const stopReveal = trackLockReveal(root, lock);
+  root.append(header, body);
+  if (lockable) root.append(lock.root);
+  const stopReveal = lockable ? trackLockReveal(root, lock) : () => undefined;
   const setLocked = (next: boolean, instant = false): void => {
     if (next === lock.locked) return;
     root.toggleAttribute("data-locked", next);

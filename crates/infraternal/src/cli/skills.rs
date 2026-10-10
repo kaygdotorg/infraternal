@@ -58,6 +58,12 @@ pub fn render_action(action: &ActionDefinition) -> Result<String, serde_json::Er
     output.push_str(&serde_json::to_string_pretty(&action.output_schema)?);
     output.push_str("\n```\n");
 
+    if let Some(hosted) = &action.hosted {
+        output.push_str("\n## Hosted action contract\n\n```json\n");
+        output.push_str(&serde_json::to_string_pretty(hosted)?);
+        output.push_str("\n```\n");
+    }
+
     output.push_str("\n## Examples\n");
     if action.examples.is_empty() {
         output.push_str("\nNo examples are registered.\n");

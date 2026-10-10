@@ -18,7 +18,7 @@
  *   what crossed the edge, at most `MOUNTS_PER_FRAME` cards. It writes no style on elements that stay.
  * - The arrows are one SVG: any change inside it repaints all of it, so arrows are mounted and dropped in batches
  *   (the camera moved a quarter of a screen, the zoom changed, the data changed, or it came to rest), never one
- *   by one while the camera moves. The set is chosen for half a screen more on every side, so a batch is
+ *   by one while the camera moves. The set is chosen for a third of a screen more on every side, so a batch is
  *   enough for the next stretch of movement. Cluster frames and their arrows change only with the data or the level.
  * - The level changes with hysteresis (below 0.62 enters clusters, above 0.7 leaves), so a zoom does not flicker.
  * - Objects are identified by identity: the source keeps the same `NodeModel` and `Grant` objects for the same
@@ -60,6 +60,8 @@ export interface GraphController {
   arrows(): TopoArrow[];
   /** A node of the graph by id. */
   node(id: string): NodeModel | undefined;
+  /** The nodes whose cards meet a rectangle (the graph's own coordinates). */
+  nodesIn(r: Rect): NodeModel[];
   /** The zoom changed enough to change arrow heads: draw the arrows again. */
   redraw(): void;
   /** Arrows are made again (the person's rights changed, so handles appear or go). */
@@ -69,7 +71,7 @@ export interface GraphController {
   dispose(): void;
 }
 
-const SMALL = 40, MAX_ARROWS = 240, ARROWS_PER_FRAME = 40, MOUNTS_PER_FRAME = 8, ENTER_CLUSTERS = 0.62, LEAVE_CLUSTERS = 0.7, MAX_CLUSTER_ARROWS = 400;
+const SMALL = 40, MAX_ARROWS = 150, ARROWS_PER_FRAME = 40, MOUNTS_PER_FRAME = 24, ENTER_CLUSTERS = 0.62, LEAVE_CLUSTERS = 0.7, MAX_CLUSTER_ARROWS = 400;
 
 export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (m: Metrics) => MeshLayout, hooks: GraphHooks): GraphController {
   const { camera, state } = cx;
@@ -86,6 +88,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
   const clusterArrows = new Map<string, Arrow>();
   let dataKey = 0, lastKey = "", lastInv = 0, chipTimer = 0, cardTimer = 0, clusterKey = -1;
   /** Where (and at what zoom) the arrows were last chosen; the next batch is due when the camera has left it. */
+  let cardsAt: { x: number; y: number; data: number } | undefined;
   let arrowAt: { x: number; y: number; z: number; data: number } | undefined;
   // What the passes cost (read by the specs that measure frame times): the time inside passes, and cards made.
   let passes = 0, passMs = 0, mounted_ = 0;
@@ -110,6 +113,26 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
   };
   const hits = (r: Rect, v: Rect): boolean => r.x < v.x + v.w && v.x < r.x + r.w && r.y < v.y + v.h && v.y < r.y + r.h;
   const nodeBox = (n: NodeModel): Rect => ({ x: n.x, y: n.y, w: state.metrics.nodeW, h: state.metrics.nodeH });
+  /** Whether a node's card meets a rectangle: no object is made, this runs for every node near the view on every frame. */
+  const meets = (n: NodeModel, v: Rect): boolean => n.x < v.x + v.w && v.x < n.x + state.metrics.nodeW && n.y < v.y + v.h && v.y < n.y + state.metrics.nodeH;
+  // The nodes by place, in cells of 512 px: a pass looks at the cells the view covers, not at every node.
+  const CELL = 512;
+  let grid = new Map<number, NodeModel[]>();
+  const cellKey = (i: number, j: number): number => (i + 4096) * 8192 + (j + 4096);
+  const buildGrid = (): void => {
+    grid = new Map();
+    for (const n of nodes.values()) {
+      const k = cellKey(Math.floor(n.x / CELL), Math.floor(n.y / CELL));
+      const list = grid.get(k);
+      if (list) list.push(n); else grid.set(k, [n]);
+    }
+  };
+  const inRect = (v: Rect, visit: (n: NodeModel) => void): void => {
+    // A node is in the cell of its top left corner and reaches at most one card width right and down of it.
+    const i0 = Math.floor((v.x - state.metrics.nodeW) / CELL), i1 = Math.floor((v.x + v.w) / CELL);
+    const j0 = Math.floor((v.y - state.metrics.nodeH) / CELL), j1 = Math.floor((v.y + v.h) / CELL);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) { const list = grid.get(cellKey(i, j)); if (list) for (const n of list) visit(n); }
+  };
 
   // ---- cards and arrows ------------------------------------------------------------------------------------------
   const mountCard = (n: NodeModel): void => {
@@ -265,17 +288,21 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
 
   const passCards = (full: boolean): void => {
     const whole = small();
-    const near = whole ? undefined : view(0.3);
-    const far = whole ? undefined : view(0.6);
+    // While the camera pans, cards are made in batches: the pass runs when the view has moved a tenth of a screen from where
+    // the last one ran, so the frames in between change nothing but the world's transform. Each batch is one change of the
+    // page's paint, however many cards it brings (the margin around the view covers the distance until the next one).
+    if (!full && !whole && !needsAnotherFrame && cardsAt && cardsAt.data === dataKey) {
+      const w = camera.vw / cam.z, h = camera.vh / cam.z;
+      if (Math.abs(cam.cx - cardsAt.x) < w * 0.1 && Math.abs(cam.cy - cardsAt.y) < h * 0.1) return;
+    }
+    cardsAt = { x: cam.cx, y: cam.cy, data: dataKey };
+    const near = whole ? undefined : view(0.2);
+    const far = whole ? undefined : view(0.4);
     let budget = MOUNTS_PER_FRAME;
     const wanted: NodeModel[] = [];
-    for (const n of nodes.values()) {
-      if (cards.has(n)) {
-        if (far && !hits(nodeBox(n), far)) unmountCard(n);
-        continue;
-      }
-      if (!near || hits(nodeBox(n), near)) wanted.push(n);
-    }
+    if (far) for (const n of [...cards.keys()]) if (!meets(n, far)) unmountCard(n);
+    if (!near) { for (const n of nodes.values()) if (!cards.has(n)) wanted.push(n); }
+    else inRect(near, (n) => { if (!cards.has(n) && meets(n, near)) wanted.push(n); });
     // The ones nearest the middle of the screen come first, so a fast pan fills the centre before the edges.
     if (wanted.length > budget && near) {
       const mx = near.x + near.w / 2, my = near.y + near.h / 2;
@@ -284,12 +311,12 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
     for (const n of wanted) { if (budget-- <= 0) { needsAnotherFrame = true; break; } mountCard(n); }
 
     if (!arrowsDue(full)) return;
-    // Arrows that touch a node near the screen (half a screen more on every side); the ones with both ends there first.
+    // Arrows that touch a node near the screen (a third of a screen more on every side); the ones with both ends there first.
     arrowAt = { x: cam.cx, y: cam.cy, z: cam.z, data: dataKey };
-    const reach = whole ? undefined : view(0.5);
+    const reach = whole ? undefined : view(0.35);
     const want = new Set<Grant>();
     const both: Grant[] = [], one: Grant[] = [];
-    const touches = (id: string): boolean => { const n = nodes.get(id); return !!n && (!reach || hits(nodeBox(n), reach)); };
+    const touches = (id: string): boolean => { const n = nodes.get(id); return !!n && (!reach || meets(n, reach)); };
     for (const g of source.grants()) {
       if (!nodes.has(g.from) || !nodes.has(g.to)) continue;
       const a = touches(g.from), b = touches(g.to);
@@ -343,6 +370,9 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
     lastKey = key;
     needsAnotherFrame = false;
     const levelChanged = next !== level;
+    // A zoom is only the world's transform: no card or arrow is made or dropped while the scale changes, and what is
+    // missing at the edges is made where the zoom stops.
+    if (!force && !levelChanged && c.colsEl.dataset.zooming !== undefined) return;
     if (levelChanged) {
       level = next;
       c.colsEl.dataset.level = level;
@@ -426,6 +456,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
   const sync = (): void => {
     const layout = layoutOf(state.metrics);
     nodes = new Map(layout.nodes.map((n) => [n.id, n]));
+    buildGrid();
     clusters = layout.clusters;
     clusterOf = new Map();
     for (const cl of clusters) { for (const id of cl.hosts) clusterOf.set(id, cl.id); if (cl.tagNode) clusterOf.set(cl.tagNode, cl.id); }
@@ -477,6 +508,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
     stats: () => ({ cards: cards.size, arrows: arrows.size, chips: chips.size && level === "clusters" ? chips.size : 0, clusterArrows: clusterArrows.size, passes, passMs: Math.round(passMs * 10) / 10, mounted: mounted_ }),
     arrows: () => mounted,
     node: (id) => nodes.get(id),
+    nodesIn(r) { const out: NodeModel[] = []; inRect(r, (n) => { if (meets(n, r)) out.push(n); }); return out; },
     redraw() {
       strokeScale();
       for (const e of mounted) hooks.drawArrow(e);

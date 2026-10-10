@@ -18,6 +18,7 @@ import { loadDroplet } from "../layout/droplet-handle";
 import { COLUMN_GAP } from "../layout/geometry";
 import type { ViewId, WindowModel } from "../model/types";
 import { coarse, reduced } from "../dom";
+import { endActivity, setActivity } from "../../perf-activity";
 import { makeWindow, setActive } from "./frame";
 import { isTerminal, makeBody } from "../views/body";
 import { SCALE_REST, restAt } from "../springs";
@@ -29,7 +30,8 @@ export interface WindowsModule {
   addColumn(c: ViewRec, m: WindowModel, index: number, w?: number, silent?: boolean, opaque?: boolean): WinRec;
   close(rec: WinRec): void;
   /** Splits a terminal window: a new shell beside or below it, or (with `session`) an existing session of the host. */
-  split(rec: WinRec, direction?: "down" | "right", session?: string): Promise<void>;
+  /** `instant`: no motion at all (a keyboard split); the layout and the focus land in the same frame. */
+  split(rec: WinRec, direction?: "down" | "right", session?: string, instant?: boolean): Promise<void>;
   /** Points a terminal window at another session of its host; the old one keeps running (detached). */
   attach(rec: WinRec, sessionId: string): void;
   /** Brings a window's name and screen in line with its session in the inventory (a rename, a run again). */
@@ -119,7 +121,6 @@ export function createWindows(cx: Ctx): WindowsModule {
     if (placed && wasRunning) cx.toast.show({ message: "Session keeps running", action: { label: "Undo", onSelect: () => reopen(placed) }, duration: 6000 });
     if (cx.inputLock.state?.win === rec) cx.inputLock.toggle();
     if (state.activeWin === rec) setActive(cx, undefined);
-    if (cx.mesh?.reachFor() === rec) cx.mesh.hideReach(true);
     const root = rec.card.root;
     const finish = (): void => {
       const before = flip.measure(flip.targets(c.colsEl));
@@ -147,7 +148,8 @@ export function createWindows(cx: Ctx): WindowsModule {
       cx.view.geometry(c);
       cx.view.paintEmpty(c);
       cx.view.settle(c.view.id);
-      flip.play(before, true);
+      // Neighbours close the gap without overshoot (a critically damped spring): no value passes its final place.
+      flip.play(before, true, { visualDuration: 0.38, bounce: 0 });
       for (const w of c.wins.values()) w.binding?.refit();
       cx.tree.render();
       // The view's stops changed: the camera re-snaps (canvas lock) to the nearest one that still exists.
@@ -165,14 +167,14 @@ export function createWindows(cx: Ctx): WindowsModule {
     spring.set(1);
   };
 
-  const split = async (rec: WinRec, direction: "down" | "right" = "down", session?: string): Promise<void> => {
+  const split = async (rec: WinRec, direction: "down" | "right" = "down", session?: string, instant = false): Promise<void> => {
     if (!isTerminal(rec)) return;
     const nm = session ? { ...cx.adapters.sessions.open(rec.model.host, { session }), splitOf: rec.model.id } : cx.adapters.sessions.open(rec.model.host, { from: rec.model });
-    await splitInto(rec, direction, nm);
+    await splitInto(rec, direction, nm, instant);
   };
 
   /** Puts a window for model `nm` beside or below `rec` and plays the droplet. Splits are windows in the one structure: no nesting. */
-  const splitInto = async (rec: WinRec, direction: "down" | "right", nm: WindowModel): Promise<void> => {
+  const splitInto = async (rec: WinRec, direction: "down" | "right", nm: WindowModel, instant = false): Promise<void> => {
     const c = rec.owner;
     const root = rec.card.root;
     const colEl = root.parentElement as HTMLElement;
@@ -193,15 +195,25 @@ export function createWindows(cx: Ctx): WindowsModule {
     cx.view.settle(c.view.id);
     cx.tree.render();
     rec.binding?.refit();
-    if (direction === "right") {
-      flip.play(before);
-      // Canvas locked: glide so the window and its new neighbour are both on screen while the droplet divides.
-      if (state.canvasLock) cx.nav.focusWindow(rec);
-    }
+    if (direction === "right" && !instant) flip.play(before);
+    // A split lands you in the new window: it becomes the active one and the camera brings it fully into view, at rest
+    // (the old window may then be partly off screen, as on a phone, where one window fills the screen). The keyboard
+    // only follows on a device that has one (a phone is never asked to open it).
+    cx.win.setActive(b);
+    cx.nav.focusWindow(b, instant);
     if (!coarse.matches) b.binding?.focus();
+    if (instant) {
+      // A keyboard action never animates (TASTE): the new window is simply there, refit once, with no silhouette.
+      rec.binding?.refit();
+      b.binding?.refit();
+      cx.store.changed();
+      return;
+    }
     colEl.dataset.split = "";
+    setActivity("split");
     const { dropletSplit } = await loadDroplet();
     await dropletSplit(root, b.card.root, direction, c.colsEl);
+    endActivity("split");
     delete colEl.dataset.split;
     rec.binding?.refit();
     b.binding?.refit();

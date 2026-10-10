@@ -5,11 +5,14 @@ use infraternal_plugin_api::{
     PluginDefinition, SafetyNotes,
 };
 
+/// Stable plugin owner used to materialize only the requested CLI definitions.
+pub const ID: &str = "ssh";
+
 /// Register the SSH component actions exposed by this plugin.
 #[must_use]
 pub fn plugin() -> PluginDefinition {
     PluginDefinition::new(
-        "ssh",
+        ID,
         "Manage SSH access on this node.",
         [
             ActionDefinition::new(

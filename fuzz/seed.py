@@ -1,8 +1,50 @@
-"""Reproducibly seed both fuzz targets from all golden frames and mux-id widths."""
+"""Reproducibly seed protocol parsers and the Mesh JSON boundary."""
+import json
 from pathlib import Path
+import sys
 
 root = Path(__file__).resolve().parent
 vectors = sorted((root.parent / 'contracts/vectors/wire').glob('*.bin'))
+
+def seed_mesh():
+    corpus = root / 'corpus' / 'mesh_api_json'
+    corpus.mkdir(parents=True, exist_ok=True)
+    cases = [
+        ('list', {}),
+        ('node-enroll', {'name': 'db-1', 'public_key': [1] * 32}),
+        ('node-observe', {'node_id': 1, 'last_rtt_us': 1234}),
+        ('node-rename', {'node_id': 1, 'name': 'db-2'}),
+        ('node-delete', {'node_id': 1}),
+        ('tag-create', {'name': 'prod'}),
+        ('tag-rename', {'name': 'prod', 'new_name': 'production'}),
+        ('tag-delete', {'name': 'prod'}),
+        ('member-add', {'tag': 'prod', 'node_id': 1}),
+        ('member-remove', {'tag': 'prod', 'node_id': 1}),
+        ('grant-create', {
+            'name': 'web', 'from': {'Tag': 'prod'}, 'to': {'Node': 1}, 'both_ways': False,
+        }),
+        ('grant-move', {
+            'name': 'web', 'side': 'to', 'endpoint': {'Tag': 'frontend'},
+        }),
+        ('grant-delete', {'name': 'web'}),
+        ('grant-rename', {'name': 'web', 'new_name': 'web-prod'}),
+        ('role-define', {
+            'name': 'prod-grants', 'actions': ['mesh.manage_grants'], 'scopes': ['prod'],
+        }),
+        ('role-assign', {'user_id': 'mesh-user', 'role': 'prod-grants'}),
+    ]
+    for selector, (name, value) in enumerate(cases):
+        payload = json.dumps(value, separators=(',', ':'), sort_keys=True).encode()
+        (corpus / name).write_bytes(bytes([selector]) + payload)
+        if name == 'grant-create':
+            # Exercise explicit null separately from the valid omitted policy.
+            null_policy = dict(value, ports=None)
+            payload = json.dumps(null_policy, separators=(',', ':'), sort_keys=True).encode()
+            (corpus / 'grant-null-policy').write_bytes(bytes([selector]) + payload)
+
+if sys.argv[1:] == ['--mesh-only']:
+    seed_mesh()
+    raise SystemExit(0)
 
 def varint(value):
     result = bytearray()
@@ -57,3 +99,5 @@ for flags in [0, 1, 2, 255]:
         framed = len(raw).to_bytes(4, 'little') + raw
         for suffix, value in [('raw', raw), ('framed', framed), ('twice', framed + framed)]:
             (shim / f'cap2-snapshot-{flags}-{length}-{suffix}').write_bytes(value)
+
+seed_mesh()

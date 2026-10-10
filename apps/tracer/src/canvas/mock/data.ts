@@ -42,20 +42,28 @@ export const CONTAINERS: ContainerRow[] = [
   { name: "proxy", image: "traefik:v3.2", state: "exited", cpu: "0%" },
 ];
 
-export const LOG_LINES = [
-  "11:02:13  web-api  GET /healthz 200 1ms",
-  "11:02:14  web-api  GET /v1/hosts 200 8ms",
-  "11:02:14  web-api  GET /v1/hosts/build-01 200 5ms",
-  "11:02:15  web-api  POST /v1/sessions 201 21ms",
-  "11:02:19  web-api  GET /healthz 200 1ms",
-  "11:02:22  web-api  GET /v1/mesh/grants 200 6ms",
-  "11:02:24  web-api  upstream worker: connection reset",
-  "11:02:24  web-api  retrying upstream worker (1/3)",
-  "11:02:25  web-api  upstream worker: ok",
-  "11:02:29  web-api  GET /healthz 200 1ms",
-  "11:02:33  web-api  GET /v1/sessions 200 4ms",
-  "11:02:39  web-api  GET /healthz 200 1ms",
-];
+/** A varied, repeatable stream of web-api log lines: mostly requests, now and then a warning or an error. */
+const PATHS = ["/v1/hosts", "/v1/hosts/build-01", "/v1/hosts/nix-cache", "/v1/sessions", "/v1/sessions/shell", "/v1/mesh/grants", "/v1/mesh/status", "/v1/containers", "/v1/layouts/default", "/v1/devices", "/healthz"];
+const hhmmss = (t: number): string => { const d = new Date(t); return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":"); };
+/** The `n`th line of the stream (n = 0, 1, 2, ...), stamped `t`. The same `n` always gives the same text. */
+export const logLine = (n: number, t: number): string => {
+  const r = (Math.imul(n + 1, 2654435761) >>> 0) / 2 ** 32; // a repeatable spread in [0, 1)
+  const r2 = (Math.imul(n + 7, 40503) >>> 0) % 1000;
+  const stamp = `${hhmmss(t)}  web-api  `;
+  if (n % 61 === 17) return `${stamp}ERROR upstream worker: connection reset (attempt ${1 + (n % 3)} of 3)`;
+  if (n % 23 === 5) return `${stamp}WARN slow request: GET ${PATHS[n % 7]} took ${180 + (r2 % 420)}ms`;
+  if (n % 47 === 30) return `${stamp}WARN session ${["shell", "journal", "release"][n % 3]} has 2 viewers; resize paused`;
+  if (n % 29 === 11) return `${stamp}upstream worker: ok`;
+  const path = PATHS[Math.floor(r * PATHS.length)]!;
+  if (path === "/healthz") return `${stamp}GET /healthz 200 1ms`;
+  const post = r2 % 9 === 0;
+  return `${stamp}${post ? "POST" : "GET"} ${path} ${post ? 201 : r2 % 41 === 3 ? 304 : 200} ${1 + (r2 % 38)}ms`;
+};
+/** A backlog of `count` lines ending at `now`, a second or two apart, oldest first. */
+export const logBacklog = (count: number, now: number): string[] => Array.from({ length: count }, (_, i) => logLine(i, now - (count - i) * 1400));
+/** How many lines the backlog starts with: enough to fill the tallest window on a big screen several times over. */
+export const LOG_BACKLOG = 240;
+export const LOG_LINES = logBacklog(LOG_BACKLOG, Date.now());
 
 export const shellLines = (user: string, host: string, extra: string): string[] => [
   `${user}@${host}:~$ ${extra}`,

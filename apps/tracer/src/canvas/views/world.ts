@@ -14,12 +14,19 @@
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
 import { clamp } from "../camera/camera";
-import type { Ctx, ViewRec } from "../context";
+import type { Ctx, ViewRec, WinRec } from "../context";
 import { MARGIN, boxOf, contentSize, resolve, snapToGrid, type Box, type Rect } from "../layout/geometry";
 import type { ColumnModel, ViewId, ViewModel, WindowModel } from "../model/types";
 import { el } from "../dom";
 import { restPx } from "../springs";
-import { viewIcon } from "./icons";
+import { ICON, viewIcon } from "./icons";
+import { windowLabel } from "../windows/label";
+import { viewRecentWindows, viewWindowEntries } from "../toolbar/palette";
+import { keyCaps } from "../../../../../packages/ui/src/shortcuts";
+import { endActivity, setActivity } from "../../perf-activity";
+
+/** Rows the view's hover card lists before its "All" row (TASTE: lists stay short). */
+const SUMMARY_ROWS = 5;
 
 export interface ViewsModule {
   contentRect(c: ViewRec): Rect;
@@ -73,32 +80,69 @@ export function createViews(cx: Ctx): ViewsModule {
   };
 
   // ---- the hover card (zoomed out, pointer devices) --------------------------------------------------
-  const hideSummary = (): void => {
+  /** `instant`: another surface takes over (the palette), so the card goes at once instead of fading under it. */
+  const hideSummary = (instant = false): void => {
     window.clearTimeout(summaryTimer);
     if (summary.hidden) return;
     summary.dataset.open = "false";
     summaryFor = undefined;
+    if (instant) { summary.hidden = true; return; }
     window.setTimeout(() => { if (summary.dataset.open === "false") summary.hidden = true; }, 170);
   };
+  // The card is a popover while it shows: the pointer can cross the gap into it, and its rows can be pressed.
+  summary.addEventListener("pointerenter", () => window.clearTimeout(summaryTimer), { signal });
+  summary.addEventListener("pointerleave", () => { summaryTimer = window.setTimeout(hideSummary, 90); }, { signal });
+  const summaryRow = (k: string, v: string): HTMLElement => {
+    const row = el("div", "cl-summary-row");
+    row.append(el("span", "cl-summary-k", k), el("span", "cl-summary-v", v));
+    return row;
+  };
+  /** A window the card lists: the same row as the view list, pressed to fly to it. */
+  const windowPick = (c: ViewRec, rec: WinRec): HTMLElement => {
+    const [name, detail] = windowLabel(rec.model, cx.adapters.inventory);
+    const b = el("button", "cl-viewrow cl-summary-pick");
+    b.type = "button";
+    b.dataset.window = rec.model.id;
+    b.innerHTML = `<span class="cl-viewrow-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${rec.model.kind === "terminal" ? ICON.terminal : viewIcon(c.view.id)}</svg></span><span class="cl-viewrow-name"></span><span class="cl-viewrow-meta"></span>`;
+    (b.querySelector(".cl-viewrow-name") as HTMLElement).textContent = name;
+    (b.querySelector(".cl-viewrow-meta") as HTMLElement).textContent = detail;
+    b.addEventListener("click", () => { hideSummary(); cx.win.setActive(rec); cx.nav.focusWindow(rec); });
+    return b;
+  };
+  /** The quiet last row: the rest of the view is one step away in ⌘K, filtered to its windows. */
+  const allRow = (c: ViewRec, total: number): HTMLElement => {
+    const b = el("button", "cl-viewrow cl-viewrow-search cl-summary-all");
+    b.type = "button";
+    b.innerHTML = `<span class="cl-viewrow-name"></span><span class="cl-viewrow-keys"></span>`;
+    (b.querySelector(".cl-viewrow-name") as HTMLElement).textContent = `All ${total} windows`;
+    const keys = b.querySelector(".cl-viewrow-keys") as HTMLElement;
+    for (const cap of keyCaps({ mac: "⌘K", other: "Ctrl+K" })) keys.append(el("kbd", "", cap));
+    b.addEventListener("click", () => { hideSummary(true); cx.core.showPalette(viewWindowEntries(cx, c)); });
+    return b;
+  };
   const showSummary = (c: ViewRec): void => {
-    if (camera.band !== "out" || !matchMedia("(hover: hover) and (pointer: fine)").matches || cx.mesh?.dragging() || clusterDrag || state.movingWindow) return;
+    if (camera.band !== "out" || !matchMedia("(hover: hover) and (pointer: fine)").matches || clusterDrag || state.movingWindow) return;
     window.clearTimeout(summaryTimer);
     if (summaryFor === c.view.id && !summary.hidden) return;
     summaryFor = c.view.id;
-    const rows = c.view.layout === "graph"
-      ? (cx.mesh?.summaryRows(c) ?? [["Hosts", String(c.view.nodes.filter((v) => v.kind === "host").length)]])
-      : [...c.wins.values()].map((w) => [w.model.kind === "terminal" ? w.model.host : (w.model.session ?? w.model.kind), w.model.kind === "terminal" ? "shell" : w.model.kind]);
     summary.innerHTML = `<div class="cl-summary-head"><span class="cl-summary-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(c.view.id)}</svg></span><span class="cl-summary-name"></span></div><div class="cl-summary-rows"></div>`;
     (summary.querySelector(".cl-summary-name") as HTMLElement).textContent = c.view.name;
     const list = summary.querySelector(".cl-summary-rows") as HTMLElement;
-    if (!rows.length) rows.push(["No windows", ""]);
-    for (const [k, v] of rows) {
-      const row = el("div", "cl-summary-row");
-      row.append(el("span", "cl-summary-k", k!), el("span", "cl-summary-v", v!));
-      list.append(row);
+    if (c.view.layout === "graph") {
+      const rows = cx.mesh?.summaryRows(c) ?? [["Hosts", String(c.view.nodes.filter((v) => v.kind === "host").length)]];
+      if (!rows.length) rows.push(["No windows", ""]);
+      for (const [k, v] of rows) list.append(summaryRow(k!, v!));
+    } else {
+      // Lists stay short (TASTE): the five windows used most recently, then one row for the rest of the view.
+      const total = c.wins.size;
+      if (!total) list.append(summaryRow("No windows", ""));
+      for (const rec of viewRecentWindows(cx, c, SUMMARY_ROWS)) list.append(windowPick(c, rec));
+      if (total > SUMMARY_ROWS) list.append(allRow(c, total));
     }
+    // Never taller than the space under the label: it scrolls rather than leave the viewport.
     summary.hidden = false;
     const r = c.label.getBoundingClientRect();
+    summary.style.maxHeight = `${Math.max(120, innerHeight - r.bottom - 8 - 12)}px`;
     const w = summary.offsetWidth;
     const left = clamp(r.left, 12, innerWidth - w - 12);
     summary.style.left = `${left}px`;
@@ -135,6 +179,7 @@ export function createViews(cx: Ctx): ViewsModule {
       if (!d.moved) {
         if (Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 6) return;
         d.moved = true;
+        setActivity("drag");
         hideSummary();
         camera.stop();
         c.el.dataset.lifted = "";
@@ -162,6 +207,7 @@ export function createViews(cx: Ctx): ViewsModule {
       const d = clusterDrag;
       if (!d || d.c !== c || e.pointerId !== d.id) return;
       clusterDrag = undefined;
+      endActivity("drag");
       delete c.el.dataset.lifted;
       delete ghost.dataset.on;
       if (!d.moved) { cx.nav.flyView(c.view.id); return; }
@@ -182,7 +228,7 @@ export function createViews(cx: Ctx): ViewsModule {
     const region = el("div", "cl-region");
     const label = el("button", "cl-label ui-pill");
     label.type = "button";
-    label.style.setProperty("--inv", camera.labelScale);
+    label.style.setProperty("--label-inv", camera.labelScale);
     const menu = cx.sharing ? '<span class="cl-label-menu" role="button" tabindex="0" aria-label="View menu" data-tip="Share layout…"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg></span>' : "";
     label.innerHTML = `<span class="cl-label-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(view.id)}</svg></span><span class="cl-label-name"></span><span class="cl-label-meta"></span>${view.team ? '<span class="ui-ts-tag cl-team">team</span>' : ""}${menu}`;
     (label.querySelector(".cl-label-name") as HTMLElement).textContent = view.name;

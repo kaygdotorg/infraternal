@@ -5,15 +5,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["cli-plugin"]
-cli-plugin = []
-
 [lints]
 workspace = true
 
+[features]
+default = ["mesh", "cli-plugin"]
+cli-plugin = []
+mesh = ["dep:infraternal-plugin-mesh"]
+
 [dependencies]
-infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 argon2.workspace = true
 axum.workspace = true
 axum-server.workspace = true
@@ -34,6 +34,8 @@ tracing-subscriber.workspace = true
 futures-util.workspace = true
 nix.workspace = true
 infraternal-protocol.workspace = true
+infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
+infraternal-plugin-mesh = { version = "0.1.0", path = "../plugins/mesh", optional = true, default-features = false, features = ["server"] }
 url.workspace = true
 uuid.workspace = true
 webauthn-rs.workspace = true
@@ -43,6 +45,7 @@ openssl.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 aes-gcm.workspace = true
 hkdf.workspace = true
+nix = { workspace = true, features = ["time"] }
 tower.workspace = true
 http-body-util.workspace = true
 tokio-tungstenite.workspace = true

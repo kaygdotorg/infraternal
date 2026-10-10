@@ -1,14 +1,69 @@
 //! Real WebSocket regressions for upgrade reservation, revoked idle sockets and clean Close.
 use super::*;
 
+/// Minimal descriptor catalog for the real socket tests of generic host-facts authorization.
+const HOST_FACTS_ACTIONS: &[infraternal_plugin_api::ActionDef] = &[
+    infraternal_plugin_api::ActionDef {
+        id: "host.facts.read",
+        summary: "Read host facts",
+        input: "{}",
+        output: "{}",
+        instructions: &["Read or configure this host through its authenticated infraternal agent."],
+        effect: infraternal_plugin_api::Effect::Read,
+        permission: infraternal_plugin_api::Permission::One("host.facts.read"),
+    },
+    infraternal_plugin_api::ActionDef {
+        id: "host.facts.configure",
+        summary: "Configure host facts",
+        input: "{}",
+        output: "{}",
+        instructions: &["Read or configure this host through its authenticated infraternal agent."],
+        effect: infraternal_plugin_api::Effect::Write,
+        permission: infraternal_plugin_api::Permission::One("host.facts.configure"),
+    },
+];
+const HOST_FACTS_DESCRIPTOR: infraternal_plugin_api::PluginDescriptor =
+    infraternal_plugin_api::PluginDescriptor {
+        id: "host",
+        api: infraternal_plugin_api::API_VERSION,
+        actions: HOST_FACTS_ACTIONS,
+        settings: "{}",
+        topics: &[],
+        roles: &[infraternal_plugin_api::RoleDef {
+            id: "node",
+            requires: &[],
+            default_enabled: true,
+        }],
+        max_frame_len: infraternal_plugin_api::MAX_ACTION_BYTES,
+        unavailable: br#"{"error":"action unavailable"}"#,
+        unavailable_event: br#"{"type":"error","error":"action unavailable"}"#,
+    };
+pub(super) const HOST_FACTS_DESCRIPTORS: &[&infraternal_plugin_api::PluginDescriptor] =
+    &[&HOST_FACTS_DESCRIPTOR];
+
 async fn socket_fixture() -> (Fixture, SocketAddr, tokio::task::JoinHandle<()>) {
-    let f = fixture().await;
+    socket_fixture_from_fixture(fixture().await, None).await
+}
+
+/// Inventory tests isolate paging from loaded-host authority deadlines; ordinary
+/// socket regressions retain the production timeout, including refusal on stalls.
+async fn socket_fixture_from_fixture(
+    f: Fixture,
+    timeout: Option<Duration>,
+) -> (Fixture, SocketAddr, tokio::task::JoinHandle<()>) {
     let (socket, _peer) = UnixStream::pair().unwrap();
     let state = crate::websocket::WebSocketState::new(
         f.auth.clone(),
         f.auth.pool.clone(),
         EmbeddedAgent::from_test_socket(socket),
-    );
+    )
+    .await
+    .unwrap()
+    .with_plugin_descriptors(HOST_FACTS_DESCRIPTORS);
+    let state = match timeout {
+        Some(timeout) => state.with_authority_read_timeout(timeout),
+        None => state,
+    };
     let app = crate::websocket::router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -473,6 +528,197 @@ async fn recovery_subscription_updates_every_signed_in_socket() {
     server.abort();
 }
 
+#[cfg(feature = "mesh")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep one real socket's handshake, snapshot, edits, and invalidations ordered.
+async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "mesh-api",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Subscribe {
+            sub_id: 72,
+            filter_json: br#"{"topic":"mesh"}"#,
+        },
+    )
+    .await;
+    let snapshot = read_client_frame(&mut socket).await;
+    let Frame::Event {
+        sub_id: 72,
+        event_json,
+    } = decode_muxed_frame(&snapshot).unwrap().frame
+    else {
+        panic!("missing initial Mesh snapshot")
+    };
+    let snapshot: Value = serde_json::from_slice(event_json).unwrap();
+    assert_eq!(snapshot["type"], "snapshot");
+    assert_eq!(snapshot["snapshot"]["revision"], 0);
+    assert_eq!(snapshot["snapshot"]["nodes"], json!([]));
+
+    let node_input = serde_json::to_vec(&json!({
+        "name":"db-1",
+        "public_key":vec![1_u8; 32],
+    }))
+    .unwrap();
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 1,
+            action_id: "mesh.node.enroll",
+            input_json: &node_input,
+        },
+    )
+    .await;
+    let result = read_client_frame(&mut socket).await;
+    let Frame::Result {
+        call_id: 1,
+        ok: true,
+        json: result_json,
+    } = decode_muxed_frame(&result).unwrap().frame
+    else {
+        panic!("mesh.node.enroll did not return a successful Result")
+    };
+    let result: Value = serde_json::from_slice(result_json).unwrap();
+    let node_id = result["node_id"].as_u64().unwrap();
+    assert_eq!(result["revision"], 1);
+    let change = read_client_frame(&mut socket).await;
+    let Frame::Event {
+        sub_id: 72,
+        event_json,
+    } = decode_muxed_frame(&change).unwrap().frame
+    else {
+        panic!("mesh.node.enroll did not notify its subscriber")
+    };
+    let change: Value = serde_json::from_slice(event_json).unwrap();
+    assert_eq!(change, json!({"type":"changed","revision":1}));
+
+    let tag_input = serde_json::to_vec(&json!({"name":"ops"})).unwrap();
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 2,
+            action_id: "mesh.tag.create",
+            input_json: &tag_input,
+        },
+    )
+    .await;
+    let result = read_client_frame(&mut socket).await;
+    let Frame::Result {
+        call_id: 2,
+        ok: true,
+        json: result_json,
+    } = decode_muxed_frame(&result).unwrap().frame
+    else {
+        panic!("mesh.tag.create did not return a successful Result")
+    };
+    let result: Value = serde_json::from_slice(result_json).unwrap();
+    assert_eq!(result["revision"], 2);
+    let change = read_client_frame(&mut socket).await;
+    let Frame::Event {
+        sub_id: 72,
+        event_json,
+    } = decode_muxed_frame(&change).unwrap().frame
+    else {
+        panic!("mesh.tag.create did not notify its subscriber")
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(event_json).unwrap(),
+        json!({"type":"changed","revision":2})
+    );
+
+    let member_input = serde_json::to_vec(&json!({"tag":"ops","node_id":node_id})).unwrap();
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 3,
+            action_id: "mesh.tag.member.add",
+            input_json: &member_input,
+        },
+    )
+    .await;
+    let result = read_client_frame(&mut socket).await;
+    assert!(matches!(
+        decode_muxed_frame(&result).unwrap().frame,
+        Frame::Result {
+            call_id: 3,
+            ok: true,
+            ..
+        }
+    ));
+    let change = read_client_frame(&mut socket).await;
+    let Frame::Event {
+        sub_id: 72,
+        event_json,
+    } = decode_muxed_frame(&change).unwrap().frame
+    else {
+        panic!("membership edit did not notify its subscriber")
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(event_json).unwrap(),
+        json!({"type":"changed","revision":3})
+    );
+
+    let list_input = b"{}";
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 4,
+            action_id: "mesh.list",
+            input_json: list_input,
+        },
+    )
+    .await;
+    let list = read_client_frame(&mut socket).await;
+    let Frame::Result {
+        call_id: 4,
+        ok: true,
+        json: list_json,
+    } = decode_muxed_frame(&list).unwrap().frame
+    else {
+        panic!("mesh.list did not return a successful Result")
+    };
+    let list: Value = serde_json::from_slice(list_json).unwrap();
+    assert_eq!(list["nodes"][0]["node"]["id"], node_id);
+    assert_eq!(list["tags"][0]["members"][0], node_id);
+    server.abort();
+}
+
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/fresh_delete.rs"]
+mod fresh_delete;
+
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/scale.rs"]
+mod scale;
+
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/review_control.rs"]
+mod review_control;
+
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/mesh_latency.rs"]
+mod mesh_latency;
 /// A fresh subscription and Pong fence expose both leaked state and queued extra events.
 async fn assert_other_recovery_unchanged<S>(socket: &mut S)
 where
@@ -513,3 +759,112 @@ where
         Frame::Pong { nonce: 118, .. }
     ));
 }
+
+/// D29 and plugin.md section 4 require permission checks before host-wide writes reach leg B.
+#[tokio::test(start_paused = true)]
+async fn non_owner_without_host_configure_permission_is_refused_before_leg_b() {
+    let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
+    let f = fixture().await;
+    // Keep the real unlocked session but remove owner authority. No role grant exists.
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    let state = crate::websocket::WebSocketState::new(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        EmbeddedAgent::from_test_socket(socket),
+    )
+    .await
+    .unwrap()
+    .with_plugin_descriptors(HOST_FACTS_DESCRIPTORS);
+    let app = crate::websocket::router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut receive = BytesMut::new();
+    let hello = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+    assert!(matches!(
+        decode_muxed_frame(&hello).unwrap().frame,
+        Frame::Hello { .. }
+    ));
+    leg_b_send(
+        &mut peer,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "permission-fixture",
+        },
+    )
+    .await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut browser, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "permission-fixture",
+        },
+    )
+    .await;
+    read_welcome(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Call {
+            call_id: 144,
+            action_id: "host.facts.configure",
+            input_json: br#"{"enabled":false}"#,
+        },
+    )
+    .await;
+    let forwarded = tokio::select! {
+        wire = read_leg_b_frame(&mut peer, &mut receive) => {
+            let wire = wire.unwrap();
+            matches!(decode_muxed_frame(&wire).unwrap().frame, Frame::Call { action_id: "host.facts.configure", .. })
+        }
+        wire = read_client_frame(&mut browser) => {
+            assert!(matches!(decode_muxed_frame(&wire).unwrap().frame, Frame::Result { call_id: 144, ok: false, .. }));
+            false
+        }
+        () = tokio::time::sleep(Duration::from_secs(5)) => panic!("configure was not refused"),
+    };
+    server.abort();
+    assert!(
+        !forwarded,
+        "host-wide configuration reached leg B without owner authority or a permission grant"
+    );
+}
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/review_subscription_refusal.rs"]
+mod review_subscription_refusal;
+
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/review_fresh_wait.rs"]
+mod review_fresh_wait;
+
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/review_liveness.rs"]
+mod review_liveness;
+
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/plugin_lifecycle.rs"]
+mod plugin_lifecycle;
+#[cfg(not(feature = "mesh"))]
+#[path = "socket_tests/plugin_no_features.rs"]
+mod plugin_no_features;
+
+#[cfg(feature = "mesh")]
+#[path = "socket_tests/claude_review_visible_liveness.rs"]
+mod claude_review_visible_liveness;

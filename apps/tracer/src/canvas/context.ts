@@ -33,6 +33,7 @@ import type { Flip } from "./layout/flip";
 import type { ViewsModule } from "./views/world";
 import type { WindowsModule } from "./windows/lifecycle";
 import type { FloatModule } from "./windows/float.on-demand";
+import type { DetailsModule } from "./windows/details.on-demand";
 import type { InputLock } from "./windows/input-lock";
 import type { Visibility } from "./windows/visibility";
 import type { PillModule } from "./toolbar/pill";
@@ -41,6 +42,7 @@ import type { TreeModule } from "./toolbar/tree";
 import type { ToolbarModule } from "./toolbar/row";
 import type { SessionUi } from "./windows/session-hooks";
 import type { SettingsSource } from "./views/settings-body.on-demand";
+import type { RecentList } from "./recency";
 
 /** One window on the canvas: its card, its model and the things that must be undone when it goes. */
 export interface WinRec {
@@ -53,6 +55,8 @@ export interface WinRec {
   stopResize?: () => void;
   /** A body that streams text (a logs window); the stream is fed from outside. */
   stream?: HTMLElement;
+  /** Appends one line to a logs window (it stays pinned to the end unless the person scrolled up). */
+  pushLog?: (line: string) => void;
   /** The session this window shows (terminal windows). */
   binding?: SessionBinding;
   /** Releases what the body holds (a settings panel). */
@@ -94,6 +98,8 @@ export interface CanvasState {
   movingWindow: boolean;
   /** Source of fresh ids for columns and split windows. */
   serial: number;
+  /** Per view, the windows made active most recently (in memory, this session): the hover card's rows (#121). */
+  recent: Map<ViewId, RecentList<string>>;
 }
 
 export interface Adapters {
@@ -111,6 +117,8 @@ export interface Adapters {
   settings: SettingsSource;
   /** The Containers list; absent until the host API exists, and the Containers view is then not offered. */
   containers?: { /** The host whose containers these are. */ host: string; rows(): ContainerRow[] };
+  /** Facts for the window details popover (a pill pressed without moving); absent, and the pill opens nothing. */
+  details?: import("./windows/details-source").DetailsSourceLoader;
   /** Starts the add-host flow (#78); absent until it exists, and the empty-state button is then not drawn. */
   addHost?: () => void;
 }
@@ -147,6 +155,8 @@ export interface Ctx {
   view: ViewsModule;
   win: WindowsModule;
   float: FloatModule;
+  /** The window details popover; absent when the instance has no `DetailsSource`. */
+  details?: DetailsModule;
   inputLock: InputLock;
   /** The session manager, the final-screen strip and the size badge; exists only with an inventory. */
   sessionUi?: SessionUi;

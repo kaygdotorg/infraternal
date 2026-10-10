@@ -17,6 +17,12 @@
 @media (pointer: coarse) { .ui-icon { width: 18px; height: 18px; } }
 .terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
 
+/* The card tint is read by the element that carries it and by nothing inside it, so it does not inherit: a change then
+   restyles the glass surfaces and not their descendants too (themes.ts `installLevelRules` sets it per element). */
+@property --overlay { syntax: "*"; inherits: false; }
+@property --ui-overlay-halo { syntax: "*"; inherits: false; }
+@property --ui-overlay-blur { syntax: "*"; inherits: false; }
+
 /* The one material's blur and saturation: surfaces and pills read these two tokens, so tuning them
    here tunes every floating thing at once. */
 :root { --ui-overlay-blur: 16px; --ui-overlay-saturation: 160%; }
@@ -118,6 +124,8 @@
   transform-origin: center bottom;
   transition: opacity 170ms ease-out, transform 190ms cubic-bezier(0.23, 1, 0.32, 1);
 }
+/* A toast is a small card of its own, not text over a busy terminal: the material's halo would only smear its glyphs. */
+.ui-toast, .ui-toast * { text-shadow: none; }
 .ui-toast[hidden] { display: none !important; }
 .ui-toast[data-tone="error"] .ui-toast-marker { display: none; }
 .ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
@@ -326,16 +334,16 @@
    buttons, the same height as the title pill and on the same line. The pill never shrinks (the title truncates
    first). On touch the pill is as tall as the title pill (44 px) and each button is 44 px wide and reaches 44 px tall with a transparent hit area. */
 .ui-window-actions {
-  display: flex; flex: none; align-items: center; gap: 2px; margin-left: auto; height: var(--ui-control-h); padding: 0 3px;
+  display: flex; flex: none; align-items: center; gap: 2px; margin-left: auto; height: var(--ui-control-h); padding: 0 2px;
   border: 1px solid var(--overlay-line); border-radius: 999px; background: var(--overlay); box-shadow: none;
 }
 .ui-window-actions:empty { display: none; }
 .ui-window-action {
-  position: relative; display: grid; place-items: center; width: calc(var(--ui-control-h) - 6px); height: calc(var(--ui-control-h) - 6px); border: 0; border-radius: 50%;
+  position: relative; display: grid; place-items: center; width: calc(var(--ui-control-h) - 6px); height: calc(var(--ui-control-h) - 6px); padding: 0; border: 0; border-radius: 50%;
   background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
 @media (pointer: coarse) {
-  .ui-window-actions { gap: 0; }
+  .ui-window-actions { gap: 0; padding: 0 3px; }
   .ui-window-action { width: 44px; }
   .ui-window-action::after { content: ""; position: absolute; inset: -3px 0; } /* 44 px tall around the 38 px button; the buttons sit on a 44 px pitch */
 }
@@ -376,6 +384,8 @@
   -webkit-user-select: text; user-select: text; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
 }
 .ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
+.ui-kv-key { display: grid; justify-items: start; }
+.ui-kv-hint { color: var(--fg-3); font: var(--ui-type-label); font-size: 11px; letter-spacing: var(--ui-tracking); white-space: nowrap; }
 .ui-kv-value { justify-self: end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
 .ui-kv-cell:active { transform: scale(var(--ui-press-scale-soft)); }
 /* The highlighted run: 6 px of even padding either side (cancelled by a -6 px margin so the text
@@ -620,9 +630,12 @@
 .ui-conn-g-slow .core { fill: var(--warn); }
 .ui-conn-g-slow .halo { fill: color-mix(in oklab, var(--warn) 22%, transparent); }
 .ui-conn .ui-conn-g-slow .ring { stroke: var(--warn); stroke-width: 1.2; }
-.ui-conn-pulse { position: absolute; inset: 0; transform-origin: 50% 50%; opacity: 0; animation: ui-conn-pulse 1700ms cubic-bezier(0.23, 1, 0.32, 1) infinite; animation-play-state: paused; }
-.ui-conn[data-state="slow"] .ui-conn-pulse { animation-play-state: running; }
+.ui-conn-pulse { position: absolute; inset: 0; transform-origin: 50% 50%; opacity: 0; animation: ui-conn-pulse 1700ms cubic-bezier(0.23, 1, 0.32, 1) 3; animation-play-state: paused; }
+/* The breath restarts by switching to an identical animation under another name (`data-breath`), which needs no style flush. */
+.ui-conn[data-breath="1"] .ui-conn-pulse { animation-name: ui-conn-pulse-b; }
+.ui-conn[data-state="slow"] .ui-conn-pulse { animation-play-state: running; will-change: transform, opacity; }
 @keyframes ui-conn-pulse { 0% { opacity: 0.7; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.1); } }
+@keyframes ui-conn-pulse-b { 0% { opacity: 0.7; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.1); } }
 
 .ui-conn .ui-conn-g-reconnecting .track { stroke: var(--fg-3); stroke-width: 1.4; opacity: 0.4; }
 .ui-conn .ui-conn-g-reconnecting .arc { stroke: var(--fg-2); stroke-width: 1.7; stroke-linecap: round; stroke-dasharray: 28 72; }
@@ -764,3 +777,16 @@
 .bm-leaf .bm-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A caption between groups inside one section: the host above its sessions. It has no branch of its own. */
 .bm-subhead { display: flex; align-items: center; height: var(--row); padding: 0 8px; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1.2 var(--font-mono); letter-spacing: 0; }
+
+/* Entity chips (entity-chip.ts): a recognised thing named in text. Text-height, on the baseline, one unit when the line
+   wraps, never animated. The fill is set inline from the palette tokens, so a theme switch recolours it with no script. */
+.ui-entity {
+  display: inline-flex; align-items: center; gap: 0.3em; box-sizing: border-box; max-width: 100%; padding: 0 0.55em 0 0.45em;
+  border-radius: 999px; font-weight: 500; line-height: 1.35; white-space: nowrap; text-shadow: none; vertical-align: baseline;
+  letter-spacing: 0; transition: none; animation: none;
+}
+.ui-entity-name { overflow: hidden; text-overflow: ellipsis; }
+.ui-entity-glyph { flex: none; width: 0.9em; height: 0.9em; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ui-entity-glyph.ui-entity-fill { fill: currentColor; stroke: none; }
+.ui-entity-initial { flex: none; min-width: 0.9em; text-align: center; font-size: 0.9em; font-weight: 600; line-height: 1; }
+.ui-entity-unit { white-space: nowrap; }

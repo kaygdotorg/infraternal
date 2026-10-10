@@ -9,6 +9,10 @@
  * - A hidden page (`visibilitychange`, `pagehide`) ends a split in progress (and with it its GL context),
  *   releases the dot layers and the compositor hint on the world, hides the world (which drops every layer under
  *   it) and tells every window it is not visible. `pageshow` and visible draw it all again.
+ * - Windows more than a screen away from the visible area are parked (`data-parked`: `visibility: hidden`, layout
+ *   untouched). Every painted window is paint chunks the compositor walks again on every frame the camera moves (about
+ *   0.07 ms of layerizing per window, so 55 windows are about 4 ms of every pan, zoom and flight frame, measured at
+ *   DPR 2); a parked one is nothing. The active window is never parked, so focus and the keyboard still reach it.
  * - Nothing here runs per frame except one rectangle test per view while the camera moves.
  */
 import type { Ctx, ViewRec } from "./context";
@@ -68,13 +72,41 @@ export function createMemory(cx: Ctx, backdrop: Backdrop | undefined): Memory {
   window.addEventListener("pageshow", show, { signal });
 
   // Frosted windows blur what is behind them, and only while they are on screen: an observer flips an attribute when a
-  // window crosses the canvas edge (never per frame).
-  const onscreen = new IntersectionObserver((entries) => { for (const e of entries) (e.target as HTMLElement).toggleAttribute("data-onscreen", e.isIntersecting); }, { root: cx.viewport });
+  // window crosses the canvas edge (never per frame). A window that is really on screen is never parked.
+  const unpark = (w: HTMLElement): void => { pending.delete(w); w.removeAttribute("data-parked"); };
+  const onscreen = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const w = e.target as HTMLElement;
+      w.toggleAttribute("data-onscreen", e.isIntersecting);
+      if (e.isIntersecting && w.hasAttribute("data-parked")) unpark(w);
+    }
+  }, { root: cx.viewport });
   signal.addEventListener("abort", () => onscreen.disconnect());
+  // Windows a screen or more away are parked. Parking is at once; un-parking (a style recalculation of the window and a
+  // paint, about 1.5 ms each) is spread over frames, two a frame, because a column of eight windows entering the margin
+  // together was a 10-20 ms frame in the middle of a zoom or a pan. The margin is wide enough (1.5 screens) that they are
+  // un-parked well before they can be seen; a window that is seen is un-parked by the observer above at once.
+  const pending = new Set<HTMLElement>();
+  let drainFrame = 0;
+  const drain = (): void => {
+    drainFrame = 0;
+    let n = 0;
+    for (const w of pending) { unpark(w); if (++n === 2) break; }
+    if (pending.size) drainFrame = requestAnimationFrame(drain);
+  };
+  const parked = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const w = e.target as HTMLElement;
+      if (!e.isIntersecting) { pending.delete(w); w.setAttribute("data-parked", ""); }
+      else if (w.hasAttribute("data-parked")) pending.add(w);
+    }
+    if (pending.size && !drainFrame) drainFrame = requestAnimationFrame(drain);
+  }, { root: cx.viewport, rootMargin: "150% 150% 150% 150%" });
+  signal.addEventListener("abort", () => { parked.disconnect(); cancelAnimationFrame(drainFrame); });
 
   return {
     cull,
-    watch(window) { onscreen.observe(window); return () => onscreen.unobserve(window); },
-    dispose() { onscreen.disconnect(); },
+    watch(window) { onscreen.observe(window); parked.observe(window); return () => { onscreen.unobserve(window); parked.unobserve(window); pending.delete(window); }; },
+    dispose() { onscreen.disconnect(); parked.disconnect(); cancelAnimationFrame(drainFrame); },
   };
 }

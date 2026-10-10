@@ -10,14 +10,16 @@ import { Spring } from "../../../../../packages/ui/src/spring";
 import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
 import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
+import { endActivity, setActivity } from "../../perf-activity";
 
 export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x: number; y: number }): void {
   const { camera, state, flip } = cx;
   const cam = camera.cam;
     const c = rec.owner;
     if (c.view.layout !== "tiled") return;
-    cx.mesh?.hideReach(true);
+    cx.details?.close(true);
     state.movingWindow = true;
+    setActivity("drag");
     cx.view.hideSummary();
     const root = rec.card.root;
     const rect0 = root.getBoundingClientRect();
@@ -97,6 +99,7 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
         root.classList.remove("is-lifted");
         slot.replaceWith(root);
         state.movingWindow = false;
+        endActivity("drag");
         cx.view.geometry(c);
         cx.view.settle(c.view.id);
         cx.tree.render();

@@ -61,11 +61,18 @@ never shows mockup UI.
 
 - 60 fps: a frame writes one `transform` on the world and nothing else per frame (camera). Label counter-scale,
   level of detail and zoom band change only when they cross a threshold. `will-change` only while moving.
+- 120 fps (#121, measured with 55 windows at DPR 2): the compositor walks every painted window on every frame the
+  camera moves (about 0.07 ms of layerizing per window), so windows a screen or more away are parked
+  (`data-parked`, memory.ts). A zoom scales the dot layers instead of repainting them (`canvas-backdrop.ts`).
+  Nothing inherited may flip mid-gesture: `pointer-events` on the windows follows the level of detail at rest
+  (`data-hit`), because an inherited property restyles every element under the window (2,249 elements, 45 ms).
+  A page at rest animates nothing that loops: the slow-link breath plays three times.
 - Instant work: handlers do a layout read and a transform write; saving, the tree and arrows are coalesced
   (timer, microtask, animation frame). Nothing runs while the camera is still.
 - Memory (iOS kills a page that holds too much): the backdrop is viewport-sized tiles; windows off screen or in
   another view hold no canvas backing store (`SessionBinding.setVisible(false)`); at most one GL context exists,
-  only during the droplet animation; big surfaces are released on `pagehide` and while hidden.
+  only during the droplet animation (a device with a fine pointer keeps one parked 1 px context, built when idle, so the
+  first frame of a split does not wait on the GPU process); big surfaces are released on `pagehide` and while hidden.
 
 ## Tests
 

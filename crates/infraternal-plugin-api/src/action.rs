@@ -263,6 +263,28 @@ pub enum DryRun {
     Required,
 }
 
+/// A single permission or any of the declared management alternatives [187].
+/// Single permissions retain the existing CLI metadata's JSON string shape.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ActionPermission {
+    /// Require this permission.
+    One(String),
+    /// Accept any one of these permissions, without inventing a new role.
+    Any { any: Vec<String> },
+}
+
+impl ActionPermission {
+    fn valid(&self) -> bool {
+        match self {
+            Self::One(permission) => !permission.trim().is_empty(),
+            Self::Any { any } => {
+                !any.is_empty() && any.iter().all(|permission| !permission.trim().is_empty())
+            }
+        }
+    }
+}
+
 /// Authorization and effect contract shared by every adapter for an action.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ActionContract {
@@ -271,7 +293,7 @@ pub struct ActionContract {
     /// State effect of the action.
     pub effect: ActionEffect,
     /// Permission name granted by roles.
-    pub permission: String,
+    pub permission: ActionPermission,
     /// Whether a dry run is available or required.
     pub dry_run: DryRun,
 }
@@ -288,7 +310,7 @@ impl ActionContract {
         Self {
             target,
             effect,
-            permission: permission.into(),
+            permission: ActionPermission::One(permission.into()),
             dry_run,
         }
     }
@@ -363,6 +385,9 @@ pub struct ActionDefinition {
     /// Permission and effect metadata shared with non-CLI adapters.
     #[serde(flatten)]
     pub contract: ActionContract,
+    /// Original hosted descriptor, retaining schema references and any-of permissions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hosted: Option<crate::ActionDef>,
     /// CLI implementation selected by this registered action.
     #[serde(skip)]
     pub cli_handler: CliHandler,
@@ -392,6 +417,7 @@ impl ActionDefinition {
             availability: ActionAvailability::Available,
             visible: true,
             contract,
+            hosted: None,
             cli_handler: CliHandler::Unavailable,
         }
     }
@@ -480,7 +506,7 @@ impl ActionDefinition {
                 self.command.join(" ")
             )));
         }
-        if self.contract.permission.trim().is_empty() {
+        if !self.contract.permission.valid() {
             return Err(RegistryError::InvalidAction(format!(
                 "action {} has no permission name",
                 self.command.join(" ")
@@ -655,6 +681,32 @@ mod tests {
                 DryRun::Unsupported,
             ),
         )
+    }
+
+    #[test]
+    fn any_of_permissions_are_machine_readable_and_empty_authority_is_rejected() {
+        for alternatives in [Vec::new(), vec!["state.read".to_owned(), " ".to_owned()]] {
+            let mut action = sample_action(&["status"]);
+            action.contract.permission = super::ActionPermission::Any { any: alternatives };
+            let registry = ActionRegistry::new(vec![PluginDefinition::new(
+                "state",
+                "State commands.",
+                [action],
+            )]);
+            assert!(matches!(registry, Err(RegistryError::InvalidAction(_))));
+        }
+        let permission = super::ActionPermission::Any {
+            any: vec!["state.read".to_owned(), "state.manage".to_owned()],
+        };
+        assert_eq!(
+            serde_json::to_value(permission).expect("permission JSON"),
+            serde_json::json!({"any": ["state.read", "state.manage"]})
+        );
+        assert_eq!(
+            serde_json::to_value(super::ActionPermission::One("state.read".to_owned()))
+                .expect("legacy permission JSON"),
+            serde_json::json!("state.read")
+        );
     }
 
     #[test]

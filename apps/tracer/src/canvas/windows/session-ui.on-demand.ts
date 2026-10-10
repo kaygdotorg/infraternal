@@ -284,6 +284,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       const main = el("button", "cl-sx-main");
       main.type = "button";
       main.setAttribute("aria-label", `${s.name}, ${detail}`);
+      main.dataset.tipOff = ""; // the row's text is its name; the label is for screen readers, never a tooltip
       if (current) main.setAttribute("aria-current", "true");
       const dot = el("span", "ui-state-dot");
       dot.dataset.state = s.state;

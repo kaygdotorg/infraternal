@@ -48,7 +48,7 @@ for (const scene of [1, 6]) {
     test.setTimeout(60_000);
     const context = await browser.newContext({ ...devices["iPhone 15"], deviceScaleFactor: 3 });
     const page = await context.newPage();
-    await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink`);
+    await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&fps=0`);
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     await page.waitForTimeout(2500);
     const m = await memory(page);
@@ -61,12 +61,13 @@ test("memory: a hidden page releases its surfaces and a shown page draws them ag
   test.setTimeout(60_000);
   const context = await browser.newContext({ ...devices["iPhone 15"], deviceScaleFactor: 3 });
   const page = await context.newPage();
-  await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink");
+  await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&fps=0");
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.keyboard.press("Escape");
   await page.waitForTimeout(1500);
   const canvasPixels = (): Promise<number> => page.evaluate(() => [...document.querySelectorAll("canvas")].reduce((a, c) => a + c.width * c.height, 0));
   const shown = async (): Promise<number> => (await page.evaluate(() => [...document.querySelectorAll(".ui-canvas-backdrop-layer")].filter((l) => !(l as HTMLElement).hidden).length));
+  await expect.poll(canvasPixels, { timeout: 10_000 }).toBeGreaterThan(0); // the terminal draws once the page has settled; a loaded host takes longer than 1.5 s
   const before = { canvas: await canvasPixels(), layers: await shown() };
   expect(before.canvas).toBeGreaterThan(0);
   expect(before.layers).toBeGreaterThan(0);

@@ -5,11 +5,14 @@ use infraternal_plugin_api::{
     PluginDefinition, SafetyNotes,
 };
 
+/// Stable plugin owner used to materialize only the requested CLI definitions.
+pub const ID: &str = "agent";
+
 /// Register the agent component actions exposed by this plugin.
 #[must_use]
 pub fn plugin() -> PluginDefinition {
     PluginDefinition::new(
-        "agent",
+        ID,
         "Manage the infraternal agent component on this node.",
         [
             ActionDefinition::new(

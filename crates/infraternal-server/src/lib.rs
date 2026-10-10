@@ -5,8 +5,16 @@ pub mod auth;
 #[cfg(feature = "cli-plugin")]
 pub mod cli;
 mod embedded;
+/// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
+#[cfg(feature = "mesh")]
+pub use infraternal_plugin_mesh::api as mesh_api;
+#[cfg(all(test, feature = "mesh"))]
+mod mesh_api_tests;
+pub mod plugins;
 mod runtime;
 mod web_assets;
 mod websocket;
 
-pub use runtime::{ProxyNetwork, ServerConfig, ServerError, TlsFiles, serve};
+pub use runtime::{
+    ProxyNetwork, ServerConfig, ServerError, TlsFiles, serve, serve_with_plugin_descriptors,
+};

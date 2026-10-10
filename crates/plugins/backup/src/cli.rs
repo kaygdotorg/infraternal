@@ -5,11 +5,14 @@ use infraternal_plugin_api::{
     PluginDefinition, SafetyNotes,
 };
 
+/// Stable plugin owner used to materialize only the requested CLI definitions.
+pub const ID: &str = "backup";
+
 /// Register the backup component actions exposed by this plugin.
 #[must_use]
 pub fn plugin() -> PluginDefinition {
     PluginDefinition::new(
-        "backup",
+        ID,
         "Manage server backup jobs on this node.",
         [
             ActionDefinition::new(

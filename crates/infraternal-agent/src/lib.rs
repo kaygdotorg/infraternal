@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod cli;
 pub mod daemon;
+pub mod plugins;
 pub mod relay;
 pub mod sessions;
 pub mod transport;

@@ -5,11 +5,14 @@ use infraternal_plugin_api::{
     PluginDefinition, SafetyNotes,
 };
 
+/// Stable plugin owner used to materialize only the requested CLI definitions.
+pub const ID: &str = "server";
+
 #[cfg(feature = "cli-plugin")]
 #[must_use]
 pub fn plugin() -> PluginDefinition {
     PluginDefinition::new(
-        "server",
+        ID,
         "Create and run the infraternal control plane.",
         [
             server_run_action(),

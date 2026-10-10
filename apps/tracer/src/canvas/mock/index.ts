@@ -8,6 +8,7 @@
  * `window.__tracerClusters` probe the specs drive. The canvas itself is the product code in `create.ts`; this file
  * only gives it mock adapters and calls its public operations.
  */
+import type { WinRec } from "../context";
 import { isMacPlatform } from "../../../../../packages/ui/src/platform";
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { createCanvas, type CanvasController } from "../create";
@@ -15,7 +16,7 @@ import { boxOf, type Metrics } from "../layout/geometry";
 import { MemoryCanvasStore } from "../model/store";
 import type { ViewId } from "../model/types";
 import { el } from "../dom";
-import { CONTAINERS, buildViews, type Role } from "./data";
+import { CONTAINERS, LOG_BACKLOG, buildViews, logLine, type Role } from "./data";
 import { offerMeshView } from "../mesh/offer";
 import { DEFAULT_SESSION, createMockInventory } from "./inventory";
 import { createMockMesh } from "./mesh";
@@ -48,7 +49,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     float: true,
     dots: new URLSearchParams(location.search).get("dots") !== "0",
     adapters: {
-      sessions, inventory, mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
+      sessions, inventory, details: () => onDemand(() => import("./details.on-demand")).then((m) => m.createMockDetails(world, inventory)), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       addHost: () => core.toast.show({ message: "Add host is its own mockup (proto=addhost)." }),
     },
@@ -168,15 +169,20 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   }, { signal });
 
   // ---- live-looking content -------------------------------------------------------------------------
-  // A logs window keeps moving, so thumbnails are visibly live.
+  // Only visible logs tick. Keep the existing tail-follow controller and backlog;
+  // parked windows must not force layout or repaint while nobody can see them.
+  let logSerial = LOG_BACKLOG;
   const streamTimer = window.setInterval(() => {
-    for (const c of cx.views.values()) for (const w of c.wins.values()) {
-      if (!w.stream || !w.model.lines) continue;
-      const now = new Date();
-      const t = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
-      w.model.lines = [...w.model.lines.slice(-14), `${t}  web-api  GET /healthz 200 1ms`];
-      w.stream.innerHTML = w.model.lines.map((l) => { const [time, src, ...msg] = l.split("  "); return `<span class="cl-log-time">${time}</span>  <span class="cl-log-src">${src}</span>  ${msg.join("  ")}`; }).join("\n");
-      w.stream.scrollTop = w.stream.scrollHeight;
+    if (document.hidden) return; // a hidden page does nothing
+    // One line, or a short burst now and then, like a service under a little load.
+    const burst = logSerial % 7 === 0 ? 3 : 1;
+    for (let k = 0; k < burst; k++, logSerial++) {
+      const line = logLine(logSerial, Date.now());
+      for (const c of cx.views.values()) for (const w of c.wins.values()) {
+        if (!w.pushLog || !w.model.lines || !w.card.root.hasAttribute("data-onscreen")) continue;
+        w.model.lines = [...w.model.lines.slice(-499), line];
+        w.pushLog(line);
+      }
     }
   }, 1600);
   // The live terminal's test double starts empty; give it one prompt so the window reads as a shell.
@@ -199,6 +205,18 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     setCamera: (cx_: number, cy: number, z: number) => { cx.nav.applyCanvasLock(false); camera.set({ cx: cx_, cy, z }); },
     flyCamera: (cx_: number, cy: number, z: number) => { cx.nav.applyCanvasLock(false); camera.flyTo(() => ({ cx: cx_, cy, z })); },
     views: () => [...cx.views.values()].map((c) => ({ id: c.view.id, name: c.view.name, team: Boolean(c.view.team), x: c.x, y: c.y, w: boxOf(c.view, state.metrics).w, h: boxOf(c.view, state.metrics).h, windows: [...c.wins.keys()] })),
+    /** A new session on the host in its own window (the inventory creates it, as a split does). */
+    newShell: (host: string): string | undefined => {
+      const rec = inventory.create?.(host);
+      if (rec) cx.win.openSession(host, rec.id);
+      return rec?.id;
+    },
+    /** Makes a window active by its id, as a press on it does (the recency list records it, #121). */
+    activateWindow: (id: string): boolean => {
+      const rec = [...cx.views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === id);
+      if (rec) cx.win.setActive(rec);
+      return Boolean(rec);
+    },
     grants: () => world.grants.map((g) => ({ ...g })),
     flyView: (id: ViewId) => cx.nav.flyView(id),
     /** Runs an appearance action (`theme:mocha`, `card:3`, `windows:4`, `bg:mesh`) as the palette does. */
@@ -211,7 +229,6 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     setRole: (r: Role) => { world.role = r; world.forcedRole = true; goScene(4); },
     canvasLock: () => ({ on: state.canvasLock, index: state.snapIdx, stops: (() => { const c = cx.views.get(state.currentView); return c ? cx.nav.stopsFor(c).lefts.length : 0; })(), view: state.currentView }),
     setCanvasLock: (on: boolean) => cx.nav.setCanvasLock(on),
-    reachFor: () => cx.mesh?.reachFor()?.model.id,
     /** The fake Mesh server and what the Mesh view has on screen (specs drive and read these). */
     mesh: {
       server: () => mesh.server,
@@ -223,7 +240,6 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       /** The saved canvas document (what a reload would restore). */
       document: () => cx.adapters.store.load(),
     },
-    reachCount: () => cx.mesh?.reachCount() ?? 0,
     sessions: () => ({ status: inventory.status(), hosts: inventory.hosts().map((host) => ({ host, sessions: inventory.list(host).map((s) => ({ id: s.id, name: s.name, state: s.state, activity: s.activity ?? null, pinned: s.pinned })) })) }),
     runSessionScene: (n: number) => sessionScenes.run(n),
   };

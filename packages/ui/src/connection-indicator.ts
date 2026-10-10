@@ -7,7 +7,9 @@
  * - connecting / reconnecting: an arc turning around a faint ring (a turn every 900 ms).
  * - connected: a calm green dot with a still halo. Nothing moves while the link is healthy, so
  *   an idle terminal schedules no animation frames [81].
- * - slow: an amber dot whose halo breathes outward, only while the round trip stays high.
+ * - slow: an amber dot whose halo breathes outward three times when the link turns slow, then rests as a still amber
+ *   dot (a looping animation would keep the compositor drawing frames, and re-blurring the glass under it, for as long
+ *   as the link is slow; an idle page must do no work).
  * - resumed: a tick pops in over the dot and settles back to "connected" by itself.
  * - approximate: a screen with its lower half filled (the picture was rebuilt, not replayed);
  *   it settles back to "connected" after a few seconds, longer than a tick so it is read.
@@ -53,6 +55,8 @@ export interface ConnectionIndicator {
   dispose(): void;
 }
 
+/** Three breaths of 1.7 s (see styles.css). */
+const BREATH_MS = 5100;
 const SETTLE_MS: Partial<Record<ConnectionIndicatorState, number>> = { resumed: 1800, approximate: 3200 };
 
 const GLYPHS = `
@@ -101,6 +105,7 @@ export function createConnectionIndicator(options: ConnectionIndicatorOptions = 
   let settle = 0;
   let sentence = "";
   let touch = false;
+  let lastBreath = -Infinity;
 
   const effective = (): ConnectionIndicatorState => (base === "connected" && slow ? "slow" : base);
   const render = (): void => {
@@ -109,6 +114,10 @@ export function createConnectionIndicator(options: ConnectionIndicatorOptions = 
     const changed = next !== shown;
     shown = next;
     root.dataset.state = next;
+    // The breath plays once per entry into "slow" (the animation is finite): start it again by switching to its twin
+    // (`getAnimations()` would flush style for the whole document, and a page with many terminals samples round trips
+    // all the time, so the state can flap), and not more often than the breath lasts.
+    if (changed && next === "slow" && performance.now() - lastBreath > BREATH_MS) { lastBreath = performance.now(); root.dataset.breath = root.dataset.breath === "1" ? "0" : "1"; }
     // The glyph a state uses: slow and connected are two colourings of the same dot.
     if (text !== sentence) {
       sentence = text;

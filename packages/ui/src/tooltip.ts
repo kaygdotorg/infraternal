@@ -73,6 +73,10 @@ const STYLE = `
 .ui-confirm-tip button:focus { outline: none; }
 :root[data-focus-ring="on"] .ui-confirm-tip button:focus-visible { outline: 2px solid color-mix(in oklab, var(--fg) 55%, transparent); outline-offset: 2px; }
 @media (hover: hover) and (pointer: fine) { .ui-confirm-tip button:not(.ui-confirm-yes):hover { background: var(--hover); color: var(--fg); } }
+/* The overlay material gives its text a soft halo in the tint colour (styles.css), meant for text that sits straight on
+   a busy terminal. The confirmation is a near-opaque card of its own, where the halo is only a dark smear around the
+   glyphs (it read as blurred text on the confirm button and the grey effect line), so nothing inside it takes one. */
+.ui-confirm-tip, .ui-confirm-tip * { text-shadow: none; }
 .ui-confirm-tip .ui-confirm-yes { background: var(--fg); color: var(--bg); }
 .ui-confirm-tip .ui-confirm-yes svg { stroke-width: 2; }
 /* Named actions: the two buttons carry their words. */
@@ -121,6 +125,9 @@ export interface ConfirmTipOptions {
   message?: string;
   /** One secondary line explaining the consequence (the earlier name of `effect`). */
   detail?: string;
+  /** The same two lines with entity chips in them (`entityText`); they replace `title` and `effect` on screen, which stay the plain text. */
+  titleNode?: Node;
+  effectNode?: Node;
   confirmLabel: string;
   cancelLabel: string;
   onConfirm(): void;
@@ -154,13 +161,13 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   text.className = "ui-confirm-tip-text";
   const message = document.createElement("p");
   message.className = "ui-confirm-tip-message";
-  message.textContent = options.title ?? options.message ?? options.label;
+  if (options.titleNode) message.append(options.titleNode); else message.textContent = options.title ?? options.message ?? options.label;
   text.append(message);
   const effectText = options.effect ?? options.detail;
-  if (effectText) {
+  if (effectText || options.effectNode) {
     const detail = document.createElement("p");
     detail.className = "ui-confirm-tip-detail";
-    detail.textContent = effectText;
+    if (options.effectNode) detail.append(options.effectNode); else detail.textContent = effectText!;
     text.append(detail);
   }
 
@@ -278,8 +285,10 @@ function triggerOf(target: EventTarget | null): HTMLElement | null {
   const el = target.closest<HTMLElement>("[data-tip], button[aria-label], a[aria-label]");
   if (!el || el.closest("[data-tip-off]")) return null;
   if (el.dataset.tip) return el;
-  // Icon-only: no visible text of its own (SVG titles do not count).
-  const text = [...el.childNodes].some((n) => n.nodeType === 3 ? n.textContent!.trim() : n instanceof HTMLElement && !(n instanceof SVGElement) && n.innerText?.trim());
+  // Icon-only: no text of its own (SVG titles do not count). textContent, not innerText: a row whose text is
+  // momentarily not rendered (a hidden span, an animating list) still has a name of its own, so its aria-label is
+  // never shown as a tooltip.
+  const text = [...el.childNodes].some((n) => n.nodeType === 3 ? n.textContent!.trim() : n instanceof HTMLElement && !(n instanceof SVGElement) && n.textContent?.trim());
   return text ? null : el;
 }
 
@@ -341,6 +350,7 @@ function show(el: HTMLElement, how: "pop" | "instant") {
     arrow.animate([{ opacity: 0 }, { opacity: 1 }], { duration: POP, easing: EASE });
   }
   shown = true;
+  watch();
 }
 
 function hide(instant = false) {
@@ -354,6 +364,20 @@ function hide(instant = false) {
 }
 
 const warm = () => shown || performance.now() < warmUntil;
+
+/** Hides any tooltip at once (a view change, a flight, a page that lost focus). */
+export function hideTips(): void { hide(true); }
+
+/** How the open tooltip was asked for: a hover tip lives only while its element is connected and hovered. */
+let byHover = false;
+let watchdog = 0;
+function watch(): void {
+  window.clearInterval(watchdog);
+  watchdog = window.setInterval(() => {
+    if (!shown || !current) { window.clearInterval(watchdog); return; }
+    if (!current.isConnected || (byHover && !current.matches(":hover"))) hide(true);
+  }, 200);
+}
 
 /** Re-reads the label of `el` if its tooltip is open (for live labels like "Copied"). */
 export function refreshTip(el: HTMLElement) {
@@ -371,6 +395,7 @@ export function flashTip(el: HTMLElement, text: string, duration = 900): void {
   if (pending) clearTimeout(pending.timer);
   const normalTip = pending ? pending.previous : el.dataset.tip;
   el.dataset.tip = text;
+  byHover = false;
   show(el, shown ? "instant" : "pop");
   const timer = window.setTimeout(() => {
     const active = temporaryTips.get(el);
@@ -389,6 +414,7 @@ export function flashTip(el: HTMLElement, text: string, duration = 900): void {
  * never closed by it.
  */
 export function peekTip(el: HTMLElement, duration = 2600): void {
+  byHover = false;
   show(el, shown ? "instant" : "pop");
   const mine = current;
   window.clearTimeout(closeTimer);
@@ -403,8 +429,9 @@ export function installTooltips() {
     const el = triggerOf(e.target);
     if (!el) return;
     if (el === current) { clearTimeout(closeTimer); return; }
-    if (warm()) show(el, "instant");
-    else { clearTimeout(openTimer); openTimer = window.setTimeout(() => show(el, "pop"), DELAY); current = el; }
+    const open = (how: "pop" | "instant"): void => { if (el.isConnected && el.matches(":hover")) { byHover = true; show(el, how); } };
+    if (warm()) open("instant");
+    else { clearTimeout(openTimer); openTimer = window.setTimeout(() => open("pop"), DELAY); current = el; }
   });
   document.addEventListener("pointerout", (e) => {
     if (e.pointerType === "touch") return;
@@ -418,7 +445,7 @@ export function installTooltips() {
   document.addEventListener("focusin", (e) => {
     const el = triggerOf(e.target);
     // Only real Tab navigation shows a tooltip on focus; programmatic focus stays quiet.
-    if (el && document.documentElement.dataset.focusRing === "on" && (e.target as HTMLElement).matches(":focus-visible")) show(el, "instant");
+    if (el && document.documentElement.dataset.focusRing === "on" && (e.target as HTMLElement).matches(":focus-visible")) { byHover = false; show(el, "instant"); }
   });
   document.addEventListener("focusout", (e) => { if (triggerOf(e.target) === current) hide(true); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") hide(true); });
@@ -429,7 +456,7 @@ export function installTooltips() {
     if (!el) return;
     press0 = { x: e.clientX, y: e.clientY };
     clearTimeout(pressTimer);
-    pressTimer = window.setTimeout(() => { swallowClick = true; show(el, "pop"); }, LONG_PRESS);
+    pressTimer = window.setTimeout(() => { swallowClick = true; byHover = false; show(el, "pop"); }, LONG_PRESS);
   }, true);
   document.addEventListener("pointermove", (e) => {
     if (press0 && Math.hypot(e.clientX - press0.x, e.clientY - press0.y) > SLOP) { clearTimeout(pressTimer); press0 = null; }
@@ -446,4 +473,5 @@ export function installTooltips() {
     if (r.bottom < 0 || r.top > innerHeight) hide(true); else place(current, false);
   }, true);
   addEventListener("resize", () => hide(true));
+  addEventListener("blur", () => hide(true));
 }

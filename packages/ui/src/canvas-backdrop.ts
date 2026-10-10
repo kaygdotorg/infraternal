@@ -13,6 +13,14 @@
  * spacing and its offset is the camera modulo one tile, so panning is a translate and the dots stay on world
  * multiples. At most two layers exist during a crossfade; the others are `hidden` and hold no surface.
  *
+ * Zoom without repainting. A layer's tiles are painted at the zoom it was last "snapped" at (`z0`); while the camera
+ * zooms, the layer is only scaled by `z / z0` on the compositor (transform), so a pinch or a wheel zoom repaints and
+ * rasters nothing per frame (measured with 55 windows at DPR 2: a zoom frame cost about twice the main-thread time
+ * and three times the raster time when `background-size` was rewritten every frame). The layer is made big enough to
+ * still cover the screen when scaled down to `MIN_SCALE`; only the tiles on screen are ever rastered, so the bigger
+ * box costs no memory. A layer is snapped again (one repaint) when it was scaled outside [MIN_SCALE, MAX_SCALE], when
+ * the screen size changed, and when the camera comes to rest at another zoom, so a resting canvas has crisp dots.
+ *
  * Level of detail: layer k has spacing `gap * 2^k`. Below 50 % zoom the next, sparser layer fades in while the
  * denser one fades out: the grid thins to every second dot with a crossfade and never becomes noise.
  *
@@ -21,11 +29,18 @@
  * `--ui-gradient-opacity` (how strongly the gradient shows) and `--ui-dot-fill` (the gradient itself).
  */
 const LEVELS = 4;
+/** How far a layer may be scaled from the zoom it was painted at before it is painted again. */
+const MIN_SCALE = 0.6;
+const MAX_SCALE = 1.7;
+/** At rest a layer within this of its painted zoom is left alone (a repaint for 1 % would only move dots by sub-pixels). */
+const REST_TOLERANCE = 0.01;
+
+interface Snap { z0: number; vw: number; vh: number }
 
 export interface CanvasBackdrop {
   readonly root: HTMLElement;
   /** Places the dots for a camera: `tx`, `ty` are the world origin on screen, `z` the zoom. */
-  update(tx: number, ty: number, z: number, viewWidth: number, viewHeight: number): void;
+  update(tx: number, ty: number, z: number, viewWidth: number, viewHeight: number, atRest?: boolean): void;
   /** Frees every layer's surface (a hidden page holds nothing); the next `update` brings them back. */
   release(): void;
   dispose(): void;
@@ -43,6 +58,7 @@ export function createCanvasBackdrop(parent: HTMLElement): CanvasBackdrop {
     layer.className = "ui-canvas-backdrop-layer";
     layer.dataset.level = String(k);
     layer.hidden = true;
+    layer.style.transformOrigin = "0 0";
     root.append(layer);
     return layer;
   });
@@ -50,7 +66,8 @@ export function createCanvasBackdrop(parent: HTMLElement): CanvasBackdrop {
 
   let gap = 22;
   let measured = false;
-  const update = (tx: number, ty: number, z: number, viewWidth: number, viewHeight: number): void => {
+  const snaps: Array<Snap | undefined> = Array.from({ length: LEVELS });
+  const update = (tx: number, ty: number, z: number, viewWidth: number, viewHeight: number, atRest = false): void => {
     if (!measured) { measured = true; gap = Number.parseFloat(getComputedStyle(root).getPropertyValue("--ui-dot-gap")) || 22; }
     const level = Math.min(LEVELS - 1, Math.max(0, -Math.log2(z) - 1));
     const lo = Math.floor(level), hi = Math.min(LEVELS - 1, lo + 1), f = level - lo;
@@ -60,20 +77,23 @@ export function createCanvasBackdrop(parent: HTMLElement): CanvasBackdrop {
       if (weight === 0) { if (!layer.hidden) layer.hidden = true; return; }
       if (layer.hidden) layer.hidden = false;
       layer.style.opacity = String(weight);
-      // Screen spacing of this level's dots. The layer is one screen (plus one tile of margin on each side), never
-      // the world: its tile size follows the zoom and its offset is the camera modulo one tile, so memory stays at
-      // about one viewport at any zoom and any world size. Dots sit at the tile centres, on world multiples of
-      // `gap * 2^k`, so they move exactly with the windows.
+      // Screen spacing of this level's dots. Its offset is the camera modulo one tile, so a pan is a translate and
+      // the dots stay on world multiples (`gap * 2^k`), moving exactly with the windows.
       const spacing = gap * 2 ** k * z;
+      let snap = snaps[k];
+      const scale = snap ? z / snap.z0 : 0;
+      if (!snap || scale < MIN_SCALE || scale > MAX_SCALE || snap.vw !== viewWidth || snap.vh !== viewHeight || (atRest && Math.abs(scale - 1) > REST_TOLERANCE)) {
+        // Paint the tiles at this zoom. The box covers the screen at the smallest scale it may be shown at.
+        snap = snaps[k] = { z0: z, vw: viewWidth, vh: viewHeight };
+        layer.style.backgroundSize = `${spacing}px ${spacing}px`;
+        layer.style.width = `${Math.ceil(viewWidth / MIN_SCALE + 2 * spacing)}px`;
+        layer.style.height = `${Math.ceil(viewHeight / MIN_SCALE + 2 * spacing)}px`;
+      }
       const ox = ((((tx - spacing / 2) % spacing) + spacing) % spacing) - spacing;
       const oy = ((((ty - spacing / 2) % spacing) + spacing) % spacing) - spacing;
-      const w = `${Math.ceil(viewWidth + 2 * spacing)}px`, h = `${Math.ceil(viewHeight + 2 * spacing)}px`;
-      if (layer.style.width !== w) layer.style.width = w;
-      if (layer.style.height !== h) layer.style.height = h;
-      layer.style.backgroundSize = `${spacing}px ${spacing}px`;
-      layer.style.transform = `translate3d(${ox}px, ${oy}px, 0)`;
+      layer.style.transform = `translate3d(${ox}px, ${oy}px, 0) scale(${z / snap.z0})`;
     });
   };
-  const release = (): void => { for (const layer of layers) { layer.hidden = true; layer.style.willChange = "auto"; } };
+  const release = (): void => { for (const layer of layers) { layer.hidden = true; layer.style.willChange = "auto"; } snaps.fill(undefined); };
   return { root, update, release, dispose() { root.remove(); } };
 }

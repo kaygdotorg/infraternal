@@ -16,6 +16,7 @@
  * Round trips: pings are sampled on attachment and on typing, at most one per 2 s, and only while a stream is
  * attached; an idle connection schedules no wakeups [81].
  */
+import { noteWsMessage } from "./perf-activity";
 import { plainCloseReason } from "./close-reasons";
 import {
   WebSocketFrameDecoder,
@@ -39,6 +40,15 @@ export class ActionRefused extends Error {
  * starts a fresh one (see `openStream`); the open streams re-attach from the start, as a reload would.
  */
 const WRITER_ROTATE_AT = 28;
+/**
+ * Terminals one socket carries. The server accepts 32 attachments per socket and refuses the rest, so a page with more
+ * windows than that must not put them on one socket: with 54 windows on one, every connect attached 32 and failed the
+ * rest, the connection rotated, and the page reconnected about once a second, re-attaching and re-painting every
+ * window each time (165 sockets in three minutes, 270 ms of main-thread CPU per second at idle). Fewer than the cap
+ * leaves room for the rotation above.
+ */
+export const STREAMS_PER_SOCKET = 28;
+const MAX_SOCKETS = 12;
 const VERSION = 1;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
@@ -311,6 +321,7 @@ export class MuxConnection {
     socket.onmessage = (event: MessageEvent<ArrayBuffer>) => {
       const receivedAt = performance.now();
       if (!(event.data instanceof ArrayBuffer)) { this.fail("server sent a non-binary frame"); return; }
+      noteWsMessage(event.data.byteLength);
       try {
         const message = new Uint8Array(event.data);
         this.decoder?.feed(message, (streamId, frame) => this.dispatch(streamId, frame, message, receivedAt));
@@ -439,4 +450,33 @@ function refusalReason(body: Uint8Array): string | undefined {
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("result is not an object");
   return value as Record<string, unknown>;
+}
+
+/**
+ * The sockets a page's terminals share. The first is the page's main connection (it also carries the control stream's
+ * subscriptions and calls: Mesh, host facts, recovery); more are opened only when the terminals outgrow it, each
+ * carrying up to `STREAMS_PER_SOCKET` of them. A window asks for a connection when its terminal opens and gives it
+ * back when the terminal goes; a connection with room is reused, so closing windows frees capacity.
+ */
+export class ConnectionPool {
+  private readonly all: Array<{ conn: MuxConnection; load: number }>;
+  constructor(primary: MuxConnection, private readonly make: () => MuxConnection = () => new MuxConnection()) {
+    this.all = [{ conn: primary, load: 0 }];
+  }
+  /** The connection for a terminal about to open its stream; call `release` with it when that terminal is gone. */
+  acquire(): MuxConnection {
+    let slot = this.all.find((c) => c.load < STREAMS_PER_SOCKET);
+    if (!slot && this.all.length < MAX_SOCKETS) { slot = { conn: this.make(), load: 0 }; this.all.push(slot); }
+    // Beyond the cap of sockets the least loaded one takes it (it rotates, as before; far more windows than any person has).
+    slot ??= this.all.reduce((a, b) => (b.load < a.load ? b : a));
+    slot.load++;
+    return slot.conn;
+  }
+  release(conn: MuxConnection): void {
+    const slot = this.all.find((c) => c.conn === conn);
+    if (slot && slot.load > 0) slot.load--;
+  }
+  /** Closes the extra sockets (the primary belongs to the page). */
+  dispose(): void { for (const { conn } of this.all.slice(1)) conn.dispose(); this.all.length = 1; }
+  get sockets(): number { return this.all.length; }
 }

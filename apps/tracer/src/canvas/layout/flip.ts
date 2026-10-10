@@ -1,12 +1,13 @@
 /**
  * FLIP reflows: when a layout changes (a window opens, closes, moves, a column resizes), every element that
- * moved animates from where it was to where it is, on one spring per element. The caller measures first,
- * changes the layout, then plays. Only `transform` is animated, in world units (the camera zoom is divided
- * out), and a new measure of an element that is still animating jumps it to rest first so the "first"
- * position is always the true one. Reduced motion skips the animation.
+ * moved animates from where it was to where it is with the spring's curve. Only `transform` is animated, in world
+ * units (the camera zoom is divided out), and as a Web Animation: the browser runs it on the compositor, so a reflow
+ * costs the main thread nothing per frame (a per-frame style write per element was 80-100 ms of Layerize and Commit for
+ * one close). The spring is sampled once per configuration into a `linear()` easing that overshoots like the spring
+ * does. The caller measures first, changes the layout, then plays; a new measure of an element that is still animating
+ * cancels it so the "first" position is always the true one. Reduced motion skips the animation.
  */
-import { Spring } from "../../../../../packages/ui/src/spring";
-import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
+import { zetaOf } from "../../../../../packages/ui/src/spring";
 
 export interface Flip {
   /** Records where the elements are now. */
@@ -17,21 +18,50 @@ export interface Flip {
   targets(colsEl: HTMLElement): HTMLElement[];
 }
 
-export function createFlip(zoom: () => number, invalidate: () => void): Flip {
+/** A spring's progress from 1 (where the element was) to 0 (where it is), sampled into a CSS easing. */
+const easings = new Map<string, { css: string; duration: number }>();
+function springEasing(cfg: { visualDuration: number; bounce: number }): { css: string; duration: number } {
+  const key = `${cfg.visualDuration}/${cfg.bounce}`;
+  const hit = easings.get(key);
+  if (hit) return hit;
+  // The same physics as `Spring`: omega from the visual duration, damping from the bounce.
+  const omega = (2 * Math.PI) / (cfg.visualDuration * 1.2), k = omega * omega, c = 2 * zetaOf(cfg.bounce) * omega;
+  const h = 1 / 240, every = 4; // a sample every 1/60 s
+  let x = 1, v = 0, t = 0;
+  const points = [0];
+  while (t < 3) {
+    for (let i = 0; i < every; i++) { v += (-k * x - c * v) * h; x += v * h; t += h; }
+    points.push(1 - x);
+    if (Math.abs(x) < 0.0005 && Math.abs(v) < 0.03) break;
+  }
+  points[points.length - 1] = 1;
+  const out = { css: `linear(${points.map((p) => p.toFixed(4)).join(", ")})`, duration: Math.round(t * 1000) };
+  easings.set(key, out);
+  return out;
+}
+
+/**
+ * `tick` runs once per frame while any reflow animation plays: the canvas redraws what follows the windows (arrows and
+ * ports) from it. It must not write styles of the moving elements.
+ */
+export function createFlip(zoom: () => number, tick: () => void): Flip {
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
-  const springs = new WeakMap<HTMLElement, Spring>();
+  const running = new Map<HTMLElement, Animation>();
+  let raf = 0;
+  const loop = (): void => { raf = running.size ? requestAnimationFrame(loop) : 0; if (running.size) tick(); };
   return {
     measure(nodes) {
       const out = new Map<HTMLElement, DOMRect>();
       for (const n of nodes) {
         out.set(n, n.getBoundingClientRect());
-        springs.get(n)?.set(0, true);
+        running.get(n)?.cancel();
       }
       return out;
     },
     play(first, scale = false, cfg = { visualDuration: 0.5, bounce: 0.22 }) {
       if (reduced.matches) return;
       const z = zoom();
+      const { css, duration } = springEasing(cfg);
       for (const [n, a] of first) {
         if (!n.isConnected) continue;
         const b = n.getBoundingClientRect();
@@ -39,16 +69,21 @@ export function createFlip(zoom: () => number, invalidate: () => void): Flip {
         const sw = scale && b.width ? a.width / b.width : 1, sh = scale && b.height ? a.height / b.height : 1;
         if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sw - 1) < 0.01 && Math.abs(sh - 1) < 0.01) continue;
         n.style.transformOrigin = "0 0";
-        const spring = new Spring(1, (p) => {
-          if (p === 0) { n.style.transform = ""; n.style.transformOrigin = ""; invalidate(); return; }
-          n.style.transform = `translate(${dx * p}px, ${dy * p}px)${scale ? ` scale(${1 + (sw - 1) * p}, ${1 + (sh - 1) * p})` : ""}`;
-          invalidate();
-        }, cfg);
-        // Progress p moves the element by dx * p: it rests when that is under a quarter of a device pixel.
-        restAt(spring, Math.min(SCALE_REST * 4, quarterDevicePx() / Math.max(1, Math.abs(dx), Math.abs(dy)), scale ? SCALE_REST / Math.max(Math.abs(sw - 1), Math.abs(sh - 1), 0.001) : 1));
-        springs.set(n, spring);
-        spring.set(0);
+        const from = `translate(${dx}px, ${dy}px)${scale ? ` scale(${sw}, ${sh})` : ""}`;
+        const to = `translate(0px, 0px)${scale ? " scale(1, 1)" : ""}`;
+        running.get(n)?.cancel();
+        const anim = n.animate([{ transform: from }, { transform: to }], { duration, easing: css });
+        running.set(n, anim);
+        const done = (): void => {
+          if (running.get(n) !== anim) return; // replaced by a newer reflow: it owns the origin now
+          running.delete(n);
+          n.style.transformOrigin = "";
+          tick();
+        };
+        anim.onfinish = done;
+        anim.oncancel = done;
       }
+      if (running.size && !raf) raf = requestAnimationFrame(loop);
     },
     targets: (colsEl) => [...colsEl.querySelectorAll<HTMLElement>(".ui-window, .cl-slot, .cl-col")],
   };

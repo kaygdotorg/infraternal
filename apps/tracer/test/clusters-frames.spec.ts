@@ -60,7 +60,7 @@ for (const rate of [1, 4]) {
   test(`frames: a 2 s zoom and a 2 s pan on the free canvas at ${rate}x CPU`, async ({ page, browser }) => {
     test.setTimeout(90_000);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto("/?mock=1&proto=clusters&scene=7&theme=ink&bg=soft");
+    await page.goto(`/?mock=1&proto=clusters&scene=7&theme=ink&bg=soft${process.env.FRAMES_QUERY ?? ""}`);
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     if (process.env.EXTRA_CSS) await page.addStyleTag({ content: process.env.EXTRA_CSS });
     await page.waitForTimeout(800);

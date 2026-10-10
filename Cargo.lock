@@ -726,6 +726,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "enum-as-inner"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1e6a265c649f3f5979b601d26f1d05ada116434c87741c9493cb56218f76cbc"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1288,6 +1300,8 @@ dependencies = [
  "infraternal-mesh",
  "infraternal-plugin-api",
  "infraternal-plugin-backup",
+ "infraternal-plugin-host-facts",
+ "infraternal-plugin-mesh",
  "infraternal-plugin-relay",
  "infraternal-plugin-ssh",
  "infraternal-server",
@@ -1305,6 +1319,7 @@ name = "infraternal-agent"
 version = "0.1.0"
 dependencies = [
  "infraternal-plugin-api",
+ "infraternal-plugin-host-facts",
  "infraternal-protocol",
  "infraternal-shim",
  "nix",
@@ -1318,6 +1333,9 @@ dependencies = [
 name = "infraternal-fuzz"
 version = "0.1.0"
 dependencies = [
+ "infraternal-plugin-api",
+ "infraternal-plugin-host-facts",
+ "infraternal-plugin-mesh",
  "infraternal-protocol",
  "infraternal-shim",
  "libfuzzer-sys",
@@ -1338,7 +1356,11 @@ dependencies = [
 name = "infraternal-plugin-api"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]
@@ -1346,6 +1368,33 @@ name = "infraternal-plugin-backup"
 version = "0.1.0"
 dependencies = [
  "infraternal-plugin-api",
+]
+
+[[package]]
+name = "infraternal-plugin-host-facts"
+version = "0.1.0"
+dependencies = [
+ "infraternal-plugin-api",
+ "infraternal-protocol",
+ "nix",
+ "serde",
+ "serde_json",
+ "sysctl",
+]
+
+[[package]]
+name = "infraternal-plugin-mesh"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "infraternal-mesh",
+ "infraternal-plugin-api",
+ "infraternal-protocol",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]
@@ -1385,6 +1434,7 @@ dependencies = [
  "hkdf",
  "http-body-util",
  "infraternal-plugin-api",
+ "infraternal-plugin-mesh",
  "infraternal-protocol",
  "nix",
  "openssl",
@@ -2719,6 +2769,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "sysctl"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cca424247104946a59dacd27eaad296223b7feec3d168a6dd04585183091eb0b"
+dependencies = [
+ "bitflags",
+ "byteorder",
+ "enum-as-inner",
+ "libc",
+ "thiserror 2.0.21",
+ "walkdir",
 ]
 
 [[package]]

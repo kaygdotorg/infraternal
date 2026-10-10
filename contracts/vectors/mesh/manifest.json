@@ -1,0 +1,478 @@
+{
+  "_comment": "Golden JSON payloads for the additive Mesh control-plane contract; comparisons are semantic JSON values.",
+  "actions": [
+    {
+      "action": "mesh.list",
+      "input": {
+        "tag": "prod"
+      }
+    },
+    {
+      "action": "mesh.node.enroll",
+      "input": {
+        "name": "db-1",
+        "public_key": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "action": "mesh.node.observe",
+      "input": {
+        "node_id": 7,
+        "last_rtt_us": 1234
+      }
+    },
+    {
+      "action": "mesh.node.rename",
+      "input": {
+        "node_id": 7,
+        "name": "db-primary"
+      }
+    },
+    {
+      "action": "mesh.node.delete",
+      "input": {
+        "node_id": 7
+      }
+    },
+    {
+      "action": "mesh.tag.create",
+      "input": {
+        "name": "prod"
+      }
+    },
+    {
+      "action": "mesh.tag.rename",
+      "input": {
+        "name": "prod",
+        "new_name": "production"
+      }
+    },
+    {
+      "action": "mesh.tag.delete",
+      "input": {
+        "name": "prod"
+      }
+    },
+    {
+      "action": "mesh.tag.member.add",
+      "input": {
+        "tag": "prod",
+        "node_id": 7
+      }
+    },
+    {
+      "action": "mesh.tag.member.remove",
+      "input": {
+        "tag": "prod",
+        "node_id": 7
+      }
+    },
+    {
+      "action": "mesh.grant.create",
+      "input": {
+        "name": "web",
+        "from": {
+          "Tag": "prod"
+        },
+        "to": {
+          "Node": 7
+        },
+        "both_ways": false,
+        "ports": {
+          "Ports": [
+            {
+              "protocol": "Tcp",
+              "number": 443
+            }
+          ]
+        }
+      }
+    },
+    {
+      "action": "mesh.grant.move",
+      "input": {
+        "name": "web",
+        "side": "to",
+        "endpoint": {
+          "Tag": "frontend"
+        }
+      }
+    },
+    {
+      "action": "mesh.grant.delete",
+      "input": {
+        "name": "web"
+      }
+    },
+    {
+      "action": "mesh.grant.rename",
+      "input": {
+        "name": "web",
+        "new_name": "web-prod"
+      }
+    },
+    {
+      "action": "mesh.role.define",
+      "input": {
+        "name": "prod-grants",
+        "actions": [
+          "mesh.manage_grants"
+        ],
+        "scopes": [
+          "prod"
+        ]
+      }
+    },
+    {
+      "action": "mesh.role.assign",
+      "input": {
+        "user_id": "user-1",
+        "role": "prod-grants"
+      }
+    }
+  ],
+  "results": [
+    {
+      "action": "mesh.list",
+      "value": {
+        "revision": 7,
+        "nodes": [
+          {
+            "node": {
+              "id": 7,
+              "public_key": [
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1
+              ],
+              "host": "db-1",
+              "tags": [
+                "prod"
+              ]
+            },
+            "live": true,
+            "last_seen": 1800000000,
+            "last_rtt_us": 1234
+          }
+        ],
+        "tags": [
+          {
+            "name": "prod",
+            "members": [
+              7
+            ]
+          }
+        ],
+        "grants": [
+          {
+            "name": "web",
+            "arrow": {
+              "id": 11,
+              "from": {
+                "Tag": "prod"
+              },
+              "to": {
+                "Node": 7
+              },
+              "both_ways": false,
+              "ports": {
+                "Ports": [
+                  {
+                    "protocol": "Tcp",
+                    "number": 443
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "action": "mesh.node.enroll",
+      "value": {
+        "node_id": 8,
+        "revision": 8
+      }
+    },
+    {
+      "action": "mesh.grant.create",
+      "value": {
+        "grant_id": 11,
+        "revision": 9
+      }
+    },
+    {
+      "action": "mesh.tag.member.add",
+      "value": {
+        "revision": 10
+      }
+    }
+  ],
+  "subscriptions": [
+    {
+      "filter": {
+        "topic": "mesh",
+        "tag": "prod"
+      },
+      "event": {
+        "type": "snapshot",
+        "snapshot": {
+          "revision": 7,
+          "nodes": [
+            {
+              "node": {
+                "id": 7,
+                "public_key": [
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1
+                ],
+                "host": "db-1",
+                "tags": [
+                  "prod"
+                ]
+              },
+              "live": true,
+              "last_seen": 1800000000,
+              "last_rtt_us": 1234
+            }
+          ],
+          "tags": [
+            {
+              "name": "prod",
+              "members": [
+                7
+              ]
+            }
+          ],
+          "grants": [
+            {
+              "name": "web",
+              "arrow": {
+                "id": 11,
+                "from": {
+                  "Tag": "prod"
+                },
+                "to": {
+                  "Node": 7
+                },
+                "both_ways": false,
+                "ports": {
+                  "Ports": [
+                    {
+                      "protocol": "Tcp",
+                      "number": 443
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "filter": {
+        "topic": "mesh",
+        "tag": "prod"
+      },
+      "event": {
+        "type": "changed",
+        "revision": 8
+      }
+    },
+    {
+      "filter": {
+        "topic": "mesh",
+        "tag": "prod"
+      },
+      "event": {
+        "type": "resync",
+        "snapshot": {
+          "revision": 8,
+          "nodes": [
+            {
+              "node": {
+                "id": 7,
+                "public_key": [
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1,
+                  1
+                ],
+                "host": "db-1",
+                "tags": [
+                  "prod"
+                ]
+              },
+              "live": true,
+              "last_seen": 1800000000,
+              "last_rtt_us": 1234
+            }
+          ],
+          "tags": [
+            {
+              "name": "prod",
+              "members": [
+                7
+              ]
+            }
+          ],
+          "grants": [
+            {
+              "name": "web",
+              "arrow": {
+                "id": 11,
+                "from": {
+                  "Tag": "prod"
+                },
+                "to": {
+                  "Node": 7
+                },
+                "both_ways": false,
+                "ports": {
+                  "Ports": [
+                    {
+                      "protocol": "Tcp",
+                      "number": 443
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "filter": {
+        "topic": "mesh",
+        "tag": "prod"
+      },
+      "event": {
+        "type": "error",
+        "error": "forbidden"
+      }
+    }
+  ]
+}

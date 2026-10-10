@@ -104,9 +104,13 @@ rust_check_cli_plugin_compile_out() {
         infraternal-agent
         infraternal-mesh
         infraternal-plugin-backup
+        infraternal-plugin-host-facts
+        infraternal-plugin-mesh
         infraternal-plugin-relay
         infraternal-plugin-ssh
         infraternal-server
+        sqlx
+        tokio
     )
 
     dependency_tree="$(cargo tree --locked --package infraternal --no-default-features --edges normal --prefix none)" || return $?

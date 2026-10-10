@@ -17,6 +17,7 @@ import type { WindowModel } from "../model/types";
 import { ICON, SESSION_ICON, iconFor } from "../views/icons";
 import { isTerminal, makeBody } from "../views/body";
 import { beginMove } from "./move";
+import { RecentList } from "../recency";
 
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   const actions: WindowAction[] = [];
@@ -58,6 +59,14 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   return rec;
 }
 
+/** A window made active counts as used: it moves to the front of its view's recency list (#121). */
+function recordUse(state: Ctx["state"], rec: WinRec): void {
+  const view = rec.owner.view.id;
+  let list = state.recent.get(view);
+  if (!list) state.recent.set(view, (list = new RecentList<string>()));
+  list.touch(rec.model.id);
+}
+
 /** Makes `rec` the active window (or none): accent hairline, the binding's focus state, the pill, the toolbar and the tree. */
 export function setActive(cx: Ctx, rec: WinRec | undefined): void {
   const { state } = cx;
@@ -66,6 +75,7 @@ export function setActive(cx: Ctx, rec: WinRec | undefined): void {
   prev?.card.setActive(false);
   prev?.binding?.setActive(false);
   state.activeWin = rec;
+  if (rec) recordUse(state, rec);
   rec?.card.setActive(true);
   rec?.binding?.setActive(true);
   cx.pill.paint();
@@ -83,8 +93,9 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
     if (!isTerminal(rec) || (e.target as Element).closest(".ui-window-head, .ui-window-lock, .ui-window-resize, .cl-sx-strip, .cl-sx-badge")) return;
     rec.binding?.focus();
   }, { signal });
-  // The pill moves the window; it opens nothing.
-  pill.addEventListener("click", (e) => e.preventDefault(), { signal });
+  // The pill moves the window, and a press that does not move opens the details popover (#127). A pointer opens on release
+  // (the press is then known not to be a drag); Enter or Space on the focused pill is a click with no pointer (detail 0).
+  pill.addEventListener("click", (e) => { e.preventDefault(); if (e.detail === 0 && camera.lod !== "thumb") cx.details?.toggle(rec, "keyboard"); }, { signal });
   pill.style.touchAction = "none";
   pill.dataset.grab = "";
   let press: { id: number; x: number; y: number; timer: number; touch: boolean } | undefined;
@@ -92,9 +103,6 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
     if (e.button !== 0 || camera.lod === "thumb" || rec.owner.view.team) return;
     const touch = e.pointerType !== "mouse";
     press = { id: e.pointerId, x: e.clientX, y: e.clientY, touch, timer: 0 };
-    if (touch && rec.model.kind === "terminal" && cx.mesh) {
-      press.timer = window.setTimeout(() => { if (press) { cx.mesh?.showReach(rec, true); press = undefined; } }, 450);
-    }
     pill.setPointerCapture(e.pointerId);
   }, { signal });
   pill.addEventListener("pointermove", (e) => {
@@ -106,7 +114,10 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
     beginMove(cx, rec, e, start);
   }, { signal });
   const release = (e: PointerEvent): void => {
-    if (press && e.pointerId === press.id) { window.clearTimeout(press.timer); press = undefined; }
+    if (!press || e.pointerId !== press.id) return;
+    window.clearTimeout(press.timer);
+    press = undefined;
+    if (e.type === "pointerup") cx.details?.toggle(rec, "pointer");
   };
   pill.addEventListener("pointerup", release, { signal });
   pill.addEventListener("pointercancel", release, { signal });
@@ -114,9 +125,6 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
   if (rec.owner.view.layout === "tiled" && !rec.model.splitOf && !rec.owner.view.team) {
     rec.stopResize = attachWindowResize(rec.card, resizeHost(cx, rec)).dispose;
   }
-  if (!isTerminal(rec)) return;
-  // Arrows on demand (hover on the pill, the port to grant access) belong to the mesh.
-  cx.mesh?.wireTerminal(rec);
 }
 
 /**

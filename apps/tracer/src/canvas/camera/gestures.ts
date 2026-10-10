@@ -18,6 +18,7 @@ import type { Ctx, ViewRec } from "../context";
 import type { Pt } from "../layout/geometry";
 import type { ViewId } from "../model/types";
 import { clamp } from "./camera";
+import { pulseActivity, setActivity } from "../../perf-activity";
 
 export function installGestures(cx: Ctx): void {
   const { viewport, world, signal, camera, state, views } = cx;
@@ -96,6 +97,7 @@ export function installGestures(cx: Ctx): void {
     const lo = st.lefts[0]! + st.view / 2, hi = st.lefts[st.lefts.length - 1]! + st.view / 2;
     let x = two.cx0 - (c.x - two.x) / cam.z;
     if (x < lo) x = lo - Math.min(60, (lo - x) * 0.3); else if (x > hi) x = hi + Math.min(60, (x - hi) * 0.3);
+    setActivity("pan");
     camera.drive({ cx: x });
     two.samples.push({ x: c.x, t: e.timeStamp });
     if (two.samples.length > 6) two.samples.shift();
@@ -156,20 +158,36 @@ export function installGestures(cx: Ctx): void {
     });
     host.dispatchEvent(forwarded);
   }, { passive: false, capture: true, signal });
-  viewport.addEventListener("wheel", (e) => {
+  const onWheel = (e: WheelEvent): void => {
+    // A log view that can scroll the way the wheel goes scrolls itself (to read back); at its end the wheel is the canvas's.
+    const logs = (e.target as Element).closest<HTMLElement>(".cl-logs");
+    if (logs && !(e.ctrlKey || e.metaKey) && Math.abs(e.deltaY) > Math.abs(e.deltaX) && (e.deltaY < 0 ? logs.scrollTop > 0 : logs.scrollTop + logs.clientHeight < logs.scrollHeight - 1)) return;
     if (state.canvasLock) { if (cx.inputLock.state) { e.preventDefault(); return; } snapWheel(e); return; }
     const inCol = (e.target as Element).closest(".cl-col");
     if (!(e.ctrlKey || e.metaKey) && inCol && Math.abs(e.deltaY) > Math.abs(e.deltaX) && camera.lod === "live") {
       const colEl = inCol as HTMLElement;
       const canScroll = colEl.scrollHeight > colEl.clientHeight + 1 && (e.deltaY < 0 ? colEl.scrollTop > 0 : colEl.scrollTop + colEl.clientHeight < colEl.scrollHeight - 1);
-      if (canScroll) return;
+      if (canScroll) { pulseActivity("scroll", 200); return; }
     }
     e.preventDefault();
     camera.takeOver();
-    if (e.ctrlKey || e.metaKey) { camera.zoomAt(e.clientX, e.clientY, cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025))); return; }
+    if (e.ctrlKey || e.metaKey) { setActivity("zoom"); camera.zoomAt(e.clientX, e.clientY, cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025))); return; }
     const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX, dy = e.shiftKey ? 0 : e.deltaY;
+    setActivity("pan");
     camera.drive({ cx: cam.cx + dx / cam.z, cy: cam.cy + dy / cam.z });
-  }, { passive: false, signal });
+  };
+  viewport.addEventListener("wheel", onWheel, { passive: false, signal });
+  // The terminal's own wheel handler always consumes the event (scrollback, or the running program) and stops it, so a
+  // swipe that starts over a terminal never reached the bubble listener above: the canvas moved only when the pointer
+  // happened to be over something else, which looked like swipes that "stop working". Unless input is locked to a
+  // terminal (handled above), a wheel over a terminal belongs to the canvas, exactly as over any other window: the
+  // terminal's scrollback is reached through the input lock (D177). The event is handled here, in the capture phase,
+  // before the terminal sees it, and goes no further.
+  viewport.addEventListener("wheel", (e) => {
+    if (cx.inputLock.state || !(e.target as Element).closest?.(".terminal-host")) return;
+    e.stopPropagation();
+    onWheel(e);
+  }, { passive: false, capture: true, signal });
   viewport.addEventListener("pointerdown", (e) => {
     if (e.pointerType === "touch") touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (state.canvasLock) return;
@@ -196,12 +214,14 @@ export function installGestures(cx: Ctx): void {
       const z = clamp(pinch.z0 * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0), 0.08, 2);
       const r = viewport.getBoundingClientRect();
       const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      setActivity("zoom");
       camera.drive({ z, cx: pinch.wp.x - (mx - r.left - camera.vw / 2) / z, cy: pinch.wp.y - (my - r.top - camera.vh / 2) / z });
       return;
     }
     if (!pan || e.pointerId !== pan.id) return;
     if (!pan.moved && Math.hypot(e.clientX - pan.x, e.clientY - pan.y) < 6) return;
     if (!pan.moved) { pan.moved = true; camera.takeOver(); viewport.dataset.panning = ""; cx.view.hideSummary(); }
+    setActivity("pan");
     camera.drive({ cx: pan.cx - (e.clientX - pan.x) / cam.z, cy: pan.cy - (e.clientY - pan.y) / cam.z });
   }, { signal });
   const pointerEnd = (e: PointerEvent): void => {
@@ -230,8 +250,4 @@ export function installGestures(cx: Ctx): void {
     const cl = (e.target as Element).closest<HTMLElement>(".cl");
     if (cl?.dataset.view && !(e.target as Element).closest(".cl-label") && !pan) cx.nav.flyView(cl.dataset.view as ViewId);
   }, { signal });
-  document.addEventListener("pointerdown", (e) => {
-    if (cx.mesh?.reachPinned() && !(e.target as Element).closest(".cl-port, .ui-window-pill, .ui-confirm-tip, .cl-edge")) cx.mesh.hideReach();
-  }, { signal, capture: true });
-
 }

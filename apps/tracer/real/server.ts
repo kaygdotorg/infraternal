@@ -26,6 +26,8 @@ export interface Bridge {
   closed: boolean;
   /** Which side ended the socket first, and its close code. */
   closedBy?: string;
+  /** The reason of the last `Close` frame the server sent on this socket (stream 0 or a terminal stream). */
+  serverClose?: string;
   /** AttachTerm frames by client stream id: the session each stream attached to (hex). */
   attached: Map<number, string[]>;
   /** Terminal output text by client stream id. */
@@ -54,13 +56,26 @@ const text = new TextDecoder();
  * `latencyMs` (or `REAL_ONE_WAY_MS`) delays every browser-socket message by that many milliseconds in each direction
  * (so 150 is the 300 ms round-trip profile of docs/PROCESS.md); order is kept. Page loads are not delayed.
  */
-export async function startRealServer(options: { latencyMs?: number } = {}): Promise<RealServer> {
+export async function startRealServer(options: { latencyMs?: number; lean?: boolean } = {}): Promise<RealServer> {
+  // `lean`: the bridge does not decode or keep the server's output (benchmarks with busy terminals: the recording of every
+  // output frame made this single-threaded relay slower than the server's one-second write limit allows, and the server
+  // then closed the socket).
+  const lean = options.lean ?? process.env.REAL_BRIDGE_LEAN === "1";
   const delay = options.latencyMs ?? Number(process.env.REAL_ONE_WAY_MS ?? 0);
   const later = (run: () => void): void => { if (delay > 0) setTimeout(run, delay); else run(); };
   const binary = process.env.INFRATERNAL_BIN ?? resolve(root, "target/x86_64-unknown-linux-musl/release/infraternal");
   const dist = resolve(process.env.TRACER_DIST ?? resolve(root, "apps/tracer/dist"));
+  // Session rendezvous sockets have a 107-byte path limit. Large fixture state
+  // may live under a long TMPDIR; keep runtime sockets in their own private root.
+  const runtimeRoot = process.env.INFRATERNAL_TEST_STATE_ROOT ?? tmpdir();
+  await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
+  const runtime = await mkdtemp(resolve(runtimeRoot, "r"));
+  const sessionSocket = resolve(runtime, "infraternal/sessions", "0".repeat(32) + ".sock");
+  if (Buffer.byteLength(sessionSocket) >= 108) {
+    await rm(runtime, { recursive: true, force: true });
+    throw new Error("real-server runtime path is too long; use a shorter INFRATERNAL_TEST_STATE_ROOT");
+  }
   const state = await mkdtemp(resolve(tmpdir(), "infraternal-real-"));
-  await mkdir(`${state}/runtime`, { mode: 0o700 });
   await cp(dist, `${state}/web`, { recursive: true });
   const reservation = createServer();
   await new Promise<void>((r) => reservation.listen(0, "127.0.0.1", r));
@@ -91,10 +106,10 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
 
   const child: ChildProcess = spawn(binary, ["server", "--listen", `127.0.0.1:${port}`, "--data", `${state}/data`, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`], {
     cwd: root, detached: true,
-    env: { ...process.env, XDG_RUNTIME_DIR: `${state}/runtime`, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
-    stdio: ["ignore", "ignore", "pipe"],
+    env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
+    stdio: ["ignore", process.env.REAL_SERVER_LOG === "1" ? "pipe" : "ignore", "pipe"],
   });
-  if (process.env.REAL_SERVER_LOG === "1") child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); else child.stderr?.resume();
+  if (process.env.REAL_SERVER_LOG === "1") { child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); child.stdout?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); } else child.stderr?.resume();
 
   const bridges: Bridge[] = [];
   const front = new WebSocketServer({ noServer: true });
@@ -120,11 +135,12 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
       upstream.on("open", () => { for (const q of queued.splice(0)) upstream.send(q); });
       upstream.on("message", (data) => {
         const bytes = Buffer.from(data as Buffer);
-        outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+        if (!lean) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack" && f.type !== "Ping") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
           if (f.type === "Output") bridge.output.set(stream, (bridge.output.get(stream) ?? "") + text.decode(f.bytes, { stream: true }));
           if (f.type === "Snapshot") bridge.output.set(stream, text.decode(f.bytes));
           if (f.type === "Ack") bridge.acked.set(stream, f.inSeqAcked);
+          if (f.type === "Close") bridge.serverClose = `s${stream === 0 ? 0 : "n"} ${typeof (f as { reason?: unknown }).reason === "string" ? (f as { reason: string }).reason : JSON.stringify((f as { reason?: unknown }).reason)}`;
           if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
         });
         later(() => { if (browser.readyState === WebSocket.OPEN) browser.send(bytes); });
@@ -141,17 +157,36 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
     if (Date.now() > deadline) throw new Error("server startup failed");
     await new Promise((r) => setTimeout(r, 50));
   }
-  const setup = spawn(binary, ["server", "setup-token", "--data", `${state}/data`], { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
+  const setup = spawn(binary, ["server", "setup-token", "--data", `${state}/data`, "--json"], { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
   let token = "";
   setup.stdout.on("data", (b) => { token += b; });
-  await once(setup, "exit");
+  const [setupCode] = await once(setup, "exit");
+  // The CLI is human-oriented by default; machine callers use the D202 envelope.
+  // Keep the one-time setup capability in memory, and never echo a bad response.
+  if (setupCode !== 0) throw new Error("setup capability unavailable");
+  let setupResult: unknown;
+  try { setupResult = JSON.parse(token); }
+  catch { throw new Error("invalid setup capability response"); }
+  const setupData = typeof setupResult === "object" && setupResult !== null && "data" in setupResult
+    ? setupResult.data : undefined;
+  const setupToken = typeof setupData === "object" && setupData !== null && "token" in setupData
+    ? setupData.token : undefined;
+  if (typeof setupToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(setupToken)) {
+    throw new Error("invalid setup capability response");
+  }
+  token = "";
 
   return {
-    origin, backend, bridges, token: token.trim(), binary,
+    origin, backend, bridges, token: setupToken, binary,
     async dispose() {
       front.close();
       tls.close();
       try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
+      // Reuse authenticated fixture teardown so detached shims cannot outlive
+      // the runtime directory that identifies them. Never scan unrelated PIDs.
+      const cleanup = spawn("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", resolve(runtime, "infraternal")], { cwd: root, stdio: "ignore" });
+      await once(cleanup, "exit");
+      await rm(runtime, { recursive: true, force: true });
       await rm(state, { recursive: true, force: true });
     },
   };

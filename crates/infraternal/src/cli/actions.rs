@@ -7,22 +7,103 @@ use infraternal_plugin_api::{
 
 /// Create the action registry for the plugins enabled in this binary.
 pub fn registry() -> Result<ActionRegistry, RegistryError> {
-    let plugins = vec![
-        cli_plugin(),
+    build_registry(None)
+}
+
+/// Materialize one plugin for its command; core discovery keeps the full registry.
+/// A plugin's own identifier selects its factory, never a handwritten action route.
+pub fn registry_for(root: Option<&str>) -> Result<ActionRegistry, RegistryError> {
+    if let Some(factory) =
+        root.and_then(|root| factories().iter().find(|factory| factory.id == root))
+    {
+        return ActionRegistry::new(vec![(factory.build)()]);
+    }
+    if let Some(root) = root {
+        let core = cli_plugin();
+        if core.actions.iter().any(|action| {
+            action
+                .command
+                .first()
+                .is_some_and(|command| command == root)
+                && !matches!(action.cli_handler, CliHandler::Status | CliHandler::Skill)
+        }) {
+            return ActionRegistry::new(vec![core]);
+        }
+    }
+    registry()
+}
+
+struct PluginFactory {
+    id: &'static str,
+    build: fn() -> PluginDefinition,
+}
+
+fn factories() -> &'static [PluginFactory] {
+    &[
         #[cfg(feature = "plugin-server")]
-        infraternal_server::cli::plugin(),
+        PluginFactory {
+            id: infraternal_server::cli::ID,
+            build: infraternal_server::cli::plugin,
+        },
         #[cfg(feature = "plugin-agent")]
-        infraternal_agent::cli::plugin(),
+        PluginFactory {
+            id: infraternal_agent::cli::ID,
+            build: infraternal_agent::cli::plugin,
+        },
         #[cfg(feature = "plugin-mesh")]
-        infraternal_mesh::cli::plugin(),
+        PluginFactory {
+            id: infraternal_plugin_mesh::descriptor::DESCRIPTOR.id,
+            build: mesh_plugin,
+        },
+        #[cfg(feature = "plugin-host-facts")]
+        PluginFactory {
+            id: infraternal_plugin_host_facts::DESCRIPTOR.id,
+            build: host_plugin,
+        },
         #[cfg(feature = "plugin-relay")]
-        infraternal_plugin_relay::cli::plugin(),
+        PluginFactory {
+            id: infraternal_plugin_relay::cli::ID,
+            build: infraternal_plugin_relay::cli::plugin,
+        },
         #[cfg(feature = "plugin-backup")]
-        infraternal_plugin_backup::cli::plugin(),
+        PluginFactory {
+            id: infraternal_plugin_backup::cli::ID,
+            build: infraternal_plugin_backup::cli::plugin,
+        },
         #[cfg(feature = "plugin-ssh")]
-        infraternal_plugin_ssh::cli::plugin(),
-    ];
+        PluginFactory {
+            id: infraternal_plugin_ssh::cli::ID,
+            build: infraternal_plugin_ssh::cli::plugin,
+        },
+    ]
+}
+
+fn build_registry(root: Option<&str>) -> Result<ActionRegistry, RegistryError> {
+    let plugins = std::iter::once(cli_plugin())
+        .chain(
+            factories()
+                .iter()
+                .filter(|factory| root.is_none_or(|root| factory.id == root))
+                .map(|factory| (factory.build)()),
+        )
+        .collect();
     ActionRegistry::new(plugins)
+}
+
+#[cfg(feature = "plugin-host-facts")]
+fn host_plugin() -> PluginDefinition {
+    infraternal_plugin_host_facts::DESCRIPTOR.cli_plugin(ActionTarget::Host)
+}
+
+#[cfg(feature = "plugin-mesh")]
+fn mesh_plugin() -> PluginDefinition {
+    let mut plugin =
+        infraternal_plugin_mesh::descriptor::DESCRIPTOR.cli_plugin(ActionTarget::Global);
+    // Node lifecycle placeholders and hosted server actions share one owner id.
+    plugin
+        .actions
+        .extend(infraternal_mesh::cli::plugin().actions);
+    plugin
 }
 
 fn cli_plugin() -> PluginDefinition {
@@ -382,5 +463,89 @@ mod tests {
                 .lines()
                 .any(|line| line.trim() == "#![cfg(feature = \"plugin-agent\")]")
         );
+    }
+}
+
+#[cfg(all(test, feature = "plugin-mesh", feature = "plugin-host-facts"))]
+mod hosted_tests {
+    //! Ensures every production descriptor is discoverable with its original authority.
+    use super::registry;
+    use infraternal_plugin_api::{ActionEffect, ActionTarget, DryRun, Permission};
+
+    #[test]
+    fn production_descriptors_share_cli_registry_and_skills() {
+        let registry = registry().expect("valid combined registry");
+        for descriptor in [
+            &infraternal_plugin_mesh::descriptor::DESCRIPTOR,
+            &infraternal_plugin_host_facts::DESCRIPTOR,
+        ] {
+            for source in descriptor.actions {
+                let path = source.id.split('.').collect::<Vec<_>>();
+                let action = registry
+                    .find(&path)
+                    .expect("hosted action is registered")
+                    .action;
+                assert_eq!(action.hosted, Some(*source));
+                let contract = serde_json::to_value(&action.contract).expect("authority contract");
+                match source.permission {
+                    Permission::One(permission) => assert_eq!(contract["permission"], permission),
+                    Permission::Any(permissions) => assert_eq!(
+                        contract["permission"]["any"],
+                        serde_json::to_value(permissions).expect("permission alternatives")
+                    ),
+                }
+                assert_eq!(action.description, source.summary);
+                let skill = crate::cli::skills::render_action(action).expect("generated skill");
+                assert!(skill.contains(source.id));
+                assert!(
+                    skill.contains(&serde_json::to_string(source.input).expect("input reference"))
+                );
+                assert!(
+                    skill
+                        .contains(&serde_json::to_string(source.output).expect("output reference"))
+                );
+                if action.contract.effect == ActionEffect::Destructive {
+                    assert_eq!(action.contract.dry_run, DryRun::Required);
+                    assert!(action.safety.destructive);
+                }
+            }
+        }
+        assert_eq!(
+            registry
+                .find(&["host", "facts", "read"])
+                .expect("facts")
+                .action
+                .contract
+                .target,
+            ActionTarget::Host
+        );
+    }
+}
+
+#[cfg(all(test, feature = "plugin-agent", feature = "plugin-mesh"))]
+mod factory_tests {
+    //! Keeps daemon startup bounded without changing discovery or action handlers.
+    use super::registry_for;
+    use infraternal_plugin_api::CliHandler;
+
+    #[test]
+    fn plugin_command_materializes_only_its_owner_and_discovery_remains_complete() {
+        let registry = registry_for(Some(infraternal_agent::cli::ID)).expect("agent registry");
+        assert_eq!(
+            registry
+                .find(&["agent"])
+                .expect("agent action")
+                .action
+                .cli_handler,
+            CliHandler::EmbeddedAgent
+        );
+        assert!(registry.find(&["mesh", "list"]).is_none());
+        let internal = registry_for(Some("__shim")).expect("internal registry");
+        assert!(internal.find(&["__shim"]).is_some());
+        assert!(internal.find(&["mesh", "list"]).is_none());
+        for root in [None, Some("status"), Some("skill")] {
+            let registry = registry_for(root).expect("discovery registry");
+            assert!(registry.find(&["mesh", "list"]).is_some());
+        }
     }
 }
