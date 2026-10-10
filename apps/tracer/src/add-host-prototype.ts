@@ -44,6 +44,7 @@ import {
   type ToastController,
 } from "../../../packages/ui/src/index";
 import type { AddHostFixture } from "./add-host-contract";
+import { guideFor } from "./canvas/addhost/model";
 import type { CanvasController, CanvasFlowWindow, CanvasHost, CanvasWindowHandle } from "./canvas/mock/windows-proto/canvas";
 import type { CoreScreen } from "./core-screen";
 import {
@@ -119,43 +120,15 @@ function parseTarget(raw: string): { user: string | undefined; host: string; por
 
 function statusOf(host: AddHostFixture): { label: string; tone: "ok" | "warn" | "off" | "none"; icon: string } {
   if (host.alreadyAdded) return { label: "Added", tone: "none", icon: ICON.added };
-  if (host.reachability === "ready") return { label: "SSH ready", tone: "ok", icon: ICON.ready };
-  if (host.reachability === "mesh-policy") return { label: "Blocked", tone: "warn", icon: ICON.blocked };
-  return { label: "No answer", tone: "off", icon: ICON.silent };
+  if (host.reachability === "ready") return { label: "Reached the host", tone: "ok", icon: ICON.ready };
+  if (host.reachability === "mesh-policy") return { label: "Your network rules block this host", tone: "warn", icon: ICON.blocked };
+  return { label: "This host isn't answering", tone: "off", icon: ICON.silent };
 }
 
+/** The wording is the product wizard's (canvas/addhost/model.ts), so the two cannot drift apart. */
 function failureCopy(item: Failure): { title: string; happened: string; next: string } {
-  const name = item.host.id;
-  if (item.kind === "unreachable") return {
-    title: `${name} didn't answer`,
-    happened: `Nothing answered on SSH port 22 at ${name}.`,
-    next: "Check that the host is on and SSH is running, then retry.",
-  };
-  if (item.kind === "auth") return {
-    title: `${name} refused the key`,
-    happened: `${name} answered, but refused the SSH identity.`,
-    next: "Choose another identity, or add this server's key to the host, then retry.",
-  };
-  if (item.kind === "host-key") return {
-    title: `${name} has an untrusted key`,
-    happened: `${name} answered with an SSH host key this server does not trust.`,
-    next: "Check the host's key fingerprint, add it to known hosts, then retry.",
-  };
-  if (item.kind === "unsupported") return {
-    title: `${name} isn't supported yet`,
-    happened: `${name} does not have what the infraternal agent needs.`,
-    next: "Use a Linux host with systemd, then add it again.",
-  };
-  if (item.kind === "install") return {
-    title: `${name} could not be set up`,
-    happened: `The installation on ${name} did not finish, and it was rolled back.`,
-    next: "Check the details, then retry.",
-  };
-  return {
-    title: "Blocked by the mesh policy",
-    happened: `The mesh access policy blocks SSH (TCP 22) from this server to ${name}.`,
-    next: "Ask a mesh admin to allow TCP 22 from this server, then retry.",
-  };
+  const { title, happened, next } = guideFor(item.host.id, { kind: item.kind, message: item.message, log_tail: [] });
+  return { title, happened, next };
 }
 
 /** Maps a discovered host to the machine facts the canvas popover shows (only what the flow knows). */
@@ -265,7 +238,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         this.run = review.run;
         this.jobs = review.failures.map((failure) => ({
           host: failure.host, target: targetIdFor(failure.host.id), run: review.run,
-          view: { state: "failed", attempt: 1, phase: failure.phase, message: failure.message, failure: { kind: failure.kind, message: failure.message, log_tail: [failure.evidence] }, elapsedMs: 0 },
+          view: { state: "failed", attempt: 1, phase: failure.phase, message: failure.message, failure: { kind: failure.kind, message: failure.message, log_tail: [failure.evidence] }, elapsedMs: 0, authentication: undefined },
         }));
         this.go("progress", 0);
       } else this.go(startEmpty ? "empty" : "discovery", 0);
@@ -332,7 +305,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
 
     private hostRow(host: AddHostFixture): string {
       const typed = this.typed.includes(host);
-      const status = typed ? { label: "On continue", tone: "none" as const, icon: ICON.pending } : statusOf(host);
+      const status = typed ? { label: "We'll check it when you continue", tone: "none" as const, icon: ICON.pending } : statusOf(host);
       const sources = host.sources.map((source) => `<span class="ah-src" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
       const checked = this.selected.some((item) => item.id === host.id);
       const mark = typed ? svg(ICON.typed, "ah-os-mark is-line") : hostIconMarkup(platformOf(host), "ah-os-mark");
@@ -424,7 +397,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
           <span class="ah-check check"><input type="checkbox" data-candidate aria-label="Add the typed host" /></span>
           ${svg(ICON.plus, "ah-os-mark is-line")}
           <span class="ah-main"><span class="ah-name">Add <span class="ah-manual-target"></span></span>
-            <span class="ah-meta"><span>Not discovered · checked when you continue</span></span></span>
+            <span class="ah-meta"><span>Not in the list. We'll check it when you continue.</span></span></span>
         </label>
         ${this.all().map((host) => this.hostRow(host)).join("")}
         <p class="ah-none" hidden>No discovered host matches.</p>`;

@@ -43,6 +43,11 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     });
     return;
   }
+  if (m.kind === "flow") {
+    // A flow fills its own body (the add-host wizard); the window only gives it a frame and a place on the canvas.
+    body.classList.add("cl-flow");
+    return;
+  }
   if (m.kind === "logs") {
     const log = mountLogBody(body, m.lines ?? []);
     rec.stream = log.scroller;

@@ -40,6 +40,12 @@ export interface WindowsModule {
   openSession(host: string, sessionId: string): WinRec | undefined;
   /** Opens a shell on `host` as a window in Console (or flies to the one that is already there). */
   open(host: string, container?: string): WinRec | undefined;
+  /**
+   * Opens a flow window (a short guided task) in a new column right after the focused window's, in the view that
+   * has focus (Console when none does). It is never saved. The caller fills `rec.card.body`, may set
+   * `rec.cleanup` to hear that the window closed, and closes it with `close` when the task is done.
+   */
+  openFlow(title: string): WinRec | undefined;
   /** Scales the window up a little and back: "this is the one". */
   pulse(rec: WinRec): void;
   /** Every window of the current view in reading order (column by column, top to bottom). */
@@ -305,6 +311,19 @@ export function createWindows(cx: Ctx): WindowsModule {
     return rec;
   };
 
+  const openFlow = (title: string): WinRec | undefined => {
+    const c = state.activeWin?.owner ?? views.get("console" as ViewId);
+    if (!c || c.view.layout !== "tiled") return undefined;
+    const columns = [...c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")];
+    const at = state.activeWin ? columns.indexOf(state.activeWin.card.root.parentElement as HTMLElement) : -1;
+    const model: WindowModel = { id: `f-${crypto.randomUUID()}`, kind: "flow", host: title };
+    const rec = addColumn(c, model, at < 0 ? columns.length : at + 1, state.metrics.colW);
+    setActive(cx, rec);
+    if (state.currentView !== c.view.id) cx.nav.flyView(c.view.id);
+    cx.nav.focusWindow(rec);
+    return rec;
+  };
+
   const flat = (): WinRec[] => {
     const c = views.get(state.currentView);
     return c ? [...c.colsEl.querySelectorAll<HTMLElement>(".ui-window")].map((n) => c.wins.get(n.dataset.windowId ?? "")).filter((w): w is WinRec => !!w) : [];
@@ -313,7 +332,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   return {
     make: (c, m) => makeWindow(cx, c, m),
     setActive: (rec) => setActive(cx, rec),
-    addColumn, close, split, attach, syncSession, openSession, open, pulse, flat,
+    addColumn, close, split, attach, syncSession, openSession, open, openFlow, pulse, flat,
     step(dir, instant = false) {
       const list = flat();
       if (!list.length) return;

@@ -39,12 +39,19 @@ export interface StartTarget {
   credential?: string;
 }
 
+/** How the server signed in (D183). Public metadata only; a provider is named only from trusted discovery. */
+export type AuthMethod = "network" | "server-key" | "user-key" | "password";
+export type NetworkProvider = "netbird" | "tailscale" | "twingate" | "other";
+export interface AuthenticationInfo { method: AuthMethod; network?: NetworkProvider }
+
 export interface FailureDetail {
   kind: FailureKind;
   message: string;
   log_tail: string[];
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
+  /** Every automatic sign-in method was refused: the person must choose one (D183). Only on `auth`. */
+  choose_method?: boolean;
 }
 
 export interface BootstrapEvent {
@@ -58,6 +65,8 @@ export interface BootstrapEvent {
   /** At most eight trusted breadcrumbs, not a shell log. */
   log_tail: string[];
   failure?: FailureDetail;
+  /** Present on the event that reports a successful sign-in. */
+  authentication?: AuthenticationInfo;
 }
 
 /** A refused command (`{"error":{...}}`) or malformed request (`{"error":"..."}`). No attempt is created. */
@@ -105,7 +114,18 @@ function parseFailure(value: unknown): FailureDetail | undefined {
   if (!isRecord(value) || typeof value.kind !== "string" || !KINDS.includes(value.kind) || typeof value.message !== "string") return undefined;
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
+  if (value.choose_method === true && value.kind === "auth") failure.choose_method = true;
   return failure;
+}
+
+const METHODS: readonly string[] = ["network", "server-key", "user-key", "password"];
+const PROVIDERS: readonly string[] = ["netbird", "tailscale", "twingate", "other"];
+
+function parseAuthentication(value: unknown): AuthenticationInfo | undefined {
+  if (!isRecord(value) || typeof value.method !== "string" || !METHODS.includes(value.method)) return undefined;
+  const info: AuthenticationInfo = { method: value.method as AuthMethod };
+  if (typeof value.network === "string" && PROVIDERS.includes(value.network)) info.network = value.network as NetworkProvider;
+  return info;
 }
 
 function parseEvent(value: Record<string, unknown>): BootstrapEvent | undefined {
@@ -115,6 +135,8 @@ function parseEvent(value: Record<string, unknown>): BootstrapEvent | undefined 
   const event: BootstrapEvent = { sequence, target, attempt, step: step as BootstrapStep, message, elapsed_ms: elapsed, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
   const failure = parseFailure(value.failure);
   if (failure) event.failure = failure;
+  const authentication = parseAuthentication(value.authentication);
+  if (authentication) event.authentication = authentication;
   return event;
 }
 
@@ -202,16 +224,20 @@ export interface TargetView {
   message: string;
   failure: FailureDetail | undefined;
   elapsedMs: number;
+  /** How this attempt signed in, once the server reported it. */
+  authentication: AuthenticationInfo | undefined;
 }
 
-export const pendingTarget = (): TargetView => ({ state: "pending", attempt: 0, phase: 0, message: "", failure: undefined, elapsedMs: 0 });
+export const pendingTarget = (): TargetView => ({ state: "pending", attempt: 0, phase: 0, message: "", failure: undefined, elapsedMs: 0, authentication: undefined });
 
 /** Folds one event into a target's view; events of an older attempt are ignored. */
 export function foldEvent(view: TargetView, event: BootstrapEvent): TargetView {
   if (event.attempt < view.attempt) return view;
   const fresh = event.attempt > view.attempt;
   const phase = (PHASES as readonly string[]).indexOf(event.step);
-  const base = fresh ? { ...pendingTarget(), attempt: event.attempt } : view;
+  // The sign-in method sticks for the attempt, so a later failure still knows it got past authentication.
+  const base: TargetView = { ...(fresh ? { ...pendingTarget(), attempt: event.attempt } : view) };
+  if (event.authentication) base.authentication = event.authentication;
   if (event.step === "done") return { ...base, state: "done", phase: PHASES.length, message: event.message, failure: undefined, elapsedMs: event.elapsed_ms };
   if (event.step === "failed") return { ...base, state: "failed", message: event.message, failure: event.failure, elapsedMs: event.elapsed_ms };
   // Rollback and warnings may emit extra install events; the phase never moves backwards.

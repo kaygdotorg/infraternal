@@ -15,6 +15,10 @@ import { onDemand } from "../on-demand";
 import { MuxConnection } from "../connection";
 import type { CoreScreen } from "../core-screen";
 import type { TerminalClient, TerminalHooks } from "../terminal";
+import { createAddHost } from "./addhost";
+import { createOverlayFlowHost } from "./addhost/flow-host";
+import { createRealProvisioning } from "./addhost/real";
+import { createWindowFlowHost } from "./addhost/window-host";
 import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
 import { columnsFromDocument, type DocTarget } from "./model/document";
@@ -65,12 +69,19 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
     .then((m) => m.createLiveDetails({ host: options.host, connection, inventory, roundTrip: () => roundTrip }));
+  // The add-host wizard on the real provisioning API, in a flow window. A host that finishes enrolling needs a
+  // remote-host session binding (#78) before a shell can open on it; until `sessions.hosts()` lists remote hosts
+  // the sink has nothing to open, and the wizard's own "ready" toast is the whole result.
+  const addHost = createAddHost(core, {
+    service: createRealProvisioning(), sink: { enrolled: () => undefined },
+    host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
+  });
   const saved = await store.load();
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
   const savedMesh = saved?.views.find((v) => v.id === "mesh");
   const mesh = createMeshApi({ transport: connectionTransport(connection), pins: savedMesh?.layout.type === "graph" ? savedMesh.layout.pinned : {} });
   const canvas = createCanvas(core, {
-    adapters: { sessions, inventory, details, store, settings: { sections: [], render: () => undefined }, mesh },
+    adapters: { sessions, inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, addHost: () => addHost.open() },
     float: false,
     persisted: (id) => id === "console" || id === "mesh",
   });
@@ -98,6 +109,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       canvas.flush();
       offRoundTrip();
       offMeshView();
+      addHost.dispose();
       canvas.dispose();
       mesh.dispose();
       inventory.dispose();
