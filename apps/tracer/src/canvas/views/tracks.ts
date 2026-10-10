@@ -78,8 +78,11 @@ export function readColumns(cx: Ctx, c: ViewRec): ColumnModel[] {
       const rec = c.wins.get(n.dataset.windowId ?? "");
       if (!rec) continue;
       const m = rec.model;
-      // A height the person set while the window stood alone (or a group band) is in the style: the model takes it.
+      // A height the person set is in the style, and the model takes it. A plain window with no height style shares its
+      // column: its old height is gone (a close clears it so the neighbour grows). A group window has no style of its own:
+      // its band's height stays in the model.
       if (n.style.height.endsWith("px")) m.h = Math.round(parseFloat(n.style.height));
+      else if (!n.style.height.includes("calc") && !colEl.parentElement?.classList.contains("cl-group")) delete m.h;
       if (n.dataset.span) m.span = Number(n.dataset.span); else delete m.span;
       if (n.dataset.rows) m.rows = Number(n.dataset.rows); else delete m.rows;
       if (n.dataset.row !== undefined) m.row = Number(n.dataset.row); else delete m.row;
