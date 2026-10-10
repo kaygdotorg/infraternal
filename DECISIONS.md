@@ -1817,3 +1817,30 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        was.
      - Detection is conservative: when in doubt, the session is kept. The
        owner: "we should be really conservative here".
+219. **UX audit decisions, round 1 (owner, 2026-10-10, #152):**
+     - **Reattach on load:** when the Console has no windows on load, the app
+       reattaches the person's most recent background session instead of
+       starting a new shell. A new shell starts only when none exists. The
+       audit measured 8 → 9 → 10 background sessions over three reloads.
+     - **Recovery ships:** the recovery screen is included in production
+       builds now. Setup no longer asks for 24 words that production can't
+       use.
+     - **Host keys over trusted paths:** a host's key is trusted on first
+       contact when the host is reached over the mesh or a private network,
+       and the person is asked only when a known key *changes*. Public
+       networks keep the fingerprint confirmation (amends D181).
+     - **`root@host` is consent:** typing `root@` counts as the root consent
+       of D139, shown as one line explaining the effect, with no tick box and
+       button.
+     - **A typed password may install the server's key:** when the person
+       signs in with a password or a key, the same connection installs this
+       server's key on the host, so later reinstalls need nothing. Said in one
+       line under the field. Not when the sign-in came from network identity
+       (mesh or Tailscale/NetBird SSH identity), because no secret was given.
+     - **Remove host uninstalls by default:** "Remove host" revokes the host's
+       certificate first, then uninstalls the infraternal agent over its own
+       connection (SSH as the fallback), then says "X was removed" (D134).
+     - **Pending:** device keys (D151) wait for the PRF research (#153);
+       shortcuts are re-grilled after their research (see #155); the agent
+       binaries proposal, the built-in web app, TLS, `server init` and the
+       single name field are still open.
