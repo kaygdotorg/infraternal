@@ -48,6 +48,17 @@ const grid = (page: Page): Promise<Grid> => page.evaluate((view) => {
   };
 }, VIEW);
 
+/** A narrow window's action, through its ⋯ menu (the same action as the header button of a wide window). */
+async function windowMenu(page: Page, id: string, action: string): Promise<void> {
+  // The menu's module loads on the first press, so its rows are awaited; the presses are DOM clicks (a window partly off
+  // the screen is still a window the person pressed).
+  await page.locator(`${VIEW} .ui-window[data-window-id="${id}"] .ui-window-more`).evaluate((b) => (b as HTMLElement).click());
+  const item = page.locator(`.ui-window-menu .ui-window-menu-item[data-action="${action}"]`);
+  await expect(item).toHaveCount(1, { timeout: 5000 });
+  await item.evaluate((b) => (b as HTMLElement).click());
+  await page.waitForTimeout(300);
+}
+
 const activate = (page: Page, id: string): Promise<void> => page.locator(`${VIEW} .ui-window[data-window-id="${id}"] .ui-window-body`).first().click({ position: { x: 20, y: 40 } }).then(() => page.waitForTimeout(400));
 
 async function press(page: Page, chord: string[]): Promise<void> {
@@ -120,7 +131,8 @@ test.describe("split right in a stacked column (D212)", () => {
     await press(page, ["Control", "Shift", "Alt", "KeyD"]);
     await activate(page, "w-edge-arm");
     const before = await grid(page);
-    await page.locator(`${VIEW} .ui-window[data-window-id="w-edge-arm"] [data-action="split-right"]`).evaluate((b) => (b as HTMLElement).click());
+    // A half is narrow: its actions sit behind the ⋯ (TASTE: title first), and the menu holds the same action.
+    await windowMenu(page, "w-edge-arm", "split-right");
     await page.waitForTimeout(1500);
     const after = await grid(page);
     expect(after.groups).toBe(1);
@@ -137,7 +149,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await activate(page, "w-edge-arm");
     await press(page, ["Control", "Shift", "KeyD"]);
     const newId = (await grid(page)).active!;
-    await page.locator(`${VIEW} .ui-window[data-window-id="${newId}"] [aria-label="Close"]`).first().click();
+    await windowMenu(page, newId, "close");
     await page.waitForTimeout(1000);
     const back = await grid(page);
     expect(back.groups).toBe(0);
@@ -152,7 +164,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await boot(page);
     await stacked(page);
     const g = await grid(page);
-    await page.locator(`${VIEW} .ui-window[data-window-id="w-edge-arm"] [aria-label="Close"]`).first().click();
+    await windowMenu(page, "w-edge-arm", "close");
     await page.waitForTimeout(1000);
     const after = await grid(page);
     expect(after.groups).toBe(0);
@@ -299,5 +311,64 @@ test.describe("moving a window of a group by its pill (D212)", () => {
     expect(after.windows).toBe(before.windows);
     expect(after.total).toBe(before.total);
     expect(after.cols.flatMap((c) => c.wins).map((w) => w.id).sort()).toEqual(before.cols.flatMap((c) => c.wins).map((w) => w.id).sort());
+  });
+});
+
+test.describe("title first in a narrow half (TASTE, D212)", () => {
+  test.setTimeout(120_000);
+
+  test("a half too narrow for its actions keeps its title, shows one ⋯, and the menu holds every action", async ({ page }) => {
+    await boot(page);
+    await stacked(page);
+    const half = page.locator(`${VIEW} .ui-window[data-window-id="w-edge-arm"]`);
+    const m = await half.evaluate((w) => {
+      const title = w.querySelector<HTMLElement>(".ui-window-title")!.getBoundingClientRect();
+      const more = w.querySelector<HTMLElement>(".ui-window-more")!;
+      const visible = [...w.querySelectorAll<HTMLElement>(".ui-window-action:not(.ui-window-more)")].filter((b) => getComputedStyle(b).display !== "none").map((b) => b.dataset.action);
+      return { titleW: Math.round(title.width), moreShown: getComputedStyle(more).display !== "none", visible, width: w.getBoundingClientRect().width };
+    });
+    expect(m.width).toBeLessThan(260);
+    expect(m.moreShown, "the ⋯ shows").toBe(true);
+    expect(m.visible, "no action button shows in the header").toEqual([]);
+    // The pill stops short of the lock at the frame's centre (TASTE: window chrome), so a 224 px half leaves about 43 px for
+    // the title: four or five characters of the host, where five actions left it one.
+    expect(m.titleW, "the title keeps room for the host").toBeGreaterThanOrEqual(40);
+    await half.locator(".ui-window-more").evaluate((b) => (b as HTMLElement).click());
+    await expect(page.locator(".ui-window-menu .ui-window-menu-item")).toHaveCount(4, { timeout: 5000 });
+    const items = await page.locator(".ui-window-menu .ui-window-menu-item").evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.action));
+    expect(items).toEqual(["split-right", "split-down", "sessions", "close"]);
+    await page.keyboard.press("Escape");
+  });
+
+  test("a wide window keeps its actions in the header, and no ⋯ is shown", async ({ page }) => {
+    await boot(page);
+    const wide = page.locator(`${VIEW} .ui-window[data-window-id="w-build-01"]`);
+    const more = await wide.evaluate((w) => getComputedStyle(w.querySelector<HTMLElement>(".ui-window-more")!).display);
+    expect(more).toBe("none");
+    const shown = await wide.evaluate((w) => [...w.querySelectorAll<HTMLElement>(".ui-window-action")].filter((b) => getComputedStyle(b).display !== "none" && !b.classList.contains("ui-window-more")).length);
+    expect(shown).toBeGreaterThanOrEqual(2);
+  });
+});
+
+test.describe("the phone after a split in a group (TASTE: chrome is never clipped)", () => {
+  test.setTimeout(120_000);
+
+  test("the new half and the spanning window's header stay on the screen", async ({ page }) => {
+    await boot(page, 393, 852);
+    await page.locator(`${VIEW} .ui-window .ui-window-body`).first().click({ position: { x: 20, y: 40 } });
+    await page.waitForTimeout(400);
+    await act(page, "canvas:split:down");
+    await act(page, "canvas:split:right");
+    const pills = await page.evaluate((v) => [...document.querySelectorAll<HTMLElement>(`${v} .ui-window`)].map((w) => {
+      const head = w.querySelector<HTMLElement>(".ui-window-head")!.getBoundingClientRect();
+      const r = w.getBoundingClientRect();
+      return { id: w.dataset.windowId, left: Math.round(r.left), right: Math.round(r.right), headLeft: Math.round(head.left), span: Number(w.dataset.span) || 1 };
+    }), VIEW);
+    const vw = await page.evaluate(() => document.documentElement.clientWidth);
+    // The windows that the camera frames (those on screen at all) show their header whole: the header's left edge is not off the screen.
+    const framed = pills.filter((p) => p.right > 0 && p.left < vw);
+    expect(framed.length).toBeGreaterThan(0);
+    for (const p of framed) expect(p.headLeft, `${p.id} header left edge`).toBeGreaterThanOrEqual(-1);
+    for (const p of framed) expect(p.right, `${p.id} right edge`).toBeLessThanOrEqual(vw + 1);
   });
 });

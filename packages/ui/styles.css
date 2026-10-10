@@ -349,6 +349,23 @@
 }
 .ui-window-action:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* Title first (TASTE): in a header this narrow the actions give way to one ⋯, so the title keeps its room. A card with one
+   action never collapses (the actions container says so with data-collapsible). The ⋯ opens the same actions in a menu. */
+.ui-window-action.ui-window-more { display: none; }
+@container (max-width: 320px) {
+  .ui-window-actions[data-collapsible] > .ui-window-action:not(.ui-window-more) { display: none; }
+  .ui-window-actions[data-collapsible] > .ui-window-action.ui-window-more { display: grid; }
+  /* The title's room is the pill's half of the header: the window's mark and session name give way first, at any narrow
+     width (a half on a phone too), so the title is never squeezed out. */
+  .ui-window-mark, .ui-window-session { display: none; }
+}
+.ui-window-menu { display: flex; flex-direction: column; gap: 2px; min-width: 168px; padding: 6px; }
+.ui-window-menu-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 10px; border: 0; border-radius: 10px;
+  background: none; color: var(--fg-2); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; text-align: left; cursor: pointer;
+}
+.ui-window-menu-item svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+@media (hover: hover) and (pointer: fine) { .ui-window-menu-item:hover { background: var(--hover); color: var(--fg); } }
 .ui-window-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 calc(var(--r-lg, 18px) - 1px) calc(var(--r-lg, 18px) - 1px); }
 @media (hover: hover) and (pointer: fine) {
   .ui-window-pill:hover { background: var(--hover); }
@@ -585,6 +602,7 @@
 .ui-shortcuts-label { min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .ui-shortcuts-keys { display: inline-flex; flex: none; gap: 4px; }
 .ui-shortcuts kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
+
 @media (pointer: coarse) { .ui-shortcuts-label { font-size: var(--text-body); } .ui-shortcuts-head { padding-right: 14px; } }
 
 /* Settings overlay (settings-overlay.ts): one centred card in the shared overlay material. */
