@@ -1,6 +1,6 @@
 //! Secure rendezvous discovery and init-independent shim launch [9][13][18].
 //!
-//! Discovery admits at most 128 sockets and connects concurrently, each
+//! Discovery recovers every live socket with bounded concurrent handshakes, each
 //! with a two-second handshake deadline; a nonresponsive shim cannot serialize
 //! recovery of healthy sessions. Only refused sockets are removed as stale.
 
@@ -32,6 +32,9 @@ use tokio::{
 
 /// Session admission bound, also bounding startup concurrency and process tasks.
 pub use infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS as MAX_SESSIONS;
+// A malformed shim can require MAX_FRAME receive bytes. Limit recovery work
+// to 32 MiB while allowing any number of live sessions (D214).
+const DISCOVERY_HANDSHAKES: usize = 32 * 1024 * 1024 / MAX_FRAME;
 const HANDSHAKE: Duration = Duration::from_secs(2);
 
 struct Watch(Inotify);
@@ -259,11 +262,12 @@ async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim handshake timed out"))?
 }
 
-/// Discover socket identities with bounded parallel handshakes; refuse excess.
+/// Discover every socket identity with bounded parallel handshakes.
 /// # Errors
-/// Returns directory errors, resource overflow or a live shim handshake failure.
+/// Returns directory errors or a live shim handshake failure.
 pub async fn discover(state: &Path) -> io::Result<Vec<Session>> {
     let mut tasks = JoinSet::new();
+    let mut sessions = Vec::new();
     for entry in fs::read_dir(state.join("sessions"))? {
         let entry = entry?;
         let path = entry.path();
@@ -276,28 +280,39 @@ pub async fn discover(state: &Path) -> io::Result<Vec<Session>> {
         let id = uuid::Uuid::parse_str(name)
             .map_err(|_| invalid("invalid shim socket identity"))?
             .into_bytes();
-        let meta = fs::symlink_metadata(&path)?;
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
         if !std::os::unix::fs::FileTypeExt::is_socket(&meta.file_type())
             || meta.uid() != Uid::effective().as_raw()
             || meta.mode() & 0o777 != 0o600
         {
             return Err(invalid("invalid shim socket permissions"));
         }
-        if tasks.len() == MAX_SESSIONS {
-            return Err(io::Error::other("infraternal session limit reached"));
+        if tasks.len() == DISCOVERY_HANDSHAKES
+            && let Some(result) = tasks.join_next().await
+            && let Some(session) = result.map_err(io::Error::other)??
+        {
+            sessions.push(session);
         }
         tasks.spawn(async move {
             match connect(path.clone(), id).await {
                 Ok(session) => Ok(Some(session)),
                 Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                    fs::remove_file(path)?;
+                    match fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
                     Ok(None)
                 }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(error),
             }
         });
     }
-    let mut sessions = Vec::with_capacity(tasks.len());
     while let Some(result) = tasks.join_next().await {
         if let Some(session) = result.map_err(io::Error::other)?? {
             sessions.push(session);

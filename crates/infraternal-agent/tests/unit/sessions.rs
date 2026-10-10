@@ -258,3 +258,6 @@ async fn reader_borrow_measurement() {
         }
     }
 }
+
+#[path = "session_bounds.rs"]
+mod bounds;
