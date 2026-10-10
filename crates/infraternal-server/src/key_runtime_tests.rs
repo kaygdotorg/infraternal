@@ -69,7 +69,7 @@ async fn configured_startup_generates_once_and_settings_shares_its_cold_lock() {
             factory: Box::new(move |auth, pool, source| {
                 assert!(source.public_key().unwrap().locked);
                 assert!(source.load().is_err());
-                let runner = default_runner(&data, auth.clone(), source.clone()).unwrap();
+                let runner = default_runner(&data, auth.clone(), source.clone(), None).unwrap();
                 *receiving.lock().unwrap() = Some((auth, pool, source));
                 runner
             }),

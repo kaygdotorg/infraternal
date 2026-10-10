@@ -84,10 +84,49 @@ struct Api {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct InvitationRequest {
-    host_id: Uuid,
-    mode: Mode,
-    execution_uid: u32,
+pub(crate) struct InvitationRequest {
+    pub(crate) host_id: Uuid,
+    pub(crate) mode: Mode,
+    pub(crate) execution_uid: u32,
+}
+
+/// SSH and HTTPS share the exact authority checks and transport revocation scope.
+#[derive(Clone)]
+pub(crate) struct InvitationIssuer(Api);
+impl InvitationIssuer {
+    pub(crate) fn new(
+        auth: Auth,
+        pool: SqlitePool,
+        store: EnrollmentStore,
+        service: EnrollmentService,
+    ) -> Self {
+        Self(Api {
+            auth,
+            pool,
+            store,
+            source: service.source,
+            endpoint: service.endpoint,
+            admission: Arc::new(Semaphore::new(8)),
+            owner_admission: Arc::new(Semaphore::new(8)),
+            sources: Arc::new(crate::remote_admission::SourceSlots::new(2)),
+        })
+    }
+    pub(crate) async fn issue(
+        &self,
+        cookie: &str,
+        request: InvitationRequest,
+    ) -> Result<JoinInvitation, StatusCode> {
+        issue_invitation(self.0.clone(), cookie, request).await
+    }
+    pub(crate) fn ready(&self) -> bool {
+        self.0.source.load().is_ok()
+    }
+    pub(crate) fn origin(&self) -> &str {
+        self.0.auth.origin()
+    }
+    pub(crate) fn store(&self) -> &EnrollmentStore {
+        &self.0.store
+    }
 }
 
 #[derive(Deserialize)]
@@ -273,17 +312,21 @@ async fn invite(
     if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(api.auth.origin()) {
         return Err(StatusCode::FORBIDDEN);
     }
+    let cookie =
+        crate::auth::session_cookie_from_headers(&headers).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    issue_invitation(api, cookie, request).await.map(Json)
+}
+
+async fn issue_invitation(
+    api: Api,
+    cookie: &str,
+    request: InvitationRequest,
+) -> Result<JoinInvitation, StatusCode> {
     let now = now()?;
-    let session_hash = crate::auth::hash(
-        crate::auth::session_cookie_from_headers(&headers).map_err(|_| StatusCode::UNAUTHORIZED)?,
-    );
+    let session_hash = crate::auth::hash(cookie);
     let session = api
         .auth
-        .session(
-            crate::auth::session_cookie_from_headers(&headers)
-                .map_err(|_| StatusCode::UNAUTHORIZED)?,
-            now,
-        )
+        .session(cookie, now)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     // Current core policy permits host enrollment to the owner. CA unlock remains
@@ -317,7 +360,7 @@ async fn invite(
         )
         .await
         .map_err(|_| StatusCode::FORBIDDEN)?;
-    Ok(Json(JoinInvitation {
+    Ok(JoinInvitation {
         host_id: request.host_id,
         mode: request.mode,
         execution_uid: request.execution_uid,
@@ -339,7 +382,7 @@ async fn invite(
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
         endpoint: api.endpoint.endpoint,
         server_name: api.endpoint.server_name,
-    }))
+    })
 }
 
 async fn join(

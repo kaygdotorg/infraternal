@@ -70,6 +70,10 @@ pub trait Backend: Send + Sync {
         host: uuid::Uuid,
     ) -> Operation<'a, ()>;
     fn failed<'a>(&'a self, authority: &'a Authority, host: uuid::Uuid) -> Operation<'a, ()>;
+    /// Retire only transient attempt ownership after durable installation commits.
+    fn completed<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Eight concurrent hosts by default across every socket/batch, not eight per request.
@@ -536,6 +540,9 @@ impl Bootstrap {
         );
         self.backend.terminal_canary(&batch.authority, host).await?;
         transaction.commit().await?;
+        // This hook releases transient bookkeeping after the durable commit.
+        // A housekeeping failure must never revoke an installed, proven host.
+        let _ = self.backend.completed(&batch.authority, host).await;
         Ok(())
     }
 

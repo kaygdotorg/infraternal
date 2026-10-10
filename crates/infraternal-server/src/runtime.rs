@@ -364,6 +364,7 @@ async fn remote_router(
         Router,
         crate::remote_runtime::RemoteHosts,
         Option<RemoteListeners>,
+        Option<crate::remote_http::InvitationIssuer>,
     ),
     ServerError,
 > {
@@ -396,6 +397,14 @@ async fn remote_router(
     if let (Some(service), Some(listeners)) = (&mut enrollment, &listeners) {
         service.endpoint.endpoint = listeners.local_addr().map_err(ServerError::Listener)?;
     }
+    let issuer = enrollment.clone().map(|service| {
+        crate::remote_http::InvitationIssuer::new(
+            auth.clone(),
+            pool.clone(),
+            enrollment_store.clone(),
+            service,
+        )
+    });
     let remote_api = enrollment.map(|service| {
         crate::remote_http::router_with_store(
             auth.clone(),
@@ -410,6 +419,7 @@ async fn remote_router(
         remote_api.unwrap_or_else(crate::remote_http::unavailable_router),
         hosts,
         listeners,
+        issuer,
     ))
 }
 
@@ -474,12 +484,6 @@ async fn build_router_core(
         remove_setup_token_socket_or_warn(&config.data_dir, "owner already exists at startup");
     }
 
-    // Compose SSH from this exact migrated pool and live revocation scope [23,138,168].
-    #[cfg(feature = "ssh")]
-    let (bootstrap, ssh_key) =
-        crate::bootstrap_runtime::initialize(&config.data_dir, &auth, &pool, factory, key_setup)
-            .await?;
-
     let agent = if let Some(agent) = supplied_agent {
         agent
     } else {
@@ -487,21 +491,33 @@ async fn build_router_core(
         EmbeddedAgent::spawn(executable)
     };
     #[cfg(feature = "remote")]
-    let (ca_api, remote_api, hosts, listeners) =
+    let (ca_api, remote_api, hosts, listeners, issuer) =
         remote_router(auth.clone(), pool.clone(), enrollment, remote).await?;
-    #[cfg(feature = "remote")]
-    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
-        .await
-        .map_err(|_| ServerError::InvalidConfiguration)?
-        .with_plugin_descriptors(infraternal_agent::plugins::descriptors())
-        .with_remote_hosts(hosts);
-    #[cfg(not(feature = "remote"))]
-    let listeners = None;
-    #[cfg(not(feature = "remote"))]
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    let integration = issuer.map(|issuer| (issuer, hosts.clone()));
+    #[cfg(all(feature = "ssh", not(feature = "remote")))]
+    let integration = None;
+    #[cfg(all(feature = "remote", not(feature = "ssh")))]
+    let _ = issuer;
+    // Compose SSH only after the shared CA ledger and admitted transport exist.
+    #[cfg(feature = "ssh")]
+    let (bootstrap, ssh_key) = crate::bootstrap_runtime::initialize(
+        &config.data_dir,
+        &auth,
+        &pool,
+        factory,
+        key_setup,
+        integration,
+    )
+    .await?;
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
         .await
         .map_err(|_| ServerError::InvalidConfiguration)?
         .with_plugin_descriptors(infraternal_agent::plugins::descriptors());
+    #[cfg(feature = "remote")]
+    let ws_state = ws_state.with_remote_hosts(hosts);
+    #[cfg(not(feature = "remote"))]
+    let listeners = None;
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)

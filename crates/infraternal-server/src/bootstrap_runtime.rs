@@ -1,4 +1,4 @@
-//! Provides a fail-closed default until #78 supplies production enrollment, discovery/vault and remote readiness adapters.
+//! Builds SSH bootstrap adapters around server authorization, CA enrollment and remote readiness.
 
 use crate::{
     ServerConfig, ServerError,
@@ -18,6 +18,17 @@ use infraternal_plugin_ssh::{
     trust::TrustedOpenSsh,
 };
 use std::{path::Path, sync::Arc, time::Duration};
+
+#[cfg(feature = "remote")]
+#[path = "bootstrap_remote.rs"]
+mod remote_backend;
+#[cfg(feature = "remote")]
+pub(crate) type RemoteBootstrap = (
+    crate::remote_http::InvitationIssuer,
+    crate::remote_runtime::RemoteHosts,
+);
+#[cfg(not(feature = "remote"))]
+pub(crate) type RemoteBootstrap = ();
 
 /// Receives the exact live authenticator and database, after safe server initialization.
 /// #78 supplies its CA/enrollment/remote registry here; no parallel owner/session state.
@@ -65,6 +76,7 @@ pub(crate) async fn initialize(
     pool: &SqlitePool,
     factory: Option<BootstrapFactory>,
     key_setup: Option<KeyInitialization>,
+    remote: Option<RemoteBootstrap>,
 ) -> Result<(Bootstrap, Arc<dyn SshKeySource>), ServerError> {
     let result: (_, Arc<dyn SshKeySource>) = if let Some(setup) = key_setup {
         let key = Arc::new(
@@ -86,7 +98,7 @@ pub(crate) async fn initialize(
         };
         let bootstrap = match factory {
             Some(factory) => factory(auth.clone(), pool.clone()),
-            None => default_runner(data_dir, auth.clone(), key.clone())?,
+            None => default_runner(data_dir, auth.clone(), key.clone(), remote)?,
         };
         (bootstrap, key)
     };
@@ -98,8 +110,29 @@ pub(crate) fn default_runner(
     data_dir: &Path,
     auth: Auth,
     key: Arc<dyn SshKeySource>,
+    remote: Option<RemoteBootstrap>,
 ) -> Result<Bootstrap, ServerError> {
     let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
+    let base = PendingRemoteRuntime {
+        auth: Some(auth),
+        key,
+    };
+    #[cfg(feature = "remote")]
+    let backend: Arc<dyn Backend> = if let Some((issuer, hosts)) = remote {
+        Arc::new(remote_backend::RemoteBackend {
+            base,
+            issuer,
+            hosts,
+            attempts: std::sync::Mutex::default(),
+        })
+    } else {
+        Arc::new(base)
+    };
+    #[cfg(not(feature = "remote"))]
+    let backend: Arc<dyn Backend> = {
+        let _ = remote;
+        Arc::new(base)
+    };
     Ok(Bootstrap::new(
         Arc::new(AutoAuth::new(Arc::new(TrustedOpenSsh::new(
             OpenSsh {
@@ -114,10 +147,7 @@ pub(crate) fn default_runner(
             },
             data_dir.join("ssh-trust"),
         )))),
-        Arc::new(PendingRemoteRuntime {
-            auth: Some(auth),
-            key,
-        }),
+        backend,
         BinaryPaths {
             x86_64: std::env::var_os("INFRATERNAL_BOOTSTRAP_X86_64_BINARY").map_or_else(
                 || executable.with_file_name("infraternal-x86_64-musl"),
@@ -247,6 +277,15 @@ fn not_ready<'a>() -> Operation<'a, ()> {
             "Remote host routing is unavailable in this build.",
         ))
     })
+}
+
+#[cfg(feature = "remote")]
+fn unix_now() -> Result<i64, Failure> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .ok_or_else(|| Failure::install("The server clock is unavailable."))
 }
 
 #[cfg(test)]
