@@ -416,3 +416,8 @@ async fn join(
 #[cfg(test)]
 #[path = "remote_http_tests.rs"]
 mod tests;
+
+/// Exact bounded removal decoders shared by HTTP and parser fuzzing.
+pub use crate::remote_removal_http::{
+    decode_finish as decode_removal_finish, decode_start as decode_removal_start,
+};

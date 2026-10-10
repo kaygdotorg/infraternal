@@ -82,3 +82,8 @@ static COMPILED_PLUGINS: &[&infraternal_plugin_api::PluginDescriptor] = &[
     #[cfg(feature = "mesh")]
     &infraternal_plugin_mesh::descriptor::DESCRIPTOR,
 ];
+
+#[cfg(feature = "remote")]
+mod remote_removal;
+#[cfg(feature = "remote")]
+mod remote_removal_http;
