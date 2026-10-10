@@ -360,6 +360,74 @@ pub async fn cleanup(context: &Context, home: &Path, uid: u32) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn retirement_signals_the_shell_after_its_foreground_job_exits() {
+        use infraternal_shim::frame::Frame;
+        let directory = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(format!(".cache/codex-scratch/a87/r{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("00000000000000000000000000000001.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            let mut session = [0; 16];
+            session[15] = 1;
+            peer.write_all(
+                &Frame::Hello {
+                    version: 1,
+                    caps: 0,
+                    session,
+                    pid: 1,
+                    cols: 80,
+                    rows: 24,
+                    created: 0,
+                    head: 0,
+                    start: 0,
+                }
+                .encode()
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                shim_frame(&mut peer).await.unwrap(),
+                Frame::Attach(0)
+            ));
+            assert!(matches!(
+                shim_frame(&mut peer).await.unwrap(),
+                Frame::ReadFrom(0)
+            ));
+            assert!(matches!(
+                shim_frame(&mut peer).await.unwrap(),
+                Frame::Signal(9)
+            ));
+            // The first signal retires an application, leaving its login shell.
+            assert!(matches!(
+                shim_frame(&mut peer).await.unwrap(),
+                Frame::Signal(9)
+            ));
+            let exit = Frame::Exited(0, 0).encode().unwrap();
+            peer.write_all(&exit[..2]).await.unwrap();
+            assert!(matches!(
+                shim_frame(&mut peer).await.unwrap(),
+                Frame::Signal(9)
+            ));
+            peer.write_all(&exit[2..]).await.unwrap();
+            assert!(matches!(
+                shim_frame(&mut peer).await.unwrap(),
+                Frame::ExitAck
+            ));
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            retire_shim(&path, nix::unistd::Uid::effective().as_raw()),
+        )
+        .await;
+        server.abort();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+        assert!(result.is_ok_and(|r| r.is_ok()));
+    }
     #[test]
     fn uninstall_never_accepts_request_selected_paths_or_foreign_identity() {
         let context = Context {
