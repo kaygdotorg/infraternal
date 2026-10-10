@@ -25,7 +25,10 @@ impl Session {
     fn start(ring: usize, detach: bool, units: Option<(&str, &str)>) -> Self {
         let counter = NEXT.fetch_add(1, Ordering::Relaxed);
         let id = format!("{:016x}{counter:016x}", std::process::id());
-        let state = PathBuf::from(format!("../../target/t{}-{counter}", std::process::id()));
+        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/session-bounds/t{}-{counter}",
+            std::process::id()
+        ));
         let mut command = if let Some((parent, scope)) = units {
             let mut command = Command::new("systemd-run");
             command.args(["--user","--quiet","--unit",parent,"--property","KillMode=control-group","--working-directory"])
@@ -133,9 +136,6 @@ impl Session {
             }
         }
         drop(peer);
-        let mut peer = self.attach(seq);
-        assert_eq!(read(&mut peer), Frame::Exited(7, seq));
-        send(&mut peer, Frame::ExitAck);
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.path().exists() {
             assert!(Instant::now() < deadline);
@@ -268,7 +268,7 @@ fn until(peer: &mut UnixStream, seq: &mut u64, needle: &[u8]) -> Vec<u8> {
     output
 }
 #[test]
-fn real_shell_reconnect_resize_and_retained_exit() {
+fn real_shell_reconnect_resize_and_delivered_exit() {
     let mut session = Session::new(8 * 1024 * 1024, false);
     assert_eq!(
         fs::metadata(session.state.join("sessions")).unwrap().mode() & 0o777,
@@ -555,4 +555,74 @@ fn disallowed_signal_only_disconnects_peer() {
     );
     until(&mut peer, &mut seq, b"SIGNAL_ALIVE\r\n");
     session.finish(peer, seq);
+}
+
+/// A dead detached shell cannot retain its shim process or rendezvous socket.
+#[test]
+fn detached_shell_exit_reaps_shim_within_one_second() {
+    let mut session = Session::new(8192, false);
+    let mut peer = session.attach(0);
+    let mut seq = 0;
+    send(
+        &mut peer,
+        Frame::Input(b"printf 'READY_%s\\n' REAP\n".to_vec()),
+    );
+    until(&mut peer, &mut seq, b"READY_REAP\r\n");
+    drop(peer);
+    let children = fs::read_to_string(format!(
+        "/proc/{}/task/{}/children",
+        session.pid, session.pid
+    ))
+    .unwrap();
+    let shell: i32 = children.split_whitespace().next().unwrap().parse().unwrap();
+    let start = Instant::now();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(shell),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    while session.path().exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "dead shim socket retained"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(session.child.as_mut().unwrap().wait().unwrap().success());
+    session.pid = 0;
+}
+
+/// A descendant holding the PTY slave cannot retain a dead shell's shim.
+#[test]
+fn detached_shell_exit_reaps_even_with_a_live_background_descendant() {
+    let mut session = Session::new(8192, false);
+    let mut peer = session.attach(0);
+    let mut seq = 0;
+    send(
+        &mut peer,
+        Frame::Input(b"(trap '' HUP; exec sleep 5) & printf 'READY_%s\\n' REAP\n".to_vec()),
+    );
+    until(&mut peer, &mut seq, b"READY_REAP\r\n");
+    drop(peer);
+    let children = fs::read_to_string(format!(
+        "/proc/{}/task/{}/children",
+        session.pid, session.pid
+    ))
+    .unwrap();
+    let shell: i32 = children.split_whitespace().next().unwrap().parse().unwrap();
+    let start = Instant::now();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(shell),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    while session.path().exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "dead shim socket retained"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(session.child.as_mut().unwrap().wait().unwrap().success());
+    session.pid = 0;
 }

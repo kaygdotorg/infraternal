@@ -64,6 +64,7 @@ enum Message {
     Shim(u32, Shim),
     Result(u32, u32, bool, Vec<u8>),
     Event(u32, Vec<u8>),
+    Exited(u32, Vec<u8>, oneshot::Sender<()>),
     Pong(u64, u64),
     Close(u32, &'static str),
 }
@@ -158,6 +159,18 @@ async fn writer(
                     },
                 )
                 .await?;
+            }
+            Message::Exited(stream, json, delivered) => {
+                tx.send(
+                    socket,
+                    stream,
+                    &Frame::Event {
+                        sub_id: 0,
+                        event_json: &json,
+                    },
+                )
+                .await?;
+                let _ = delivered.send(());
             }
             Message::Pong(nonce, sent_us) => {
                 tx.send(socket, 0, &Frame::Pong { nonce, sent_us }).await?;
@@ -702,8 +715,13 @@ async fn terminal(
                     Shim::InputAck(seq) => emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?,
                     Shim::Exited(status, final_seq) => {
                         let json = serde_json::to_vec(&serde_json::json!({"type":"terminal.exited", "session_id":uuid::Uuid::from_bytes(id), "status":status, "final_seq":final_seq}))?;
-                        // Keep shim exit until a future explicit lifecycle policy acknowledges it.
-                        emit(&tx, Message::Event(stream, json)).await?;
+                        // A reaped shim closes its socket immediately. Retire only
+                        // after the ordered exit reaches leg B: an EOF-derived
+                        // priority Close must never overtake this final event.
+                        let (delivered, delivery) = oneshot::channel();
+                        emit(&tx, Message::Exited(stream, json, delivered)).await?;
+                        delivery.await.map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+                        return Ok(());
                     }
                     Shim::Error(1 | 2, _) => {
                         // Older shims cannot negotiate approximation. Park

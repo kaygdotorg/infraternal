@@ -231,7 +231,7 @@ fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
     listener.set_nonblocking(true)?;
     Ok((listener, guard))
 }
-/// Run one Linux session until an authenticated peer acknowledges its drained exit.
+/// Run one Linux session until its drained exit has been delivered to every viewer.
 /// # Errors
 /// Returns invalid startup configuration, account, PTY, socket or resource failures.
 #[allow(clippy::too_many_lines)]
@@ -326,18 +326,30 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 }
             }
         }
+        // Delivery means the complete Exited frame has reached the local socket,
+        // after the final output. A disconnected viewer cannot retain a dead PTY;
+        // authenticated discovery/control probes without a cursor are not viewers.
+        if exit.is_some()
+            && drained
+            && peers
+                .iter()
+                .filter(|p| p.cursor.is_some())
+                .all(|p| p.exited_sent && p.pending.is_empty())
+        {
+            return Ok(());
+        }
         // Borrow descriptors only through poll. Every queue and ownership
         // mutation happens after this scope, so replacement cannot leave a
         // PollFd referring to a closed/reused file descriptor.
+        // A fast viewer permits PTY progress. Lagging viewers catch up from
+        // the ring or a snapshot; when every viewer stalls the old bounded
+        // backpressure rule still applies until their daemon links detach.
+        let can_read = !drained
+            && (!peers.iter().any(|p| p.cursor.is_some())
+                || peers.iter().any(|p| {
+                    p.pending.is_empty() && p.cursor.is_some_and(|seq| seq == ring.head())
+                }));
         let ready = {
-            // A fast viewer permits PTY progress. Lagging viewers catch up from
-            // the ring or a snapshot; when every viewer stalls the old bounded
-            // backpressure rule still applies until their daemon links detach.
-            let can_read = !drained
-                && (peers.is_empty()
-                    || peers.iter().any(|p| {
-                        p.pending.is_empty() && p.cursor.is_some_and(|seq| seq == ring.head())
-                    }));
             let has_input = !input.is_empty();
             // Stack slots preserve the allocation-free readiness loop. Disabled
             // PTYs are omitted because level-triggered HUP would otherwise spin.
@@ -369,7 +381,11 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 }
                 fds[index + 3] = PollFd::new(p.stream.as_fd(), flags);
             }
-            match poll(&mut fds[..peers.len() + 3], None::<u16>) {
+            // Once the owned child exits, a descendant may hold the slave open
+            // without producing a readiness event. Probe the nonblocking master
+            // immediately, while retaining viewer backpressure during the drain.
+            let timeout = (exit.is_some() && can_read).then_some(0_u16);
+            match poll(&mut fds[..peers.len() + 3], timeout) {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => return Err(e.into()),
@@ -443,7 +459,10 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 }
             }
         }
-        if ready.2.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) && !drained {
+        if !drained
+            && (ready.2.intersects(PollFlags::POLLIN | PollFlags::POLLHUP)
+                || (exit.is_some() && can_read))
+        {
             let mut bytes = [0; CHUNK];
             let limit = CHUNK.min(config.ring_capacity);
             let mut used = 0;
@@ -466,7 +485,13 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         drained = true;
                         break;
                     }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // Background descendants may keep the slave open after
+                        // the owned shell exits. Drain ready bytes, never wait
+                        // indefinitely for an unrelated descendant to close it.
+                        drained = exit.is_some();
+                        break;
+                    }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     Err(e) => return Err(e),
                 }
@@ -511,10 +536,8 @@ pub fn run(mut config: Config) -> io::Result<()> {
                             Ok(())
                         });
                         p.decoder = decoder;
-                        if result.is_err() {
+                        if result.is_err() || acknowledged_exit {
                             disconnect = true;
-                        } else if acknowledged_exit {
-                            return Ok(());
                         }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
