@@ -13,9 +13,14 @@ default = ["mesh", "ssh"]
 mesh = ["dep:infraternal-plugin-mesh"]
 remote = ["dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn"]
 
-ssh = ["dep:infraternal-plugin-ssh"]
+ssh = ["dep:infraternal-plugin-ssh", "dep:hyper", "dep:hyper-util", "dep:tokio-openssl", "dep:http-body-util"]
 
 [dependencies]
+# The release downloader reuses the HTTP/TLS engines already used by server tests.
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+tokio-openssl = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
 infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }
