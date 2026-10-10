@@ -82,7 +82,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private readonly n = ++serial;
     private mark(step: string): void { performance.mark(`sw:${this.n}:${step}`); }
 
-    constructor(private readonly model: WindowModel, private readonly changed: () => void) {}
+    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined) {}
 
     /** Keeps a picture of this terminal's screen as its session's last known one (only while it is drawn). */
     private keepScreen(): void {
@@ -142,6 +142,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         ...(first ? options.firstHooks : {}),
         onAttached: (resumed, terminal) => { this.mark("attached"); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
         onPaintedOutput: (bytes, at, sequence) => { if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
+        onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         onSessionCreated: (id) => {
           this.model.sessionId = id;
           this.changed();
@@ -220,7 +221,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
   return {
     bind(model, env): SessionBinding {
-      const b = new Binding(model, env.changed);
+      const b = new Binding(model, env.changed, env.exited);
       bindings.add(b);
       return b;
     },
