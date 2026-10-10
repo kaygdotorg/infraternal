@@ -112,6 +112,9 @@ pub const SERVE: ActionDef = ActionDef {
     dry_run: DryRun::Unsupported,
     opens: None,
 };
+pub mod server_restart;
+pub use server_restart::RESTART;
+
 /// Create machine trust only after a fresh administrator passkey verification.
 pub const BOOTSTRAP_CA: ActionDef = ActionDef {
     input: SchemaRef("remote.request"),
@@ -156,7 +159,15 @@ pub const CA_ADMINISTRATORS: ActionDef = ActionDef {
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "remote",
     api: API_VERSION,
-    actions: &[JOIN, RUN, SERVE, BOOTSTRAP_CA, CA_ADMINISTRATORS, REMOVE],
+    actions: &[
+        JOIN,
+        RUN,
+        SERVE,
+        RESTART,
+        BOOTSTRAP_CA,
+        CA_ADMINISTRATORS,
+        REMOVE,
+    ],
     // Settings retain the source declarations; these adapters have no socket dispatcher.
     settings: Some(SchemaRef(
         r#"{"type":"object","properties":{"enabled":{"type":"boolean","description":"Enable remote host transport on this node","default":false},"listen":{"type":["string","null"],"description":"Server transport socket address","default":null},"ca-directory":{"type":["string","null"],"description":"Retained public certificate-authority trust","default":null},"identity-directory":{"type":["string","null"],"description":"Private enrolled node identity","default":null}},"additionalProperties":false}"#,
