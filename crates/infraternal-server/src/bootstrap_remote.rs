@@ -118,8 +118,31 @@ impl Backend for RemoteBackend {
         target: &'a Target,
         check: &'a Check,
     ) -> Operation<'a, JoinMaterial> {
+        self.invitation_with_trust(authority, target, check, None)
+    }
+    fn invitation_with_trust<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+    ) -> Operation<'a, JoinMaterial> {
         Box::pin(async move {
             self.authorize(authority).await?;
+            let address = match &target.address {
+                infraternal_plugin_ssh::model::TargetAddress::Manual(address) => address.as_str(),
+                infraternal_plugin_ssh::model::TargetAddress::Discovered(_) => {
+                    return Err(unavailable());
+                }
+            };
+            let existing: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
+                .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).fetch_one(&self.issuer.store().0).await.map_err(|_|unavailable())?;
+            if existing {
+                let mut failure =
+                    Failure::install("This host is already added. Open its terminal from Console.");
+                failure.already_added = true;
+                return Err(failure);
+            }
             if !self.issuer.ready() {
                 return Err(Failure::install(
                     "Set up or unlock host connections with an administrator passkey before adding a host.",
@@ -167,6 +190,21 @@ impl Backend for RemoteBackend {
                     "The host invitation was refused. Unlock your session and try again.",
                 ));
             };
+            let address = match &target.address {
+                infraternal_plugin_ssh::model::TargetAddress::Manual(address) => address.as_str(),
+                infraternal_plugin_ssh::model::TargetAddress::Discovered(_) => {
+                    return Err(unavailable());
+                }
+            };
+            sqlx::query(
+                "INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,?,?)",
+            )
+            .bind(host.as_bytes().as_slice())
+            .bind(address)
+            .bind(lookup)
+            .execute(&self.issuer.store().0)
+            .await
+            .map_err(|_| unavailable())?;
             let stdin = serde_json::to_vec(&invitation);
             invitation.token.zeroize();
             let stdin = stdin.map_err(|_| unavailable())?;
@@ -468,6 +506,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+        assert!(f.backend.attempts.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn readding_a_live_host_reports_already_added_before_issuing_a_certificate() {
+        let f = fixture(true).await;
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture',NULL)").bind(f.prior.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let event = finished(&start(&f, "owner")).await;
+        assert_eq!(event.step, Step::Failed);
+        assert!(event.failure.unwrap().already_added);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM remote_hosts")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
         assert!(f.backend.attempts.lock().unwrap().is_empty());
     }
     #[tokio::test]
