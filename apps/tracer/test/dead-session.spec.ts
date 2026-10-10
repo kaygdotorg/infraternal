@@ -11,12 +11,14 @@ import { resolve } from "node:path";
 import { expect, test, type APIRequestContext, type Page } from "playwright/test";
 
 type MockState = { attach_count: number; session_id: string; echoed_text: string };
-const mockState = async (request: APIRequestContext): Promise<MockState> => (await (await request.get("/__mock/state")).json()) as MockState;
+/** The latency proxy may hang up a pooled keep-alive connection that a socket drop closed; one retry absorbs it. */
+const retry = <T>(call: () => Promise<T>): Promise<T> => call().catch(() => call());
+const mockState = async (request: APIRequestContext): Promise<MockState> => (await (await retry(() => request.get("/__mock/state"))).json()) as MockState;
 
 async function openProduct(page: Page): Promise<void> {
   const request = page.context().request;
-  await request.post("/__mock/reset");
-  await request.post("/__mock/open-terminal");
+  await retry(() => request.post("/__mock/reset"));
+  await retry(() => request.post("/__mock/open-terminal"));
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/?theme=ink&bg=none");
   await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
@@ -33,7 +35,7 @@ test("a dead session ends quietly: one attach, an ended state, and a new shell i
   const before = (await mockState(request)).attach_count;
 
   // The host loses the session and the link drops: the page reconnects and asks once.
-  const dead = ((await (await request.post("/__mock/end-session")).json()) as { session_id: string }).session_id;
+  const dead = ((await (await retry(() => request.post("/__mock/end-session"))).json()) as { session_id: string }).session_id;
   await expect(win.locator(".cl-sx-strip")).toBeVisible({ timeout: 10_000 });
   await expect(win.locator(".cl-sx-strip-text")).toHaveText("Session ended");
   await expect(win.locator(".cl-sx-strip .ui-mark")).toHaveAttribute("data-mark", "ended");
@@ -47,7 +49,7 @@ test("a dead session ends quietly: one attach, an ended state, and a new shell i
 
   // No retry: not over time, and not after another link drop.
   await page.waitForTimeout(2_000);
-  await request.post("/__mock/drop-sockets");
+  await retry(() => request.post("/__mock/drop-sockets"));
   await page.waitForTimeout(3_000);
   expect((await mockState(request)).attach_count, "the page attached to a dead session again").toBe(ended);
   await expect(win.locator(".cl-sx-strip-text")).toHaveText("Session ended");
