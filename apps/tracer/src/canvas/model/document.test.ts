@@ -54,3 +54,35 @@ test("parseDocument rejects anything that is not a document of this format", () 
   }
   expect(parseDocument(good)).toEqual(good);
 });
+
+/**
+ * A document saved before D212, written by hand in the v1 shape, still loads unchanged: no field was added, so the
+ * four window actions need no migration. A split pair is two columns with weights that add up to the old column, and a
+ * full-size window is a window with `height` 1 (one column height).
+ */
+test("a version 1 document from before D212 loads, with its split pair and a full-size window", () => {
+  const old = {
+    format: FORMAT, version: VERSION, revision: 7,
+    views: [{
+      id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 },
+      layout: {
+        type: "tiled",
+        columns: [
+          { id: "c1", weight: 0.5, windows: [{ id: "w1", target: { type: "session", id: "s1", host: "build-01", name: "zsh" } }] },
+          { id: "c2", weight: 0.5, windows: [{ id: "w2", target: { type: "session", id: "s2", host: "build-01" } }] },
+          { id: "c3", weight: 1, windows: [{ id: "w3", target: { type: "session", id: "s3", host: "edge-arm" }, height: 1 }, { id: "s-appearance", target: { type: "settings", section: "appearance" } }] },
+        ],
+      },
+    }],
+  };
+  const doc = parseDocument(old);
+  expect(doc).toBeDefined();
+  const layout = doc!.views[0]!.layout;
+  if (layout.type !== "tiled") throw new Error("tiled");
+  const cols = columnsFromDocument(layout, m, (t) => (t.type === "session" ? { host: t.host, sessionId: t.id, ...(t.name ? { session: t.name } : {}) } : t.type === "settings" ? { host: "" } : undefined));
+  expect(cols.map((c) => [c.id, c.w, c.wins.map((w) => w.id)])).toEqual([["c1", Math.round(0.5 * m.colW), ["w1"]], ["c2", Math.round(0.5 * m.colW), ["w2"]], ["c3", m.colW, ["w3", "s-appearance"]]]);
+  expect(cols[2]!.wins[0]!.h).toBe(1);
+  // Saving it again writes the same shape back.
+  const again: unknown = JSON.parse(JSON.stringify(toDocument([{ ...console_, cols }], m, 8).views[0]!.layout));
+  expect(again).toEqual(JSON.parse(JSON.stringify(old.views[0]!.layout)));
+});
