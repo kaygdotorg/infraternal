@@ -577,6 +577,33 @@ mod tests {
     }
 
     #[test]
+    fn pretty_tables_omit_empty_columns_and_rows() {
+        let result = CommandResult::new(
+            "status",
+            CommandState::Ready,
+            "Components were inspected.",
+            json!({
+                "components": [
+                    {"name": "mesh", "state": "running", "details": ""},
+                    {}
+                ]
+            }),
+        );
+        let output = render_pretty(
+            &result,
+            RenderOptions {
+                terminal: false,
+                color: false,
+                width: 80,
+            },
+        )
+        .expect("render status");
+
+        assert!(!output.contains("Details"), "empty column: {output}");
+        assert!(!output.contains("  \n"), "empty row: {output}");
+    }
+
+    #[test]
     fn json_snapshot_has_stable_versioned_fields_and_omits_absent_details() {
         let mut result = CommandResult::new(
             "mesh up",
