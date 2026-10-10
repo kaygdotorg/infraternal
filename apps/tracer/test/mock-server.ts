@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { extname, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
+import { CLOSE_SESSION_GONE, encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
 import { handleBootstrapHttp, serveProvisioning } from "./provisioning-double";
@@ -67,6 +67,10 @@ interface Connection {
   credit: number;
   outputCursor: bigint;
   attached: boolean;
+  /** The client stream the terminal uses (1 until a new shell opens another). */
+  stream: number;
+  /** Streams this connection ended with the final Close 4404; their in-flight frames are absorbed, as the server does. */
+  goneStreams: Set<number>;
   welcomed: boolean;
   resumeAccepted: boolean;
   resumeExpected: boolean;
@@ -89,6 +93,9 @@ let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
 let selectedFixture: Uint8Array | undefined;
 let session = createSession();
+/** Sessions the "host" no longer has (`/__mock/end-session`), and every AttachTerm seen, for the dead-session spec (#158). */
+const goneSessions = new Set<string>();
+let attachCount = 0;
 const traceEvents: TraceEvent[] = [];
 
 const perfSink = createPerfSink(FRONT_PORT);
@@ -134,6 +141,8 @@ webSockets.on("connection", (socket, request) => {
     credit: 0,
     outputCursor: 0n,
     attached: false,
+    stream: 1,
+    goneStreams: new Set(),
     welcomed: false,
     resumeAccepted: false,
     resumeExpected: false,
@@ -354,14 +363,14 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     session.echoedText = "";
 
     if (mode === "snapshot") {
-      sendFrame(connection.socket, 1, { type: "Snapshot", outSeq: BigInt(bytes.byteLength), bytes });
+      sendFrame(connection.socket, connection.stream, { type: "Snapshot", outSeq: BigInt(bytes.byteLength), bytes });
       connection.outputCursor = BigInt(bytes.byteLength);
       connection.credit -= bytes.byteLength;
       session.snapshotCount += 1;
     } else {
       for (let offset = 0; offset < bytes.byteLength; offset += MAX_MESSAGE) {
         const chunk = bytes.subarray(offset, Math.min(offset + MAX_MESSAGE, bytes.byteLength));
-        sendFrame(connection.socket, 1, { type: "Output", outSeq: BigInt(offset), bytes: chunk });
+        sendFrame(connection.socket, connection.stream, { type: "Output", outSeq: BigInt(offset), bytes: chunk });
         connection.outputCursor = BigInt(offset + chunk.byteLength);
         connection.credit -= chunk.byteLength;
       }
@@ -394,6 +403,8 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       snapshot_count: session.snapshotCount,
       socket_open_count: socketOpenCount,
       socket_close_count: socketCloseCount,
+      attach_count: attachCount,
+      session_id: session.sessionIdText,
       active_socket_count: connections.size,
     });
   }
@@ -434,6 +445,17 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method === "POST" && url.pathname === "/__mock/screen-reset") {
     appendEchoOutput(session, new TextEncoder().encode("\u001bc"));
     return sendJson(response, 200, { ok: true, output_sequence: String(session.outputLength) });
+  }
+  // The host loses the current session (its shim is gone), and the link drops, as when the host's infraternal
+  // agent restarts. The page reconnects and its attach gets the server's final answer (#158).
+  if (request.method === "POST" && url.pathname === "/__mock/end-session") {
+    goneSessions.add(session.sessionIdText);
+    for (const connection of connections) connection.socket.close(1011, "test-double host restarted");
+    return sendJson(response, 200, { session_id: session.sessionIdText });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/drop-sockets") {
+    for (const connection of connections) connection.socket.close(1011, "test-double link dropped");
+    return sendJson(response, 200, {});
   }
   if (request.method === "POST" && url.pathname === "/__mock/reset") {
     resetMockState();
@@ -600,8 +622,12 @@ function handleWire(connection: Connection, streamId: number, frame: WireFrame, 
   }
   if (streamId === 0) {
     handleControlFrame(connection, frame);
-  } else if (streamId === 1) {
-    handleTerminalFrame(connection, frame);
+  } else if (connection.goneStreams.has(streamId)) {
+    // Like the server: frames that crossed the final Close are dropped, and the client's own Close ends the entry.
+    if (frame.type === "Close") connection.goneStreams.delete(streamId);
+    else if (frame.type !== "Input" && frame.type !== "Credit" && frame.type !== "Resize") connection.socket.close(1002, "unexpected frame on an ended stream");
+  } else if (streamId % 2 === 1 && (streamId === connection.stream || (frame.type === "AttachTerm" && !connection.attached))) {
+    handleTerminalFrame(connection, streamId, frame);
   } else {
     connection.socket.close(1002, "unexpected mux stream");
   }
@@ -634,7 +660,7 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
         sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"unknown action"}') });
         return;
       }
-      if (!connection.welcomed || frame.callId !== 1 || frame.actionId !== "ssh.session.open") {
+      if (!connection.welcomed || frame.callId < 1 || frame.actionId !== "ssh.session.open") {
         connection.socket.close(1002, "unexpected test-double action");
         return;
       }
@@ -660,16 +686,23 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
   }
 }
 
-function handleTerminalFrame(connection: Connection, frame: WireFrame): void {
+function handleTerminalFrame(connection: Connection, streamId: number, frame: WireFrame): void {
   switch (frame.type) {
     case "AttachTerm":
+      attachCount += 1;
+      if (goneSessions.has(uuidText(frame.sessionId))) {
+        connection.goneStreams.add(streamId);
+        sendFrame(connection.socket, streamId, { type: "Close", code: CLOSE_SESSION_GONE, reason: "session ended" });
+        return;
+      }
+      connection.stream = streamId;
       if (!bytesEqual(frame.sessionId, connection.session.sessionId) || connection.attached) {
         connection.socket.close(1002, "invalid test-double attach");
         return;
       }
       connection.attached = true;
       connection.outputCursor = frame.lastOutSeq;
-      sendFrame(connection.socket, 1, { type: "Ack", inSeqAcked: connection.session.writtenInput });
+      sendFrame(connection.socket, connection.stream, { type: "Ack", inSeqAcked: connection.session.writtenInput });
       flushOutput(connection);
       return;
     case "Credit":
@@ -689,8 +722,12 @@ function handleTerminalFrame(connection: Connection, frame: WireFrame): void {
       return;
     case "Resize":
       return;
+    case "Close":
+      // The window detached; the session keeps running.
+      connection.attached = false;
+      return;
     case "Ping":
-      sendFrame(connection.socket, 1, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
+      sendFrame(connection.socket, connection.stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
       return;
     default:
       connection.socket.close(1002, "unexpected test-double terminal frame");
@@ -727,7 +764,7 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
     connection.socket.close(4001, "test-double forced input acknowledgement drop");
     return;
   }
-  sendFrame(connection.socket, 1, { type: "Ack", inSeqAcked: connection.session.writtenInput });
+  sendFrame(connection.socket, connection.stream, { type: "Ack", inSeqAcked: connection.session.writtenInput });
   flushOutput(connection);
 }
 
@@ -763,7 +800,7 @@ function flushOutput(connection: Connection): void {
     const snapshots = connection.session.snapshotFrames;
     const repaintBytes = snapshots.reduce((total, snapshot) => total + snapshot.bytes.byteLength, 0);
     if (snapshots.length === 0 || repaintBytes > connection.credit) return;
-    sendFrames(connection.socket, 1, snapshots.map(({ outSeq, bytes }) => ({ type: "Snapshot", outSeq, bytes })));
+    sendFrames(connection.socket, connection.stream, snapshots.map(({ outSeq, bytes }) => ({ type: "Snapshot", outSeq, bytes })));
     // A Snapshot may predate output that is already in the session ring. Resume
     // at its absolute cursor so that those later bytes still follow the repaint.
     connection.outputCursor = snapshots[snapshots.length - 1]!.outSeq;
@@ -779,7 +816,7 @@ function flushOutput(connection: Connection): void {
     const sourceEnd = absoluteOffset < fixtureLength ? fixtureLength : fixtureLength + connection.session.echoOutputLength;
     const length = Math.min(MAX_MESSAGE, connection.credit, sourceEnd - absoluteOffset);
     const bytes = source.subarray(offset, offset + length);
-    sendFrame(connection.socket, 1, { type: "Output", outSeq: connection.outputCursor, bytes },
+    sendFrame(connection.socket, connection.stream, { type: "Output", outSeq: connection.outputCursor, bytes },
       connection.traceEnabled ? connection.outputCursor : undefined, length);
     connection.outputCursor += BigInt(length);
     connection.credit -= length;
@@ -928,6 +965,8 @@ function resetMockState(): void {
   selectedFixture = undefined;
   socketOpenCount = 0;
   socketCloseCount = 0;
+  goneSessions.clear();
+  attachCount = 0;
   traceEvents.length = 0;
   session = createSession();
 }
@@ -1016,6 +1055,11 @@ function randomUuid(): string {
 
 function uuidBytes(value: string): Uint8Array {
   return new Uint8Array(Buffer.from(value.replace(/-/g, ""), "hex"));
+}
+
+function uuidText(bytes: Uint8Array): string {
+  const hex = Buffer.from(bytes).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
