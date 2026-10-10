@@ -300,7 +300,7 @@ pub(crate) fn replace(
     replacement: Replacement,
     json: bool,
 ) -> std::process::ExitCode {
-    drop(runtime);
+    shutdown_runtime(runtime);
     let _error = replacement.exec();
     super::output::refuse(
         json,
@@ -314,3 +314,8 @@ pub(crate) fn replace(
 #[cfg(test)]
 #[path = "restart_tests.rs"]
 mod tests;
+
+/// Blocking cleanup has its own SIGKILL/reap deadline; exec cannot wait forever.
+fn shutdown_runtime(runtime: tokio::runtime::Runtime) {
+    runtime.shutdown_timeout(Duration::from_secs(4));
+}

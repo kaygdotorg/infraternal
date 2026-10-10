@@ -718,3 +718,28 @@ fn child_spawn_disposes_inherited_stdin() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[tokio::test]
+async fn unresponsive_child_is_killed_and_reaped_within_the_shutdown_bound() {
+    use std::io::Read;
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "trap '' TERM; printf ready; exec sleep 60"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = [0; 5];
+    child.stdout.take().unwrap().read_exact(&mut ready).unwrap();
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+    let result = tokio::time::timeout(Duration::from_secs(4), stop_child(pid)).await;
+    if result.is_err() {
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+    }
+    // stop_child normally reaps through waitpid; Child::wait then returns ECHILD.
+    // The failure path also waits, releasing the original blocking waiter.
+    let _ = child.wait();
+    assert!(
+        result.is_ok(),
+        "SIGTERM-resistant child must be SIGKILLed and reaped within the bound"
+    );
+}

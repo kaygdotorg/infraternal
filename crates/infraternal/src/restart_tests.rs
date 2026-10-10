@@ -282,3 +282,55 @@ async fn default_restart_opens_the_receiver_target_exactly_once() {
         "receiver must pin one opened fd, including default-path restart"
     );
 }
+
+#[test]
+fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
+    use std::os::unix::process::CommandExt;
+    const NAME: &str = "restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter";
+    if std::env::var_os("INFRATERNAL_RUNTIME_BOUND_TEST").is_some() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = entered.clone();
+        runtime.spawn_blocking(move || {
+            started.store(true, std::sync::atomic::Ordering::Release);
+            let _ = nix::sys::wait::waitpid(pid, None);
+        });
+        while !entered.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        shutdown_runtime(runtime);
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        let _ = child.wait();
+        return;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_RUNTIME_BOUND_TEST", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap()),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+            let _ = child.wait();
+            panic!("runtime shutdown waited forever on a blocking waitpid");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

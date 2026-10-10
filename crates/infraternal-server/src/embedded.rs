@@ -1588,15 +1588,36 @@ fn spawn_socketpair_agent(
 
 #[cfg(unix)]
 async fn stop_child(pid: nix::unistd::Pid) {
-    use nix::{
-        sys::{
-            signal::{Signal, kill},
-            wait::waitpid,
-        },
-        unistd::Pid,
+    use nix::sys::{
+        signal::{Signal, kill},
+        wait::{WaitPidFlag, WaitStatus, waitpid},
     };
-    let _ = kill(pid, Signal::SIGTERM);
-    let _ = tokio::task::spawn_blocking(move || waitpid(Pid::from_raw(pid.as_raw()), None)).await;
+    // Keep escalation inside the blocking task: runtime cancellation may drop
+    // its async waiter, but must not cancel the SIGKILL deadline or reaping.
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = kill(pid, Signal::SIGTERM);
+        let graceful = std::time::Instant::now() + Duration::from_secs(2);
+        let final_deadline = graceful + Duration::from_secs(1);
+        let mut escalated = false;
+        loop {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => {}
+                // Reap only this child. On return, no later signal can target a
+                // reused PID; ECHILD also retires the identity immediately.
+                _ => return,
+            }
+            let now = std::time::Instant::now();
+            if !escalated && now >= graceful {
+                let _ = kill(pid, Signal::SIGKILL);
+                escalated = true;
+            }
+            if now >= final_deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })
+    .await;
 }
 
 #[cfg(not(unix))]
