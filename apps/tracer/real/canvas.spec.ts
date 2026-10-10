@@ -82,6 +82,8 @@ async function type(page: Page, window: number, command: string): Promise<void> 
 }
 
 test("the bootstrap socket keeps text routing and stays outside protocol diagnostics", async () => {
+  // The signed-in canvas can mount before its initial protocol socket opens.
+  await expect.poll(() => live().at(-1)?.attached.size ?? 0).toBe(1);
   const before = server.bridges.length;
   const response = await page.evaluate(() => new Promise<{ text: boolean; refused: boolean }>((resolve) => {
     const socket = new WebSocket(`${location.origin.replace("https:", "wss:")}/v1/bootstrap/ws`);
