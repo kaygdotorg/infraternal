@@ -60,6 +60,9 @@ enum Command {
         detach: bool,
         #[arg(long, default_value_t = 8 * 1024 * 1024)]
         ring_capacity: usize,
+        /// Internal test/startup override, clamped to the production ceiling.
+        #[arg(long, default_value_t = 600_000)]
+        exit_retention_ms: u64,
     },
 }
 
@@ -177,7 +180,17 @@ fn main() -> ExitCode {
             state,
             detach,
             ring_capacity,
-        } => match run_shim(&session, uid, cols, rows, state, detach, ring_capacity) {
+            exit_retention_ms,
+        } => match run_shim(
+            &session,
+            uid,
+            cols,
+            rows,
+            state,
+            detach,
+            ring_capacity,
+            exit_retention_ms,
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => output::refuse(
                 json,
@@ -539,6 +552,7 @@ fn run_shim(
     state: Option<std::path::PathBuf>,
     detach: bool,
     ring_capacity: usize,
+    exit_retention_ms: u64,
 ) -> std::io::Result<()> {
     if session.len() != 32 || !session.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(std::io::Error::new(
@@ -554,14 +568,17 @@ fn run_shim(
     if detach && !infraternal_shim::detach()? {
         return Ok(());
     }
-    infraternal_shim::run(infraternal_shim::Config {
-        session: id,
-        uid,
-        cols,
-        rows,
-        state,
-        ring_capacity,
-    })
+    infraternal_shim::run_with_retention(
+        infraternal_shim::Config {
+            session: id,
+            uid,
+            cols,
+            rows,
+            state,
+            ring_capacity,
+        },
+        std::time::Duration::from_millis(exit_retention_ms),
+    )
 }
 
 /// A core-only node refuses remote activation before reading stdin or private identity.
