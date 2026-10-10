@@ -10,10 +10,14 @@
  */
 import type { WindowModel } from "../model/types";
 import type { SessionInventory } from "../sessions/inventory";
+import { SETTINGS_SECTIONS } from "../views/settings";
 
 /** `inventory` is the canvas's session inventory, when it has one; a window's session is looked up in it. */
 export function windowLabel(m: WindowModel, inventory?: SessionInventory): [name: string, detail: string] {
-  if (m.kind !== "terminal") return [m.host, m.session ?? ""];
+  // A settings window is named by its section. The title comes from the section list by the window's id (`s-<section>`),
+  // so a window rebuilt without its host field (a restored layout) is still titled, never blank.
+  if (m.kind === "settings") return [m.host || SETTINGS_SECTIONS.find((s) => `s-${s.id}` === m.id)?.title || "Settings", m.session ?? ""];
+  if (m.kind !== "terminal") return [m.host || m.kind, m.session ?? ""];
   const who = m.user ? `${m.user}@${m.host}` : m.host;
   const session = m.sessionId ? inventory?.get(m.host, m.sessionId) : undefined;
   if (!session) return m.session ? [m.session, who] : [who, ""];
