@@ -131,6 +131,7 @@ mod tests {
             head: 0,
             pid: std::process::id(),
             caps: 0,
+            supports_owner: false,
         };
         let mut registry = Registry::default();
         registry.insert(&session).unwrap();
@@ -171,6 +172,7 @@ mod tests {
             head: 0,
             pid: std::process::id(),
             caps: 0,
+            supports_owner: false,
         };
         let mut registry = Registry::default();
         registry.insert(&session).unwrap();

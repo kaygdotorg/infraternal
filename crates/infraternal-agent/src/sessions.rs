@@ -88,6 +88,8 @@ pub struct Session {
     pub pid: u32,
     /// Selected capabilities, never inferred from the binary version.
     pub caps: u64,
+    /// Advertised ownership support; data Attach never selects this bit.
+    pub supports_owner: bool,
 }
 
 /// Reusable receive storage, bounded by the frozen shim frame limit.
@@ -222,6 +224,25 @@ pub async fn connect_writer(path: PathBuf, id: [u8; 16], writer: u32) -> io::Res
     Ok(session)
 }
 
+/// Keep ownership independent of the replaceable, credit-funded data link.
+/// # Errors
+/// Returns authentication/handshake failures. Old shims select no owner capability.
+pub async fn own(path: PathBuf, id: [u8; 16]) -> io::Result<Option<Session>> {
+    timeout(HANDSHAKE, async {
+        let mut owner = connect_with(path, id, infraternal_shim::frame::SESSION_OWNER).await?;
+        if owner.caps == 0 {
+            return Ok(None);
+        }
+        send(&mut owner.peer, &Frame::InputStateRequest).await?;
+        if Reader::default().read(&mut owner.peer).await? != Frame::InputState(0, 0) {
+            return Err(invalid("invalid shim ownership confirmation"));
+        }
+        Ok(Some(owner))
+    })
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
 async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result<Session> {
     timeout(HANDSHAKE, async {
         let mut peer = UnixStream::connect(&path).await?;
@@ -245,6 +266,7 @@ async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result
         if session != id || start > head {
             return Err(invalid("shim identity or ring range mismatch"));
         }
+        let supports_owner = caps & infraternal_shim::frame::SESSION_OWNER != 0;
         let caps = caps & requested;
         send(&mut peer, &Frame::Attach(caps)).await?;
         Ok(Session {
@@ -254,6 +276,7 @@ async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result
             head,
             pid,
             caps,
+            supports_owner,
         })
     })
     .await
