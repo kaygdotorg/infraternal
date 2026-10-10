@@ -32,8 +32,8 @@ async fn welcomed(
     socket
 }
 
-/// Sends what a browser sends to attach (AttachTerm, Credit, Resize), then a late
-/// Input and its own Close, then a control Ping. Returns the frames up to the Pong.
+/// Sends what a browser sends to attach (`AttachTerm`, `Credit`, `Resize`), then a late
+/// `Input` and its own `Close`, then a control `Ping`. Returns the frames up to the Pong.
 async fn attach_and_fence<S>(socket: &mut S, session: &[u8; 16]) -> Vec<(u32, String)>
 where
     S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
