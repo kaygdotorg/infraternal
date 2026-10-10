@@ -106,15 +106,19 @@ Rules:
   reconnect, it sends `ReadFrom(last_seq)`. Thus, no byte is lost or sent two
   times while the bytes are in the ring (DECISIONS 41: no lost bytes on
   resume).
-- **Exit delivery and retirement (owner brief #151).** After PTY drain, the
-  shim flushes `Exited` to attached data viewers, then removes its socket and
-  exits without requiring `ExitAck`. With no data viewer it retires within one
-  second; discovery/control peers cannot hold it alive. `ExitAck` remains
-  accepted but cannot skip another viewer's ordered exit. Retired shells are
-  not resumable after an infraternal agent restart: startup reconciles only live
-  shims. D178 preserves detached shells while they are running. This owner
-  amendment replaces the earlier retained-exit lifetime rule; opcodes and frame
-  layouts remain frozen.
+- **Exit delivery and retirement (owner brief #151, round 2).** After PTY
+  drain, unowned shims flush `Exited` to data viewers and retire promptly.
+  An ownership-only connection (cap bit 3) retains the final output independently
+  of an output link's 250 ms credit-starvation detach. Release ownership after
+  ordered leg-B delivery or when the window closes. Ownership links cannot
+  backpressure the PTY or select writers. All legacy layouts remain unchanged.
+  Retention ends at 600 seconds from child exit even if an owner or output peer
+  stalls. Before that forced retirement, write the frozen `Exited` frame as a
+  mode-0600 `.ended` record in the private runtime sessions directory. An attach
+  to the retired session returns ordered `terminal.exited` with status/final_seq
+  followed by final Close 4404 (wire §4), without claiming a final repaint.
+  Runtime records survive infraternal agent restarts, not a host reboot; they
+  contain no shell output. D178 still preserves detached *running* shells.
 
 ## 5. Budgets (from DECISIONS 41)
 
@@ -232,3 +236,14 @@ Count each actually forwarded approximate repaint in the process counter
 `approximate_snapshots_total`; a pending repaint does not increment it twice.
 Legacy rejection is reported as a `terminal.snapshot_unavailable` Event with
 session identity and sequence, preserving the live mux stream.
+
+### Capability bit 3: SESSION_OWNER (#151, round 2)
+
+Hello advertises bit 3; an ownership-only Attach selects exactly bit 3.
+This link has no writer or output cursor and accepts no PTY/input requests.
+It remains open for one owning window across data-link replacements; socket
+closure releases ownership. An infraternal agent only opens it when advertised.
+Old shims retain their negotiated behavior. The maximum 32 peer sockets includes
+ownership links. Only exited shims use the one-shot 600-second retention timer;
+running idle shims have no timer. The hidden shim startup option may shorten
+this bound for deterministic real-PTY tests, but cannot increase it.
