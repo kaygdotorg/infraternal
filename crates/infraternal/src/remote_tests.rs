@@ -194,3 +194,53 @@ fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata(
     assert!(publisher.publish(&certificate).is_err());
     assert_eq!(std::fs::read(target).unwrap(), b"unchanged");
 }
+
+#[test]
+fn ssh_installation_can_enroll_before_starting_the_service() {
+    use clap::Parser;
+    let parsed = crate::Cli::try_parse_from([
+        "infraternal",
+        "agent",
+        "--data",
+        "/private/staged-identity",
+        "join",
+        "https://localhost/remote/join",
+        "--enroll-only",
+    ]);
+    assert!(
+        parsed.is_ok(),
+        "SSH installation requires a finite enrollment command"
+    );
+    assert!(matches!(
+        parsed.unwrap().command,
+        crate::Command::Agent {
+            action: Some(crate::AgentAction::Join {
+                enroll_only: true,
+                ..
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn ordinary_join_keeps_the_foreground_connection_default() {
+    use clap::Parser;
+    let parsed = crate::Cli::try_parse_from([
+        "infraternal",
+        "agent",
+        "join",
+        "https://localhost/remote/join",
+    ])
+    .unwrap();
+    assert!(matches!(
+        parsed.command,
+        crate::Command::Agent {
+            action: Some(crate::AgentAction::Join {
+                enroll_only: false,
+                ..
+            }),
+            ..
+        }
+    ));
+}

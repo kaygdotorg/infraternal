@@ -67,7 +67,12 @@ enum Command {
 enum AgentAction {
     /// Redeem a private-stdin invitation over pinned HTTPS, then connect.
     #[cfg_attr(feature = "remote", command(about = infraternal_plugin_remote::JOIN.summary, long_about = infraternal_plugin_remote::JOIN.help()))]
-    Join { url: String },
+    Join {
+        url: String,
+        /// Save the joined identity and return so a service can start it.
+        #[arg(long)]
+        enroll_only: bool,
+    },
     /// Reconnect using the local enrolled identity.
     #[cfg_attr(feature = "remote", command(about = infraternal_plugin_remote::RUN.summary, long_about = infraternal_plugin_remote::RUN.help()))]
     Run,
@@ -324,6 +329,13 @@ fn run_remote_agent(
     data: Option<PathBuf>,
     json: bool,
 ) -> ExitCode {
+    let enroll_only = matches!(
+        &action,
+        AgentAction::Join {
+            enroll_only: true,
+            ..
+        }
+    );
     let operation = match &action {
         AgentAction::Join { .. } => infraternal_plugin_remote::JOIN.id,
         AgentAction::Run => infraternal_plugin_remote::RUN.id,
@@ -358,10 +370,15 @@ fn run_remote_agent(
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        if let AgentAction::Join { url } = action {
+        if let AgentAction::Join { url, .. } = action {
             let mut invitation = Vec::with_capacity(8192);
             std::io::stdin().take(8193).read_to_end(&mut invitation)?;
             runtime.block_on(remote::join(&url, &data, &invitation))?;
+            // SSH publishes staged state only after enrollment returns. Running
+            // here would hold its transaction until the service was cancelled.
+            if enroll_only {
+                return Ok(());
+            }
             output::report(
                 json,
                 operation,
@@ -373,13 +390,23 @@ fn run_remote_agent(
         runtime.block_on(remote::run(&data, state))
     })();
     if result.is_ok() {
-        output::report(
-            json,
-            operation,
-            "stopped",
-            "Remote infraternal agent stopped",
-            "Reconnect with the retained enrolled identity when needed.",
-        );
+        if enroll_only {
+            output::report(
+                json,
+                operation,
+                "enrolled",
+                "Private host identity retained",
+                "Start the service with infraternal agent run using this identity directory.",
+            );
+        } else {
+            output::report(
+                json,
+                operation,
+                "stopped",
+                "Remote infraternal agent stopped",
+                "Reconnect with the retained enrolled identity when needed.",
+            );
+        }
         ExitCode::SUCCESS
     } else {
         output::refuse(

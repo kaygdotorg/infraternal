@@ -28,6 +28,7 @@ pub const JOIN: ActionDef = ActionDef {
         "Obtain an invitation from an existing server.",
         "Pass invitation material through private stdin.",
         "Run infraternal agent join with the server enrollment URL.",
+        "For service installation use --enroll-only, then start the retained identity with infraternal agent run.",
         "Retain the private enrolled identity for subsequent reconnects.",
     ],
     input: SchemaRef("remote.host.join"),
