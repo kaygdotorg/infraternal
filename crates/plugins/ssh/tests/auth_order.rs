@@ -66,6 +66,9 @@ struct Session {
     failure: FailureKind,
 }
 impl SshSession for Session {
+    fn trust_lookup(&self) -> Option<String> {
+        Some("[fixture]:2222".into())
+    }
     fn run<'a>(&'a self, script: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
         assert_eq!(script, infraternal_plugin_ssh::probe::CHECK_SCRIPT);
         Box::pin(async move {
@@ -125,6 +128,7 @@ async fn successful_authentication_is_reported_and_later_secrets_are_never_reque
             .unwrap();
         assert_eq!(*provider.requested.lock().unwrap(), requested);
         assert_eq!(*transport.opens.lock().unwrap(), index);
+        assert_eq!(session.trust_lookup().as_deref(), Some("[fixture]:2222"));
         let auth = session.authentication().unwrap();
         assert_eq!(auth.method, method);
         assert_eq!(
