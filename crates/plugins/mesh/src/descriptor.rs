@@ -27,6 +27,54 @@ const DESTRUCTIVE: &[&str] = &[
 ];
 pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
+        id: "mesh.default.get",
+        summary: "Read Mesh default",
+        instructions: &[
+            "Sign in as the server owner.",
+            "Read the stored Mesh default, or the edition default before first use.",
+        ],
+        input: infraternal_plugin_api::SchemaRef("Empty"),
+        output: infraternal_plugin_api::SchemaRef("MeshDefault"),
+        permission: One("server.configure"),
+        effect: Effect::Read,
+    },
+    ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
+        id: "mesh.default.preview",
+        summary: "Preview lost Mesh reach",
+        instructions: &[
+            "Sign in as the server owner.",
+            "Preview member pairs that would lose reach under the proposed default.",
+            "Follow next_cursor to review more affected member pairs at this revision.",
+            "Use mesh.default.set with this revision to apply after a fresh passkey confirmation.",
+        ],
+        input: infraternal_plugin_api::SchemaRef("MeshDefaultPreview"),
+        output: infraternal_plugin_api::SchemaRef("MeshReachPreview"),
+        permission: One("server.configure"),
+        effect: Effect::Read,
+    },
+    ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Required,
+        opens: None,
+        id: "mesh.default.set",
+        summary: "Change Mesh default",
+        instructions: &[
+            "Sign in as the server owner.",
+            "Preview member pairs that would lose reach under the proposed default.",
+            "Confirm with your passkey and submit the preview revision to apply.",
+        ],
+        input: infraternal_plugin_api::SchemaRef("MeshDefaultSet"),
+        output: infraternal_plugin_api::SchemaRef("MeshDefault"),
+        permission: One("server.configure"),
+        effect: Effect::Destructive,
+    },
+    ActionDef {
         target: infraternal_plugin_api::Target::Node,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
@@ -221,7 +269,14 @@ pub const ACTIONS: &[ActionDef] = &[
 ];
 /// The server part requires an existing server; a future node part joins this same plugin [201].
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
-    defaults: &[],
+    defaults: &[infraternal_plugin_api::SettingDefault {
+        id: "default_policy",
+        value: infraternal_plugin_api::DefaultValue::Text(if cfg!(feature = "ee") {
+            "Deny"
+        } else {
+            "Allow"
+        }),
+    }],
     dependencies: &[],
     can_enable_components: &[],
     events: &[],
@@ -230,9 +285,11 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     api: infraternal_plugin_api::API_VERSION,
     actions: ACTIONS,
     topics: &["mesh"],
-    settings: Some(infraternal_plugin_api::SchemaRef(
-        r#"{"type":"object","properties":{"enabled":{"type":"boolean","default":true}},"additionalProperties":false}"#,
-    )),
+    settings: Some(infraternal_plugin_api::SchemaRef(if cfg!(feature = "ee") {
+        r#"{"type":"object","properties":{"enabled":{"type":"boolean","default":true},"default_policy":{"type":"string","title":"Mesh default","enum":["Allow","Deny"],"default":"Deny"}},"additionalProperties":false}"#
+    } else {
+        r#"{"type":"object","properties":{"enabled":{"type":"boolean","default":true},"default_policy":{"type":"string","title":"Mesh default","enum":["Allow","Deny"],"default":"Allow"}},"additionalProperties":false}"#
+    })),
     roles: &[RoleDef {
         id: "server",
         requires: &["server"],

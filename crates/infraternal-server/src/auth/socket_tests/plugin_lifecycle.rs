@@ -107,7 +107,7 @@ async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
     assert_eq!(runtime.active_workers("mesh"), 0);
     let descriptor = &discovery["plugins"][0]["descriptor"];
     assert_eq!(descriptor["id"], "mesh");
-    assert_eq!(descriptor["actions"].as_array().unwrap().len(), 16);
+    assert_eq!(descriptor["actions"].as_array().unwrap().len(), 19);
     assert_eq!(descriptor["roles"][0]["requires"], json!(["server"]));
     for action in descriptor["actions"].as_array().unwrap() {
         assert_ne!(action["summary"].as_str().unwrap(), "");
@@ -233,7 +233,7 @@ async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
     runtime.set_enabled("mesh", false).await.unwrap();
     assert_eq!(runtime.active_workers("mesh"), 0);
     println!(
-        "plugins=1 discovered_actions=16 workers_constructor=0 workers_watch=1 workers_disabled=0 workers_lazy_enable=0 same_socket_restart=true pong=true"
+        "plugins=1 discovered_actions=19 workers_constructor=0 workers_watch=1 workers_disabled=0 workers_lazy_enable=0 same_socket_restart=true pong=true"
     );
     server.abort();
 }
@@ -570,6 +570,7 @@ fn mesh_destructive_metadata_matches_frozen_confirmation_requirements() {
     assert_eq!(
         destructive,
         vec![
+            "mesh.default.set",
             "mesh.grant.delete",
             "mesh.grant.move",
             "mesh.node.delete",

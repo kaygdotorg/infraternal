@@ -663,6 +663,9 @@ fn shared_mesh_vectors_cover_each_production_action_and_wire_shape() {
         "mesh.grant.rename",
         "mesh.role.define",
         "mesh.role.assign",
+        "mesh.default.get",
+        "mesh.default.preview",
+        "mesh.default.set",
     ];
     let actions = manifest["actions"].as_array().unwrap();
     assert_eq!(actions.len(), expected_actions.len());
