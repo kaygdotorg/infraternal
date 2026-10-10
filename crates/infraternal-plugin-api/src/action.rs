@@ -227,6 +227,96 @@ pub enum ActionAvailability {
     NotAvailableYet,
 }
 
+/// Scope against which the authorization permission is evaluated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionTarget {
+    /// The action applies to the server or local node as a whole.
+    Global,
+    /// The action applies to one managed host.
+    Host,
+    /// The action applies to one active session.
+    Session,
+}
+
+/// Kind of state change an action can perform.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionEffect {
+    /// The action only reads state.
+    Read,
+    /// The action changes state without removing existing data or access.
+    Write,
+    /// The action can remove data, access, or running services.
+    Destructive,
+}
+
+/// Dry-run support declared by an action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DryRun {
+    /// The action cannot produce a meaningful preview.
+    Unsupported,
+    /// The action can produce a preview before it runs.
+    Supported,
+    /// The action requires a preview before it runs.
+    Required,
+}
+
+/// Authorization and effect contract shared by every adapter for an action.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ActionContract {
+    /// Scope against which the permission is evaluated.
+    pub target: ActionTarget,
+    /// State effect of the action.
+    pub effect: ActionEffect,
+    /// Permission name granted by roles.
+    pub permission: String,
+    /// Whether a dry run is available or required.
+    pub dry_run: DryRun,
+}
+
+impl ActionContract {
+    /// Declare the authorization scope, effect, permission, and dry-run policy.
+    #[must_use]
+    pub fn new(
+        target: ActionTarget,
+        effect: ActionEffect,
+        permission: impl Into<String>,
+        dry_run: DryRun,
+    ) -> Self {
+        Self {
+            target,
+            effect,
+            permission: permission.into(),
+            dry_run,
+        }
+    }
+}
+
+/// Runtime binding for the CLI adapter; command paths remain data in the registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CliHandler {
+    /// Report the action's declared unavailable state.
+    Unavailable,
+    /// Inspect the local node and registered components.
+    Status,
+    /// List or render generated command skills.
+    Skill,
+    /// Run the configured server in the foreground.
+    ServerRun,
+    /// Create and start a server service.
+    ServerInit,
+    /// Explain the migration from the hidden legacy server install command.
+    ServerInstallCompatibility,
+    /// Read the one-time server setup capability.
+    ServerSetupToken,
+    /// Run the agent process inherited by the server.
+    EmbeddedAgent,
+    /// Run the internal session shim process.
+    SessionShim,
+}
+
 /// Example invocation and its user-facing result.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ActionExample {
@@ -270,6 +360,12 @@ pub struct ActionDefinition {
     pub availability: ActionAvailability,
     /// Whether the action appears in user-facing help and skill listings.
     pub visible: bool,
+    /// Permission and effect metadata shared with non-CLI adapters.
+    #[serde(flatten)]
+    pub contract: ActionContract,
+    /// CLI implementation selected by this registered action.
+    #[serde(skip)]
+    pub cli_handler: CliHandler,
 }
 
 impl ActionDefinition {
@@ -282,6 +378,7 @@ impl ActionDefinition {
         instructions: impl IntoIterator<Item = impl Into<String>>,
         input_schema: JsonSchema,
         output_schema: JsonSchema,
+        contract: ActionContract,
     ) -> Self {
         Self {
             command: command.into_iter().map(Into::into).collect(),
@@ -294,7 +391,16 @@ impl ActionDefinition {
             safety: SafetyNotes::default(),
             availability: ActionAvailability::Available,
             visible: true,
+            contract,
+            cli_handler: CliHandler::Unavailable,
         }
+    }
+
+    /// Bind the registered action to its CLI implementation.
+    #[must_use]
+    pub const fn with_cli_handler(mut self, handler: CliHandler) -> Self {
+        self.cli_handler = handler;
+        self
     }
 
     /// Attach a command-line example.
@@ -365,6 +471,20 @@ impl ActionDefinition {
         {
             return Err(RegistryError::InvalidAction(format!(
                 "action {} must have non-empty instructions",
+                self.command.join(" ")
+            )));
+        }
+        if self.contract.permission.trim().is_empty() {
+            return Err(RegistryError::InvalidAction(format!(
+                "action {} has no permission name",
+                self.command.join(" ")
+            )));
+        }
+        if self.contract.effect == ActionEffect::Destructive
+            && self.contract.dry_run != DryRun::Required
+        {
+            return Err(RegistryError::InvalidAction(format!(
+                "destructive action {} must require a dry run",
                 self.command.join(" ")
             )));
         }
@@ -509,7 +629,10 @@ impl std::error::Error for RegistryError {}
 mod tests {
     //! Checks validation and lookup behavior for plugin action contracts.
 
-    use super::{ActionDefinition, ActionRegistry, JsonSchema, PluginDefinition, RegistryError};
+    use super::{
+        ActionContract, ActionDefinition, ActionEffect, ActionRegistry, ActionTarget, DryRun,
+        JsonSchema, PluginDefinition, RegistryError,
+    };
 
     fn sample_action(command: &[&str]) -> ActionDefinition {
         ActionDefinition::new(
@@ -519,6 +642,12 @@ mod tests {
             ["Read the current state."],
             JsonSchema::empty_object(),
             JsonSchema::empty_object(),
+            ActionContract::new(
+                ActionTarget::Global,
+                ActionEffect::Read,
+                "state.inspect",
+                DryRun::Unsupported,
+            ),
         )
     }
 
@@ -577,6 +706,12 @@ mod tests {
             ["Read the current state."],
             invalid_schema,
             JsonSchema::empty_object(),
+            ActionContract::new(
+                ActionTarget::Global,
+                ActionEffect::Read,
+                "state.inspect",
+                DryRun::Unsupported,
+            ),
         );
         let registry = ActionRegistry::new(vec![PluginDefinition::new(
             "state",

@@ -1,6 +1,9 @@
 //! Declares agent component actions shared by CLI help and generated skills.
 
-use infraternal_plugin_api::{ActionDefinition, JsonSchema, PluginDefinition, SafetyNotes};
+use infraternal_plugin_api::{
+    ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliHandler, DryRun, JsonSchema,
+    PluginDefinition, SafetyNotes,
+};
 
 /// Register the agent component actions exposed by this plugin.
 #[must_use]
@@ -25,7 +28,14 @@ pub fn plugin() -> PluginDefinition {
                     std::iter::empty(),
                 ),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "agent.run",
+                    DryRun::Unsupported,
+                ),
             )
+            .with_cli_handler(CliHandler::EmbeddedAgent)
             .hidden(),
             ActionDefinition::new(
                 ["agent", "up"],
@@ -34,6 +44,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The infraternal agent component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "agent.up",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_example("agent up", "Request agent setup for this node."),
@@ -44,6 +60,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The agent component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "agent.down",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_safety(SafetyNotes {
@@ -62,6 +84,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The agent component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Read,
+                    "agent.status",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_example("agent status", "Check the agent component state."),

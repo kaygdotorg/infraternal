@@ -4,6 +4,7 @@
 pub mod action;
 
 pub use action::{
-    ActionAvailability, ActionDefinition, ActionExample, ActionRegistry, JsonSchema,
-    JsonSchemaType, PluginDefinition, RegisteredAction, RegistryError, SafetyNotes,
+    ActionAvailability, ActionContract, ActionDefinition, ActionEffect, ActionExample,
+    ActionRegistry, ActionTarget, CliHandler, DryRun, JsonSchema, JsonSchemaType, PluginDefinition,
+    RegisteredAction, RegistryError, SafetyNotes,
 };

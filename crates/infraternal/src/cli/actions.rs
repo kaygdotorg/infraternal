@@ -1,7 +1,8 @@
 //! Builds the validated action registry from built-in and enabled component plugins.
 
 use infraternal_plugin_api::{
-    ActionDefinition, ActionRegistry, JsonSchema, PluginDefinition, RegistryError,
+    ActionContract, ActionDefinition, ActionEffect, ActionRegistry, ActionTarget, CliHandler,
+    DryRun, JsonSchema, PluginDefinition, RegistryError,
 };
 
 /// Create the action registry for the plugins enabled in this binary.
@@ -63,7 +64,14 @@ fn status_action() -> ActionDefinition {
         ],
         JsonSchema::empty_object(),
         JsonSchema::command_result_with(status_data),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Read,
+            "cli.status",
+            DryRun::Unsupported,
+        ),
     )
+    .with_cli_handler(CliHandler::Status)
     .with_example("status", "Show this node's current role and components.")
 }
 
@@ -85,6 +93,12 @@ fn up_action() -> ActionDefinition {
         ],
         JsonSchema::empty_object(),
         JsonSchema::command_result_with(up_data),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Write,
+            "cli.up",
+            DryRun::Unsupported,
+        ),
     )
     .not_available_yet()
     .with_example(
@@ -105,7 +119,14 @@ fn skill_action() -> ActionDefinition {
         ],
         skill_input_schema(),
         JsonSchema::command_result_with(skill_output_data_schema()),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Read,
+            "cli.skill",
+            DryRun::Unsupported,
+        ),
     )
+    .with_cli_handler(CliHandler::Skill)
     .with_example("skill status", "Print the generated skill for status.")
 }
 

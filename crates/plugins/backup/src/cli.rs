@@ -1,6 +1,9 @@
 //! Declares the backup component actions shared by CLI help and generated skills.
 
-use infraternal_plugin_api::{ActionDefinition, JsonSchema, PluginDefinition, SafetyNotes};
+use infraternal_plugin_api::{
+    ActionContract, ActionDefinition, ActionEffect, ActionTarget, DryRun, JsonSchema,
+    PluginDefinition, SafetyNotes,
+};
 
 /// Register the backup component actions exposed by this plugin.
 #[must_use]
@@ -16,6 +19,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The backup component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "backup.up",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_example("backup up", "Request backup service on this node."),
@@ -26,6 +35,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The backup component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "backup.down",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_safety(SafetyNotes {
@@ -41,6 +56,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The backup component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Read,
+                    "backup.status",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_example("backup status", "Check scheduled backup state."),

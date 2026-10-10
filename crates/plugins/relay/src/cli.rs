@@ -1,6 +1,9 @@
 //! Declares the relay component actions shared by CLI help and generated skills.
 
-use infraternal_plugin_api::{ActionDefinition, JsonSchema, PluginDefinition, SafetyNotes};
+use infraternal_plugin_api::{
+    ActionContract, ActionDefinition, ActionEffect, ActionTarget, DryRun, JsonSchema,
+    PluginDefinition, SafetyNotes,
+};
 
 /// Register the relay component actions exposed by this plugin.
 #[must_use]
@@ -16,6 +19,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The relay component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "relay.up",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_example("relay up", "Request relay service on this node."),
@@ -26,6 +35,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The relay component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "relay.down",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_safety(SafetyNotes {
@@ -41,6 +56,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The relay component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Read,
+                    "relay.status",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_example("relay status", "Check relay service on this node."),

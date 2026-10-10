@@ -1,6 +1,9 @@
 //! Declares SSH component actions for CLI, help, and generated skill adapters.
 
-use infraternal_plugin_api::{ActionDefinition, JsonSchema, PluginDefinition, SafetyNotes};
+use infraternal_plugin_api::{
+    ActionContract, ActionDefinition, ActionEffect, ActionTarget, DryRun, JsonSchema,
+    PluginDefinition, SafetyNotes,
+};
 
 /// Register the SSH component actions exposed by this plugin.
 #[must_use]
@@ -16,6 +19,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The SSH component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "ssh.up",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_example("ssh up", "Request SSH access on this node."),
@@ -26,6 +35,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The SSH component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "ssh.down",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_safety(SafetyNotes {
@@ -41,6 +56,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The SSH component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Read,
+                    "ssh.status",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_example("ssh status", "Check the SSH component state."),

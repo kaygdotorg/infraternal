@@ -1,6 +1,9 @@
 //! Declares mesh node actions shared by CLI help and generated skills.
 
-use infraternal_plugin_api::{ActionDefinition, JsonSchema, PluginDefinition, SafetyNotes};
+use infraternal_plugin_api::{
+    ActionContract, ActionDefinition, ActionEffect, ActionTarget, DryRun, JsonSchema,
+    PluginDefinition, SafetyNotes,
+};
 
 /// Register the mesh component actions exposed by this plugin.
 #[must_use]
@@ -25,6 +28,12 @@ pub fn plugin() -> PluginDefinition {
                     std::iter::empty(),
                 ),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "mesh.up",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_example("mesh up --ssh", "Request mesh and SSH connectivity."),
@@ -35,6 +44,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The mesh component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Write,
+                    "mesh.down",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_safety(SafetyNotes {
@@ -52,6 +67,12 @@ pub fn plugin() -> PluginDefinition {
                 ["The mesh component command is not available yet."],
                 JsonSchema::empty_object(),
                 JsonSchema::command_result(),
+                ActionContract::new(
+                    ActionTarget::Global,
+                    ActionEffect::Read,
+                    "mesh.status",
+                    DryRun::Unsupported,
+                ),
             )
             .not_available_yet()
             .with_example("mesh status", "Check mesh connectivity on this node."),

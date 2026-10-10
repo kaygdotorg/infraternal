@@ -1,6 +1,9 @@
 //! Declares server role commands and their stable CLI contracts.
 
-use infraternal_plugin_api::{ActionDefinition, JsonSchema, PluginDefinition, SafetyNotes};
+use infraternal_plugin_api::{
+    ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliHandler, DryRun, JsonSchema,
+    PluginDefinition, SafetyNotes,
+};
 
 #[cfg(feature = "cli-plugin")]
 #[must_use]
@@ -44,7 +47,14 @@ fn server_run_action() -> ActionDefinition {
         ],
         JsonSchema::object(server_input_fields(), std::iter::empty()),
         JsonSchema::command_result_with(server_data),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Write,
+            "server.run",
+            DryRun::Unsupported,
+        ),
     )
+    .with_cli_handler(CliHandler::ServerRun)
     .with_example("server --listen 127.0.0.1:7443", "Run a local server.")
 }
 
@@ -80,7 +90,14 @@ fn server_init_action() -> ActionDefinition {
         ],
         JsonSchema::object(inputs, std::iter::empty()),
         JsonSchema::command_result_with(server_init_result_schema()),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Write,
+            "server.init",
+            DryRun::Supported,
+        ),
     )
+    .with_cli_handler(CliHandler::ServerInit)
     .with_safety(SafetyNotes {
         destructive: false,
         dry_run_first: true,
@@ -118,6 +135,12 @@ fn server_features_action() -> ActionDefinition {
         ["Server feature switching is not available yet."],
         JsonSchema::empty_object(),
         JsonSchema::command_result_with(data),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Read,
+            "server.features",
+            DryRun::Unsupported,
+        ),
     )
     .not_available_yet()
 }
@@ -158,7 +181,14 @@ fn server_install_compat_action() -> ActionDefinition {
         ],
         JsonSchema::object(inputs, std::iter::empty()),
         JsonSchema::command_result_with(server_init_result_schema()),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Read,
+            "server.install.compatibility",
+            DryRun::Unsupported,
+        ),
     )
+    .with_cli_handler(CliHandler::ServerInstallCompatibility)
     .hidden()
     .with_safety(SafetyNotes {
         destructive: false,
@@ -193,7 +223,14 @@ fn server_setup_token_action() -> ActionDefinition {
             std::iter::empty(),
         ),
         JsonSchema::command_result_with(token),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Read,
+            "server.setup-token",
+            DryRun::Unsupported,
+        ),
     )
+    .with_cli_handler(CliHandler::ServerSetupToken)
     .with_safety(SafetyNotes {
         destructive: false,
         dry_run_first: false,
