@@ -84,7 +84,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private readonly n = ++serial;
     private mark(step: string): void { performance.mark(`sw:${this.n}:${step}`); }
 
-    constructor(private readonly model: WindowModel, private readonly changed: () => void) {}
+    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly showSessions?: (event?: MouseEvent) => void) {}
 
     /** Keeps a picture of this terminal's screen as its session's last known one (only while it is drawn). */
     private keepScreen(): void {
@@ -147,6 +147,13 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         ...(first ? options.firstHooks : {}),
         onAttached: (resumed, terminal) => { this.mark("attached"); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
         onPaintedOutput: (bytes, at, sequence) => { if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
+        onOpenRefused: (message, sessionList) => {
+          if (this.disposed) return true;
+          core.toast.show({ message, tone: "error", ...(sessionList ? { duration: 0 } : {}),
+            ...(sessionList && this.showSessions ? { action: { label: "Sessions", onSelect: this.showSessions } } : {}),
+          });
+          return true;
+        },
         onSessionCreated: (id) => {
           this.model.sessionId = id;
           this.changed();
@@ -160,6 +167,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         if (this.disposed) return;
         const client = await TerminalClient.open({
           host: hostEl,
+          hostName: this.model.host,
           screen: core.stage,
           status: this.status.element,
           theme: core.theme(),
@@ -232,7 +240,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
   return {
     bind(model, env): SessionBinding {
-      const b = new Binding(model, env.changed);
+      const b = new Binding(model, env.changed, env.showSessions);
       bindings.add(b);
       return b;
     },

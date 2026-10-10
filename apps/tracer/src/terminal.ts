@@ -1,4 +1,5 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
+import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { plainCloseReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
@@ -51,6 +52,8 @@ interface GhosttyActivityControls {
 }
 
 export interface TerminalHooks {
+  /** Return true when a product surface presents the refusal and its session-list action. */
+  onOpenRefused?: (message: string, sessionList: boolean) => boolean;
   /** Only a public session id; writer/resume capabilities remain in memory. */
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
@@ -97,6 +100,8 @@ export type TerminalTraceHop =
   | "prediction";
 
 export interface TerminalConfig {
+  /** Readable label for refusal guidance; hostId remains the routing authority. */
+  hostName?: string;
   host: HTMLElement;
   /** Stage that follows the visual viewport when iOS opens its on-screen keyboard. */
   screen?: HTMLElement;
@@ -778,9 +783,12 @@ export class TerminalClient {
       } catch {
         this.protocolFailure("terminal.open returned an invalid session id");
       }
-    }, () => {
+    }, (error: unknown) => {
       this.openCallSent = false;
-      if (!this.closed && this.conn.isOpen) this.setStatus("The server could not open this terminal.");
+      if (!this.closed && this.conn.isOpen) {
+        const refusal = terminalRefusal(error, this.config.hostName);
+        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList)) this.setStatus(refusal.message);
+      }
     });
   }
 
