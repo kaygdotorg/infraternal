@@ -53,6 +53,8 @@ export interface FailureDetail {
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
+  host_key_type?: string;
+  host_key_changed?: boolean;
   /** Every automatic sign-in method was refused: the person must choose one (D183). Only on `auth`. */
   choose_method?: boolean;
 }
@@ -125,6 +127,8 @@ function parseFailure(value: unknown): FailureDetail | undefined {
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;
+  if (typeof value.host_key_type === "string") failure.host_key_type = value.host_key_type;
+  if (value.host_key_changed === true) failure.host_key_changed = true;
   if (value.choose_method === true && value.kind === "auth") failure.choose_method = true;
   return failure;
 }
