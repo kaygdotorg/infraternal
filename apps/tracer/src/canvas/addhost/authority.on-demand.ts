@@ -26,6 +26,9 @@ export async function deriveCaKey(dek: Uint8Array, salt: Uint8Array, member: str
   return new Uint8Array(await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: auth.toArrayBuffer(salt), info: auth.toArrayBuffer(new TextEncoder().encode(`infraternal/ca-wrap/v1|${member}|${generation}`)) }, material, 256));
 }
 
+/** Shown when a passkey proves who you are but cannot give the secret that unlocks your account key (#153). */
+const NO_PRF = "This passkey signed you in, but it can't unlock host connections from here. Try again where your passkey app works directly, such as its browser extension or your own computer, instead of scanning a QR code.";
+
 export async function unlockAuthority(): Promise<void> {
   // Bootstrap chooses setup for a fresh server and ordinary unlock for retained trust.
   const start = await post<CaStart>("bootstrap/start", {});
@@ -48,9 +51,15 @@ export async function unlockAuthority(): Promise<void> {
     input = auth.decodeBase64url(entry.prf_input);
     prf = auth.prfFrom(assertion);
     const requested = publicKey.extensions && (publicKey.extensions as { prf?: unknown }).prf;
-    if (!prf || !requested || auth.base64url(auth.prfInputFrom(publicKey)) !== entry.prf_input) {
+    const askedThisCredential = !!requested && auth.base64url(auth.prfInputFrom(publicKey)) === entry.prf_input;
+    // The passkey was asked for its unlock secret and gave none: a second prompt would fail the same way (common on
+    // the phone/QR route), so say what happened and what works instead (#153). A second prompt stays only for the
+    // case where the first request could not have asked this credential the right question.
+    if (!prf && askedThisCredential) throw new ServiceError(NO_PRF);
+    if (!prf || !askedThisCredential) {
       prf?.fill(0);
-      prf = await auth.credentialPrf(assertion, publicKey.rpId, input);
+      try { prf = await auth.credentialPrf(assertion, publicKey.rpId, input); }
+      catch { throw new ServiceError(NO_PRF); }
     }
     dek = await auth.unwrapDek(prf, entry.wrap, member, "passkey");
     salt = auth.decodeBase64url(start.ca.salt);
