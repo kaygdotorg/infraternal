@@ -193,6 +193,23 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "plugin-mesh")]
+    #[test]
+    fn registered_actions_include_plugin_permission_contract_fields() {
+        let registry = registry().expect("built-in plugin metadata is valid");
+        let action = registry
+            .find(&["mesh", "up"])
+            .expect("mesh action is registered");
+        let value = serde_json::to_value(action.action).expect("serialize action definition");
+
+        for field in ["target", "effect", "permission", "dry_run"] {
+            assert!(
+                value.get(field).is_some(),
+                "registered action is missing the `{field}` field required by the plugin contract: {value}"
+            );
+        }
+    }
+
     #[cfg(not(feature = "plugin-mesh"))]
     #[test]
     fn compiled_out_mesh_has_no_registered_commands() {
