@@ -80,11 +80,13 @@ export function createViews(cx: Ctx): ViewsModule {
   };
 
   // ---- the hover card (zoomed out, pointer devices) --------------------------------------------------
-  const hideSummary = (): void => {
+  /** `instant`: another surface takes over (the palette), so the card goes at once instead of fading under it. */
+  const hideSummary = (instant = false): void => {
     window.clearTimeout(summaryTimer);
     if (summary.hidden) return;
     summary.dataset.open = "false";
     summaryFor = undefined;
+    if (instant) { summary.hidden = true; return; }
     window.setTimeout(() => { if (summary.dataset.open === "false") summary.hidden = true; }, 170);
   };
   // The card is a popover while it shows: the pointer can cross the gap into it, and its rows can be pressed.
@@ -115,7 +117,7 @@ export function createViews(cx: Ctx): ViewsModule {
     (b.querySelector(".cl-viewrow-name") as HTMLElement).textContent = `All ${total} windows`;
     const keys = b.querySelector(".cl-viewrow-keys") as HTMLElement;
     for (const cap of keyCaps({ mac: "⌘K", other: "Ctrl+K" })) keys.append(el("kbd", "", cap));
-    b.addEventListener("click", () => { hideSummary(); cx.core.showPalette(viewWindowEntries(cx, c)); });
+    b.addEventListener("click", () => { hideSummary(true); cx.core.showPalette(viewWindowEntries(cx, c)); });
     return b;
   };
   const showSummary = (c: ViewRec): void => {
