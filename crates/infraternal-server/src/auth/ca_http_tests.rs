@@ -355,3 +355,35 @@ async fn first_machine_certificate_setup_starts_a_fresh_passkey_ceremony() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn ca_status_distinguishes_initial_setup_from_locked_retained_trust() {
+    let (f, retained) = http_fixture().await;
+    let fresh = crate::ca_http::router(
+        f.auth.auth.clone(),
+        Arc::new(CaAdministration::new(
+            f.auth.auth.clone(),
+            f.auth.auth.pool.clone(),
+            Arc::new(crate::ca_memory::MemoryCaSource::unprovisioned(None)),
+            Arc::new(CaCopies::new(&f.root).unwrap()),
+        )),
+    );
+    for (app, initialized) in [(retained, true), (fresh, false)] {
+        let response = app
+            .oneshot(ca_request(
+                "/remote/ca/status",
+                Some(ORIGIN),
+                Some(&f.auth.session),
+                "{}".into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let status: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(status["locked"], true);
+        assert_eq!(status["initialized"], initialized);
+        assert_eq!(status.as_object().unwrap().len(), 2);
+    }
+}

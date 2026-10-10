@@ -281,5 +281,9 @@ async fn status(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value
         .status(token, now)
         .await
         .map_err(|_| StatusCode::FORBIDDEN)?;
-    Ok(Json(json!({"locked":locked})))
+    let initialized = api
+        .administration
+        .initialized()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({"locked":locked,"initialized":initialized})))
 }
