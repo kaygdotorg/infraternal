@@ -736,3 +736,42 @@ fn owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer() {
         17
     );
 }
+
+#[test]
+fn delivered_exit_cannot_release_another_owning_window() {
+    let session = Session::new(8192, false);
+    let first = owner(&session);
+    let second = owner(&session);
+    exit_without_viewer(&session);
+    let mut data = session.attach(0);
+    let mut seq = 0;
+    loop {
+        match read(&mut data) {
+            Frame::Output(offset, bytes) => {
+                assert_eq!(offset, seq);
+                seq += bytes.len() as u64;
+            }
+            Frame::Exited(status, final_seq) => {
+                assert_eq!((status, final_seq), (7, seq));
+                break;
+            }
+            frame => panic!("unexpected {frame:?}"),
+        }
+    }
+    drop(data);
+    drop(first);
+    thread::sleep(Duration::from_millis(350));
+    assert!(
+        session.path().exists(),
+        "the sibling window still owns final output"
+    );
+    drop(second);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while session.path().exists() {
+        assert!(
+            Instant::now() < deadline,
+            "all owners released but shim remains"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
