@@ -19,6 +19,8 @@ pub mod ca_memory;
 #[cfg(feature = "remote")]
 pub mod csr;
 mod embedded;
+#[cfg(all(test, feature = "ssh"))]
+mod release_http;
 pub mod release_verify;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
 #[cfg(feature = "mesh")]
