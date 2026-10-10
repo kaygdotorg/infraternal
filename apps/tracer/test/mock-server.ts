@@ -446,6 +446,17 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     appendEchoOutput(session, new TextEncoder().encode("\u001bc"));
     return sendJson(response, 200, { ok: true, output_sequence: String(session.outputLength) });
   }
+  // A transient stream failure leaves its session and the shared WebSocket alive for retry (#158 review).
+  if (request.method === "POST" && url.pathname === "/__mock/transient-terminal-close") {
+    let closed = 0;
+    for (const connection of connections) if (connection.attached) {
+      connection.attached = false;
+      connection.credit = 0;
+      sendFrame(connection.socket, connection.stream, { type: "Close", code: 1013, reason: "attachment ended" });
+      closed += 1;
+    }
+    return sendJson(response, 200, { closed });
+  }
   // The host loses the current session (its shim is gone), and the link drops, as when the host's infraternal
   // agent restarts. The page reconnects and its attach gets the server's final answer (#158).
   if (request.method === "POST" && url.pathname === "/__mock/end-session") {
