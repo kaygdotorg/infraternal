@@ -3,7 +3,7 @@
  * Option chords on a Mac match the physical key (Option rewrites the character), AltGr never triggers, and labels
  * show the Ctrl+Shift family on PC and the Command family on a Mac. Platforms are emulated through navigator.
  */
-import { beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { comboLabel, keyCaps, matchesCombo, platformCombo, type Combo } from "../../../packages/ui/src/shortcuts";
 
 const setPlatform = (platform: string): void => {
@@ -18,6 +18,8 @@ const press = (keys: Keys): KeyboardEvent => ({
 }) as unknown as KeyboardEvent;
 
 beforeEach(() => setPlatform("Win32"));
+// Bun runs every test file in one process, so the emulated platform must not outlive this file.
+afterEach(() => setPlatform("Win32"));
 
 test("PC: Ctrl+Shift+K matches the palette chord, plain Ctrl+K does not (it is the terminal's)", () => {
   const palette: Combo = { code: "KeyK", key: "k", mod: true, shift: true };
