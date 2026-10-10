@@ -95,6 +95,35 @@ rust_check_cli_stub() {
     printf '%s subcommand: exit 2, versioned JSON unavailable result\n' "$mode"
 }
 
+# Disabled CLI plugins must leave both their actions and role crates out of the binary.
+rust_check_cli_plugin_compile_out() {
+    local dependency_tree
+    local plugin
+    local failed=0
+    local plugins=(
+        infraternal-agent
+        infraternal-mesh
+        infraternal-plugin-backup
+        infraternal-plugin-relay
+        infraternal-plugin-ssh
+        infraternal-server
+    )
+
+    dependency_tree="$(cargo tree --locked --package infraternal --no-default-features --edges normal --prefix none)" || return $?
+    for plugin in "${plugins[@]}"; do
+        if grep -Fq "${plugin} v" <<<"$dependency_tree"; then
+            printf 'disabled CLI plugin dependency remains in the build graph: %s\n' "$plugin" >&2
+            failed=1
+        fi
+    done
+    if ((failed)); then
+        return 1
+    fi
+
+    printf 'disabled CLI plugin dependencies: absent from normal dependency graph\n'
+    cargo test --locked --package infraternal --bin infraternal --no-default-features
+}
+
 rust_static_build_check() {
     local target
     local targets=("x86_64-unknown-linux-musl" "aarch64-unknown-linux-musl")
@@ -125,6 +154,7 @@ rust_verify_fast() {
 
     rust_run_gate "fmt" cargo fmt --all --check
     rust_run_gate "VT native fmt" zig fmt --check crates/infraternal-shim/native/snapshot.zig
+    rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
     rust_run_gate "test" cargo test --workspace --locked
     rust_run_gate "cargo-deny" cargo deny check

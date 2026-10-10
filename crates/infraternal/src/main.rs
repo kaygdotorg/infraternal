@@ -2,14 +2,17 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 mod cli;
+#[cfg(feature = "plugin-server")]
 mod install;
 
 use std::{
     io::{self, IsTerminal, Write},
-    net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
 };
+
+#[cfg(feature = "plugin-server")]
+use std::net::SocketAddr;
 
 use clap::ArgMatches;
 use cli::output::{CommandResult, CommandState, RenderOptions, render_json, render_pretty};
@@ -20,6 +23,7 @@ use serde::Serialize;
 use serde_json::json;
 
 /// Server listener and application settings read from a registered action's input schema.
+#[cfg(feature = "plugin-server")]
 #[derive(Debug)]
 struct ServerArgs {
     listen: SocketAddr,
@@ -33,6 +37,7 @@ struct ServerArgs {
 }
 
 /// Options controlling a user or system service installation.
+#[cfg(feature = "plugin-server")]
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]
 struct InstallArgs {
@@ -69,10 +74,15 @@ fn main() -> ExitCode {
         ["__shim"] => run_shim_command(selected.matches),
         ["status"] => run_status(&registry, json_output),
         ["skill"] => run_skill(&registry, selected.matches, json_output),
+        #[cfg(feature = "plugin-server")]
         ["server"] => run_server(selected.matches, json_output),
+        #[cfg(feature = "plugin-server")]
         ["server", "init"] => run_server_init(selected.matches, json_output),
+        #[cfg(feature = "plugin-server")]
         ["server", "install"] => run_server_install_compat(selected.matches, json_output),
+        #[cfg(feature = "plugin-server")]
         ["server", "setup-token"] => run_setup_token(selected.matches, json_output),
+        #[cfg(feature = "plugin-agent")]
         ["agent"] => run_embedded_agent(selected.matches, json_output),
         _ => {
             let Some(action) = find_action(&registry, &selected.path) else {
@@ -309,7 +319,7 @@ fn server_state_from_units(units: &str) -> Option<bool> {
     found.then_some(false)
 }
 
-#[cfg(all(test, feature = "plugin-server"))]
+#[cfg(test)]
 mod status_tests {
     //! Verifies status recognizes server services independently of their chosen unit name.
 
@@ -370,6 +380,7 @@ fn run_unavailable(action: &ActionDefinition, json_output: bool) -> ExitCode {
     }
 }
 
+#[cfg(feature = "plugin-server")]
 fn run_server(matches: &ArgMatches, json_output: bool) -> ExitCode {
     if !server_configuration_was_supplied(matches) {
         print_result(
@@ -407,6 +418,7 @@ fn run_server(matches: &ArgMatches, json_output: bool) -> ExitCode {
     run_server_foreground(args, &runtime, json_output)
 }
 
+#[cfg(feature = "plugin-server")]
 fn server_configuration_was_supplied(matches: &ArgMatches) -> bool {
     [
         "listen",
@@ -422,6 +434,7 @@ fn server_configuration_was_supplied(matches: &ArgMatches) -> bool {
         || matches.get_many::<String>("trusted_proxy").is_some()
 }
 
+#[cfg(feature = "plugin-server")]
 fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
     let listen = matches.get_one::<String>("listen").map_or_else(
         || Ok(SocketAddr::from(([127, 0, 0, 1], 7443))),
@@ -455,6 +468,7 @@ fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
     })
 }
 
+#[cfg(feature = "plugin-server")]
 fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
     let args = match server_args(matches) {
         Ok(args) => args,
@@ -491,6 +505,7 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
     install_server("server init", &args, &install_args, json_output)
 }
 
+#[cfg(feature = "plugin-server")]
 fn confirm_server_setup(
     yes: bool,
     dry_run: bool,
@@ -521,6 +536,7 @@ fn confirm_server_setup(
     }
 }
 
+#[cfg(feature = "plugin-server")]
 fn run_server_install_compat(_matches: &ArgMatches, json_output: bool) -> ExitCode {
     let result = CommandResult::new(
         "server install",
@@ -535,6 +551,7 @@ fn run_server_install_compat(_matches: &ArgMatches, json_output: bool) -> ExitCo
     ExitCode::from(2)
 }
 
+#[cfg(feature = "plugin-server")]
 fn install_server(
     command: &str,
     args: &ServerArgs,
@@ -578,6 +595,7 @@ fn install_server(
     }
 }
 
+#[cfg(feature = "plugin-server")]
 fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
     let data_dir = matches
         .get_one::<String>("data")
@@ -613,6 +631,7 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
     }
 }
 
+#[cfg(feature = "plugin-server")]
 fn run_server_foreground(
     args: ServerArgs,
     runtime: &tokio::runtime::Runtime,
@@ -656,6 +675,7 @@ fn run_server_foreground(
     }
 }
 
+#[cfg(feature = "plugin-agent")]
 fn run_embedded_agent(matches: &ArgMatches, json_output: bool) -> ExitCode {
     let Some(fd) = matches
         .get_one::<i64>("fd")
@@ -815,7 +835,7 @@ fn print_result<T: Serialize>(result: &CommandResult<T>, json_output: bool, to_s
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "plugin-server"))]
 async fn read_setup_token(data_dir: &Path) -> Result<String, &'static str> {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -848,11 +868,12 @@ async fn read_setup_token(data_dir: &Path) -> Result<String, &'static str> {
     String::from_utf8(response[..43].to_vec()).map_err(|_| "invalid local token response")
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), feature = "plugin-server"))]
 async fn read_setup_token(_data_dir: &Path) -> Result<String, &'static str> {
     Err("local token retrieval requires a Unix socket")
 }
 
+#[cfg(feature = "plugin-server")]
 fn server_config(args: ServerArgs) -> Result<infraternal_server::ServerConfig, String> {
     let tls = match (args.tls_cert, args.tls_key) {
         (Some(certificate), Some(private_key)) => Some(infraternal_server::TlsFiles {
@@ -876,6 +897,7 @@ fn server_config(args: ServerArgs) -> Result<infraternal_server::ServerConfig, S
     })
 }
 
+#[cfg(feature = "plugin-server")]
 fn origin_for_listener(listen: SocketAddr) -> String {
     let host = if listen.ip().is_loopback() {
         "localhost".to_owned()
@@ -885,7 +907,7 @@ fn origin_for_listener(listen: SocketAddr) -> String {
     format!("https://{host}:{}", listen.port())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "plugin-server"))]
 mod setup_token_tests {
     //! Verifies the explicit CLI handoff uses the private local request protocol.
 
