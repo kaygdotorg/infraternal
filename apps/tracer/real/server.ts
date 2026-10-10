@@ -1,7 +1,7 @@
 /**
  * The real-server fixture for the canvas specs: the production `infraternal` binary serving a production build of
  * the tracer, behind a local TLS front (passkeys need a secure context), with a WebSocket bridge that records the
- * wire frames of every browser socket. No test double stands in for the server, the agent, the shim or the PTY.
+ * wire frames of every browser socket. No test double stands in for the server, the infraternal agent, the shim or the PTY.
  *
  * - The binary comes from `INFRATERNAL_BIN` (default: the release musl binary of the repository's `target`).
  * - The web root is a copy of `TRACER_DIST` (default `dist`), frozen so a rebuild cannot change it mid-run.
@@ -45,6 +45,8 @@ export interface RealServer {
   bridges: Bridge[];
   token: string;
   binary: string;
+  dataDir: string;
+  pid: number;
   dispose(): Promise<void>;
 }
 
@@ -54,7 +56,18 @@ const text = new TextDecoder();
  * `latencyMs` (or `REAL_ONE_WAY_MS`) delays every browser-socket message by that many milliseconds in each direction
  * (so 150 is the 300 ms round-trip profile of docs/PROCESS.md); order is kept. Page loads are not delayed.
  */
-export async function startRealServer(options: { latencyMs?: number } = {}): Promise<RealServer> {
+export async function startRealServer(options: {
+  latencyMs?: number;
+  address?: string;
+  port?: number;
+  hostname?: string;
+  stateRoot?: string;
+  remoteListen?: string;
+  /** Public fixture certificate only; private TLS material remains in memory. */
+  certificate?: (pem: string) => Promise<void>;
+  /** Seeds controlled public host trust before any bootstrap operation. */
+  prepareData?: (directory: string) => Promise<void>;
+} = {}): Promise<RealServer> {
   const delay = options.latencyMs ?? Number(process.env.REAL_ONE_WAY_MS ?? 0);
   const later = (run: () => void): void => { if (delay > 0) setTimeout(run, delay); else run(); };
   const binary = process.env.INFRATERNAL_BIN ?? resolve(root, "target/x86_64-unknown-linux-musl/release/infraternal");
@@ -69,7 +82,9 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
     await rm(runtime, { recursive: true, force: true });
     throw new Error("real-server runtime path is too long; use a shorter INFRATERNAL_TEST_STATE_ROOT");
   }
-  const state = await mkdtemp(resolve(tmpdir(), "infraternal-real-"));
+  const stateRoot = options.stateRoot ?? process.env.INFRATERNAL_TEST_DATA_ROOT ?? tmpdir();
+  await mkdir(stateRoot, { recursive: true, mode: 0o700 });
+  const state = await mkdtemp(resolve(stateRoot, "r"));
   await cp(dist, `${state}/web`, { recursive: true });
   const reservation = createServer();
   await new Promise<void>((r) => reservation.listen(0, "127.0.0.1", r));
@@ -78,14 +93,18 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
   const backend = `http://127.0.0.1:${port}`;
 
   // The certificate is generated into memory and handed straight to the TLS server.
-  const ssl = spawn("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-keyout", "-", "-out", "-"], { stdio: ["ignore", "pipe", "ignore"] });
+  const hostname = options.hostname ?? "localhost";
+  const address = options.address ?? "127.0.0.1";
+  const ssl = spawn("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1", "-subj", `/CN=${hostname}`, "-addext", `subjectAltName=DNS:${hostname},IP:${address}`, "-keyout", "-", "-out", "-"], { stdio: ["ignore", "pipe", "ignore"] });
   let pem = "";
   ssl.stdout.on("data", (b) => { pem += b; });
   const [code] = await once(ssl, "exit");
   if (code !== 0) throw new Error("test certificate generation failed");
+  const certificate = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0] ?? "";
+  await options.certificate?.(certificate);
   const tls = createHttpsServer({
     key: pem.match(/-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----/)?.[0] ?? "",
-    cert: pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0] ?? "",
+    cert: certificate,
   }, (req, res) => {
     const upstream = httpRequest(backend + (req.url ?? "/"), { method: req.method, headers: req.headers, agent: false }, (response) => {
       res.writeHead(response.statusCode ?? 500, response.headers);
@@ -95,10 +114,10 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
     req.pipe(upstream);
   });
   pem = "";
-  await new Promise<void>((r) => tls.listen(0, "127.0.0.1", r));
-  const origin = `https://localhost:${(tls.address() as AddressInfo).port}`;
+  await new Promise<void>((r) => tls.listen(options.port ?? 0, address, r));
+  const origin = `https://${hostname}:${(tls.address() as AddressInfo).port}`;
 
-  const child: ChildProcess = spawn(binary, ["server", "--listen", `127.0.0.1:${port}`, "--data", `${state}/data`, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`], {
+  const child: ChildProcess = spawn(binary, ["server", "--listen", `127.0.0.1:${port}`, "--data", state, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`, ...(options.remoteListen ? ["--remote-listen", options.remoteListen, "--remote-ca-dir", `${state}/ca`] : [])], {
     cwd: root, detached: true,
     env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
     stdio: ["ignore", "ignore", "pipe"],
@@ -153,13 +172,14 @@ export async function startRealServer(options: { latencyMs?: number } = {}): Pro
     if (Date.now() > deadline) throw new Error("server startup failed");
     await new Promise((r) => setTimeout(r, 50));
   }
-  const setup = spawn(binary, ["server", "setup-token", "--data", `${state}/data`], { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
+  await options.prepareData?.(state);
+  const setup = spawn(binary, ["server", "setup-token", "--data", state], { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
   let token = "";
   setup.stdout.on("data", (b) => { token += b; });
   await once(setup, "exit");
 
   return {
-    origin, backend, bridges, token: token.trim(), binary,
+    origin, backend, bridges, token: token.trim(), binary, dataDir: state, pid: child.pid!,
     async dispose() {
       front.close();
       tls.close();
