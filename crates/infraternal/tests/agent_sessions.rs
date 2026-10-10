@@ -1,4 +1,5 @@
 //! Real shim launch, session discovery and exact byte-offset replay [13][41].
+#![cfg(feature = "plugin-agent")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use infraternal_agent::sessions::{Manager, Reader, discover, launch, send, state};
 use infraternal_shim::frame::Frame;
