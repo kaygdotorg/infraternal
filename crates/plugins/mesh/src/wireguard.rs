@@ -46,11 +46,20 @@ impl Device {
     pub fn create() -> io::Result<()> {
         let mut payload = vec![0; 16];
         attribute(&mut payload, 3, b"infraternal0\0")?;
-        attribute(&mut payload, 20, b"infraternal.mesh.v1\0")?;
         let mut linkinfo = Vec::new();
         attribute(&mut linkinfo, 1, b"wireguard\0")?;
         attribute(&mut payload, 0x12 | NESTED, &linkinfo)?;
-        Socket::open(SockProtocol::NetlinkRoute)?.request(16, 4 | 0x200 | 0x400, &payload)?;
+        let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        socket.request(16, 4 | 0x200 | 0x400, &payload)?;
+        // Creation does not run the generic alias setter. Mark the new link
+        // explicitly before a later process may adopt it; never leave an unmarked success.
+        let mut marker = vec![0; 16];
+        attribute(&mut marker, 3, b"infraternal0\0")?;
+        attribute(&mut marker, 20, b"infraternal.mesh.v1\0")?;
+        if let Err(error) = socket.request(16, 4, &marker) {
+            Self::delete()?;
+            return Err(error);
+        }
         Ok(())
     }
     /// Verify the ownership marker before adopting kernel state after a process restart.

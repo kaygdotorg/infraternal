@@ -121,3 +121,11 @@ fn retired_host_routes_can_be_replayed() {
     Device::routes(std::slice::from_ref(&peer), true).unwrap();
     Device::delete().unwrap();
 }
+
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn created_interface_is_marked_for_restart_adoption() {
+    Device::create().unwrap();
+    assert!(Device::owned().unwrap());
+    Device::delete().unwrap();
+}
