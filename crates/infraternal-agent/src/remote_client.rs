@@ -31,7 +31,7 @@ pub struct RemoteIdentity {
 /// # Errors
 /// Refuses local uid mismatch or invalid credentials before contacting the server.
 pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Result<()> {
-    run_inner(identity, state, None).await
+    run_inner(identity, state, None, None).await
 }
 
 /// Keep atomic publication and reconnect identity in sync throughout live renewal.
@@ -42,15 +42,28 @@ pub async fn run_with_publisher(
     state: Option<PathBuf>,
     publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
 ) -> io::Result<()> {
+    run_with_installation(identity, state, publisher, None).await
+}
+
+/// Bind node uninstall to checked local managed-service coordinates.
+/// # Errors
+/// Refuses the same identity and transport configuration failures.
+pub async fn run_with_installation(
+    identity: &RemoteIdentity,
+    state: Option<PathBuf>,
+    publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
+    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
+) -> io::Result<()> {
     let renewal =
         crate::remote_renewal::RenewalIdentity::new(&identity.identity, &identity.roots, publisher);
-    run_inner(identity, state, Some(&renewal)).await
+    run_inner(identity, state, Some(&renewal), installation).await
 }
 
 async fn run_inner(
     identity: &RemoteIdentity,
     state: Option<PathBuf>,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
 ) -> io::Result<()> {
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
@@ -93,7 +106,8 @@ async fn run_inner(
         let connected = dial_preferred(&endpoint, identity, &tls).await;
         match connected {
             Ok(Connected::Quic(connection)) => {
-                let _ = quic_session(connection, identity, state.clone(), renewal).await;
+                let _ =
+                    quic_session(connection, identity, state.clone(), renewal, installation).await;
             }
             Ok(Connected::Tcp(connection)) => {
                 // The losing handshake otherwise retains Quinn drain timers after
@@ -101,11 +115,12 @@ async fn run_inner(
                 // the authenticated TCP channel and rootless shims are independent.
                 drop(endpoint);
                 drop(quic);
-                let _ = daemon::run_authenticated_with_renewal(
+                let _ = daemon::run_authenticated_with_installation(
                     &connection.channel,
                     state.clone(),
                     identity.execution_uid,
                     renewal,
+                    installation,
                 )
                 .await;
             }
@@ -216,6 +231,7 @@ async fn quic_session(
     identity: &RemoteIdentity,
     state: Option<PathBuf>,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
 ) -> io::Result<()> {
     let result = async {
         let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
@@ -234,7 +250,7 @@ async fn quic_session(
         encode_frame_into(&hello.frame, &mut prefix).map_err(io::Error::other)?;
         let control = PrefixedControl { channel:control, prefix:Mutex::new(prefix), sent_greeting:Mutex::new(Some(sent_greeting)), receive:Mutex::new(rx) };
         let mut terminals = JoinSet::new();
-        let dispatch = daemon::run_authenticated_with_renewal(&control, state.clone(), identity.execution_uid, renewal);
+        let dispatch = daemon::run_authenticated_with_installation(&control, state.clone(), identity.execution_uid, renewal, installation);
         tokio::pin!(dispatch);
         loop {
             // Keep partial binding progress across completed terminal jobs.
