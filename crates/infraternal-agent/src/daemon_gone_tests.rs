@@ -157,3 +157,6 @@ async fn a_vanished_session_gets_a_final_close_and_the_channel_stays_up() {
         ]
     );
 }
+
+#[path = "gone_scale_review_tests.rs"]
+mod scale_review;
