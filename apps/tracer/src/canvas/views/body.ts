@@ -7,7 +7,6 @@
 import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
 import { onDemand } from "../../on-demand";
-import { mountLogBody } from "./log-body";
 
 /** True for kinds whose window is a terminal session: the only kind that can split or take input. */
 export const isTerminal = (rec: WinRec): boolean => rec.model.kind === "terminal" && !rec.model.noAccess;
@@ -51,9 +50,16 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     return;
   }
   if (m.kind === "logs") {
-    const log = mountLogBody(body, m.lines ?? []);
-    rec.stream = log.scroller;
-    rec.pushLog = log.push;
+    // Logs windows are rare (no product path opens one yet), so their body loads on demand (D188), like Settings.
+    // A feed pushes only to a window with `pushLog`, so nothing arrives before the body has mounted its backlog.
+    let gone = false;
+    rec.cleanup = () => { gone = true; };
+    void onDemand(() => import("./log-body.on-demand")).then((mod) => {
+      if (gone) return;
+      const log = mod.mountLogBody(body, m.lines ?? []);
+      rec.stream = log.scroller;
+      rec.pushLog = log.push;
+    });
     return;
   }
   if (m.kind === "containers") {
