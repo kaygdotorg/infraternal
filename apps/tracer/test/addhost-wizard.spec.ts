@@ -203,6 +203,9 @@ test("an unknown host key shows its fingerprint and is never trusted without a c
   await addTyped(page, "kayg@newkey.lab");
   await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(".ah-keyblock")).toContainText(/SHA256:[A-Za-z0-9+/]{43}/);
+  await expect(page.locator(".ah-keyblock")).toContainText("ED25519");
+  await expect(page.locator(".ah-keyblock")).not.toContainText("Key 2");
+  await expect(page.getByText("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub", { exact: true })).toBeVisible();
   // Nothing proceeds by itself.
   await page.waitForTimeout(800);
   await expect(inWizard(page, "Trust this key")).toBeVisible();
