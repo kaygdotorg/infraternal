@@ -23,6 +23,9 @@ const REMOTE = process.env.REAL_REMOTE_ORIGIN;
 /** `REAL_SCALE_GPU=1`: the browser is the new headless Chromium with the machine's GPU (no software rasteriser), and the trace adds the GPU and compositor threads. */
 const GPU = process.env.REAL_SCALE_GPU === "1";
 /** The shortcuts of the page's platform: the app's "mod" is Command on a Mac and Control elsewhere (and the split keys differ, see canvas/toolbar/shortcuts.ts). */
+/** `REAL_SCALE_VIEW=2502x1326` sets the browser's viewport (default 1440x900; the owner's screen is 2502x1326 points at 2x). */
+const [VW, VH] = (process.env.REAL_SCALE_VIEW ?? "1440x900").split("x").map(Number) as [number, number];
+const VIEW = { width: VW, height: VH };
 const MAC = process.platform === "darwin";
 const MOD = MAC ? "Meta" : "Control";
 const SPLIT_RIGHT = MAC ? "Control+Alt+R" : "Control+Shift+D";
@@ -58,7 +61,7 @@ test.beforeAll(async () => {
     console.log(`GPUINFO chrome://gpu ${(text.match(/(Canvas|Compositing|Rasterization|Video Decode|WebGL|WebGL2|WebGPU|Skia Graphite)\s*:\s*[A-Za-z ,.]+/g) ?? []).slice(0, 12).join(" | ")}`);
     await probe.close();
   }
-  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: VIEW, deviceScaleFactor: Number(process.env.REAL_SCALE_DPR ?? 2) });
   page = await context.newPage();
   page.on("console", (m) => { if (m.text().startsWith("CLOSE-REASON")) console.log(m.text()); });
   if (process.env.REAL_SCALE_TRACE === "1") await page.addInitScript(() => {
@@ -258,6 +261,7 @@ test(`${N} real sessions: what scales with the session count`, async () => {
   await page.waitForTimeout(600);
   if (want("pan")) results.pan = await measure(cdp, "pan", () => wheelDrive((ph) => ({ deltaX: (ph < 0.5 ? -1 : 1) * 24, deltaY: (ph < 0.5 ? -1 : 1) * 9 })));
   await page.waitForTimeout(500);
+  if (process.env.REAL_SCALE_ZOOM_PRE) await page.evaluate(process.env.REAL_SCALE_ZOOM_PRE); // an experiment hook: runs just before the zoom is measured
   if (want("zoom")) results.zoom = await measure(cdp, "zoom", () => wheelDrive((ph) => ({ deltaY: (ph < 0.5 ? 1 : -1) * 14, ctrlKey: true })));
   await page.waitForTimeout(500);
   await page.keyboard.press(`${MOD}+Shift+G`);
