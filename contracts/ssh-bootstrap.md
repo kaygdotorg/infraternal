@@ -339,3 +339,36 @@ are exact allowlisted public lines, including enrollment DNS and TLS failures;
 arbitrary stderr never becomes UI copy or log output. Re-adding a retained host
 (address or effective application SSH lookup) returns `already_added` before
 issuing another invitation, and the UI directs the person to its existing terminal.
+
+## Verified architecture payloads (#157, D220, D224, D225)
+
+The default server payload source uses its exact running Linux executable for
+its own architecture. For the other supported architecture, it requests the
+server's workspace version from `https://builds.infraternal.com/releases/<version>/`:
+`SHA256SUMS`, `SHA256SUMS.sig`, `VERSION`, and `infraternal-<architecture>-musl`.
+The unchanged release-signer Worker signs the manifest with Ed25519 SSHSIG,
+namespace `infraternal-release`, hash SHA-512. The binary embeds both public
+trust anchors from `release/allowed_signers` and verifies opened descriptors.
+`VERSION` is signed content containing the exact workspace version plus newline;
+this binds the release to its version rather than trusting the URL path.
+
+The existing `install` progress phase emits “Get the arm64 binary” or
+“Get the x86_64 binary” before resolution. Failures add two values to the
+optional `failed_step` field: `get-arm64-binary` and `get-x86-64-binary`.
+Their plain public reason is retained. Resolution is bounded to 60 seconds,
+shortened to finish before the whole attempt deadline. Download or verification
+failure stops before any upload or installation transaction.
+
+Verified payloads and signed metadata are published together by atomic directory
+rename under the configured server state directory:
+`releases/<version>/<architecture>/`. Every cache reuse reverifies the manifest,
+version and binary; unsafe ownership, shared modes, symlinks and hard links are
+refused. The cache is server-owned trusted state and published files are never
+rewritten by the resolver. It has no polling or background release worker.
+
+Only a development build (without the pipeline's compile-time
+`INFRATERNAL_RELEASE_BUILD=1` marker) and a 404 for the version's manifest allow
+fallback to the adjacent locally built architecture payload. Offline, TLS,
+missing payload, wrong-version and signature failures never enable fallback.
+Existing path-based installation adapters remain available through `BinaryPaths`;
+the default server supplies the verified source through the same SSH plugin.
