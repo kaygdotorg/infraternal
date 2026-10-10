@@ -330,7 +330,16 @@ pub async fn discover(state: &Path) -> io::Result<Vec<Session>> {
                     Ok(None)
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error),
+                Err(error) => {
+                    // The sealed exit can precede listener teardown. A known
+                    // ended session cannot make restart fail on its last EOF;
+                    // unknown or insecure records retain the strict error path.
+                    if infraternal_shim::ended::read(&path)?.is_some() {
+                        Ok(None)
+                    } else {
+                        Err(error)
+                    }
+                }
             }
         });
     }
