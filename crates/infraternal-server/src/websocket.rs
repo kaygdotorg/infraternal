@@ -1030,7 +1030,9 @@ where
                 Some((size, host)) if size.valid() => {
                     open_terminal(state, user_id, session_token, size, host).await
                 }
-                _ => Err(()),
+                _ => Err(crate::embedded::AgentError::OpenRefused(
+                    infraternal_plugin_api::admission::OpenRefusal::Invalid,
+                )),
             };
             if !session_is_live(state, user_id, session_token).await {
                 return Err(());
@@ -1056,14 +1058,19 @@ where
                     )
                     .await
                 }
-                Err(()) => {
+                Err(error) => {
+                    let refusal = match error {
+                        crate::embedded::AgentError::OpenRefused(reason) => reason,
+                        _ => infraternal_plugin_api::admission::OpenRefusal::Unavailable,
+                    };
+                    let json = refusal.json().map_err(|_| ())?;
                     send_frame(
                         sink,
                         CONTROL_STREAM,
                         &Frame::Result {
                             call_id,
                             ok: false,
-                            json: br#"{"error":"terminal unavailable"}"#,
+                            json: &json,
                         },
                         encode,
                     )
@@ -1366,12 +1373,14 @@ async fn open_terminal(
     session_token: &str,
     size: TerminalOpen,
     host: Option<uuid::Uuid>,
-) -> Result<[u8; 16], ()> {
+) -> Result<[u8; 16], crate::embedded::AgentError> {
     #[cfg(test)]
     let connect_timeout = state.terminal_connect_timeout;
     #[cfg(not(test))]
     let connect_timeout = TERMINAL_CONNECT_TIMEOUT;
-    let agent = terminal_agent(state, user_id, host).await?;
+    let agent = terminal_agent(state, user_id, host)
+        .await
+        .map_err(|()| crate::embedded::AgentError::Unavailable)?;
     let session_id = tokio::time::timeout(
         connect_timeout,
         agent.open(TerminalSize {
@@ -1382,12 +1391,11 @@ async fn open_terminal(
         }),
     )
     .await
-    .map_err(|_| ())?
-    .map_err(|_| ())?;
+    .map_err(|_| crate::embedded::AgentError::Unavailable)??;
     if !session_is_live(state, user_id, session_token).await {
-        return Err(());
+        return Err(crate::embedded::AgentError::Unavailable);
     }
-    let now = unix_seconds()?;
+    let now = unix_seconds().map_err(|()| crate::embedded::AgentError::Unavailable)?;
     let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND (? IS NULL OR EXISTS (SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL))")
         .bind(session_id.as_slice())
         .bind(user_id)
@@ -1398,9 +1406,9 @@ async fn open_terminal(
         .bind(host.map(|id| id.as_bytes().to_vec())).bind(host.map(|id| id.as_bytes().to_vec())).bind(user_id)
         .execute(&state.pool)
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| crate::embedded::AgentError::Unavailable)?;
     if changed.rows_affected() != 1 {
-        return Err(());
+        return Err(crate::embedded::AgentError::Unavailable);
     }
     Ok(session_id)
 }

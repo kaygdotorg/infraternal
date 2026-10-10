@@ -3293,3 +3293,6 @@ mod verified_passkey_tests;
 #[cfg(feature = "remote")]
 #[path = "ca_administration_tests.rs"]
 mod ca_administration_tests;
+
+#[path = "terminal_refusal_tests.rs"]
+mod terminal_refusal_tests;
