@@ -302,4 +302,15 @@ mod tests {
             );
         }
     }
+
+    #[cfg(not(feature = "plugin-agent"))]
+    #[test]
+    fn agent_session_integration_target_is_gated_by_agent_plugin() {
+        let integration_test = include_str!("../../tests/agent_sessions.rs");
+        assert!(
+            integration_test
+                .lines()
+                .any(|line| line.trim() == "#![cfg(feature = \"plugin-agent\")]")
+        );
+    }
 }
