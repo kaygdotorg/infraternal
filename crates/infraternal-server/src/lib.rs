@@ -47,6 +47,7 @@ mod remote_runtime;
 mod remote_startup;
 mod runtime;
 mod server_tls;
+mod terminal_exit;
 mod web_assets;
 mod websocket;
 
