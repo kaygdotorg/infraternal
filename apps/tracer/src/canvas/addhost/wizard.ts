@@ -31,7 +31,8 @@ import type { BootstrapEvent, StartTarget, TargetView } from "../../provisioning
 import type { FlowHost, FlowSurface } from "./flow-host";
 import { ICON, escapeHtml, svg } from "./icons";
 import { failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, RUNNING_TEXT, stagesOf, STAGES } from "./model";
-import type { Guide } from "./model";
+import type { Guide, ParsedTarget } from "./model";
+import { matchListed } from "./model";
 import { ServiceError } from "./service";
 import type { AddHostSink, DiscoveredHost, EnrolledHost, InstallCommand, ProvisioningService, SavedKey, ServerKey } from "./service";
 
@@ -200,15 +201,22 @@ export class Wizard {
     return { id: host.id, label: host.id, user: host.user, address: host.address, port: undefined, os: host.os ?? platformOf(host.operatingSystem), discovered: host };
   }
 
-  /** Typed entries first, then discovered hosts that are not added, then the added ones (listed, not selectable). */
-  private all(): Array<{ entry: Entry; added: boolean }> {
+  /** Discovered hosts as list rows: those not added first, then the added ones (listed, not selectable). */
+  private listed(): Array<{ entry: Entry; added: boolean }> {
     const rows = this.discovered.map((host) => ({ entry: this.entryOf(host), added: host.alreadyAdded === true }));
-    return [...this.typed.map((entry) => ({ entry, added: false })), ...rows.filter((row) => !row.added), ...rows.filter((row) => row.added)];
+    return [...rows.filter((row) => !row.added), ...rows.filter((row) => row.added)];
+  }
+
+  /** Any host the field can hold. Typed hosts are chips only; they never get a list row. */
+  private find(id: string): Entry | undefined {
+    return this.typed.find((entry) => entry.id === id) ?? this.listed().find((row) => row.entry.id === id)?.entry;
   }
 
   private later(ms: number, fn: () => void): void { this.timers.push(window.setTimeout(fn, ms)); }
   private clearTimers(): void { for (const id of this.timers) window.clearTimeout(id); this.timers = []; }
   private focusField(): void { if (matchMedia("(pointer: fine)").matches) this.chips?.input.focus({ preventScroll: true }); }
+  /** The discovery page on screen, when it is the one showing. */
+  private discoveryPage(): HTMLElement | undefined { return this.current?.dataset.page === "discovery" ? this.current : undefined; }
 
   // ── Steps ──────────────────────────────────────────────────────────────────
   /** Shared step transition: overlapping panes on springs, spring height, Back reverses. */
@@ -259,23 +267,21 @@ export class Wizard {
   // ── Discovery: chips + one list ────────────────────────────────────────────
   private chipFor(entry: Entry): Chip {
     const typed = !entry.discovered || this.typed.includes(entry);
-    return { id: entry.id, label: entry.user && typed ? `${entry.user}@${entry.label}` : entry.label, icon: typed && !entry.discovered ? svg(ICON.typed, "is-line") : hostIconMarkup(entry.os, "") };
+    // A typed chip reads as it was typed, port included, so Backspace puts back exactly that text.
+    const label = typed ? `${entry.user ? `${entry.user}@` : ""}${entry.label}${entry.port ? `:${entry.port}` : ""}` : entry.label;
+    return { id: entry.id, label, icon: typed && !entry.discovered ? svg(ICON.typed, "is-line") : hostIconMarkup(entry.os, "") };
   }
 
   private rowOf(entry: Entry, added: boolean): string {
-    const host = entry.discovered;
-    const typed = this.typed.includes(entry);
-    const status = typed || !host ? { label: "We'll check it when you continue", tone: "none" as const, icon: ICON.pending } : statusOf(host);
-    const sources = (host?.sources ?? []).map((source) => `<span class="ah-src" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
+    const host = entry.discovered!;
+    const status = statusOf(host);
+    const sources = host.sources.map((source) => `<span class="ah-src" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
     const checked = this.selected.some((item) => item.id === entry.id);
-    const mark = typed || !host ? svg(ICON.typed, "ah-os-mark is-line") : hostIconMarkup(entry.os, "ah-os-mark");
-    const facts = typed || !host
-      ? `<span>${escapeHtml(entry.user ? `${entry.user}@` : "")}${escapeHtml(entry.address)}${entry.port ? `:${entry.port}` : ""}</span>`
-      : [host.operatingSystem, host.architecture].filter(Boolean).map((item, index) => `<span>${index ? "· " : ""}${escapeHtml(item!)}</span>`).join("") || `<span>${escapeHtml(entry.address)}</span>`;
+    const facts = [host.operatingSystem, host.architecture].filter(Boolean).map((item, index) => `<span>${index ? "· " : ""}${escapeHtml(item!)}</span>`).join("") || `<span>${escapeHtml(entry.address)}</span>`;
     return `<label class="ah-row${added ? " is-added" : ""}" data-host="${escapeHtml(entry.id)}">
       <span class="ah-check check"><input type="checkbox" value="${escapeHtml(entry.id)}" ${added ? "disabled" : ""} ${checked ? "checked" : ""}
         aria-label="${escapeHtml(entry.label)}${status.label ? `, ${escapeHtml(status.label)}` : ""}" /></span>
-      ${mark}
+      ${hostIconMarkup(entry.os, "ah-os-mark")}
       <span class="ah-main">
         <span class="ah-name">${escapeHtml(entry.label)}</span>
         <span class="ah-meta">${facts}${sources ? `<span class="ah-srcs">${sources}</span>` : ""}</span>
@@ -288,122 +294,135 @@ export class Wizard {
     page.innerHTML = `<h1 class="ah-title">Add hosts</h1>
       <p class="ah-lede">Pick a host, type <span class="ah-code">user@host</span>, or paste your SSH config. We won't sign in to anything until you continue.</p>
       <div class="ah-field">${svg(ICON.servers, "ah-field-icon")}</div>
+      <p class="ah-hint" role="status" aria-hidden="true">Type user@host, for example kayg@o2</p>
       <div class="ah-list" role="group" aria-label="Hosts"></div>`;
+    this.token = "";
     this.chips = mountChipInput(page.querySelector<HTMLElement>(".ah-field")!, {
       label: "Hosts to add",
       placeholder: "Find or type user@host",
       resolve: (token, delimited) => this.resolve(token, delimited),
       onChange: (chips) => this.syncSelection(chips),
-      onToken: (token) => { this.token = token; this.applyFilter(); },
+      onToken: (token) => { this.token = token; this.refreshDiscovery(); },
       onSubmit: () => { if (this.selected.length) this.proceed(); },
     });
     for (const entry of this.selected) this.chips.add(this.chipFor(entry));
     this.renderList(page);
     this.setFoot(`<span class="ah-count" aria-live="polite"></span><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="continue"><span>Continue</span></button>`);
-    this.updateCount();
+    this.refreshDiscovery(page);
   }
 
-  /** A token becomes a chip when it names exactly one host, or is ended and parses as user@host. */
+  /** How a target relates to the listed hosts that are not added yet. */
+  private matchOf(target: ParsedTarget): { host: Entry | undefined; prefixed: boolean } {
+    const matched = matchListed(target, this.listed().filter((row) => !row.added).map((row) => row.entry));
+    return { host: matched.named, prefixed: matched.prefixed };
+  }
+
+  /**
+   * Turns a token into a chip, or returns undefined while it must still be typed. A token that names a listed host
+   * chips at once, unless it is also the start of other hosts' names: then it waits for a delimiter. An ended token
+   * (delimiter, Tab, Enter, Continue) is final: a valid target that names no listed host becomes a typed host.
+   */
   private resolve(token: string, delimited: boolean): Chip | undefined {
     const target = parseTarget(token);
     if (!target) return undefined;
-    const rows = this.all().filter((row) => !row.added);
-    const known = rows.find(({ entry }) => !this.typed.includes(entry) && (entry.id === target.host || entry.address === target.host));
-    if (known) {
-      const longer = rows.some(({ entry }) => entry !== known.entry && entry.id.startsWith(target.host));
-      if (!delimited && longer) return undefined;
-      if (target.user && target.user !== known.entry.user) return this.typedChip(target, known.entry);
-      return this.chipFor(known.entry);
+    const { host, prefixed } = this.matchOf(target);
+    if (host) {
+      if (prefixed && !delimited) return undefined;
+      if (target.user && target.user !== host.user) return this.typedChip(target, host);
+      return this.chipFor(host);
     }
     return delimited ? this.typedChip(target) : undefined;
   }
 
-  private typedChip(target: NonNullable<ReturnType<typeof parseTarget>>, base?: Entry): Chip {
+  /** True when the unfinished token is a valid target that Continue would commit (the same rule as Enter). */
+  private pendingReady(): boolean {
+    return parseTarget(this.token) !== undefined;
+  }
+
+  private typedChip(target: ParsedTarget, base?: Entry): Chip {
     const id = `${target.user ?? ""}@${target.host}${target.port ? `:${target.port}` : ""}`;
     let entry = this.typed.find((item) => item.id === id);
     if (!entry) {
       entry = { id, label: target.host, user: target.user, address: target.host, port: target.port, os: base?.os ?? "unknown", discovered: base?.discovered };
       this.typed = [entry, ...this.typed];
-      if (this.current) this.renderList(this.current);
     }
     return this.chipFor(entry);
   }
 
   /** Chips are the selection; checkboxes follow them. */
   private syncSelection(chips: Chip[]): void {
-    const rows = this.all();
-    this.selected = chips.map((chip) => rows.find(({ entry }) => entry.id === chip.id)?.entry).filter((entry): entry is Entry => !!entry);
+    this.selected = chips.map((chip) => this.find(chip.id)).filter((entry): entry is Entry => !!entry);
     // While a discovery page is being built, `current` is still the previous page; it renders from `selected`.
-    if (this.current?.dataset.page === "discovery") {
-      if (chips.some((chip) => !this.current!.querySelector(`.ah-row[data-host="${CSS.escape(chip.id)}"]`))) this.renderList(this.current);
+    const page = this.discoveryPage();
+    if (page) {
       for (const [id, tick] of this.ticks) {
         const want = this.selected.some((entry) => entry.id === id);
-        const input = this.current.querySelector<HTMLInputElement>(`.ah-row[data-host="${CSS.escape(id)}"] input`);
+        const input = page.querySelector<HTMLInputElement>(`.ah-row[data-host="${CSS.escape(id)}"] input`);
         if (input && input.checked !== want) { input.checked = want; tick.set(want); }
       }
-      this.applyFilter();
     }
-    this.updateCount();
+    this.refreshDiscovery(page);
   }
 
   private renderList(page: HTMLElement): void {
     const list = page.querySelector<HTMLElement>(".ah-list")!;
-    const rows = this.all();
+    const rows = this.listed();
     let note = "";
     if (this.discovery.state === "loading") note = `<p class="ah-note ah-loading" role="status"><span class="ah-spin"></span><span>Looking for hosts…</span></p>`;
     else if (this.discovery.state === "failed") note = `<p class="ah-note ah-load-error" role="alert">${svg(ICON.warning)}<span>${escapeHtml(this.discovery.message)}</span><button class="ah-link" type="button" data-ah="reload">Try again</button></p>`;
     else if (!rows.length) note = `<p class="ah-note ah-empty">${svg(ICON.servers)}<span>No hosts found yet. Type one above, or paste your SSH config.</span></p>`;
-    list.innerHTML = `<label class="ah-row ah-candidate" hidden>
-        <span class="ah-check check"><input type="checkbox" data-candidate aria-label="Add the typed host" /></span>
-        ${svg(ICON.plus, "ah-os-mark is-line")}
-        <span class="ah-main"><span class="ah-name">Add <span class="ah-manual-target"></span></span>
-          <span class="ah-meta"><span>Not in the list. We'll check it when you continue.</span></span></span>
-      </label>
-      ${rows.map(({ entry, added }) => this.rowOf(entry, added)).join("")}
+    list.innerHTML = `${rows.map(({ entry, added }) => this.rowOf(entry, added)).join("")}
       ${note}
       <p class="ah-none" hidden>No host matches.</p>`;
     const spin = list.querySelector<HTMLElement>(".ah-spin");
     if (spin) spin.replaceWith(createSpinner());
     this.ticks = new Map();
     for (const input of list.querySelectorAll<HTMLInputElement>(".ah-row[data-host] input")) this.ticks.set(input.value, springCheckbox(input));
-    for (const input of list.querySelectorAll<HTMLInputElement>(".ah-candidate input")) springCheckbox(input);
     this.applyFilter(page);
   }
 
+  /** Everything the unfinished token and the chips drive: the list filter, the hint, the count and Continue. */
+  private refreshDiscovery(page: HTMLElement | undefined = this.discoveryPage()): void {
+    if (page) { this.applyFilter(page); this.updateHint(page); }
+    this.updateCount();
+  }
+
   /** Shows rows matching the unfinished token; selected rows always stay listed. */
-  private applyFilter(page: HTMLElement | undefined = this.current): void {
-    if (!page || page.dataset.page !== "discovery") return;
+  private applyFilter(page: HTMLElement): void {
     const needle = this.token.toLowerCase();
     const target = parseTarget(this.token);
-    const rows = this.all();
-    let visible = 0;
-    let exact = false;
+    const hosts = new Map(this.listed().map((row) => [row.entry.id, row.entry]));
     for (const row of page.querySelectorAll<HTMLElement>(".ah-row[data-host]")) {
-      const found = rows.find(({ entry }) => entry.id === row.dataset.host)?.entry;
+      const found = hosts.get(row.dataset.host ?? "");
       if (!found) continue;
       const isSelected = this.selected.some((item) => item.id === found.id);
       const named = !!target && (found.label === target.host || found.address === target.host);
       const match = !needle || `${found.user ?? ""}@${found.label} ${found.address} ${found.discovered?.operatingSystem ?? ""} ${found.discovered?.architecture ?? ""}`.toLowerCase().includes(needle) || named;
-      if (named) exact = true;
       const wasHidden = row.hidden;
       row.hidden = !match && !isSelected;
-      if (match && !isSelected) visible++;
       if (wasHidden && !row.hidden && !reducedMotion()) row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE });
     }
-    const candidate = page.querySelector<HTMLElement>(".ah-candidate")!;
-    const offer = !!target && !exact && visible === 0;
-    candidate.hidden = !offer;
-    if (offer) page.querySelector<HTMLElement>(".ah-manual-target")!.textContent = this.token;
+    // "No host matches" would contradict a token that is about to become a chip.
     const shown = page.querySelectorAll(".ah-row[data-host]:not([hidden])").length;
-    page.querySelector<HTMLElement>(".ah-none")!.hidden = shown > 0 || offer || !needle || rows.length === 0;
+    page.querySelector<HTMLElement>(".ah-none")!.hidden = shown > 0 || !needle || hosts.size === 0 || this.pendingReady();
   }
 
+  /** The quiet hint shows while the unfinished token is not a host name; it reserves its line so nothing below jumps. */
+  private updateHint(page: HTMLElement): void {
+    const hint = page.querySelector<HTMLElement>(".ah-hint")!;
+    const invalid = this.token !== "" && !parseTarget(this.token);
+    hint.dataset.show = String(invalid);
+    hint.setAttribute("aria-hidden", String(!invalid));
+  }
+
+  /** The count and Continue reflect the chips and the unfinished token, which Continue will commit. */
   private updateCount(): void {
     if (this.page !== "discovery") return;
     const count = this.foot.querySelector<HTMLElement>(".ah-count");
     const primary = this.foot.querySelector<HTMLButtonElement>("[data-ah='continue']");
-    if (count) count.textContent = this.selected.length === 0 ? "" : `${this.selected.length} selected`;
-    if (primary) primary.disabled = this.selected.length === 0;
+    const total = this.selected.length + (this.pendingReady() ? 1 : 0);
+    if (count) count.textContent = total === 0 ? "" : `${total} ${total === 1 ? "host" : "hosts"}`;
+    if (primary) primary.disabled = total === 0;
   }
 
   /** Pasted ssh_config becomes chips; anything else pastes as text for the chip field to split. */
@@ -426,6 +445,8 @@ export class Wizard {
   }
 
   private proceed(): void {
+    // Continue ends the unfinished token first, exactly as Enter would; a token that is not a target stays as text.
+    this.chips?.commit();
     if (!this.selected.length) return;
     if (this.rootCandidates().length) this.go("root");
     else this.startBatch(false);
@@ -1009,12 +1030,8 @@ export class Wizard {
   private readonly onChange = (event: Event): void => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement)) return;
-    if (input.matches("[data-candidate]")) {
-      if (input.checked) { input.checked = false; this.chips?.commit(); }
-      return;
-    }
     if (input.closest(".ah-row[data-host]")) {
-      const entry = this.all().find((row) => row.entry.id === input.value)?.entry;
+      const entry = this.find(input.value);
       if (!entry || !this.chips) return;
       if (input.checked) this.chips.add(this.chipFor(entry)); else this.chips.remove(entry.id);
     } else if (input.matches("[data-consent]")) {
