@@ -37,13 +37,12 @@ export function writeSize<K extends keyof WindowSizes>(kind: K, value: WindowSiz
 }
 
 /**
- * The default column (window) width for a canvas area `width` px wide. `width` is the canvas viewport's client width,
- * which includes its own gutter padding on both sides; `gutter` is that padding. A phone's "full" and "edge" widths
- * are 99% of the space between the margins, so "full" keeps the gutter and "edge" (whose panes run to the screen
- * edges, see `edgeToEdge`) fills the screen. Pure, so it can be tested alone.
+ * The default column (window) width for a canvas area `width` px wide: the canvas viewport's client width, which is the
+ * space between the screen margins on a phone (the panes keep the gutter) and the whole screen when the phone is set to
+ * "Edge to edge" (see `edgeToEdge`). Pure, so it can be tested alone.
  */
-export function columnWidth(width: number, narrow: boolean, sizes: WindowSizes, gutter = 0): number {
-  if (narrow) return sizes.phone === "comfortable" ? Math.max(260, Math.min(520, Math.round(width - 28))) : Math.round((width - 2 * gutter) * 0.99);
+export function columnWidth(width: number, narrow: boolean, sizes: WindowSizes): number {
+  if (narrow) return sizes.phone === "comfortable" ? Math.max(260, Math.min(520, Math.round(width - 28))) : Math.round(width * 0.99);
   if (sizes.desktop === "full") return Math.max(480, Math.round(width * 0.99));
   if (sizes.desktop === "wide") return Math.max(480, Math.min(960, Math.round((width - 24) / 2)));
   return Math.max(400, Math.min(640, Math.round((width - 24) / 3)));

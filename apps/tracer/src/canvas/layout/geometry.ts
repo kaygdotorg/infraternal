@@ -24,9 +24,9 @@ export interface Metrics { colW: number; clh: number; narrow: boolean; nodeW: nu
  * sliver for each neighbour to peek in; on a desktop three columns fill the width; a column is always as tall
  * as the viewport (D119: windows tile the pane).
  */
-export const metricsFor = (width: number, height: number, coarse: boolean, sizes: WindowSizes = DEFAULT_SIZES, gutter = 0): Metrics => {
+export const metricsFor = (width: number, height: number, coarse: boolean, sizes: WindowSizes = DEFAULT_SIZES): Metrics => {
   const narrow = coarse || width < 720;
-  const colW = columnWidth(width, narrow, sizes, gutter);
+  const colW = columnWidth(width, narrow, sizes);
   // A view is as tall as the canvas area. It may get short (the on-screen keyboard is up): only the height changes,
   // never the width or a column count, so nothing rewraps and the camera does not scale the window down (D191).
   const clh = Math.max(120, Math.round(height));
