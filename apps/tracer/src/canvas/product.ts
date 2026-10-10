@@ -17,7 +17,7 @@ import type { CoreScreen } from "../core-screen";
 import type { TerminalClient, TerminalHooks } from "../terminal";
 import { createAddHost } from "./addhost";
 import { createOverlayFlowHost } from "./addhost/flow-host";
-import { createRealProvisioning } from "./addhost/real";
+import type { ProvisioningService } from "./addhost/service";
 import { createWindowFlowHost } from "./addhost/window-host";
 import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
@@ -72,8 +72,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
     .then((m) => m.createLiveDetails({ host: options.host, connection, inventory, roundTrip: () => roundTrip }));
   // A ready result carries the admitted UUID; labels are only presentation.
+  // The real provisioning glue loads with the wizard on first use, then stays for the page (D188 deferred budget).
+  let provisioning: Promise<ProvisioningService> | undefined;
+  const loadProvisioning = (): Promise<ProvisioningService> =>
+    (provisioning ??= onDemand(() => import("./addhost/real.on-demand")).then((m) => m.createRealProvisioning()).catch((e: unknown) => { provisioning = undefined; throw e; }));
   const addHost = createAddHost(core, {
-    service: createRealProvisioning(), sink: { enrolled(hosts) {
+    service: loadProvisioning, sink: { enrolled(hosts) {
       for (const host of hosts) {
         if (!host.hostId) { core.toast.show({ message: "The host did not return its connection identity. Add it again.", tone: "error", duration: 5000 }); continue; }
         sessions.registerHost({ id: host.hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os, ...(host.address ? { address: host.address } : {}) });

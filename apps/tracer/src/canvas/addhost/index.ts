@@ -18,7 +18,8 @@ import { onDemand } from "../../on-demand";
 import type { Wizard } from "./wizard";
 
 export interface AddHostOptions {
-  service: ProvisioningService;
+  /** The provisioning service, or a loader for it: the real one loads with the wizard, not with the canvas (D188). */
+  service: ProvisioningService | (() => Promise<ProvisioningService>);
   sink: AddHostSink;
   host?: FlowHost;
 }
@@ -39,8 +40,9 @@ export function createAddHost(core: CoreScreen, options: AddHostOptions): AddHos
     if (loading) return;
     loading = true;
     // The wizard's code loads the first time it is opened; a failed load says so and a second tap tries again.
-    void onDemand(() => import("./add-host.on-demand")).then(({ Wizard: Open }) => {
-      const fresh: Wizard = new Open({ service: options.service, sink: options.sink, host, toast: core.toast, onClosed: () => { if (wizard === fresh) wizard = undefined; } });
+    const service = typeof options.service === "function" ? options.service() : Promise.resolve(options.service);
+    void Promise.all([onDemand(() => import("./add-host.on-demand")), service]).then(([{ Wizard: Open }, service]) => {
+      const fresh: Wizard = new Open({ service, sink: options.sink, host, toast: core.toast, onClosed: () => { if (wizard === fresh) wizard = undefined; } });
       wizard = fresh;
       fresh.focus();
     }, () => core.toast.show({ message: "The add-host flow couldn't load. Check your connection and try again." }))
