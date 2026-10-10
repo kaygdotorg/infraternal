@@ -1733,3 +1733,20 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      tag-scoped manager must cover every tag that machine has, the same rule
      as editing the machine itself. Someone scoped to `prod` cannot change
      access into a machine that `dev` also owns.
+212. **Four window actions: split divides, new window opens beside (owner,
+     2026-10-10):** split right and split down divide the window's own space
+     into two windows; new window right and new window below add a full-size
+     window next to it.
+     - **No nesting:** windows stay in one flat layout. Splitting a window
+       that shares its column with others divides only that window's space:
+       the layout is a flat grid in which a window may span columns, so the
+       windows above and below keep their width. No window contains another.
+     - **New window below** adds a full-size window under the current one;
+       the column grows and the camera moves to it, as new window right does
+       sideways.
+     - **Keys use the usual terminal bindings:** ⌘D splits right and ⌘⇧D
+       splits down (Ctrl+Shift+D and Ctrl+Shift+Alt+D off a Mac). New window
+       right and new window below take ⌃⌥R and ⌃⌥D. All four stay
+       rebindable and appear in ⌘K and the window's header pill.
+     - **Words:** "Split right", "Split down", "New window right", "New
+       window below". There are no tabs.
