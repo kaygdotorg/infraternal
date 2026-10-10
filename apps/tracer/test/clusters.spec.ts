@@ -54,7 +54,13 @@ test("overview: three views, thumbnails, a hover summary, and the views listed i
   expect(camera.z).toBeLessThan(0.6);
   expect(camera.lod).toBe("thumb");
   await page.locator('.cl[data-view="console"] .cl-label').hover();
-  await expect(page.locator(".cl-summary[data-open='true']")).toContainText("build-01");
+  // The card lists the view's five most recent windows by name (fewer when the view has fewer), and "All" only above five.
+  const shown = (await probe(page, (p) => p.views())).find((v) => v.id === "console")!.windows.length;
+  const summary = page.locator(".cl-summary[data-open='true']");
+  await expect(summary.locator(".cl-summary-pick")).toHaveCount(Math.min(5, shown));
+  await expect(summary.locator(".cl-summary-pick .cl-viewrow-name").first()).not.toHaveText("");
+  if (shown > 5) await expect(summary.locator(".cl-summary-all")).toHaveText(/All \d+ windows/);
+  else await expect(summary.locator(".cl-summary-all")).toHaveCount(0);
   await page.mouse.move(700, 880);
   await page.locator("#sidebar-toggle").click();
   await expect(page.locator("#tree .bm-sec")).toHaveCount(4);
