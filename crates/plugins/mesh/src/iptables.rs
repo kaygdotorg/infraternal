@@ -13,16 +13,40 @@ const TOOLS: [&str; 2] = [
     "/usr/sbin/iptables-nft-restore",
     "/usr/sbin/ip6tables-nft-restore",
 ];
-const CHAINS: [&str; 2] = ["IFM_IN", "IFM_OUT"];
+const CHAINS: [&str; 3] = ["IFM_IN", "IFM_OUT", "IFM_FWD"];
+const GUARD: &str = "IFM_GUARD";
+/// Restore is atomic per table, so adoption records interrupted tables separately.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Ownership {
+    filter: bool,
+    guard: bool,
+}
+impl Ownership {
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.filter || self.guard
+    }
+    #[must_use]
+    pub fn complete(self) -> bool {
+        self.filter && self.guard
+    }
+}
 /// Restore both address families. The caller retains a restrictive fence until both succeed.
 /// # Errors
 /// Refuses missing `nf_tables` executables or failed restore batches.
 pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
     // Ownership and backend validation belong to first installation/adoption.
     // Repeated updates reuse the owned two-family state and avoid discovery processes.
-    let installed = if installed { [true, true] } else { presence()? };
+    let installed = if installed {
+        [Ownership {
+            filter: true,
+            guard: true,
+        }; 2]
+    } else {
+        presence()?
+    };
     // Preflight both families before mutating either. Restore batches are atomic
-    // per family; a second-family failure is fenced or rolled back by the caller.
+    // per table; an interrupted table/family is fenced or rolled back by the caller.
     for (index, tool) in TOOLS.iter().enumerate() {
         test(tool, &render(config, index == 1, installed[index]))?;
     }
@@ -37,31 +61,44 @@ pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
 pub fn remove() -> io::Result<()> {
     let installed = presence()?;
     for (index, tool) in TOOLS.iter().enumerate() {
-        if !installed[index] {
+        let owner = installed[index];
+        if !owner.any() {
             continue;
         }
-        let mut script = String::from("*filter\n");
-        for (chain, hook, flag) in [
-            (CHAINS[0], "INPUT", "-i"),
-            (CHAINS[1], "OUTPUT", "-o"),
-            (CHAINS[0], "FORWARD", "-i"),
-            (CHAINS[1], "FORWARD", "-o"),
-        ] {
-            let _ = writeln!(script, "-D {hook} {flag} {INTERFACE} -j {chain}");
+        let mut script = String::new();
+        if owner.guard {
+            let _ = writeln!(
+                script,
+                "*raw\n-D PREROUTING -j {GUARD}\n-F {GUARD}\n-X {GUARD}\nCOMMIT"
+            );
         }
-        for chain in CHAINS {
-            let _ = writeln!(script, "-F {chain}\n-X {chain}");
+        if owner.filter {
+            script.push_str("*filter\n");
+            for (chain, hook, flag) in hooks() {
+                let _ = writeln!(script, "-D {hook} {flag} {INTERFACE} -j {chain}");
+            }
+            for chain in CHAINS {
+                let _ = writeln!(script, "-F {chain}\n-X {chain}");
+            }
+            script.push_str("COMMIT\n");
         }
-        script.push_str("COMMIT\n");
         run(tool, &script)?;
     }
     Ok(())
 }
-/// Detect owned chains independently in each family, including interrupted setup.
+fn hooks() -> [(&'static str, &'static str, &'static str); 4] {
+    [
+        (CHAINS[0], "INPUT", "-i"),
+        (CHAINS[1], "OUTPUT", "-o"),
+        (CHAINS[2], "FORWARD", "-i"),
+        (CHAINS[2], "FORWARD", "-o"),
+    ]
+}
+/// Detect owned tables independently in each family, including interrupted setup.
 /// # Errors
 /// Refuses unrelated chains, unavailable tools and privilege failures.
-pub fn presence() -> io::Result<[bool; 2]> {
-    let mut present = [false; 2];
+pub fn presence() -> io::Result<[Ownership; 2]> {
+    let mut present = [Ownership::default(); 2];
     for (index, tool) in ["/usr/sbin/iptables-nft", "/usr/sbin/ip6tables-nft"]
         .iter()
         .enumerate()
@@ -75,31 +112,35 @@ pub fn presence() -> io::Result<[bool; 2]> {
         {
             return Err(io::ErrorKind::Unsupported.into());
         }
-        let mut chains = [false; 2];
-        for (chain_index, chain) in CHAINS.iter().enumerate() {
-            let output = Command::new(tool)
-                .args(["-S", chain])
-                .stderr(Stdio::null())
-                .output()?;
-            match output.status.code() {
-                Some(0) => {
-                    if !String::from_utf8_lossy(&output.stdout).contains("infraternal.mesh.v1") {
-                        return Err(io::ErrorKind::AlreadyExists.into());
-                    }
-                    chains[chain_index] = true;
-                }
-                Some(1) => {}
-                _ => return Err(io::ErrorKind::PermissionDenied.into()),
-            }
+        let mut filter = [false; 3];
+        for (slot, chain) in filter.iter_mut().zip(CHAINS) {
+            *slot = owned(tool, "filter", chain)?;
         }
-        // Each family is installed in one atomic restore batch. A lone chain
-        // cannot be our interrupted transaction and must not be overwritten.
-        if chains[0] != chains[1] {
+        if filter.iter().any(|exists| *exists) != filter.iter().all(|exists| *exists) {
+            // All filter chains share an atomic table transaction. A subset
+            // cannot be our interrupted install and must not be overwritten.
             return Err(io::ErrorKind::AlreadyExists.into());
         }
-        present[index] = chains[0];
+        present[index] = Ownership {
+            filter: filter[0],
+            guard: owned(tool, "raw", GUARD)?,
+        };
     }
     Ok(present)
+}
+fn owned(tool: &str, table: &str, chain: &str) -> io::Result<bool> {
+    let output = Command::new(tool)
+        .args(["-t", table, "-S", chain])
+        .stderr(Stdio::null())
+        .output()?;
+    match output.status.code() {
+        Some(0) if String::from_utf8_lossy(&output.stdout).contains("infraternal.mesh.v1") => {
+            Ok(true)
+        }
+        Some(0) => Err(io::ErrorKind::AlreadyExists.into()),
+        Some(1) => Ok(false),
+        _ => Err(io::ErrorKind::PermissionDenied.into()),
+    }
 }
 fn test(tool: &str, script: &str) -> io::Result<()> {
     execute(tool, script, true)
@@ -133,13 +174,39 @@ fn execute(tool: &str, script: &str, preflight: bool) -> io::Result<()> {
 }
 // Keep the complete per-family atomic restore batch visible together.
 #[allow(clippy::too_many_lines)]
-fn render(config: &Config, ipv6: bool, installed: bool) -> String {
-    let mut script = String::from("*filter\n");
+fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
+    let mut script = String::from("*raw\n");
+    if installed.guard {
+        let _ = writeln!(script, "-F {GUARD}");
+    } else {
+        let _ = writeln!(script, ":{GUARD} - [0:0]");
+    }
+    let address = if ipv6 {
+        config.addresses.ipv6.to_string()
+    } else {
+        config.addresses.ipv4.to_string()
+    };
+    let _ = writeln!(
+        script,
+        "-A {GUARD} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {GUARD} -i lo -j RETURN\n-A {GUARD} -d {address} -j DROP"
+    );
+    if !installed.guard {
+        let _ = writeln!(script, "-I PREROUTING 1 -j {GUARD}");
+    }
+    script.push_str("COMMIT\n*filter\n");
     for chain in CHAINS {
-        if installed {
+        if installed.filter {
             let _ = writeln!(script, "-F {chain}");
         } else {
             let _ = writeln!(script, ":{chain} - [0:0]");
+        }
+        if chain == CHAINS[2] {
+            // Direct node paths do not grant transit through a forwarding host.
+            let _ = writeln!(
+                script,
+                "-A {chain} -m comment --comment infraternal.mesh.v1 -j DROP"
+            );
+            continue;
         }
         let _ = writeln!(
             script,
@@ -229,16 +296,11 @@ fn render(config: &Config, ipv6: bool, installed: bool) -> String {
             let _ = writeln!(script, "-A {chain} {selector}{service} -j ACCEPT");
         }
     }
-    for chain in CHAINS {
+    for chain in &CHAINS[..2] {
         let _ = writeln!(script, "-A {chain} -j DROP");
     }
-    if !installed {
-        for (chain, hook, flag) in [
-            (CHAINS[0], "INPUT", "-i"),
-            (CHAINS[1], "OUTPUT", "-o"),
-            (CHAINS[0], "FORWARD", "-i"),
-            (CHAINS[1], "FORWARD", "-o"),
-        ] {
+    if !installed.filter {
+        for (chain, hook, flag) in hooks() {
             let _ = writeln!(script, "-I {hook} 1 {flag} {INTERFACE} -j {chain}");
         }
     }
@@ -286,10 +348,10 @@ mod tests {
     #[test]
     fn contiguous_open_members_use_ranges_without_opening_gaps() {
         let thousand: Vec<_> = (2..=1001).collect();
-        let rules = render(&config(&thousand), false, false);
+        let rules = render(&config(&thousand), false, Ownership::default());
         assert_eq!(rules.matches("-m iprange").count(), 2);
         assert!(rules.contains("--src-range 10.254.0.2-10.254.3.233"));
-        let gaps = render(&config(&[2, 3, 5, 6]), false, false);
+        let gaps = render(&config(&[2, 3, 5, 6]), false, Ownership::default());
         assert!(gaps.contains("10.254.0.2-10.254.0.3"));
         assert!(gaps.contains("10.254.0.5-10.254.0.6"));
         assert!(!gaps.contains("10.254.0.2-10.254.0.6"));
@@ -301,16 +363,28 @@ mod tests {
             peer.inbound = TrafficPolicy::None;
             peer.outbound = TrafficPolicy::None;
         }
-        let rules = render(&config, true, true);
+        let rules = render(
+            &config,
+            true,
+            Ownership {
+                filter: true,
+                guard: true,
+            },
+        );
         assert_eq!(rules.matches("ESTABLISHED,RELATED").count(), 2);
-        assert_eq!(rules.matches("-j DROP").count(), 2);
+        assert_eq!(rules.matches("-j DROP").count(), 4);
         assert!(!rules.contains("-I INPUT"));
         assert!(!rules.contains("-m iprange"));
     }
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn real_nf_tables_ownership_partial_family_and_scaled_apply() {
-        assert_eq!(presence().expect("empty namespace"), [false, false]);
+        assert!(
+            presence()
+                .expect("empty namespace")
+                .into_iter()
+                .all(|o| !o.any())
+        );
         let tool = "/usr/sbin/iptables-nft";
         assert!(
             Command::new(tool)
@@ -331,12 +405,19 @@ mod tests {
                 .success()
         );
         let mut config = config(&(2..=1001).collect::<Vec<_>>());
-        run(TOOLS[0], &render(&config, false, false)).expect("single-family interrupted install");
-        assert_eq!(presence().expect("partial families"), [true, false]);
+        run(TOOLS[0], &render(&config, false, Ownership::default()))
+            .expect("single-family interrupted install");
+        let partial = presence().expect("partial families");
+        assert!(partial[0].complete() && !partial[1].any());
         let started = std::time::Instant::now();
         apply(&config, false).expect("complete both families");
         let initial = started.elapsed().as_micros();
-        assert_eq!(presence().expect("owned families"), [true, true]);
+        assert!(
+            presence()
+                .expect("owned families")
+                .into_iter()
+                .all(Ownership::complete)
+        );
         config.peers.get_mut(&NodeId(500)).expect("member").inbound = TrafficPolicy::None;
         let started = std::time::Instant::now();
         apply(&config, true).expect("one policy change");
@@ -348,6 +429,27 @@ mod tests {
                 .trim()
         );
         remove().expect("owned cleanup");
-        assert_eq!(presence().expect("off"), [false, false]);
+        assert!(presence().expect("off").into_iter().all(|o| !o.any()));
+        // The raw table commits before the filter table. Recover that exact
+        // interrupted state without treating it as a complete family.
+        let batch = render(&config, false, Ownership::default());
+        let raw = batch.split("*filter").next().expect("raw transaction");
+        run(TOOLS[0], raw).expect("interrupted raw table");
+        let partial = presence().expect("partial tables");
+        assert!(partial[0].guard && !partial[0].filter);
+        apply(&config, false).expect("recover partial tables");
+        assert!(
+            presence()
+                .expect("complete tables")
+                .into_iter()
+                .all(Ownership::complete)
+        );
+        remove().expect("partial-table recovery cleanup");
+        assert!(
+            presence()
+                .expect("off after recovery")
+                .into_iter()
+                .all(|o| !o.any())
+        );
     }
 }

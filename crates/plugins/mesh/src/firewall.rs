@@ -64,8 +64,10 @@ impl Firewall {
         self.select();
         if self.is_fallback() {
             let families = crate::iptables::presence()?;
-            self.installed = families.into_iter().any(|present| present);
-            self.fallback_complete = families.into_iter().all(|present| present);
+            self.installed = families.into_iter().any(crate::iptables::Ownership::any);
+            self.fallback_complete = families
+                .into_iter()
+                .all(crate::iptables::Ownership::complete);
         } else {
             let tables = Command::new(NFT)
                 .args(["-j", "list", "tables"])
@@ -252,7 +254,16 @@ pub fn render(config: &Config, replace: bool) -> String {
     }
     let _ = writeln!(
         script,
-        " chain forward {{ type filter hook forward priority -10; policy accept; iifname \"{INTERFACE}\" jump incoming; oifname \"{INTERFACE}\" jump outgoing; }}\n}}"
+        " chain forward {{ type filter hook forward priority -10; policy accept; iifname \"{INTERFACE}\" drop; oifname \"{INTERFACE}\" drop; }}"
+    );
+    // Mesh-bound services must receive authenticated tunnel packets. Fence
+    // underlay delivery before destination NAT, independently of conntrack.
+    // Loopback remains available for the node's own services. Subnet transit
+    // has no owner in this slice, even when a host enables IP forwarding.
+    let _ = writeln!(
+        script,
+        " chain ingress {{ type filter hook prerouting priority -310; policy accept; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop; }}\n}}",
+        config.addresses.ipv4, config.addresses.ipv6
     );
     script
 }
@@ -297,8 +308,8 @@ mod tests {
     fn rule_count_is_independent_of_membership_and_policy_data_is_in_sets() {
         let mut config = config();
         let rules = render(&config, false);
-        assert_eq!(rules.matches(" accept").count(), 17);
-        assert_eq!(rules.matches(" drop").count(), 2);
+        assert_eq!(rules.matches(" accept").count(), 18);
+        assert_eq!(rules.matches(" drop").count(), 6);
         let peer = config.peers.get_mut(&NodeId(2)).expect("member");
         peer.outbound = TrafficPolicy::Ports(std::collections::BTreeSet::from([
             crate::policy::rules::Port {
