@@ -30,8 +30,6 @@ use tokio::{
     time::timeout,
 };
 
-/// Session admission bound, also bounding startup concurrency and process tasks.
-pub use infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS as MAX_SESSIONS;
 // A malformed shim can require MAX_FRAME receive bytes. Limit recovery work
 // to 32 MiB while allowing any number of live sessions (D214).
 const DISCOVERY_HANDSHAKES: usize = 32 * 1024 * 1024 / MAX_FRAME;
@@ -319,6 +317,30 @@ pub async fn discover(state: &Path) -> io::Result<Vec<Session>> {
         }
     }
     Ok(sessions)
+}
+
+/// Directory retirement events keep the registry fresh without idle timers.
+pub(crate) struct SessionEvents(tokio::io::unix::AsyncFd<Watch>);
+impl SessionEvents {
+    pub(crate) fn new(state: &Path) -> io::Result<Self> {
+        let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
+            .map_err(io::Error::from)?;
+        watch
+            .add_watch(state.join("sessions").as_path(), AddWatchFlags::IN_DELETE)
+            .map_err(io::Error::from)?;
+        Ok(Self(tokio::io::unix::AsyncFd::new(Watch(watch))?))
+    }
+    pub(crate) async fn changed(&self) -> io::Result<()> {
+        loop {
+            let mut ready = self.0.readable().await?;
+            if let Ok(result) =
+                ready.try_io(|fd| fd.get_ref().0.read_events().map_err(io::Error::from))
+            {
+                result?;
+                return Ok(());
+            }
+        }
+    }
 }
 
 // std::process pre_exec would require unsafe code to mark an inherited raw fd

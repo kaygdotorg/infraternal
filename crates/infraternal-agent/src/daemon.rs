@@ -278,9 +278,10 @@ async fn run_channel(
         .map_err(|_| sessions::invalid("invalid compiled plugin registry"))?;
     let manager = Manager::detect().await;
     let exe = std::env::current_exe()?;
-    let mut registry = HashMap::new();
+    let retirements = sessions::SessionEvents::new(&state)?;
+    let mut registry = crate::lifecycle::Registry::default();
     for session in sessions::discover(&state).await? {
-        registry.insert(session.id, session.path.clone());
+        registry.insert(&session)?;
         // Startup discovery authenticates identity, but does not stall unviewed PTYs.
         drop(session);
     }
@@ -307,6 +308,7 @@ async fn run_channel(
         let mut opens: JoinSet<(u32, u32, io::Result<Session>)> = JoinSet::new();
         loop {
             tokio::select! {
+                changed = retirements.changed() => { changed?; registry.refresh(); }
                 result = jobs.join_next(), if !jobs.is_empty() => {
                     let (stream, result) = result.ok_or_else(|| sessions::invalid("missing relay task"))?.map_err(io::Error::other)?;
                     // Close/re-attach may reuse a stream before the old task exits.
@@ -328,10 +330,17 @@ async fn run_channel(
                     match result {
                         Ok(session) => {
                             let json = serde_json::to_vec(&serde_json::json!({"session_id": uuid::Uuid::from_bytes(session.id)}))?;
-                            registry.insert(session.id, session.path.clone());
+                            registry.insert(&session)?;
                             reply(&control, Message::Result(stream, call_id, true, json))?;
                         }
-                        Err(_) => reply(&control, Message::Result(stream, call_id, false, b"{\"error\":\"terminal open refused\"}".to_vec()))?,
+                        Err(error) => {
+                            use infraternal_plugin_api::admission::OpenRefusal;
+                            let reason = match error.kind() {
+                                io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData | io::ErrorKind::PermissionDenied => OpenRefusal::Invalid,
+                                _ => OpenRefusal::ResourceUnavailable,
+                            };
+                            reply(&control, Message::Result(stream, call_id, false, reason.json()?))?;
+                        }
                     }
                 }
                 decoded = receive.next(socket) => {
@@ -354,22 +363,33 @@ async fn run_channel(
                             }
                         }
                         Frame::Call {call_id, action_id: "terminal.open", input_json} if execution_uid.is_none() || stream == 0 => {
-                            let input = serde_json::from_slice::<Open>(input_json);
-                            if let Ok(input) = input && execution_uid.is_none_or(|uid| input.uid == uid) && registry.len() + opens.len() < sessions::MAX_SESSIONS {
-                                let exe = exe.clone(); let state = state.clone();
-                                opens.spawn(async move { (stream, call_id, sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await) });
+                            use infraternal_plugin_api::admission::OpenRefusal;
+                            registry.refresh();
+                            let input = if input_json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON { serde_json::from_slice::<Open>(input_json).ok() } else { None };
+                            if let Some(input) = input && execution_uid.is_none_or(|uid| input.uid == uid)
+                                && (nix::unistd::Uid::effective().is_root() || input.uid == nix::unistd::Uid::effective().as_raw())
+                                && input.cols > 0 && input.rows > 0 && usize::from(input.cols) * usize::from(input.rows) <= 200_000 {
+                                match plugins.admit("terminal.open", registry.context()) {
+                                    Ok(()) => {
+                                        let exe = exe.clone(); let state = state.clone();
+                                        opens.spawn(async move { (stream, call_id, sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await) });
+                                    }
+                                    Err(reason) => reply(&control, Message::Result(stream, call_id, false, reason.json()?))?,
+                                }
                             } else {
-                                reply(&control, Message::Result(stream, call_id, false, b"{\"error\":\"invalid terminal open or session limit\"}".to_vec()))?;
+                                reply(&control, Message::Result(stream, call_id, false, OpenRefusal::Invalid.json()?))?;
                             }
                         }
                         Frame::Call {call_id, action_id, input_json} if stream == 0 => {
+                            registry.refresh();
+                            plugins.update_context(registry.context());
                             match plugins.call(action_id, input_json) {
                                 Ok(json) => emit(&tx, Message::Result(0, call_id, true, json)).await?,
                                 Err(_) => emit(&tx, Message::Result(0, call_id, false, b"{\"error\":\"plugin action rejected\"}".to_vec())).await?,
                             }
                         }
                         Frame::AttachTerm {session_id, last_out_seq, last_in_seq} if stream != 0 => {
-                            if streams.len() >= sessions::MAX_SESSIONS || streams.contains_key(&stream) {
+                            if streams.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS || streams.contains_key(&stream) {
                                 return Err(sessions::invalid("terminal stream already attached or limit reached"));
                             }
                             let path = registry.get(session_id).ok_or_else(|| sessions::invalid("unknown terminal session"))?.clone();
@@ -507,6 +527,20 @@ impl Link {
         frame.encode_into(&mut self.transmit)?;
         self.session.peer.write_all(&self.transmit).await
     }
+    // Inspect readiness without consuming bytes or waiting: a retired shim's
+    // unread final frames are irreplaceable once its rendezvous is removed.
+    async fn read_closed(&self) -> io::Result<bool> {
+        let ready = self.session.peer.ready(tokio::io::Interest::READABLE);
+        tokio::pin!(ready);
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(match std::future::Future::poll(ready.as_mut(), cx) {
+                std::task::Poll::Ready(Ok(ready)) => Ok(ready.is_read_closed()),
+                std::task::Poll::Ready(Err(error)) => Err(error),
+                std::task::Poll::Pending => Ok(false),
+            })
+        })
+        .await
+    }
     async fn read(&mut self) -> io::Result<Shim> {
         let frame = self.reader.read(&mut self.session.peer).await?;
         if matches!(frame, Shim::SnapshotWithFlags(..))
@@ -582,9 +616,12 @@ async fn terminal(
         .ok_or_else(|| sessions::invalid("missing shim"))?
         .send(&Shim::ReadFrom(cursor))
         .await?;
+    #[cfg(feature = "plugin-host-facts")]
+    let _window = crate::lifecycle::windows::Attachment::new(path.clone());
     let mut output = relay::Output::attach(cursor);
     let mut pending: Option<Shim> = None;
     let mut deadline = None;
+    let mut finished_peer = false;
     loop {
         if let Some(frame) = pending.take() {
             match frame {
@@ -660,6 +697,11 @@ async fn terminal(
                 _ => return Err(sessions::invalid("invalid pending frame")),
             }
         }
+        // No further timer is needed for a closed peer: credit or cancellation
+        // alone wakes this relay, and the bounded final frames stay available.
+        if finished_peer {
+            deadline = None;
+        }
         if output.needs_snapshot() && session.is_none() {
             let mut next = Link::connect(path.clone(), id, stream).await?;
             let written = input_state(&mut next).await?;
@@ -676,6 +718,7 @@ async fn terminal(
                 let Some(command) = command else { return Ok(()); };
                 match command {
                     Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?; if session.is_none() && bytes > 0 { output.retry_recovery(); } deadline = None; }
+                    _ if finished_peer => {}
                     other => {
                         let detached = session.is_none();
                         if detached {
@@ -704,7 +747,14 @@ async fn terminal(
                 }
             }
             () = async { if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; } else { std::future::pending::<()>().await; } } => {
-                output.expire(Instant::now()); session = None; pending = None; deadline = None;
+                finished_peer = match session.as_ref() {
+                    Some(peer) => peer.read_closed().await?,
+                    None => false,
+                };
+                if !finished_peer {
+                    output.expire(Instant::now()); session = None; pending = None;
+                }
+                deadline = None;
             }
             frame = async {
                 if let Some(session) = &mut session { session.read().await }
