@@ -9,6 +9,8 @@ mod output;
 #[cfg(feature = "remote")]
 mod remote;
 mod remote_server;
+#[cfg(feature = "remote")]
+mod restart;
 #[cfg(feature = "ssh")]
 mod ssh_askpass;
 
@@ -134,6 +136,9 @@ enum ServerAction {
     Install(InstallArgs),
     /// Print the initial owner setup capability through the private local control socket.
     SetupToken,
+    #[cfg(feature = "remote")]
+    #[command(about = infraternal_plugin_remote::RESTART.summary, long_about = infraternal_plugin_remote::RESTART.help())]
+    Restart(restart::Options),
 }
 
 #[derive(Debug, Args)]
@@ -226,7 +231,10 @@ fn main() -> ExitCode {
             finish,
             retain,
         } => host_remove::run(&server, host, finish, retain, json),
-        Command::Server(args) => run_server(args, json),
+        Command::Server(args) => {
+            infraternal_server::configure_logging(json);
+            run_server(args, json)
+        }
         #[cfg(feature = "ssh")]
         Command::SshAskpass => ssh_askpass::run(),
         Command::Shim {
@@ -286,7 +294,6 @@ fn run_server(mut args: ServerArgs, json: bool) -> ExitCode {
         return ExitCode::from(2);
     }
     let action = args.remote.action_id();
-    infraternal_server::configure_logging(json);
     // Only the server arm constructs a multi-threaded runtime: shim dispatch must remain synchronous before fork.
     let Ok(runtime) = tokio::runtime::Runtime::new() else {
         return output::refuse(
@@ -342,6 +349,8 @@ fn run_server(mut args: ServerArgs, json: bool) -> ExitCode {
                 1,
             ),
         },
+        #[cfg(feature = "remote")]
+        Some(ServerAction::Restart(options)) => restart::run(&runtime, &args.data, options, json),
         None => {
             let options = std::mem::take(&mut args.remote);
             let config = match server_config(args) {
@@ -358,7 +367,7 @@ fn run_server(mut args: ServerArgs, json: bool) -> ExitCode {
                 "Check the configured listener and retained public trust.",
             );
             match runtime.block_on(remote_server::serve(config, options)) {
-                Ok(()) => {
+                Ok(remote_server::Outcome::Stopped) => {
                     output::report(
                         json,
                         action,
@@ -367,6 +376,10 @@ fn run_server(mut args: ServerArgs, json: bool) -> ExitCode {
                         "Start the configured server when needed.",
                     );
                     ExitCode::SUCCESS
+                }
+                #[cfg(feature = "remote")]
+                Ok(remote_server::Outcome::Restart(replacement)) => {
+                    restart::replace(runtime, replacement, json)
                 }
                 Err(error) => output::refuse(
                     json,

@@ -158,8 +158,13 @@ fn render_unit(
     } else {
         "multi-user.target"
     };
+    let reload = if cfg!(feature = "remote") {
+        "ExecReload=/bin/kill -HUP $MAINPID\n"
+    } else {
+        ""
+    };
     Ok(format!(
-        "[Unit]\nDescription=infraternal server ({name})\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy={target}\n"
+        "[Unit]\nDescription=infraternal server ({name})\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={command}\n{reload}Restart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy={target}\n"
     ))
 }
 
