@@ -74,6 +74,9 @@ test("publication with two build directories admits only one writer", async () =
     const exits = await Promise.all(children.map((child) => child.exited));
     expect(exits.every((code) => code !== 0)).toBe(true);
     console.log(`PUBLICATION_ADMISSION same_host=true build_directories=2 list_requests=${lists} uploads=${uploads} replaced_objects=${replacements}`);
+    // At least one writer must reach the mutation boundary; a fixture timeout
+    // must not count as successful serialization.
+    expect(uploads).toBeGreaterThanOrEqual(names.length);
     expect(uploads).toBeLessThanOrEqual(names.length);
     expect(replacements).toBe(0);
   } finally {
