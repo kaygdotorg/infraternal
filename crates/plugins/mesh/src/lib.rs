@@ -29,3 +29,6 @@ pub mod store;
 
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod iptables;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod firewall;
