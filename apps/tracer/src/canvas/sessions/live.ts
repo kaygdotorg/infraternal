@@ -45,6 +45,7 @@ export interface LiveSessions extends SessionService {
   activeClient(): TerminalClient | undefined;
   /** Registers only an admitted UUID; readable labels never become routing authority. */
   registerHost(host: HostEntry & { address?: string }): void;
+  forgetHost(id: string): void;
   dispose(): void;
 }
 
@@ -243,6 +244,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       remotes.set(entry.id, { ...entry });
       for (const listener of listeners) listener();
     },
+    forgetHost(id) { remotes.delete(id); for (const listener of listeners) listener(); },
     hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}) }, ...remotes.values()]; },
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     activeClient: () => active?.client,
