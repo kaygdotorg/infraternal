@@ -7,8 +7,9 @@
  * layouts, and the Super key is never a default, because the OS owns it. Printable keys match the character the layout
  * types (`key`); arrows and the digit row match the physical key, which is what a position means.
  */
-import { allShortcuts, bindShortcut, bindingOf, comboLabel, matchesCombo, onBindingsChange, platformCombo, registerShortcuts, type Combo } from "../../../../../packages/ui/src/shortcuts";
+import { allShortcuts, bindCombo, bindShortcut, bindingOf, comboLabel, matchesCombo, onBindingsChange, platformCombo, registerShortcuts, type Combo } from "../../../../../packages/ui/src/shortcuts";
 import { isTypingTarget } from "../../../../../packages/ui/src/shortcuts-view";
+import { isKeyboardLocked } from "../../../../../packages/ui/src/keyboard-lock";
 import { bindTerminalFont } from "../../terminal-font-shortcuts";
 import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
@@ -65,6 +66,9 @@ export function installShortcuts(cx: Ctx): () => void {
     bindShortcut("new-window-right", (e) => windowKey(e, (w) => cx.win.newWindow(w, "right", true))),
     bindShortcut("new-window-below", (e) => windowKey(e, (w) => cx.win.newWindow(w, "below", true))),
     bindShortcut("close-window", closeActive),
+    // Keyboard Lock (fullscreen only, D222): ⌘W on a Mac and Ctrl+Shift+W elsewhere close the window too, but only while the
+    // browser has handed those keys over. Otherwise the browser keeps them (it closes the tab), so the chord is not bound.
+    bindCombo(platformCombo({ code: "KeyW", key: "w", mod: true, shift: false }, { code: "KeyW", key: "w", mod: true, shift: true }), closeActive, () => isKeyboardLocked()),
     bindShortcut("next-window", () => { if (!cx.inputLock.state) cx.win.step(1, true); }),
     bindShortcut("previous-window", () => { if (!cx.inputLock.state) cx.win.step(-1, true); }),
     bindShortcut("move-left", () => { if (!cx.inputLock.state) cx.win.move("left", true); }),

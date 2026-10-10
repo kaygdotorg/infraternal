@@ -192,3 +192,11 @@ for (const [name, platform, mod] of [["Windows", WINDOWS, "Control"], ["Mac", MA
     expect(await size(), "reset to the default").toBe("14");
   });
 }
+
+test("Windows: the lock-only close (Ctrl+Shift+W) does nothing while the keys are not locked, so the browser keeps the chord", async ({ page }) => {
+  await boot(page, WINDOWS);
+  const before = await windows(page);
+  await chord(page, ["Control", "Shift", "KeyW"]);
+  await page.waitForTimeout(300);
+  expect(await windows(page)).toBe(before);
+});
