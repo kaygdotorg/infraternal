@@ -335,15 +335,23 @@ button { color: inherit; }
   display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 10px;
 }
 
-/* The top controls float over the pane; only the controls receive a light blur. */
+/* The top controls float over the pane; only the controls receive a light blur.
+   The pill sits in the middle of three columns, and both side columns are the same width (1fr each), so the pill
+   centres on the viewport whatever sits on either side (the sidebar toggle's spacer on the left; the "+" and the canvas
+   buttons on the right). Each side track is at least one control wide, so a control never runs under the pill; the
+   right-hand group hugs the right edge. The middle track is at least the pill's own minimum (--capsule-min) when the
+   two sides leave room for it, and otherwise shrinks to what the sides leave, so the pill truncates instead of overlapping.
+   Widths are measured in the browser (test/top-centre.spec.ts), not offsets. */
 .top {
+  --capsule-min: 420px;
   position: absolute; z-index: 3;
   top: calc(10px + env(safe-area-inset-top)); left: var(--gutter); right: var(--gutter);
-  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px;
+  display: grid; grid-template-columns: minmax(var(--pill-h), 1fr) minmax(min(var(--capsule-min), calc(100vw - 2 * var(--gutter) - 2 * var(--pill-h) - 20px)), auto) minmax(var(--pill-h), 1fr); align-items: center; gap: 10px;
   pointer-events: none;
 }
 .top > * { pointer-events: auto; }
-.top > .top-spacer { width: var(--pill-h); height: var(--pill-h); pointer-events: none; }
+.top > .top-spacer { width: var(--pill-h); height: var(--pill-h); pointer-events: none; justify-self: start; }
+.top > .tabs { justify-self: end; }
 
 /* The sidebar toggle is one pill that travels: top-left of the UI while the sidebar is closed, the
    right end of the sidebar's header row while it is open. Only its transform moves (GPU, and a
@@ -360,7 +368,7 @@ button { color: inherit; }
 .sidebar-toggle.instant { transition: none; }
 .keybar button:active { transform: scale(var(--ui-press-scale)); }
 .capsule {
-  justify-self: center; min-width: min(420px, 100%); padding: 0 8px 0 14px; justify-content: flex-start;
+  justify-self: center; min-width: min(var(--capsule-min), 100%); padding: 0 8px 0 14px; justify-content: flex-start;
   gap: 8px; color: var(--fg); font-weight: var(--fw-label); letter-spacing: -0.005em;
 }
 .capsule-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -560,7 +568,6 @@ button { color: inherit; }
 @media (max-width: 720px) {
   .terminal-screen { --gutter: max(12px, env(safe-area-inset-left)); }
   .tabs { display: none; }
-  .top { grid-template-columns: auto minmax(0, 1fr); }
   .capsule { width: 100%; min-width: 0; justify-self: stretch; }
   .capsule-kbd { display: none; }
   .sidebar { width: auto; right: var(--gutter); bottom: calc(60px + env(safe-area-inset-bottom)); }
