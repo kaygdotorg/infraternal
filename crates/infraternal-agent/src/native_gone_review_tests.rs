@@ -2,6 +2,69 @@
 
 use super::*;
 
+/// A native peer that accepts AttachTerm but never consumes the final reply.
+struct BlockedNative {
+    attach: std::sync::Mutex<Option<Vec<u8>>>,
+    retired: std::sync::atomic::AtomicBool,
+}
+
+impl crate::channel::Channel for BlockedNative {
+    fn native_stream_id(&self) -> Option<u32> {
+        Some(42)
+    }
+    fn retire(&self) {
+        self.retired
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    async fn read(&self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let attach = self.attach.lock().unwrap().take();
+        if let Some(attach) = attach {
+            bytes[..attach.len()].copy_from_slice(&attach);
+            return Ok(attach.len());
+        }
+        std::future::pending().await
+    }
+    async fn write(&self, _: &[u8]) -> std::io::Result<()> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn vanished_native_session_bounds_final_reply_drain_for_a_stuck_peer() {
+    let id = uuid::Uuid::new_v4();
+    let base = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/fds");
+    std::fs::create_dir_all(&base).unwrap();
+    let state = State {
+        path: sessions::state(Some(
+            base.join(format!("b{}", &id.simple().to_string()[..8])),
+        ))
+        .unwrap(),
+        pid: None,
+    };
+    let mut attach = Vec::new();
+    infraternal_protocol::encode_frame_into(
+        &Frame::AttachTerm {
+            session_id: id.as_bytes(),
+            last_out_seq: 0,
+            last_in_seq: 0,
+        },
+        &mut attach,
+    )
+    .unwrap();
+    let channel = BlockedNative {
+        attach: std::sync::Mutex::new(Some(attach)),
+        retired: std::sync::atomic::AtomicBool::new(false),
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        daemon::run_bound_terminal(&channel, Some(state.path.clone())),
+    )
+    .await
+    .expect("a stuck peer pinned the final reply drain");
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    assert!(channel.retired.load(std::sync::atomic::Ordering::Relaxed));
+}
+
 #[tokio::test]
 async fn vanished_native_session_delivers_final_close_before_stream_retirement() {
     let id = uuid::Uuid::new_v4();
