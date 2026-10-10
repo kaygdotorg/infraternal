@@ -5,8 +5,8 @@
 //! the next record. Only a kernel-origin reply for this request is accepted.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 use nix::sys::socket::{
-    bind, recvfrom, sendto, socket, AddressFamily, MsgFlags, NetlinkAddr, SockFlag, SockProtocol,
-    SockType,
+    AddressFamily, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockType, bind, recvfrom, sendto,
+    socket,
 };
 use std::{
     io,
