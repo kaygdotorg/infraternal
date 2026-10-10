@@ -90,3 +90,6 @@ static COMPILED_PLUGINS: &[&infraternal_plugin_api::PluginDescriptor] = &[
 mod remote_removal;
 #[cfg(feature = "remote")]
 mod remote_removal_http;
+
+#[cfg(test)]
+mod release_build_tests;
