@@ -244,7 +244,9 @@ impl AgentPlugin for UninstallPlugin {
         })
     }
 }
-async fn shim_frame(peer: &mut UnixStream) -> io::Result<infraternal_shim::frame::Frame> {
+async fn shim_frame(
+    peer: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> io::Result<infraternal_shim::frame::Frame> {
     let length = peer.read_u32_le().await? as usize;
     if length == 0 || length > infraternal_shim::frame::MAX_FRAME {
         return Err(denied());
@@ -273,10 +275,26 @@ async fn retire_shim(path: &Path, uid: u32) -> io::Result<()> {
     peer.write_all(&Frame::Attach(0).encode()?).await?;
     peer.write_all(&Frame::ReadFrom(head).encode()?).await?;
     peer.write_all(&Frame::Signal(9).encode()?).await?;
+    let (mut reader, mut writer) = peer.into_split();
+    // A foreground application has its own process group. After retiring it,
+    // signal the restored shell as well, within the caller's existing deadline.
+    let mut signals = tokio::time::interval(Duration::from_millis(100));
+    signals.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    signals.tick().await;
     loop {
-        match shim_frame(&mut peer).await? {
+        let pending = shim_frame(&mut reader);
+        tokio::pin!(pending);
+        // Keep the same read future across ticks: cancelling a partial frame
+        // would discard bytes and corrupt the authenticated socket decoder.
+        let frame = loop {
+            tokio::select! {
+                frame = &mut pending => break frame?,
+                _ = signals.tick() => writer.write_all(&Frame::Signal(9).encode()?).await?,
+            }
+        };
+        match frame {
             Frame::Exited(..) => {
-                peer.write_all(&Frame::ExitAck.encode()?).await?;
+                writer.write_all(&Frame::ExitAck.encode()?).await?;
                 return Ok(());
             }
             Frame::Output(..)
