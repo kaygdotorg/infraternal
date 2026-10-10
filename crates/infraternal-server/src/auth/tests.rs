@@ -3293,3 +3293,7 @@ mod verified_passkey_tests;
 #[cfg(feature = "remote")]
 #[path = "ca_administration_tests.rs"]
 mod ca_administration_tests;
+
+#[cfg(feature = "remote")]
+#[path = "remote_removal_tests.rs"]
+mod remote_removal_tests;
