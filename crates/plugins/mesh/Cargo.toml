@@ -8,6 +8,7 @@ license.workspace = true
 [features]
 default = ["server"]
 server = []
+ee = []
 agent = ["dep:nix", "dep:openssl", "dep:zeroize"]
 
 [dependencies]
