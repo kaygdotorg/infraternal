@@ -78,11 +78,20 @@ pub(crate) async fn serve(
                 infraternal_server::serve(config).await
             }
         };
-        tokio::select! {
-            result = serving => result.map(|()| Outcome::Stopped),
-            replacement = control.requested(source.as_deref()) => {
-                let replacement = replacement.map_err(infraternal_server::ServerError::Listener)?;
-                Ok(Outcome::Restart(replacement))
+        tokio::pin!(serving);
+        loop {
+            tokio::select! {
+                result = &mut serving => return result.map(|()| Outcome::Stopped),
+                replacement = control.requested(source.as_deref()) => {
+                    match replacement {
+                        Ok(replacement) => return Ok(Outcome::Restart(replacement)),
+                        Err(error) => {
+                            eprintln!("Server restart control failed ({})", error.kind());
+                            // Keep serving; back off if accept repeatedly fails.
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
             }
         }
     }

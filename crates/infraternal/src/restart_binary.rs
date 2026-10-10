@@ -14,6 +14,8 @@ pub(crate) struct Opened {
 }
 impl Opened {
     pub(crate) fn open(path: PathBuf) -> io::Result<Self> {
+        #[cfg(test)]
+        TEST_OPENS.with(|count| count.set(count.get() + 1));
         if !path.is_absolute()
             || path
                 .components()
@@ -72,4 +74,15 @@ impl Opened {
 fn verify_release_fd(_file: &File) -> io::Result<()> {
     // Release-signature enforcement belongs to the signed-update lane.
     Ok(())
+}
+
+#[cfg(test)]
+std::thread_local! { static TEST_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(crate) fn reset_test_opens() {
+    TEST_OPENS.with(|count| count.set(0));
+}
+#[cfg(test)]
+pub(crate) fn test_opens() -> usize {
+    TEST_OPENS.with(std::cell::Cell::get)
 }

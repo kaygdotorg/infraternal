@@ -83,7 +83,15 @@ impl Control {
     ) -> io::Result<Replacement> {
         loop {
             let mut socket = tokio::select! {
-                _ = self.reload.recv() => return crate::restart_binary::Opened::open(current_binary()?).map(|binary| Replacement::new(binary, source)),
+                _ = self.reload.recv() => {
+                    match current_binary().and_then(crate::restart_binary::Opened::open) {
+                        Ok(binary) => return Ok(Replacement::new(binary, source)),
+                        Err(error) => {
+                            eprintln!("Server reload request refused ({})", error.kind());
+                            continue;
+                        }
+                    }
+                },
                 accepted = self.listener.accept() => accepted?.0,
             };
             if !socket
@@ -105,7 +113,12 @@ impl Control {
                 } else {
                     b"RESTARTING COLD (CA locked)\n".as_slice()
                 };
-                socket.write_all(reply).await?;
+                if let Err(error) = socket.write_all(reply).await {
+                    // A vanished requester must not cancel the live server or
+                    // export a socket to a successor that was never acknowledged.
+                    eprintln!("Server restart requester disconnected ({})", error.kind());
+                    continue;
+                }
                 return Ok(replacement);
             }
         }
@@ -135,9 +148,22 @@ async fn read_request(socket: &mut UnixStream) -> io::Result<PathBuf> {
 }
 
 fn current_binary() -> io::Result<PathBuf> {
-    let binary = std::env::current_exe()?;
-    executable(&binary)?;
-    Ok(binary)
+    let running = std::env::current_exe()?;
+    if running.as_os_str().as_bytes().ends_with(b" (deleted)") {
+        // ExecStart/our pinned exec argv[0] retains the configured install path.
+        // Reopen its newly installed inode rather than the vanished old image.
+        let configured = std::env::args_os()
+            .next()
+            .map(PathBuf::from)
+            .ok_or(io::ErrorKind::NotFound)?;
+        let configured = if configured.is_absolute() {
+            configured
+        } else {
+            std::env::current_dir()?.join(configured)
+        };
+        return Ok(configured);
+    }
+    Ok(running)
 }
 
 fn executable(binary: &Path) -> io::Result<()> {

@@ -204,3 +204,81 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[tokio::test]
+async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
+    let directory = Directory::new();
+    let mut control = Control::start(&directory.0).unwrap();
+    let path = control.path.clone();
+    let receive = async {
+        let result =
+            tokio::time::timeout(Duration::from_millis(200), control.requested(None)).await;
+        assert!(
+            result.is_err(),
+            "EPIPE must be handled in the request loop, without ending serve"
+        );
+    };
+    // Own the path independently of the mutable control borrow.
+    let broken = async {
+        let mut socket = UnixStream::connect(path).await.unwrap();
+        socket.write_u16(1).await.unwrap();
+        socket.write_all(b".").await.unwrap();
+        socket.shutdown().await.unwrap();
+        drop(socket);
+    };
+    tokio::join!(receive, broken);
+    let (received, requested) = tokio::join!(control.requested(None), request(&directory.0, None));
+    assert!(received.is_ok());
+    assert!(!requested.unwrap());
+}
+
+#[test]
+fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
+    const NAME: &str =
+        "restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced";
+    if std::env::var_os("INFRATERNAL_DELETED_BINARY_TEST").is_some() {
+        let installed = std::env::current_exe().unwrap();
+        let staged = installed.with_extension("next");
+        std::fs::copy(&installed, &staged).unwrap();
+        std::fs::rename(&staged, &installed).unwrap();
+        assert!(
+            std::env::current_exe()
+                .unwrap()
+                .as_os_str()
+                .as_bytes()
+                .ends_with(b" (deleted)")
+        );
+        assert_eq!(current_binary().unwrap(), installed);
+        return;
+    }
+    let directory = Directory::new();
+    let installed = directory.0.join("installed");
+    std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
+    let output = std::process::Command::new(&installed)
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_DELETED_BINARY_TEST", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn default_restart_opens_the_receiver_target_exactly_once() {
+    let directory = Directory::new();
+    let mut control = Control::start(&directory.0).unwrap();
+    crate::restart_binary::reset_test_opens();
+    let (received, sent) = tokio::join!(control.requested(None), request(&directory.0, None));
+    assert!(received.is_ok());
+    assert!(sent.is_ok());
+    assert_eq!(
+        crate::restart_binary::test_opens(),
+        1,
+        "receiver must pin one opened fd, including default-path restart"
+    );
+}
