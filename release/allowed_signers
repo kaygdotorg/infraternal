@@ -1,0 +1,7 @@
+# infraternal release signing public keys (D184, D224). Every release's SHA256SUMS is signed with
+# release key 1 by the release-signer Worker; release key 2 is the offline spare that signs only a
+# rotation. Verify a release with:
+#   ssh-keygen -Y verify -f release/allowed_signers -I release@infraternal.com \
+#     -n infraternal-release -s SHA256SUMS.sig < SHA256SUMS
+release@infraternal.com namespaces="infraternal-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFuyvevVswnws0hN+Ch12peOKEEivKh/FBTN7+SN59HE release-key-1
+release@infraternal.com namespaces="infraternal-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKaaLYxFOfvYIE4SOReWCtfFPuygJh58hbWQGgUVk5Wk release-key-2-spare
