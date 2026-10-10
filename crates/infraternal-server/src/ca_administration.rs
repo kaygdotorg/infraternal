@@ -133,6 +133,14 @@ impl CaAdministration {
         Ok(*self.source.subscribe_locked().borrow())
     }
 
+    /// Whether public trust was retained, independently of the private signing key's lock state.
+    ///
+    /// # Errors
+    /// Refuses an unavailable in-memory trust store.
+    pub fn initialized(&self) -> Result<bool, CaError> {
+        Ok(self.source.retained_issuer()?.is_some())
+    }
+
     /// Wire the real auth verifier, database and private copy store to one cold signer.
     #[must_use]
     pub fn new(
