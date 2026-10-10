@@ -472,6 +472,13 @@ button { color: inherit; }
      material itself (fill, hairline, blur) comes from .ui-overlay-surface. */
   transition: opacity 120ms ease-out, transform 120ms var(--ease-out), display 120ms allow-discrete;
 }
+/* The palette is a list read at a glance over busy terminals, so its glass hides text at every card level (TASTE: glass shows
+   colour, never legible text; the blur is at least about 1.5x the terminal line height, about 28 px). Tinted and Clear
+   blur less than that on the shared material (8 and 24 px), which let terminal text and window titles read through the
+   palette; here the palette alone takes the floor. Frosted already blurs 32 px and Solid has no glass, so neither is touched.
+   The fill also never falls below a floor of the page colour. The blur is one static region while the palette is open. */
+:root[data-card="tinted"] .palette, :root[data-card="clear"] .palette { --ui-overlay-blur: 28px; }
+.palette { --ui-overlay-background: color-mix(in oklab, var(--overlay) 58%, var(--bg)); }
 .palette:not([hidden]) { transition-duration: 240ms; }
 @starting-style { .palette:not([hidden]) { opacity: 0; transform: translate(-50%, -6px) scale(0.98); } }
 .palette[hidden] { display: none; opacity: 0; transform: translate(-50%, -4px) scale(0.99); }
@@ -506,12 +513,19 @@ button { color: inherit; }
 .result[aria-selected="true"]::before { background: var(--accent-soft); }
 .result-icon.has-svg svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .result-icon { display: grid; place-items: center; width: 20px; flex: none; color: var(--fg-2); font: var(--fw-label) var(--text-secondary)/1 var(--font-mono); }
-.result-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.result-hint { margin-left: auto; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
+/* The title wins the row: the hint takes only what the title leaves (to an ellipsis), so a long hint never squeezes the title to nothing
+   on a narrow screen (the Settings row read as a row with no title on a phone). */
+.result-label { flex: none; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: right; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
 .swatch { height: 14px; border-radius: 50%; }
 .palette-empty { margin: 16px 8px; color: var(--fg-2); font-size: var(--text-body); }
 .palette-foot { display: flex; align-items: center; gap: 5px; margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); color: var(--fg-3); font-size: var(--text-caption); }
 .palette-foot kbd { padding: 3px 5px; border-radius: 4px; background: var(--hover); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
+/* The key hints are for a keyboard: with no fine pointer, or no hover, or a narrow screen they say nothing, so the footer
+   goes and the list takes its space (TASTE: a phone sees phone things). The list's cap is the palette's own cap less
+   the 57 px field, so what the footer used to hold is now rows. */
+@media (hover: none), (pointer: coarse), (max-width: 720px) { .palette-foot { display: none; } }
+@media (max-width: 720px) { .palette-results { max-height: calc(min(72vh, 620px) - 57px); } }
 
 /* Variant A mobile tray: circular key targets over one blurred, edge-faded capsule. */
 .keyblur { display: none; position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; height: 108px; pointer-events: none; background: linear-gradient(transparent, color-mix(in oklab, var(--bg) 58%, transparent)); transition: opacity 180ms ease-out; }

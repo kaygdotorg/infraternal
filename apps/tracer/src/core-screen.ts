@@ -22,6 +22,11 @@ import { initialFont, rememberFont } from "./font-preference";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
 import { recoveryUiEnabled } from "./recovery-ui";
+import { titled } from "./palette-entry";
+
+/** True only in preview builds (see build.ts): there a palette row without a title is an error, in production it is repaired. */
+declare const __CLUSTERS_PREVIEW__: boolean;
+const STRICT_ROWS = typeof __CLUSTERS_PREVIEW__ !== "undefined" && __CLUSTERS_PREVIEW__;
 import { quarterDevicePx, restAt } from "./canvas/springs";
 
 const ROOT = document.documentElement;
@@ -467,7 +472,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // state (Lock or Unlock) are new at each open, so opening the palette re-attaches rows instead of rebuilding them.
   let staticEntries = baseEntries();
   const indexEntry = (entry: PaletteEntry, index: number): void => {
-    paletteSearchText.set(entry, `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase());
+    // A row without a title throws in preview builds; in production the repaired title is what is searched and shown.
+    const { label } = titled(entry, STRICT_ROWS);
+    paletteSearchText.set(entry, `${entry.group} ${label} ${entry.hint}`.toLocaleLowerCase());
     // Normalize IDs once so typing never sanitizes every matching result.
     paletteOptionIds.set(entry, `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`);
     if (!paletteGroupIds.has(entry.group)) paletteGroupIds.set(entry.group, `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`);
@@ -593,7 +600,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         }
         const label = document.createElement("span");
         label.className = "result-label";
-        label.textContent = entry.label;
+        label.textContent = titled(entry, false).label;
         const hint = document.createElement("span");
         hint.className = "result-hint";
         hint.textContent = entry.hint;
