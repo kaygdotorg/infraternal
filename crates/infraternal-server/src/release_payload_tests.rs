@@ -334,3 +334,133 @@ async fn cache_symlinks_and_shared_files_are_refused() {
     assert!(resolver.resolve(Architecture::Aarch64).await.is_err());
     assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
 }
+// This subprocess helper lets the parent stop a real download without running
+// Staging::drop, matching abrupt server termination rather than cancellation.
+#[test]
+#[ignore = "subprocess helper for release-cache restart verification"]
+fn partial_download_restart_child() {
+    let Some(state) = std::env::var_os("REVIEW_RELEASE_STATE") else {
+        return;
+    };
+    let resolver = ReleasePayload {
+        executable: PathBuf::from("unused"),
+        local: infraternal_plugin_ssh::install::BinaryPaths {
+            x86_64: PathBuf::from("unused"),
+            aarch64: PathBuf::from("unused"),
+        },
+        cache: PathBuf::from(state).join("releases"),
+        version: "0.1.0".into(),
+        development: false,
+        origin: std::env::var("REVIEW_RELEASE_ORIGIN").unwrap(),
+        lock: Mutex::new(()),
+        trust: Some(std::env::var("REVIEW_RELEASE_TRUST").unwrap()),
+    };
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(resolver.resolve(Architecture::Aarch64))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
+    use std::process::{Command, Stdio};
+    let release = Release::new(2 * 1024 * 1024);
+    let bucket = Bucket::new(release.files.clone());
+    let restarted = release.resolver(bucket.origin.clone(), "restart", false);
+    let version = restarted.cache.join("0.1.0");
+    // Repeat the abrupt stop: retention must be bounded across restarts, not
+    // merely within one download. Each child writes one MiB before stopping.
+    for _ in 0..2 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let files = release.files.clone();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for _ in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let size = socket.read(&mut request).await.unwrap();
+                let path = std::str::from_utf8(&request[..size])
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                let body = files.get(path).unwrap();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                if path.ends_with("infraternal-aarch64-musl") {
+                    socket.write_all(&body[..1024 * 1024]).await.unwrap();
+                    // The body deliberately remains incomplete until the child
+                    // stops; successful verification/publication cannot happen.
+                    let mut remaining = Vec::new();
+                    let _ = socket.read_to_end(&mut remaining).await;
+                } else {
+                    socket.write_all(body).await.unwrap();
+                }
+            }
+        });
+        let before = partial_payload_bytes(&version);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "release_payload::tests::partial_download_restart_child",
+                "--ignored",
+            ])
+            .env("REVIEW_RELEASE_STATE", restarted.cache.parent().unwrap())
+            .env("REVIEW_RELEASE_ORIGIN", origin)
+            .env("REVIEW_RELEASE_TRUST", &release.trust)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while partial_payload_bytes(&version) < before + 1024 * 1024 {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "download child stopped early"
+            );
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("partial download did not reach its retained-byte boundary");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        server.await.unwrap();
+    }
+    let retained_before = partial_payload_bytes(&version);
+    assert_eq!(retained_before, 2 * 1024 * 1024);
+    let ready = restarted.resolve(Architecture::Aarch64).await.unwrap();
+    assert_eq!(std::fs::metadata(ready).unwrap().len(), 2 * 1024 * 1024);
+    let retained_after = partial_payload_bytes(&version);
+    println!(
+        "RELEASE_CACHE_RESTART abrupt_stops=2 retained_before_bytes={retained_before} retained_after_bytes={retained_after}"
+    );
+    assert_eq!(
+        retained_after, 0,
+        "completed restart resolution must reclaim abandoned partial release downloads"
+    );
+}
+
+// Count only payload files in resolver-owned temporary directories. The
+// verified published cache and signed metadata are deliberately excluded.
+fn partial_payload_bytes(version: &Path) -> u64 {
+    std::fs::read_dir(version)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("download-"))
+        .filter_map(|entry| std::fs::metadata(entry.path().join("infraternal-aarch64-musl")).ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
