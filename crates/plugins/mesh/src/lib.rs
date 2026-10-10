@@ -38,3 +38,6 @@ pub mod node_state;
 
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod node_actions;
