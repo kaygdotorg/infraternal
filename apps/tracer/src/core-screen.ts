@@ -654,6 +654,20 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (instant) window.setTimeout(() => sidebar.classList.remove("instant"), 0);
   };
 
+  // The palette owns the top bar while it is open (TASTE): a top-bar control whose box the palette covers fades out
+  // (opacity, 120 ms in style.css) and takes no pointer, and the rest stay. The overlap is measured once, when the
+  // palette opens, so no layout is read per frame; on close every control comes back. Only the top bar's controls are
+  // listed: the canvas's corner buttons (the sidebar toggle, the "+") and the capsule the palette grows from.
+  const PALETTE_COVERABLE = [sidebarToggle, capsule, ...document.querySelectorAll<HTMLElement>(".top > .tabs > .tab-add")];
+  const coverTopBar = (open: boolean): void => {
+    if (!open) { for (const control of PALETTE_COVERABLE) delete control.dataset.paletteCovered; return; }
+    const box = palette.getBoundingClientRect();
+    for (const control of PALETTE_COVERABLE) {
+      const r = control.getBoundingClientRect();
+      const overlaps = r.left < box.right && box.left < r.right && r.top < box.bottom && box.top < r.bottom;
+      if (overlaps) control.dataset.paletteCovered = ""; else delete control.dataset.paletteCovered;
+    }
+  };
   const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer", only?: PaletteEntry[]): void => {
     // The source of the last open or close decides its motion (a key-triggered open is the shorter one).
     palette.dataset.openKind = source;
@@ -671,12 +685,14 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       renderPalette();
       palette.hidden = false;
       scrim.hidden = false;
+      coverTopBar(true);
       paletteInput.focus({ preventScroll: true });
     } else {
       indexScoped(false);
       scopedEntries = undefined;
       palette.hidden = true;
       scrim.hidden = true;
+      coverTopBar(false);
       paletteInput.removeAttribute("aria-activedescendant");
       syncFontPreview();
     }
