@@ -161,3 +161,20 @@ test("only a completed canonical host identity becomes terminal authority", () =
   const ready = fold(event("done", { host_id: id } as Partial<BootstrapEvent>));
   expect((foldEvent(ready, event("check", { attempt: 2 })) as { hostId?: string }).hostId).toBeUndefined();
 });
+
+test("install diagnostics name the failed step and public host error", () => {
+  const failure = { kind: "install" as const, message: "Joining the host to this server failed.", failed_step: "join" as const, log_tail: ["Join DNS lookup failed: Temporary failure in name resolution."] };
+  expect(failureLine(failure)).toContain("Joining");
+  expect(guideFor("worker", failure).happened).toContain("Temporary failure in name resolution");
+});
+test("missing payload tells the operator the architecture and expected server path", () => {
+  const failure = { kind: "install" as const, message: "The matching static infraternal binary is unavailable.", failed_step: "upload" as const, log_tail: [], missing_binary: { architecture: "aarch64", path: "/release/infraternal-aarch64-musl" } };
+  expect(guideFor("worker", failure).happened).toContain("aarch64");
+  expect(guideFor("worker", failure).happened).toContain("/release/infraternal-aarch64-musl");
+});
+test("an already added host says so and offers opening its existing terminal", () => {
+  const failure = { kind: "install" as const, message: "This host is already added. Open its terminal from Console.", log_tail: [], already_added: true };
+  expect(guideFor("worker", failure).title).toBe("worker is already added");
+  expect(guideFor("worker", failure).happened).toContain("already added");
+  expect(guideFor("worker", failure).fix).toBe("none");
+});
