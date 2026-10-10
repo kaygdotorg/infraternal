@@ -7,6 +7,8 @@ const baseURL = `http://localhost:${Number(process.env.TRACER_TEST_PORT ?? "4173
 
 async function mobilePage(browser: Browser): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext({ ...devices["iPhone 15"], baseURL });
+  // An iPhone reports its platform as "iPhone", which names the modifier Option (Apple keyboard); the emulation runs on Linux.
+  await context.addInitScript(() => Object.defineProperty(navigator, "platform", { get: () => "iPhone" }));
   // Paste reads the clipboard; without the permission it opens a paste target, which (rightly) takes the focus.
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: baseURL });
   await context.request.post("/__mock/open-terminal");

@@ -132,7 +132,7 @@
   color: var(--fg-2);
   font-size: 12.5px;
 }
-.auth-command code { flex: 1; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+.auth-command code { flex: 1; overflow-x: auto; white-space: nowrap; }
 .auth-hint { min-height: 1em; margin: 6px 0 14px; color: var(--fg-3); font-size: 12px; }
 .recovery-word-label { margin-top: 18px; }
 .auth-word-inputs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; list-style: none; margin: 0; padding: 0; }
