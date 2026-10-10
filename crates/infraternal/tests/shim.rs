@@ -679,6 +679,29 @@ fn exit_without_viewer(session: &Session) {
 }
 
 #[test]
+fn unowned_normal_exit_retires_promptly_and_records_status() {
+    let mut session = Session::new(8192, false);
+    exit_without_viewer(&session);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while session.path().exists() {
+        assert!(
+            Instant::now() < deadline,
+            "unowned exit retained a dead shim"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        infraternal_shim::ended::read(&session.path())
+            .unwrap()
+            .unwrap()
+            .0,
+        7
+    );
+    assert!(session.child.as_mut().unwrap().wait().unwrap().success());
+    session.pid = 0;
+}
+
+#[test]
 fn owned_exit_releases_promptly_on_window_close() {
     let session = Session::new(8192, false);
     let ownership = owner(&session);
