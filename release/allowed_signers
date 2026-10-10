@@ -3,5 +3,5 @@
 # rotation. Verify a release with:
 #   ssh-keygen -Y verify -f release/allowed_signers -I release@infraternal.com \
 #     -n infraternal-release -s SHA256SUMS.sig < SHA256SUMS
-release@infraternal.com namespaces="infraternal-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKIrLOHZeP/G3TBJ+45Y8Of/468FQ4Z3zjIp5jDV1ReC release-key-1
-release@infraternal.com namespaces="infraternal-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMpH+hwfgkg81BDRveBuDk+RGiqhQ/G/oet9ph7xjO8E release-key-2-spare
+release@infraternal.com namespaces="infraternal-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFuyvevVswnws0hN+Ch12peOKEEivKh/FBTN7+SN59HE release-key-1
+release@infraternal.com namespaces="infraternal-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKaaLYxFOfvYIE4SOReWCtfFPuygJh58hbWQGgUVk5Wk release-key-2-spare
