@@ -39,7 +39,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "host-key": return "This host's key needs your OK";
     case "auth": return "Couldn't sign in to this host";
     case "unsupported": return "This host can't run the infraternal agent yet";
-    case "install": return "Setting up this host didn't finish";
+    case "install": if (failure.already_added) return failure.message; if (failure.missing_binary) return `The ${failure.missing_binary.architecture} static infraternal binary is unavailable. Put it at ${failure.missing_binary.path} on the server, then try again.`; return failure.failed_step ? [failure.message, ...failure.log_tail.filter((line) => !line.startsWith("Remote command returned"))].join(" ") : "Setting up this host didn't finish";
     default: return "Something went wrong while setting up this host. Try again.";
   }
 }
@@ -95,6 +95,7 @@ export interface Guide { title: string; happened: string; next: string; fix: Fix
 
 /** Plain-language account of a failed host. `name` is what the person typed or picked. */
 export function guideFor(name: string, failure: FailureDetail | undefined): Guide {
+  if (failure?.already_added) return { title: `${name} is already added`, happened: failure.message, next: "Open its terminal from Console or the command palette.", fix: "none" };
   switch (failure?.kind) {
     case "unreachable": return {
       title: `${name} isn't answering`,
@@ -133,7 +134,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined): Guid
     };
     case "install": return {
       title: `Setting up ${name} didn't finish`,
-      happened: "Setup stopped before this host was ready.",
+      happened: failure.failed_step ? failureLine(failure) : "Setup stopped before this host was ready.",
       next: "Open the details, restore access to the host if needed, then try again.",
       fix: "retry",
     };

@@ -279,6 +279,11 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
 
     private setFoot(markup: string): void {
       this.foot.innerHTML = markup;
+      // Fixture buttons use the same primitive and instance geometry as production.
+      for (const button of this.foot.querySelectorAll<HTMLButtonElement>(".ah-primary, .ah-secondary")) {
+        button.classList.add("ui-button");
+        button.dataset.button = button.classList.contains("ah-primary") ? "primary" : "secondary";
+      }
       this.foot.hidden = markup === "";
       if (!reducedMotion() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: EASE });
     }
