@@ -1,7 +1,8 @@
 /**
  * A split from the keyboard never animates and never floods (TASTE, #141). One press is one split and lands at once:
  * no silhouette layer, no flip, the new window active. Holding the key for 2 s (auto-repeat) adds nothing more and
- * keeps every frame short. The pointer path keeps its animation (the silhouette layer exists for it).
+ * keeps every frame short. The pointer path keeps its animation (the silhouette layer exists for it). The Mac chords
+ * are covered in clusters-window-actions.spec.ts (D212).
  */
 import { expect, test, type Page } from "playwright/test";
 
@@ -29,7 +30,7 @@ test("a key press splits at once, and holding it splits once with short frames",
     requestAnimationFrame(tick);
   });
   const before = await count(page);
-  // Split right is Ctrl+Shift+D here (Linux); on a Mac the same action is Control+Option+R or Command+D.
+  // Split right is Ctrl+Shift+D here (Linux); on a Mac it is Command+D (D212).
   await page.keyboard.down("Control"); await page.keyboard.down("Shift");
   await page.evaluate(() => { (window as unknown as { __t0: number }).__t0 = performance.now(); });
   await page.keyboard.down("KeyD");
@@ -58,18 +59,4 @@ test("a pointer split still plays the silhouette", async ({ page }) => {
   const seen = page.evaluate(() => new Promise<boolean>((r) => { const mo = new MutationObserver(() => { if (document.querySelector(".cl-goo")) { mo.disconnect(); r(true); } }); mo.observe(document.body, { subtree: true, childList: true }); setTimeout(() => r(false), 3000); }));
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:split:down", source: "pointer" } })));
   expect(await seen).toBe(true);
-});
-
-test("on a Mac, Control+Option+R, Control+Option+D and the Command alternates split instantly (D206)", async ({ page }) => {
-  test.setTimeout(60_000);
-  await page.addInitScript(() => { Object.defineProperty(navigator, "platform", { get: () => "MacIntel" }); });
-  await boot(page);
-  for (const [keys, expectDelta] of [[["Control", "Alt", "KeyR"], 1], [["Control", "Alt", "KeyD"], 1], [["Meta", "KeyD"], 1], [["Meta", "Shift", "KeyD"], 1], [["Control", "Alt", "Shift", "KeyD"], 0]] as const) {
-    const before = await count(page);
-    for (const k of keys) await page.keyboard.down(k);
-    for (const k of [...keys].reverse()) await page.keyboard.up(k);
-    await page.waitForTimeout(250);
-    expect(await count(page) - before, keys.join("+")).toBe(expectDelta);
-    expect(await page.locator(".cl-goo").count(), "no silhouette").toBe(0);
-  }
 });
