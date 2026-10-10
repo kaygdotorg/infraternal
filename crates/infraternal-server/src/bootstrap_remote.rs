@@ -282,7 +282,9 @@ async fn canary(actor: &EmbeddedAgent) -> Result<(), Failure> {
     let mut received = Vec::new();
     while let Some(event) = output.recv().await {
         match event {
-            TerminalOutput::Output { bytes, .. } => {
+            // A fast first command may be included in the initial faithful
+            // repaint; snapshots carry confirmed PTY output just as deltas do.
+            TerminalOutput::Output { bytes, .. } | TerminalOutput::Snapshot { bytes, .. } => {
                 if received.len() + bytes.len() > 65536 {
                     return Err(unavailable());
                 }

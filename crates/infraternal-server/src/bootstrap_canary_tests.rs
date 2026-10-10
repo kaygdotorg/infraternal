@@ -1,4 +1,4 @@
-//! Exercises the actual terminal actor's leg-A/leg-B routing in SSH readiness; malformed canary input must not retire a healthy host.
+//! Exercises actual terminal actor routing and confirmed output forms used by SSH readiness.
 use super::*;
 use bytes::{Buf, BytesMut};
 use infraternal_protocol::{DecodeError, Frame, decode_muxed_frame, encode_muxed_frame_into};
@@ -7,7 +7,7 @@ use tokio::{
     net::UnixStream,
 };
 
-async fn terminal_peer(mut socket: UnixStream) {
+async fn terminal_peer(mut socket: UnixStream, snapshot: bool) {
     let mut pending = BytesMut::new();
     let mut reply = Vec::new();
     loop {
@@ -46,15 +46,18 @@ async fn terminal_peer(mut socket: UnixStream) {
             let command = std::str::from_utf8(bytes).unwrap();
             let arguments: Vec<_> = command.split('\'').collect();
             let marker = format!("{}{}", arguments[3], arguments[5]);
-            encode_muxed_frame_into(
-                frame.stream_id,
-                &Frame::Output {
+            let response = if snapshot {
+                Frame::Snapshot {
+                    out_seq: marker.len() as u64,
+                    bytes: marker.as_bytes(),
+                }
+            } else {
+                Frame::Output {
                     out_seq: 0,
                     bytes: marker.as_bytes(),
-                },
-                &mut reply,
-            )
-            .unwrap();
+                }
+            };
+            encode_muxed_frame_into(frame.stream_id, &response, &mut reply).unwrap();
             socket.write_all(&reply).await.unwrap();
         }
         pending.advance(length);
@@ -64,7 +67,7 @@ async fn terminal_peer(mut socket: UnixStream) {
 #[tokio::test]
 async fn readiness_input_preserves_the_terminal_actor_and_host_connection() {
     let (socket, peer) = UnixStream::pair().unwrap();
-    let task = tokio::spawn(terminal_peer(peer));
+    let task = tokio::spawn(terminal_peer(peer, false));
     let actor = EmbeddedAgent::from_test_socket(socket);
     tokio::time::timeout(Duration::from_secs(5), canary(&actor))
         .await
@@ -76,6 +79,20 @@ async fn readiness_input_preserves_the_terminal_actor_and_host_connection() {
             .await
             .is_ok()
     );
+    drop(actor);
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn readiness_accepts_authoritative_snapshot_output() {
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let task = tokio::spawn(terminal_peer(peer, true));
+    let actor = EmbeddedAgent::from_test_socket(socket);
+    tokio::time::timeout(Duration::from_secs(5), canary(&actor))
+        .await
+        .unwrap()
+        .unwrap();
     drop(actor);
     task.abort();
     let _ = task.await;
