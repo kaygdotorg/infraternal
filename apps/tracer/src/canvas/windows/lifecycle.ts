@@ -38,6 +38,12 @@ export interface WindowsModule {
   addColumn(c: ViewRec, m: WindowModel, index: number, w?: number, silent?: boolean, opaque?: boolean): WinRec;
   close(rec: WinRec): void;
   /**
+   * The keyboard close (D212 shortcuts): the window closes at once, with no motion, through the same path as the close
+   * button (its session keeps running, detached). Focus and the active window move to the next window in reading order
+   * first, so the next press closes the next one.
+   */
+  closeKey(rec: WinRec): void;
+  /**
    * Divides a terminal window's own space into two windows (D212): `down` halves its height, `right` halves its
    * width. A new shell takes the other half. Works in a stacked column too: the windows around it span the new half.
    * `instant`: no motion at all (a keyboard action); the layout and the focus land in the same frame.
@@ -127,7 +133,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     cx.store.changed();
   };
 
-  const close = (rec: WinRec): void => {
+  const close = (rec: WinRec, instant = false): void => {
     const c = rec.owner;
     // Closing never ends the session (D178): it keeps running, detached, and the toast says so.
     const inv = cx.adapters.inventory;
@@ -184,15 +190,16 @@ export function createWindows(cx: Ctx): WindowsModule {
       cx.view.geometry(c);
       cx.view.paintEmpty(c);
       cx.view.settle(c.view.id);
-      // Neighbours close the gap without overshoot (a critically damped spring): no value passes its final place.
-      flip.play(before, true, { visualDuration: 0.38, bounce: 0 });
+      // Neighbours close the gap without overshoot (a critically damped spring): no value passes its final place. A keyboard
+      // close moves nothing on screen with a motion: the layout is simply the new one.
+      if (!instant) flip.play(before, true, { visualDuration: 0.38, bounce: 0 });
       for (const w of c.wins.values()) w.binding?.refit();
       cx.tree.render();
       // The view's stops changed: the camera re-snaps (canvas lock) to the nearest one that still exists.
       if (state.canvasLock && state.currentView === c.view.id && views.has(c.view.id)) cx.nav.goStop(c, cx.nav.nearestStop(c, camera.cam.cx));
       cx.store.changed();
     };
-    if (reduced.matches) { finish(); return; }
+    if (reduced.matches || instant) { finish(); return; }
     root.style.pointerEvents = "none";
     const spring = new Spring(0, (p) => {
       root.style.transform = `scale(${1 - 0.04 * p})`;
@@ -207,6 +214,14 @@ export function createWindows(cx: Ctx): WindowsModule {
    * A grid change (D212): measures the windows for the motion (none for a keyboard action), lets `change` decide the new
    * model from what the DOM holds, writes it into the DOM, reads it back and plays the motion.
    */
+  const closeKey = (rec: WinRec): void => {
+    const list = flat();
+    const at = list.indexOf(rec);
+    const next = list[at + 1] ?? list[at - 1];
+    close(rec, true);
+    if (next) { setActive(cx, next); cx.nav.focusWindow(next, true); }
+  };
+
   const reshape = (c: ViewRec, instant: boolean, change: () => Col[]): void => {
     const before = instant ? undefined : flip.measure(flip.targets(c.colsEl));
     const next = change();
@@ -453,7 +468,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   return {
     make: (c, m) => makeWindow(cx, c, m),
     setActive: (rec) => setActive(cx, rec),
-    addColumn, close, split, newWindow, attach, syncSession, openSession, open, pulse, flat,
+    addColumn, close, closeKey, split, newWindow, attach, syncSession, openSession, open, pulse, flat,
     step(dir, instant = false) {
       const list = flat();
       if (!list.length) return;

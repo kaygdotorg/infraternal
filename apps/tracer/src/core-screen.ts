@@ -6,7 +6,7 @@ import { Spring } from "../../../packages/ui/src/spring";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
-import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
+import { bindShortcut, bindingLabel, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
 import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
@@ -435,7 +435,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
     ...(options.canvas ? [
-      { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
+      { group: "Help", glyph: "?", label: "Show keyboard shortcuts", hint: bindingLabel("shortcuts") || "?", action: "shortcuts:open" },
       // The hint carries the aliases, so "version", "build" and "commit" find it.
       { group: "Help", glyph: "⌨", label: "Settings: Shortcuts", hint: "keys · rebind · reset", action: "settings:shortcuts" },
       ...(canvasItems.size ? [{ group: "Help", glyph: "▭", label: "Settings: Toolbar", hint: "rows · order · show · hide", action: "settings:toolbar" }] : []),
@@ -659,10 +659,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const sidebarClick = (event: MouseEvent): void => setSidebar(sidebar.hidden, event.detail === 0);
   // The `?` view: the capsule morphs into the shortcut list. Sections come from the registry; the
   // canvas registers its own, and a future container or cluster area registers its sections the same way.
+  // The panel lists the area it was opened in first: from a focused terminal the Terminal section leads (D160).
+  let shortcutsFromTerminal = false;
   const shortcuts = mountShortcutsView({
     pill: capsule,
     stage,
-    areas: () => stage.dataset.canvas === "on" ? ["canvas", "terminal"] : ["terminal"],
+    areas: () => stage.dataset.canvas !== "on" ? ["terminal"] : shortcutsFromTerminal ? ["terminal", "canvas"] : ["canvas", "terminal"],
   });
   const removeShortcuts = [
     registerShortcuts({ id: "terminal", title: "Terminal", area: "terminal", shortcuts: [
@@ -671,10 +673,19 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     ] }),
     registerShortcuts({ id: "global", title: "Everywhere", area: "global", shortcuts: [
       { id: "palette", label: "Open the command palette", keys: { mac: "⌘K", other: "Ctrl+K" } },
-      { id: "shortcuts", label: "Show these shortcuts", keys: "?" },
+      // ⌘/ on a Mac and Ctrl+Shift+/ elsewhere work inside a focused terminal, where "?" is typed into the shell; "?" stays
+      // as the alternate outside text fields.
+      { id: "shortcuts", label: "Show these shortcuts", keys: "?", combo: isMacPlatform() ? { code: "Slash", mod: true } : { code: "Slash", mod: true, shift: true }, alternates: [{ code: "Slash", shift: true }] },
       { id: "close", label: "Close the open panel", keys: "Esc" },
     ] }),
   ];
+  // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
+  // screen has the panel, as before.
+  if (options.canvas) removeShortcuts.push(bindShortcut("shortcuts", (event) => {
+    if (!palette.hidden) return;
+    shortcutsFromTerminal = !!(event.target as Element | null)?.closest?.(".terminal-host");
+    shortcuts.toggle();
+  }));
   const capsuleClick = (event: MouseEvent): void => setPalette(true, event.detail === 0 ? "keyboard" : "pointer");
   const scrimClick = (): void => setPalette(false, "pointer");
 
@@ -697,12 +708,6 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       event.preventDefault();
       event.stopPropagation();
       setPalette(palette.hidden, "keyboard");
-      return;
-    }
-    if (options.canvas && event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isTypingTarget(event.target) && palette.hidden) {
-      event.preventDefault();
-      event.stopPropagation();
-      shortcuts.toggle();
       return;
     }
     if (event.key === "Escape") {
@@ -1347,6 +1352,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else if (kind === "shortcuts") {
       // After the palette has gone, so the morph starts from the settled pill.
       setPalette(false, source);
+      shortcutsFromTerminal = false;
       requestAnimationFrame(() => shortcuts.open());
       return true;
     } else if (kind === "session" || kind === "host") {

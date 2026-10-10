@@ -602,7 +602,8 @@
 .ui-shortcuts-label { min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .ui-shortcuts-keys { display: inline-flex; flex: none; gap: 4px; }
 .ui-shortcuts kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
-
+/* An alternate binding: the same keycap, quieter, so the primary reads first (TASTE: hierarchy by weight and tone). */
+.ui-shortcuts kbd.ui-shortcuts-alt { color: var(--fg-3); opacity: 0.7; }
 @media (pointer: coarse) { .ui-shortcuts-label { font-size: var(--text-body); } .ui-shortcuts-head { padding-right: 14px; } }
 
 /* Settings overlay (settings-overlay.ts): one centred card in the shared overlay material. */

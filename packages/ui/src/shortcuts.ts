@@ -47,6 +47,11 @@ export interface ShortcutSection {
   shortcuts: Shortcut[];
 }
 
+/** True for keystrokes that belong to something being typed into (a terminal, a field). */
+export function isTypingTarget(target: EventTarget | null): boolean {
+  return !!(target as Element | null)?.closest?.("input, textarea, select, [contenteditable], .terminal-host, [role='textbox'], [role='searchbox']");
+}
+
 /** The area whose sections are always shown, after the current area's. */
 export const GLOBAL_AREA = "global";
 
@@ -99,6 +104,8 @@ export const keyName = (code: string): string => KEY_NAMES[code] ?? code.replace
 
 /** The label of a combination on this platform: ⌘⇧G on a Mac, Ctrl+Shift+G elsewhere. */
 export function comboLabel(combo: Combo): string {
+  // Shift+/ with nothing else is the "?" key (it is typed, so it is shown as the glyph people type).
+  if (combo.code === "Slash" && combo.shift && !combo.mod && !combo.alt && !combo.ctrl) return "?";
   const key = keyName(combo.code);
   if (isMacPlatform()) return `${combo.ctrl ? "⌃" : ""}${combo.alt ? "⌥" : ""}${combo.shift ? "⇧" : ""}${combo.mod ? "⌘" : ""}${key}`.replace(/^(⌥?⇧?)(⌘)/, "$1$2");
   return [combo.mod ? "Ctrl" : "", combo.alt ? "Alt" : "", combo.shift ? "Shift" : "", key].filter(Boolean).join("+");
@@ -118,6 +125,13 @@ export function setBinding(id: string, combo: Combo | undefined): void {
 export function resetBindings(): void { overrides = {}; writeLocal(STORE, "{}"); for (const l of listeners) l(); }
 export function onBindingsChange(listener: () => void): () => void { listeners.add(listener); return () => { listeners.delete(listener); }; }
 
+/** The label of a shortcut's current binding ("⌘/", "Ctrl+Shift+/"), or "" when it has none. */
+export function bindingLabel(id: string): string {
+  const found = allShortcuts().find((entry) => entry.shortcut.id === id);
+  const combo = found && bindingOf(found.shortcut);
+  return combo ? comboLabel(combo) : "";
+}
+
 /** Every registered shortcut, with the user's binding applied to what is shown (`keys`). */
 export function allShortcuts(): Array<{ section: ShortcutSection; shortcut: Shortcut }> {
   return [...registered.values()].flatMap((section) => section.shortcuts.map((shortcut) => ({ section, shortcut })));
@@ -134,7 +148,11 @@ export function bindShortcut(id: string, handler: (event: KeyboardEvent) => void
     const combo = found && bindingOf(found.shortcut);
     // A rebinding replaces the primary combo; the alternates stay only while the shortcut still has its default.
     const spare = found && !isOverridden(id) ? found.shortcut.alternates ?? [] : [];
-    if (!combo || ![combo, ...spare].some((c) => matchesCombo(event, c))) return;
+    const hit = combo && [combo, ...spare].find((c) => matchesCombo(event, c));
+    if (!hit) return;
+    // A key that is typed (no Command, Control or Option: "?", a plain letter) belongs to a text field or a terminal
+    // that has focus. Only a chord reaches the shortcut from inside them, so ⌘/ works in a terminal and "?" does not.
+    if (!hit.mod && !hit.alt && !hit.ctrl && isTypingTarget(event.target)) return;
     event.preventDefault();
     event.stopPropagation();
     handler(event);

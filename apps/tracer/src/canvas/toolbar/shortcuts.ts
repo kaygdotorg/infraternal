@@ -36,6 +36,9 @@ export function installShortcuts(cx: Ctx): () => void {
     { id: "split-down", label: "Split down", keys: "", combo: isMacPlatform() ? { code: "KeyD", mod: true, shift: true } : { code: "KeyD", mod: true, shift: true, alt: true } },
     { id: "new-window-right", label: "New window right", keys: "", combo: newWindowChord("KeyR") },
     { id: "new-window-below", label: "New window below", keys: "", combo: newWindowChord("KeyD") },
+    // Close the active window (D178: its session keeps running, detached). Control+Option+W on a Mac (Command+W is the
+    // browser's), Control+Alt+W elsewhere. Rebindable like the rest.
+    { id: "close-window", label: "Close window", keys: "", combo: newWindowChord("KeyW") },
     { id: "next-window", label: "Next window", keys: "", combo: { code: "ArrowRight", mod: true, shift: true } },
     { id: "previous-window", label: "Previous window", keys: "", combo: { code: "ArrowLeft", mod: true, shift: true } },
     { id: "overview", label: "All views (overview)", keys: "Esc" },
@@ -56,6 +59,8 @@ export function installShortcuts(cx: Ctx): () => void {
     bindShortcut("split-down", (e) => windowKey(e, (w) => cx.win.split(w, "down", true))),
     bindShortcut("new-window-right", (e) => windowKey(e, (w) => cx.win.newWindow(w, "right", true))),
     bindShortcut("new-window-below", (e) => windowKey(e, (w) => cx.win.newWindow(w, "below", true))),
+    // One press, one window: a repeat is ignored, and the window closes before the next press can see it.
+    bindShortcut("close-window", (e) => { if (e.repeat) return; const w = state.activeWin; if (w && !cx.inputLock.state && w.model.kind !== "node" && w.model.kind !== "settings") cx.win.closeKey(w); }),
     bindShortcut("next-window", () => { if (!cx.inputLock.state) cx.win.step(1, true); }),
     bindShortcut("previous-window", () => { if (!cx.inputLock.state) cx.win.step(-1, true); }),
   ];
