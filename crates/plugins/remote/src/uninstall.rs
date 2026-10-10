@@ -110,6 +110,9 @@ fn public_file(path: &Path, uid: u32, max: u64) -> io::Result<String> {
 /// # Errors
 /// Refuses arbitrary layouts, another uid/host, symlinks or unrelated units/launchers.
 pub fn validate(context: &Context, home: &Path, uid: u32) -> io::Result<()> {
+    validate_artifacts(context, home, uid, true)
+}
+fn validate_artifacts(context: &Context, home: &Path, uid: u32, unlocked: bool) -> io::Result<()> {
     let paths = layout(context, home, uid)?;
     let base = std::fs::symlink_metadata(&paths.base)?;
     if !base.is_dir() || base.uid() != uid || base.mode() & 0o777 != 0o700 {
@@ -118,9 +121,11 @@ pub fn validate(context: &Context, home: &Path, uid: u32) -> io::Result<()> {
     if public_file(&paths.base.join(".bootstrap-owner"), uid, 64)?.trim() != context.host {
         return Err(denied());
     }
-    match std::fs::symlink_metadata(paths.base.join(".bootstrap-lock")) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        _ => return Err(denied()),
+    if unlocked {
+        match std::fs::symlink_metadata(paths.base.join(".bootstrap-lock")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            _ => return Err(denied()),
+        }
     }
     let unit = public_file(&paths.unit, uid, 4096)?;
     if !unit
@@ -155,7 +160,10 @@ impl UninstallPlugin {
     /// # Errors
     /// Refuses a foreground or unrelated installation before registering its handler.
     pub fn new(context: Context, home: PathBuf, uid: u32) -> io::Result<Self> {
-        validate(&context, &home, uid)?;
+        // The service starts while bootstrap still holds its publication lock.
+        // Register the owned handler now; every call and cleanup rechecks the
+        // lock, so installation must finish before any removal is accepted.
+        validate_artifacts(&context, &home, uid, false)?;
         Ok(Self { context, home, uid })
     }
 }
