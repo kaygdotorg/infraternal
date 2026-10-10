@@ -203,3 +203,46 @@ fn real_exec_failures_and_killed_receiver_never_unlock_a_cold_successor() {
         "cold successor unexpectedly unlocked"
     );
 }
+
+#[test]
+fn failed_null_open_or_duplication_closes_private_stdin() {
+    const NAME: &str = "ca_handoff::tests::failed_null_open_or_duplication_closes_private_stdin";
+    if let Ok(stage) = std::env::var("INFRATERNAL_NULL_FAILURE_TEST") {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        nix::unistd::dup2_stdin(&receiver).unwrap();
+        drop(sender);
+        drop(receiver);
+        let result = if stage == "open" {
+            clear_stdin(
+                || Err(std::io::ErrorKind::PermissionDenied.into()),
+                nix::unistd::dup2_stdin,
+            )
+        } else {
+            clear_stdin(
+                || std::fs::File::open("/dev/null"),
+                |_| Err(nix::errno::Errno::EBADF),
+            )
+        };
+        assert!(result.is_err());
+        assert_eq!(
+            nix::fcntl::fcntl(std::io::stdin(), nix::fcntl::FcntlArg::F_GETFD),
+            Err(nix::errno::Errno::EBADF),
+            "cleanup failure must close private fd0"
+        );
+        return;
+    }
+    for stage in ["open", "dup"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env("INFRATERNAL_NULL_FAILURE_TEST", stage)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

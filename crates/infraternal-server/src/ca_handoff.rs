@@ -113,8 +113,7 @@ pub fn receive_stdin() -> Result<Received, CaError> {
     let result = nix::sys::prctl::set_dumpable(false)
         .map_err(|_| CaError)
         .and_then(|()| receive(&input));
-    let null = std::fs::File::open("/dev/null").map_err(|_| CaError)?;
-    nix::unistd::dup2_stdin(null).map_err(|_| CaError)?;
+    clear_stdin(|| std::fs::File::open("/dev/null"), nix::unistd::dup2_stdin)?;
     result.map(|material| Received { material })
 }
 
@@ -153,3 +152,19 @@ mod tests;
 #[cfg(test)]
 #[path = "ca_handoff_shipping_tests.rs"]
 mod shipping_tests;
+
+/// Keep injection at the syscall boundary so each failure can be reproduced.
+fn clear_stdin(
+    open: impl FnOnce() -> std::io::Result<std::fs::File>,
+    duplicate: impl FnOnce(std::fs::File) -> Result<(), nix::errno::Errno>,
+) -> Result<(), CaError> {
+    let result = open()
+        .map_err(|_| CaError)
+        .and_then(|null| duplicate(null).map_err(|_| CaError));
+    if result.is_err() {
+        // Neither a failed open nor a failed dup may return with the key socket
+        // on stdin. Linux close releases fd0 even on EINTR; EBADF is already safe.
+        let _ = nix::unistd::close(0);
+    }
+    result
+}
