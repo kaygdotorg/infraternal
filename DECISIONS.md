@@ -1932,3 +1932,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
          defeats;
        - the Mac Secure Enclave and the 1Password SSH agent, which need the
          owner for every release.
+225. **Add-host gets its binary by architecture (owner, 2026-10-10; amends D220):**
+     - **Same architecture as the server:** the server copies its own
+       running binary to the new host.
+     - **Another architecture:** the server downloads the binary for that
+       architecture, at the server's exact version, from
+       `builds.infraternal.com`, and verifies its signature (D224, both
+       built-in keys) before sending it. The host never trusts the network:
+       the server verifies, then sends it over the existing SSH or mesh link.
+     - **Already downloaded:** a verified download is cached under the
+       state directory (#34), so a second add-host of that architecture is a
+       local copy.
+     - **Failure:** if the download or verification fails, add-host stops at
+       a named step ("Get the arm64 binary") and says why; nothing unverified
+       is ever installed.
+     - **Development builds** that are not on `builds.infraternal.com` fall
+       back to a locally built payload next to the server, as before.
