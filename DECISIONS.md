@@ -1844,3 +1844,21 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        shortcuts are re-grilled after their research (see #155); the agent
        binaries proposal, the built-in web app, TLS, `server init` and the
        single name field are still open.
+220. **Agent payloads come from signed releases; the website is three pages
+     (owner, 2026-10-10; implements D184, amends D44/D46):**
+     - **Payloads:** to install a host, the server uses its own executable
+       for its own architecture. Other architectures are downloaded from the
+       signed release on **builds.infraternal.com** the first time they are
+       needed, verified against the release key built into the binary (D184),
+       and cached. The server checks this before the add-host flow asks
+       anything, so nobody answers questions and then hits "binary
+       unavailable". No files are placed next to the server by hand. This is
+       the permanent fix; shipping both architectures by hand was a stopgap.
+     - **Website:** infraternal.com ships exactly **/releases, /docs and
+       /changelog**. /releases lists versions and links each artifact on
+       builds.infraternal.com. The landing page, roadmap and waitlist of D46
+       are dropped.
+     - **Web app inside the binary (#152 Q10):** the web app is built into
+       the server binary; `--web-root` stays as a development override.
+       Automatic TLS belongs to a separate **reverse-proxy component**, a
+       plugin per D198, not to the core server.
