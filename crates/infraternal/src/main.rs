@@ -13,7 +13,9 @@ use std::{
 
 use clap::ArgMatches;
 use cli::output::{CommandResult, CommandState, RenderOptions, render_json, render_pretty};
-use infraternal_plugin_api::{ActionAvailability, ActionDefinition, ActionRegistry};
+use infraternal_plugin_api::{
+    ActionAvailability, ActionDefinition, ActionRegistry, JsonSchema, JsonSchemaType,
+};
 use serde::Serialize;
 use serde_json::json;
 
@@ -66,6 +68,7 @@ fn main() -> ExitCode {
     match path.as_slice() {
         ["__shim"] => run_shim_command(selected.matches),
         ["status"] => run_status(&registry, json_output),
+        ["skill"] => run_skill(&registry, selected.matches, json_output),
         ["server"] => run_server(selected.matches, json_output),
         ["server", "init"] => run_server_init(selected.matches, json_output),
         ["server", "install"] => run_server_install_compat(selected.matches, json_output),
@@ -143,6 +146,110 @@ fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
     )
     .with_next_step(next_step);
     print_result(&result, json_output, false);
+    ExitCode::SUCCESS
+}
+
+fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool) -> ExitCode {
+    let command = matches
+        .get_many::<String>("command")
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let write_directory = matches.get_one::<String>("write");
+    if write_directory.is_some() && !command.is_empty() {
+        return report_failure(
+            "skill",
+            "Choose a command path or a destination directory.",
+            "--write cannot be combined with a command path".to_owned(),
+            json_output,
+        );
+    }
+
+    if let Some(directory) = write_directory {
+        return match cli::skills::write_all(registry, Path::new(directory)) {
+            Ok(files) => {
+                let result = CommandResult::new(
+                    "skill",
+                    CommandState::Ready,
+                    format!("Wrote {} command skill files.", files.len()),
+                    json!({"commands": [], "skill": "", "files": files}),
+                )
+                .with_next_step("Open a generated Markdown file to review its command contract.");
+                print_result(&result, json_output, false);
+                ExitCode::SUCCESS
+            }
+            Err(error) => report_failure(
+                "skill",
+                "The command skill files could not be written.",
+                error.to_string(),
+                json_output,
+            ),
+        };
+    }
+
+    if command.is_empty() {
+        let commands = cli::skills::commands(registry);
+        let result = CommandResult::new(
+            "skill",
+            CommandState::Ready,
+            format!("{} commands are enabled in this build.", commands.len()),
+            json!({"commands": commands, "skill": "", "files": []}),
+        )
+        .with_next_step("Run `infraternal skill <command>` to print one command skill.");
+        print_result(&result, json_output, false);
+        return ExitCode::SUCCESS;
+    }
+
+    let Some(registered) = registry.find(&command) else {
+        return report_failure(
+            "skill",
+            "The requested command has no generated skill in this build.",
+            format!(
+                "No visible action is registered for {:?}.",
+                command.join(" ")
+            ),
+            json_output,
+        );
+    };
+    if !registered.action.visible {
+        return report_failure(
+            "skill",
+            "The requested command has no generated skill in this build.",
+            "internal commands are not listed as skills".to_owned(),
+            json_output,
+        );
+    }
+    let markdown = match cli::skills::render_action(registered.action) {
+        Ok(markdown) => markdown,
+        Err(error) => {
+            return report_failure(
+                "skill",
+                "The command skill could not be rendered.",
+                error.to_string(),
+                json_output,
+            );
+        }
+    };
+    if json_output {
+        let result = CommandResult::new(
+            format!("skill {}", command.join(" ")),
+            CommandState::Ready,
+            format!(
+                "Generated the skill for `infraternal {}`.",
+                command.join(" ")
+            ),
+            json!({"commands": [], "skill": markdown, "files": []}),
+        );
+        print_result(&result, true, false);
+    } else if let Err(error) = io::stdout().write_all(markdown.as_bytes()) {
+        return report_failure(
+            "skill",
+            "The generated command skill could not be printed.",
+            error.to_string(),
+            false,
+        );
+    }
     ExitCode::SUCCESS
 }
 
@@ -542,12 +649,80 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
 
 fn report_failure(command: &str, message: &str, details: String, json_output: bool) -> ExitCode {
     print_result(
-        &CommandResult::new(command, CommandState::Failed, message, json!({}))
-            .with_details(details),
+        &CommandResult::new(
+            command,
+            CommandState::Failed,
+            message,
+            failure_data(command),
+        )
+        .with_details(details),
         json_output,
         true,
     );
     ExitCode::FAILURE
+}
+
+/// Keep failed JSON results typed by the action's declared `data` schema.
+fn failure_data(command: &str) -> serde_json::Value {
+    let command = command.split_whitespace().collect::<Vec<_>>();
+    cli::actions::registry()
+        .ok()
+        .and_then(|registry| {
+            registry
+                .find(&command)
+                .and_then(|registered| registered.action.output_schema.properties.get("data"))
+                .map(empty_schema_value)
+        })
+        .unwrap_or_else(|| json!({}))
+}
+
+/// Build neutral values recursively, omitting optional fields from objects.
+fn empty_schema_value(schema: &JsonSchema) -> serde_json::Value {
+    match schema.schema_type {
+        JsonSchemaType::String => json!(""),
+        JsonSchemaType::Integer | JsonSchemaType::Number => json!(0),
+        JsonSchemaType::Boolean => json!(false),
+        JsonSchemaType::Array => json!([]),
+        JsonSchemaType::Object => {
+            let mut object = serde_json::Map::new();
+            for field in &schema.required {
+                if let Some(field_schema) = schema.properties.get(field) {
+                    object.insert(field.clone(), empty_schema_value(field_schema));
+                }
+            }
+            serde_json::Value::Object(object)
+        }
+    }
+}
+
+#[cfg(test)]
+mod failure_data_tests {
+    //! Keeps JSON error payloads typed to their registered action schemas.
+
+    use super::failure_data;
+    use serde_json::json;
+
+    #[test]
+    fn skill_errors_keep_the_registered_result_data_shape() {
+        assert_eq!(
+            failure_data("skill"),
+            json!({"commands": [], "skill": "", "files": []})
+        );
+    }
+
+    #[cfg(feature = "plugin-server")]
+    #[test]
+    fn server_errors_keep_the_registered_result_data_shapes() {
+        assert_eq!(
+            failure_data("server"),
+            json!({"listen": "", "public_origin": ""})
+        );
+        assert_eq!(
+            failure_data("server init"),
+            json!({"service": "", "enabled": false, "dry_run": false})
+        );
+        assert_eq!(failure_data("server setup-token"), json!({"token": ""}));
+    }
 }
 
 fn print_result<T: Serialize>(result: &CommandResult<T>, json_output: bool, to_stderr: bool) {

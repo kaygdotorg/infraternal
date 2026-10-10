@@ -126,6 +126,9 @@ fn build_node(node: &CommandNode<'_>) -> Command {
             command = command.about(description.clone());
         }
         for (name, schema) in &action.input_schema.properties {
+            if action.command == ["skill"] && name == "command" {
+                continue;
+            }
             command = command.arg(input_argument(
                 name,
                 schema,
@@ -136,6 +139,16 @@ fn build_node(node: &CommandNode<'_>) -> Command {
                     .any(|field| field == name),
                 action.visible,
             ));
+        }
+        if action.command == ["skill"] {
+            command = command.arg(
+                Arg::new("command")
+                    .value_name("COMMAND")
+                    .help("Command path to print, such as `status` or `mesh up`.")
+                    .index(1)
+                    .num_args(1..)
+                    .action(ArgAction::Append),
+            );
         }
     } else if let Some(description) = &node.plugin_description {
         command = command.about(description.clone());
@@ -279,6 +292,35 @@ mod tests {
         assert_eq!(command.path, ["mesh", "up"]);
         assert!(matches.get_flag("json"));
         assert!(command.matches.get_flag("ssh"));
+    }
+
+    #[test]
+    fn skill_parser_accepts_a_multi_part_command_and_write_directory() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from(["infraternal", "skill", "server", "init", "--json"])
+            .expect("skill command path and global JSON option");
+        let command = selected(&matches);
+        assert_eq!(command.path, ["skill"]);
+        assert_eq!(
+            command
+                .matches
+                .get_many::<String>("command")
+                .map(|values| { values.map(String::as_str).collect::<Vec<_>>() }),
+            Some(vec!["server", "init"])
+        );
+        assert!(matches.get_flag("json"));
+
+        let matches = build(&registry)
+            .try_get_matches_from(["infraternal", "skill", "--write", "./skills"])
+            .expect("skill output directory option");
+        assert_eq!(
+            selected(&matches)
+                .matches
+                .get_one::<String>("write")
+                .map(String::as_str),
+            Some("./skills")
+        );
     }
 
     #[test]

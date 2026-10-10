@@ -28,7 +28,7 @@ fn cli_plugin() -> PluginDefinition {
     PluginDefinition::new(
         "cli",
         "Inspect this node and manage its configured components.",
-        [status_action(), up_action()],
+        [status_action(), up_action(), skill_action()],
     )
 }
 
@@ -90,6 +90,81 @@ fn up_action() -> ActionDefinition {
     .with_example(
         "up",
         "Request startup of this node's configured components.",
+    )
+}
+
+fn skill_action() -> ActionDefinition {
+    ActionDefinition::new(
+        ["skill"],
+        "List commands or print generated skills for AI agents.",
+        "Use this command to discover enabled commands or share their contracts with an AI agent.",
+        [
+            "Run `infraternal skill` to list the commands enabled in this build.",
+            "Add a command path to print its generated skill and stable JSON output shape.",
+            "Pass --write DIR to save one Markdown skill file per visible command.",
+        ],
+        skill_input_schema(),
+        JsonSchema::command_result_with(skill_output_data_schema()),
+    )
+    .with_example("skill status", "Print the generated skill for status.")
+}
+
+fn skill_input_schema() -> JsonSchema {
+    JsonSchema::object(
+        [
+            (
+                "command".to_owned(),
+                JsonSchema::array(
+                    JsonSchema::string("Command path part."),
+                    "Optional command path following `skill`.",
+                ),
+            ),
+            (
+                "write".to_owned(),
+                JsonSchema::string("Directory receiving one skill file per visible command."),
+            ),
+        ],
+        std::iter::empty(),
+    )
+}
+
+fn skill_output_data_schema() -> JsonSchema {
+    let skill_command_row = JsonSchema::object(
+        [
+            (
+                "command".to_owned(),
+                JsonSchema::string("Registered command path."),
+            ),
+            (
+                "description".to_owned(),
+                JsonSchema::string("Short command description."),
+            ),
+        ],
+        ["command".to_owned(), "description".to_owned()],
+    );
+    JsonSchema::object(
+        [
+            (
+                "commands".to_owned(),
+                JsonSchema::array(skill_command_row, "Visible registered commands."),
+            ),
+            (
+                "skill".to_owned(),
+                JsonSchema::string("Generated Markdown skill, empty when not requested."),
+            ),
+            (
+                "files".to_owned(),
+                JsonSchema::array(
+                    JsonSchema::string("Written skill filename."),
+                    "Written skill files.",
+                ),
+            ),
+        ],
+        [
+            "commands".to_owned(),
+            "skill".to_owned(),
+            "files".to_owned(),
+        ],
     )
 }
 
