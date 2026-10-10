@@ -244,3 +244,15 @@ fn ordinary_join_keeps_the_foreground_connection_default() {
         }
     ));
 }
+
+#[tokio::test]
+async fn join_dns_failure_reports_resolution_instead_of_generic_refusal() {
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        connect_enrollment("infraternal-fixture-no-such-host.invalid", 443),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.to_string().starts_with("Join DNS lookup failed"));
+}
