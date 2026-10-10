@@ -387,3 +387,44 @@ to permit an immediate ClientHello behind the same NAT as stalled sockets.
 QUIC sends a keep-alive every 15 seconds and expires a silent transport after
 60 seconds. Acknowledged probes keep healthy idle connections alive; four
 intervals allow transient mobile loss while bounding stale NAT connections.
+
+## Confirmed host removal (#87, D16/D168/D198/D202)
+
+The remote plugin declares `remote.host.remove` once. Its summary and instructions
+supply the UI label, CLI help and `infraternal skill remote.host.remove` output.
+`POST /remote/hosts/actions` returns that definition only to a live server owner.
+
+`POST /remote/hosts/remove/start` accepts `host_id` and optional `uninstall`
+(default true), under the exact same-origin session policy. It returns a real
+user-verifying passkey challenge and the selected public host coordinates.
+A bounded private registry binds the challenge to that host, uninstall choice,
+original session and owner, for 300 seconds. The finish body contains `host_id`,
+`ceremony` and `proof`. An ordinary sign-in or CA challenge cannot remove a host.
+A foreign host UUID, replay, expired challenge, logout, lost owner authority or
+removed signing passkey is refused.
+
+A process-owned operation keeps the authorized mutation alive after a browser
+HTTP disconnect. SQLite's writer transaction serializes final authorization,
+a bounded five-second node uninstall handoff and public revocation. It deletes
+the visible bootstrap inventory and its application-owned SSH pin (unless another
+retained host uses that pin). External SSH trust is untouched. The existing
+revocation fence cuts the live QUIC/TLS channel before committing the tombstone.
+Public certificate denial tombstones remain so a removed certificate stays denied.
+
+The internal `remote.host.uninstall` action is absent from the browser action
+catalogue. Only a checked managed remote installation registers its handler.
+Its input contains the exact host identity and a dry-run flag; paths never come
+from the action. It revalidates the owned root, marker, launcher, unit, enable
+link and absence of an in-progress bootstrap. A generic `after_write` plugin
+continuation sends acceptance before handing a bounded private-stdin plan to an
+independent transient service. Failed or cancelled writes discard the effect.
+The helper retires owned shims and removes the installed service, launcher and
+data root. No task runs merely because the plugin is compiled in.
+
+The finish result distinguishes `requested`, `unreachable` and `retained` host
+cleanup. `requested` means acceptance was transmitted; it does not assert that
+host cleanup completed. An unreachable host still loses server access, and the
+response names the service, binary and data that may remain for local removal.
+The CLI uses the same HTTPS start/finish routes, with session and passkey proof
+only on bounded private stdin. Its default output is organized human text;
+`--json` exposes the structured preview or result.

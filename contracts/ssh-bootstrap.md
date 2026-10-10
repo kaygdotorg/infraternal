@@ -325,3 +325,17 @@ The browser displays the selected fingerprint once, names its key type and gives
 the corresponding `ssh-keygen -lf /etc/ssh/ssh_host_<type>_key.pub` comparison.
 Helper sockets use a short private runtime directory under `XDG_RUNTIME_DIR` or
 `/run`, independent of the persistent data-directory length.
+
+## Release payloads and public install diagnostics (#87)
+
+A server release directory contains `infraternal` plus
+`infraternal-x86_64-musl` and `infraternal-aarch64-musl`, all from the same revision.
+`scripts/package-release` builds and publishes the complete directory with public
+checksums. A missing architecture payload produces its architecture and expected
+server path as trusted public metadata; the UI tells the operator where to put it.
+
+Failures retain the connect/upload/install/join/start boundary. Host diagnostics
+are exact allowlisted public lines, including enrollment DNS and TLS failures;
+arbitrary stderr never becomes UI copy or log output. Re-adding a retained host
+(address or effective application SSH lookup) returns `already_added` before
+issuing another invitation, and the UI directs the person to its existing terminal.
