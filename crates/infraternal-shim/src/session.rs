@@ -96,6 +96,26 @@ struct Peer {
     request: Option<Request>,
 }
 impl Peer {
+    /// Ownership links never enter writer replacement or output backpressure.
+    fn attach(&mut self, caps: u64) -> io::Result<()> {
+        if self.attached {
+            return Err(invalid_input());
+        }
+        self.attached = true;
+        self.caps = caps & (SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SESSION_OWNER);
+        if self.caps & SESSION_OWNER != 0 {
+            if self.caps != SESSION_OWNER {
+                return Err(invalid_input());
+            }
+            self.writer = None;
+        } else if self.caps & MULTI_WRITER != 0 {
+            if self.caps & SEQUENCED_INPUT == 0 {
+                return Err(invalid_input());
+            }
+            self.writer = None;
+        }
+        Ok(())
+    }
     fn queue(&mut self, frame: &Frame) -> io::Result<()> {
         frame.encode_into(&mut self.pending)?;
         self.written = 0;
@@ -617,24 +637,7 @@ fn handle<'a>(
     };
     let frame = frame.into();
     if let FrameRef::Owned(Frame::Attach(caps)) = frame {
-        if p.attached {
-            return Err(invalid());
-        }
-        p.attached = true;
-        p.caps = caps & (SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SESSION_OWNER);
-        if p.caps & SESSION_OWNER != 0 {
-            if p.caps != SESSION_OWNER {
-                return Err(invalid());
-            }
-            p.writer = None;
-            return Ok(false);
-        }
-        if p.caps & MULTI_WRITER != 0 {
-            if p.caps & SEQUENCED_INPUT == 0 {
-                return Err(invalid());
-            }
-            p.writer = None;
-        }
+        p.attach(caps)?;
         return Ok(false);
     }
     if p.attached && p.caps == SESSION_OWNER {
