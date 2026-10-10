@@ -6,6 +6,14 @@ use crate::policy::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, net::SocketAddr};
 
+/// Public node identity and actual UDP socket coordinates; private material has no field.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Identity {
+    pub public_key: PublicKey,
+    pub port: u16,
+}
+
 /// Explicit pair rules replace this fallback, so port grants also narrow an open mesh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefaultPolicy {
