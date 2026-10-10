@@ -6,7 +6,8 @@ import { Spring } from "../../../packages/ui/src/spring";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
-import { bindShortcut, bindingLabel, keyCaps, PALETTE_KEYS, registerShortcuts } from "../../../packages/ui/src/shortcuts";
+import { bindTerminalFont, TERMINAL_FONT_SHORTCUTS } from "./terminal-font-shortcuts";
+import { bindShortcut, bindingLabel, keyCaps, PALETTE_KEYS, paletteAlternate, paletteCombo, platformCombo, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
 import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
@@ -237,7 +238,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   app.innerHTML = SCREEN;
   // The modifier names are read per mount, not in the template: "Option" is the Mac key, "Alt" elsewhere.
   for (const mod of ["ctrl", "alt"] as const) get<HTMLElement>(`[data-mod="${mod}"]`).setAttribute("aria-label", modifierName(mod));
-  // The palette key is written per platform (⌘K on a Mac keyboard, Ctrl K elsewhere): one keycap per part.
+  // The palette key is written per platform (⌘K on a Mac keyboard, Ctrl+Shift+K elsewhere): one keycap per part.
   get<HTMLElement>("#capsule-keys").replaceChildren(...keyCaps(shortcutLabel(PALETTE_KEYS)).map((cap) => { const kbd = document.createElement("kbd"); kbd.className = "capsule-kbd"; kbd.textContent = cap; return kbd; }));
   const stage = get<HTMLElement>("#terminal-screen");
   // The canvas preview never draws the status line, from the first frame (the canvas chunk loads a
@@ -654,6 +655,20 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (instant) window.setTimeout(() => sidebar.classList.remove("instant"), 0);
   };
 
+  // The palette owns the top bar while it is open (TASTE): a top-bar control whose box the palette covers fades out
+  // (opacity, 120 ms in style.css) and takes no pointer, and the rest stay. The overlap is measured once, when the
+  // palette opens, so no layout is read per frame; on close every control comes back. Only the top bar's controls are
+  // listed: the canvas's corner buttons (the sidebar toggle, the "+") and the capsule the palette grows from.
+  const PALETTE_COVERABLE = [sidebarToggle, capsule, ...document.querySelectorAll<HTMLElement>(".top > .tabs > .tab-add")];
+  const coverTopBar = (open: boolean): void => {
+    if (!open) { for (const control of PALETTE_COVERABLE) delete control.dataset.paletteCovered; return; }
+    const box = palette.getBoundingClientRect();
+    for (const control of PALETTE_COVERABLE) {
+      const r = control.getBoundingClientRect();
+      const overlaps = r.left < box.right && box.left < r.right && r.top < box.bottom && box.top < r.bottom;
+      if (overlaps) control.dataset.paletteCovered = ""; else delete control.dataset.paletteCovered;
+    }
+  };
   const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer", only?: PaletteEntry[]): void => {
     // The source of the last open or close decides its motion (a key-triggered open is the shorter one).
     palette.dataset.openKind = source;
@@ -671,12 +686,14 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       renderPalette();
       palette.hidden = false;
       scrim.hidden = false;
+      coverTopBar(true);
       paletteInput.focus({ preventScroll: true });
     } else {
       indexScoped(false);
       scopedEntries = undefined;
       palette.hidden = true;
       scrim.hidden = true;
+      coverTopBar(false);
       paletteInput.removeAttribute("aria-activedescendant");
       syncFontPreview();
     }
@@ -697,13 +714,19 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       { id: "back", label: "Back to the terminal", keys: "Shift+F6" },
     ] }),
     registerShortcuts({ id: "global", title: "Everywhere", area: "global", shortcuts: [
-      { id: "palette", label: "Open the command palette", keys: PALETTE_KEYS },
+      { id: "palette", label: "Open the command palette", keys: PALETTE_KEYS, combo: paletteCombo(), alternates: [paletteAlternate()] },
       // ⌘/ on a Mac and Ctrl+Shift+/ elsewhere work inside a focused terminal, where "?" is typed into the shell; "?" stays
       // as the alternate outside text fields.
-      { id: "shortcuts", label: "Show these shortcuts", keys: "?", combo: isMacPlatform() ? { code: "Slash", mod: true } : { code: "Slash", mod: true, shift: true }, alternates: [{ code: "Slash", shift: true }] },
+      { id: "shortcuts", label: "Show these shortcuts", keys: "?", combo: platformCombo({ code: "Slash", key: "/", mod: true, shift: false }, { code: "Slash", key: "/", mod: true, shift: true }), alternates: [{ code: "Slash", key: "?" }] },
       { id: "close", label: "Close the open panel", keys: "Esc" },
+      ...TERMINAL_FONT_SHORTCUTS,
     ] }),
   ];
+  // The palette's chords come from the registry too (D222). A locked window owns every key, but a Mac's ⌘K still opens
+  // the palette, since a terminal never receives ⌘; a declined press goes through to the terminal (Ctrl+K stays the shell's).
+  // The font chords act on the one terminal here; on the canvas the canvas binds them to its active window.
+  if (!options.canvas) removeShortcuts.push(...bindTerminalFont(() => client));
+  removeShortcuts.push(bindShortcut("palette", () => setPalette(palette.hidden, "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
   // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
   // screen has the panel, as before.
   if (options.canvas) removeShortcuts.push(bindShortcut("shortcuts", (event) => {
@@ -726,18 +749,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       event.stopPropagation();
       return;
     }
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-      // A locked window owns every key. Terminals never receive ⌘K, so it still opens the palette
-      // on macOS; Ctrl+K belongs to the terminal (kill-line, clear) and goes through.
-      if (stage.hasAttribute("data-locked") && !(isMacPlatform() && event.metaKey)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      setPalette(palette.hidden, "keyboard");
-      return;
-    }
     if (event.key === "Escape") {
       if (settings?.isOpen || shortcuts.isOpen) return; // the open overlay takes this Escape itself
-      if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); }
+      // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
+      // capture phase, after this window listener) stays open. The capture order is what makes stopping necessary.
+      if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); event.stopPropagation(); }
       else if (!sidebar.hidden) { setSidebar(false, true); event.preventDefault(); }
     }
   };

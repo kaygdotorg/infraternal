@@ -189,6 +189,8 @@ export class Wizard {
     try {
       this.discovered = await this.deps.service.discover();
       this.discovery = { state: "ready", message: "" };
+      // A token typed while the list was loading names a host only now: it chips at once, as it would have.
+      this.chips?.recheck();
     } catch (error: unknown) {
       this.discovery = { state: "failed", message: error instanceof ServiceError ? error.message : "Hosts couldn't be listed." };
     }

@@ -402,7 +402,7 @@ test("palette: About infraternal opens Settings, About, and is found by version,
   await page.setViewportSize({ width: 1440, height: 900 });
   await openCanvas(page);
   for (const alias of ["about", "version", "build", "commit"]) {
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await page.locator("#palette-input").fill(alias);
     await expect(page.locator(".result[data-action='settings:about']")).toBeVisible();
     if (alias === "commit") {
@@ -503,11 +503,11 @@ test("lock: Ctrl+K reaches the terminal on Linux and Windows while locked, and o
   });
   await page.keyboard.press("Control+Shift+KeyL");
   await expect(page.locator(".ui-window").first()).toHaveAttribute("data-locked", "");
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeHidden();
   expect(await page.evaluate(() => (window as unknown as { __keys: string[] }).__keys)).toEqual(["ctrl+k"]);
   await page.keyboard.press("Control+Shift+KeyL");
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeVisible();
   // The palette offers the action that fits the state, with the shortcut shown.
   await expect(page.locator(".result[data-action='proto:lock'] .result-label")).toHaveText("Lock window");
@@ -528,7 +528,7 @@ test("lock: on macOS, ⌘K still opens the palette while locked and offers Unloc
   await expect(page.locator(".ui-window").first()).toHaveAttribute("data-locked", "");
   await expect(page.locator(".ui-window-lock").first()).toHaveAttribute("data-tip", "Unlock input");
   // Ctrl+K belongs to the terminal on a Mac too (kill-line); ⌘K is the palette.
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeHidden();
   await page.keyboard.press("Meta+k");
   await expect(page.locator("#palette")).toBeVisible();
@@ -578,11 +578,11 @@ test("shortcuts: ? morphs the capsule into the list, current area first, one sho
   await openCanvas(page);
   // Typing into the terminal is never hijacked.
   await page.locator(".ui-window").first().locator(".terminal-host").click();
-  await page.keyboard.press("Shift+Slash");
+  await page.keyboard.press("?");
   await expect(page.locator(".ui-shortcuts")).toHaveCount(0);
   await blurTerminal(page);
   const pillBox = (await page.locator("#capsule").boundingBox())!;
-  await page.keyboard.press("Shift+Slash");
+  await page.keyboard.press("?");
   const panel = page.locator(".ui-shortcuts");
   await expect(panel).toBeVisible();
   // Mid-morph: the shape is clipped to part of the panel and the pill is fading out.
@@ -599,7 +599,7 @@ test("shortcuts: ? morphs the capsule into the list, current area first, one sho
   expect(new Set(labels).size).toBe(labels.length);
   // One shortcut per action: the palette shows Ctrl+K here, never ⌘K as well.
   const palette = await panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd").allTextContents();
-  expect(palette).toEqual(["Ctrl", "K"]);
+  expect(palette).toEqual(["Ctrl", "Shift", "K", "Ctrl", "Shift", "P"]); // the primary, then the alternate (dimmed) on the same row
   const material = await panel.evaluate((node) => { const s = getComputedStyle(node); return { filter: s.backdropFilter, bg: s.backgroundColor }; });
   expect(material.filter).toContain("blur(8px)"); // the default card level, Tinted
   // At rest nothing is left animating: no transform, no opacity on the content.
@@ -608,11 +608,11 @@ test("shortcuts: ? morphs the capsule into the list, current area first, one sho
   await expect(panel).toHaveCount(0);
   await expect(page.locator("#capsule")).toHaveCSS("opacity", "1");
   // ? again toggles; a press outside closes.
-  await page.keyboard.press("Shift+Slash");
+  await page.keyboard.press("?");
   await expect(panel).toBeVisible();
-  await page.keyboard.press("Shift+Slash");
+  await page.keyboard.press("?");
   await expect(panel).toHaveCount(0);
-  await page.keyboard.press("Shift+Slash");
+  await page.keyboard.press("?");
   await expect(panel).toBeVisible();
   await page.mouse.click(300, 700);
   await expect(panel).toHaveCount(0);
@@ -629,7 +629,7 @@ test("shortcuts: the palette offers Keyboard shortcuts, lock shortcuts are liste
   const panel = page.locator(".ui-shortcuts");
   await expect(panel).toBeVisible();
   await expect(panel.locator(".ui-shortcuts-row", { hasText: "Lock or unlock" }).locator("kbd")).toHaveText(["Ctrl", "Shift", "L"]);
-  await expect(panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd")).toHaveText(["⌘", "K"]);
+  await expect(panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd")).toHaveText(["⌘", "K", "⌘", "⇧", "P"]);
   await page.keyboard.press("Escape");
   await expect(panel).toHaveCount(0);
   await context.close();
@@ -640,7 +640,7 @@ test("shortcuts (reduced motion): the panel crossfades without any shape travel"
   const page = await context.newPage();
   await openCanvas(page);
   await blurTerminal(page);
-  await page.keyboard.press("Shift+Slash");
+  await page.keyboard.press("?");
   const panel = page.locator(".ui-shortcuts");
   await expect(panel).toBeVisible();
   expect(await panel.evaluate((node) => getComputedStyle(node).clipPath)).toBe("none");
@@ -854,7 +854,7 @@ test("palette (desktop): centred, as tall as its results, never closer than a qu
   await openCanvas(page);
   const palette = page.locator("#palette");
   const box = async () => (await palette.boundingBox())!;
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(palette).toBeVisible();
   await page.waitForTimeout(300);
   // No query: the default sections up to the cap (50 % of the viewport), centred both ways.
@@ -891,7 +891,7 @@ test("palette (phone): keeps its placement under the top bar, inside the safe ar
   const context = await browser.newContext({ hasTouch: true, isMobile: true, deviceScaleFactor: 3, viewport: { width: 393, height: 852 } });
   const page = await touchContext(context);
   await openCanvas(page);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeVisible();
   await page.waitForTimeout(300);
   const b = (await page.locator("#palette").boundingBox())!;
@@ -906,7 +906,7 @@ test("palette: Ctrl+K then typing within 20 ms lands every character; arrow sele
   await openCanvas(page);
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   // The open animates (a short fade), yet the field is focused at once and takes the first keystrokes.
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.waitForTimeout(20);
   await page.keyboard.type("thm", { delay: 0 });
   await expect(page.locator("#palette-input")).toHaveValue("thm");
@@ -926,7 +926,7 @@ test("clear and frosted cards blur what is behind them by more than a line of te
   await page.setViewportSize({ width: 1440, height: 900 });
   await openCanvas(page, "&card=3");
   await page.locator("#sidebar-toggle").click();
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.waitForTimeout(400);
   const blurs = await page.evaluate(() => Object.fromEntries(["#palette", "#sidebar"].map((selector) => [selector, parseFloat(/blur\(([\d.]+)px\)/.exec(getComputedStyle(document.querySelector(selector)!).backdropFilter)?.[1] ?? "0")])));
   await page.keyboard.press("Escape");

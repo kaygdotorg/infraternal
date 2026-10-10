@@ -74,6 +74,12 @@ export interface WindowsModule {
   flat(): WinRec[];
   /** Makes the next (1) or previous (-1) window of the current view active and brings it into view. */
   step(dir: number, instant?: boolean): void;
+  /**
+   * Makes the nearest window of the current view in a direction active and brings it into view (D222: ⌥⌘ arrows on a
+   * Mac, Ctrl+Shift+arrows elsewhere). "Nearest" weighs distance along the direction twice as much as sideways offset,
+   * so a window straight above or below beats one further along but offset. Nothing happens when no window lies that way.
+   */
+  move(dir: "left" | "right" | "up" | "down", instant?: boolean): void;
 }
 
 export function createWindows(cx: Ctx): WindowsModule {
@@ -499,6 +505,37 @@ export function createWindows(cx: Ctx): WindowsModule {
       const next = list[clamp((at < 0 ? (dir > 0 ? -1 : list.length) : at) + dir, 0, list.length - 1)]!;
       setActive(cx, next);
       cx.nav.focusWindow(next, instant, true);
+    },
+    move(dir, instant = false) {
+      const list = flat();
+      const from = state.activeWin;
+      // Nothing is active yet (a click in a gap cleared it): a move activates the first window, or the last one going back.
+      if (!from) {
+        const first = list.length ? (dir === "left" || dir === "up" ? list[list.length - 1]! : list[0]!) : undefined;
+        if (!first) return;
+        setActive(cx, first);
+        cx.nav.focusWindow(first, instant, true);
+        return;
+      }
+      if (list.length < 2) return;
+      const origin = from.card.root.getBoundingClientRect();
+      const ox = origin.left + origin.width / 2, oy = origin.top + origin.height / 2;
+      const horizontal = dir === "left" || dir === "right";
+      let best: WinRec | undefined;
+      let bestScore = Infinity;
+      for (const rec of list) {
+        if (rec === from) continue;
+        const box = rec.card.root.getBoundingClientRect();
+        const cx0 = box.left + box.width / 2, cy0 = box.top + box.height / 2;
+        const along = dir === "left" ? ox - cx0 : dir === "right" ? cx0 - ox : dir === "up" ? oy - cy0 : cy0 - oy;
+        if (along <= 0) continue;
+        const across = horizontal ? Math.abs(cy0 - oy) : Math.abs(cx0 - ox);
+        const score = along + 2 * across;
+        if (score < bestScore) { bestScore = score; best = rec; }
+      }
+      if (!best) return;
+      setActive(cx, best);
+      cx.nav.focusWindow(best, instant, true);
     },
   };
 }

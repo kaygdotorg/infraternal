@@ -297,13 +297,13 @@ test("another device typed last: scaled to fit, a badge says so, typing takes th
 test("⌘K lists every session on every host, the actions and the sessions scenes", async ({ browser }) => {
   const { context, page } = await open(browser, DESKTOP);
   try {
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await page.keyboard.type("detached");
     const rows = page.locator(".result");
     await expect(rows.filter({ hasText: "local-api" })).toHaveCount(1);
     await expect(rows.filter({ hasText: "journal" })).toHaveCount(1);
     await page.keyboard.press("Escape");
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await page.keyboard.type("sessions scene 3");
     await expect(page.locator(".result").first()).toContainText("Mockup: sessions scene 3");
     await page.keyboard.press("Enter");

@@ -28,8 +28,11 @@ const [VW, VH] = (process.env.REAL_SCALE_VIEW ?? "1440x900").split("x").map(Numb
 const VIEW = { width: VW, height: VH };
 const MAC = process.platform === "darwin";
 const MOD = MAC ? "Meta" : "Control";
-const SPLIT_RIGHT = MAC ? "Control+Alt+R" : "Control+Shift+D";
-const SPLIT_DOWN = MAC ? "Control+Alt+D" : "Control+Shift+Alt+D";
+const SPLIT_RIGHT = MAC ? "Meta+KeyD" : "Control+Shift+KeyD";
+const SPLIT_DOWN = MAC ? "Meta+Shift+KeyD" : "Control+Shift+KeyE";
+// Next and previous window: ⌘] and ⌘[ on a Mac, Ctrl+Shift+] and [ elsewhere (D222).
+const WALK_FORWARD = MAC ? "Meta+BracketRight" : "Control+Shift+BracketRight";
+const WALK_BACK = MAC ? "Meta+BracketLeft" : "Control+Shift+BracketLeft";
 const N = Number(process.env.REAL_SCALE_N ?? 54);
 const LABEL = process.env.REAL_SCALE_LABEL ?? "run";
 test.skip(!ENABLED, "set REAL_SCALE=1 to run the many-session benchmark");
@@ -230,7 +233,7 @@ test(`${N} real sessions: what scales with the session count`, async () => {
       const at = await index();
       if (process.env.REAL_SCALE_DEBUG === "1") console.log(`step ${step} at ${at}`);
       if (at >= 0 && at % 5 === 2 && !typed.has(at)) { typed.add(at); await page.keyboard.type((printers++ % 2 ? "top -b -d 1" : "while :; do seq 1 40; sleep 1; done") + "\n", { delay: 2 }); }
-      await page.keyboard.press(`${MOD}+Shift+ArrowLeft`); // the last window is active: walk back
+      await page.keyboard.press(WALK_BACK); // the last window is active: walk back
       await page.waitForTimeout(260);
     }
   }
@@ -266,7 +269,7 @@ test(`${N} real sessions: what scales with the session count`, async () => {
   await page.waitForTimeout(500);
   await page.keyboard.press(`${MOD}+Shift+G`);
   await page.waitForTimeout(800);
-  if (want("step")) results.step = await measure(cdp, "window-step", async () => { for (let i = 0; i < 6; i++) { await page.keyboard.press(`${MOD}+Shift+ArrowRight`); await page.waitForTimeout(450); } });
+  if (want("step")) results.step = await measure(cdp, "window-step", async () => { for (let i = 0; i < 6; i++) { await page.keyboard.press(WALK_FORWARD); await page.waitForTimeout(450); } });
   if (want("split")) results.split = await measure(cdp, "split", async () => { for (let i = 0; i < 3; i++) { await page.keyboard.press(i % 2 ? SPLIT_DOWN : SPLIT_RIGHT); await page.waitForTimeout(1000); } });
   if (process.env.REAL_SCALE_TRACE === "1") { const log = await page.evaluate(() => (window as unknown as { __wsLog: string[] }).__wsLog); const tally: Record<string, number> = {}; for (const l of log) tally[l] = (tally[l] ?? 0) + 1; console.log(`WSLOG ${JSON.stringify(Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 12))}`); }
   expect(Object.keys(results)).toHaveLength(only.length || 6);

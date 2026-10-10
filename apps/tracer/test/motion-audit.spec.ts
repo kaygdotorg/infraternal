@@ -592,7 +592,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   console.log(`MOTION_AUDIT core-idle ${JSON.stringify(idle)}`);
 
   await page.evaluate(() => { window.__motionAudit.label = "keyboard-palette"; window.__motionAudit.startSample(); });
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeVisible();
   await page.waitForTimeout(220);
   const palette = await sampleAndEvents(page, "keyboard-palette");
@@ -618,7 +618,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   console.log(`MOTION_AUDIT keyboard-theme ${JSON.stringify({ ...keyboardTheme, ...themeTiming })}`);
   await page.keyboard.press("Escape");
 
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("Mesh from the theme");
   const backdropStartAt = await page.evaluate(() => performance.now());
   await page.evaluate(() => { window.__motionAudit.label = "keyboard-backdrop"; window.__motionAudit.startSample(); });
@@ -641,7 +641,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   await page.screenshot({ path: meshPath });
   await testInfo.attach("production mesh", { path: meshPath, contentType: "image/png" });
   console.log(`MOTION_AUDIT keyboard-backdrop ${JSON.stringify({ ...keyboardBackdrop, ...backdropTiming, requestedWorkers })}`);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("None");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(260);

@@ -17,6 +17,9 @@ const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
 const TERMINAL_FONT_SIZE_DESKTOP = 14;
 const TERMINAL_FONT_SIZE_TOUCH = 13;
+/** The font sizes a keyboard step or a pinch may reach (terminal-touch.ts uses the same range). */
+const TERMINAL_FONT_SIZE_MIN = 9;
+const TERMINAL_FONT_SIZE_MAX = 24;
 const THEME_HISTORY_PROBE_ROWS = 10_000;
 const THEME_HISTORY_INDEXED_COLUMN = "theme-history-00000 | ".length;
 const THEME_HISTORY_TRUECOLOR_COLUMN = THEME_HISTORY_INDEXED_COLUMN + 4;
@@ -582,6 +585,24 @@ export class TerminalClient {
 
   /** Recomputes the grid from the host's box (the window was resized). */
   refit(): void {
+    this.scheduleFit();
+  }
+
+  /**
+   * Keyboard font size (D222): one point up or down, or back to this device's default. The size stays in the range a
+   * terminal reads at (the pinch range of terminal-touch.ts), and the grid refits once. Only this window changes; the
+   * others keep theirs.
+   */
+  adjustFontSize(step: number | "reset"): void {
+    if (this.closed) return;
+    const base = matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP;
+    const current = this.terminal.options.fontSize ?? base;
+    const next = step === "reset" ? base : Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, current + step));
+    if (next === current) return;
+    this.terminal.options.fontSize = next;
+    // The size is also on the host, where a test (and a person inspecting the page) can read it.
+    this.config.host.dataset.fontSize = String(next);
+    this.wakeTerminal();
     this.scheduleFit();
   }
 

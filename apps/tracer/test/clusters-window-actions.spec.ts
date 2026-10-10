@@ -63,7 +63,7 @@ async function press(page: Page, chord: string[]): Promise<void> {
 
 /** Opens ⌘K, types the label and chooses the first row (the same path a person takes). */
 async function fromPalette(page: Page, label: string): Promise<void> {
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeVisible();
   await page.locator("#palette-input").fill(label);
   await expect(page.locator("#palette-results .result").first()).toContainText(label);
@@ -92,7 +92,7 @@ test.describe("keys (Linux and Windows chords; Mac chords are in the last test)"
     await boot(page);
     const before = await layout(page);
     const at = await activeAt(page);
-    await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+    await press(page, ["Control", "Shift", "KeyE"]);
     const after = await layout(page);
     expect(after.widths).toEqual(before.widths);
     expect(after.heights[at.col]!.length).toBe(before.heights[at.col]!.length + 1);
@@ -104,7 +104,7 @@ test.describe("keys (Linux and Windows chords; Mac chords are in the last test)"
     await boot(page);
     const before = await layout(page);
     const at = await activeAt(page);
-    await press(page, ["Control", "Alt", "KeyR"]);
+    await press(page, ["Control", "Shift", "Enter"]);
     const after = await layout(page);
     expect(after.widths.length).toBe(before.widths.length + 1);
     expect(after.widths[at.col + 1]).toBe(before.widths[at.col]);
@@ -116,7 +116,7 @@ test.describe("keys (Linux and Windows chords; Mac chords are in the last test)"
     await boot(page);
     const before = await layout(page);
     const at = await activeAt(page);
-    await press(page, ["Control", "Alt", "KeyD"]);
+    await press(page, ["Control", "Shift", "Alt", "Enter"]);
     const after = await layout(page);
     expect(after.widths).toEqual(before.widths);
     expect(after.heights[at.col]!.length).toBe(before.heights[at.col]!.length + 1);
@@ -146,7 +146,7 @@ test.describe("⌘K palette", () => {
   test("each of the four actions is in ⌘K with its exact label, and runs", async ({ page }) => {
     await boot(page);
     for (const label of ["Split right", "Split down", "New window right", "New window below"]) {
-      await page.keyboard.press("Control+k");
+      await page.keyboard.press("Control+Shift+K");
       await expect(page.locator("#palette")).toBeVisible();
       await page.locator("#palette-input").fill(label);
       await expect(page.locator("#palette-results .result", { hasText: label }).first()).toBeVisible();
@@ -210,7 +210,7 @@ test.describe("the rules that hold across actions", () => {
   test("split right in a stacked column divides only that window's column: a group, the footprint unchanged (D212)", async ({ page }) => {
     await boot(page);
     // Stack the active window (split down), so its column is no longer its own.
-    await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+    await press(page, ["Control", "Shift", "KeyE"]);
     const stacked = await layout(page);
     const at = await activeAt(page);
     expect(stacked.heights[at.col]!.length).toBeGreaterThan(1);
@@ -237,7 +237,7 @@ test.describe("the rules that hold across actions", () => {
   });
 });
 
-test.describe("on a Mac the chords are ⌘D, ⌘⇧D, ⌃⌥R and ⌃⌥D", () => {
+test.describe("on a Mac the chords are ⌘D, ⌘⇧D, ⌘↩ and ⌘⇧↩ (D222)", () => {
   test.setTimeout(120_000);
 
   test("each Mac chord runs its own action, and Control+Option+Shift+D is nothing", async ({ page }) => {
@@ -248,10 +248,10 @@ test.describe("on a Mac the chords are ⌘D, ⌘⇧D, ⌃⌥R and ⌃⌥D", () =
     await press(page, ["Meta", "KeyD"]); // split right
     expect(await count()).toBe(before + 1);
     before = await count();
-    await press(page, ["Control", "Alt", "KeyR"]); // new window right
+    await press(page, ["Meta", "Enter"]); // new window right
     expect(await count()).toBe(before + 1);
     before = await count();
-    await press(page, ["Control", "Alt", "KeyD"]); // new window below
+    await press(page, ["Meta", "Shift", "Enter"]); // new window below
     expect(await count()).toBe(before + 1);
     before = await count();
     await press(page, ["Meta", "Shift", "KeyD"]); // split down

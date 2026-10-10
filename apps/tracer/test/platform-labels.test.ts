@@ -38,10 +38,10 @@ test("Windows and Linux: combo labels and written keys never show an Apple glyph
     emulate(env.platform, env.userAgent);
     expect(isMacPlatform()).toBe(false);
     for (const combo of COMBOS) expect(comboLabel(combo)).not.toMatch(APPLE_GLYPHS);
-    expect(shortcutLabel(PALETTE_KEYS)).toBe("Ctrl+K");
+    expect(shortcutLabel(PALETTE_KEYS)).toBe("Ctrl+Shift+K");
     expect(keysLabel("Ctrl+Shift+L")).toBe("Ctrl+Shift+L");
     expect(keysLabel("Shift+Scroll")).toBe("Shift+Scroll");
-    expect(keyCaps(PALETTE_KEYS)).toEqual(["Ctrl", "K"]);
+    expect(keyCaps(PALETTE_KEYS)).toEqual(["Ctrl", "Shift", "K"]);
     expect(comboLabel({ code: "KeyG", mod: true, shift: true })).toBe("Ctrl+Shift+G");
   }
 });
@@ -56,7 +56,7 @@ test("Mac and iPad keyboards: the same labels are written with Apple glyphs", ()
     expect(keysLabel("Shift+F6")).toBe("⇧F6");
     expect(keysLabel("Esc")).toBe("Esc");
     expect(keyCaps(PALETTE_KEYS)).toEqual(["⌘", "K"]);
-    expect(comboLabel({ code: "KeyG", mod: true, shift: true })).toBe("⇧⌘G");
+    expect(comboLabel({ code: "KeyG", mod: true, shift: true })).toBe("⌘⇧G");
     expect(comboLabel({ code: "KeyR", ctrl: true, alt: true })).toBe("⌃⌥R");
   }
 });

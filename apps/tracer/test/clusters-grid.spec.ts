@@ -112,7 +112,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await press(page, ["Control", "Shift", "Alt", "KeyD"]);
     await activate(page, "w-edge-arm");
     const before = await grid(page);
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await expect(page.locator("#palette")).toBeVisible();
     await page.locator("#palette-input").fill("Split right");
     await expect(page.locator("#palette-results .result").first()).toContainText("Split right");
