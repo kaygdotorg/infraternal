@@ -1,0 +1,17 @@
+Running as unit: run-p3733170-i41439891.scope; invocation ID: 5a415d913e8b4c75ac770c7eff4215dc
+ENVIRONMENT machine=infraternal-dev arch=x86_64 cores=8 load=14.94 26.04 32.13 compiler=rustc 1.99.0 (b940084d7 2026-09-28) scope_cpu_weight=10000
+
+running 1 test
+test release_verify::tests::verification_twenty_megabytes_fifty_runs ... METRIC name=verify_release_file payload_bytes=20971520 samples=50 p50_ms=105.790
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 5.72s
+
+ENVIRONMENT phase=cross_arch_cache load=14.94 25.85 32.03
+
+running 1 test
+test release_payload::tests::cross_architecture_cold_and_warm_cache_measurements ... METRIC name=add_host_get_arm64_binary payload_bytes=20971520 cold_ms=308.227 warm_p50_ms=104.661 samples=50 concurrent_hosts=8 eight_warm_ms=439.572 network_requests=4
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 6.45s
+

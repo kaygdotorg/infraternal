@@ -1,0 +1,14 @@
+Running as unit: run-p3748220-i41454941.scope; invocation ID: c96962c0ccdc4f0384d891857d77cd82
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-6ffzqs4g.js, chunk-chqn1x03.js, chunk-v1x28c3m.js, chunk-9n6x4dkt.js, chunk-a895a34j.js, chunk-zmxykxpz.js, chunk-kjxhpfe0.js, chunk-0th2e7qk.js, chunk-ha6p9haw.js, chunk-cqjxczw9.js, chunk-zfrs8pte.js, chunk-jmes7n23.js, chunk-fsmfh1ze.js, chunk-yvhhqffe.js, chunk-te4fp4cq.js, chunk-130y2vdx.js, chunk-ptx7vyp4.js, chunk-065hdb1d.js, chunk-p8htmrng.js, main.js, chunk-4qw8adyp.js, chunk-rqzw75kv.js, chunk-h8prebd7.js, chunk-q15hqdkx.js, chunk-3cp71khf.js, chunk-ag7vg4nx.js, chunk-t2b5f172.js, chunk-zpatga97.js, chunk-3a7fgd0v.js, chunk-gxk8gck7.js, chunk-1qqgctc9.js, chunk-8hvj6jw4.js, chunk-axbkkqp1.js, chunk-17b3s55t.js, chunk-6yt53xd4.js, chunk-qa646xhs.js, chunk-cm6ey8cq.js, chunk-vb2cjxwq.js, chunk-v72j6ssj.js, chunk-4r9ae8e4.js, chunk-dbhk4df9.js, chunk-s89gaear.js, chunk-hg4ac9x2.js, chunk-81gdxjcs.js, chunk-jk5y383t.js, chunk-7csz21kn.js, chunk-z6h8pmd1.js, chunk-fz6hta9m.js, chunk-jwxqvysc.js, chunk-60ncmgyc.js, chunk-hrvzx1ty.js, chunk-v00sbwre.js, chunk-mzjv1hhr.js, chunk-a3vjf5n3.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-6zshvtxs.js, chunk-kfmsm7nk.js, chunk-ssm15f13.js, chunk-tg6pjn8d.js, chunk-yh9apkh5.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4818
+[WebServer] latency proxy listening on http://localhost:4817; upstream port=4818
+
+Running 2 tests using 1 worker
+
+(node:3750053) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/addhost-wizard.spec.ts:416:3 › signed payload refusal names its step at 1440px (11.5s)
+  ✓  2 test/addhost-wizard.spec.ts:416:3 › signed payload refusal names its step at 393px (11.5s)
+
+  2 passed (30.3s)
