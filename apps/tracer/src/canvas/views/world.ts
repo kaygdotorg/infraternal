@@ -24,8 +24,7 @@ import { windowLabel } from "../windows/label";
 import { viewRecentWindows, viewWindowEntries } from "../toolbar/palette";
 import { keyCaps } from "../../../../../packages/ui/src/shortcuts";
 import { endActivity, setActivity } from "../../perf-activity";
-import { arrange, readColumns } from "./tracks";
-import { warmDropGrid } from "../layout/drop-grid-handle";
+import { groupsLoaded } from "../layout/groups-handle";
 
 /** Rows the view's hover card lists before its "All" row (TASTE: lists stay short). */
 const SUMMARY_ROWS = 5;
@@ -275,10 +274,11 @@ export function createViews(cx: Ctx): ViewsModule {
   function geometry(c: ViewRec): void {
     // Columns are the truth: read them back from the DOM so drags, resizes and moves persist, then make the DOM agree with
     // what was read (a group's grid, its bands and placements; D212).
-    if (c.view.layout === "tiled" && c.colsEl.querySelector(".cl-group")) {
-      warmDropGrid();
-      c.view.cols = readColumns(cx, c);
-      arrange(cx, c, c.view.cols);
+    const grouped = groupsLoaded();
+    if (c.view.layout === "tiled" && grouped && c.colsEl.querySelector(".cl-group")) {
+      // A group's DOM exists only once the grouped module has run (layout/groups.on-demand.ts), so `groupsLoaded` is set.
+      c.view.cols = grouped.readColumns(cx, c);
+      grouped.arrange(cx, c, c.view.cols);
     } else if (c.view.layout === "tiled") {
       // No group in the view: the plain read the product always did, with no style reads (plain columns pay nothing for
       // the grid, D212). A group that a change has just dissolved was already taken apart by `arrange` in that change.

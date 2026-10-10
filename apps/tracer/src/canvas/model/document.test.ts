@@ -88,15 +88,16 @@ test("a version 1 document from before D212 loads, with its split pair and a ful
 });
 
 test("a grouped view saves its spans and bands and loads back to the same grid (D212)", () => {
+  // The model as the canvas holds it at a save: a group's windows carry their settled spans and bands.
   const grouped: ViewModel = {
     ...console_,
     cols: [
       { id: "g1", w: 300, wins: [
-        { id: "a", kind: "terminal", host: "h1", sessionId: "s1", session: "one", span: 2 },
-        { id: "b", kind: "terminal", host: "h1", sessionId: "s2", session: "two", h: 0.4 },
-        { id: "c", kind: "terminal", host: "h1", sessionId: "s3", session: "three", span: 2 },
+        { id: "a", kind: "terminal", host: "h1", sessionId: "s1", session: "one", span: 2, row: 0 },
+        { id: "b", kind: "terminal", host: "h1", sessionId: "s2", session: "two", h: 0.4, row: 1 },
+        { id: "c", kind: "terminal", host: "h1", sessionId: "s3", session: "three", span: 2, row: 2 },
       ] },
-      { id: "g2", w: 300, wins: [{ id: "d", kind: "terminal", host: "h2", sessionId: "s4", session: "four" }] },
+      { id: "g2", w: 300, wins: [{ id: "d", kind: "terminal", host: "h2", sessionId: "s4", session: "four", row: 1 }] },
     ],
   };
   const doc = parseDocument(JSON.parse(JSON.stringify(toDocument([grouped], m, 2))));

@@ -14,7 +14,6 @@
  * returns nothing when the input is not a document of this format, so a damaged store can never break the canvas.
  */
 import { CELL, type Metrics } from "../layout/geometry";
-import { runsOf, settle } from "../layout/grid";
 import type { ColumnModel, ViewModel, WindowModel } from "./types";
 
 export const FORMAT = "infraternal.canvas";
@@ -63,29 +62,28 @@ function targetOf(w: WindowModel): DocTarget | undefined {
 }
 
 /**
- * The saved form of a view's columns (D212). Spans and bands are written only when they say something: a plain window
- * is saved exactly as it always was, so a document without groups does not change. `row` is written only inside a group,
- * where the list order alone cannot place a window that spans columns.
+ * The saved form of a view's columns (D212). A window's span, band and row are written only when they say something: a
+ * plain window is saved exactly as it always was. The model is settled before a save (the grouped layout writes each
+ * group window's band when it arranges it), so the windows are written as they stand. `row` exists only for a window in a
+ * group, where the list order alone cannot place a window that spans columns.
  */
 function docColumns(cols: readonly ColumnModel[], metrics: Metrics): DocColumn[] {
-  // A view with no span, band or row has no grid: its windows are saved in list order and nothing is settled. Every save
-  // runs this, and a plain view should pay nothing for the grid (D212).
-  const plain = cols.every((col) => col.wins.every((w) => (w.span ?? 1) === 1 && (w.rows ?? 1) === 1 && w.row === undefined));
-  const settled = plain ? undefined : settle(cols);
-  const grouped = settled ? runsOf(settled).filter((r) => r.to > r.from) : [];
-  const inGroup = (j: number): boolean => grouped.some((r) => j >= r.from && j <= r.to);
-  return cols.map((c, j): DocColumn => ({
+  return cols.map((c): DocColumn => ({
     id: c.id, weight: Number((c.w / metrics.colW).toFixed(3)),
-    windows: c.wins.flatMap((w, k): DocWindow[] => {
+    windows: c.wins.flatMap((w): DocWindow[] => {
       const target = targetOf(w);
       if (!target) return [];
-      const s = settled?.[j]?.wins[k];
       return [{
         id: w.id, target, ...(w.h ? { height: w.h } : {}),
-        ...(s && s.span > 1 ? { span: s.span } : {}), ...(s && s.rows > 1 ? { rows: s.rows } : {}), ...(s && inGroup(j) ? { row: s.row } : {}),
+        ...(w.span && w.span > 1 ? { span: w.span } : {}), ...(w.rows && w.rows > 1 ? { rows: w.rows } : {}), ...(w.row !== undefined ? { row: w.row } : {}),
       }];
     }),
   }));
+}
+
+/** True when a document holds a group: a window that spans columns, takes several bands, or has a band (D212). */
+export function docHasGroups(doc: CanvasDocument): boolean {
+  return doc.views.some((v) => v.layout.type === "tiled" && v.layout.columns.some((c) => c.windows.some((w) => (w.span ?? 1) > 1 || (w.rows ?? 1) > 1 || w.row !== undefined)));
 }
 
 export function toDocument(views: readonly ViewModel[], metrics: Metrics, revision: number): CanvasDocument {

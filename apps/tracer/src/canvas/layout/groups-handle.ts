@@ -1,0 +1,25 @@
+/**
+ * The handle on the grouped layout's on-demand module (layout/groups.on-demand.ts, D188). A plain view never calls it.
+ *
+ * - `loadGroups()` loads the module (the first time, a fetch; afterwards the same instance).
+ * - `groupsLoaded()` is the module once it has run, or undefined. A group can only exist once it has, so a caller that found
+ *   a group DOM element can use it without waiting.
+ * - `warmGroups()` loads it when the browser is idle, so the first grouped action does not wait for the fetch.
+ *
+ * The module registers itself here when it evaluates, so a path that imports it statically (the sharing layout, which is
+ * already on demand) and a path that loads it through `loadGroups()` see the same functions.
+ */
+import { onDemand } from "../../on-demand";
+import type { groups } from "./groups.on-demand";
+
+export type Groups = typeof groups;
+let loaded: Groups | undefined;
+
+/** Called by the module when it evaluates. */
+export const registerGroups = (g: Groups): void => { loaded = g; };
+export const groupsLoaded = (): Groups | undefined => loaded;
+export const loadGroups = (): Promise<Groups> => loaded ? Promise.resolve(loaded) : onDemand(() => import("./groups.on-demand")).then(() => loaded!);
+export const warmGroups = (): void => {
+  const idle = (f: () => void): void => { (window.requestIdleCallback ?? ((g: () => void) => window.setTimeout(g, 2000)))(f); };
+  idle(() => { void loadGroups().catch(() => undefined); });
+};

@@ -9,11 +9,9 @@
 import { Spring } from "../../../../../packages/ui/src/spring";
 import type { Ctx, ViewRec, WinRec } from "../context";
 import { el } from "../dom";
-import { columnRect, columnEls } from "../layout/columns";
+import { columnEls, columnRect, freshColumnId } from "../layout/columns";
 import { COLUMN_GAP } from "../layout/geometry";
-import { freshColumnId, fromGrid, applyCols, readColumns } from "../views/tracks";
-import { groupOf, runsOf, settle } from "../layout/grid";
-import { droppedGrid, warmDropGrid } from "../layout/drop-grid-handle";
+import { groupsLoaded } from "../layout/groups-handle";
 
 import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
 import { endActivity, setActivity } from "../../perf-activity";
@@ -36,10 +34,9 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
     const colEl = root.parentElement as HTMLElement;
     // A window in a group, or one that spans, lands through the grid (D212): the layout as it is now, before the lift, is
     // what the landing works from. A plain window keeps the flat path.
-    const cols0 = readColumns(cx, c);
-    const grid0 = (rec.model.span ?? 1) > 1 || !!groupOf(runsOf(cols0), columnEls(c.colsEl).indexOf(colEl)) ? { cols: cols0, w: Number(colEl.dataset.w) || state.metrics.colW, h: root.offsetHeight } : undefined;
-    // The landing module loads while the person is still dragging, so it is there when the window is dropped.
-    if (grid0) warmDropGrid();
+    // A group's DOM exists only once the grouped module has run (layout/groups.on-demand.ts), so a grouped window finds it loaded.
+    const groupedNow = groupsLoaded();
+    const grid0 = groupedNow && ((rec.model.span ?? 1) > 1 || colEl.parentElement?.classList.contains("cl-group")) ? { g: groupedNow, cols: groupedNow.readColumns(cx, c), w: Number(colEl.dataset.w) || state.metrics.colW, h: root.offsetHeight } : undefined;
     colEl.insertBefore(slot, root);
     const fixedH = root.style.height;
     root.classList.add("is-lifted");
@@ -110,11 +107,9 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
         root.style.cssText = fixedH ? `height:${fixedH}` : "";
         root.classList.remove("is-lifted");
         // Through the grid when the window was in one (D212): where it landed is read from the slot and the windows around it.
-        // Not loaded yet (a drop before the module arrived): the window goes back where it was, which is always valid.
-        const dropGrid = droppedGrid();
-        const landedAt = grid0 && dropGrid ? dropGrid.landing({ cols0: grid0.cols, gap: COLUMN_GAP, id: rec.model.id, root, h: grid0.h, w: grid0.w, view: c.colsEl, newId: () => freshColumnId(cx, c), slot }) : undefined;
+        const landedAt = grid0 ? grid0.g.landing({ cols0: grid0.cols, gap: COLUMN_GAP, id: rec.model.id, root, h: grid0.h, w: grid0.w, view: c.colsEl, newId: () => freshColumnId(cx, c), slot }) : undefined;
         slot.replaceWith(root);
-        if (grid0) applyCols(cx, c, fromGrid(c, landedAt ?? settle(grid0.cols)));
+        if (grid0) grid0.g.applyCols(cx, c, grid0.g.fromGrid(c, landedAt ?? grid0.g.settle(grid0.cols)));
         state.movingWindow = false;
         endActivity("drag");
         cx.view.geometry(c);

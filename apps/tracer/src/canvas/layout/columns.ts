@@ -7,6 +7,8 @@
  * way; `scrollerOf` says what actually scrolls.
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
+import type { Ctx, ViewRec } from "../context";
+import { columnEls } from "./column-els";
 import { clamp } from "../camera/camera";
 import { restPx } from "../springs";
 
@@ -21,9 +23,7 @@ const WINDOW_INSET = 14;
 const scrolls = new WeakMap<HTMLElement, { sp: Spring; target: number }>();
 
 /** The element that columns of a view are in, in order: plain columns and group wrappers (D212). */
-export function columnEls(colsEl: HTMLElement): HTMLElement[] {
-  return [...colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col, :scope > .cl-group > .cl-col")];
-}
+export { columnEls } from "./column-els";
 
 /** The child of `colsEl` that holds `el`: a plain column, or the group that holds it (D212). */
 export function topItem(colsEl: HTMLElement, el: HTMLElement): HTMLElement | null {
@@ -101,4 +101,12 @@ export function stepWindow(colEl: HTMLElement, dir: number): void {
 /** Scrolls a column so a window starts at its top. */
 export function scrollToWindow(colEl: HTMLElement, win: HTMLElement, instant = false): void {
   scrollColumn(colEl, win.offsetTop - WINDOW_INSET, instant);
+}
+
+/** An id no column of the view has: a new column never takes the id of one that is already there (the scene's ids too). */
+export function freshColumnId(cx: Ctx, c: ViewRec): string {
+  const taken = new Set(columnEls(c.colsEl).map((e) => e.dataset.id ?? ""));
+  let id = "";
+  do id = `c${++cx.state.serial}`; while (taken.has(id));
+  return id;
 }

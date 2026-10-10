@@ -11,7 +11,7 @@ import { createPillMorph, type PillMorph } from "../../../../../packages/ui/src/
 import type { Ctx, ViewRec } from "../context";
 import { el } from "../dom";
 import type { ViewModel, WindowModel } from "../model/types";
-import { applyCols } from "../views/tracks";
+import { loadGroups } from "../layout/groups-handle";
 import { copyForRecipient } from "./copy";
 import { buildShareDialog, type ShareChoice } from "./dialog";
 import type { IncomingShare, SharingAdapter } from "./adapter";
@@ -99,22 +99,25 @@ export function createSharing(cx: Ctx, adapter: SharingAdapter): SharingControll
 
   /** A team layout changed: the follower's copy takes the publisher's arrangement, moving there (FLIP on the shared spring). */
   const applyTeamSnapshot = (c: ViewRec, fresh: ViewModel): void => {
-    const before = flip.measure(flip.targets(c.colsEl));
-    const keep = new Set<string>();
-    for (const col of fresh.cols) for (const w of col.wins) {
-      let rec = c.wins.get(w.id);
-      if (!rec) { rec = cx.win.make(c, w as WindowModel); c.wins.set(w.id, rec); }
-      keep.add(w.id);
-    }
-    for (const [id, rec] of [...c.wins]) if (!keep.has(id)) { rec.stopResize?.(); cx.visibility.unwatch(rec); rec.binding?.dispose(); rec.cleanup?.(); rec.card.dispose(); c.wins.delete(id); }
-    // The arrangement, spans and bands included, goes into the DOM the one way every layout change does (D212).
-    applyCols(cx, c, fresh.cols);
-    c.view.cols = fresh.cols;
-    cx.view.geometry(c);
-    cx.view.settle(c.view.id);
-    flip.play(before, true);
-    cx.tree.render();
-    if (state.canvasLock && state.currentView === c.view.id) cx.nav.goStop(c, cx.nav.nearestStop(c, cx.camera.cam.cx));
+    // The arrangement, spans and bands included, goes into the DOM the one way every layout change does (D212). The
+    // grouped module loads first: the whole change waits for it, so the measure, the change and the motion stay in order.
+    void loadGroups().then((grouped) => {
+      const before = flip.measure(flip.targets(c.colsEl));
+      const keep = new Set<string>();
+      for (const col of fresh.cols) for (const w of col.wins) {
+        let rec = c.wins.get(w.id);
+        if (!rec) { rec = cx.win.make(c, w as WindowModel); c.wins.set(w.id, rec); }
+        keep.add(w.id);
+      }
+      for (const [id, rec] of [...c.wins]) if (!keep.has(id)) { rec.stopResize?.(); cx.visibility.unwatch(rec); rec.binding?.dispose(); rec.cleanup?.(); rec.card.dispose(); c.wins.delete(id); }
+      grouped.applyCols(cx, c, fresh.cols);
+      c.view.cols = fresh.cols;
+      cx.view.geometry(c);
+      cx.view.settle(c.view.id);
+      flip.play(before, true);
+      cx.tree.render();
+      if (state.canvasLock && state.currentView === c.view.id) cx.nav.goStop(c, cx.nav.nearestStop(c, cx.camera.cam.cx));
+    });
   };
 
   const onIncoming = (shares: IncomingShare[]): void => {

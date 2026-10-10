@@ -20,11 +20,10 @@ import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
 import { loadDroplet } from "../layout/droplet-handle";
 import { COLUMN_GAP } from "../layout/geometry";
-import { columnEls, topItem } from "../layout/columns";
-import { newRight, runsOf, splitDown, splitRight, type Col } from "../layout/grid";
-import { droppedGrid, loadDropGrid } from "../layout/drop-grid-handle";
+import { columnEls, freshColumnId, topItem } from "../layout/columns";
+import type { Col } from "../layout/grid";
+import { groupsLoaded, loadGroups, type Groups } from "../layout/groups-handle";
 import type { ViewId, WindowModel } from "../model/types";
-import { applyCols, freshColumnId, fromGrid, readColumns } from "../views/tracks";
 import { coarse, reduced } from "../dom";
 import { endActivity, setActivity } from "../../perf-activity";
 import { makeWindow, setActive } from "./frame";
@@ -150,7 +149,9 @@ export function createWindows(cx: Ctx): WindowsModule {
       const colEl = root.parentElement as HTMLElement | null;
       // A plain window (no group, no span) closes exactly as before; only a grouped one reads the view (D212).
       const grouped = !!colEl && (inGroup(colEl) || (rec.model.span ?? 1) > 1);
-      const cols = grouped ? readColumns(cx, c) : [];
+      // A group's DOM exists only once the grouped module has run, so a grouped window finds it loaded.
+      const g0 = grouped ? groupsLoaded() : undefined;
+      const cols = g0 ? g0.readColumns(cx, c) : [];
       const before = flip.measure(flip.targets(c.colsEl));
       c.wins.delete(rec.model.id);
       const freed = root.offsetHeight + COLUMN_GAP;
@@ -162,12 +163,10 @@ export function createWindows(cx: Ctx): WindowsModule {
       // The structure re-tiles: what remains in the column takes the freed height, an emptied column goes
       // and its neighbours close the gap. Everything animates as one move (a FLIP on the same spring as
       // every other layout move); the terminal refits once, at the new size.
-      if (grouped) {
-        // The removal (fills, then columns and bands that nothing crosses) lives in the grid's on-demand module, loaded
-        // when the view first held a group. A close that finds it not yet loaded applies the same change as soon as it has.
-        const dropGrid = droppedGrid();
-        const apply = (m: typeof import("../layout/drop-grid.on-demand")): void => { applyCols(cx, c, fromGrid(c, m.removeWin(cols, rec.model.id, COLUMN_GAP))); cx.view.geometry(c); };
-        if (dropGrid) apply(dropGrid); else void loadDropGrid().then(apply);
+      // The removal (fills, then columns and bands that nothing crosses) is the grouped module's (D212).
+      if (g0) {
+        g0.applyCols(cx, c, g0.fromGrid(c, g0.removeWin(cols, rec.model.id, COLUMN_GAP)));
+        cx.view.geometry(c);
       }
       else if (colEl) {
         const rest = [...colEl.querySelectorAll<HTMLElement>(":scope > .ui-window")];
@@ -222,10 +221,10 @@ export function createWindows(cx: Ctx): WindowsModule {
     if (next) { setActive(cx, next); cx.nav.focusWindow(next, true); }
   };
 
-  const reshape = (c: ViewRec, instant: boolean, change: () => Col[]): void => {
+  const reshape = (g: Groups, c: ViewRec, instant: boolean, change: () => Col[]): void => {
     const before = instant ? undefined : flip.measure(flip.targets(c.colsEl));
     const next = change();
-    applyCols(cx, c, fromGrid(c, next));
+    g.applyCols(cx, c, g.fromGrid(c, next));
     cx.view.geometry(c);
     if (before) flip.play(before);
   };
@@ -252,21 +251,23 @@ export function createWindows(cx: Ctx): WindowsModule {
     const root = rec.card.root;
     const colEl = root.parentElement as HTMLElement;
     const grouped = inGroup(colEl);
+    // The grouped module loads before the window is made: a keyboard action then finds it there (warmed when a view is built).
+    const g = grouped ? await loadGroups() : undefined;
     const before = flip.measure(flip.targets(c.colsEl));
-    if (grouped) {
+    if (g) {
       // Inside a group the grid decides where the window goes (D212): a full-size window beside the group, or a band below.
       const b = makeWindow(cx, c, side === "below" ? { ...nm, h: 1 } : nm);
       c.wins.set(nm.id, b);
-      reshape(c, instant, () => {
-        const cols = readColumns(cx, c);
-        if (side === "right") return newRight(cols, rec.model.id, { id: nm.id, colId: freshColumnId(cx, c) }, Number(colEl.dataset.w) || state.metrics.colW);
+      reshape(g, c, instant, () => {
+        const cols = g.readColumns(cx, c);
+        if (side === "right") return g.newRight(cols, rec.model.id, { id: nm.id, colId: freshColumnId(cx, c) }, Number(colEl.dataset.w) || state.metrics.colW);
         const at = columnEls(c.colsEl).indexOf(colEl);
-        const run = runsOf(cols).find((r) => at >= r.from && at <= r.to);
+        const run = g.runsOf(cols).find((r) => at >= r.from && at <= r.to);
         for (let j = run?.from ?? at; j <= (run?.to ?? at); j++) for (const m of cols[j]?.wins ?? []) {
           const el = c.wins.get(m.id)?.card.root;
           if (el && (m.rows ?? 1) === 1) m.h = el.offsetHeight;
         }
-        return splitDown(cols, rec.model.id, { id: nm.id }, undefined, 1);
+        return g.splitDown(cols, rec.model.id, { id: nm.id }, undefined, 1);
       });
     } else if (side === "right") {
       const next = cx.view.newCol({ id: freshColumnId(cx, c), w: Number(colEl.dataset.w) || state.metrics.colW, wins: [nm] });
@@ -326,7 +327,10 @@ export function createWindows(cx: Ctx): WindowsModule {
     const colEl = root.parentElement as HTMLElement;
     // The window's height before the split: a window in a group is its band, which the split halves.
     const h0 = root.offsetHeight;
-    if (!inGroup(colEl) && (direction === "down" || ownsColumn(rec))) {
+    // A stacked window split right, or any window in a group, is the grouped module's; a plain split is the flat path.
+    const plain = !inGroup(colEl) && (direction === "down" || ownsColumn(rec));
+    const g = plain ? undefined : await loadGroups();
+    if (plain) {
       if (direction === "down") {
         const half = Math.round((h0 - COLUMN_GAP) / 2);
         root.style.height = `${half}px`; root.style.flex = "none";
@@ -348,11 +352,11 @@ export function createWindows(cx: Ctx): WindowsModule {
       cx.view.geometry(c);
       cx.view.settle(c.view.id);
     } else {
-      reshape(c, instant, () => {
-        const cols = readColumns(cx, c);
-        if (direction === "right") return splitRight(cols, rec.model.id, { id: nm.id, colId: freshColumnId(cx, c), pair: `p${++state.serial}` }, COLUMN_GAP);
+      reshape(g!, c, instant, () => {
+        const cols = g!.readColumns(cx, c);
+        if (direction === "right") return g!.splitRight(cols, rec.model.id, { id: nm.id, colId: freshColumnId(cx, c), pair: `p${++state.serial}` }, COLUMN_GAP);
         const half = Math.round((h0 - COLUMN_GAP) / 2);
-        return splitDown(cols, rec.model.id, { id: nm.id }, half, half);
+        return g!.splitDown(cols, rec.model.id, { id: nm.id }, half, half);
       });
     }
     cx.tree.render();

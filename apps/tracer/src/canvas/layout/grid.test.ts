@@ -1,7 +1,7 @@
 /** The grid of a tiled view (D212): groups, split right and down, closing back to the original layout, and the invariants. */
 import { expect, test } from "bun:test";
 import { insertBand, runsOf, settle, splitDown, splitRight, newRight, type ColIn, type Col } from "./grid";
-import { problems, removeWin } from "./drop-grid.on-demand";
+import { problems, removeWin } from "./groups.on-demand";
 
 const GAP = 12;
 const W = 900;

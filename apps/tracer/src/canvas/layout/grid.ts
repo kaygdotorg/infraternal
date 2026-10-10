@@ -10,7 +10,7 @@
  *   is level with its neighbours. Band heights come from the explicit `h` of the single-band windows in that band;
  *   a band without one takes an equal share of what is left (`1fr`), as a flat column does.
  *
- * Invariants (checked by `problems` in drop-grid.on-demand.ts, and by the tests):
+ * Invariants (checked by `problems` in groups.on-demand.ts, and by the tests):
  * - Every cell of a group (row band x column) is covered by exactly one window. No gaps, no overlaps.
  * - A column's windows are listed in row order.
  * - A column that no window starts in and no window crosses is removed, and its width goes to its half partner (or
