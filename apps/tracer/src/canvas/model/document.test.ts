@@ -54,3 +54,16 @@ test("parseDocument rejects anything that is not a document of this format", () 
   }
   expect(parseDocument(good)).toEqual(good);
 });
+
+test("remote affinity survives reload and invalid UUIDs cannot become local references", () => {
+  const hostId = "11111111-2222-3333-4444-555555555555";
+  const remote: ViewModel = { ...console_, cols: [{ id: "remote", w: m.colW, wins: [{ id: "rw", kind: "terminal", host: "worker", hostId, user: "operator", address: "worker:22", sessionId: "retained" }] }] };
+  const document = toDocument([remote], m, 1);
+  const parsed = parseDocument(document)!;
+  const layout = parsed.views[0]!.layout;
+  if (layout.type !== "tiled") throw new Error("tiled");
+  expect(layout.columns[0]!.windows[0]!.target).toEqual({ type: "session", id: "retained", host: "worker", hostId, user: "operator", address: "worker:22" });
+  const bad = JSON.parse(JSON.stringify(document));
+  bad.views[0].layout.columns[0].windows[0].target.hostId = "not-a-uuid";
+  expect(parseDocument(bad)).toBeUndefined();
+});

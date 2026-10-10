@@ -13,6 +13,7 @@
  * only way untrusted JSON (storage, an import, the server) becomes a document: it checks shape and bounds and
  * returns nothing when the input is not a document of this format, so a damaged store can never break the canvas.
  */
+import { isCanonicalUuid } from "../../identifiers";
 import { CELL, type Metrics } from "../layout/geometry";
 import type { ColumnModel, ViewModel, WindowModel } from "./types";
 
@@ -21,7 +22,7 @@ export const VERSION = 1;
 
 /** What a window shows, by stable reference. */
 export type DocTarget =
-  | { type: "session"; id: string; host: string; name?: string }
+  | { type: "session"; id: string; host: string; hostId?: string; user?: string; address?: string; name?: string }
   | { type: "settings"; section: string }
   | { type: "containers" | "logs"; host: string };
 
@@ -49,7 +50,7 @@ const MAX_VIEWS = 64, MAX_COLUMNS = 64, MAX_WINDOWS = 256, MAX_TEXT = 200;
 
 /** Turns a runtime window into its stable reference. Windows that cannot be referenced (node cards) are left out. */
 function targetOf(w: WindowModel): DocTarget | undefined {
-  if (w.kind === "terminal") return w.sessionId ? { type: "session", id: w.sessionId, host: w.host, ...(w.session ? { name: w.session } : {}) } : undefined;
+  if (w.kind === "terminal") return w.sessionId ? { type: "session", id: w.sessionId, host: w.host, ...(w.hostId ? { hostId: w.hostId, ...(w.user ? { user: w.user } : {}), ...(w.address ? { address: w.address } : {}) } : {}), ...(w.session ? { name: w.session } : {}) } : undefined;
   if (w.kind === "settings") return { type: "settings", section: w.id.slice(2) };
   if (w.kind === "containers" || w.kind === "logs") return { type: w.kind, host: w.host };
   return undefined;
@@ -102,7 +103,7 @@ const finite = (v: unknown, lo: number, hi: number): v is number => typeof v ===
 
 function parseTarget(v: unknown): DocTarget | undefined {
   if (!isObject(v)) return undefined;
-  if (v.type === "session" && text(v.id) && text(v.host)) return { type: "session", id: v.id, host: v.host, ...(text(v.name) ? { name: v.name } : {}) };
+  if (v.type === "session" && text(v.id) && text(v.host) && (v.hostId === undefined || isCanonicalUuid(v.hostId))) return { type: "session", id: v.id, host: v.host, ...(isCanonicalUuid(v.hostId) ? { hostId: v.hostId, ...(text(v.user) ? { user: v.user } : {}), ...(text(v.address) ? { address: v.address } : {}) } : {}), ...(text(v.name) ? { name: v.name } : {}) };
   if (v.type === "settings" && text(v.section)) return { type: "settings", section: v.section };
   if ((v.type === "containers" || v.type === "logs") && text(v.host)) return { type: v.type, host: v.host };
   return undefined;

@@ -17,6 +17,9 @@ export interface WindowModel {
   kind: WindowKind;
   /** Host (or tag) name shown in the pill. */
   host: string;
+  /** Server-owned remote host identity; absence selects the embedded host only for known local windows. */
+  hostId?: string;
+  address?: string;
   /** The session's readable name (D178); the stable target is `sessionId`. */
   session?: string;
   /** The session this window shows (a terminal window): stable across renames and reloads (D180). */
