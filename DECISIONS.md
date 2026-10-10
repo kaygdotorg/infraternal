@@ -1871,3 +1871,31 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      appliances, and Windows until RDP or our own capture exists). It keeps
      D104's model: the server or infraternal agent holds the session. Order:
      app windows from a Mac (#146) first, then the VNC fallback, then RDP.
+222. **Shortcuts follow each platform's terminals (owner, 2026-10-10;
+     replaces D212's key table, amends D206; research #155):**
+     - **Terminal conventions win** wherever the browser lets a page claim the
+       key. Only keys the browser truly reserves (close tab, new tab/window,
+       tab switching, quit) get the nearest free key. No function-key chords
+       as defaults.
+     - **Mac** follows iTerm2/Ghostty: ⌘D split right, ⌘⇧D split down,
+       ⌘⇧P and ⌘K palette, ⌘] / ⌘[ next/previous window, ⌥⌘+arrows move
+       between windows, ⌘+/⌘−/⌘0 font size, ⌘/ shortcuts panel.
+     - **Windows and Linux** use the same actions on **Ctrl+Shift** (where Mac
+       terminals use ⌘), following Windows Terminal, Konsole, Kitty and
+       Ghostty: Ctrl+Shift+D split right, Ctrl+Shift+E split down,
+       Ctrl+Shift+P/K palette, Ctrl+Shift+] / [, Ctrl+Shift+arrows,
+       Ctrl+Shift+/ panel; font size on plain Ctrl+/−/0. Plain Ctrl+K and other
+       shell keys always reach the terminal. No default uses Ctrl+Alt (AltGr).
+       The Windows/Super key is never a default: the OS and desktops own it.
+       It stays available through rebinding.
+     - **Reserved keys:** close window (⌥⌘W on Mac) and new window
+       right/below take free keys. The final choice comes from a real-browser
+       test (Chrome, Edge, Safari, Firefox; tab and installed app). The owner
+       sees the final table before it ships.
+     - **Matching by character,** not key position, with labels from the
+       person's keyboard layout.
+     - **Fullscreen bonus:** where the browser supports Keyboard Lock in
+       fullscreen (Chrome, Edge, Safari 26.4; not Firefox), the reserved keys
+       work too: ⌘W closes the window, and any key that isn't ours (for
+       example Ctrl+W, Ctrl+T on PC) goes straight into the terminal, as in a
+       native terminal. Automatic, with no setting.
