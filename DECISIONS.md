@@ -1909,3 +1909,26 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      artifacts trustworthy wherever they are hosted. Deploying either site
      needs a Cloudflare token scoped to that job (Pages; R2 for one bucket).
      The owner provides it, and it never enters the repo, logs or argv.
+224. **Release signing: a Cloudflare Worker secret, keys mastered in 1Password
+     (owner, 2026-10-10; amends D184):** two Ed25519 keys are created in the
+     owner's **personal** 1Password: the signing key and a spare. Every
+     binary trusts both public keys.
+     - **Signing:** the signing key's private half (exported as PKCS#8) is a
+       write-only Cloudflare Worker secret. The Worker
+       (`apps/release-signer`) hashes a release's files in R2 itself, signs
+       SHA256SUMS as an OpenSSH signature (namespace "infraternal-release",
+       verifiable with `ssh-keygen -Y verify`), appends to the public
+       releases/index.json and notifies the owner.
+     - **Nobody but the Worker can use the key.** Agents and the pipeline
+       can ask for a signature, but cannot read the key. Their Cloudflare
+       token never gets Workers edit rights, and only the owner deploys the
+       Worker, because whoever can change its code could read the secret.
+     - **The spare** never leaves the owner's personal vault. It signs only a
+       rotation that retires the signing key; servers follow on their next
+       update check.
+     - **Rejected:**
+       - a key in a 1Password service account, which is readable in full;
+       - a root-only signer on the build host, which passwordless sudo
+         defeats;
+       - the Mac Secure Enclave and the 1Password SSH agent, which need the
+         owner for every release.
