@@ -1,0 +1,9 @@
+# Role: Raw command output for 0rtt-300ms-quinn repetition 2 attempt 1. SPDX-License-Identifier: AGPL-3.0-only
+qdisc netem 806a: root refcnt 2 limit 1000 delay 150ms  15ms seed 4617153661955360564
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,639502,639502,639502,639502,3506,3506.000,0.000,27390.625000
+qdisc netem 806a: root refcnt 2 limit 1000 delay 150ms  15ms seed 4617153661955360564
+ Sent 23796 bytes 46 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 1703b 3p requeues 0

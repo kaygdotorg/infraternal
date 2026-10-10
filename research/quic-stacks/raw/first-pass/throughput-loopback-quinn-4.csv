@@ -1,0 +1,7 @@
+# Role: Raw measured benchmark rows for throughput-loopback-quinn-4. SPDX-License-Identifier: AGPL-3.0-only
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+quinn-rustls-ring,stream-throughput,4-bidi-streams,1048576,20612,20612,20612,20612,27289,0.026,48.515,3.253102
+quinn-rustls-ring,stream-throughput,4-bidi-streams,1048576,20506,20506,20506,20506,30513,0.029,48.766,3.637433
+quinn-rustls-ring,stream-throughput,4-bidi-streams,1048576,26159,26159,26159,26159,34472,0.033,38.228,4.109383
+quinn-rustls-ring,stream-throughput,4-bidi-streams,1048576,20877,20877,20877,20877,19950,0.019,47.900,2.378225
+quinn-rustls-ring,stream-throughput,4-bidi-streams,1048576,18466,18466,18466,18466,29691,0.028,54.154,3.539443

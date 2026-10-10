@@ -1,0 +1,7 @@
+# Role: Five raw Linux data-plane samples for the NepTUN engine.
+engine,repetition,loadavg_start,loadavg_end,base_ping_p50_ms,base_ping_p99_ms,tunnel_ping_p50_ms,tunnel_ping_p99_ms,iperf1_mbps,iperf1_cpu_seconds_per_gbit,iperf4_mbps,iperf4_cpu_seconds_per_gbit,rss_base_bytes,rss_100_bytes,rss_1000_bytes,kernel_cgroup_base_bytes,kernel_cgroup_100_bytes,kernel_cgroup_1000_bytes
+neptun,1,27.09/25.14/22.29,26.11/24.99/22.27,0.038,0.051,0.269,4.08,870.992,2.2455,1311.307,2.2599,3887104,6033408,24588288,NA,NA,NA
+neptun,2,26.11/24.99/22.27,26.46/25.09/22.33,0.035,0.056,0.291,4.21,955.562,2.2849,1167.685,2.4580,3862528,5963776,24514560,NA,NA,NA
+neptun,3,26.46/25.09/22.33,24.77/24.79/22.28,0.037,0.050,0.263,4.23,1061.573,2.0628,988.903,2.5887,3878912,6008832,24547328,NA,NA,NA
+neptun,4,24.77/24.79/22.28,24.70/24.77/22.30,0.037,0.061,0.278,2.79,817.201,1.9516,662.945,2.3679,3850240,5951488,24502272,NA,NA,NA
+neptun,5,24.70/24.77/22.30,24.66/24.76/22.32,0.036,0.065,0.272,4.31,1146.393,2.0065,860.740,2.2467,3891200,5984256,24539136,NA,NA,NA

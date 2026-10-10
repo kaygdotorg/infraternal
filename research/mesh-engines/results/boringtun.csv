@@ -1,0 +1,7 @@
+# Role: Five raw Linux data-plane samples for the BoringTun engine.
+engine,repetition,loadavg_start,loadavg_end,base_ping_p50_ms,base_ping_p99_ms,tunnel_ping_p50_ms,tunnel_ping_p99_ms,iperf1_mbps,iperf1_cpu_seconds_per_gbit,iperf4_mbps,iperf4_cpu_seconds_per_gbit,rss_base_bytes,rss_100_bytes,rss_1000_bytes,kernel_cgroup_base_bytes,kernel_cgroup_100_bytes,kernel_cgroup_1000_bytes
+boringtun,1,29.55/23.35/17.70,29.07/23.44/17.79,0.032,0.058,0.159,0.544,624.649,1.4742,686.225,1.7580,4046848,6025216,24391680,NA,NA,NA
+boringtun,2,29.07/23.44/17.79,28.62/23.62/17.94,0.032,0.056,0.147,0.204,604.644,1.6069,586.397,1.9539,4038656,6012928,22798336,NA,NA,NA
+boringtun,3,28.62/23.62/17.94,29.60/24.01/18.12,0.031,0.055,0.143,1.81,550.605,1.5643,429.442,2.2252,4018176,5992448,22777856,NA,NA,NA
+boringtun,4,29.60/24.01/18.12,29.13/24.09/18.21,0.031,0.072,0.144,0.208,533.022,1.5426,603.580,1.8709,4022272,5996544,24363008,NA,NA,NA
+boringtun,5,29.13/24.09/18.21,28.97/24.22/18.32,0.035,0.075,0.154,4.18,594.858,1.5429,495.540,2.0014,3997696,5971968,22757376,NA,NA,NA

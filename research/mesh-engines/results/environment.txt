@@ -1,0 +1,42 @@
+# Role: Host description and rootless TUN/CPU-weight checks for the five-run benchmark samples.
+
+[timestamp]
+2026-10-07T14:06:59+02:00
+
+[kernel_and_os]
+Linux infraternal-dev 6.12.111+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.111-1 (2026-09-28) x86_64 GNU/Linux
+
+[cpu]
+Architecture:                            x86_64
+CPU(s):                                  8
+On-line CPU(s) list:                     0-7
+Model name:                              Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz
+Thread(s) per core:                      1
+Core(s) per socket:                      8
+Socket(s):                               1
+NUMA node0 CPU(s):                       0-7
+
+[memory]
+total        used        free      shared  buff/cache   available
+Mem:            31Gi       8.3Gi       307Mi       293Mi        23Gi        22Gi
+Swap:             0B          0B          0B
+
+[load_average_at_capture]
+12.97 20.83 22.15 9/1196 2673928
+
+[tun_device_node]
+crw-rw-rw- 1 root root 10, 200 Oct  5 11:08 /dev/net/tun
+
+[rootless_tun_creation]
+2: meshprobe0: <POINTOPOINT,MULTICAST,NOARP> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 500
+    link/none  promiscuity 0 allmulti 0 minmtu 68 maxmtu 65535
+    tun type tun pi off vnet_hdr off persist on addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536
+
+[cpu_weight_scope]
+0::/user.slice/user-1001.slice/user@1001.service/app.slice/run-p2673934-i6867964.scope
+10000
+
+[rootless_kernel_wireguard]
+2: meshwg0: <POINTOPOINT,NOARP> mtu 1420 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/none  promiscuity 0 allmulti 0 minmtu 0 maxmtu 2147483552
+    wireguard addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536

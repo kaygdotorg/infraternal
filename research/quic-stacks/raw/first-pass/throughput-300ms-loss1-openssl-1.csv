@@ -1,0 +1,7 @@
+# Role: Raw measured benchmark rows for throughput-300ms-loss1-openssl-1. SPDX-License-Identifier: AGPL-3.0-only
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,44381874,44381874,44381874,44381874,409381,0.390,0.023,48.802018
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,45987526,45987526,45987526,45987526,336395,0.321,0.022,40.101409
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,43403131,43403131,43403131,43403131,344169,0.328,0.023,41.028142
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,47846843,47846843,47846843,47846843,383402,0.366,0.021,45.705080
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,43014895,43014895,43014895,43014895,412539,0.393,0.023,49.178481

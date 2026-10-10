@@ -1,0 +1,7 @@
+# Role: Raw measured benchmark rows for memory-1000-openssl. SPDX-License-Identifier: AGPL-3.0-only
+stack,connections,baseline_rss_bytes,idle_rss_bytes,active_rss_bytes,idle_bytes_per_connection,stream_bytes_per_connection
+openssl-native-3.6.3,1000,5099520,74858496,81305600,69758,6447
+openssl-native-3.6.3,1000,5095424,74960896,81420288,69865,6459
+openssl-native-3.6.3,1000,5095424,74756096,81186816,69660,6430
+openssl-native-3.6.3,1000,5095424,74928128,81371136,69832,6443
+openssl-native-3.6.3,1000,5095424,74862592,81326080,69767,6463

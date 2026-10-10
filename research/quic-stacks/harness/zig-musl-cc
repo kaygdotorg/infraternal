@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Role: Adapts the Rust musl target triple for Zig's C compiler.
+# SPDX-License-Identifier: AGPL-3.0-only
+set -euo pipefail
+args=()
+for arg in "$@"; do
+  if [[ "$arg" == "--target=x86_64-unknown-linux-musl" ]]; then
+    args+=("--target=x86_64-linux-musl")
+  else
+    args+=("$arg")
+  fi
+done
+exec zig cc -target x86_64-linux-musl "${args[@]}"

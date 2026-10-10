@@ -24,11 +24,19 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
   bits-ui is for headless primitives only. Use sveltebits.xyz only as a
   visual reference. Never copy its code: its license (MIT + Commons Clause)
   is not compatible with AGPL.
+- Taste: read `docs/design/TASTE.md` before any UI work and check your work
+  against it. Every annoyance the owner spots is added there the same day.
 - Review UI from screenshots of a real production build. Codex jobs attach the
   screenshots. They do not judge their own visual quality.
 - Code explains itself. Use module docs and comments for choices and
   invariants that are not obvious.
 - No secrets in the repo, in logs or in argv. No prices in the repo.
+- No other products' names in code or code comments. Never write that something
+  is "like", "inspired by", "re-implemented from" or "the same as" another product.
+  We implement features our own way. Documentation (docs/, research/, DECISIONS)
+  may name products as examples. Code may name something only where it directly
+  integrates with or depends on it (for example calling a CLI we support, or a
+  library we ship), and then only factually.
 - Do not push or deploy unless the task tells you to.
 
 ## History and tracking (owner rule)

@@ -1,0 +1,9 @@
+# Role: Candidate release executable sizes before and after ELF symbol stripping.
+artifact,release_bytes,stripped_bytes
+boringtun,1599168,1306712
+gotatun,2723040,2261256
+neptun,1818752,1483408
+wireguard-go,3313824,3312248
+nl-wireguard-bench,1470816,1061560
+typed-minimal-bench,601840,459896
+nlink-bench,2313400,1589752

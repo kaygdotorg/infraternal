@@ -1,0 +1,7 @@
+# Role: Raw measured benchmark rows for 0rtt-300ms-quinn. SPDX-License-Identifier: AGPL-3.0-only
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,607192,607192,607192,607192,3851,3851.000,0.000,30085.937500
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,606061,606061,606061,606061,5582,5582.000,0.000,43609.375000
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,910007,910007,910007,910007,7056,7056.000,0.000,55125.000000
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,607428,607428,607428,607428,4979,4979.000,0.000,38898.437500
+quinn-rustls-ring,resumption-0rtt-echo,mtls-ticket-accepted,1,611772,611772,611772,611772,5977,5977.000,0.000,46695.312500

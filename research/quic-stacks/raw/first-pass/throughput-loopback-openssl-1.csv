@@ -1,0 +1,7 @@
+# Role: Raw measured benchmark rows for throughput-loopback-openssl-1. SPDX-License-Identifier: AGPL-3.0-only
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,19367,19367,19367,19367,27459,0.026,51.634,3.273368
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,24898,24898,24898,24898,28837,0.028,40.164,3.437638
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,12521,12521,12521,12521,19907,0.019,79.866,2.373099
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,13637,13637,13637,13637,22754,0.022,73.330,2.712488
+openssl-native-3.6.3,stream-throughput,1-bidi-stream,1048576,23662,23662,23662,23662,33936,0.032,42.262,4.045486

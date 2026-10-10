@@ -1,0 +1,7 @@
+# Role: Five raw Linux kernel WireGuard reference samples.
+engine,repetition,loadavg_start,loadavg_end,base_ping_p50_ms,base_ping_p99_ms,tunnel_ping_p50_ms,tunnel_ping_p99_ms,iperf1_mbps,iperf1_cpu_seconds_per_gbit,iperf4_mbps,iperf4_cpu_seconds_per_gbit,rss_base_bytes,rss_100_bytes,rss_1000_bytes,kernel_cgroup_base_bytes,kernel_cgroup_100_bytes,kernel_cgroup_1000_bytes
+kernel,1,30.23/26.41/19.98,33.30/27.27/20.36,0.033,0.061,0.154,0.305,2138.291,1.9600,2572.945,1.5457,NA,NA,NA,6393856,5406720,5185536
+kernel,2,33.30/27.27/20.36,34.80/27.79/20.61,0.035,0.110,0.168,0.316,2280.239,1.7012,2371.206,1.7166,NA,NA,NA,3555328,2498560,2437120
+kernel,3,34.80/27.79/20.61,35.71/28.21/20.82,0.035,0.051,0.147,4.12,2196.570,2.4421,2657.790,1.7092,NA,NA,NA,3891200,3022848,3002368
+kernel,4,35.71/28.21/20.82,35.78/28.60/21.06,0.035,0.053,0.152,2.12,2482.249,2.5059,2829.709,1.5469,NA,NA,NA,3297280,2486272,2437120
+kernel,5,35.78/28.60/21.06,35.36/28.73/21.19,0.035,0.060,0.157,0.264,2361.323,3.0853,2769.902,2.8527,NA,NA,NA,3842048,2646016,2744320

@@ -147,3 +147,16 @@ Reviews and fixes run at the same time as the next lane's build.
   results from the pinned performance VM, as specified in section 1.
 - For size investigations, use `cargo bloat --release --crates` for native
   builds or pass the x86_64 musl target to inspect the static release profile.
+
+## 8. Backend grill first, design grill second (owner, 2026-10-08)
+
+Every feature goes through two grills, in this order:
+
+1. **Backend grill, extensively.** The orchestrator questions the owner until the backend design tree is empty. The decisions are recorded in DECISIONS.md and the feature's issue, and Codex jobs start building at once.
+2. **Design grill, extensively.** Then come the design questions and mockup iterations, as many rounds as it takes to reach "good enough", while the backend builds in parallel.
+
+The aim is that the backend is finished when the design is approved, so approved UI is wired to real behaviour instead of a test double. Every status report says plainly what is shipped, what is built but not wired, and what is mockup only.
+
+## 9. Every backend job gets a break-it review (owner, 2026-10-08)
+
+When a Codex implementation job finishes, an independent Codex reviewer starts automatically on its branch head (`~/.local/state/codex-jobs/infraternal/auto-review.sh`, template `review-template.md`). The reviewer gets the diff, the contract and the claims, not the author's reasoning. Its only goal is to prove the work wrong: correctness and concurrency edge cases, defensive input and authorization checks, data safety, resource leaks, re-measured performance claims and contract drift. Each finding is a failing test committed on `review-<job>`, plus an entry in its findings file and a comment on the issue for P0/P1, ending with a verdict. The implementation's next run must make those tests pass before merge. Sol reviews security, data and sync work; Luna reviews the rest.

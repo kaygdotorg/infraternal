@@ -1,0 +1,7 @@
+# Role: Five raw Linux data-plane samples for the GotaTun engine.
+engine,repetition,loadavg_start,loadavg_end,base_ping_p50_ms,base_ping_p99_ms,tunnel_ping_p50_ms,tunnel_ping_p99_ms,iperf1_mbps,iperf1_cpu_seconds_per_gbit,iperf4_mbps,iperf4_cpu_seconds_per_gbit,rss_base_bytes,rss_100_bytes,rss_1000_bytes,kernel_cgroup_base_bytes,kernel_cgroup_100_bytes,kernel_cgroup_1000_bytes
+gotatun,1,29.68/24.60/18.54,31.46/25.14/18.78,0.039,0.052,0.224,4.18,598.482,1.8385,553.610,2.3376,4849664,6873088,24809472,NA,NA,NA
+gotatun,2,31.46/25.14/18.78,31.01/25.26/18.89,0.035,0.050,0.215,0.297,705.334,1.8073,504.182,2.2439,4845568,6844416,24891392,NA,NA,NA
+gotatun,3,31.01/25.26/18.89,31.93/25.72/19.14,0.037,0.095,0.214,0.333,596.986,1.9147,509.597,2.4102,4825088,6930432,25006080,NA,NA,NA
+gotatun,4,31.93/25.72/19.14,31.12/25.75/19.22,0.035,0.055,0.222,4.21,533.677,1.9136,514.288,2.3664,4915200,6963200,24932352,NA,NA,NA
+gotatun,5,31.12/25.75/19.22,29.95/25.67/19.27,0.035,0.065,0.216,0.418,621.745,1.8945,573.628,2.2306,4780032,6819840,24776704,NA,NA,NA

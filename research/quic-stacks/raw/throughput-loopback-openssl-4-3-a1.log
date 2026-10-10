@@ -1,0 +1,3 @@
+# Role: Raw command output for throughput-loopback-openssl-4 repetition 3 attempt 1. SPDX-License-Identifier: AGPL-3.0-only
+stack,workload,scenario,units,min_us,median_us,p95_us,max_us,cpu_us,cpu_per_unit_us,median_MiB_s,cpu_s_per_Gbit
+openssl-native-3.6.3,stream-throughput,4-bidi-streams,1048576,15678,15678,15678,15678,30475,0.029,63.784,3.632903
