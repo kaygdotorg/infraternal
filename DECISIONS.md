@@ -1862,3 +1862,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        the server binary; `--web-root` stays as a development override.
        Automatic TLS belongs to a separate **reverse-proxy component**, a
        plugin per D198, not to the core server.
+221. **Remote desktop: our own capture first, VNC as the universal fallback
+     (owner, 2026-10-10; amends D105):** on a Mac running the infraternal
+     agent, app windows and the whole screen come from our own capture
+     (D207, D208). VNC is no longer the first Mac target. VNC is the lowest
+     common denominator and fallback: it covers any machine our agent can't
+     capture or isn't installed on (Linux desktops, Proxmox/QEMU consoles,
+     appliances, and Windows until RDP or our own capture exists). It keeps
+     D104's model: the server or infraternal agent holds the session. Order:
+     app windows from a Mac (#146) first, then the VNC fallback, then RDP.
