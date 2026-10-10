@@ -368,6 +368,55 @@ pub async fn cleanup(context: &Context, home: &Path, uid: u32) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bootstrap_lock_delays_uninstall_without_omitting_its_handler() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let uid = nix::unistd::Uid::effective().as_raw();
+        if uid == 0 {
+            return;
+        } // Root's frozen layout cannot be redirected to a fixture.
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(format!(".cache/codex-scratch/a87/n{}", std::process::id()));
+        let base = home.join(".local/share/infraternal");
+        let context = Context {
+            host: "00000000000000000000000000000001".into(),
+            uid,
+            data: base.join("state"),
+            sessions: base.join("sessions"),
+        };
+        let paths = layout(&context, &home, uid).unwrap();
+        for path in [
+            base.join("bin"),
+            paths.unit.parent().unwrap().to_owned(),
+            paths.launcher.parent().unwrap().to_owned(),
+            base.join(".bootstrap-lock"),
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(base.join(".bootstrap-owner"), &context.host).unwrap();
+        std::fs::write(&paths.unit,format!("# infraternal bootstrap {}\nKillMode=process\nExecStart=\"{}/bin/current\" agent --data \"{}/state\" --state \"{}/sessions\" run\n",context.host,base.display(),base.display(),base.display())).unwrap();
+        for file in [base.join(".bootstrap-owner"), paths.unit.clone()] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        symlink(base.join("bin/current"), &paths.launcher).unwrap();
+        symlink(base.join("bin/live"), base.join("bin/current")).unwrap();
+        let mut plugin = UninstallPlugin::new(context.clone(), home.clone(), uid);
+        let registered = plugin.is_ok();
+        if let Ok(plugin) = &mut plugin {
+            let input =
+                serde_json::to_vec(&serde_json::json!({"host":context.host,"dry_run":true}))
+                    .unwrap();
+            assert!(plugin.call_with_reply(crate::UNINSTALL.id, &input).is_err());
+            std::fs::remove_dir(base.join(".bootstrap-lock")).unwrap();
+            assert!(plugin.call_with_reply(crate::UNINSTALL.id, &input).is_ok());
+        }
+        std::fs::remove_dir_all(home).unwrap();
+        assert!(
+            registered,
+            "the service starts before bootstrap removes its lock"
+        );
+    }
     #[tokio::test]
     async fn retirement_signals_the_shell_after_its_foreground_job_exits() {
         use infraternal_shim::frame::Frame;
