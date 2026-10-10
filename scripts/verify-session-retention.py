@@ -8,6 +8,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -95,7 +96,39 @@ def run(binary):
         client.send(3, 0x16, uuid.uuid4().bytes + bytes(16))
         stream, kind, body = client.read()
         assert (stream, kind) == (3, 0x0f) and struct.unpack('<H', body[:2])[0] == 4404
-        print('Bounded owned exit, unfunded notification, restarted reconnect status, unknown session: PASS')
+        client.kill()
+        # Publication precedes peer/listener teardown. Model that overlap with
+        # the real exit record and a private same-UID socket closing handshakes.
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(path))
+        os.chmod(path, 0o600)
+        listener.listen()
+        listener.settimeout(.05)
+        stop = threading.Event()
+
+        def retiring_listener():
+            while not stop.is_set():
+                try:
+                    peer, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                peer.close()
+
+        worker = threading.Thread(target=retiring_listener)
+        worker.start()
+        try:
+            client = Binary(binary, state)
+            client.send(1, 0x16, identity.bytes + bytes(16))
+            assert ended(client, identity) == first
+        finally:
+            stop.set()
+            listener.close()
+            worker.join(timeout=1)
+            assert not worker.is_alive()
+            path.unlink(missing_ok=True)
+        print('Bounded owned exit, unfunded notification, restarted reconnect status, retirement handshake race, unknown session: PASS')
     finally:
         if client is not None:
             client.kill()
