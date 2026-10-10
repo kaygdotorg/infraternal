@@ -783,7 +783,7 @@ test("droplet split: a goo layer exists only while it runs, the gap pulls past i
   await expect(page.locator(".cl-goo")).toHaveCount(1, { timeout: 2000 });
   await expect(page.locator(".cl-goo")).toHaveCount(0, { timeout: 3000 });
   const r = await page.evaluate(() => (window as unknown as { __splitProbe: { frames: number; drawMs: number; maxDrawMs: number; trace: Array<[number, number]> } }).__splitProbe);
-  console.log(`SPLIT_COST frames=${r.frames} avgDrawMs=${(r.drawMs / r.frames).toFixed(3)} maxDrawMs=${r.maxDrawMs.toFixed(2)}`);
+  console.log(`SPLIT_COST frames=${r.frames} avgDrawMs=${(r.drawMs / r.frames).toFixed(3)} maxDrawMs=${r.maxDrawMs.toFixed(2)} durationMs=${r.trace.at(-1)?.[0]}`);
   expect(r.maxDrawMs).toBeLessThan(4);
   const gaps = r.trace.map((t) => t[1]);
   expect(Math.max(...gaps)).toBeGreaterThan(60); // pulled far past the resting gap
