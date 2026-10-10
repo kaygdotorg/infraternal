@@ -151,27 +151,9 @@ async fn writer(
                 )
                 .await?;
             }
-            Message::Event(stream, json) => {
-                tx.send(
-                    socket,
-                    stream,
-                    &Frame::Event {
-                        sub_id: 0,
-                        event_json: &json,
-                    },
-                )
-                .await?;
-            }
+            Message::Event(stream, json) => write_event(&mut tx, socket, stream, &json).await?,
             Message::Exited(stream, json, delivered) => {
-                tx.send(
-                    socket,
-                    stream,
-                    &Frame::Event {
-                        sub_id: 0,
-                        event_json: &json,
-                    },
-                )
-                .await?;
+                write_event(&mut tx, socket, stream, &json).await?;
                 let _ = delivered.send(());
             }
             Message::Pong(nonce, sent_us) => {
@@ -196,6 +178,24 @@ async fn writer(
     }
     Ok(())
 }
+/// Keep both ordinary and acknowledged exit Events on the same ordered wire path.
+async fn write_event(
+    tx: &mut Transmit,
+    socket: &impl Channel,
+    stream: u32,
+    json: &[u8],
+) -> io::Result<()> {
+    tx.send(
+        socket,
+        stream,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: json,
+        },
+    )
+    .await
+}
+
 // Shared dispatch must never await the capacity consumed by a stalled writer.
 // Unacknowledged input remains with the shim and can be replayed on reconnect.
 fn reply(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
