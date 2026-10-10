@@ -981,3 +981,32 @@ fn run_shim(
         ring_capacity,
     })
 }
+
+#[cfg(test)]
+mod dispatch_tests {
+    //! Ensures internal CLI actions resolve and execute through their registered handler.
+
+    use super::{ExitCode, dispatch_selected_action};
+    use crate::cli::{actions, command_tree};
+
+    #[test]
+    fn hidden_session_shim_dispatches_from_the_registered_action() {
+        let registry = actions::registry().expect("action registry");
+        let matches = command_tree::build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "__shim",
+                "--session",
+                "invalid",
+                "--uid",
+                "1000",
+            ])
+            .expect("registered session shim input schema");
+        let selected = command_tree::selected(&matches);
+
+        assert_eq!(
+            dispatch_selected_action(&registry, &selected, false),
+            ExitCode::from(1)
+        );
+    }
+}
