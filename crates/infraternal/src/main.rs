@@ -676,5 +676,14 @@ mod startup_tests;
 
 /// First userspace entry protection applies equally to server and child modes.
 fn harden_startup() -> Result<(), nix::errno::Errno> {
-    nix::sys::prctl::set_dumpable(false)
+    nix::sys::prctl::set_dumpable(false)?;
+    #[cfg(feature = "remote")]
+    if std::env::args_os()
+        .skip(1)
+        .find(|argument| argument != "--json")
+        .is_some_and(|argument| argument == "server")
+    {
+        crate::restart::queue_reload().map_err(|_| nix::errno::Errno::EIO)?;
+    }
+    Ok(())
 }

@@ -1564,7 +1564,15 @@ fn spawn_socketpair_agent(
             nix::sys::stat::Mode::empty(),
         )
         .map_err(|_| AgentError::Unavailable)?;
-    let attributes = PosixSpawnAttr::init().map_err(|_| AgentError::Unavailable)?;
+    let mut attributes = PosixSpawnAttr::init().map_err(|_| AgentError::Unavailable)?;
+    // Runtime workers inherit the server's early blocked reload mask. Child
+    // roles and PTY shells must start with their own normal signal policy.
+    attributes
+        .set_sigmask(&nix::sys::signal::SigSet::empty())
+        .map_err(|_| AgentError::Unavailable)?;
+    attributes
+        .set_flags(nix::spawn::PosixSpawnFlags::POSIX_SPAWN_SETSIGMASK)
+        .map_err(|_| AgentError::Unavailable)?;
     let pid = posix_spawn(path.as_c_str(), &actions, &attributes, &argv, &envp)
         .map_err(|_| AgentError::Unavailable)?;
     drop(child);

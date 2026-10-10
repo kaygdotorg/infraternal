@@ -32,6 +32,16 @@ pub(crate) struct Control {
 }
 impl Control {
     pub(crate) fn start(data: &Path) -> io::Result<Self> {
+        let reload = signal(SignalKind::hangup())?;
+        let mut mask = nix::sys::signal::SigSet::empty();
+        mask.add(nix::sys::signal::Signal::SIGHUP);
+        // Register first, then drain pending signals. Even a later endpoint
+        // failure leaves a handler, rather than the terminating default.
+        nix::sys::signal::sigprocmask(
+            nix::sys::signal::SigmaskHow::SIG_UNBLOCK,
+            Some(&mask),
+            None,
+        )?;
         let directory = data.join("restart");
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -74,7 +84,7 @@ impl Control {
         Ok(Self {
             listener,
             path,
-            reload: signal(SignalKind::hangup())?,
+            reload,
         })
     }
     pub(crate) async fn requested(
@@ -244,6 +254,7 @@ impl Replacement {
             }
             // Execute exactly the checked inode; no pathname lookup occurs after
             // exporting the CA. O_CLOEXEC closes this fd in the successor.
+            queue_reload()?;
             nix::unistd::fexecve(&self.binary.file, &argv, &environment)?;
             Ok(())
         };
@@ -318,4 +329,13 @@ mod tests;
 /// Blocking cleanup has its own SIGKILL/reap deadline; exec cannot wait forever.
 fn shutdown_runtime(runtime: tokio::runtime::Runtime) {
     runtime.shutdown_timeout(Duration::from_secs(4));
+}
+
+/// Block before spawning threads or exec; pending reloads cannot hit a default
+/// disposition in the successor's loader/startup window.
+pub(crate) fn queue_reload() -> io::Result<()> {
+    let mut mask = nix::sys::signal::SigSet::empty();
+    mask.add(nix::sys::signal::Signal::SIGHUP);
+    nix::sys::signal::sigprocmask(nix::sys::signal::SigmaskHow::SIG_BLOCK, Some(&mask), None)?;
+    Ok(())
 }

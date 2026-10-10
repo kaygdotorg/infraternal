@@ -334,3 +334,38 @@ fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn early_hangup_is_queued_until_control_installs_its_handler() {
+    const NAME: &str = "restart::tests::early_hangup_is_queued_until_control_installs_its_handler";
+    if std::env::var_os("INFRATERNAL_EARLY_HUP_TEST").is_some() {
+        queue_reload().unwrap();
+        // Direct the signal to this thread: the real image does this before
+        // creating any runtime threads, which then inherit the blocked mask.
+        nix::sys::signal::raise(nix::sys::signal::Signal::SIGHUP).unwrap();
+        let directory = Directory::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut control = Control::start(&directory.0).unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), control.requested(None))
+                    .await
+                    .unwrap()
+                    .is_ok()
+            );
+        });
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_EARLY_HUP_TEST", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "early SIGHUP ended the fresh image: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
