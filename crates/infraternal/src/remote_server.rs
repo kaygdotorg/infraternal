@@ -67,13 +67,24 @@ pub(crate) async fn serve(
         let source = remote
             .as_ref()
             .map(|remote| remote.enrollment.source.clone());
-        let mut control = crate::restart::Control::start(&config.data_dir)
-            .map_err(infraternal_server::ServerError::Listener)?;
+        let control = crate::restart::Control::start(&config.data_dir);
         let serving = async move {
             if let Some(remote) = remote {
                 infraternal_server::serve_with_remote(config, remote).await
             } else {
                 infraternal_server::serve(config).await
+            }
+        };
+        let mut control = match control {
+            Ok(control) => control,
+            Err(error) => {
+                // The private convenience endpoint is not a dependency of the
+                // HTTP server or retained public CA verification.
+                eprintln!(
+                    "Server restart control unavailable; continuing without its socket ({})",
+                    error.kind()
+                );
+                return serving.await.map(|()| Outcome::Stopped);
             }
         };
         tokio::pin!(serving);
