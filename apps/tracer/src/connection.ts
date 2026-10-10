@@ -7,7 +7,9 @@
  * - the control stream (0): actions as `Call`/`Result`, the account's recovery notices, and pings;
  * - the stream table: odd stream ids are the client's, one per terminal, allocated by `openStream`; frames are
  *   dispatched to the stream's handler by id, so the hot path (decode, then hand the frame over) does not change;
- * - reconnecting with backoff, forced drops for the resume probe, and protocol failures.
+ * - reconnecting with a bounded, jittered exponential backoff, forced drops for the resume probe, and protocol
+ *   failures. The backoff starts over only once a socket has stayed up for a while, so a socket that is welcomed
+ *   and then dropped at once (a request the server keeps refusing) backs off instead of reconnecting every 50 ms.
  *
  * A terminal (`TerminalClient`) keeps its own cursors (output, input, acknowledged input) and re-attaches itself
  * with them on every welcome, so a reconnect restores every stream independently. Closing a stream detaches it
@@ -48,6 +50,11 @@ const WRITER_ROTATE_AT = 28;
  * leaves room for the rotation above.
  */
 export const STREAMS_PER_SOCKET = 28;
+/** Reconnect pauses: the first retry is quick (a dropped mobile link), repeats double up to the ceiling. */
+const RECONNECT_FIRST_MS = 50;
+const RECONNECT_CEILING_MS = 5000;
+/** A socket that stayed welcomed this long ended for a new reason; the next reconnect is quick again. */
+const STABLE_SOCKET_MS = 10_000;
 const MAX_SOCKETS = 12;
 const VERSION = 1;
 const SEND_BUFFER_SIZE = 32 * 1024;
@@ -114,6 +121,8 @@ export class MuxConnection {
   private lastPingAt = -Infinity;
   private retryTimer = 0;
   private retryAttempt = 0;
+  /** When the current socket was welcomed (`performance.now()`), for the backoff's reset. */
+  private welcomedAt = 0;
   private forcedDrop = false;
   private closed = false;
   private welcomed = false;
@@ -139,6 +148,7 @@ export class MuxConnection {
       this.credentials?.connectionId.fill(0);
       this.credentials?.resumeToken.fill(0);
       this.credentials = undefined;
+      this.retryAttempt = 0;
       this.socket.close(4001, "tracer connection rotation");
       return id;
     }
@@ -332,6 +342,7 @@ export class MuxConnection {
     socket.onerror = () => this.status("Connection interrupted. Reconnecting…");
     socket.onclose = () => {
       if (this.socket !== socket || this.closed) return;
+      const lived = this.welcomed && performance.now() - this.welcomedAt >= STABLE_SOCKET_MS;
       this.socket = undefined;
       this.decoder = undefined;
       this.welcomed = false;
@@ -342,6 +353,8 @@ export class MuxConnection {
       this.calls.clear();
       const forced = this.forcedDrop;
       this.forcedDrop = false;
+      // A drop we asked for, or the end of a socket that worked for a while, is not a repeat failure.
+      if (lived || forced) this.retryAttempt = 0;
       for (const s of [...this.streams.values()]) s.onDisconnected(forced);
       this.status("Connection lost. Reconnecting…");
       // With no stream left there is nothing to restore; the next `openStream` connects again.
@@ -376,7 +389,7 @@ export class MuxConnection {
           deadline: Date.now() + frame.resumeWindowSeconds * 1000,
         };
         this.welcomed = true;
-        this.retryAttempt = 0;
+        this.welcomedAt = performance.now();
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         for (const l of [...this.welcomeListeners]) l();
         if (!this.resumeSent) this.writersUsed.clear();
@@ -426,7 +439,9 @@ export class MuxConnection {
 
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer !== 0) return;
-    const delay = Math.min(1000, 50 * 2 ** Math.min(this.retryAttempt, 4));
+    // Equal jitter: half the step is fixed, half random, so many pages dropped together do not return in step.
+    const step = Math.min(RECONNECT_CEILING_MS, RECONNECT_FIRST_MS * 2 ** Math.min(this.retryAttempt, 10));
+    const delay = step / 2 + Math.random() * (step / 2);
     this.retryAttempt += 1;
     this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, delay);
   }
