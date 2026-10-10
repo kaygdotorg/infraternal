@@ -566,7 +566,7 @@ button { color: inherit; }
   .panes { bottom: calc(var(--keybar-inset) + var(--keybar-height) + var(--keybar-gap) + env(safe-area-inset-bottom)); }
 }
 @media (max-width: 720px) {
-  .terminal-screen { --gutter: max(12px, env(safe-area-inset-left)); }
+  .terminal-screen { --gutter: max(16px, env(safe-area-inset-left)); }
   .tabs { display: none; }
   .capsule { width: 100%; min-width: 0; justify-self: stretch; }
   .capsule-kbd { display: none; }

@@ -82,6 +82,9 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   const edges = el("div", "cl-edges");
   viewport.append(world, edges);
   core.panes.append(viewport);
+  // The viewport's padding is the top bar's gutter (canvas.css): its client width includes it, so the width the
+  // phone sizes fill is the client width less both paddings (TASTE: windows keep the gutter on phones).
+  const gutterPx = (): number => parseFloat(getComputedStyle(viewport).paddingLeft) || 0;
   const setEdge = (sizes: ReturnType<typeof readSizes>): void => { stage.toggleAttribute("data-window-edge", edgeToEdge(coarse.matches || innerWidth < 720, sizes)); };
   setEdge(readSizes());
   const backdrop: Backdrop | undefined = options.dots === false ? undefined : createBackdrop(stage, viewport);
@@ -89,7 +92,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   const events = new AbortController();
 
   const state: CanvasState = {
-    metrics: metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes()),
+    metrics: metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes(), gutterPx()),
     activeWin: undefined, currentView: "console", canvasLock: true, snapIdx: 0, movingWindow: false, serial: 0, recent: new Map(),
   };
   let frameQueued = 0;
@@ -148,7 +151,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     cx.camera.resized();
     backdrop?.measure();
     const previous = state.metrics;
-    const next = metricsFor(w, h, coarse.matches, sizes);
+    const next = metricsFor(w, h, coarse.matches, sizes, gutterPx());
     if (next.colW === previous.colW && next.clh === previous.clh && next.narrow === previous.narrow) {
       // Nothing about the windows changed (the area did): keep the framing centred, unless a flight is under way.
       if (performance.now() >= animatingUntil) { if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true); }
@@ -200,7 +203,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     setViews(models) {
       cx.inputLock.reset();
       cx.view.clear();
-      state.metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes());
+      state.metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes(), gutterPx());
       cx.camera.resized();
       world.style.setProperty("--clh", `${state.metrics.clh}px`);
       for (const v of typeof models === "function" ? models(state.metrics) : models) cx.views.set(v.id, cx.view.build(v));
