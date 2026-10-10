@@ -80,9 +80,9 @@ pub(crate) async fn serve(
         };
         tokio::select! {
             result = serving => result.map(|()| Outcome::Stopped),
-            binary = control.requested() => {
-                let binary = binary.map_err(infraternal_server::ServerError::Listener)?;
-                Ok(Outcome::Restart(crate::restart::Replacement::new(binary, source.as_deref())))
+            replacement = control.requested(source.as_deref()) => {
+                let replacement = replacement.map_err(infraternal_server::ServerError::Listener)?;
+                Ok(Outcome::Restart(replacement))
             }
         }
     }

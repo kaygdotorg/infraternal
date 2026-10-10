@@ -53,12 +53,15 @@ async fn restart_requests_use_the_servers_binary_and_reject_untrusted_paths() {
     let directory = Directory::new();
     let mut control = Control::start(&directory.0).unwrap();
     let (received, requested) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(control.requested(), request(&directory.0, None))
+        tokio::join!(control.requested(None), request(&directory.0, None))
     })
     .await
     .expect("owner restart request deadline");
     assert!(requested.is_ok());
-    assert_eq!(received.unwrap(), std::env::current_exe().unwrap());
+    assert_eq!(
+        received.unwrap().binary.path,
+        std::env::current_exe().unwrap()
+    );
     let alias = directory.0.join("alias");
     std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &alias).unwrap();
     assert!(executable(&alias).is_err());
@@ -101,4 +104,103 @@ fn private_path_prefix_cannot_authorize_a_parent_directory_escape() {
         .join(format!("{}usr/bin/true", "../".repeat(depth)));
     assert!(escaped.exists());
     assert!(executable(&escaped).is_err());
+}
+
+#[test]
+fn replacement_never_exports_to_a_general_purpose_binary() {
+    struct Probe(std::sync::atomic::AtomicUsize);
+    impl infraternal_server::ca::CaKeySource for Probe {
+        fn load(
+            &self,
+        ) -> Result<infraternal_server::ca::CaMaterial, infraternal_server::ca::CaError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(infraternal_server::ca::CaError)
+        }
+    }
+    let source = Probe(std::sync::atomic::AtomicUsize::new(0));
+    let _replacement = Replacement::new(
+        crate::restart_binary::Opened::open(PathBuf::from("/usr/bin/bash")).unwrap(),
+        Some(&source),
+    );
+    assert_eq!(
+        source.0.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "an unmarked executable must never receive signing material, even as root"
+    );
+}
+
+#[test]
+fn rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode() {
+    if nix::unistd::Uid::effective().is_root() {
+        return;
+    }
+    let directory = Directory::new();
+    let binary = directory.0.join("infraternal");
+    std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+    let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
+    assert!(infraternal_server::ca_handoff_binary::capable(&opened.file).unwrap());
+    assert!(!opened.warm);
+    let original = opened.file.metadata().unwrap().ino();
+    std::fs::rename(&binary, directory.0.join("retained")).unwrap();
+    std::fs::copy("/usr/bin/bash", &binary).unwrap();
+    assert_eq!(opened.file.metadata().unwrap().ino(), original);
+    assert_ne!(std::fs::metadata(&binary).unwrap().ino(), original);
+    assert!(Replacement::new(opened, None).input.is_none());
+}
+
+#[test]
+fn root_owned_marked_target_requires_protected_root_parents() {
+    if !nix::unistd::Uid::effective().is_root() {
+        return; // Explicitly run this test again in the root fixture scope.
+    }
+    let directory = Directory::new();
+    let binary = directory.0.join("infraternal");
+    std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+    let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
+    assert!(opened.warm);
+    std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o770)).unwrap();
+    assert!(
+        !crate::restart_binary::Opened::open(binary.clone())
+            .unwrap()
+            .warm
+    );
+    std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::copy("/usr/bin/bash", &binary).unwrap();
+    assert!(!crate::restart_binary::Opened::open(binary).unwrap().warm);
+}
+
+#[test]
+fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
+    const NAME: &str =
+        "restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin";
+    if std::env::var_os("INFRATERNAL_RESTART_FD_TEST").is_some() {
+        if std::env::current_exe().unwrap().file_name().unwrap() == "retained" {
+            assert_eq!(
+                std::fs::read_link("/proc/self/fd/0").unwrap(),
+                Path::new("/dev/null")
+            );
+            return;
+        }
+        let directory = PathBuf::from(std::env::var_os("INFRATERNAL_RESTART_FD_TEST").unwrap());
+        let binary = directory.join("candidate");
+        std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+        let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
+        std::fs::rename(&binary, directory.join("retained")).unwrap();
+        std::fs::copy("/usr/bin/bash", &binary).unwrap();
+        // Keep cleanup with the outer process: successful exec replaces Rust destructors.
+        let error = Replacement::new(opened, None).exec();
+        panic!("fd replacement failed: {}", error.kind());
+    }
+    let directory = Directory::new();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_RESTART_FD_TEST", &directory.0)
+        .stdin(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }

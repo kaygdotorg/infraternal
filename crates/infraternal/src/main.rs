@@ -11,6 +11,8 @@ mod remote;
 mod remote_server;
 #[cfg(feature = "remote")]
 mod restart;
+#[cfg(feature = "remote")]
+mod restart_binary;
 #[cfg(feature = "ssh")]
 mod ssh_askpass;
 

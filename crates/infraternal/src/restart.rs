@@ -1,14 +1,13 @@
 //! Implements local-owner restart requests and same-PID exec without transporting the CA over a named socket [168][217], #154.
 
 use std::{
-    ffi::OsString,
+    ffi::CString,
     io,
     os::unix::{
+        ffi::OsStrExt,
         fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
-        process::CommandExt,
     },
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     time::Duration,
 };
 use tokio::{
@@ -19,7 +18,7 @@ use tokio::{
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct Options {
-    /// Verified replacement executable (defaults to the running server's binary).
+    /// Replacement executable (root-owned handoff-capable builds can retain CA unlock).
     #[arg(long)]
     pub binary: Option<PathBuf>,
 }
@@ -78,10 +77,13 @@ impl Control {
             reload: signal(SignalKind::hangup())?,
         })
     }
-    pub(crate) async fn requested(&mut self) -> io::Result<PathBuf> {
+    pub(crate) async fn requested(
+        &mut self,
+        source: Option<&dyn infraternal_server::ca::CaKeySource>,
+    ) -> io::Result<Replacement> {
         loop {
             let mut socket = tokio::select! {
-                _ = self.reload.recv() => return current_binary(),
+                _ = self.reload.recv() => return crate::restart_binary::Opened::open(current_binary()?).map(|binary| Replacement::new(binary, source)),
                 accepted = self.listener.accept() => accepted?.0,
             };
             if !socket
@@ -93,12 +95,18 @@ impl Control {
             let request =
                 tokio::time::timeout(Duration::from_secs(2), read_request(&mut socket)).await;
             if let Ok(Ok(binary)) = request {
-                if executable(&binary).is_err() {
+                let Ok(binary) = crate::restart_binary::Opened::open(binary) else {
                     let _ = socket.write_all(b"REFUSED\n").await;
                     continue;
-                }
-                socket.write_all(b"RESTARTING\n").await?;
-                return Ok(binary);
+                };
+                let replacement = Replacement::new(binary, source);
+                let reply = if replacement.input.is_some() {
+                    b"RESTARTING\n".as_slice()
+                } else {
+                    b"RESTARTING COLD (CA locked)\n".as_slice()
+                };
+                socket.write_all(reply).await?;
+                return Ok(replacement);
             }
         }
     }
@@ -133,43 +141,10 @@ fn current_binary() -> io::Result<PathBuf> {
 }
 
 fn executable(binary: &Path) -> io::Result<()> {
-    // Parent components can escape a private ancestor after it was validated.
-    // Require a rooted path with no such escape before tracking protection.
-    if !binary.is_absolute()
-        || binary
-            .components()
-            .any(|part| matches!(part, std::path::Component::ParentDir))
-    {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    let owner = nix::unistd::Uid::effective().as_raw();
-    let ancestors: Vec<_> = binary.ancestors().collect();
-    let mut private = false;
-    for (index, path) in ancestors.iter().enumerate().rev() {
-        let metadata = std::fs::symlink_metadata(path)?;
-        // Validate the original path before canonicalizing. Root-to-leaf
-        // traversal tracks an owned private ancestor: directories beneath it
-        // cannot be reached by another local user, even with group-write bits.
-        // Files must still be immutable to group/other and never set-ID.
-        if (metadata.uid() != owner && metadata.uid() != 0)
-            || if index == 0 {
-                !metadata.is_file() || metadata.mode() & 0o111 == 0 || metadata.mode() & 0o6022 != 0
-            } else {
-                !metadata.is_dir()
-                    || metadata.mode() & 0o002 != 0
-                    || (metadata.mode() & 0o020 != 0 && !private)
-            }
-        {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
-        if index != 0 && metadata.uid() == owner && metadata.mode() & 0o777 == 0o700 {
-            private = true;
-        }
-    }
-    Ok(())
+    crate::restart_binary::Opened::open(binary.to_owned()).map(|_| ())
 }
 
-pub(crate) async fn request(data: &Path, binary: Option<&Path>) -> io::Result<()> {
+pub(crate) async fn request(data: &Path, binary: Option<&Path>) -> io::Result<bool> {
     // An omitted path means the server's own executable, not the CLI's binary.
     // The single-byte sentinel is expanded by the receiver before validation.
     let path = binary
@@ -195,42 +170,63 @@ pub(crate) async fn request(data: &Path, binary: Option<&Path>) -> io::Result<()
         .await?;
     socket.write_all(bytes).await?;
     let mut response = Vec::new();
-    socket.take(32).read_to_end(&mut response).await?;
-    if response != b"RESTARTING\n" {
-        return Err(io::ErrorKind::PermissionDenied.into());
+    socket.take(64).read_to_end(&mut response).await?;
+    match response.as_slice() {
+        b"RESTARTING\n" => Ok(true),
+        b"RESTARTING COLD (CA locked)\n" => Ok(false),
+        _ => Err(io::ErrorKind::PermissionDenied.into()),
     }
-    Ok(())
 }
 
 pub(crate) struct Replacement {
-    binary: PathBuf,
+    binary: crate::restart_binary::Opened,
     input: Option<std::os::unix::net::UnixStream>,
 }
 impl Replacement {
     pub(crate) fn new(
-        binary: PathBuf,
+        binary: crate::restart_binary::Opened,
         source: Option<&dyn infraternal_server::ca::CaKeySource>,
     ) -> Self {
-        Self {
-            binary,
-            input: source.and_then(|source| infraternal_server::ca_handoff::prepare(source).ok()),
-        }
+        let input = if binary.warm {
+            source.and_then(|source| infraternal_server::ca_handoff::prepare(source).ok())
+        } else {
+            None
+        };
+        Self { binary, input }
     }
     pub(crate) fn exec(self) -> io::Error {
-        let mut command = Command::new(self.binary);
-        // Stdin is authenticated by its kernel peer identity, so no private
-        // argv flag is needed. A predecessor without the import adapter can
-        // still boot normally (cold-locked) during a compatibility rollback.
-        let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
-        command.args(arguments);
-        if let Some(input) = self.input {
-            command.stdin(Stdio::from(std::os::fd::OwnedFd::from(input)));
-        } else {
-            command.stdin(Stdio::null());
-        }
-        // Successful exec destroys every old key reference and thread while
-        // retaining the service PID. No signer survives in a courier process.
-        command.exec()
+        let execute = || -> io::Result<()> {
+            let argv = std::iter::once(self.binary.path.as_os_str().to_owned())
+                .chain(std::env::args_os().skip(1))
+                .map(|argument| {
+                    CString::new(argument.as_bytes())
+                        .map_err(|_| io::ErrorKind::InvalidInput.into())
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            let environment = std::env::vars_os()
+                .map(|(key, value)| {
+                    let mut entry = key.as_bytes().to_vec();
+                    entry.push(b'=');
+                    entry.extend_from_slice(value.as_bytes());
+                    CString::new(entry).map_err(|_| io::ErrorKind::InvalidInput.into())
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            if let Some(input) = &self.input {
+                nix::unistd::dup2_stdin(input)?;
+            } else {
+                nix::unistd::dup2_stdin(std::fs::File::open("/dev/null")?)?;
+            }
+            // Execute exactly the checked inode; no pathname lookup occurs after
+            // exporting the CA. O_CLOEXEC closes this fd in the successor.
+            nix::unistd::fexecve(&self.binary.file, &argv, &environment)?;
+            Ok(())
+        };
+        let error = execute()
+            .err()
+            .unwrap_or_else(|| io::ErrorKind::Other.into());
+        // An exec error must not leave queued signing material on stdin.
+        let _ = nix::unistd::close(0);
+        error
     }
 }
 
@@ -248,12 +244,16 @@ pub(crate) fn run(
         )
         .await
     }) {
-        Ok(Ok(())) => {
+        Ok(Ok(warm)) => {
             super::output::report(
                 json,
                 infraternal_plugin_remote::RESTART.id,
                 "requested",
-                "Server replacement requested",
+                if warm {
+                    "Server replacement requested with CA handoff"
+                } else {
+                    "Server replacement requested cold (CA locked)"
+                },
                 "Check health and administrator CA status after startup.",
             );
             std::process::ExitCode::SUCCESS
