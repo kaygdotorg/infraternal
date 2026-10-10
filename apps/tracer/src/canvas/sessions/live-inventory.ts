@@ -13,7 +13,7 @@
  */
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
-interface Stored { id: string; name: string; pinned: boolean; frecency: number }
+interface Stored { host?: string; id: string; name: string; pinned: boolean; frecency: number }
 
 export interface LiveInventory extends SessionInventory { dispose(): void }
 
@@ -21,29 +21,31 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const key = `tracer.sessions.${options.accountId}`;
   const records = new Map<string, SessionRecord>();
   const listeners = new Set<() => void>();
+  const owners = new Map<string, string>();
   let top = 0;
   const emit = (): void => { for (const l of listeners) l(); };
   const save = (): void => {
-    const rows: Stored[] = [...records.values()].map((s) => ({ id: s.id, name: s.name, pinned: s.pinned, frecency: s.frecency }));
+    const rows: Stored[] = [...records.values()].map((s) => ({ host: owners.get(s.id) ?? options.host, id: s.id, name: s.name, pinned: s.pinned, frecency: s.frecency }));
     try { window.localStorage.setItem(key, JSON.stringify(rows)); } catch { /* private mode: the inventory then lasts for this page */ }
   };
   const blank = (id: string, name: string): SessionRecord => ({ id, name, pinned: false, state: "detached", lastOutput: "", age: "", viewers: 0, size: "", frecency: 0, screen: [] });
   try {
     const rows = JSON.parse(window.localStorage.getItem(key) ?? "[]") as Stored[];
-    for (const r of rows) if (typeof r.id === "string" && typeof r.name === "string") { records.set(r.id, { ...blank(r.id, r.name), pinned: Boolean(r.pinned), frecency: Number(r.frecency) || 0 }); top = Math.max(top, Number(r.frecency) || 0); }
+    for (const r of rows) if (typeof r.id === "string" && typeof r.name === "string") { owners.set(r.id, typeof r.host === "string" && r.host.length <= 200 ? r.host : options.host); records.set(r.id, { ...blank(r.id, r.name), pinned: Boolean(r.pinned), frecency: Number(r.frecency) || 0 }); top = Math.max(top, Number(r.frecency) || 0); }
   } catch { /* unreadable: start empty */ }
 
   const can: InventoryCapabilities = { rename: true, end: false, runAgain: false, dismiss: false };
-  const only = (host: string): boolean => host === options.host;
+  const only = (host: string, id: string): boolean => owners.get(id) === host;
   return {
     can,
     status: (): InventoryStatus => "ready",
     reload: async () => undefined,
-    hosts: () => [options.host],
-    list: (host) => (only(host) ? [...records.values()] : []),
-    get: (host, id) => (only(host) ? records.get(id) : undefined),
+    hosts: () => [...new Set([options.host, ...owners.values()])],
+    list: (host) => [...records.values()].filter((record) => only(host, record.id)),
+    get: (host, id) => (only(host, id) ? records.get(id) : undefined),
     attach(host, id, hint) {
-      if (!only(host)) return;
+      if (owners.has(id) && !only(host, id)) return;
+      owners.set(id, host);
       let s = records.get(id);
       if (!s) { s = blank(id, hint?.name ?? "shell"); records.set(id, s); }
       else if (hint?.name && !s.pinned) s.name = hint.name;
@@ -54,14 +56,14 @@ export function createLiveInventory(options: { accountId: string; host: string }
       emit();
     },
     detach(host, id) {
-      const s = only(host) ? records.get(id) : undefined;
+      const s = only(host, id) ? records.get(id) : undefined;
       if (!s || s.state !== "open") return;
       s.state = "detached";
       save();
       emit();
     },
     rename(host, id, name) {
-      const s = only(host) ? records.get(id) : undefined;
+      const s = only(host, id) ? records.get(id) : undefined;
       const next = name.trim();
       if (!s || !next || next === s.name) return;
       s.name = next;
