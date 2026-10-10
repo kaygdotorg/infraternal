@@ -160,3 +160,16 @@ The aim is that the backend is finished when the design is approved, so approved
 ## 9. Every backend job gets a break-it review (owner, 2026-10-08)
 
 When a Codex implementation job finishes, an independent Codex reviewer starts automatically on its branch head (`~/.local/state/codex-jobs/infraternal/auto-review.sh`, template `review-template.md`). The reviewer gets the diff, the contract and the claims, not the author's reasoning. Its only goal is to prove the work wrong: correctness and concurrency edge cases, defensive input and authorization checks, data safety, resource leaks, re-measured performance claims and contract drift. Each finding is a failing test committed on `review-<job>`, plus an entry in its findings file and a comment on the issue for P0/P1, ending with a verdict. The implementation's next run must make those tests pass before merge. Sol reviews security, data and sync work; Luna reviews the rest.
+
+
+## 10. Branches, commits and pushing (owner, 2026-10-10)
+
+- Every change is an atomic commit, and every commit is pushed. Work that
+  exists only on this build host can be lost.
+- `dev` holds the dev builds. Merges, decisions, TASTE rows and process docs
+  land on `dev` and are pushed straight away.
+- `main` holds stable builds only. It moves forward from `dev` when a build is
+  declared stable, never by direct commits.
+- Job and release branches are pushed as soon as they have commits. Unfinished
+  job work that can't be committed yet is snapshotted to `wip/<job>` so it
+  isn't lost.

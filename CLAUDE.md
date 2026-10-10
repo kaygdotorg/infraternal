@@ -37,7 +37,9 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
   may name products as examples. Code may name something only where it directly
   integrates with or depends on it (for example calling a CLI we support, or a
   library we ship), and then only factually.
-- Do not push or deploy unless the task tells you to.
+- Commit atomically and push every commit (owner, 2026-10-10). Development goes
+  to `dev`; `main` holds stable builds only (docs/PROCESS.md §10). Deploy only
+  when the task tells you to.
 
 ## History and tracking (owner rule)
 
