@@ -512,6 +512,11 @@ button { color: inherit; }
 .palette-empty { margin: 16px 8px; color: var(--fg-2); font-size: var(--text-body); }
 .palette-foot { display: flex; align-items: center; gap: 5px; margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); color: var(--fg-3); font-size: var(--text-caption); }
 .palette-foot kbd { padding: 3px 5px; border-radius: 4px; background: var(--hover); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
+/* The key hints are for a keyboard: with no fine pointer, or no hover, or a narrow screen they say nothing, so the footer
+   goes and the list takes its space (TASTE: a phone sees phone things). The list's cap is the palette's own cap less
+   the 57 px field, so what the footer used to hold is now rows. */
+@media (hover: none), (pointer: coarse), (max-width: 720px) { .palette-foot { display: none; } }
+@media (max-width: 720px) { .palette-results { max-height: calc(min(72vh, 620px) - 57px); } }
 
 /* Variant A mobile tray: circular key targets over one blurred, edge-faded capsule. */
 .keyblur { display: none; position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; height: 108px; pointer-events: none; background: linear-gradient(transparent, color-mix(in oklab, var(--bg) 58%, transparent)); transition: opacity 180ms ease-out; }
