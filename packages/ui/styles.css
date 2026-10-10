@@ -576,7 +576,7 @@
    overlay surface; only the layout lives here. */
 .ui-shortcuts { position: absolute; z-index: 7; display: flex; flex-direction: column; min-height: 0; border-radius: var(--r-lg, 18px); color: var(--fg); outline: none; }
 .ui-shortcuts-head { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; height: var(--pill-h, 38px); padding: 0 8px 0 14px; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
-.ui-shortcuts-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 4px 14px 14px; scrollbar-width: thin; }
+.ui-shortcuts-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 4px 14px 14px; }
 .ui-shortcuts-section + .ui-shortcuts-section { margin-top: 12px; }
 .ui-shortcuts-title { margin: 0; padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-shortcuts-list { display: grid; margin: 0; padding: 0; list-style: none; }
@@ -790,3 +790,30 @@
 .ui-entity-glyph.ui-entity-fill { fill: currentColor; stroke: none; }
 .ui-entity-initial { flex: none; min-width: 0.9em; text-align: center; font-size: 0.9em; font-weight: 600; line-height: 1; }
 .ui-entity-unit { white-space: nowrap; }
+
+/* ---- scroll bars only while scrolling (packages/ui/src/scrollbars.ts; TASTE §4) ------------------------------ */
+/* Every scroll container except terminals: no bar at rest, a thin thumb while `data-scrolling` is set, which the
+   helper clears 800 ms after the last scroll. The thumb is --fg-2 at 45%, and clearing it fades the colour out.
+   Two engines, two property sets, because each one ignores the other's:
+   - Firefox reads scrollbar-width and scrollbar-color.
+   - Chromium and Safari ignore ::-webkit-scrollbar once scrollbar-width is set (Chromium 121+), so they get the
+     webkit parts instead. The buttons are hidden: a classic bar draws arrows on Windows and Linux, which is chrome.
+   :where() keeps the Firefox rules at zero specificity, so a surface that sets its own scrollbar-width still wins. */
+/* Only on a fine pointer (desktop, laptop): touch devices already draw overlay bars that take no layout space.
+   A reserved 8 px bar would move the phone's key tray and its targets. */
+@media (hover: hover) and (pointer: fine) {
+@supports (-moz-appearance: none) {
+  :where(*:not(.terminal-host)) { scrollbar-width: thin; scrollbar-color: transparent transparent; transition: scrollbar-color 240ms cubic-bezier(0.23, 1, 0.32, 1); }
+  :where(*:not(.terminal-host))[data-scrolling] { scrollbar-color: color-mix(in srgb, var(--fg-2) 45%, transparent) transparent; }
+}
+@supports not (-moz-appearance: none) {
+  *:not(.terminal-host)::-webkit-scrollbar { width: 8px; height: 8px; background: transparent; }
+  *:not(.terminal-host)::-webkit-scrollbar-button { display: none; }
+  *:not(.terminal-host)::-webkit-scrollbar-track { background: transparent; }
+  *:not(.terminal-host)::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; transition: background-color 240ms cubic-bezier(0.23, 1, 0.32, 1); }
+  *:not(.terminal-host)[data-scrolling]::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fg-2) 45%, transparent); }
+}
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(*:not(.terminal-host)), *:not(.terminal-host)::-webkit-scrollbar-thumb { transition: none; }
+}

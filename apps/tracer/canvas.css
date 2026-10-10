@@ -62,7 +62,7 @@
 .canvas-popover-tabs { display: flex; padding: 0 16px 10px; }
 .canvas-popover-scroll {
   min-height: 0; overflow: auto; padding: 2px 16px 10px; overscroll-behavior: contain;
-  border-top: 1px solid var(--line); scrollbar-width: thin;
+  border-top: 1px solid var(--line);
   -webkit-mask-image: linear-gradient(transparent, #000 10px, #000 calc(100% - 10px), transparent);
   mask-image: linear-gradient(transparent, #000 10px, #000 calc(100% - 10px), transparent);
 }

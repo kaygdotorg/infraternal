@@ -12,7 +12,7 @@
 .cl-sx-names { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .cl-sx-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .cl-sx-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
-.cl-sx-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); scrollbar-width: thin; }
+.cl-sx-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); }
 @media (pointer: coarse) { .cl-sx-pop { border-radius: 18px; } .cl-sx-head { padding: 16px 16px 12px; } .cl-sx-logo { width: 28px; height: 28px; } }
 
 /* ---- the manager ---------------------------------------------------------------- */
