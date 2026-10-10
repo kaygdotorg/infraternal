@@ -472,6 +472,13 @@ button { color: inherit; }
      material itself (fill, hairline, blur) comes from .ui-overlay-surface. */
   transition: opacity 120ms ease-out, transform 120ms var(--ease-out), display 120ms allow-discrete;
 }
+/* The palette is a list read at a glance over busy terminals, so its glass hides text at every card level (TASTE: glass shows
+   colour, never legible text; the blur is at least about 1.5x the terminal line height, about 28 px). Tinted and Clear
+   blur less than that on the shared material (8 and 24 px), which let terminal text and window titles read through the
+   palette; here the palette alone takes the floor. Frosted already blurs 32 px and Solid has no glass, so neither is touched.
+   The fill also never falls below a floor of the page colour. The blur is one static region while the palette is open. */
+:root[data-card="tinted"] .palette, :root[data-card="clear"] .palette { --ui-overlay-blur: 28px; }
+.palette { --ui-overlay-background: color-mix(in oklab, var(--overlay) 58%, var(--bg)); }
 .palette:not([hidden]) { transition-duration: 240ms; }
 @starting-style { .palette:not([hidden]) { opacity: 0; transform: translate(-50%, -6px) scale(0.98); } }
 .palette[hidden] { display: none; opacity: 0; transform: translate(-50%, -4px) scale(0.99); }
