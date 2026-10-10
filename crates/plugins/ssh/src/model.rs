@@ -182,12 +182,37 @@ pub enum FailureKind {
     Install,
 }
 
+/// Trusted installation boundary; no request chooses its diagnostic context.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstallStep {
+    Connect,
+    Upload,
+    Install,
+    Join,
+    Start,
+}
+
+/// Architecture and expected public path selected by the server's release bundle.
+#[derive(Clone, Debug, Serialize)]
+pub struct MissingBinary {
+    pub architecture: &'static str,
+    pub path: String,
+}
+
 /// Human diagnostics are trusted static text; fingerprints are independently validated.
 #[derive(Clone, Debug, Serialize)]
 pub struct Failure {
     pub kind: FailureKind,
     pub message: &'static str,
     pub log_tail: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_step: Option<InstallStep>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub already_added: bool,
+    /// Trusted server payload coordinates; never fields echoed from SSH stderr.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_binary: Option<Box<MissingBinary>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fingerprints: Vec<String>,
     /// Exact public key family selected for this confirmation and subsequent negotiation.
@@ -210,12 +235,30 @@ impl Failure {
             kind,
             message,
             log_tail: Vec::new(),
+            failed_step: None,
+            already_added: false,
+            missing_binary: None,
             fingerprints: Vec::new(),
             host_key_type: None,
             host_key_changed: false,
             choose_method: false,
             host_key_challenge: None,
         }
+    }
+    /// Attach the command boundary without changing authentication/trust classification.
+    #[must_use]
+    pub fn at(mut self, step: InstallStep) -> Self {
+        self.failed_step = Some(step);
+        if self.kind == FailureKind::Install && self.missing_binary.is_none() {
+            self.message = match step {
+                InstallStep::Connect => "Connecting to the host failed.",
+                InstallStep::Upload => "Uploading the infraternal binary failed.",
+                InstallStep::Install => "Installing the infraternal agent failed.",
+                InstallStep::Join => "Joining the host to this server failed.",
+                InstallStep::Start => "Starting the infraternal agent service failed.",
+            };
+        }
+        self
     }
     #[must_use]
     pub fn unsupported(message: &'static str) -> Self {
