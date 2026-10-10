@@ -190,6 +190,12 @@ pub struct Failure {
     pub log_tail: Vec<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fingerprints: Vec<String>,
+    /// Exact public key family selected for this confirmation and subsequent negotiation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_key_type: Option<String>,
+    /// An existing application pin differs; replacement requires this explicit confirmation.
+    #[serde(skip_serializing_if = "is_false")]
+    pub host_key_changed: bool,
     /// Only exhausted D183 authentication permits the UI to request another method.
     #[serde(skip_serializing_if = "is_false")]
     pub choose_method: bool,
@@ -205,6 +211,8 @@ impl Failure {
             message,
             log_tail: Vec::new(),
             fingerprints: Vec::new(),
+            host_key_type: None,
+            host_key_changed: false,
             choose_method: false,
             host_key_challenge: None,
         }

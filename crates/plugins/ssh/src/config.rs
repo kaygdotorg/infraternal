@@ -163,6 +163,11 @@ impl PublicSshConfiguration {
                 .options
                 .iter()
                 .any(|(name, value)| name == "knownhostscommand" && value != "none"),
+            algorithms: self
+                .options
+                .iter()
+                .find(|(name, _)| name == "hostkeyalgorithms")
+                .map(|(_, value)| value.split(',').map(str::to_owned).collect()),
             digest: digest.finalize().into(),
         })
     }
@@ -190,12 +195,17 @@ impl PublicSshConfiguration {
         true
     }
 
-    pub(crate) fn configure_pin(&mut self, path: &std::path::Path) {
+    pub(crate) fn configure_pin(&mut self, path: &std::path::Path, algorithms: &str) {
         // Admission already checked this exact lookup and configured trust.
-        // Retain KRL and crypto policy while selecting only the immutable pin.
+        // Retain KRL and crypto policy while selecting the confirmed key family.
         self.options.retain(|(name, _)| {
-            !matches!(name.as_str(), "userknownhostsfile" | "globalknownhostsfile")
+            !matches!(
+                name.as_str(),
+                "userknownhostsfile" | "globalknownhostsfile" | "hostkeyalgorithms"
+            )
         });
+        self.options
+            .push(("hostkeyalgorithms".into(), algorithms.into()));
         self.options
             .push(("userknownhostsfile".into(), quoted(&path.to_string_lossy())));
         self.options
@@ -251,5 +261,31 @@ pub struct TrustPolicy {
     pub paths: Vec<std::path::PathBuf>,
     /// Dynamic trust cannot be proven absent by querying static public files.
     pub dynamic_trust: bool,
+    algorithms: Option<Vec<String>>,
     digest: [u8; 32],
+}
+
+impl TrustPolicy {
+    /// Constrain negotiation to the confirmed key without weakening configured crypto policy.
+    pub(crate) fn key_algorithms(&self, key_type: &str) -> Option<String> {
+        let candidates: &[&str] = match key_type {
+            "ssh-ed25519" => &["ssh-ed25519"],
+            "ssh-rsa" => &["rsa-sha2-512", "rsa-sha2-256"],
+            "ecdsa-sha2-nistp256" => &["ecdsa-sha2-nistp256"],
+            "ecdsa-sha2-nistp384" => &["ecdsa-sha2-nistp384"],
+            "ecdsa-sha2-nistp521" => &["ecdsa-sha2-nistp521"],
+            _ => return None,
+        };
+        let allowed = candidates
+            .iter()
+            .filter(|candidate| {
+                self.algorithms
+                    .as_ref()
+                    .is_none_or(|values| values.iter().any(|value| value == **candidate))
+            })
+            .copied()
+            .collect::<Vec<_>>()
+            .join(",");
+        (!allowed.is_empty()).then_some(allowed)
+    }
 }

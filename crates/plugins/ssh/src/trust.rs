@@ -1,4 +1,4 @@
-//! Records only explicitly confirmed first-contact public host pins; existing/changed/revoked trust cannot be replaced.
+//! Pins one explicitly confirmed SSH key; changed application pins need a fresh observation and atomic confirmation.
 
 use crate::{
     config::TrustPolicy,
@@ -23,6 +23,7 @@ struct Observation {
     destination: Destination,
     policy: TrustPolicy,
     keys: Vec<(String, String)>,
+    previous: Option<String>,
     received: Instant,
 }
 
@@ -32,6 +33,7 @@ pub struct TrustedOpenSsh {
     ssh: OpenSsh,
     root: PathBuf,
     pending: Mutex<HashMap<uuid::Uuid, Observation>>,
+    publication: Mutex<()>,
 }
 impl TrustedOpenSsh {
     #[must_use]
@@ -40,6 +42,7 @@ impl TrustedOpenSsh {
             ssh,
             root,
             pending: Mutex::new(HashMap::new()),
+            publication: Mutex::new(()),
         }
     }
 
@@ -66,7 +69,7 @@ impl TrustedOpenSsh {
         Ok(())
     }
 
-    fn recorded(&self, policy: &TrustPolicy) -> Result<bool, Failure> {
+    fn recorded(&self, policy: &TrustPolicy) -> Result<Option<String>, Failure> {
         self.private_root()?;
         let path = self.pin(policy);
         let mut file = match OpenOptions::new()
@@ -75,7 +78,7 @@ impl TrustedOpenSsh {
             .open(path)
         {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(unavailable()),
         };
         let metadata = file.metadata().map_err(|_| unavailable())?;
@@ -98,7 +101,10 @@ impl TrustedOpenSsh {
         {
             return Err(unavailable());
         }
-        Ok(true)
+        if public_record(text.as_bytes(), &policy.lookup).as_deref() != Some(text) {
+            return Err(unavailable());
+        }
+        Ok(Some(text.to_owned()))
     }
 
     async fn configured_trust(&self, policy: &TrustPolicy) -> Result<bool, Failure> {
@@ -132,7 +138,8 @@ impl TrustedOpenSsh {
         destination: Destination,
         policy: TrustPolicy,
     ) -> Result<Option<uuid::Uuid>, Failure> {
-        if self.recorded(&policy)? || self.configured_trust(&policy).await? {
+        let previous = self.recorded(&policy)?;
+        if self.configured_trust(&policy).await? {
             return Ok(None);
         }
         let mut scan = Command::new(&self.ssh.ssh_keyscan);
@@ -146,6 +153,10 @@ impl TrustedOpenSsh {
             let Some(record) = public_record(line, &policy.lookup) else {
                 continue;
             };
+            let key_type = record.split_whitespace().nth(1).ok_or_else(unavailable)?;
+            if policy.key_algorithms(key_type).is_none() {
+                continue;
+            }
             let mut fingerprint = Command::new(&self.ssh.ssh_keygen);
             fingerprint.args(["-l", "-E", "sha256", "-f", "/dev/stdin"]);
             let checked = execute(
@@ -168,6 +179,14 @@ impl TrustedOpenSsh {
                 break;
             }
         }
+        // Selection is independent of keyscan response ordering. The connection
+        // is constrained to this family when the exact key is confirmed.
+        keys.sort_by_key(|(_, record)| match record.split_whitespace().nth(1) {
+            Some("ssh-ed25519") => 0,
+            Some("ssh-rsa") => 2,
+            _ => 1,
+        });
+        keys.truncate(1);
         if keys.is_empty() {
             return Ok(None);
         }
@@ -183,6 +202,7 @@ impl TrustedOpenSsh {
                 destination,
                 policy,
                 keys,
+                previous,
                 received: Instant::now(),
             },
         );
@@ -210,7 +230,7 @@ impl TrustedOpenSsh {
             crate::openssh::effective_destination(&self.ssh.ssh, &destination).await?;
         let policy = configuration.trust_policy().ok_or_else(denied)?;
         if policy != observation.policy
-            || self.recorded(&policy)?
+            || self.recorded(&policy)? != observation.previous
             || self.configured_trust(&policy).await?
         {
             return Err(denied());
@@ -228,25 +248,33 @@ impl TrustedOpenSsh {
         }
         authority.authorize().await?;
         self.private_root()?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW)
-            .open(self.pin(&policy))
-            .map_err(|_| denied())?;
-        if file
-            .write_all(record.as_bytes())
-            .and_then(|()| file.sync_all())
-            .is_err()
-        {
-            // An incomplete record never authenticates a host; retain it to fail
-            // closed for manual recovery instead of racing another confirmation.
-            return Err(unavailable());
+        // Serialize compare-and-replace across this server's concurrent confirmations.
+        // A challenge can replace only the exact pin observed, never a later decision.
+        let _publication = lock(&self.publication);
+        if self.recorded(&policy)? != observation.previous {
+            return Err(denied());
         }
-        fs::File::open(&self.root)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| unavailable())?;
+        let temporary = self
+            .root
+            .join(format!("{}.new", uuid::Uuid::new_v4().simple()));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(&temporary)
+                .map_err(|_| unavailable())?;
+            file.write_all(record.as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|_| unavailable())?;
+            fs::rename(&temporary, self.pin(&policy)).map_err(|_| unavailable())?;
+            fs::File::open(&self.root)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| unavailable())
+        })();
+        let _ = fs::remove_file(temporary);
+        result?;
         Ok(())
     }
 }
@@ -263,14 +291,16 @@ impl SshTransport for TrustedOpenSsh {
                 crate::openssh::effective_destination(&self.ssh.ssh, &destination).await?;
             let policy = configuration.trust_policy();
             if let Some(policy) = &policy
-                && self.recorded(policy)?
+                && let Some(record) = self.recorded(policy)?
             {
-                // Dedicated pins are immutable. Matching public configuration
-                // added later needs review, rather than broadening acceptance.
+                // External trust never silently loses to an application-owned pin.
+                // Replacements are limited to explicitly observed application pins.
                 if self.configured_trust(policy).await? {
                     return Err(denied());
                 }
-                configuration.configure_pin(&self.pin(policy));
+                let key_type = record.split_whitespace().nth(1).ok_or_else(unavailable)?;
+                let algorithms = policy.key_algorithms(key_type).ok_or_else(unavailable)?;
+                configuration.configure_pin(&self.pin(policy), &algorithms);
             }
             match self
                 .ssh
@@ -283,6 +313,18 @@ impl SshTransport for TrustedOpenSsh {
                         && let Some(policy) = policy
                     {
                         failure.host_key_challenge = self.observe(destination, policy).await?;
+                        // The shown fingerprint and type come from the same observation
+                        // consumed by confirmation, rather than a second scanner's order.
+                        failure.fingerprints.clear();
+                        if let Some(challenge) = failure.host_key_challenge
+                            && let Some(observation) = lock(&self.pending).get(&challenge)
+                            && let Some((fingerprint, record)) = observation.keys.first()
+                        {
+                            failure.fingerprints.push(fingerprint.clone());
+                            failure.host_key_type =
+                                record.split_whitespace().nth(1).map(str::to_owned);
+                            failure.host_key_changed = observation.previous.is_some();
+                        }
                     }
                     Err(failure)
                 }
