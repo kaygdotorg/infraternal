@@ -162,6 +162,7 @@ impl SshTransport for AutoAuth {
                     provider: Mutex::new(Some(provider)),
                     selected: tokio::sync::Mutex::new(None),
                     authentication: Mutex::new(None),
+                    trust_lookup: Mutex::new(None),
                 }) as Arc<dyn SshSession>),
                 credentials => self.transport.open(destination, credentials, mesh).await,
             }
@@ -188,8 +189,15 @@ struct Pending {
     provider: Mutex<Option<Arc<dyn AuthProvider>>>,
     selected: tokio::sync::Mutex<Option<Arc<dyn SshSession>>>,
     authentication: Mutex<Option<Authentication>>,
+    trust_lookup: Mutex<Option<String>>,
 }
 impl SshSession for Pending {
+    fn trust_lookup(&self) -> Option<String> {
+        self.trust_lookup
+            .lock()
+            .ok()
+            .and_then(|lookup| lookup.clone())
+    }
     fn authentication(&self) -> Option<Authentication> {
         self.authentication
             .lock()
@@ -228,6 +236,13 @@ impl SshSession for Pending {
                 .lock()
                 .map_err(|_| Failure::install("The SSH authentication result is unavailable."))? =
                 Some(authentication);
+            // Preserve the authenticated connection's exact public lookup;
+            // removal must forget its pin, including after method fallback.
+            *self
+                .trust_lookup
+                .lock()
+                .map_err(|_| Failure::install("The SSH trust result is unavailable."))? =
+                session.trust_lookup();
             *selected = Some(session);
             Ok(output)
         })
