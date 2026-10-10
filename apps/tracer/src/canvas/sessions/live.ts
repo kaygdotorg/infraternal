@@ -189,12 +189,16 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       this.activeNow = isActive;
       if (isActive) {
         active = this;
+        this.client?.setFrozen(false);
         if (this.client) core.setActiveTerminal(this.client);
       } else if (active === this) {
         active = undefined;
         core.setActiveTerminal(undefined);
       }
     }
+
+    /** Holds the terminal's drawing while the camera moves (the active window is never held). */
+    setFrozen(frozen: boolean): void { this.client?.setFrozen(frozen && active !== this); }
 
     setVisible(visible: boolean): void {
       this.visible = visible;
@@ -240,6 +244,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}) }]; },
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     activeClient: () => active?.client,
+    freeze(frozen) { for (const b of bindings) b.setFrozen(frozen); },
     dispose() { for (const b of [...bindings]) b.dispose(); bindings.clear(); },
   };
 }

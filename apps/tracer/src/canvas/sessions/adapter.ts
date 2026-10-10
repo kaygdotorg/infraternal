@@ -53,4 +53,6 @@ export interface SessionService {
   hosts(): HostEntry[];
   /** Called when the set of hosts or sessions changes (a host appears, a session exits). */
   onChange(listener: () => void): () => void;
+  /** The camera is moving at a small scale: terminals other than the active one hold their drawing until it rests (#121). Optional: test doubles draw nothing real. */
+  freeze?(frozen: boolean): void;
 }
