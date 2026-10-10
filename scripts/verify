@@ -2,19 +2,12 @@
 # Dispatch repository verification modes and report which gate is not ready yet.
 set -euo pipefail
 
-# Ghostty VT and the musl C dependencies share exactly Zig 0.15.2 [94].
-# Nix supplies the local compiler; CI uses the checksum-verified downloader.
+# Ghostty VT and vendored C share the one checksum-pinned Zig [94][213].
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 [[ "$target_dir" = /* ]] || target_dir="$repo_root/$target_dir"
-if ! command -v zig >/dev/null || [[ "$(zig version)" != 0.15.2 ]]; then
-    if command -v nix >/dev/null; then
-        exec nix shell nixpkgs#zig_0_15 -c "$0" "$@"
-    fi
-    "$(dirname -- "${BASH_SOURCE[0]}")/auth-toolchain"
-    export PATH="$target_dir/auth-tools/zig:$PATH"
-fi
-[[ "$(zig version)" == 0.15.2 ]] || { printf 'Zig 0.15.2 required\n' >&2; exit 1; }
+"$repo_root/scripts/auth-toolchain"
+export PATH="$target_dir/auth-tools/zig:$PATH"
 
 # Nix hosts may expose Rust but omit OpenSSL's native build drivers. CI installs
 # these explicitly; the documented Nix invocation supplies them here when absent.
