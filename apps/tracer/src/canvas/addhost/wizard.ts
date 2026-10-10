@@ -452,7 +452,8 @@ export class Wizard {
   private proceed(): void {
     // Continue ends the unfinished token first, exactly as Enter would; a token that is not a target stays as text.
     this.chips?.commit();
-    if (this.token.trim() && !parseTarget(this.token)) { this.hintArmed = true; this.refreshDiscovery(); }
+    const pending = this.token ?? "";
+    if (pending.trim() && !parseTarget(pending)) { this.hintArmed = true; this.refreshDiscovery(); }
     if (!this.selected.length) return;
     if (this.rootCandidates().length) this.go("root");
     else this.startBatch(false);
