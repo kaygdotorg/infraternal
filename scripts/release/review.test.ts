@@ -1,4 +1,4 @@
-/** Verifies same-host publication admission across isolated build directories (#157, D184). */
+/** Verifies publication admission and fail-closed storage response parsing (#157, D184). */
 import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -87,3 +87,20 @@ test("publication with two build directories admits only one writer", async () =
     await rm(directory, { recursive: true, force: true });
   }
 }, 30_000);
+
+// An existing-object result and an empty result in one response disagree. The
+// preflight must refuse that state before the publisher receives write permission.
+test("storage preflight refuses ambiguous existing-object results", async () => {
+  const child = Bun.spawn(["python3", join(root, "scripts/release/response.py"), "empty-prefix"], {
+    stdin: "pipe", stdout: "pipe", stderr: "pipe",
+  });
+  child.stdin.write('{"success":true,"result":[{"key":"releases/0.1.0/infraternal"}],"result":[]}');
+  child.stdin.end();
+  const [exit, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  console.log(`STORAGE_PREFLIGHT duplicate_result=true existing_objects=1 exit=${exit} stdout_bytes=${stdout.length} stderr_bytes=${stderr.length}`);
+  expect(exit).not.toBe(0);
+});
