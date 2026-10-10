@@ -88,13 +88,34 @@ pub fn parse(frame: &[u8]) -> Result<CaMaterial, CaError> {
 /// # Errors
 /// Refuses any channel not created by this UID and this same pre-exec PID.
 pub fn accept_stdin(source: &MemoryCaSource) -> Result<(), CaError> {
+    receive_stdin()?.install(source)
+}
+
+/// Validated in-memory import held while retained public configuration loads.
+/// Its material can only be installed against the exact retained issuer.
+pub struct Received {
+    material: CaMaterial,
+}
+impl Received {
+    /// Publish only after the cold source validates the retained issuer.
+    /// # Errors
+    /// Refuses mismatched public trust or poisoned source state.
+    pub fn install(self, source: &MemoryCaSource) -> Result<(), CaError> {
+        source.install(self.material)
+    }
+}
+
+/// Consume and detach stdin before any cold configuration work can fail.
+/// # Errors
+/// Refuses invalid kernel peer credentials, frames or descriptor cleanup.
+pub fn receive_stdin() -> Result<Received, CaError> {
     let input = std::io::stdin();
     let result = nix::sys::prctl::set_dumpable(false)
         .map_err(|_| CaError)
         .and_then(|()| receive(&input));
     let null = std::fs::File::open("/dev/null").map_err(|_| CaError)?;
     nix::unistd::dup2_stdin(null).map_err(|_| CaError)?;
-    source.install(result?)
+    result.map(|material| Received { material })
 }
 
 fn receive(fd: &impl std::os::fd::AsFd) -> Result<CaMaterial, CaError> {

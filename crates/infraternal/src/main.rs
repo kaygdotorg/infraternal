@@ -190,6 +190,11 @@ fn run_skill(action: &str, json: bool) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    // Exec resets dumpability. Close the window before parsing or any adapter
+    // can inspect inherited input or create a child process.
+    if harden_startup().is_err() {
+        return ExitCode::FAILURE;
+    }
     // Installation slots and symlinks must not rename the daemon or its shims
     // in ps/journald. Apply before the embedded dispatcher bypasses clap.
     #[cfg(target_os = "linux")]
@@ -663,4 +668,13 @@ fn run_remote_agent(
         "Use a build with the remote plugin enabled.",
         2,
     )
+}
+
+#[cfg(test)]
+#[path = "startup_tests.rs"]
+mod startup_tests;
+
+/// First userspace entry protection applies equally to server and child modes.
+fn harden_startup() -> Result<(), nix::errno::Errno> {
+    nix::sys::prctl::set_dumpable(false)
 }

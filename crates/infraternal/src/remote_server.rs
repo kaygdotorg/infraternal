@@ -43,6 +43,9 @@ pub(crate) async fn serve(
 ) -> Result<Outcome, infraternal_server::ServerError> {
     #[cfg(feature = "remote")]
     {
+        // Detach private stdin before cold_start can return an error or perform
+        // any configuration I/O; install only after retained trust is available.
+        let inherited = infraternal_server::ca_handoff::receive_stdin();
         let remote = options
             .remote_listen
             .map(|listen| {
@@ -53,18 +56,13 @@ pub(crate) async fn serve(
                 .cold_start(&config)
             })
             .transpose()?;
-        {
-            if let Some(authority) = remote
+        if let (Ok(inherited), Some(authority)) = (
+            inherited,
+            remote
                 .as_ref()
-                .and_then(|remote| remote.ca_administration.as_ref())
-            {
-                // Invalid inheritance never prevents serving retained public
-                // trust: it simply leaves the cold source locked [168][217].
-                let _ = infraternal_server::ca_handoff::accept_stdin(&authority.memory_source());
-            } else {
-                let cold = infraternal_server::ca_memory::MemoryCaSource::unprovisioned(None);
-                let _ = infraternal_server::ca_handoff::accept_stdin(&cold);
-            }
+                .and_then(|remote| remote.ca_administration.as_ref()),
+        ) {
+            let _ = inherited.install(&authority.memory_source());
         }
         let source = remote
             .as_ref()

@@ -139,3 +139,58 @@ fn independent_review_remote_operator_commands_accept_json_output() {
         "remote commands refuse the required JSON output option"
     );
 }
+
+#[test]
+fn failed_cold_configuration_still_disposes_handoff_stdin() {
+    use std::process::{Command, Stdio};
+    const NAME: &str =
+        "remote_server::tests::failed_cold_configuration_still_disposes_handoff_stdin";
+    if std::env::var_os("INFRATERNAL_COLD_FAILURE_TEST").is_some() {
+        let directory = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/ca-handoff/missing-config");
+        let config = infraternal_server::ServerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            data_dir: directory.join("db"),
+            public_origin: "https://localhost".into(),
+            web_root: None,
+            tls: Some(infraternal_server::TlsFiles {
+                certificate: directory.join("missing.pem"),
+                private_key: directory.join("missing.key"),
+            }),
+            behind_proxy: false,
+            trusted_proxies: vec![],
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(
+            runtime
+                .block_on(serve(
+                    config,
+                    Options {
+                        remote_listen: Some("127.0.0.1:7443".parse().unwrap()),
+                        remote_ca_dir: Some(directory.join("ca")),
+                    }
+                ))
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_link("/proc/self/fd/0").unwrap(),
+            std::path::Path::new("/dev/null"),
+            "import cleanup must run before cold_start can fail"
+        );
+        return;
+    }
+    let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(sender);
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_COLD_FAILURE_TEST", "1")
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(receiver)))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
