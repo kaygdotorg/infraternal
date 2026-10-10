@@ -319,6 +319,40 @@ pub async fn discover(state: &Path) -> io::Result<Vec<Session>> {
     Ok(sessions)
 }
 
+/// Extract the live process birth tick from a bounded kernel stat record.
+/// The command field can contain spaces, parentheses or non-UTF8 bytes; field
+/// 22 is counted from its final delimiter. Dead states never supply an identity.
+#[must_use]
+pub fn process_birth_ticks(record: &[u8]) -> Option<u64> {
+    if record.len() > 4096 {
+        return None;
+    }
+    let open = record.windows(2).position(|pair| pair == b" (")?;
+    let end = record.windows(2).rposition(|pair| pair == b") ")?;
+    if open + 2 > end {
+        return None;
+    }
+    let pid = std::str::from_utf8(&record[..open]).ok()?;
+    if !pid.as_bytes().iter().all(u8::is_ascii_digit) || pid.parse::<u32>().ok()? == 0 {
+        return None;
+    }
+    let mut fields = std::str::from_utf8(&record[end + 2..])
+        .ok()?
+        .split_ascii_whitespace();
+    let state = fields.next()?;
+    if state.len() != 1
+        || !state.as_bytes()[0].is_ascii_alphabetic()
+        || matches!(state, "Z" | "X" | "x")
+    {
+        return None;
+    }
+    let birth = fields.nth(18)?;
+    if !birth.as_bytes().iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    birth.parse().ok()
+}
+
 /// Directory retirement events keep the registry fresh without idle timers.
 pub(crate) struct SessionEvents(tokio::io::unix::AsyncFd<Watch>);
 impl SessionEvents {

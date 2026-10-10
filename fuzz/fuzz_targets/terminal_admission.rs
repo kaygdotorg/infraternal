@@ -1,4 +1,4 @@
-//! Fuzz bounded memory settings and additive public refusal JSON without losing numeric invariants [D214], #151.
+//! Fuzz bounded terminal policy, public refusals and kernel process identity records [D214], #151.
 #![no_main]
 #![forbid(unsafe_code)]
 use infraternal_plugin_api::{admission::OpenRefusal, channel::MAX_CONTROL_JSON};
@@ -17,6 +17,13 @@ fuzz_target!(|input: &[u8]| {
         assert_eq!(
             serde_json::from_slice::<OpenRefusal>(&reason.json().unwrap()).unwrap(),
             reason
+        );
+    }
+    if let Some(birth) = infraternal_agent::sessions::process_birth_ticks(input) {
+        let record = format!("17 (fuzz) S {}{birth}\n", "0 ".repeat(18));
+        assert_eq!(
+            infraternal_agent::sessions::process_birth_ticks(record.as_bytes()),
+            Some(birth)
         );
     }
 });

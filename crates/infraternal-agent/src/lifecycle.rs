@@ -2,23 +2,33 @@
 
 use crate::sessions::Session;
 use infraternal_plugin_api::admission::NodeContext;
-use std::{collections::HashMap, fs, io, os::unix::fs::MetadataExt, path::PathBuf};
+use std::{collections::HashMap, fs, io, path::PathBuf};
 
 struct Live {
     path: PathBuf,
     process: PathBuf,
-    birth_inode: u64,
+    birth_ticks: u64,
 }
 
 impl Live {
     fn alive(&self) -> bool {
-        // proc directory identity changes on PID reuse; exe disappears for a
-        // zombie. Socket existence alone cannot distinguish an abruptly stopped
-        // shim from its stale rendezvous. These checks run on control reads only.
+        // A proc inode can change on cache eviction. The kernel birth clock is
+        // stable across that change; a new PID incarnation cannot borrow the
+        // recorded lifetime. Executable presence also excludes zombies. These
+        // checks run on control reads and retirement events, with no idle timer.
         self.path.exists()
-            && fs::metadata(&self.process).is_ok_and(|meta| meta.ino() == self.birth_inode)
+            && birth(&self.process).is_ok_and(|value| value == Some(self.birth_ticks))
             && self.process.join("exe").exists()
     }
+}
+
+fn birth(process: &std::path::Path) -> io::Result<Option<u64>> {
+    use std::io::Read;
+    let mut record = Vec::with_capacity(512);
+    fs::File::open(process.join("stat"))?
+        .take(4097)
+        .read_to_end(&mut record)?;
+    Ok(crate::sessions::process_birth_ticks(&record))
 }
 
 #[derive(Default)]
@@ -27,15 +37,16 @@ pub(crate) struct Registry(HashMap<[u8; 16], Live>);
 impl Registry {
     pub(crate) fn insert(&mut self, session: &Session) -> io::Result<()> {
         let process = PathBuf::from(format!("/proc/{}", session.pid));
-        let meta = match fs::metadata(&process) {
-            Ok(meta) => meta,
+        let birth_ticks = match birth(&process) {
+            Ok(Some(value)) => value,
+            Ok(None) => return Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
         let live = Live {
             path: session.path.clone(),
             process,
-            birth_inode: meta.ino(),
+            birth_ticks,
         };
         if live.alive() {
             self.0.insert(session.id, live);
@@ -137,12 +148,76 @@ mod tests {
         assert_eq!(registry.context().background_session_count, 0);
         drop(second);
         assert_eq!(registry.context().background_session_count, 1);
-        registry.0.get_mut(&session.id).unwrap().birth_inode = 0;
+        registry.0.get_mut(&session.id).unwrap().birth_ticks = 0;
         registry.refresh();
         assert_eq!(registry.context(), NodeContext::default());
         registry.insert(&session).unwrap();
         fs::remove_file(path).unwrap();
         registry.refresh();
         assert_eq!(registry.context(), NodeContext::default());
+    }
+
+    #[tokio::test]
+    async fn directory_inode_changes_do_not_retire_the_same_process() {
+        let root = PathBuf::from("../../target").join(format!("identity-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("socket");
+        fs::write(&path, b"").unwrap();
+        let (peer, _remote) = tokio::net::UnixStream::pair().unwrap();
+        let session = Session {
+            id: [150; 16],
+            path,
+            peer,
+            head: 0,
+            pid: std::process::id(),
+            caps: 0,
+        };
+        let mut registry = Registry::default();
+        registry.insert(&session).unwrap();
+        let view = root.join("process");
+        fs::create_dir(&view).unwrap();
+        // Kernel proc directory inodes can be recreated. Preserve the exact
+        // process birth record and executable while presenting a fresh inode;
+        // this models eviction without changing host caches or adding load.
+        fs::write(view.join("stat"), fs::read("/proc/self/stat").unwrap()).unwrap();
+        std::os::unix::fs::symlink("/proc/self/exe", view.join("exe")).unwrap();
+        registry.0.get_mut(&session.id).unwrap().process = view;
+        registry.refresh();
+        let count = registry.context().session_count;
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            count, 1,
+            "the same live process must survive proc inode recreation"
+        );
+    }
+    #[test]
+    fn process_birth_parser_handles_command_bytes_and_numeric_bounds() {
+        use crate::sessions::process_birth_ticks;
+        let record = |name: &[u8], state: &str, tick: &str| {
+            let mut bytes = b"17 (".to_vec();
+            bytes.extend_from_slice(name);
+            bytes.extend_from_slice(format!(") {state} {}{tick}\n", "0 ".repeat(18)).as_bytes());
+            bytes
+        };
+        assert_eq!(
+            process_birth_ticks(&record(b"name ) ( \xff", "S", "42")),
+            Some(42)
+        );
+        assert_eq!(
+            process_birth_ticks(&record(b"shim", "R", "18446744073709551615")),
+            Some(u64::MAX)
+        );
+        for tick in ["-1", "+1", "1.0", "18446744073709551616"] {
+            assert_eq!(process_birth_ticks(&record(b"shim", "R", tick)), None);
+        }
+        for state in ["Z", "X", "x", "12"] {
+            assert_eq!(process_birth_ticks(&record(b"shim", state, "42")), None);
+        }
+        assert_eq!(process_birth_ticks(b"17 (shim) S 0"), None);
+        let mut padded = record(b"shim", "S", "42");
+        padded.resize(4096, b' ');
+        assert_eq!(process_birth_ticks(&padded), Some(42));
+        padded.push(b' ');
+        assert_eq!(process_birth_ticks(&padded), None);
     }
 }
