@@ -333,3 +333,23 @@ test("the wizard works on a phone and keeps the footer on screen", async ({ brow
     await context.close();
   }
 });
+
+
+for (const mode of ["fresh", "locked"] as const) {
+  test(`${mode} CA explains passkey confirmation before starting SSH`, async ({ page }) => {
+    await open(page, `&ca=${mode}`);
+    await openWizard(page);
+    let started = false;
+    page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+      if (typeof payload === "string") { try { if (JSON.parse(payload).action === "start") started = true; } catch { /* unrelated binary protocol */ } }
+    }));
+    await addTyped(page, "hosttest@ca-worker");
+    await expect(wizard(page).getByRole("heading", { name: `${mode === "fresh" ? "Set up" : "Unlock"} host connections` })).toBeVisible();
+    await expect(wizard(page)).toContainText("certificate valid for seven days");
+    expect(started).toBe(false);
+    await inWizard(page, "Confirm with passkey").click();
+    await expect(wizard(page).locator(".ah-page[data-page=progress]")).toBeVisible();
+    await expect.poll(() => started).toBe(true);
+  });
+}
+

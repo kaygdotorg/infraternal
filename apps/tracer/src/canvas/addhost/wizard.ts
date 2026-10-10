@@ -39,7 +39,7 @@ const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const SOURCE_LABELS: Record<HostSource, string> = { netbird: "NetBird", tailscale: "Tailscale", "known-hosts": "Known hosts", "ssh-config": "SSH config", "already-added": "Added" };
 const reducedMotion = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-type Page = "discovery" | "root" | "progress" | "choose" | "hostkey" | "failure" | "install";
+type Page = "authority" | "discovery" | "root" | "progress" | "choose" | "hostkey" | "failure" | "install";
 type Direction = 1 | -1 | 0;
 
 /** One host the person picked or typed. */
@@ -118,6 +118,9 @@ export class Wizard {
   /** The page the install command was opened from, so Back returns to it. */
   private installFrom: "choose" | "failure" = "failure";
   private busy = false;
+  private authorityReady = false;
+  private authorityInitialized = false;
+  private authorityRoot = false;
   private timers: number[] = [];
   /** Stage siblings made inert while the card is open. */
   private readonly inerted: Element[] = [];
@@ -219,6 +222,7 @@ export class Wizard {
     if (next !== "discovery") this.chips = undefined;
     if (next === "discovery") this.renderDiscovery(page);
     else if (next === "root") this.renderRoot(page);
+    else if (next === "authority") this.renderAuthority(page);
     else if (next === "progress") this.renderProgress(page);
     else if (next === "choose") this.renderChoose(page);
     else if (next === "hostkey") this.renderHostKey(page);
@@ -457,6 +461,46 @@ export class Wizard {
   }
 
   private startBatch(root: boolean): void {
+    if (!this.authorityReady && this.deps.service.authorityStatus) { void this.prepareAuthority(root); return; }
+    this.beginBatch(root);
+  }
+
+  private async prepareAuthority(root: boolean): Promise<void> {
+    if (this.busy) return;
+    this.setBusy(true);
+    try {
+      const status = await this.deps.service.authorityStatus!();
+      if (!this.alive || this.closing) return;
+      this.authorityRoot = root;
+      this.authorityInitialized = status.initialized;
+      if (status.locked) this.go("authority");
+      else { this.authorityReady = true; this.beginBatch(root); }
+    } catch (error: unknown) {
+      if (this.alive && !this.closing) this.showError(error instanceof ServiceError ? error.message : "Host connections could not be checked. Try again.");
+    } finally { this.setBusy(false); }
+  }
+
+  private renderAuthority(page: HTMLElement): void {
+    page.innerHTML = `${this.hero(ICON.shield)}<h1 class="ah-title">${this.authorityInitialized ? "Unlock" : "Set up"} host connections</h1>
+      <p class="ah-lede">${this.authorityInitialized ? "Confirm with your administrator passkey to let this server connect new hosts." : "Host connections have not been set up yet. Confirm with your administrator passkey to create the certificate authority for your hosts."}</p>
+      <p class="ah-text">Your account key stays in your browser. New hosts receive a certificate valid for seven days.</p>`;
+    this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-primary" type="button" data-ah="unlock-authority">${svg(ICON.shieldCheck)}<span>Confirm with passkey</span></button>`);
+  }
+
+  private async unlockAuthority(): Promise<void> {
+    if (this.busy || !this.deps.service.unlockAuthority) return;
+    this.setBusy(true);
+    try {
+      await this.deps.service.unlockAuthority();
+      if (!this.alive || this.closing) return;
+      this.authorityReady = true;
+      this.beginBatch(this.authorityRoot);
+    } catch (error: unknown) {
+      if (this.alive && !this.closing) this.showError(error instanceof ServiceError ? error.message : "Passkey confirmation did not finish. Try again.");
+    } finally { this.setBusy(false); }
+  }
+
+  private beginBatch(root: boolean): void {
     this.closeAllRuns();
     const ids = this.targetIds(this.selected);
     const rootIds = new Set(root ? this.rootCandidates().map((entry) => entry.id) : []);
@@ -935,6 +979,7 @@ export class Wizard {
     const jobOf = (): Job | undefined => this.jobs.find((item) => item.target === target.closest<HTMLElement>("[data-job]")?.dataset.job);
     if (action === "close") this.requestClose();
     else if (action === "continue") this.proceed();
+    else if (action === "unlock-authority") void this.unlockAuthority();
     else if (action === "as-root") this.startBatch(true);
     else if (action === "as-user") this.startBatch(false);
     else if (action === "back") this.go("discovery", -1);

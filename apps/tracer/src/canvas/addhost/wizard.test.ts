@@ -26,3 +26,45 @@ test("a saved-key prompt completing after close never starts an SSH attempt", as
   expect(minted).toBe(0);
   expect(retried).toBe(0);
 });
+
+
+function authorityWizard(service: object) {
+  const observed: { page?: string; batches: boolean[] } = { batches: [] };
+  const wizard = Object.assign(Object.create(Wizard.prototype) as {
+    alive: boolean; closing: boolean; authorityInitialized: boolean; authorityRoot: boolean;
+    prepareAuthority(root: boolean): Promise<void>; unlockAuthority(): Promise<void>;
+  }, {
+    alive: true, closing: false, busy: false, deps: { service },
+    setBusy() {}, go(page: string) { observed.page = page; },
+    beginBatch(root: boolean) { observed.batches.push(root); },
+    showError() { throw new Error("unexpected authority refusal"); },
+  });
+  return { wizard, observed };
+}
+
+test("fresh CA requires setup before any SSH attempt and preserves root consent", async () => {
+  const { wizard, observed } = authorityWizard({ authorityStatus: async () => ({ initialized: false, locked: true }) });
+  await wizard.prepareAuthority(true);
+  expect(observed.page).toBe("authority");
+  expect(wizard.authorityInitialized).toBe(false);
+  expect(wizard.authorityRoot).toBe(true);
+  expect(observed.batches).toEqual([]);
+});
+
+test("ready CA begins the requested installation mode without another prompt", async () => {
+  const { wizard, observed } = authorityWizard({ authorityStatus: async () => ({ initialized: true, locked: false }) });
+  await wizard.prepareAuthority(false);
+  expect(observed.batches).toEqual([false]);
+});
+
+test("closing during CA confirmation never starts an SSH attempt", async () => {
+  let finish: () => void = () => {};
+  const confirmation = new Promise<void>((resolve) => { finish = resolve; });
+  const { wizard, observed } = authorityWizard({ unlockAuthority: () => confirmation });
+  const work = wizard.unlockAuthority();
+  wizard.alive = false;
+  wizard.closing = true;
+  finish();
+  await work;
+  expect(observed.batches).toEqual([]);
+});

@@ -54,7 +54,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   // shell window in Console, which is also how the sidebar inventory learns of it (the tree lists windows).
   const addHost = createAddHost(core, {
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
-    service: createMockProvisioning({ savedKey: new URLSearchParams(location.search).get("savedkey") === "1" }),
+    service: createMockProvisioning({ savedKey: new URLSearchParams(location.search).get("savedkey") === "1", authority: new URLSearchParams(location.search).get("ca") ?? "ready" }),
     sink: { enrolled: (hosts) => enrol(hosts) },
   });
   function enrol(hosts: EnrolledHost[]): void {
