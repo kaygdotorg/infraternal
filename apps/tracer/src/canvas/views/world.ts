@@ -22,7 +22,7 @@ import { restPx } from "../springs";
 import { ICON, viewIcon } from "./icons";
 import { windowLabel } from "../windows/label";
 import { viewRecentWindows, viewWindowEntries } from "../toolbar/palette";
-import { keyCaps } from "../../../../../packages/ui/src/shortcuts";
+import { keyCaps, PALETTE_KEYS } from "../../../../../packages/ui/src/shortcuts";
 import { endActivity, setActivity } from "../../perf-activity";
 
 /** Rows the view's hover card lists before its "All" row (TASTE: lists stay short). */
@@ -116,7 +116,7 @@ export function createViews(cx: Ctx): ViewsModule {
     b.innerHTML = `<span class="cl-viewrow-name"></span><span class="cl-viewrow-keys"></span>`;
     (b.querySelector(".cl-viewrow-name") as HTMLElement).textContent = `All ${total} windows`;
     const keys = b.querySelector(".cl-viewrow-keys") as HTMLElement;
-    for (const cap of keyCaps({ mac: "⌘K", other: "Ctrl+K" })) keys.append(el("kbd", "", cap));
+    for (const cap of keyCaps(PALETTE_KEYS)) keys.append(el("kbd", "", cap));
     b.addEventListener("click", () => { hideSummary(true); cx.core.showPalette(viewWindowEntries(cx, c)); });
     return b;
   };

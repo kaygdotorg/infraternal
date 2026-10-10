@@ -4,6 +4,7 @@ import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/s
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { installFocusRing } from "../../../packages/ui/src/focus-ring";
+import { installAutoScrollbars } from "../../../packages/ui/src/scrollbars";
 import { applyFontVars, loadFont } from "../../../packages/ui/src/fonts";
 import { initialFont } from "./font-preference";
 import { mountOnboarding } from "./onboarding";
@@ -114,6 +115,7 @@ void start();
 
 async function start(): Promise<void> {
   installFocusRing();
+  installAutoScrollbars();
   installForegroundListener();
   // The chosen font applies to the whole app, sign-in card included, before the first paint.
   // The default is already declared in CSS and preloaded; another font is fetched here.

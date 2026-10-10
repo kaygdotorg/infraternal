@@ -10,4 +10,20 @@ export function isMacPlatform(): boolean {
 
 /** A shortcut written once for each platform; `shortcutLabel` picks the one that works here. */
 export interface PlatformKeys { mac: string; other: string }
-export const shortcutLabel = (keys: PlatformKeys | string): string => typeof keys === "string" ? keys : isMacPlatform() ? keys.mac : keys.other;
+
+/**
+ * Modifier words that a written key label ("Ctrl+Shift+L") turns into Apple glyphs on a Mac keyboard.
+ * A written label names physical keys, so Ctrl is the Control key on every platform; only its
+ * rendering changes. Glyphs are never shown elsewhere (Windows and Linux read the words).
+ */
+const MAC_GLYPHS: Record<string, string> = { Ctrl: "⌃", Control: "⌃", Alt: "⌥", Option: "⌥", Shift: "⇧", Cmd: "⌘", Command: "⌘", Meta: "⌘" };
+
+/** A written key label as this platform shows it: "Ctrl+Shift+L" → "⌃⇧L" on a Mac, unchanged elsewhere. */
+export function keysLabel(keys: string): string {
+  if (keys.length < 2 || !keys.includes("+") || !isMacPlatform()) return keys;
+  const parts = keys.split("+");
+  const key = parts.pop() ?? "";
+  return parts.map((part) => MAC_GLYPHS[part] ?? part).join("") + key;
+}
+
+export const shortcutLabel = (keys: PlatformKeys | string): string => typeof keys === "string" ? keysLabel(keys) : isMacPlatform() ? keys.mac : keys.other;

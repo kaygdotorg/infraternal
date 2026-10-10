@@ -9,7 +9,8 @@
  * only gives it mock adapters and calls its public operations.
  */
 import type { WinRec } from "../context";
-import { isMacPlatform } from "../../../../../packages/ui/src/platform";
+import { isMacPlatform, shortcutLabel } from "../../../../../packages/ui/src/platform";
+import { PALETTE_KEYS } from "../../../../../packages/ui/src/shortcuts";
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { createCanvas, type CanvasController } from "../create";
 import { boxOf, type Metrics } from "../layout/geometry";
@@ -111,7 +112,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
         const narrow = state.metrics.narrow;
         camera.flyTo(() => ({ cx: r.x + r.w / 2 + (narrow ? 0 : 180), cy: r.y + r.h / 2 + (narrow ? 120 : 200), z: 0.62 }), true);
       } },
-    { name: "Sharing", hint: "Share layout… (⌘K or a view label's menu) sends views to a person or group. Then Mockup: view as asha: the copy arrives as a new view. Publish to team keeps followers linked and read-only.",
+    { name: "Sharing", hint: `Share layout… (${shortcutLabel(PALETTE_KEYS)} or a view label's menu) sends views to a person or group. Then Mockup: view as asha: the copy arrives as a new view. Publish to team keeps followers linked and read-only.`,
       enter() { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("incident", true); } },
   ];
   const mockupTag = el("button", "ui-pill cl-mockup", "mockup");

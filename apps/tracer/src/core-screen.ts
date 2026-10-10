@@ -5,8 +5,8 @@ import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { Spring } from "../../../packages/ui/src/spring";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
-import { isMacPlatform } from "../../../packages/ui/src/platform";
-import { registerShortcuts } from "../../../packages/ui/src/shortcuts";
+import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
+import { keyCaps, PALETTE_KEYS, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
 import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
@@ -150,7 +150,7 @@ const SCREEN = `
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
         <span class="capsule-session">SSH shell</span><span class="capsule-rtt" id="rtt" aria-label="Connection delay">··</span>
-        <kbd class="capsule-kbd">⌘K</kbd>
+        <span class="capsule-keys" id="capsule-keys" aria-hidden="true"></span>
       </button>
       <nav class="tabs" aria-label="Other sessions">
         <button class="ui-pill ui-pill-icon tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
@@ -229,9 +229,16 @@ export interface PaletteEntry {
   previewFont?: MonoFont;
 }
 
+/** The name of a modifier key on this platform: Option is the Mac key, Alt the PC one (Control is the same word everywhere). */
+const modifierName = (mod: keyof InputModifiers): string => mod === "ctrl" ? "Control" : isMacPlatform() ? "Option" : "Alt";
+
 /** Mounts the authenticated server host, its live shell session, and terminal controls. */
 export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): CoreScreen {
   app.innerHTML = SCREEN;
+  // The modifier names are read per mount, not in the template: "Option" is the Mac key, "Alt" elsewhere.
+  for (const mod of ["ctrl", "alt"] as const) get<HTMLElement>(`[data-mod="${mod}"]`).setAttribute("aria-label", modifierName(mod));
+  // The palette key is written per platform (⌘K on a Mac keyboard, Ctrl K elsewhere): one keycap per part.
+  get<HTMLElement>("#capsule-keys").replaceChildren(...keyCaps(shortcutLabel(PALETTE_KEYS)).map((cap) => { const kbd = document.createElement("kbd"); kbd.className = "capsule-kbd"; kbd.textContent = cap; return kbd; }));
   const stage = get<HTMLElement>("#terminal-screen");
   // The canvas preview never draws the status line, from the first frame (the canvas chunk loads a
   // moment after the screen mounts, and the line's "Starting terminal…" must not flash meanwhile).
@@ -688,7 +695,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       { id: "back", label: "Back to the terminal", keys: "Shift+F6" },
     ] }),
     registerShortcuts({ id: "global", title: "Everywhere", area: "global", shortcuts: [
-      { id: "palette", label: "Open the command palette", keys: { mac: "⌘K", other: "Ctrl+K" } },
+      { id: "palette", label: "Open the command palette", keys: PALETTE_KEYS },
       { id: "shortcuts", label: "Show these shortcuts", keys: "?" },
       { id: "close", label: "Close the open panel", keys: "Esc" },
     ] }),
@@ -827,13 +834,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     requestAnimationFrame(() => requestAnimationFrame(() => { delete button.dataset.instant; }));
   };
   const renderModifiers = (instant = false): void => {
-    const names: Record<keyof InputModifiers, string> = { ctrl: "Control", alt: "Option" };
     for (const button of keybar.querySelectorAll<HTMLButtonElement>("[data-mod]")) {
       const name = button.dataset.mod as keyof InputModifiers;
       const state: InputModifierState = modifiers[name];
       button.dataset.modState = state;
       button.setAttribute("aria-pressed", state === "locked" ? "mixed" : String(state === "armed"));
-      button.setAttribute("aria-label", state === "off" ? names[name] : `${names[name]}, ${state}`);
+      button.setAttribute("aria-label", state === "off" ? modifierName(name) : `${modifierName(name)}, ${state}`);
       if (instant) markInstant(button);
       refreshTip(button);
     }

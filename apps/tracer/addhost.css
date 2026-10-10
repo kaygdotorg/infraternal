@@ -75,7 +75,7 @@
      than the theme's --fg-2 does; the window computes the lift, the card uses it. */
   --fg-2: var(--ah-fg2);
 }
-.ah-scroll { touch-action: pan-y; min-height: 0; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; padding: 36px 32px 36px; scrollbar-width: thin; }
+.ah-scroll { touch-action: pan-y; min-height: 0; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; padding: 36px 32px 36px; }
 /* With actions below, the list ends 20 px above them; with none (a running batch) it ends with the
    same 36 px it starts with, so the last row never touches the card edge. */
 .ah-float:has(.ah-foot:not([hidden])) .ah-scroll { padding-bottom: 20px; }

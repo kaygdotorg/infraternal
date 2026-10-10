@@ -50,6 +50,12 @@ export interface ShortcutSection {
 /** The area whose sections are always shown, after the current area's. */
 export const GLOBAL_AREA = "global";
 
+/**
+ * The command palette key, written once. Every surface that names it (the top pill, the view popover,
+ * the palette hints, the shortcuts panel) takes it from here so Mac and PC always agree.
+ */
+export const PALETTE_KEYS: PlatformKeys = { mac: "⌘K", other: "Ctrl+K" };
+
 const registered = new Map<string, ShortcutSection>();
 
 /** Registers (or replaces) a section; returns a remover. */
