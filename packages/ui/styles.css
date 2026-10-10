@@ -55,6 +55,27 @@
   cursor: pointer;
   transition: background 140ms ease, color 140ms ease;
 }
+/* Optional button kinds share states and motion; instances supply only geometry
+   and typography through variables. Plain ui-button callers keep their defaults. */
+.ui-button[data-button] {
+  display: inline-flex;
+  min-width: var(--ui-button-min-width, 0);
+  height: var(--ui-button-height, 44px);
+  align-items: center;
+  justify-content: center;
+  gap: var(--ui-button-gap, 10px);
+  border: 0;
+  font: var(--ui-button-font, inherit);
+  letter-spacing: var(--ui-button-letter-spacing, normal);
+  transition: var(--ui-button-transition, transform 140ms var(--ease-out, ease), background-color 160ms ease, color 120ms ease);
+}
+.ui-button[data-button="primary"] { background: var(--ui-button-background, var(--fg)); color: var(--ui-button-color, var(--bg)); }
+.ui-button[data-button="secondary"] { background: var(--ui-button-background, none); color: var(--ui-button-color, var(--fg-2, var(--fg))); }
+.ui-button[data-button]:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
+.ui-button[data-button]:disabled { cursor: default; }
+/* Disabled solid buttons remain opaque over content beneath their surface. */
+.ui-button[data-button="primary"]:disabled { background: var(--ui-button-disabled-background, color-mix(in oklab, var(--fg) 30%, var(--bg))); color: var(--ui-button-disabled-color, color-mix(in oklab, var(--bg) 85%, var(--fg))); }
+@media (hover: hover) and (pointer: fine) { .ui-button[data-button="secondary"]:hover:not(:disabled) { color: var(--ui-button-hover-color, var(--fg)); } }
 .ui-source-icon { display: block; width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 /* One native switch keeps pointer, keyboard, and assistive-technology state aligned. */
