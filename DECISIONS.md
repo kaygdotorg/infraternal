@@ -1793,3 +1793,27 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      comes first), with a plain explanation. Rules in the Access table work
      the same under both defaults. Turning deny-by-default on shows, in one
      sentence, which machines lose reach before it applies.
+217. **Updates never lock the CA; deploys use the in-memory handoff (owner,
+     2026-10-10; implements D168):** D168 stays as written: the CA locks only
+     on a real cold start (crash, reboot, power loss, manual stop/start,
+     restore). Every update, including the orchestrator's deploys, replaces
+     the server process through an in-memory handoff: the running server
+     passes the unlocked CA key to its successor over a private,
+     authenticated, local channel, without ever writing it to disk. If the
+     handoff fails, the server simply stays locked, and that counts as a cold
+     start. Deploying by plain stop/start, which locked the CA on every
+     deploy on 2026-10-10, is retired.
+218. **Closing a window ends its session only when nothing is happening
+     (owner, 2026-10-10; amends D178):** closing a window ends the session
+     only when the shell is the only process in its terminal session: no
+     foreground program, no background or stopped job, nothing `nohup`ed or
+     `disown`ed. This is checked across every process of the shell's
+     session, not just its children.
+     - **Kept:** a session running `tmux`, `screen`, `ssh`, `sudo`, an
+       editor or any program is never ended. It stays in the background and
+       is counted.
+     - **Undo:** the shell is ended 30 s after the close. Meanwhile a toast
+       "Closed · Undo" (or reopening the session) restores it exactly as it
+       was.
+     - Detection is conservative: when in doubt, the session is kept. The
+       owner: "we should be really conservative here".
