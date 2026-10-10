@@ -80,12 +80,20 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     } },
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
   });
+  let readyRemoval: import("./context").Adapters["hostRemoval"];
+  const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), remove: (id, name, anchor) => readyRemoval?.remove(id, name, anchor) };
+  // Registry metadata is optional chrome: load it without delaying the first terminal.
+  void onDemand(() => import("./host-removal.on-demand")).then((module) => module.createHostRemoval(core, (id) => {
+    sessions.forgetHost(id);
+    for (const view of canvas.cx.views.values()) for (const rec of [...view.wins.values()]) if (rec.model.hostId === id) canvas.cx.win.close(rec);
+    canvas.flush();
+  })).then((adapter) => { readyRemoval = adapter; });
   const saved = await store.load();
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
   const savedMesh = saved?.views.find((v) => v.id === "mesh");
   const mesh = createMeshApi({ transport: connectionTransport(connection), pins: savedMesh?.layout.type === "graph" ? savedMesh.layout.pinned : {} });
   const canvas = createCanvas(core, {
-    adapters: { sessions, inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, addHost: () => addHost.open() },
+    adapters: { sessions, inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => addHost.open() },
     float: false,
     persisted: (id) => id === "console" || id === "mesh",
   });
