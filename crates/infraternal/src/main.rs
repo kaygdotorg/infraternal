@@ -141,6 +141,12 @@ struct InstallArgs {
 }
 
 fn main() -> ExitCode {
+    // Installation slots and symlinks must not rename the daemon or its shims
+    // in ps/journald. Apply before the embedded dispatcher bypasses clap.
+    #[cfg(target_os = "linux")]
+    if nix::sys::prctl::set_name(c"infraternal").is_err() {
+        return ExitCode::FAILURE;
+    }
     if let Some(result) = embedded_cli::run_if_requested() {
         return result;
     }
