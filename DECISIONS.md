@@ -1776,3 +1776,20 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        bounds replace it: bytes buffered per connection and streams per
        person, sized from measured memory. A limit must protect a resource
        and say which one; a round count protects nothing.
+215. **Infraternal agents talk to the server over the mesh (owner,
+     2026-10-10):** once a machine is in the mesh, its connection to the
+     server automatically takes the best mesh path (direct, then relay, then
+     TCP/TLS 443), using the same path selection as every other mesh link
+     (D196, D197). The agent's 7-day certificate (D168) is its mesh identity.
+     The server's agent port (D64, 7443) stays for the first join and as a
+     last fallback. Owner: "that's good ux - it also removes the need to have
+     ports open." It is built as part of the mesh data plane (#129), not as
+     a separate feature.
+216. **Mesh default policy depends on the edition (owner, 2026-10-10;
+     amends D164):** the open-source edition is **allow by default**: a new
+     mesh lets its members reach each other until rules narrow it. The
+     enterprise edition ships **deny by default**. Either way, the default is
+     one switch in **Settings → Access** (D210: Access lives in Settings and
+     comes first), with a plain explanation. Rules in the Access table work
+     the same under both defaults. Turning deny-by-default on shows, in one
+     sentence, which machines lose reach before it applies.
