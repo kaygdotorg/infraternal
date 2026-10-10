@@ -12,7 +12,13 @@ import { el } from "../dom";
 import { columnRect, columnEls } from "../layout/columns";
 import { COLUMN_GAP } from "../layout/geometry";
 import { freshColumnId, fromGrid, applyCols, readColumns } from "../views/tracks";
-import { groupOf, insertBand, problems, removeWin, runsOf, settle, type Col } from "../layout/grid";
+import { groupOf, runsOf, settle } from "../layout/grid";
+import { onDemand } from "../../on-demand";
+
+/** The grouped-move code loads on the first grouped grab (D188); it is in the on-demand chunk, not the canvas one. */
+type DropGrid = typeof import("../layout/drop-grid.on-demand");
+let dropGrid: DropGrid | undefined;
+const loadDropGrid = (): Promise<DropGrid> => dropGrid ? Promise.resolve(dropGrid) : onDemand(() => import("../layout/drop-grid.on-demand")).then((m) => (dropGrid = m));
 import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
 import { endActivity, setActivity } from "../../perf-activity";
 
@@ -36,6 +42,8 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
     // what the landing works from. A plain window keeps the flat path.
     const cols0 = readColumns(cx, c);
     const grid0 = (rec.model.span ?? 1) > 1 || !!groupOf(runsOf(cols0), columnEls(c.colsEl).indexOf(colEl)) ? { cols: cols0, w: Number(colEl.dataset.w) || state.metrics.colW, h: root.offsetHeight } : undefined;
+    // The landing module loads while the person is still dragging, so it is there when the window is dropped.
+    if (grid0) void loadDropGrid().catch(() => undefined);
     colEl.insertBefore(slot, root);
     const fixedH = root.style.height;
     root.classList.add("is-lifted");
@@ -106,7 +114,8 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
         root.style.cssText = fixedH ? `height:${fixedH}` : "";
         root.classList.remove("is-lifted");
         // Through the grid when the window was in one (D212): where it landed is read from the slot and the windows around it.
-        const landedAt = grid0 ? landing(cx, c, rec, grid0, slot) : undefined;
+        // Not loaded yet (a drop before the module arrived): the window goes back where it was, which is always valid.
+        const landedAt = grid0 && dropGrid ? dropGrid.landing({ cols0: grid0.cols, gap: COLUMN_GAP, id: rec.model.id, root, h: grid0.h, w: grid0.w, view: c.colsEl, newId: () => freshColumnId(cx, c), slot }) : undefined;
         slot.replaceWith(root);
         if (grid0) applyCols(cx, c, fromGrid(c, landedAt ?? settle(grid0.cols)));
         state.movingWindow = false;
@@ -126,42 +135,3 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
     move(first);
   }
 
-/**
- * Where a window dropped on a grid lands (D212): the layout it was taken from, without it (its space given to its
- * neighbours, as a close does), with it inserted as a new band of the column the slot is in, above the window that is
- * below the slot. A slot in a new column makes a plain column at that place. Returns nothing when no valid place
- * exists, and the window goes back where it was.
- */
-function landing(cx: Ctx, c: ViewRec, rec: WinRec, grid0: { cols: ReturnType<typeof readColumns>; w: number; h: number }, slot: HTMLElement): Col[] | undefined {
-  const id = rec.model.id;
-  const base = removeWin(grid0.cols, id, COLUMN_GAP);
-  const colEl = slot.parentElement as HTMLElement | null;
-  if (!colEl) return undefined;
-  const slotTop = slot.getBoundingClientRect().top;
-  const below = [...colEl.querySelectorAll<HTMLElement>(":scope > .ui-window")]
-    .filter((n) => n !== rec.card.root && n.getBoundingClientRect().top > slotTop)
-    .map((n) => n.dataset.windowId);
-  const next: Col[] = [...base];
-  const N = { id, span: 1, rows: 1, row: 0, h: grid0.h > 0 ? grid0.h : undefined };
-  const at = next.findIndex((col) => col.id === colEl.dataset.id);
-  let out: Col[];
-  if (at >= 0) {
-    const col = next[at]!;
-    const belowWin = below.map((b) => col.wins.find((w) => w.id === b)).find((w) => w !== undefined);
-    const bottom = Math.max(0, ...col.wins.map((w) => w.row + w.rows));
-    const runRows = Math.max(0, ...next.flatMap((x) => x.wins.map((w) => w.row + w.rows)));
-    const rowAt = belowWin ? belowWin.row : bottom || runRows;
-    out = insertBand(next, at, rowAt, { id, span: 1, h: N.h });
-  } else {
-    // A new column: it takes its place among the columns, by where its element stands in the view.
-    const els = columnEls(c.colsEl);
-    const pos = els.indexOf(colEl);
-    const before = els.slice(0, pos).map((e) => e.dataset.id);
-    const index = next.filter((col) => before.includes(col.id)).length;
-    const colId = colEl.dataset.id ?? freshColumnId(cx, c);
-    const fresh: Col = { id: colId, w: grid0.w, wins: [{ id, span: 1, rows: 1, row: 0, ...(N.h !== undefined ? { h: N.h } : {}) }] };
-    next.splice(index, 0, fresh);
-    out = settle(next);
-  }
-  return problems(out).length ? undefined : out;
-}

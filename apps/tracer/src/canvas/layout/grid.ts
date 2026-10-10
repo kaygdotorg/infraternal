@@ -10,7 +10,7 @@
  *   is level with its neighbours. Band heights come from the explicit `h` of the single-band windows in that band;
  *   a band without one takes an equal share of what is left (`1fr`), as a flat column does.
  *
- * Invariants (checked by `problems`, and by the tests):
+ * Invariants (checked by `problems` in drop-grid.on-demand.ts, and by the tests):
  * - Every cell of a group (row band x column) is covered by exactly one window. No gaps, no overlaps.
  * - A column's windows are listed in row order.
  * - A column that no window starts in and no window crosses is removed, and its width goes to its half partner (or
@@ -339,29 +339,6 @@ function normalize(input: Col[], gap: number): Col[] {
 export function bandHeights(cols: readonly Col[], run: Run): (number | undefined)[] {
   const out: (number | undefined)[] = new Array(run.rows).fill(undefined);
   for (let j = run.from; j <= run.to; j++) for (const v of cols[j]!.wins) if (v.rows === 1 && v.h !== undefined && out[v.row] === undefined) out[v.row] = v.h;
-  return out;
-}
-
-/** Every rule the grid must hold, as messages (empty when it holds). Used by the tests and by the DOM sync in development. */
-export function problems(cols: readonly Col[]): string[] {
-  const out: string[] = [];
-  for (const run of runsOf(cols)) {
-    const cover = new Map<string, number>();
-    for (let j = run.from; j <= run.to; j++) {
-      for (const v of cols[j]!.wins) {
-        if (v.span < 1 || v.rows < 1) out.push(`${v.id} has an empty span or band`);
-        if (j + v.span - 1 > run.to) out.push(`${v.id} leaves its group`);
-        for (let x = j; x < j + v.span; x++) for (let y = v.row; y < v.row + v.rows; y++) cover.set(`${x}:${y}`, (cover.get(`${x}:${y}`) ?? 0) + 1);
-      }
-      const rows = cols[j]!.wins.map((v) => v.row);
-      if (rows.some((r, i) => i > 0 && r < rows[i - 1]!)) out.push(`column ${cols[j]!.id} is not in row order`);
-    }
-    // Every cell of every run is covered once: a plain column has no gaps either.
-    for (let j = run.from; j <= run.to; j++) for (let y = 0; y < run.rows; y++) {
-      const n = cover.get(`${j}:${y}`) ?? 0;
-      if (n !== 1) out.push(`cell ${j}:${y} is covered ${n} times`);
-    }
-  }
   return out;
 }
 
