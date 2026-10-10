@@ -241,6 +241,8 @@ session identity and sequence, preserving the live mux stream.
 
 Hello advertises bit 3; an ownership-only Attach selects exactly bit 3.
 This link has no writer or output cursor and accepts no PTY/input requests.
+An `InputStateRequest` on this link receives `InputState(0,0)` solely as an
+ownership-installation barrier; these zeroes are not writer cursors.
 It remains open for one owning window across data-link replacements; socket
 closure releases ownership. An infraternal agent only opens it when advertised.
 Old shims retain their negotiated behavior. The maximum 32 peer sockets includes

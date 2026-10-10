@@ -18,4 +18,4 @@ pub fn detach() -> std::io::Result<bool> {
 mod session;
 mod terminal;
 mod terminal_native;
-pub use session::{Config, run};
+pub use session::{Config, run, run_with_retention};
