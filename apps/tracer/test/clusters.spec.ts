@@ -1113,7 +1113,8 @@ test("window header actions are one pill: as tall as the title pill, on its line
         return at(cx - 21, cy) && at(cx + 21, cy) && at(cx, cy - 21) && at(cx, cy + 21);
       });
     });
-    expect(hits).toEqual([true, true, true, true]);
+    // Only Close is in the phone header, so one 44 px target.
+    expect(hits).toEqual([true]);
   } finally { await t.close(); }
 });
 
