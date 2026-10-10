@@ -15,6 +15,7 @@ use axum::{
     serve::ListenerExt,
 };
 use axum_server::tls_openssl::OpenSSLConfig;
+use infraternal_plugin_api::PluginDescriptor;
 use serde_json::json;
 use sqlx::{
     SqlitePool,
@@ -200,7 +201,17 @@ pub enum ServerError {
 ///
 /// Returns a sanitized startup, storage, migration, TLS, or listener error.
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
-    serve_inner(config, None, None, None, None).await
+    serve_inner(config, None, None, None, None, None).await
+}
+
+/// Start with the caller's compiled infraternal agent action catalog, preserving the production adapter.
+/// # Errors
+/// Returns sanitized configuration, storage, authentication, TLS and listener failures.
+pub async fn serve_with_plugin_descriptors(
+    config: ServerConfig,
+    catalog: &'static [&'static PluginDescriptor],
+) -> Result<(), ServerError> {
+    serve_inner(config, None, None, None, None, Some(catalog)).await
 }
 
 /// Mount host enrollment using the trusted runtime's D168 signing source.
@@ -211,7 +222,7 @@ pub async fn serve_with_enrollment(
     config: ServerConfig,
     enrollment: Option<EnrollmentService>,
 ) -> Result<(), ServerError> {
-    serve_inner(config, enrollment, None, None, None).await
+    serve_inner(config, enrollment, None, None, None, None).await
 }
 
 /// Serve enrollment, host transports and browser routing using trusted D168 sources.
@@ -226,6 +237,7 @@ pub async fn serve_with_remote(
         config,
         Some(remote.enrollment.clone()),
         Some(remote),
+        None,
         None,
         None,
     )
@@ -247,7 +259,7 @@ pub(crate) async fn serve_with_key_setup(
     factory: Option<BootstrapFactory>,
     key_setup: Option<KeyInitialization>,
 ) -> Result<(), ServerError> {
-    serve_inner(config, None, None, factory, key_setup).await
+    serve_inner(config, None, None, factory, key_setup, None).await
 }
 
 async fn serve_inner(
@@ -256,10 +268,19 @@ async fn serve_inner(
     remote: Option<RemoteService>,
     factory: Option<BootstrapFactory>,
     key_setup: Option<KeyInitialization>,
+    catalog: Option<&'static [&'static PluginDescriptor]>,
 ) -> Result<(), ServerError> {
     configure_logging(false);
-    let (app, setup_token, _listeners) =
-        build_router_core(config.clone(), None, enrollment, remote, factory, key_setup).await?;
+    let (app, setup_token, _listeners) = build_router_core(
+        config.clone(),
+        None,
+        enrollment,
+        remote,
+        factory,
+        key_setup,
+        catalog,
+    )
+    .await?;
     if let Some(token) = setup_token {
         start_setup_token_socket(&config.data_dir, token)?;
     }
@@ -325,7 +346,7 @@ async fn build_router_with_enrollment(
     enrollment: Option<EnrollmentService>,
 ) -> Result<(Router, Option<String>), ServerError> {
     let (app, setup, _) =
-        build_router_core(config, supplied_agent, enrollment, None, None, None).await?;
+        build_router_core(config, supplied_agent, enrollment, None, None, None, None).await?;
     Ok((app, setup))
 }
 
@@ -431,7 +452,7 @@ async fn build_router_with_key_setup(
     key_setup: Option<KeyInitialization>,
 ) -> Result<(Router, Option<String>), ServerError> {
     let (app, setup, _) =
-        build_router_core(config, supplied_agent, None, None, factory, key_setup).await?;
+        build_router_core(config, supplied_agent, None, None, factory, key_setup, None).await?;
     Ok((app, setup))
 }
 
@@ -442,6 +463,7 @@ async fn build_router_core(
     remote: Option<RemoteService>,
     factory: Option<BootstrapFactory>,
     key_setup: Option<KeyInitialization>,
+    catalog: Option<&'static [&'static PluginDescriptor]>,
 ) -> Result<(Router, Option<String>, Option<RemoteListeners>), ServerError> {
     #[cfg(not(feature = "remote"))]
     let _ = (enrollment, remote);
@@ -513,7 +535,7 @@ async fn build_router_core(
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
         .await
         .map_err(|_| ServerError::InvalidConfiguration)?
-        .with_plugin_descriptors(infraternal_agent::plugins::descriptors());
+        .with_plugin_descriptors(catalog.unwrap_or_else(infraternal_agent::plugins::descriptors));
     #[cfg(feature = "remote")]
     let ws_state = ws_state.with_remote_hosts(hosts);
     #[cfg(not(feature = "remote"))]

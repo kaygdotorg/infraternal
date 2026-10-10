@@ -261,6 +261,7 @@ async fn fixture_at_with_lock(
         Some(service),
         None,
         None,
+        None,
     )
     .await
     .unwrap();

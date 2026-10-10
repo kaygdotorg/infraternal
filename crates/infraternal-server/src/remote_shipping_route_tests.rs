@@ -27,6 +27,7 @@ async fn review_default_server_must_register_remote_join() {
         None,
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -127,6 +128,7 @@ async fn independent_review_configured_server_mounts_ca_unlock_routes() {
         Some(EmbeddedAgent::unavailable()),
         Some(remote.enrollment.clone()),
         Some(remote),
+        None,
         None,
         None,
     )
