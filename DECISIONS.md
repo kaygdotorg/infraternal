@@ -1750,3 +1750,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        rebindable and appear in ⌘K and the window's header pill.
      - **Words:** "Split right", "Split down", "New window right", "New
        window below". There are no tabs.
+213. **Zig is the C toolchain for static builds (owner, 2026-10-10):** the
+     C dependencies of the static musl binaries (OpenSSL, SQLite, and
+     libghostty-vt, which is written in Zig per D94) are compiled with `zig
+     cc` for x86_64 and aarch64, from one build host. The version is pinned
+     (0.15.2) and the download is checked by SHA-256 in
+     `scripts/auth-toolchain`. It lives in the build's target directory and is
+     never installed system-wide. This confirms the choice a job made in
+     469d0e87 (#17) without a grill. Rejected: a musl cross-gcc per
+     architecture, and clang with a separate musl sysroot; both mean more
+     toolchains to keep in step. There is exactly one Zig in the build: no
+     second copy from the system or nixpkgs.
