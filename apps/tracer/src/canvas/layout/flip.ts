@@ -85,6 +85,6 @@ export function createFlip(zoom: () => number, tick: () => void): Flip {
       }
       if (running.size && !raf) raf = requestAnimationFrame(loop);
     },
-    targets: (colsEl) => [...colsEl.querySelectorAll<HTMLElement>(".ui-window, .cl-slot, .cl-col")],
+    targets: (colsEl) => [...colsEl.querySelectorAll<HTMLElement>(".ui-window, .cl-slot, :scope > .cl-col, :scope > .cl-group")],
   };
 }

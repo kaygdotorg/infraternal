@@ -12,7 +12,7 @@
 import type { Ctx, ViewRec, WinRec } from "../context";
 import type { ViewId } from "../model/types";
 import { COLUMN_GAP, type Rect } from "../layout/geometry";
-import { scrollToWindow } from "../layout/columns";
+import { columnEls, scrollToWindow } from "../layout/columns";
 import { isFreeView, nearestStop as nearest, stopsFor as stops, type Stops } from "../layout/stops";
 import { bounds, clamp, type Cam } from "./camera";
 
@@ -89,7 +89,7 @@ export function createNav(cx: Ctx): Nav {
       if (c.view.layout !== "tiled") { flyView(c.view.id, instant); return; }
       state.currentView = c.view.id; applyCanvasLock(true); cx.pill.paint();
       const colEl = rec.card.root.parentElement as HTMLElement;
-      const cols = [...c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")];
+      const cols = columnEls(c.colsEl);
       let left = 0;
       for (const col of cols) { if (col === colEl) break; left += (Number(col.dataset.w) || state.metrics.colW) + COLUMN_GAP; }
       // The stop that frames this column: stops are centred on their column (when the viewport is wider than it), so the

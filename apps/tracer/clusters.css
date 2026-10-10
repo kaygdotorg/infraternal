@@ -55,6 +55,19 @@
 .cl-col::-webkit-scrollbar { display: none; }
 .cl-col > .ui-window { flex: 1 1 0; min-height: 160px; pointer-events: auto; }
 .cl-col > .ui-window[style*="height"] { flex: none; }
+/* A group (D212): columns that a spanning window links share one grid. The group is the scroller, sized and padded as a
+   column is, so its tracks line up with plain columns; its columns have no box, so their windows are grid items. */
+.cl-group {
+  position: relative; flex: none; box-sizing: border-box; display: grid; column-gap: 12px; row-gap: 12px;
+  height: calc(100% + 28px); margin: -14px; padding: 14px;
+  overflow-x: clip; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none;
+  pointer-events: none; touch-action: pan-y;
+}
+.cl-group::-webkit-scrollbar { display: none; }
+.cl-group > .cl-col { display: contents; }
+.cl-group > .cl-col > .ui-window { min-width: 0; min-height: 160px; pointer-events: auto; }
+.cl-world[data-snap] .cl-group { overflow-y: hidden; }
+.cl-viewport[data-input-lock] .cl-group { touch-action: none; overflow-y: hidden; }
 /* `data-hit`, not `data-lod`: pointer-events is inherited, so flipping it mid-zoom restyled every element under every window (38-47 ms in one frame). The camera sets data-hit when it comes to rest. */
 .cl-world[data-hit="thumb"] .ui-window { pointer-events: none; }
 .cl-world[data-lod="thumb"] .ui-window-actions, .cl-world[data-lod="thumb"] .ui-window-lock, .cl-world[data-lod="thumb"] .cl-port { opacity: 0 !important; }

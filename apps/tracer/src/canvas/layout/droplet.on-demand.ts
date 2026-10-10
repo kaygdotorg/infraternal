@@ -24,6 +24,7 @@
  * the animation only moves the contents with their shapes (translate) and clips the content of a
  * shape that is shorter than its frame. The layer is at most a few thousand pixels, one draw call.
  */
+import { scrollerOf } from "./columns";
 import { Spring } from "../../../../../packages/ui/src/spring";
 
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
@@ -135,7 +136,8 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" |
       b.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: "ease-out" }).onfinish = () => resolve();
       return;
     }
-    const column = direction === "right" ? host! : a.parentElement!;
+    // A column of a group has no box of its own (D212): its scroller is the box the split happens in.
+    const column = direction === "right" ? host! : scrollerOf(a.parentElement as HTMLElement);
     const right = direction === "right";
     // Rects relative to the layer's parent, in its own (unzoomed) pixels, whatever camera zoom is applied above it.
     const origin = column.getBoundingClientRect();

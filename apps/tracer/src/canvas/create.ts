@@ -22,6 +22,7 @@ import type { Adapters, CanvasState, Ctx } from "./context";
 import { SVG_NS, coarse, el } from "./dom";
 import { createFlip } from "./layout/flip";
 import { metricsFor, type Metrics } from "./layout/geometry";
+import { columnEls } from "./layout/columns";
 import { SIZE_EVENT, edgeToEdge, readSizes } from "./window-sizes";
 import { createMesh } from "./mesh";
 import { createDocumentSync } from "./model/sync";
@@ -151,7 +152,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     world.style.setProperty("--clh", `${next.clh}px`);
     for (const c of cx.views.values()) {
       if (c.view.layout !== "tiled") continue;
-      for (const colEl of c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")) {
+      for (const colEl of columnEls(c.colsEl)) {
         if (colEl.dataset.user || colEl.dataset.w !== String(previous.colW)) continue;
         colEl.dataset.w = String(next.colW);
         colEl.style.setProperty("--w", `${next.colW}px`);
