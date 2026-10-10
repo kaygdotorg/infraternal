@@ -1554,6 +1554,16 @@ fn spawn_socketpair_agent(
             .add_close(child_fd)
             .map_err(|_| AgentError::Unavailable)?;
     }
+    // The parent may still be handling an inherited private input channel.
+    // Child stdin is always explicit, independent of startup import cleanup.
+    actions
+        .add_open(
+            0,
+            std::path::Path::new("/dev/null"),
+            nix::fcntl::OFlag::O_RDONLY,
+            nix::sys::stat::Mode::empty(),
+        )
+        .map_err(|_| AgentError::Unavailable)?;
     let attributes = PosixSpawnAttr::init().map_err(|_| AgentError::Unavailable)?;
     let pid = posix_spawn(path.as_c_str(), &actions, &attributes, &argv, &envp)
         .map_err(|_| AgentError::Unavailable)?;

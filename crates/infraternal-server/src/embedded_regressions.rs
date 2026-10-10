@@ -667,3 +667,54 @@ async fn credited_output_queue_at_stream_capacity() {
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
+
+#[test]
+fn child_spawn_disposes_inherited_stdin() {
+    use std::{
+        os::unix::fs::PermissionsExt,
+        process::{Command, Stdio},
+    };
+    const NAME: &str = "embedded::regressions::child_spawn_disposes_inherited_stdin";
+    if std::env::var_os("INFRATERNAL_STDIN_CHILD_TEST").is_some() {
+        let directory = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/ca-handoff")
+            .join(format!("stdin-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("child");
+        std::fs::write(&script, b"#!/bin/sh\nreadlink /proc/self/fd/0 >&3\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (mut channel, pid) = spawn_socketpair_agent(&script).unwrap();
+            let mut reply = String::new();
+            tokio::io::AsyncReadExt::read_to_string(&mut channel, &mut reply)
+                .await
+                .unwrap();
+            nix::sys::wait::waitpid(pid.unwrap(), None).unwrap();
+            assert_eq!(
+                reply.trim(),
+                "/dev/null",
+                "the infraternal agent inherited stdin"
+            );
+        });
+        std::fs::remove_dir_all(directory).unwrap();
+        return;
+    }
+    let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(sender);
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_STDIN_CHILD_TEST", "1")
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(receiver)))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

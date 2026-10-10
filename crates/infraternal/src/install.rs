@@ -63,11 +63,13 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     }
 
     let mut command = Command::new("systemctl");
+    command.stdin(std::process::Stdio::null());
     command.args(&scope_args).arg("daemon-reload");
     if !command.status().map_err(InstallError::Io)?.success() {
         return Err(InstallError::Systemctl);
     }
     let mut command = Command::new("systemctl");
+    command.stdin(std::process::Stdio::null());
     command
         .args(&scope_args)
         .args(["enable", "--now", &service]);
