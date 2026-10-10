@@ -422,7 +422,7 @@ export class Wizard {
 
   // ── Root consent (D139) ────────────────────────────────────────────────────
   private rootCandidates(): Entry[] {
-    return this.selected.filter((entry) => entry.discovered?.rootAvailable && entry.discovered.reach !== "unreachable");
+    return this.selected.filter((entry) => entry.user === "root" || (entry.discovered?.rootAvailable && entry.discovered.reach !== "unreachable"));
   }
 
   private proceed(): void {
@@ -433,14 +433,15 @@ export class Wizard {
 
   private renderRoot(page: HTMLElement): void {
     const roots = this.rootCandidates();
+    const directRoot = roots.some((entry) => entry.user === "root");
     const subject = roots.length === 1 ? roots[0]!.label : `${roots.length} hosts`;
     const names = roots.length <= 3 ? roots.map((entry) => entry.label).join(", ") : `${roots.slice(0, 2).map((entry) => entry.label).join(", ")} and ${roots.length - 2} more`;
     page.innerHTML = `${this.hero(ICON.shield)}<h1 class="ah-title">Install as root on ${escapeHtml(subject)}?</h1>
-      <p class="ah-lede">${escapeHtml(names)} ${roots.length > 1 ? "allow" : "allows"} admin commands without a password. That alone doesn't mean you want root.</p>
-      <p class="ah-text">A root infraternal agent can manage packages, services and containers, and can read every file on the host. You can also install as a user now and switch to root later.</p>
+      <p class="ah-lede">${directRoot ? "These hosts use a root SSH login. Installing as root needs your explicit consent." : `${escapeHtml(names)} ${roots.length > 1 ? "allow" : "allows"} admin commands without a password. That alone doesn't mean you want root.`}</p>
+      <p class="ah-text">A root infraternal agent can manage packages, services and containers, and can read every file on the host. ${directRoot ? "To install as a user, go Back and change the SSH sign-in user." : "You can also install as a user now and switch to root later."}</p>
       <label class="ah-consent check"><input type="checkbox" data-consent /><span>I trust infraternal with root on ${escapeHtml(subject)}</span></label>`;
     for (const input of page.querySelectorAll<HTMLInputElement>(".ah-consent input")) springCheckbox(input);
-    this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-secondary" type="button" data-ah="as-user">Install as user</button><button class="ah-primary" type="button" data-ah="as-root" disabled>${svg(ICON.shieldCheck)}<span>Install as root</span></button>`);
+    this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button>${directRoot ? "" : '<button class="ah-secondary" type="button" data-ah="as-user">Install as user</button>'}<button class="ah-primary" type="button" data-ah="as-root" disabled>${svg(ICON.shieldCheck)}<span>Install as root</span></button>`);
   }
 
   // ── Runs and jobs ──────────────────────────────────────────────────────────

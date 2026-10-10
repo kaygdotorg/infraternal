@@ -379,3 +379,22 @@ test("Tab can leave a canvas flow", async ({ page }) => {
   await page.keyboard.press("Shift+Tab");
   expect(await wizard(page).evaluate((element) => element.contains(document.activeElement))).toBe(false);
 });
+
+
+test("a typed root login requires consent and cannot pretend to install as a user", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  let mode: string | undefined;
+  page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+    if (typeof payload === "string") { try { const command = JSON.parse(payload); if (command.action === "start") mode = command.targets[0]?.mode; } catch { /* unrelated binary protocol */ } }
+  }));
+  await addTyped(page, "root@root.lab");
+  await expect(wizard(page).getByRole("heading", { name: "Install as root on root.lab?", exact: true })).toBeVisible();
+  await expect(inWizard(page, "Install as root")).toBeDisabled();
+  await expect(inWizard(page, "Install as user")).toHaveCount(0);
+  await expect(wizard(page)).toContainText("go Back and change the SSH sign-in user");
+  expect(mode).toBeUndefined();
+  await page.locator(".ah-consent").click();
+  await inWizard(page, "Install as root").click();
+  await expect.poll(() => mode).toBe("root");
+});

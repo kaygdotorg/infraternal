@@ -1,4 +1,4 @@
-/** Closing the flow cancels private-input work even when a passkey prompt finishes later. */
+/** Exercises flow lifetime, CA authority and explicit root consent before private SSH work. */
 import { expect, test } from "bun:test";
 const previous = globalThis.matchMedia;
 globalThis.matchMedia = (() => ({ matches: false })) as unknown as typeof matchMedia;
@@ -67,4 +67,17 @@ test("closing during CA confirmation never starts an SSH attempt", async () => {
   finish();
   await work;
   expect(observed.batches).toEqual([]);
+});
+
+
+test("a typed root login requires explicit consent before any installation", () => {
+  const pages: string[] = [], batches: boolean[] = [];
+  const wizard = Object.assign(Object.create(Wizard.prototype) as { proceed(): void }, {
+    selected: [{ id: "manual", label: "machine", user: "root", address: "machine" }],
+    go(page: string) { pages.push(page); },
+    startBatch(root: boolean) { batches.push(root); },
+  });
+  wizard.proceed();
+  expect(pages).toEqual(["root"]);
+  expect(batches).toEqual([]);
 });
