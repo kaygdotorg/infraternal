@@ -142,6 +142,57 @@ fn executable(path: &std::path::Path, text: &str) {
 }
 
 #[tokio::test]
+async fn fresh_runtime_empty_directories_do_not_block_rollback_and_retry() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    // The real service creates this rendezvous directory even before opening a PTY.
+    std::fs::create_dir_all(fixture.base().join("sessions/sessions")).unwrap();
+    transaction.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_runtime_unexpected_data_keeps_ownership_and_cleanup_receipt() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    let runtime = fixture.base().join("sessions/sessions");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let unexpected = runtime.join("unknown-data");
+    std::fs::write(&unexpected, b"public fixture data").unwrap();
+    assert!(transaction.rollback().await.is_err());
+    assert_eq!(std::fs::read(&unexpected).unwrap(), b"public fixture data");
+    assert!(fixture.base().join(".bootstrap-owner").exists());
+    assert!(fixture.receipt().exists());
+    assert!(fixture.transaction().stage(&fixture.binary).await.is_err());
+    std::fs::remove_file(unexpected).unwrap();
+    transaction.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+}
+
+#[tokio::test]
+async fn fresh_runtime_symlink_never_removes_foreign_empty_directories() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let foreign = fixture.root.join("foreign/sessions");
+    std::fs::create_dir_all(&foreign).unwrap();
+    symlink(foreign.parent().unwrap(), fixture.base().join("sessions")).unwrap();
+    assert!(transaction.rollback().await.is_err());
+    assert!(foreign.exists());
+    assert!(fixture.base().join(".bootstrap-owner").exists());
+    std::fs::remove_file(fixture.base().join("sessions")).unwrap();
+    transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn fresh_failure_removes_owned_artifacts_and_success_can_rejoin() {
     let fixture = Fixture::new();
     let transaction = fixture.transaction();

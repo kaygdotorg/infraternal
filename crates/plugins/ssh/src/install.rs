@@ -444,6 +444,20 @@ finish_fresh() {
         # the receipt and makes cleanup fail rather than claiming success.
         rm -f "$base/.bootstrap-ready"
         rmdir "$base/bin" 2>/dev/null || :
+        # The service creates these rendezvous directories before its first PTY.
+        # Remove only empty owned directories; never follow a parent link or
+        # remove retained shim/session data merely because installation failed.
+        if [ -d "$base/sessions" ] && [ ! -L "$base/sessions" ] && [ -O "$base/sessions" ]; then
+            if [ ! -L "$base/sessions/sessions" ] && [ -O "$base/sessions/sessions" ]; then
+                rmdir "$base/sessions/sessions" 2>/dev/null || :
+            fi
+            rmdir "$base/sessions" 2>/dev/null || :
+        fi
+        # Preserve the owner marker alongside the receipt if unknown data keeps
+        # the root nonempty. Another attempt cannot claim this unfinished root.
+        for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
+            [ "$entry" = "$base/.bootstrap-owner" ] || { [ ! -e "$entry" ] && [ ! -L "$entry" ]; } || exit 72
+        done
         [ ! -e "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] || rm -f "$base/.bootstrap-owner"
         rmdir "$base"
     fi
