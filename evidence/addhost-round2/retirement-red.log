@@ -1,0 +1,19 @@
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-addhost/crates/plugins/remote)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.36s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-addhost/target/debug/deps/infraternal_plugin_remote-804b0fed7bb66b00)
+
+running 1 test
+
+thread 'uninstall::tests::retirement_signals_the_shell_after_its_foreground_job_exits' (3846998) panicked at crates/plugins/remote/src/uninstall.rs:369:9:
+assertion failed: result.is_ok_and(|r| r.is_ok())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test uninstall::tests::retirement_signals_the_shell_after_its_foreground_job_exits ... FAILED
+
+failures:
+
+failures:
+    uninstall::tests::retirement_signals_the_shell_after_its_foreground_job_exits
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.00s
+
+error: test failed, to rerun pass `-p infraternal-plugin-remote --lib`

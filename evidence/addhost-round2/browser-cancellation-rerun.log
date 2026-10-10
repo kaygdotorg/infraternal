@@ -1,0 +1,13 @@
+Running as unit: run-p3329182-i36847288.scope; invocation ID: b409b91165cd418784aba9ba645e1ea9
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-5ze9w9py.js, chunk-gsx05mng.js, chunk-2ep4k63h.js, chunk-1f6kq72x.js, chunk-x2rnzs26.js, chunk-6eyq6bc0.js, chunk-nwph11s9.js, chunk-5eyf7n7q.js, chunk-5s3endb3.js, chunk-84n9pcex.js, chunk-dbfxw2wz.js, chunk-dpm3kffz.js, chunk-dvep95v0.js, chunk-vgbmspbx.js, chunk-0gsytqak.js, chunk-e867qrpr.js, main.js, chunk-hna59wqc.js, chunk-7t3gch3c.js, chunk-gzn016x0.js, chunk-0tahf7vz.js, chunk-qv82khay.js, chunk-0jd62nn0.js, chunk-tnt6q39g.js, chunk-a3eazgdd.js, chunk-2eexceqk.js, chunk-8dn5a1yt.js, chunk-rg3y9kq0.js, chunk-30vg6bqj.js, chunk-wntn1a9t.js, chunk-0nmgyndh.js, chunk-8ftypqmq.js, chunk-94jtgw22.js, chunk-qcwg6bwk.js, chunk-sep7c9sh.js, chunk-syr5ft20.js, chunk-5b25ap6h.js, chunk-e1kgzw1c.js, chunk-zpa1d9z5.js, chunk-axbkkqp1.js, chunk-5hxskjkg.js, chunk-7r5vxk6j.js, chunk-psfw09gz.js, chunk-92yfq4ft.js, chunk-e1qzfrxh.js, chunk-805gygrk.js, chunk-vs1va7fy.js, chunk-6cswhcwm.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-znenj3dv.js, chunk-jcv760bm.js, chunk-h9vnn6ts.js, chunk-e93g94yg.js, chunk-2ngpsnys.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4313
+[WebServer] latency proxy listening on http://localhost:4312; upstream port=4313
+
+Running 1 test using 1 worker
+
+(node:3331773) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/addhost-wizard.spec.ts:311:1 › closing mid-install asks first, and cancelling ends the run (14.0s)
+
+  1 passed (27.8s)
