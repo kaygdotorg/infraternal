@@ -33,7 +33,7 @@ pub fn build(registry: &ActionRegistry) -> Command {
     for child in &tree.children {
         root = root.subcommand(build_node(child));
     }
-    root.subcommand(shim_command())
+    root
 }
 
 /// Find the deepest selected subcommand and return its path and input matches.
@@ -224,38 +224,6 @@ fn input_argument(name: &str, schema: &JsonSchema, required: bool, visible: bool
     argument
 }
 
-fn shim_command() -> Command {
-    Command::new("__shim")
-        .hide(true)
-        .arg(Arg::new("session").long("session").required(true))
-        .arg(
-            Arg::new("uid")
-                .long("uid")
-                .required(true)
-                .value_parser(value_parser!(u32)),
-        )
-        .arg(
-            Arg::new("cols")
-                .long("cols")
-                .default_value("80")
-                .value_parser(value_parser!(u16)),
-        )
-        .arg(
-            Arg::new("rows")
-                .long("rows")
-                .default_value("24")
-                .value_parser(value_parser!(u16)),
-        )
-        .arg(Arg::new("state").long("state"))
-        .arg(Arg::new("detach").long("detach").action(ArgAction::SetTrue))
-        .arg(
-            Arg::new("ring_capacity")
-                .long("ring-capacity")
-                .default_value("8388608")
-                .value_parser(value_parser!(usize)),
-        )
-}
-
 #[cfg(test)]
 mod tests {
     //! Checks that help and parsing use the enabled registry's descriptions and inputs.
@@ -278,6 +246,33 @@ mod tests {
             up_help
                 .to_string()
                 .contains("Start the node components when lifecycle management is available.")
+        );
+    }
+
+    #[test]
+    fn hidden_session_shim_parser_uses_the_registered_input_schema() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "__shim",
+                "--session",
+                "0123456789abcdef0123456789abcdef",
+                "--uid",
+                "1000",
+                "--cols",
+                "80",
+            ])
+            .expect("registered hidden session shim command");
+        let command = selected(&matches);
+        assert_eq!(command.path, ["__shim"]);
+        assert_eq!(command.matches.get_one::<i64>("uid"), Some(&1000));
+        assert_eq!(command.matches.get_one::<i64>("cols"), Some(&80));
+        assert!(
+            !build(&registry)
+                .render_long_help()
+                .to_string()
+                .contains("__shim")
         );
     }
 

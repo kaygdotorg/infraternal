@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use clap::ArgMatches;
 use cli::output::{CommandResult, CommandState, RenderOptions, render_json, render_pretty};
 use infraternal_plugin_api::{
-    ActionAvailability, ActionDefinition, ActionRegistry, JsonSchema, JsonSchemaType,
+    ActionAvailability, ActionDefinition, ActionRegistry, CliHandler, JsonSchema, JsonSchemaType,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -69,33 +69,83 @@ fn main() -> ExitCode {
     let matches = cli::command_tree::build(&registry).get_matches();
     let json_output = matches.get_flag("json");
     let selected = cli::command_tree::selected(&matches);
-    let path = selected.path.iter().map(String::as_str).collect::<Vec<_>>();
-    match path.as_slice() {
-        ["__shim"] => run_shim_command(selected.matches),
-        ["status"] => run_status(&registry, json_output),
-        ["skill"] => run_skill(&registry, selected.matches, json_output),
-        #[cfg(feature = "plugin-server")]
-        ["server"] => run_server(selected.matches, json_output),
-        #[cfg(feature = "plugin-server")]
-        ["server", "init"] => run_server_init(selected.matches, json_output),
-        #[cfg(feature = "plugin-server")]
-        ["server", "install"] => run_server_install_compat(selected.matches, json_output),
-        #[cfg(feature = "plugin-server")]
-        ["server", "setup-token"] => run_setup_token(selected.matches, json_output),
-        #[cfg(feature = "plugin-agent")]
-        ["agent"] => run_embedded_agent(selected.matches, json_output),
-        _ => {
-            let Some(action) = find_action(&registry, &selected.path) else {
-                return missing_action(json_output);
-            };
-            run_unavailable(action, json_output)
-        }
-    }
+    dispatch_selected_action(&registry, &selected, json_output)
 }
 
-fn find_action<'a>(registry: &'a ActionRegistry, path: &[String]) -> Option<&'a ActionDefinition> {
-    let path = path.iter().map(String::as_str).collect::<Vec<_>>();
-    registry.find(&path).map(|registered| registered.action)
+fn dispatch_selected_action(
+    registry: &ActionRegistry,
+    selected: &cli::command_tree::SelectedCommand<'_>,
+    json_output: bool,
+) -> ExitCode {
+    let path = selected.path.iter().map(String::as_str).collect::<Vec<_>>();
+    let Some(registered) = registry.find(&path) else {
+        return missing_action(json_output);
+    };
+    dispatch_action(registry, registered.action, selected.matches, json_output)
+}
+
+fn dispatch_action(
+    registry: &ActionRegistry,
+    action: &ActionDefinition,
+    matches: &ArgMatches,
+    json_output: bool,
+) -> ExitCode {
+    match action.cli_handler {
+        CliHandler::Unavailable => run_unavailable(action, json_output),
+        CliHandler::Status => run_status(registry, json_output),
+        CliHandler::Skill => run_skill(registry, matches, json_output),
+        CliHandler::ServerRun => {
+            #[cfg(feature = "plugin-server")]
+            {
+                run_server(matches, json_output)
+            }
+            #[cfg(not(feature = "plugin-server"))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
+        CliHandler::ServerInit => {
+            #[cfg(feature = "plugin-server")]
+            {
+                run_server_init(matches, json_output)
+            }
+            #[cfg(not(feature = "plugin-server"))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
+        CliHandler::ServerInstallCompatibility => {
+            #[cfg(feature = "plugin-server")]
+            {
+                run_server_install_compat(matches, json_output)
+            }
+            #[cfg(not(feature = "plugin-server"))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
+        CliHandler::ServerSetupToken => {
+            #[cfg(feature = "plugin-server")]
+            {
+                run_setup_token(matches, json_output)
+            }
+            #[cfg(not(feature = "plugin-server"))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
+        CliHandler::EmbeddedAgent => {
+            #[cfg(feature = "plugin-agent")]
+            {
+                run_embedded_agent(matches, json_output)
+            }
+            #[cfg(not(feature = "plugin-agent"))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
+        CliHandler::SessionShim => run_shim_command(matches),
+    }
 }
 
 fn missing_action(json_output: bool) -> ExitCode {
@@ -347,24 +397,16 @@ mod status_tests {
 
 fn run_unavailable(action: &ActionDefinition, json_output: bool) -> ExitCode {
     let command = action.command.join(" ");
-    let (state, message, data) = if action.availability == ActionAvailability::NotAvailableYet {
-        let data = match action.command.as_slice() {
-            [command] if command == "up" => json!({"started": []}),
-            [server, feature] if server == "server" && feature == "features" => {
-                json!({"features": []})
-            }
-            _ => json!({}),
-        };
+    let data = empty_action_data(action);
+    let (state, message) = if action.availability == ActionAvailability::NotAvailableYet {
         (
             CommandState::Unavailable,
             format!("The {command} command is not available yet."),
-            data,
         )
     } else {
         (
             CommandState::Failed,
             format!("The {command} command has no handler in this build."),
-            json!({}),
         )
     };
     print_result(
@@ -710,15 +752,23 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
     let session = matches
         .get_one::<String>("session")
         .map_or("", String::as_str);
-    let uid = matches.get_one::<u32>("uid").copied().unwrap_or_default();
-    let cols = matches.get_one::<u16>("cols").copied().unwrap_or(80);
-    let rows = matches.get_one::<u16>("rows").copied().unwrap_or(24);
+    let parsed: Result<(u32, u16, u16, usize), String> = (|| {
+        Ok((
+            shim_integer(matches, "uid", None)?,
+            shim_integer(matches, "cols", Some(80))?,
+            shim_integer(matches, "rows", Some(24))?,
+            shim_integer(matches, "ring_capacity", Some(8 * 1024 * 1024))?,
+        ))
+    })();
+    let (uid, cols, rows, ring_capacity) = match parsed {
+        Ok(values) => values,
+        Err(error) => {
+            eprintln!("shim startup/session failed: {error}");
+            return ExitCode::from(2);
+        }
+    };
     let state = matches.get_one::<String>("state").map(PathBuf::from);
     let detach = matches.get_flag("detach");
-    let ring_capacity = matches
-        .get_one::<usize>("ring_capacity")
-        .copied()
-        .unwrap_or(8 * 1024 * 1024);
     match run_shim(session, uid, cols, rows, state, detach, ring_capacity) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -726,6 +776,17 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Parse schema-generated integer inputs into the shim's platform-specific types.
+fn shim_integer<T>(matches: &ArgMatches, name: &str, default: Option<T>) -> Result<T, String>
+where
+    T: TryFrom<i64>,
+{
+    let Some(value) = matches.get_one::<i64>(name).copied() else {
+        return default.ok_or_else(|| format!("--{name} is required"));
+    };
+    T::try_from(value).map_err(|_| format!("--{name} is outside the supported range"))
 }
 
 fn report_failure(command: &str, message: &str, details: String, json_output: bool) -> ExitCode {
@@ -751,10 +812,18 @@ fn failure_data(command: &str) -> serde_json::Value {
         .and_then(|registry| {
             registry
                 .find(&command)
-                .and_then(|registered| registered.action.output_schema.properties.get("data"))
-                .map(empty_schema_value)
+                .map(|registered| empty_action_data(registered.action))
         })
         .unwrap_or_else(|| json!({}))
+}
+
+/// Build an empty data value matching the registered action's output contract.
+fn empty_action_data(action: &ActionDefinition) -> serde_json::Value {
+    action
+        .output_schema
+        .properties
+        .get("data")
+        .map_or_else(|| json!({}), empty_schema_value)
 }
 
 /// Build neutral values recursively, omitting optional fields from objects.
@@ -789,6 +858,13 @@ mod failure_data_tests {
             failure_data("skill"),
             json!({"commands": [], "skill": "", "files": []})
         );
+    }
+
+    #[test]
+    fn unavailable_results_keep_registered_data_shapes() {
+        assert_eq!(failure_data("up"), json!({"started": []}));
+        #[cfg(feature = "plugin-server")]
+        assert_eq!(failure_data("server features"), json!({"features": []}));
     }
 
     #[cfg(feature = "plugin-server")]

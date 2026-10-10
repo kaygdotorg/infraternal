@@ -439,11 +439,17 @@ impl ActionDefinition {
     }
 
     fn validate(&self, plugin_id: &str) -> Result<(), RegistryError> {
+        // Internal host routes use a reserved prefix and never appear in public help.
+        let allows_internal_underscores =
+            !self.visible && self.command.len() == 1 && self.command[0].starts_with("__");
         if self.command.is_empty()
             || self.command.iter().any(|part| {
                 part.is_empty()
                     || !part.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || byte == b'-'
+                            || (allows_internal_underscores && byte == b'_')
                     })
             })
         {
@@ -691,6 +697,25 @@ mod tests {
             duplicate.expect_err("duplicate path is rejected"),
             RegistryError::DuplicateCommand("status".to_owned())
         );
+    }
+
+    #[test]
+    fn only_hidden_internal_routes_may_use_the_reserved_prefix() {
+        let internal = sample_action(&["__shim"]).hidden();
+        let registry = ActionRegistry::new(vec![PluginDefinition::new(
+            "cli",
+            "Core commands.",
+            [internal],
+        )]);
+        assert!(registry.is_ok());
+
+        let public = sample_action(&["__shim"]);
+        let registry = ActionRegistry::new(vec![PluginDefinition::new(
+            "cli",
+            "Core commands.",
+            [public],
+        )]);
+        assert!(matches!(registry, Err(RegistryError::InvalidAction(_))));
     }
 
     #[test]

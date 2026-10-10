@@ -29,7 +29,12 @@ fn cli_plugin() -> PluginDefinition {
     PluginDefinition::new(
         "cli",
         "Inspect this node and manage its configured components.",
-        [status_action(), up_action(), skill_action()],
+        [
+            status_action(),
+            up_action(),
+            skill_action(),
+            session_shim_action(),
+        ],
     )
 }
 
@@ -130,6 +135,60 @@ fn skill_action() -> ActionDefinition {
     .with_example("skill status", "Print the generated skill for status.")
 }
 
+fn session_shim_action() -> ActionDefinition {
+    ActionDefinition::new(
+        ["__shim"],
+        "Run the internal session shim.",
+        "Use this hidden command only when a host process starts a private session shim.",
+        [
+            "Connect the shim to the requested session identifier and user.",
+            "Use the optional terminal dimensions, state directory and replay capacity when supplied.",
+        ],
+        JsonSchema::object(
+            [
+                (
+                    "session".to_owned(),
+                    JsonSchema::string("Validated session identifier."),
+                ),
+                (
+                    "uid".to_owned(),
+                    JsonSchema::integer("Effective user identifier."),
+                ),
+                (
+                    "cols".to_owned(),
+                    JsonSchema::integer("PTY column count; defaults to 80."),
+                ),
+                (
+                    "rows".to_owned(),
+                    JsonSchema::integer("PTY row count; defaults to 24."),
+                ),
+                (
+                    "state".to_owned(),
+                    JsonSchema::string("Private session state directory."),
+                ),
+                (
+                    "detach".to_owned(),
+                    JsonSchema::boolean("Detach from the parent process."),
+                ),
+                (
+                    "ring_capacity".to_owned(),
+                    JsonSchema::integer("Replay ring capacity; defaults to 8388608 bytes."),
+                ),
+            ],
+            ["session".to_owned(), "uid".to_owned()],
+        ),
+        JsonSchema::command_result(),
+        ActionContract::new(
+            ActionTarget::Session,
+            ActionEffect::Write,
+            "cli.internal.session-shim",
+            DryRun::Unsupported,
+        ),
+    )
+    .hidden()
+    .with_cli_handler(CliHandler::SessionShim)
+}
+
 fn skill_input_schema() -> JsonSchema {
     JsonSchema::object(
         [
@@ -194,6 +253,7 @@ mod tests {
     //! Verifies every enabled public action has complete, collision-free metadata.
 
     use super::registry;
+    use infraternal_plugin_api::CliHandler;
 
     #[test]
     fn every_registered_action_has_description_and_step_by_step_guidance() {
@@ -212,6 +272,16 @@ mod tests {
                     .all(|instruction| !instruction.trim().is_empty())
             );
         }
+    }
+
+    #[test]
+    fn hidden_session_shim_is_registered_to_its_runtime_handler() {
+        let registry = registry().expect("built-in plugin metadata is valid");
+        let action = registry
+            .find(&["__shim"])
+            .expect("internal shim action is registered");
+        assert!(!action.action.visible);
+        assert_eq!(action.action.cli_handler, CliHandler::SessionShim);
     }
 
     #[cfg(feature = "plugin-mesh")]
