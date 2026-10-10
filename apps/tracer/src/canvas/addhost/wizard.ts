@@ -568,7 +568,7 @@ export class Wizard {
     this.settle();
   }
 
-  /** The socket ended. The server cancelled and rolled back whatever was running on it. */
+  /** A lost socket requests cancellation; the browser cannot assert that remote cleanup finished. */
   private onRunClosed(run: ProvisioningRun): void {
     if (!this.alive || this.closing) return;
     let changed = false;
@@ -576,7 +576,7 @@ export class Wizard {
       if (job.run !== run) continue;
       job.run = undefined;
       if (job.view.state === "pending" || job.view.state === "running") {
-        const message = "The connection to the server ended, so the install stopped and its changes were undone.";
+        const message = "The connection to the server ended. Installation stopped; automatic cleanup may still need to finish.";
         job.view = { ...job.view, state: "failed", message, failure: { kind: "install", message, log_tail: [] } };
         this.paint(job);
         changed = true;
@@ -919,8 +919,8 @@ export class Wizard {
   private requestClose(): void {
     const running = this.jobs.some((job) => job.view.state === "pending" || job.view.state === "running");
     if (!running) { this.dismiss(); return; }
-    // Closing mid-install cancels it and rolls it back, so ask first.
-    this.setFoot(`<span class="ah-count">If you close this now, the install stops and its changes on the host are undone.</span><button class="ah-secondary" type="button" data-ah="keep">Keep installing</button><button class="ah-primary" type="button" data-ah="cancel-install">Stop installing</button>`);
+    // Cancellation asks for rollback; losing SSH can leave cleanup pending.
+    this.setFoot(`<span class="ah-count">Closing stops installation and asks the server to undo this attempt. Cleanup can remain pending if the host is unavailable.</span><button class="ah-secondary" type="button" data-ah="keep">Keep installing</button><button class="ah-primary" type="button" data-ah="cancel-install">Stop installing</button>`);
   }
 
   private dismiss(after?: () => void): void {

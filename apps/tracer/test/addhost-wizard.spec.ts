@@ -247,7 +247,7 @@ test("an unsupported host cannot be retried; an install failure can", async ({ p
   await page.locator(".ui-chip-remove").click({ force: true });
   await addTyped(page, "broken.lab");
   await expect(page.getByRole("heading", { name: "Setting up broken.lab didn't finish" })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("undone").first()).toBeVisible();
+  await expect(page.getByText("Automatic cleanup may still need to finish.", { exact: false })).toBeVisible();
   await inWizard(page, "Retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
@@ -305,7 +305,7 @@ test("closing mid-install asks first, and cancelling ends the run", async ({ pag
   await inWizard(page, "Continue").click();
   await expect(page.locator(".ah-run[data-state='running']")).toBeVisible({ timeout: 10_000 });
   await page.keyboard.press("Escape");
-  await expect(page.getByText("If you close this now, the install stops and its changes on the host are undone.")).toBeVisible();
+  await expect(page.getByText("Closing stops installation and asks the server to undo this attempt. Cleanup can remain pending if the host is unavailable.")).toBeVisible();
   await inWizard(page, "Keep installing").click();
   await expect(wizard(page)).toBeVisible();
   await page.locator(".ah-close").click();
