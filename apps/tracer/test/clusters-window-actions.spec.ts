@@ -215,7 +215,6 @@ test.describe("the rules that hold across actions", () => {
     expect(stacked.heights[(await activeAt(page)).col]!.length).toBeGreaterThan(1);
     await press(page, ["Control", "Shift", "KeyD"]);
     expect((await layout(page)).windows).toBe(stacked.windows);
-    await expect(page.locator(".ui-toast")).toContainText("Split right needs a window with its column to itself");
   });
 
   test("closing a split half gives its width back, so the layout returns to what it was", async ({ page }) => {

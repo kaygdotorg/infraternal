@@ -199,10 +199,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   const split = async (rec: WinRec, direction: "down" | "right", instant = false): Promise<boolean> => {
     if (!isTerminal(rec)) return false;
     // Refused before any shell is opened: a split that cannot divide must not leave a session behind.
-    if (direction === "right" && !ownsColumn(rec)) {
-      cx.toast.show({ message: "Split right needs a window with its column to itself", duration: 4000 });
-      return false;
-    }
+    if (direction === "right" && !ownsColumn(rec)) return false;
     await splitInto(rec, direction, cx.adapters.sessions.open(rec.model.host, { from: rec.model }), instant);
     return true;
   };
