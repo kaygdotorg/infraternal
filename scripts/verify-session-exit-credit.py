@@ -29,6 +29,7 @@ def run(binary, exit_after_detach=False):
             hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
             assert hello[11:27] == client.id.bytes
             pid = struct.unpack('<I', hello[27:31])[0]
+            retained_owner = bool(struct.unpack('<Q', hello[3:11])[0] & 8)
             for body in [b'\x02' + struct.pack('<Q', 0), b'\x13' + struct.pack('<Q', 0)]:
                 peer.sendall(struct.pack('<I', len(body)) + body)
             tail = b''
@@ -41,8 +42,8 @@ def run(binary, exit_after_detach=False):
         children = Path(f'/proc/{pid}/task/{pid}/children').read_text().split()
         assert len(children) == 1
         if exit_after_detach:
-            # Observe the actual starvation detach: only the listener remains
-            # in the shim. The browser attachment itself has not been closed.
+            # Observe data-link detachment: only the listener and, when
+            # negotiated, the independent owner remain. The window is still open.
             deadline = time.monotonic() + 5
             while True:
                 sockets = 0
@@ -51,7 +52,7 @@ def run(binary, exit_after_detach=False):
                         sockets += os.readlink(fd).startswith('socket:')
                     except FileNotFoundError:
                         pass
-                if sockets == 1:
+                if sockets == (2 if retained_owner else 1):
                     break
                 assert time.monotonic() < deadline, 'relay did not detach'
                 time.sleep(.005)
@@ -65,12 +66,13 @@ def run(binary, exit_after_detach=False):
                     peer.sendall(struct.pack('<I', len(body)) + body)
         else:
             os.kill(int(children[0]), signal.SIGKILL)
-        deadline = time.monotonic() + 1
-        while path.exists():
-            assert time.monotonic() < deadline, 'shim did not retire after writing its exit'
-            time.sleep(.005)
+        if not retained_owner:
+            deadline = time.monotonic() + 1
+            while path.exists():
+                assert time.monotonic() < deadline, 'shim did not retire after writing its exit'
+                time.sleep(.005)
         # Cross the existing one-shot 250 ms relay starvation deadline with no
-        # Credit. The socket's unread final output/exit is now the sole source.
+        # Credit. Legacy shims retain socket bytes; new shims retain owned state.
         time.sleep(.35)
         client.send(1, 0x14, struct.pack('<I', 1048576))
         received = bytearray()
@@ -84,6 +86,10 @@ def run(binary, exit_after_detach=False):
         assert client.events[-1]['final_seq'] == client.out
         if exit_after_detach:
             assert b'FINAL_OUTPUT' in received, 'final output was not delivered'
+        deadline = time.monotonic() + 1
+        while path.exists():
+            assert time.monotonic() < deadline, 'shim did not retire after ordered delivery'
+            time.sleep(.005)
         print('Reaped shim final output and ordered exit survive delayed credit: PASS')
     finally:
         client.kill()

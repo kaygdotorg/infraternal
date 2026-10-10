@@ -23,6 +23,14 @@ impl Session {
         Self::start(ring, detach, None)
     }
     fn start(ring: usize, detach: bool, units: Option<(&str, &str)>) -> Self {
+        Self::start_retention(ring, detach, units, 600_000)
+    }
+    fn start_retention(
+        ring: usize,
+        detach: bool,
+        units: Option<(&str, &str)>,
+        retention_ms: u64,
+    ) -> Self {
         let counter = NEXT.fetch_add(1, Ordering::Relaxed);
         let id = format!("{:016x}{counter:016x}", std::process::id());
         let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
@@ -68,6 +76,9 @@ impl Session {
                 "--state",
             ])
             .arg(&state);
+        command
+            .arg("--exit-retention-ms")
+            .arg(retention_ms.to_string());
         if detach {
             command.arg("--detach");
         }
@@ -625,4 +636,103 @@ fn detached_shell_exit_reaps_even_with_a_live_background_descendant() {
     }
     assert!(session.child.as_mut().unwrap().wait().unwrap().success());
     session.pid = 0;
+}
+
+/// Ownership-only peers retain exited shells without consuming a data cursor.
+fn owner(session: &Session) -> UnixStream {
+    let mut peer = session.connect();
+    assert!(
+        matches!(read(&mut peer), Frame::Hello { caps, .. } if caps & infraternal_shim::frame::SESSION_OWNER != 0)
+    );
+    send(
+        &mut peer,
+        Frame::Attach(infraternal_shim::frame::SESSION_OWNER),
+    );
+    send(&mut peer, Frame::InputStateRequest);
+    assert_eq!(read(&mut peer), Frame::InputState(0, 0));
+    peer
+}
+
+/// A control-only request exits the real shell; no output link masks ownership.
+fn exit_without_viewer(session: &Session) {
+    let mut peer = session.connect();
+    assert!(matches!(read(&mut peer), Frame::Hello { .. }));
+    send(
+        &mut peer,
+        Frame::Attach(
+            infraternal_shim::frame::SEQUENCED_INPUT | infraternal_shim::frame::MULTI_WRITER,
+        ),
+    );
+    send(&mut peer, Frame::SelectWriter(999_999));
+    send(
+        &mut peer,
+        Frame::SequencedInput(0, b"printf 'FINAL_%s\\n' OUTPUT; exit 7\n".to_vec()),
+    );
+    // Keep the control connection until the shell disappears: write_all is not
+    // proof the shim consumed the request, and control peers cannot retain exit.
+    let children = format!("/proc/{}/task/{}/children", session.pid, session.pid);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(&children).is_ok_and(|value| !value.trim().is_empty()) {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn owned_exit_releases_promptly_on_window_close() {
+    let session = Session::new(8192, false);
+    let ownership = owner(&session);
+    exit_without_viewer(&session);
+    thread::sleep(Duration::from_millis(350));
+    assert!(
+        session.path().exists(),
+        "data disconnect must not release ownership"
+    );
+    drop(ownership);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while session.path().exists() {
+        assert!(
+            Instant::now() < deadline,
+            "closed owner retained a dead shim"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        infraternal_shim::ended::read(&session.path())
+            .unwrap()
+            .unwrap()
+            .0,
+        7
+    );
+}
+
+#[test]
+fn owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer() {
+    let session = Session::start_retention(8192, false, None, 700);
+    let _ownership = owner(&session);
+    let _stalled = session.attach(0);
+    exit_without_viewer(&session);
+    assert!(
+        session.path().exists(),
+        "owner must retain exit before bound"
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while session.path().exists() {
+        assert!(
+            Instant::now() < deadline,
+            "owner/data peer extended the maximum"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let (status, seq) = infraternal_shim::ended::read(&session.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 7);
+    assert!(seq > 0);
+    assert_eq!(
+        fs::metadata(session.path().with_extension("ended"))
+            .unwrap()
+            .len(),
+        17
+    );
 }
