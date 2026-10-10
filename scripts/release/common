@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Shared version, transport and immutable-release checks for D213/D224 publication.
+set +x
+set -euo pipefail
+release_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+release_target="${CARGO_TARGET_DIR:-$HOME/.cache/codex-scratch/release-pipeline/target}"
+release_scratch="${release_target}/release-work"
+mkdir -p "$release_scratch"
+release_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' "$release_root/Cargo.toml")"
+release_public=https://builds.infraternal.com
+release_signer=https://infraternal-release-signer.mail-111.workers.dev
+release_api=https://api.cloudflare.com/client/v4
+# Local stand-ins are explicit and loopback-only; production never relaxes HTTPS.
+if [[ -n "${RELEASE_TEST_ORIGIN:-}" ]]; then
+    [[ "$RELEASE_TEST_ORIGIN" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || { printf 'invalid local test origin\n' >&2; exit 2; }
+    release_public="$RELEASE_TEST_ORIGIN/builds"
+    release_signer="$RELEASE_TEST_ORIGIN/signer"
+    release_api="$RELEASE_TEST_ORIGIN/api"
+fi
+valid_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; }
+request() {
+    local token="$1"; shift
+    # curl reads its authorization header from a pipe, never argv or a file.
+    # Restrict config metacharacters before writing any secret to that pipe.
+    [[ "$token" != *[!a-zA-Z0-9_.-]* ]] || { printf 'unsupported token encoding\n' >&2; return 1; }
+    { if [[ -n "$token" ]]; then printf 'header = "Authorization: Bearer %s"\n' "$token"; fi; } |
+        curl --config - --silent --show-error --fail --connect-timeout 10 --max-time 180 \
+            --user-agent "infraternal-release/$release_version" "$@"
+}
+workspace_version() {
+    valid_version "$1" && [[ "$1" == "$release_version" ]] || { printf 'version must match workspace version %s\n' "$release_version" >&2; exit 2; }
+}
+verify_download() {
+    local version="$1" directory="$2"
+    request '' --max-filesize 65536 "$release_public/releases/$version/SHA256SUMS" -o "$directory/SHA256SUMS"
+    request '' --max-filesize 1024 "$release_public/releases/$version/SHA256SUMS.sig" -o "$directory/SHA256SUMS.sig"
+    ssh-keygen -Y verify -f "$release_root/release/allowed_signers" -I release@infraternal.com \
+        -n infraternal-release -s "$directory/SHA256SUMS.sig" < "$directory/SHA256SUMS"
+    # Only fixed bundle names are accepted, even in a trusted signed manifest.
+    awk 'NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ || ($2 != "infraternal" && $2 != "infraternal-x86_64-musl" && $2 != "infraternal-aarch64-musl" && $2 != "VERSION") || seen[$2]++ { exit 1 } END { if (!seen["VERSION"] || !seen["infraternal-x86_64-musl"] || !seen["infraternal-aarch64-musl"]) exit 1 }' "$directory/SHA256SUMS" || { printf 'invalid release file list\n' >&2; return 1; }
+    while read -r digest name; do
+        local limit=134217728
+        [[ "$name" != VERSION ]] || limit=128
+        request '' --max-filesize "$limit" "$release_public/releases/$version/$name" -o "$directory/$name"
+    done < "$directory/SHA256SUMS"
+    (cd "$directory" && sha256sum --strict --check SHA256SUMS)
+    printf '%s\n' "$version" | cmp - "$directory/VERSION" || { printf 'the signed release belongs to another version\n' >&2; return 1; }
+}
