@@ -135,7 +135,7 @@ fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
         None => (
             CommandState::Unknown,
             "The infraternal server service state could not be read.",
-            "Check the user service with `systemctl --user status infraternal-server.service`.",
+            "Check the user and system service managers for the infraternal server unit.",
         ),
     };
     let result = CommandResult::new(
@@ -255,23 +255,84 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
 
 fn systemd_server_state() -> Option<bool> {
     let scopes: [&[&str]; 2] = [&["--user"], &[]];
-    let mut service_was_found = false;
+    let mut every_manager_responded = true;
     for scope in scopes {
         let output = Command::new("systemctl")
             .args(scope)
-            .args(["is-active", "infraternal-server.service"])
+            .args([
+                "list-units",
+                "--type=service",
+                "--all",
+                "--no-legend",
+                "--no-pager",
+                "--plain",
+                "--full",
+            ])
+            .env("LC_ALL", "C")
+            .env("COLUMNS", "4096")
+            .env("SYSTEMD_COLORS", "0")
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
             .ok()?;
-        let state = String::from_utf8_lossy(&output.stdout);
-        match state.trim() {
-            "active" => return Some(true),
-            "inactive" | "failed" | "deactivating" | "dead" => service_was_found = true,
-            _ => {}
+        if !output.status.success() {
+            every_manager_responded = false;
+            continue;
+        }
+        if server_state_from_units(&String::from_utf8_lossy(&output.stdout)) == Some(true) {
+            return Some(true);
         }
     }
-    service_was_found.then_some(false)
+    every_manager_responded.then_some(false)
+}
+
+fn server_state_from_units(units: &str) -> Option<bool> {
+    let mut found = false;
+    for line in units.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(unit), Some(_load), Some(active), Some(_sub)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if !unit.ends_with(".service") {
+            continue;
+        }
+        let description = fields.collect::<Vec<_>>().join(" ");
+        if description.starts_with("infraternal server (") && description.ends_with(')') {
+            found = true;
+            if active == "active" {
+                return Some(true);
+            }
+        }
+    }
+    found.then_some(false)
+}
+
+#[cfg(all(test, feature = "plugin-server"))]
+mod status_tests {
+    //! Verifies status recognizes server services independently of their chosen unit name.
+
+    use super::server_state_from_units;
+
+    #[test]
+    fn custom_named_server_service_is_reported_as_running() {
+        let units = "infraternal-edge.service loaded active running infraternal server (infraternal-edge)\n";
+        assert_eq!(server_state_from_units(units), Some(true));
+    }
+
+    #[test]
+    fn custom_named_stopped_server_service_is_reported_as_stopped() {
+        let units =
+            "infraternal-edge.service loaded inactive dead infraternal server (infraternal-edge)\n";
+        assert_eq!(server_state_from_units(units), Some(false));
+    }
+
+    #[test]
+    fn unrelated_services_do_not_appear_as_infraternal_servers() {
+        let units = "infraternal-edge.service loaded active running infraternal mesh component\n";
+        assert_eq!(server_state_from_units(units), None);
+    }
 }
 
 fn run_unavailable(action: &ActionDefinition, json_output: bool) -> ExitCode {
