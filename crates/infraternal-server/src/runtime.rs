@@ -379,6 +379,7 @@ async fn remote_router(
     pool: SqlitePool,
     mut enrollment: Option<EnrollmentService>,
     remote: Option<RemoteService>,
+    trust: std::path::PathBuf,
 ) -> Result<
     (
         Router,
@@ -430,14 +431,23 @@ async fn remote_router(
         crate::remote_http::router_with_store(
             auth.clone(),
             pool.clone(),
-            enrollment_store,
+            enrollment_store.clone(),
             service.source,
             service.endpoint,
         )
     });
+    let removal = crate::remote_removal::Removal::new(
+        auth.clone(),
+        pool.clone(),
+        enrollment_store,
+        hosts.clone(),
+        trust,
+    );
     Ok((
         ca_api,
-        remote_api.unwrap_or_else(crate::remote_http::unavailable_router),
+        remote_api
+            .unwrap_or_else(crate::remote_http::unavailable_router)
+            .merge(crate::remote_removal_http::router(auth, removal)),
         hosts,
         listeners,
         issuer,
@@ -456,6 +466,8 @@ async fn build_router_with_key_setup(
     Ok((app, setup))
 }
 
+// Keep the runtime composition together; each optional plugin supplies its own router.
+#[allow(clippy::too_many_lines)]
 async fn build_router_core(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
@@ -513,8 +525,14 @@ async fn build_router_core(
         EmbeddedAgent::spawn(executable)
     };
     #[cfg(feature = "remote")]
-    let (ca_api, remote_api, hosts, listeners, issuer) =
-        remote_router(auth.clone(), pool.clone(), enrollment, remote).await?;
+    let (ca_api, remote_api, hosts, listeners, issuer) = remote_router(
+        auth.clone(),
+        pool.clone(),
+        enrollment,
+        remote,
+        config.data_dir.join("ssh-trust"),
+    )
+    .await?;
     #[cfg(all(feature = "ssh", feature = "remote"))]
     let integration = issuer.map(|issuer| (issuer, hosts.clone()));
     #[cfg(all(feature = "ssh", not(feature = "remote")))]

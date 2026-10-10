@@ -103,6 +103,8 @@ export interface CanvasState {
 }
 
 export interface Adapters {
+  /** Registry-labelled removal, shared by the palette and machine popover. */
+  hostRemoval?: { label(): string | undefined; remove(id: string, name: string, anchor: HTMLElement): void };
   /** Binds terminal windows to sessions (real in the product, previews in mockups). */
   sessions: SessionService;
   /** Lists, names and ends sessions (D178, D183); absent until the lifecycle API exists, and the manager, the markers and the final-screen strip are then not offered. */

@@ -63,6 +63,7 @@ type RenewalIdentity = ();
 enum Message {
     Shim(u32, Shim),
     Result(u32, u32, bool, Vec<u8>),
+    Deferred(u32, u32, infraternal_plugin_api::ActionReply),
     Event(u32, Vec<u8>),
     Pong(u64, u64),
     Close(u32, &'static str),
@@ -73,6 +74,30 @@ struct Open {
     uid: u32,
     cols: u16,
     rows: u16,
+}
+
+// A failed or cancelled write drops the continuation without starting its effect.
+async fn deferred_reply(
+    tx: &mut Transmit,
+    socket: &impl Channel,
+    stream: u32,
+    call_id: u32,
+    reply: infraternal_plugin_api::ActionReply,
+) -> io::Result<()> {
+    tx.send(
+        socket,
+        stream,
+        &Frame::Result {
+            call_id,
+            ok: true,
+            json: &reply.json,
+        },
+    )
+    .await?;
+    if let Some(after_write) = reply.after_write {
+        after_write();
+    }
+    Ok(())
 }
 
 async fn writer(
@@ -148,6 +173,9 @@ async fn writer(
                 )
                 .await?;
             }
+            Message::Deferred(stream, call_id, reply) => {
+                deferred_reply(&mut tx, socket, stream, call_id, reply).await?;
+            }
             Message::Event(stream, json) => {
                 tx.send(
                     socket,
@@ -198,7 +226,7 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
         return Err(sessions::invalid("embedded leg B requires fd 3"));
     }
     let socket = Socket::inherited(fd)?;
-    run_channel(&socket, state, None, None).await
+    run_channel(&socket, state, None, None, None).await
 }
 
 /// Dispatch an admitted remote server connection through the same session and shim path.
@@ -226,6 +254,20 @@ pub async fn run_authenticated_with_renewal(
     execution_uid: u32,
     renewal: Option<&RenewalIdentity>,
 ) -> io::Result<()> {
+    run_authenticated_with_installation(channel, state, execution_uid, renewal, None).await
+}
+
+/// Supply only checked local installation coordinates, never fields from a channel request.
+/// # Errors
+/// Refuses the same authenticated dispatch and installation bounds.
+#[cfg(feature = "remote")]
+pub async fn run_authenticated_with_installation(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    execution_uid: u32,
+    renewal: Option<&RenewalIdentity>,
+    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
+) -> io::Result<()> {
     if channel.native_stream_id().is_some_and(|writer| writer != 0)
         || execution_uid != nix::unistd::Uid::effective().as_raw()
     {
@@ -236,7 +278,7 @@ pub async fn run_authenticated_with_renewal(
     // Cancellation retires the authenticated channel as well as its task set;
     // a caller cannot reuse it with detached readers or unfinished wire writes.
     let _retire = RetireChannel(channel);
-    run_channel(channel, state, Some(execution_uid), renewal).await
+    run_channel(channel, state, Some(execution_uid), renewal, installation).await
 }
 
 #[cfg(feature = "remote")]
@@ -254,6 +296,7 @@ async fn run_channel(
     state: Option<PathBuf>,
     execution_uid: Option<u32>,
     renewal: Option<&RenewalIdentity>,
+    installation: Option<&crate::plugins::Installation>,
 ) -> io::Result<()> {
     let state = sessions::state(state)?;
     let mode = if execution_uid.is_some() {
@@ -261,7 +304,7 @@ async fn run_channel(
     } else {
         crate::plugins::ExecutionMode::Embedded
     };
-    let mut plugins = crate::plugins::registry(mode)
+    let mut plugins = crate::plugins::registry_with_installation(mode, installation)
         .map_err(|_| sessions::invalid("invalid compiled plugin registry"))?;
     let manager = Manager::detect().await;
     let exe = std::env::current_exe()?;
@@ -350,9 +393,9 @@ async fn run_channel(
                             }
                         }
                         Frame::Call {call_id, action_id, input_json} if stream == 0 => {
-                            match plugins.call(action_id, input_json) {
-                                Ok(json) => emit(&tx, Message::Result(0, call_id, true, json)).await?,
-                                Err(_) => emit(&tx, Message::Result(0, call_id, false, b"{\"error\":\"plugin action rejected\"}".to_vec())).await?,
+                            match plugins.call_with_reply(action_id, input_json) {
+                                Ok(result) => reply(&control, Message::Deferred(0, call_id, result))?,
+                                Err(_) => reply(&control, Message::Result(0, call_id, false, b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
                             }
                         }
                         Frame::AttachTerm {session_id, last_out_seq, last_in_seq} if stream != 0 => {

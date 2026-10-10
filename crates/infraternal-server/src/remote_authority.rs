@@ -149,7 +149,7 @@ impl EnrollmentStore {
     /// Thereafter the owned task keeps commit and publication together, even if
     /// a deadline cancels the caller while SQLite's worker is completing COMMIT.
     /// Process exit also retires its transports; no detached polling worker exists.
-    async fn commit_revocation(
+    pub(crate) async fn commit_revocation(
         &self,
         transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
         host: Uuid,

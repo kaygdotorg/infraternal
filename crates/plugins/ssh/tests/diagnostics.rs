@@ -111,3 +111,22 @@ fn dynamic_public_trust_is_retained_without_becoming_file_only_admission() {
         b"hostname fixture.invalid\nport 22\nknownhostscommand none\nknownhostscommand /public/tool\n",
     ).is_none());
 }
+
+#[test]
+fn failed_join_retains_only_the_allowlisted_host_dns_error() {
+    let failure = classify(
+        b"Join DNS lookup failed: Temporary failure in name resolution.\nprivate-sentinel\n",
+        false,
+        MeshEvidence::default(),
+    );
+    assert!(
+        failure
+            .log_tail
+            .contains(&"Join DNS lookup failed: Temporary failure in name resolution.")
+    );
+    assert!(
+        !serde_json::to_string(&failure)
+            .unwrap()
+            .contains("private-sentinel")
+    );
+}

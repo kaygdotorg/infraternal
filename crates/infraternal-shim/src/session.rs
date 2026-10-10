@@ -650,7 +650,7 @@ fn handle<'a>(
             });
         }
         Frame::SnapshotRequest => p.request = Some(Request::Snapshot),
-        Frame::Signal(signal) if !exited => pty.signal(signal)?,
+        Frame::Signal(signal) => pty.signal_unless_exited(signal, exited)?,
         Frame::ExitAck if exited && p.exited_sent && p.pending.is_empty() => return Ok(true),
         Frame::Error(..) => {}
         _ => return Err(invalid()),

@@ -74,6 +74,7 @@ export function installPalette(cx: Ctx): () => void {
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.lock, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
     // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
     for (const host of cx.adapters.sessions.hosts()) {
+      if (host.id !== "embedded" && cx.adapters.hostRemoval?.label()) out.push({ group: "Hosts", glyph: "×", label: `${cx.adapters.hostRemoval.label()}: ${host.name}`, hint: "revoke access · uninstall", action: `canvas:removehost:${host.id}` });
       out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: "terminal · ssh · console", action: `canvas:open:${host.name}` });
     }
     for (const row of cx.adapters.containers?.rows() ?? []) out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${row.name}`, hint: "container · terminal · console", action: `canvas:ctr:${row.name}` });
@@ -108,6 +109,10 @@ export function installPalette(cx: Ctx): () => void {
     else if (kind === "win" && value) {
       const rec = [...views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === value);
       if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); }
+    }
+    else if (kind === "removehost" && value) {
+      const host = cx.adapters.sessions.hosts().find((entry) => entry.id === value);
+      if (host) cx.adapters.hostRemoval?.remove(host.id, host.name, active?.card.pill ?? core.stage);
     }
     else if (kind === "open" && value) cx.win.open(value);
     else if (kind === "session" && value) { const [host, sid] = value.split("/"); if (host && sid) cx.win.openSession(host, sid); }

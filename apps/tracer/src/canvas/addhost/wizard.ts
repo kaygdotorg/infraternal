@@ -29,6 +29,7 @@ import type { Chip, ChipInputController, HostPlatform, HostSource, StepStatusCon
 import { foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
 import type { BootstrapEvent, StartTarget, TargetView } from "../../provisioning-client";
 import type { FlowHost, FlowSurface } from "./flow-host";
+import { hostKeyPresentation } from "./host-key";
 import { ICON, escapeHtml, svg } from "./icons";
 import { failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, RUNNING_TEXT, stagesOf, STAGES } from "./model";
 import type { Guide, ParsedTarget } from "./model";
@@ -465,7 +466,7 @@ export class Wizard {
     const subject = roots.length === 1 ? roots[0]!.label : `${roots.length} hosts`;
     const names = roots.length <= 3 ? roots.map((entry) => entry.label).join(", ") : `${roots.slice(0, 2).map((entry) => entry.label).join(", ")} and ${roots.length - 2} more`;
     page.innerHTML = `${this.hero(ICON.shield)}<h1 class="ah-title">Install as root on ${escapeHtml(subject)}?</h1>
-      <p class="ah-lede">${directRoot ? "These hosts use a root SSH login. Installing as root needs your explicit consent." : `${escapeHtml(names)} ${roots.length > 1 ? "allow" : "allows"} admin commands without a password. That alone doesn't mean you want root.`}</p>
+      <p class="ah-lede">${directRoot ? `${roots.length === 1 ? "This host uses" : "These hosts use"} a root SSH login. Installing as root needs your explicit consent.` : `${escapeHtml(names)} ${roots.length > 1 ? "allow" : "allows"} admin commands without a password. That alone doesn't mean you want root.`}</p>
       <p class="ah-text">A root infraternal agent can manage packages, services and containers, and can read every file on the host. ${directRoot ? "To install as a user, go Back and change the SSH sign-in user." : "You can also install as a user now and switch to root later."}</p>
       <label class="ah-consent check"><input type="checkbox" data-consent /><span>I trust infraternal with root on ${escapeHtml(subject)}</span></label>`;
     for (const input of page.querySelectorAll<HTMLInputElement>(".ah-consent input")) springCheckbox(input);
@@ -759,16 +760,18 @@ export class Wizard {
 
   private renderHostKey(page: HTMLElement): void {
     const job = this.fixing!;
-    const prints = job.view.failure?.fingerprints ?? [];
+    const print = job.view.failure?.fingerprints?.[0];
+    const key = hostKeyPresentation(job.view.failure?.host_key_type);
+    const changed = job.view.failure?.host_key_changed === true;
     page.innerHTML = `${this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(job.entry.label)}'s key</h1>
-      <p class="ah-lede">This server has not met ${escapeHtml(job.entry.label)} before, or its key changed. Trust it only if the fingerprint matches the one on the host.</p>
+      <p class="ah-lede">${changed ? "Warning: this host’s trusted key changed. Replace it only after you verify the new fingerprint on the host." : "Compare this fingerprint with the one on the host before trusting it."}</p>
       <div class="ah-keyblock" data-kv></div>
-      <p class="ah-text">On the host, run <span class="ah-code">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</span> and compare.</p>
+      <p class="ah-text">${key.command ? `On the host, run <span class="ah-code">${escapeHtml(key.command)}</span> and compare.` : "Ask the host’s owner to verify this fingerprint through a trusted connection."}</p>
       <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(this.detailsOf(job))}</pre></details>`;
-    const list = createKeyValueList("Host key fingerprints");
-    list.set(prints.map((print, index) => ({ key: prints.length > 1 ? `Key ${index + 1}` : "Fingerprint", value: print })));
+    const list = createKeyValueList("Host key fingerprint");
+    list.set(print ? [{ key: "Host key", value: `${key.label} · ${print}` }] : []);
     page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="trust-key">${svg(ICON.shieldCheck)}<span>Trust this key</span></button>`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="trust-key">${svg(ICON.shieldCheck)}<span>${changed ? "Replace trusted key" : "Trust this key"}</span></button>`);
   }
 
   private renderChoose(page: HTMLElement): void {

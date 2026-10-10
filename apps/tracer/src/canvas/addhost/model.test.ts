@@ -64,7 +64,7 @@ describe("authLabel", () => {
     expect(authLabel({ method: "network" })).toBe("network access");
     expect(authLabel({ method: "network", network: "tailscale" })).toBe("network access (Tailscale)");
     expect(authLabel({ method: "server-key" })).toBe("this server's key");
-    expect(authLabel({ method: "user-key" })).toBe("your saved key");
+    expect(authLabel({ method: "user-key" })).toBe("your key");
     expect(authLabel({ method: "password" })).toBe("your password");
   });
 });
@@ -72,9 +72,9 @@ describe("authLabel", () => {
 describe("guideFor", () => {
   test("installation failures never claim that incomplete cleanup succeeded", () => {
     const guide = guideFor("fixture", { kind: "install", message: "cleanup pending", log_tail: [] });
-    expect(guide.happened).toContain("cleanup may still need to finish");
+    expect(guide.happened).not.toContain("cleanup");
     expect(guide.happened).not.toContain("nothing is left half done");
-    expect(guide.next).toContain("finish cleanup before another attempt");
+    expect(guide.next).not.toContain("cleanup");
     expect(guide.fix).toBe("retry");
   });
 
@@ -196,4 +196,21 @@ describe("matchListed", () => {
   test("a new name that starts no host is neither named nor waiting", () => {
     expect(matchListed(parseTarget("kayg@o9")!, hosts)).toEqual({ named: undefined, prefixed: false });
   });
+});
+
+test("install diagnostics name the failed step and public host error", () => {
+  const failure = { kind: "install" as const, message: "Joining the host to this server failed.", failed_step: "join" as const, log_tail: ["Join DNS lookup failed: Temporary failure in name resolution."] };
+  expect(failureLine(failure)).toContain("Joining");
+  expect(guideFor("worker", failure).happened).toContain("Temporary failure in name resolution");
+});
+test("missing payload tells the operator the architecture and expected server path", () => {
+  const failure = { kind: "install" as const, message: "The matching static infraternal binary is unavailable.", failed_step: "upload" as const, log_tail: [], missing_binary: { architecture: "aarch64", path: "/release/infraternal-aarch64-musl" } };
+  expect(guideFor("worker", failure).happened).toContain("aarch64");
+  expect(guideFor("worker", failure).happened).toContain("/release/infraternal-aarch64-musl");
+});
+test("an already added host says so and offers opening its existing terminal", () => {
+  const failure = { kind: "install" as const, message: "This host is already added. Open its terminal from Console.", log_tail: [], already_added: true };
+  expect(guideFor("worker", failure).title).toBe("worker is already added");
+  expect(guideFor("worker", failure).happened).toContain("already added");
+  expect(guideFor("worker", failure).fix).toBe("none");
 });

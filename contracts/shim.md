@@ -106,6 +106,9 @@ Rules:
   reconnect, it sends `ReadFrom(last_seq)`. Thus, no byte is lost or sent two
   times while the bytes are in the ring (DECISIONS 41: no lost bytes on
   resume).
+- **Signal after exit.** An allowlisted signal after the PTY exits is a no-op;
+  unsupported signals are still refused. This preserves the retained exit and
+  its acknowledgement when host uninstall races shell exit (#87).
 - **Exit is kept.** The shim keeps `Exited` until it gets `ExitAck`, so an
   agent restart cannot lose the exit status.
 

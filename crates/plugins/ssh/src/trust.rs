@@ -19,6 +19,55 @@ use std::{
 };
 use tokio::process::Command;
 
+static PUBLICATION: Mutex<()> = Mutex::new(());
+
+/// Delete only an owned application pin; external SSH trust is never changed.
+/// # Errors
+/// Refuses unsafe ownership, malformed records and filesystem failures.
+pub fn forget_pin(root: &std::path::Path, lookup: &str) -> Result<(), Failure> {
+    let _publication = lock(&PUBLICATION);
+    let path = root.join(format!("{:x}.pub", Sha256::digest(lookup.as_bytes())));
+    if !root.try_exists().map_err(|_| unavailable())? {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(root).map_err(|_| unavailable())?;
+    if !metadata.is_dir()
+        || metadata.mode() & 0o777 != 0o700
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+    {
+        return Err(unavailable());
+    }
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(unavailable()),
+    };
+    let metadata = file.metadata().map_err(|_| unavailable())?;
+    if !metadata.is_file()
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.len() > 8192
+    {
+        return Err(unavailable());
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(8193)
+        .read_to_end(&mut bytes)
+        .map_err(|_| unavailable())?;
+    if public_record(&bytes, lookup).as_deref().map(str::as_bytes) != Some(bytes.as_slice()) {
+        return Err(unavailable());
+    }
+    fs::remove_file(path).map_err(|_| unavailable())?;
+    fs::File::open(root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| unavailable())
+}
+
 struct Observation {
     destination: Destination,
     policy: TrustPolicy,
@@ -33,7 +82,6 @@ pub struct TrustedOpenSsh {
     ssh: OpenSsh,
     root: PathBuf,
     pending: Mutex<HashMap<uuid::Uuid, Observation>>,
-    publication: Mutex<()>,
 }
 impl TrustedOpenSsh {
     #[must_use]
@@ -42,7 +90,6 @@ impl TrustedOpenSsh {
             ssh,
             root,
             pending: Mutex::new(HashMap::new()),
-            publication: Mutex::new(()),
         }
     }
 
@@ -250,7 +297,7 @@ impl TrustedOpenSsh {
         self.private_root()?;
         // Serialize compare-and-replace across this server's concurrent confirmations.
         // A challenge can replace only the exact pin observed, never a later decision.
-        let _publication = lock(&self.publication);
+        let _publication = lock(&PUBLICATION);
         if self.recorded(&policy)? != observation.previous {
             return Err(denied());
         }
@@ -326,7 +373,7 @@ impl SshTransport for TrustedOpenSsh {
                             failure.host_key_changed = observation.previous.is_some();
                         }
                     }
-                    Err(failure)
+                    Err(failure.at(crate::model::InstallStep::Connect))
                 }
             }
         })

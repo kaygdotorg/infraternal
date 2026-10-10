@@ -39,7 +39,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "host-key": return "This host's key needs your OK";
     case "auth": return "Couldn't sign in to this host";
     case "unsupported": return "This host can't run the infraternal agent yet";
-    case "install": return "Setting up this host didn't finish";
+    case "install": if (failure.already_added) return failure.message; if (failure.missing_binary) return `The ${failure.missing_binary.architecture} static infraternal binary is unavailable. Put it at ${failure.missing_binary.path} on the server, then try again.`; return failure.failed_step ? [failure.message, ...failure.log_tail.filter((line) => !line.startsWith("Remote command returned"))].join(" ") : "Setting up this host didn't finish";
     default: return "Something went wrong while setting up this host. Try again.";
   }
 }
@@ -52,7 +52,7 @@ const NETWORK_NAMES: Record<NetworkProvider, string> = { netbird: "NetBird", tai
 export function authLabel(info: AuthenticationInfo): string {
   if (info.method === "network") return info.network && info.network !== "other" ? `network access (${NETWORK_NAMES[info.network]})` : "network access";
   if (info.method === "server-key") return "this server's key";
-  if (info.method === "user-key") return "your saved key";
+  if (info.method === "user-key") return "your key";
   return "your password";
 }
 
@@ -95,6 +95,7 @@ export interface Guide { title: string; happened: string; next: string; fix: Fix
 
 /** Plain-language account of a failed host. `name` is what the person typed or picked. */
 export function guideFor(name: string, failure: FailureDetail | undefined): Guide {
+  if (failure?.already_added) return { title: `${name} is already added`, happened: failure.message, next: "Open its terminal from Console or the command palette.", fix: "none" };
   switch (failure?.kind) {
     case "unreachable": return {
       title: `${name} isn't answering`,
@@ -116,7 +117,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined): Guid
     };
     case "auth": return failure.choose_method ? {
       title: `Couldn't sign in to ${name}`,
-      happened: "Your network access, this server's key and your saved key didn't get in.",
+      happened: "The sign-in methods tried so far didn't get in.",
       next: "Choose another way to sign in, or give this server's key to the host.",
       fix: "choose-method",
     } : {
@@ -133,8 +134,8 @@ export function guideFor(name: string, failure: FailureDetail | undefined): Guid
     };
     case "install": return {
       title: `Setting up ${name} didn't finish`,
-      happened: "Installation stopped before this host was ready. Automatic cleanup may still need to finish.",
-      next: "Open the details, restore access to the host if needed, then try again to finish cleanup before another attempt.",
+      happened: failure.failed_step ? failureLine(failure) : "Setup stopped before this host was ready.",
+      next: "Open the details, restore access to the host if needed, then try again.",
       fix: "retry",
     };
     default: return {

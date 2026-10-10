@@ -55,7 +55,7 @@ interface BootstrapEvent {
   message: string;
   elapsed_ms: number;
   log_tail: string[];
-  failure?: { kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; choose_method?: boolean };
+  failure?: { kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -181,7 +181,9 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
   };
 
   /** Staggered, host-dependent pace so a batch looks like separate machines. */
-  const pace = (target: Target, phase: number): number => 420 + ((target.id.length * 97 + phase * 53) % 380);
+  // Cancellation owns a deliberately pending fixture; it must not turn into a
+  // successful install while a loaded browser is opening the confirmation.
+  const pace = (target: Target, phase: number): number => target.name === "cancellation.lab" && phase === 1 ? 60_000 : 420 + ((target.id.length * 97 + phase * 53) % 380);
 
   function schedule(target: Target): void {
     target.state = "queued";
@@ -199,7 +201,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       if (!failure) return;
       emit(target, "failed", failure.message, {
         kind: failure.kind, message: failure.message, log_tail: [failure.evidence],
-        ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id } : {}), ...(failure.choose ? { choose_method: true } : {}),
+        ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id, host_key_type: "ssh-ed25519" } : {}), ...(failure.choose ? { choose_method: true } : {}),
       });
       target.state = "failed";
       target.fixed = true;

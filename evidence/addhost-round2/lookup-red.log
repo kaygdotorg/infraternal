@@ -1,0 +1,25 @@
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-addhost/crates/infraternal-plugin-api)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-addhost/crates/plugins/ssh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.82s
+     Running tests/auth_order.rs (/home/kayg/.cache/codex-scratch/release-addhost/target/debug/deps/auth_order-a8c8dd4f9fcf7b6c)
+
+running 1 test
+test successful_authentication_is_reported_and_later_secrets_are_never_requested ... FAILED
+
+failures:
+
+---- successful_authentication_is_reported_and_later_secrets_are_never_requested stdout ----
+
+thread 'successful_authentication_is_reported_and_later_secrets_are_never_requested' (4148826) panicked at crates/plugins/ssh/tests/auth_order.rs:131:9:
+assertion `left == right` failed
+  left: None
+ right: Some("[fixture]:2222")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    successful_authentication_is_reported_and_later_secrets_are_never_requested
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p infraternal-plugin-ssh --test auth_order`

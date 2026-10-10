@@ -29,3 +29,13 @@ test("unknown and ambiguous labels never open an embedded shell", () => {
   expect(sessions.open(id).hostId).toBe(id);
   sessions.dispose();
 });
+
+test("removed hosts disappear from inventory and cannot route a new shell", () => {
+  const sessions = service();
+  sessions.registerHost({ id, name: "worker" });
+  sessions.forgetHost(id);
+  expect(sessions.hosts().map((host) => host.id)).toEqual(["embedded"]);
+  expect(sessions.open(id).noAccess).toBe(true);
+  expect(sessions.open("worker").noAccess).toBe(true);
+  sessions.dispose();
+});

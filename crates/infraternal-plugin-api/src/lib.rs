@@ -406,6 +406,16 @@ mod component_tests {
 /// Maximum encoded node-side plugin action body.
 pub const MAX_ACTION_BYTES: usize = 8 * 1024;
 
+/// A nonblocking continuation released only after its successful result frame is written.
+/// Dropping it on cancellation must leave the deferred effect unstarted.
+pub type AfterReply = Box<dyn FnOnce() + Send + 'static>;
+
+/// Bounded JSON plus an optional handoff that needs its reply transmitted first.
+pub struct ActionReply {
+    pub json: Vec<u8>,
+    pub after_write: Option<AfterReply>,
+}
+
 /// A plugin implementation that can be routed without feature-specific agent code.
 pub trait AgentPlugin: Send {
     /// Static action and settings metadata.
@@ -414,6 +424,19 @@ pub trait AgentPlugin: Send {
     /// # Errors
     /// Returns a bounded plugin error for a rejected action, unknown action, or oversized body.
     fn call(&mut self, action_id: &str, input: &[u8]) -> Result<Vec<u8>, PluginError>;
+    /// Prepare an effect that can interrupt the current transport after its reply.
+    /// # Errors
+    /// Returns the same bounded dispatch failures as `call`.
+    fn call_with_reply(
+        &mut self,
+        action_id: &str,
+        input: &[u8],
+    ) -> Result<ActionReply, PluginError> {
+        self.call(action_id, input).map(|json| ActionReply {
+            json,
+            after_write: None,
+        })
+    }
 }
 
 /// A bounded registry that dispatches actions only to declared plugin handlers.
@@ -450,6 +473,21 @@ impl PluginRegistry {
     /// # Errors
     /// Returns a bounded error for an unknown action, oversized message, or plugin rejection.
     pub fn call(&mut self, action_id: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
+        let reply = self.call_with_reply(action_id, input)?;
+        if reply.after_write.is_some() {
+            return Err(PluginError::Rejected);
+        }
+        Ok(reply.json)
+    }
+
+    /// Dispatch with a continuation owned by the transport writer until transmission.
+    /// # Errors
+    /// Refuses undeclared actions, oversized bodies and rejected plugin calls.
+    pub fn call_with_reply(
+        &mut self,
+        action_id: &str,
+        input: &[u8],
+    ) -> Result<ActionReply, PluginError> {
         if input.len() > MAX_ACTION_BYTES {
             return Err(PluginError::MessageTooLarge);
         }
@@ -463,8 +501,8 @@ impl PluginRegistry {
         let Some(plugin) = plugin else {
             return Err(PluginError::UnknownAction);
         };
-        let output = plugin.call(action_id, input)?;
-        if output.len() > MAX_ACTION_BYTES {
+        let output = plugin.call_with_reply(action_id, input)?;
+        if output.json.len() > MAX_ACTION_BYTES {
             return Err(PluginError::MessageTooLarge);
         }
         Ok(output)

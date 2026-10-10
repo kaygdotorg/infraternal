@@ -137,3 +137,10 @@ path = "fuzz_targets/ssh_auth_once_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "remote_removal_decode"
+path = "fuzz_targets/remote_removal_decode.rs"
+test = false
+doc = false
+bench = false

@@ -885,3 +885,6 @@ mod plugin_no_features;
 #[cfg(feature = "mesh")]
 #[path = "socket_tests/claude_review_visible_liveness.rs"]
 mod claude_review_visible_liveness;
+
+#[path = "socket_tests/terminal_exit.rs"]
+mod terminal_exit;

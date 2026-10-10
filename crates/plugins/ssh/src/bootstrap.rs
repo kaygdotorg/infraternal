@@ -59,6 +59,16 @@ pub trait Backend: Send + Sync {
         target: &'a Target,
         check: &'a Check,
     ) -> Operation<'a, JoinMaterial>;
+    /// Bind nonsecret cleanup coordinates to the connection that actually authenticated.
+    fn invitation_with_trust<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        _lookup: Option<String>,
+    ) -> Operation<'a, JoinMaterial> {
+        self.invitation(authority, target, check)
+    }
     fn connected_facts<'a>(
         &'a self,
         authority: &'a Authority,
@@ -480,7 +490,7 @@ impl Bootstrap {
         // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
         let join = self
             .backend
-            .invitation(&batch.authority, target, &check)
+            .invitation_with_trust(&batch.authority, target, &check, session.trust_lookup())
             .await?;
         resources.host = Some(join.host);
         if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
@@ -502,7 +512,19 @@ impl Bootstrap {
         );
         transaction
             .stage(self.binaries.get(check.architecture))
-            .await?;
+            .await
+            .map_err(|mut error| {
+                if error.message == "The matching static infraternal binary is unavailable." {
+                    error.missing_binary = Some(Box::new(crate::model::MissingBinary {
+                        architecture: match check.architecture {
+                            crate::probe::Architecture::X86_64 => "x86_64",
+                            crate::probe::Architecture::Aarch64 => "aarch64",
+                        },
+                        path: self.binaries.get(check.architecture).display().to_string(),
+                    }));
+                }
+                error
+            })?;
         transaction.enroll_and_start(&join).await?;
         drop(join); // Capability plaintext is erased immediately after its stdin handoff.
         if !transaction.enable_linger().await? {

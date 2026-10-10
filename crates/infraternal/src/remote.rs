@@ -140,6 +140,44 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     Ok(())
 }
 
+/// DNS is its own boundary: retain only known public resolver diagnostics.
+async fn connect_enrollment(name: &str, port: u16) -> io::Result<tokio::net::TcpStream> {
+    let addresses = tokio::net::lookup_host((name, port))
+        .await
+        .map_err(|error| {
+            let message = match error.to_string().as_str() {
+                "failed to lookup address information: Temporary failure in name resolution" => {
+                    "Join DNS lookup failed: Temporary failure in name resolution."
+                }
+                "failed to lookup address information: Name or service not known" => {
+                    "Join DNS lookup failed: Name or service not known."
+                }
+                _ => "Join DNS lookup failed.",
+            };
+            io::Error::new(error.kind(), message)
+        })?
+        .collect::<Vec<_>>();
+    tokio::net::TcpStream::connect(addresses.as_slice())
+        .await
+        .map_err(|error| io::Error::new(error.kind(), "Join connection failed."))
+}
+
+/// CLI output can carry only these authored public contexts, never arbitrary errors.
+pub(crate) fn public_error(error: &io::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "Join DNS lookup failed: Temporary failure in name resolution." => {
+            "Join DNS lookup failed: Temporary failure in name resolution."
+        }
+        "Join DNS lookup failed: Name or service not known." => {
+            "Join DNS lookup failed: Name or service not known."
+        }
+        "Join DNS lookup failed." => "Join DNS lookup failed.",
+        "Join connection failed." => "Join connection failed.",
+        "Join TLS verification failed." => "Join TLS verification failed.",
+        _ => "Remote infraternal agent operation failed",
+    }
+}
+
 async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Result<JoinResponse> {
     use http_body_util::BodyExt;
     let url = url::Url::parse(url).map_err(|_| refused())?;
@@ -188,15 +226,18 @@ async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Re
         .map_err(|_| refused())?
         .into_ssl(name)
         .map_err(|_| refused())?;
-    let socket = tokio::net::TcpStream::connect((name, port))
-        .await
-        .map_err(|_| refused())?;
+    let socket = connect_enrollment(name, port).await?;
     socket.set_nodelay(true)?;
     let mut stream = tokio_openssl::SslStream::new(ssl, socket).map_err(|_| refused())?;
     std::pin::Pin::new(&mut stream)
         .connect()
         .await
-        .map_err(|_| refused())?;
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Join TLS verification failed.",
+            )
+        })?;
     // Hyper is the same HTTP engine used by the server; retain its bounded codec.
     let (mut sender, connection) =
         hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
@@ -321,11 +362,20 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         execution_uid: stored.execution_uid,
     };
     drop(bytes);
+    let installation =
+        state
+            .as_ref()
+            .map(|sessions| infraternal_plugin_remote::uninstall::Context {
+                host: stored.host_id.simple().to_string(),
+                uid: stored.execution_uid,
+                data: data.to_owned(),
+                sessions: sessions.clone(),
+            });
     let publisher = std::sync::Arc::new(IdentityPublisher {
         data: data.to_owned(),
         stored,
     });
-    remote_client::run_with_publisher(&identity, state, publisher).await
+    remote_client::run_with_installation(&identity, state, publisher, installation.as_ref()).await
 }
 
 /// The existing installation is the publication boundary; no new key is generated.
@@ -381,3 +431,40 @@ impl infraternal_agent::remote_renewal::CertificatePublisher for IdentityPublish
 #[cfg(test)]
 #[path = "remote_tests.rs"]
 mod tests;
+
+/// The internal independent service receives a bounded public plan only on stdin.
+pub(crate) fn uninstall_if_requested() -> Option<std::process::ExitCode> {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    if arguments
+        .get(1)
+        .is_none_or(|argument| argument != "--bootstrap-uninstall")
+    {
+        return None;
+    }
+    let execute = || -> io::Result<()> {
+        use std::io::Read;
+        if arguments.len() != 2 {
+            return Err(refused());
+        }
+        let mut bytes = Vec::new();
+        std::io::stdin().take(8193).read_to_end(&mut bytes)?;
+        if bytes.len() > 8192 {
+            return Err(refused());
+        }
+        let plan = serde_json::from_slice(&bytes).map_err(|_| refused())?;
+        let home = std::env::var_os("HOME").map_or_else(|| "/".into(), PathBuf::from);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(infraternal_plugin_remote::uninstall::cleanup(
+            &plan,
+            &home,
+            nix::unistd::Uid::effective().as_raw(),
+        ))
+    };
+    Some(if execute().is_ok() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    })
+}

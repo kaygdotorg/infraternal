@@ -8,11 +8,13 @@ license.workspace = true
 [features]
 default = []
 transport = ["dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol"]
-agent = ["transport"]
+agent = ["transport", "dep:infraternal-shim", "dep:nix"]
 server = ["transport"]
 test-support = ["transport"]
 
 [dependencies]
+infraternal-shim = { workspace = true, optional = true }
+nix = { workspace = true, optional = true }
 infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
 infraternal-protocol = { workspace = true, optional = true }
 openssl = { workspace = true, optional = true }

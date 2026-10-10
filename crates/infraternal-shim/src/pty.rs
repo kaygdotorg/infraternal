@@ -154,22 +154,37 @@ impl Pty {
         }
         Ok(())
     }
-    pub fn signal(&self, number: u8) -> io::Result<()> {
-        let signal = Signal::try_from(i32::from(number)).map_err(errno)?;
-        if !matches!(
-            signal,
-            Signal::SIGINT | Signal::SIGTERM | Signal::SIGHUP | Signal::SIGKILL | Signal::SIGWINCH
-        ) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "signal is not allowed",
-            ));
+    // Cleanup can race a retained exit. Validate but never signal a recycled
+    // foreground group or close the peer before its ExitAck.
+    pub(crate) fn signal_unless_exited(&self, number: u8, exited: bool) -> io::Result<()> {
+        if exited {
+            allowed_signal(number).map(|_| ())
+        } else {
+            self.signal(number)
         }
+    }
+    pub fn signal(&self, number: u8) -> io::Result<()> {
+        let signal = allowed_signal(number)?;
         // Job control gives full-screen applications their own foreground group.
         // Send to that group, not merely to the login shell's process group.
         let group = unistd::tcgetpgrp(&self.master).map_err(errno)?;
         killpg(group, signal).map_err(errno)
     }
+}
+// Validate independently of delivery: an already exited PTY must still refuse
+// unsupported signals, while a permitted duplicate cannot disturb its ExitAck.
+fn allowed_signal(number: u8) -> io::Result<Signal> {
+    let signal = Signal::try_from(i32::from(number)).map_err(errno)?;
+    if !matches!(
+        signal,
+        Signal::SIGINT | Signal::SIGTERM | Signal::SIGHUP | Signal::SIGKILL | Signal::SIGWINCH
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "signal is not allowed",
+        ));
+    }
+    Ok(signal)
 }
 /// Detach only before threads or PTYs exist. The original process returns;
 /// the grandchild owns the session and redirects inherited standard handles.

@@ -272,6 +272,11 @@ pub fn scan_destination(original: &Destination, bytes: &[u8]) -> Option<Destinat
 }
 
 impl SshSession for Session {
+    fn trust_lookup(&self) -> Option<String> {
+        self.configuration
+            .trust_policy()
+            .map(|policy| policy.lookup)
+    }
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             let master = self.master.as_ref().ok_or_else(|| {
@@ -339,7 +344,7 @@ impl SshSession for Session {
             }
             // Authentication already succeeded. Never treat remote stderr or
             // a command's exit 255 as permission to try a different credential.
-            Err(Failure::install("The authenticated SSH command failed."))
+            Err(classify(&result.stderr, false, MeshEvidence::default()))
         })
     }
 }
@@ -396,5 +401,20 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
         FailureKind::Unreachable => "OpenSSH could not establish the connection.",
         _ => "Remote command returned a failure status; raw output was withheld.",
     });
+    // Copy only canonical public error lines, never arbitrary remote bytes.
+    // Even a compromised banner can select a category but cannot inject secrets.
+    for line in [
+        "Join DNS lookup failed: Temporary failure in name resolution.",
+        "Join DNS lookup failed: Name or service not known.",
+        "Join DNS lookup failed.",
+        "Join connection failed.",
+        "Join TLS verification failed.",
+        "Failed to connect to bus: No medium found",
+        "Failed to connect to bus: No such file or directory",
+    ] {
+        if text.contains(line) && !failure.log_tail.iter().any(|known| known.contains(line)) {
+            failure.log_tail.push(line);
+        }
+    }
     failure
 }

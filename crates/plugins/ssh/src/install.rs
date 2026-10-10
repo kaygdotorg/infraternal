@@ -1,7 +1,7 @@
 //! Stages a matching binary and identity, preserving previous artifacts until authenticated readiness [17][139].
 
 use crate::{
-    model::{Failure, InstallMode, Target},
+    model::{Failure, InstallMode, InstallStep, Target},
     probe::Architecture,
     transport::{Input, Secret, SshSession, shell_quote},
 };
@@ -117,7 +117,9 @@ impl Installation {
     /// # Errors
     /// Reports binary, ownership, concurrent install or upload failure.
     pub async fn stage(&self, binary: &Path) -> Result<(), Failure> {
-        let digest = binary_digest(binary).await?;
+        let digest = binary_digest(binary)
+            .await
+            .map_err(|error| error.at(InstallStep::Upload))?;
         self.session.run(&self.script(&format!(r#"
 # A retired fresh transaction still owns final cleanup outside the base.
 # Admit no replacement until its receipt is removed after successful cleanup.
@@ -143,7 +145,7 @@ fi
 cat > "$stage/payload"
 printf '%s  %s\n' {} "$stage/payload" | sha256sum -c - >/dev/null
 chmod 700 "$stage/payload"
-"#, shell_quote(&digest))), Input::File(binary)).await?;
+"#, shell_quote(&digest))), Input::File(binary)).await.map_err(|error| error.at(InstallStep::Upload))?;
         Ok(())
     }
 
@@ -205,13 +207,14 @@ stage="$base/.bootstrap-lock"
 if [ -d "$base/state" ]; then cp -a "$base/state" "$stage/state"; fi
 # Enrollment writes only the staged identity and returns before service activation.
 # Shim rendezvous belongs to the live service, outside identity replacement.
-"$stage/payload" agent --data "$stage/state" join {} --enroll-only >/dev/null 2>&1
+"$stage/payload" agent --data "$stage/state" join {} --enroll-only >/dev/null
 "#,
             shell_quote(&join.url)
         );
         self.session
             .run(&self.script(&join_body), Input::Bytes(join.stdin.expose()))
-            .await?;
+            .await
+            .map_err(|error| error.at(InstallStep::Join))?;
         // Never replace unrelated launcher/unit files. A previous installation is
         // recognizable only through the same host marker and exact launcher target.
         let start_body = r##"
@@ -258,12 +261,25 @@ mv -Tf "$launcher.new" "$launcher"
 printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\n[Service]\nExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$base" "$wanted" > "$unit.new"
 : > "$stage/replacing-unit"
 mv -f "$unit.new" "$unit"
-$manager daemon-reload
-$manager enable --now infraternal-agent.service
 "##;
         self.session
             .run(&self.script(start_body), Input::Empty)
-            .await?;
+            .await
+            .map_err(|error| error.at(InstallStep::Install))?;
+        self.session
+            .run(
+                &self.script(
+                    r#"
+stage="$base/.bootstrap-lock"
+[ ! -L "$stage" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+$manager daemon-reload
+$manager enable --now infraternal-agent.service
+"#,
+                ),
+                Input::Empty,
+            )
+            .await
+            .map_err(|error| error.at(InstallStep::Start))?;
         Ok(())
     }
 

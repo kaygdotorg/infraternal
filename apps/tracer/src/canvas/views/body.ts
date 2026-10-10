@@ -28,6 +28,8 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
       cx.store.changed();
       // A session id the window just learned (a new shell was created on the server): the inventory knows it is open.
       if (m.sessionId) cx.adapters.inventory?.attach(m.host, m.sessionId, m.session ? { name: m.session } : undefined);
+    }, exited: (status) => {
+      if (status === 0) cx.win.close(rec);
     } });
     rec.binding = binding;
     binding.mount(body);

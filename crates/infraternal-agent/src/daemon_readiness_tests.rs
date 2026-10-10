@@ -195,3 +195,27 @@ fn rss() -> u64 {
         .parse()
         .unwrap()
 }
+
+#[tokio::test]
+async fn uninstall_handoff_runs_only_after_a_successful_real_socket_write() {
+    use std::sync::atomic::AtomicUsize;
+    use std::{os::fd::AsRawFd, sync::Arc};
+    let count = Arc::new(AtomicUsize::new(0));
+    for healthy in [false, true] {
+        let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        let socket = Socket::inherited(writer.as_raw_fd()).unwrap();
+        if !healthy {
+            drop(reader);
+        }
+        let effect = count.clone();
+        let reply = infraternal_plugin_api::ActionReply {
+            json: b"{}".to_vec(),
+            after_write: Some(Box::new(move || {
+                effect.fetch_add(1, Ordering::SeqCst);
+            })),
+        };
+        let result = deferred_reply(&mut Transmit::default(), &socket, 0, 1, reply).await;
+        assert_eq!(result.is_ok(), healthy);
+        assert_eq!(count.load(Ordering::SeqCst), usize::from(healthy));
+    }
+}

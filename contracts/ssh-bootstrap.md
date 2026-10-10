@@ -289,8 +289,11 @@ failure; a fresh check produces a fresh observation.
 At most 128 bounded public observations are held in memory. Idle expiration
 is reclaimed on access, without timers. Confirmed public pins persist in the
 server data directory (`ssh-trust/`, mode 0700; files 0600). Publication uses
-create-new and fsync; existing pins are never overwritten. A changed key,
-matching normal/CA/revoked configured record, changed configuration, revoked
+an owned create-new temporary file, fsync and atomic rename. Replacement needs
+explicit confirmation of the changed key; each challenge snapshots the previous
+pin and rejects a superseded confirmation. Show one policy-permitted key,
+preferring ED25519, and its exact type. Pin authenticated negotiation to that
+key family. A matching normal/CA/revoked configured record, changed configuration, revoked
 session or ambiguous public paths refuses confirmation. OpenSSH retains its
 configured revocation and cryptographic policy. Later configured matching trust
 alongside a dedicated pin requires review. External public configuration edits
@@ -316,3 +319,23 @@ Collection uses platform constants and OS concurrency metadata, without
 subprocesses, discovery scans or recurring polling. Invalid input returns the
 short fixed error `invalid host facts request`. Provisioning still requires
 its separate terminal canary before committing and emitting `done`.
+
+Round-two failures optionally include `host_key_type` and `host_key_changed`.
+The browser displays the selected fingerprint once, names its key type and gives
+the corresponding `ssh-keygen -lf /etc/ssh/ssh_host_<type>_key.pub` comparison.
+Helper sockets use a short private runtime directory under `XDG_RUNTIME_DIR` or
+`/run`, independent of the persistent data-directory length.
+
+## Release payloads and public install diagnostics (#87)
+
+A server release directory contains `infraternal` plus
+`infraternal-x86_64-musl` and `infraternal-aarch64-musl`, all from the same revision.
+`scripts/package-release` builds and publishes the complete directory with public
+checksums. A missing architecture payload produces its architecture and expected
+server path as trusted public metadata; the UI tells the operator where to put it.
+
+Failures retain the connect/upload/install/join/start boundary. Host diagnostics
+are exact allowlisted public lines, including enrollment DNS and TLS failures;
+arbitrary stderr never becomes UI copy or log output. Re-adding a retained host
+(address or effective application SSH lookup) returns `already_added` before
+issuing another invitation, and the UI directs the person to its existing terminal.
