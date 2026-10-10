@@ -5,6 +5,75 @@ mod budgets {
     //! Exercises session invariants against real data and frozen expectations.
     use super::*;
     #[test]
+    fn allowlisted_signal_after_real_pty_exit_keeps_exit_ack_available() {
+        let mut pty = Pty::spawn(Uid::effective().as_raw(), 20, 4).unwrap();
+        pty.child.kill().unwrap();
+        pty.child.wait().unwrap();
+        let (stream, _other) = UnixStream::pair().unwrap();
+        let mut peer = Peer {
+            stream,
+            decoder: Decoder::default(),
+            attached: true,
+            caps: 0,
+            input_reply: None,
+            writer: Some(0),
+            ack_queued: 0,
+            size: (20, 4, 0, 0),
+            cursor: None,
+            pending: Vec::new(),
+            written: 0,
+            exited_sent: true,
+            request: None,
+        };
+        let mut terminal = Terminal::new(20, 4).unwrap();
+        let ring = Ring::new(DEFAULT_CAPACITY);
+        let mut config = Config::new([0; 16], Uid::effective().as_raw());
+        let mut input = VecDeque::new();
+        let mut cursors = Inputs::default();
+        assert!(
+            !handle(
+                Frame::Signal(9),
+                &mut peer,
+                &mut pty,
+                &mut terminal,
+                &ring,
+                &mut config,
+                &mut input,
+                &mut cursors,
+                true
+            )
+            .unwrap()
+        );
+        assert!(
+            handle(
+                Frame::Signal(255),
+                &mut peer,
+                &mut pty,
+                &mut terminal,
+                &ring,
+                &mut config,
+                &mut input,
+                &mut cursors,
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            handle(
+                Frame::ExitAck,
+                &mut peer,
+                &mut pty,
+                &mut terminal,
+                &ring,
+                &mut config,
+                &mut input,
+                &mut cursors,
+                true
+            )
+            .unwrap()
+        );
+    }
+    #[test]
     #[ignore = "real-PTY performance measurement; set ZDOTDIR to tests/profile"]
     fn input_to_pty_write() {
         let mut pty = Pty::spawn(Uid::effective().as_raw(), 200, 60).unwrap();
