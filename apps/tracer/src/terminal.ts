@@ -6,7 +6,7 @@ import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from ".
 import { terminalTouch } from "./terminal-touch";
 import { pulseActivity } from "./perf-activity";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
-import type { WireFrame } from "../../../packages/protocol/src/codec";
+import { CLOSE_SESSION_GONE, type WireFrame } from "../../../packages/protocol/src/codec";
 import { MuxConnection, type StreamHandler } from "./connection";
 
 const INITIAL_CREDIT = 1024 * 1024;
@@ -60,6 +60,11 @@ export interface TerminalHooks {
   onDisconnected?: (forced: boolean) => void;
   /** Final output has painted; clean exits may close their window. */
   onExited?: (status: number) => void;
+  /**
+   * The host no longer has this terminal's session (the server's final Close 4404). The terminal has stopped
+   * attaching; the window shows the ended state. Every other close stays transient and retries.
+   */
+  onSessionGone?: () => void;
   onInput?: (data: string, at: number, sequence: bigint) => boolean | void;
   onTrace?: (keyId: string, hop: TerminalTraceHop, at: number) => void;
   onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint) => void;
@@ -244,6 +249,8 @@ export class TerminalClient {
   private closed = false;
   private pendingExit: { status: number; finalSeq: bigint } | undefined;
   private exitReported = false;
+  /** The server's final answer that the session is gone: no attach is ever sent for it again. */
+  private sessionGone = false;
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
@@ -696,7 +703,7 @@ export class TerminalClient {
   private streamHandler(): StreamHandler {
     return {
       onSocketOpen: (resuming) => {
-        if (this.closed || this.pendingExit) return;
+        if (this.closed || this.pendingExit || this.sessionGone) return;
         this.connectionIsResume = this.sessionId !== undefined;
         if (this.sessionId && resuming) {
           this.attachRequested = true;
@@ -706,7 +713,7 @@ export class TerminalClient {
         }
       },
       onWelcome: (resumed) => {
-        if (this.closed || this.pendingExit) return;
+        if (this.closed || this.pendingExit || this.sessionGone) return;
         // A connection the server does not know starts every writer at zero, like a page reload.
         if (!resumed && this.hasAttached) this.restartCursors();
         if (!this.sessionId) this.openSession();
@@ -717,7 +724,7 @@ export class TerminalClient {
       },
       onFrame: (frame, message, receivedAt) => this.handleTerminalFrame(frame, message, receivedAt),
       onDisconnected: (forced) => {
-        if (this.closed || this.exitReported) return;
+        if (this.closed || this.exitReported || this.sessionGone) return;
         this.attached = false;
         this.attachRequested = false;
         this.openCallSent = false;
@@ -787,6 +794,7 @@ export class TerminalClient {
         this.conn.acceptPong(frame.nonce);
         return;
       case "Close":
+        if (frame.code === CLOSE_SESSION_GONE) { this.endSession(); return; }
         this.setStatus(plainCloseReason(frame.reason));
         // On a connection of its own a closed stream restarts it; on a shared one the others keep running.
         if (this.ownsConnection) this.conn.forceClose();
@@ -822,7 +830,7 @@ export class TerminalClient {
   }
 
   private tryAttach(): void {
-    if (!this.attachRequested || !this.sessionId || this.attached || this.closed || this.exitReported || !this.conn.isOpen) return;
+    if (!this.attachRequested || !this.sessionId || this.attached || this.closed || this.exitReported || this.sessionGone || !this.conn.isOpen) return;
     if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
     this.attachRequested = false;
     this.attached = true;
@@ -866,6 +874,20 @@ export class TerminalClient {
    */
   retarget(sessionId: string): void {
     if (this.closed || !isCanonicalUuid(sessionId)) return;
+    this.restartOn(uuidBytes(sessionId));
+  }
+
+  /**
+   * Starts a new shell on the same host in this same terminal (the ended state's one action): like `retarget`, but
+   * the new stream opens a session instead of attaching to one. The window, renderer and layout stay.
+   */
+  openNewSession(): void {
+    if (this.closed) return;
+    this.restartOn(undefined);
+  }
+
+  /** Moves this terminal to a fresh stream for `sessionId`, or for a new session when there is none. */
+  private restartOn(sessionId: Uint8Array | undefined): void {
     if (this.attached) this.conn.streamAttached(false);
     this.conn.closeStream(this.streamId);
     this.attached = false;
@@ -874,14 +896,32 @@ export class TerminalClient {
     this.hasAttached = false;
     this.pendingExit = undefined;
     this.exitReported = false;
+    this.sessionGone = false;
     this.snapshotWriteInFlight = false;
     this.outputWriteInFlight = false;
-    this.sessionId = uuidBytes(sessionId);
+    this.sessionId = sessionId;
     this.restartCursors();
-    this.connectionIsResume = true;
+    this.connectionIsResume = sessionId !== undefined;
+    this.setStatus("");
     this.streamId = this.conn.openStream(this.streamHandler());
     // Choosing a session is the person's own act in this window, so on a desktop the keys go to it, as for a new terminal.
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
+  }
+
+  /**
+   * The server's final answer: the host no longer has this session. Stop for good (no reattach on this or any later
+   * socket), release the stream, and let the window say so. Typing goes nowhere until a new session starts.
+   */
+  private endSession(): void {
+    if (this.sessionGone || this.closed) return;
+    this.sessionGone = true;
+    if (this.attached) this.conn.streamAttached(false);
+    this.attached = false;
+    this.attachRequested = false;
+    // The server keeps absorbing this stream's in-flight frames until this Close (contracts/wire.md §4).
+    this.conn.closeStream(this.streamId);
+    if (this.config.hooks?.onSessionGone) { this.setStatus(""); this.config.hooks.onSessionGone(); }
+    else this.setStatus("This session has ended. Open a new shell to continue.");
   }
 
   /** Starts the stream's cursors over: its session is attached again from the beginning, as after a reload. */
@@ -920,7 +960,7 @@ export class TerminalClient {
 
   private handleInput(data: string): void {
     pulseActivity("typing", 400);
-    if (this.closed || this.pendingExit || !data) return;
+    if (this.closed || this.pendingExit || this.sessionGone || !data) return;
     const ctrl = this.inputModifiers.ctrl !== "off";
     const alt = this.inputModifiers.alt !== "off";
     if (this.inputModifiers.ctrl === "armed") this.inputModifiers.ctrl = "off";
