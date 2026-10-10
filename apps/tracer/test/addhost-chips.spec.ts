@@ -90,16 +90,22 @@ test("an invalid token shows the hint and never blocks the chips beside it", asy
   await expect(continueButton(page)).toBeEnabled();
   await field(page).fill("");
   await expect(hint(page)).toHaveAttribute("data-show", "false");
+  // Mid-typing never shows the hint; ending the token does.
   await page.keyboard.type("@o2", { delay: 5 });
+  await expect(hint(page)).toHaveAttribute("data-show", "false");
+  await page.keyboard.press("Enter");
   await expect(hint(page)).toHaveAttribute("data-show", "true");
   await expect(continueButton(page)).toBeEnabled();
 });
 
-test("with only an invalid token the hint shows and Continue stays disabled", async ({ page }) => {
+test("with only an invalid token the hint shows once it is ended, and Continue stays disabled", async ({ page }) => {
   await open(page);
   await openWizard(page);
   await field(page).click();
   await page.keyboard.type("kayg@", { delay: 5 });
+  // Still typing: no hint yet.
+  await expect(hint(page)).toHaveAttribute("data-show", "false");
+  await page.keyboard.press("Enter");
   await expect(hint(page)).toHaveAttribute("data-show", "true");
   await expect(continueButton(page)).toBeDisabled();
   await expect(page.locator(".ah-count")).toHaveText("");

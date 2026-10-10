@@ -102,6 +102,8 @@ export class Wizard {
   private chips: ChipInputController | undefined;
   private ticks = new Map<string, Tick>();
   private token = "";
+  /** The invalid-entry hint appears only after the person ended a token (delimiter, Enter, Tab, Continue), never mid-typing. */
+  private hintArmed = false;
   /** What discovery returned; `loading` until it answers. */
   private discovered: DiscoveredHost[] = [];
   private discovery: { state: "loading" | "ready" | "failed"; message: string } = { state: "loading", message: "" };
@@ -302,7 +304,7 @@ export class Wizard {
       placeholder: "Find or type user@host",
       resolve: (token, delimited) => this.resolve(token, delimited),
       onChange: (chips) => this.syncSelection(chips),
-      onToken: (token) => { this.token = token; this.refreshDiscovery(); },
+      onToken: (token) => { this.token = token; if (!token.trim() || parseTarget(token)) this.hintArmed = false; this.refreshDiscovery(); },
       onSubmit: () => { if (this.selected.length) this.proceed(); },
     });
     for (const entry of this.selected) this.chips.add(this.chipFor(entry));
@@ -324,7 +326,10 @@ export class Wizard {
    */
   private resolve(token: string, delimited: boolean): Chip | undefined {
     const target = parseTarget(token);
-    if (!target) return undefined;
+    if (!target) {
+      if (delimited && token.trim()) { this.hintArmed = true; const page = this.discoveryPage(); if (page) this.updateHint(page); }
+      return undefined;
+    }
     const { host, prefixed } = this.matchOf(target);
     if (host) {
       if (prefixed && !delimited) return undefined;
@@ -407,10 +412,10 @@ export class Wizard {
     page.querySelector<HTMLElement>(".ah-none")!.hidden = shown > 0 || !needle || hosts.size === 0 || this.pendingReady();
   }
 
-  /** The quiet hint shows while the unfinished token is not a host name; it reserves its line so nothing below jumps. */
+  /** The quiet hint shows once an ended token is not a host name (never while typing); it reserves its line so nothing below jumps. */
   private updateHint(page: HTMLElement): void {
     const hint = page.querySelector<HTMLElement>(".ah-hint")!;
-    const invalid = this.token !== "" && !parseTarget(this.token);
+    const invalid = this.hintArmed && this.token !== "" && !parseTarget(this.token);
     hint.dataset.show = String(invalid);
     hint.setAttribute("aria-hidden", String(!invalid));
   }
@@ -447,6 +452,7 @@ export class Wizard {
   private proceed(): void {
     // Continue ends the unfinished token first, exactly as Enter would; a token that is not a target stays as text.
     this.chips?.commit();
+    if (this.token.trim() && !parseTarget(this.token)) { this.hintArmed = true; this.refreshDiscovery(); }
     if (!this.selected.length) return;
     if (this.rootCandidates().length) this.go("root");
     else this.startBatch(false);
