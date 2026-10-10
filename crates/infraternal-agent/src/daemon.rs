@@ -609,7 +609,22 @@ async fn exited(
         .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
 }
 
-/// An absent rendezvous is final; every other connection error remains transient.
+/// A verified record is authoritative even while the retiring socket still exists.
+async fn recorded_end(
+    path: &std::path::Path,
+    id: [u8; 16],
+    stream: u32,
+    tx: &mpsc::Sender<Message>,
+) -> io::Result<bool> {
+    let Some((status, seq)) = infraternal_shim::ended::read(path)? else {
+        return Ok(false);
+    };
+    exited(tx, stream, id, status, seq).await?;
+    emit(tx, Message::Ended(stream)).await?;
+    Ok(true)
+}
+
+/// An absent rendezvous is final; known records add status, other errors propagate.
 async fn relink(
     path: &std::path::Path,
     id: [u8; 16],
@@ -624,18 +639,52 @@ async fn relink(
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
             ) =>
         {
-            if let Some((status, seq)) = infraternal_shim::ended::read(path)? {
-                exited(tx, stream, id, status, seq).await?;
+            if !recorded_end(path, id, stream, tx).await? {
+                emit(tx, Message::Ended(stream)).await?;
             }
-            emit(tx, Message::Ended(stream)).await?;
             Ok(None)
         }
         Err(error) => Err(error),
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// All relay errors preserve a sealed exit, including incomplete final handshakes.
+#[allow(clippy::too_many_arguments)]
 async fn terminal(
+    path: PathBuf,
+    id: [u8; 16],
+    stream: u32,
+    cursor: u64,
+    last_input: u64,
+    commands: session_commands::Receiver,
+    tx: mpsc::Sender<Message>,
+) -> io::Result<()> {
+    match terminal_run(
+        path.clone(),
+        id,
+        stream,
+        cursor,
+        last_input,
+        commands,
+        tx.clone(),
+    )
+    .await
+    {
+        Err(error) => {
+            // EOF may occur in Hello, ownership confirmation or input-state
+            // recovery before the steady-state select can observe owner EOF.
+            if recorded_end(&path, id, stream, &tx).await? {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+        Ok(()) => Ok(()),
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn terminal_run(
     path: PathBuf,
     id: [u8; 16],
     stream: u32,
@@ -805,9 +854,7 @@ async fn terminal(
                 if result? != 0 { return Err(sessions::invalid("unexpected ownership data")); }
                 // At the bound the shim writes the exit record before closing
                 // either link. Do not wait for more credit to report ended state.
-                if let Some((status, seq)) = infraternal_shim::ended::read(&path)? {
-                    exited(&tx, stream, id, status, seq).await?;
-                    emit(&tx, Message::Ended(stream)).await?;
+                if recorded_end(&path, id, stream, &tx).await? {
                     return Ok(());
                 }
                 return Err(io::ErrorKind::UnexpectedEof.into());
