@@ -270,4 +270,36 @@ mod tests {
             );
         }
     }
+
+    #[cfg(not(feature = "plugin-server"))]
+    #[test]
+    fn server_only_dependencies_are_removed_with_server_plugin() {
+        let manifest = include_str!("../../Cargo.toml");
+        let dependencies = manifest
+            .split("[dependencies]")
+            .nth(1)
+            .expect("normal dependency section")
+            .split("[features]")
+            .next()
+            .expect("feature section boundary");
+        let server_feature = manifest
+            .lines()
+            .find(|line| line.starts_with("plugin-server ="))
+            .expect("server feature declaration");
+
+        for dependency in ["sqlx", "tokio"] {
+            let declaration = dependencies
+                .lines()
+                .map(str::trim)
+                .find(|line| line.starts_with(&format!("{dependency}.")));
+            let Some(declaration) = declaration else {
+                continue;
+            };
+            assert!(
+                declaration.contains("optional = true")
+                    && server_feature.contains(&format!("dep:{dependency}")),
+                "{dependency} remains available without the server plugin: {declaration}"
+            );
+        }
+    }
 }
