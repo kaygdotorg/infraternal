@@ -21,8 +21,12 @@ pub mod ca_memory;
 #[cfg(feature = "remote")]
 pub mod csr;
 mod embedded;
-#[cfg(feature = "ssh")]
+#[cfg(any(feature = "ssh", feature = "release"))]
 mod release_http;
+#[cfg(feature = "release")]
+mod release_latest;
+#[cfg(feature = "release")]
+pub use release_latest::release_service;
 pub mod release_verify;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
 #[cfg(feature = "mesh")]
@@ -86,6 +90,8 @@ static COMPILED_PLUGINS: &[&infraternal_plugin_api::PluginDescriptor] = &[
     &infraternal_plugin_remote::DESCRIPTOR,
     #[cfg(feature = "mesh")]
     &infraternal_plugin_mesh::descriptor::DESCRIPTOR,
+    #[cfg(feature = "release")]
+    &infraternal_plugin_release::descriptor::DESCRIPTOR,
 ];
 
 #[cfg(feature = "remote")]
