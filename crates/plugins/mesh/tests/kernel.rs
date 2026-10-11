@@ -15,7 +15,7 @@ use std::{
 fn real_kernel_chunked_peers() {
     Device::create().unwrap();
     let (local, _) = Key::generate().unwrap();
-    Device::configure(&local, 51820).unwrap();
+    Device::configure(&local, 0).unwrap();
     let peers: Vec<_> = (1_u32..=1000)
         .map(|id| {
             let (_, key) = Key::generate().unwrap();
@@ -25,7 +25,7 @@ fn real_kernel_chunked_peers() {
                     ipv4: Ipv4Addr::from(0x0afe_0000 + id),
                     ipv6: Ipv6Addr::from((0xfd_u128 << 120) + u128::from(id)),
                 },
-                endpoint: Some("192.0.2.1:51820".parse().unwrap()),
+                endpoint: Some("192.0.2.1:44000".parse().unwrap()),
             }
         })
         .collect();
@@ -34,13 +34,22 @@ fn real_kernel_chunked_peers() {
     client.peers(&peers, &[]).unwrap();
     let thousand = start.elapsed();
     let mut change = peers[0].clone();
-    change.endpoint = Some("192.0.2.2:51820".parse().unwrap());
+    change.endpoint = Some("192.0.2.2:44000".parse().unwrap());
     let start = Instant::now();
     client
         .endpoint(change.key, change.endpoint.unwrap())
         .unwrap();
     let single = start.elapsed();
     assert_eq!(Device::counters().unwrap().len(), 1000);
+    let counters = Device::counters().unwrap();
+    assert_eq!(
+        counters
+            .values()
+            .filter(|peer| peer.persistent_keepalive_secs == 25)
+            .count(),
+        1000,
+        "all configured peers need persistent keepalive"
+    );
     println!(
         "METRIC kernel_peers machine=infraternal-dev peers=1000 apply_us={} single_peer_us={} load={}",
         thousand.as_micros(),
@@ -59,6 +68,14 @@ fn real_kernel_ephemeral_identity() {
     let (actual, port) = Device::identity().unwrap();
     assert_eq!(actual, public);
     assert_ne!(port, 0, "the advertised endpoint needs a bound UDP port");
+    assert_ne!(port, 51820, "the mesh reserves no fixed UDP port");
+    assert_eq!(
+        Device::configure(&local, 51820).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    let changed = Device::allocate_port().unwrap();
+    assert_ne!(changed, 51820);
+    assert_eq!(Device::identity().unwrap(), (public, changed));
     Device::delete().unwrap();
 }
 

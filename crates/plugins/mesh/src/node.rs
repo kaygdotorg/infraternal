@@ -84,9 +84,14 @@ impl Node {
                 node.firewall.remove()?;
                 return Ok(node);
             }
-            let (public_key, port) = identity?;
+            let (public_key, mut port) = identity?;
             if public_key.0 == [0; 32] || port == 0 {
                 return Err(io::ErrorKind::NotConnected.into());
+            }
+            // A retained interface from an older daemon may have selected the
+            // reserved port. Rebind its socket while preserving its private key.
+            if port == 51820 {
+                port = Device::allocate_port()?;
             }
             node.identity = Some(Identity { public_key, port });
             node.client = Some(Client::new()?);
@@ -535,7 +540,7 @@ mod tests {
                             peer: Peer {
                                 key,
                                 addresses: addresses(id),
-                                endpoint: Some("192.0.2.1:51820".parse().expect("public endpoint")),
+                                endpoint: Some("192.0.2.1:44000".parse().expect("public endpoint")),
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
@@ -568,7 +573,7 @@ mod tests {
             .get_mut(&NodeId(500))
             .expect("member")
             .peer
-            .endpoint = Some("192.0.2.2:51820".parse().expect("public endpoint"));
+            .endpoint = Some("192.0.2.2:44000".parse().expect("public endpoint"));
         let delta = crate::configuration::chunks(Some(&config), &next).expect("delta");
         assert_eq!(delta.len(), 1);
         assert_eq!(delta[0].upserted.len(), 1);

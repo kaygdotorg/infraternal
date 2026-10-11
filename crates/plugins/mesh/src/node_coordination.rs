@@ -212,7 +212,7 @@ mod tests {
                     return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
                         Identity {
                             public_key: PublicKey([2; 32]),
-                            port: 51820,
+                            port: 44000,
                         },
                     ))
                     .map_err(|_| "encoding failed");
@@ -272,7 +272,7 @@ mod tests {
             .attach(
                 "host",
                 PublicKey([2; 32]),
-                Some("192.0.2.1:51820".parse().unwrap()),
+                Some("192.0.2.1:44000".parse().unwrap()),
                 false,
             )
             .await
@@ -363,7 +363,7 @@ mod tests {
             .attach(
                 "host",
                 PublicKey([2; 32]),
-                Some("192.0.2.1:51820".parse().unwrap()),
+                Some("192.0.2.1:44000".parse().unwrap()),
                 false,
             )
             .await
@@ -400,7 +400,7 @@ mod tests {
             .attach(
                 "host",
                 PublicKey([2; 32]),
-                Some("192.0.2.1:51820".parse().unwrap()),
+                Some("192.0.2.1:44000".parse().unwrap()),
                 false,
             )
             .await

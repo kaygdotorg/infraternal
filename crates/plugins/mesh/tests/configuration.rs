@@ -86,7 +86,7 @@ fn chunks_fit_body_budget_and_one_peer_delta_does_not_repeat_the_snapshot() {
     let mut next = config.clone();
     next.version += 1;
     next.peers.get_mut(&NodeId(3)).unwrap().peer.endpoint =
-        Some("192.0.2.3:51820".parse().unwrap());
+        Some("192.0.2.3:44000".parse().unwrap());
     let delta = configuration::chunks(Some(&config), &next).unwrap();
     assert_eq!(delta.len(), 1);
     assert_eq!(delta[0].upserted.len(), 1);

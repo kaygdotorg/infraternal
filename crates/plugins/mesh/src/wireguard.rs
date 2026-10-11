@@ -27,9 +27,10 @@ impl Key {
     }
 }
 pub use crate::dataplane::Peer;
-/// Kernel counters, available even while the coordinator is unreachable.
+/// Public kernel peer status, available even while the coordinator is unreachable.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Counters {
+    pub persistent_keepalive_secs: u16,
     pub handshake_secs: u64,
     pub received_bytes: u64,
     pub sent_bytes: u64,
@@ -95,13 +96,40 @@ impl Device {
     /// # Errors
     /// Returns a kernel configuration error without key material.
     pub fn configure(key: &Key, port: u16) -> io::Result<()> {
+        // Reserve the coexistence port before entering the kernel, including
+        // for explicit callers. Ephemeral allocation is checked after binding.
+        if port == 51820 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         let mut payload = Zeroizing::new(header());
         attribute(&mut payload, 3, &key.0)?;
         attribute(&mut payload, 6, &port.to_ne_bytes())?;
-        send(&payload)?;
         // A zero listen port is bound only when the kernel device is running.
         // Activate before advertising the public endpoint to the coordinator.
-        activate(index()?)
+        send(&payload)?;
+        activate(index()?)?;
+        if Self::identity()?.1 == 51820 {
+            Self::allocate_port()?;
+        }
+        Ok(())
+    }
+    /// Allocate an unreserved kernel socket without replacing the retained key.
+    /// # Errors
+    /// Reports kernel errors or bounded allocation exhaustion.
+    pub fn allocate_port() -> io::Result<u16> {
+        let mut payload = header();
+        attribute(&mut payload, 6, &0_u16.to_ne_bytes())?;
+        for _ in 0..16 {
+            // Port zero asks the kernel to allocate again. Never reserve a
+            // userspace socket and release it into a bind race with WireGuard.
+            send(&payload)?;
+            activate(index()?)?;
+            let port = Self::identity()?.1;
+            if port != 0 && port != 51820 {
+                return Ok(port);
+            }
+        }
+        Err(io::ErrorKind::AddrInUse.into())
     }
     /// Refuse host-route overlap on another interface before touching addresses or packet policy [165].
     /// # Errors
@@ -247,7 +275,7 @@ impl Device {
         let family = socket.family("wireguard")?;
         let mut payload = header();
         payload[0] = 0;
-        let mut counters = BTreeMap::new();
+        let mut counters: BTreeMap<PublicKey, Counters> = BTreeMap::new();
         // The kernel includes its key in a device dump; every reply buffer is zeroized on drop.
         let replies = socket.request(family, 0x300, &payload)?;
         for reply in replies {
@@ -258,7 +286,10 @@ impl Device {
                 }
                 for peer in netlink::attributes(device.payload)? {
                     let mut key = None;
-                    let mut stats = Counters::default();
+                    let mut keepalive = None;
+                    let mut handshake = None;
+                    let mut received = None;
+                    let mut sent = None;
                     for field in netlink::attributes(peer.payload)? {
                         match field.kind {
                             1 if field.payload.len() == 32 => {
@@ -266,14 +297,34 @@ impl Device {
                                     field.payload.try_into().map_err(io::Error::other)?,
                                 ));
                             }
-                            6 => stats.handshake_secs = scalar64(field.payload)?,
-                            7 => stats.received_bytes = scalar64(field.payload)?,
-                            8 => stats.sent_bytes = scalar64(field.payload)?,
+                            6 => handshake = Some(scalar64(field.payload)?),
+                            5 => {
+                                keepalive = Some(u16::from_ne_bytes(
+                                    field.payload.try_into().map_err(io::Error::other)?,
+                                ));
+                            }
+                            7 => received = Some(scalar64(field.payload)?),
+                            8 => sent = Some(scalar64(field.payload)?),
                             _ => {}
                         }
                     }
                     if let Some(key) = key {
-                        counters.insert(key, stats);
+                        // Multipart dumps repeat a key with only remaining
+                        // AllowedIPs. Absence must retain the earlier metadata;
+                        // a present zero is still an authoritative value.
+                        let stats = counters.entry(key).or_default();
+                        if let Some(value) = keepalive {
+                            stats.persistent_keepalive_secs = value;
+                        }
+                        if let Some(value) = handshake {
+                            stats.handshake_secs = value;
+                        }
+                        if let Some(value) = received {
+                            stats.received_bytes = value;
+                        }
+                        if let Some(value) = sent {
+                            stats.sent_bytes = value;
+                        }
                     }
                 }
             }
@@ -387,6 +438,9 @@ impl Client {
                 &if peer.is_some() { 2_u32 } else { 1_u32 }.to_ne_bytes(),
             )?;
             if let Some(peer) = peer {
+                // Both ends send, preserving stateful firewall mappings even
+                // when only one side currently has application traffic [228].
+                attribute(&mut encoded, 5, &25_u16.to_ne_bytes())?;
                 if let Some(endpoint) = peer.endpoint {
                     attribute(&mut encoded, 4, &sockaddr(endpoint))?;
                 }
