@@ -1,5 +1,6 @@
 //! Real native TLS/HTTP2 and proxy HTTP/1 registration probes using the ES256 fixture.
 //! Certificates, private keys and auth capabilities stay in memory throughout each test.
+//! Independent review covers split ceremony reuse and duplicate denial before proof consumption.
 use super::*;
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum_server::tls_openssl::{OpenSSLAcceptor, OpenSSLConfig};
@@ -215,18 +216,65 @@ async fn registration_session(behind_proxy: bool) {
         .next()
         .unwrap()
         .to_owned();
+    // Two pages sharing a cookie jar must retain their common browser binding.
+    let (status, shared_headers, _) = client
+        .post(
+            "setup-start",
+            json!({"token":setup,"name":"owner"}),
+            &["unrelated=value", &ceremony],
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let shared_binding = shared_headers[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    // Report only reuse success; assertion output must never print capabilities.
+    let binding_reused = shared_binding == ceremony;
+    assert!(
+        binding_reused,
+        "split fields must reuse the browser binding"
+    );
     let user = str_field(&start, "user_id");
     let words = bip39::Mnemonic::generate(24).unwrap().to_string();
     let mut software = Software::new();
     software.rp_id = "localhost";
     let dek = rand::random::<[u8; 32]>();
     let proof = software.registration(&start, &origin, true);
-    let (status, headers, _) = client.post("registration-finish", json!({
+    let finish = json!({
         "ceremony":start["ceremony"], "proof":proof,
         "passkey_wrap":browser_wrap(&software.prf(&start), &dek, user, "passkey"),
         "recovery_wrap":browser_wrap(&recovery_material(&words,"wrap"), &dek, user,"recovery"),
         "recovery_verifier":recovery_verifier(&words),
-    }), &[&ceremony], None).await;
+    });
+    // Independent review: rejected bindings must leave the signed proof usable.
+    // A distinct duplicate, or a malformed duplicate on either side, must deny.
+    let invalid = "__Host-infraternal-ceremony=short";
+    let foreign = format!("__Host-infraternal-ceremony={}", "A".repeat(43));
+    for fields in [
+        vec![ceremony.as_str(), foreign.as_str()],
+        vec![ceremony.as_str(), invalid],
+        vec![invalid, ceremony.as_str()],
+    ] {
+        assert_eq!(
+            client
+                .post("registration-finish", finish.clone(), &fields, None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (status, headers, _) = client
+        .post(
+            "registration-finish",
+            finish,
+            &["unrelated=value", &ceremony],
+            None,
+        )
+        .await;
     assert_eq!(status, StatusCode::OK);
     let session = headers[header::SET_COOKIE]
         .to_str()
