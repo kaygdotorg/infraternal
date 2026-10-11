@@ -147,9 +147,14 @@ the viewer presents it in its ended state. Every other stream close is transient
 
 The embedded infraternal agent sends a complete `Event` on control stream 0
 with `sub_id: 0` and `{"type":"terminal.sessions.snapshot","session_ids":[UUID...]}`
-after startup discovery and whenever its live-shim set changes. It refreshes
-process identities every 400 ms so an unlinked rendezvous or a killed shim is
-removed even when no terminal stream was attached. The server reconciles open
+once after connect/reconnect discovery and thereafter only when its live-shim
+set changes. New or adopted shims register process-exit readiness in one shared
+kernel queue (Linux pidfd, macOS kqueue EVFILT_PROC/NOTE_EXIT); an exit, including
+SIGKILL, removes the shim even without an attached terminal stream. Rendezvous
+removal also triggers an identity check. Where pidfd_open is unavailable,
+identity checks run only at connect/reconnect and open/close/exit events. There
+is no periodic census or idle timer (D81). Census queue pressure is retried on
+queue capacity, preserving the ordered open fence below. The server reconciles open
 local `terminal_sessions` rows against each snapshot and closes rows whose shim
 is absent; it never signals a shim to exit. On leg A, an authenticated browser
 may `Subscribe` with `{"topic":"terminal.sessions"}`. The server sends an
