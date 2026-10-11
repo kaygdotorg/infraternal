@@ -5,3 +5,7 @@ pub mod latest;
 pub mod pointer;
 #[cfg(feature = "server")]
 pub mod service;
+#[cfg(feature = "server")]
+mod socket;
+#[cfg(feature = "server")]
+pub use socket::ReleasePlugin;
