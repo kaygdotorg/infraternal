@@ -39,3 +39,7 @@ pub const SERVER_PATH_PROPOSALS: u64 = 1 << 3;
 
 /// The server can park an enrolled fallback without replacing its active host actor [215].
 pub const REMOTE_STANDBY: u64 = 1 << 4;
+
+/// Native standby writers can share durable shim cursors before path activation [215].
+/// Both peers negotiate this bit before using the bounded per-writer cursor request.
+pub const REMOTE_PRIMED_WRITERS: u64 = 1 << 5;
