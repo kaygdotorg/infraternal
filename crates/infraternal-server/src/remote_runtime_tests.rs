@@ -382,3 +382,6 @@ async fn claude_review_idle_anonymous_sockets_cannot_starve_host_handshakes() {
 
 #[path = "remote_probe_tests.rs"]
 mod candidate_proofs;
+
+#[path = "remote_listener_tests.rs"]
+mod additional_listeners;

@@ -71,12 +71,12 @@ pub(crate) async fn quic(
     let mut handshakes = JoinSet::new();
     while let Some(incoming) = quic.accept().await {
         while handshakes.try_join_next().is_some() {}
-        let address = incoming.remote_address().ip();
+        let address = incoming.remote_address().ip().to_canonical();
         let Some((source_permit, permit)) = limits.handshake(address) else {
             incoming.refuse();
             continue;
         };
-        let hosts = hosts.clone();
+        let hosts = hosts.for_local(incoming.local_ip());
         let store = store.clone();
         let known = limits.known.clone();
         handshakes.spawn(async move {
@@ -116,7 +116,7 @@ pub(crate) async fn tcp(
     let mut handshakes = JoinSet::new();
     while let Ok((socket, address)) = tcp.accept().await {
         while handshakes.try_join_next().is_some() {}
-        let address = address.ip();
+        let address = address.ip().to_canonical();
         let known_source = limits
             .known
             .lock()
@@ -149,7 +149,7 @@ pub(crate) async fn tcp(
             ((source, permit), Duration::from_millis(100))
         };
         let limits = limits.clone();
-        let hosts = hosts.clone();
+        let hosts = hosts.for_local(socket.local_addr().ok().map(|address| address.ip()));
         let store = store.clone();
         let tls = tls.clone();
         handshakes.spawn(async move {

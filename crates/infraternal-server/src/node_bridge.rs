@@ -11,6 +11,8 @@ pub(crate) struct NodeBridge {
     pub actor: EmbeddedAgent,
     #[cfg(feature = "remote")]
     pub authority: Option<crate::remote_guard::AuthorityGuard>,
+    #[cfg(feature = "remote")]
+    pub listeners: Option<crate::remote_runtime::RemoteHosts>,
 }
 impl NodeChannel for NodeBridge {
     fn id(&self) -> &str {
@@ -27,6 +29,32 @@ impl NodeChannel for NodeBridge {
     }
     fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.actor.changes()
+    }
+    fn listen_server(
+        &self,
+        address: IpAddr,
+    ) -> PluginOperation<'_, Option<Box<dyn infraternal_plugin_api::server_path::ListenerLease>>>
+    {
+        Box::pin(async move {
+            #[cfg(feature = "remote")]
+            if self.server
+                && let Some(listeners) = &self.listeners
+            {
+                return listeners
+                    .listen(address)
+                    .await
+                    .map(|lease| {
+                        lease.map(|lease| {
+                            Box::new(lease)
+                                as Box<dyn infraternal_plugin_api::server_path::ListenerLease>
+                        })
+                    })
+                    .map_err(|_| "Server listener refused.");
+            }
+            #[cfg(not(feature = "remote"))]
+            let _ = address;
+            Ok(None)
+        })
     }
     fn call(&self, action: &str, input: Vec<u8>) -> PluginOperation<'_, Vec<u8>> {
         let action = action.to_owned();
