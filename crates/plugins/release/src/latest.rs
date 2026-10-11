@@ -16,10 +16,33 @@ pub struct VerifiedLookup {
     origin: String,
     engine: Arc<dyn ReleaseEngine>,
 }
-struct Staging(PathBuf);
+struct Staging {
+    path: PathBuf,
+    _lock: nix::fcntl::Flock<std::fs::File>,
+}
+impl Staging {
+    fn new(state: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+
+        // Serialize creation with restart cleanup so a new empty directory cannot
+        // be collected before its lifetime lock is established.
+        let (state_lock, metadata) = lock_directory(state, nix::fcntl::FlockArg::LockExclusive)?;
+        if !private_state(&metadata) {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        let path = state.join(format!("release-check-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        let (lock, metadata) = lock_directory(&path, nix::fcntl::FlockArg::LockExclusiveNonblock)?;
+        if !owned_private_staging(&metadata) {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        drop(state_lock);
+        Ok(Self { path, _lock: lock })
+    }
+}
 impl Drop for Staging {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 /// Transport and trust are supplied by the host's existing approved engines.
@@ -57,6 +80,9 @@ impl VerifiedLookup {
     /// Bind existing private server state and an HTTPS-capable transport; start no work.
     #[must_use]
     pub fn new(state: PathBuf, origin: String, engine: Arc<dyn ReleaseEngine>) -> Self {
+        // Best-effort startup sweep: unsafe or active entries are retained, and
+        // a later lookup still reports ordinary storage errors if state is unavailable.
+        let _ = cleanup_abandoned_staging(&state);
         Self {
             state,
             origin,
@@ -65,20 +91,12 @@ impl VerifiedLookup {
     }
 
     async fn check(&self, channel: &str) -> Result<Value, &'static str> {
-        use std::os::unix::fs::DirBuilderExt;
         if !matches!(channel, "stable" | "edge") {
             return Err("invalid release channel setting");
         }
         // Random private staging is owned by this future and removed even when a feature switch cancels it.
-        let path = self
-            .state
-            .join(format!("release-check-{}", uuid::Uuid::new_v4()));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .map_err(|_| "release check storage unavailable")?;
-        let staging = Staging(path);
-        let pointer = staging.0.join("pointer.json");
+        let staging = Staging::new(&self.state).map_err(|_| "release check storage unavailable")?;
+        let pointer = staging.path.join("pointer.json");
         let result = self
             .engine
             .download(
@@ -107,7 +125,7 @@ impl VerifiedLookup {
             ("VERSION", 128),
         ] {
             self.engine
-                .download(&format!("{base}/{name}"), &staging.0.join(name), limit)
+                .download(&format!("{base}/{name}"), &staging.path.join(name), limit)
                 .await
                 .map_err(|e| e.reason())?;
         }
@@ -116,14 +134,14 @@ impl VerifiedLookup {
         // could outlive runtime disable and race staging cleanup [198].
         let verified = (|| {
             use std::{io::Read, os::unix::fs::OpenOptionsExt};
-            let sums = std::fs::read(staging.0.join("SHA256SUMS"))
+            let sums = std::fs::read(staging.path.join("SHA256SUMS"))
                 .map_err(|_| "release manifest could not be read")?;
-            let signature = std::fs::read(staging.0.join("SHA256SUMS.sig"))
+            let signature = std::fs::read(staging.path.join("SHA256SUMS.sig"))
                 .map_err(|_| "release signature could not be read")?;
             let file = std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-                .open(staging.0.join("VERSION"))
+                .open(staging.path.join("VERSION"))
                 .map_err(|_| "release VERSION could not be read")?;
             if !file
                 .metadata()
@@ -144,6 +162,111 @@ impl VerifiedLookup {
         })()?;
         Ok(json!({"channel":channel,"state":"verified","version":verified}))
     }
+}
+
+fn lock_directory(
+    path: &Path,
+    mode: nix::fcntl::FlockArg,
+) -> std::io::Result<(nix::fcntl::Flock<std::fs::File>, std::fs::Metadata)> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    let lock = nix::fcntl::Flock::lock(file, mode).map_err(|(_, error)| error)?;
+    Ok((lock, metadata))
+}
+
+fn private_state(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.is_dir()
+        && metadata.uid() == nix::unistd::geteuid().as_raw()
+        && metadata.mode() & 0o022 == 0
+}
+
+#[allow(clippy::verbose_bit_mask)]
+fn owned_private_staging(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.is_dir()
+        && metadata.uid() == nix::unistd::geteuid().as_raw()
+        && metadata.mode() & 0o7777 == 0o700
+}
+
+#[allow(clippy::verbose_bit_mask)]
+fn owned_private_metadata(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.is_file()
+            && metadata.uid() == nix::unistd::geteuid().as_raw()
+            && metadata.mode() & 0o077 == 0
+            && metadata.nlink() == 1
+    })
+}
+
+/// Reclaim only canonical private stage directories whose process lock was released [198,226; #157].
+fn cleanup_abandoned_staging(state: &Path) -> std::io::Result<()> {
+    let (state_lock, metadata) = lock_directory(state, nix::fcntl::FlockArg::LockExclusive)?;
+    if !private_state(&metadata) {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    for entry in std::fs::read_dir(state)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("release-check-"))
+        else {
+            continue;
+        };
+        if !uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id) {
+            continue;
+        }
+        let path = entry.path();
+        let (staging_lock, metadata) =
+            match lock_directory(&path, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+                Ok(lock) => lock,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::NotADirectory
+                            | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+        if !owned_private_staging(&metadata) {
+            continue;
+        }
+        let Ok(files) =
+            std::fs::read_dir(&path).and_then(|files| files.collect::<Result<Vec<_>, _>>())
+        else {
+            continue;
+        };
+        if !files.iter().all(|file| {
+            matches!(
+                file.file_name().to_str(),
+                Some("pointer.json" | "SHA256SUMS" | "SHA256SUMS.sig" | "VERSION")
+            ) && owned_private_metadata(&file.path())
+        }) {
+            continue;
+        }
+        for file in files {
+            std::fs::remove_file(file.path())?;
+        }
+        std::fs::remove_dir(path)?;
+        drop(staging_lock);
+    }
+    drop(state_lock);
+    Ok(())
 }
 impl ReleaseLookup for VerifiedLookup {
     fn latest<'a>(&'a self, channel: &'a str) -> Operation<'a, Result<Value, &'static str>> {
