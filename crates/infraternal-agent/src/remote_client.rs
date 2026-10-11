@@ -55,6 +55,11 @@ async fn run_inner(
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
+    let state = crate::sessions::state(state)?;
+    // The host control surface remains available while the authenticated server is offline.
+    let service =
+        crate::plugin_control::Service::start(&state, crate::plugins::ExecutionMode::Remote)
+            .await?;
     let mut backoff = Duration::from_millis(200);
     loop {
         let current = match renewal {
@@ -93,7 +98,14 @@ async fn run_inner(
         let connected = dial_preferred(&endpoint, identity, &tls).await;
         match connected {
             Ok(Connected::Quic(connection)) => {
-                let _ = quic_session(connection, identity, state.clone(), renewal).await;
+                let _ = quic_session(
+                    connection,
+                    identity,
+                    state.clone(),
+                    renewal,
+                    service.registry.clone(),
+                )
+                .await;
             }
             Ok(Connected::Tcp(connection)) => {
                 // The losing handshake otherwise retains Quinn drain timers after
@@ -101,11 +113,12 @@ async fn run_inner(
                 // the authenticated TCP channel and rootless shims are independent.
                 drop(endpoint);
                 drop(quic);
-                let _ = daemon::run_authenticated_with_renewal(
+                let _ = daemon::run_authenticated_with_plugins(
                     &connection.channel,
                     state.clone(),
                     identity.execution_uid,
                     renewal,
+                    service.registry.clone(),
                 )
                 .await;
             }
@@ -214,8 +227,9 @@ async fn quic_connect(
 async fn quic_session(
     connection: quinn::Connection,
     identity: &RemoteIdentity,
-    state: Option<PathBuf>,
+    state: PathBuf,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    plugins: crate::plugin_control::Registry,
 ) -> io::Result<()> {
     let result = async {
         let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
@@ -234,7 +248,7 @@ async fn quic_session(
         encode_frame_into(&hello.frame, &mut prefix).map_err(io::Error::other)?;
         let control = PrefixedControl { channel:control, prefix:Mutex::new(prefix), sent_greeting:Mutex::new(Some(sent_greeting)), receive:Mutex::new(rx) };
         let mut terminals = JoinSet::new();
-        let dispatch = daemon::run_authenticated_with_renewal(&control, state.clone(), identity.execution_uid, renewal);
+        let dispatch = daemon::run_authenticated_with_plugins(&control, state.clone(), identity.execution_uid, renewal,plugins);
         tokio::pin!(dispatch);
         loop {
             // Keep partial binding progress across completed terminal jobs.
@@ -249,7 +263,7 @@ async fn quic_session(
                     let channel = NativeChannel::terminal(terminal?)?;
                     if terminals.len() >= crate::sessions::MAX_SESSIONS { channel.retire(); break; }
                     let state = state.clone();
-                    terminals.spawn(async move { let _ = daemon::run_bound_terminal(&channel,state).await; });
+                    terminals.spawn(async move { let _ = daemon::run_bound_terminal(&channel,Some(state)).await; });
                     break;
                 }
                 _ = terminals.join_next(), if !terminals.is_empty() => {}

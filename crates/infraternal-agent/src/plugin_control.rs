@@ -190,8 +190,8 @@ impl Local {
 }
 impl Drop for Local {
     fn drop(&mut self) {
-        self.task.abort();
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        self.task.abort();
         // The pathname may have been replaced while this listener was alive.
         // Retire only its own filesystem inode, never an unrelated replacement.
         if std::fs::symlink_metadata(&self.path).is_ok_and(|meta| {

@@ -165,10 +165,10 @@ fn private(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Resolve and validate the runtime-only state directory and session directory.
+/// Resolve the existing runtime location without creating directories for read-only CLI calls.
 /// # Errors
 /// Rejects absent/unsafe rootless runtime directories and insecure state paths.
-pub fn state(path: Option<PathBuf>) -> io::Result<PathBuf> {
+pub fn state_path(path: Option<PathBuf>) -> io::Result<PathBuf> {
     let path = if let Some(path) = path {
         path
     } else if Uid::effective().is_root() {
@@ -185,6 +185,14 @@ pub fn state(path: Option<PathBuf>) -> io::Result<PathBuf> {
         }
         runtime.join("infraternal")
     };
+    Ok(path)
+}
+
+/// Validate/create the runtime and session directories for a running infraternal agent.
+/// # Errors
+/// Rejects absent or unsafe runtime locations and unowned/exposed state directories.
+pub fn state(path: Option<PathBuf>) -> io::Result<PathBuf> {
+    let path = state_path(path)?;
     private(&path)?;
     private(&path.join("sessions"))?;
     Ok(path)
