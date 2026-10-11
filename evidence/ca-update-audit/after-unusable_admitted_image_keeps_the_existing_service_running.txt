@@ -1,0 +1,16 @@
+
+running 1 test
+test restart_binary::audit_tests::unusable_admitted_image_keeps_the_existing_service_running ... {"action":"remote.server.restart","message":"Could not execute the replacement server","next":"Recover service with the retained binary; a cold start requires an administrator CA unlock.","state":"refused"}
+FAILED
+
+failures:
+
+failures:
+    restart_binary::audit_tests::unusable_admitted_image_keeps_the_existing_service_running
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.02s
+
+
+thread 'restart_binary::audit_tests::unusable_admitted_image_keeps_the_existing_service_running' (4043124) panicked at crates/infraternal/src/restart_signature_audit_tests.rs:131:5:
+failed executable must leave the current server serving
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

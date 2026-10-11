@@ -39,7 +39,7 @@ and records these cases as unimplemented rather than substituting a mock verifie
 | ID | Severity | Property | Result |
 | --- | --- | --- | --- |
 | CA-01 | P2 | Persistent unlocked key pages lack mlock | FAIL; unresolved, mitigated by supplied host policy |
-| CA-02 | P2 | Unlock custody event absent | FAIL before; authorized logging change pending |
+| CA-02 | P2 | Unlock custody event absent | FAIL before; PASS after authorized audit event |
 | CA-03 | P2 | No temporal budget on CA starts | FAIL; unresolved |
 | UP-01 | P1 | Replacement signature hook is a no-op | FAIL; unresolved |
 | UP-02 | P2 | Opened inode remains writable before exec | FAIL; unresolved |
@@ -264,4 +264,125 @@ scratch executables were normalized to remove group/world write. No #118 waiver
 has been used. Initial full fast gate completed: fmt, VT native fmt, Clippy, workspace tests and
 cargo-deny PASS; only the known static-size ceiling fails. x86 stripped static
 PIE/no PT_INTERP is 20,064,976 bytes vs ceiling 16,404,816. Server 296 PASS/35
-ignored. A final post-instrumentation gate remains required.
+ignored. Final post-instrumentation results are recorded below.
+
+## CA-02 resolution — authorized audit event only
+
+`crates/infraternal-server/src/ca_administration.rs:234–374` now emits
+`server_ca_unlock` with server-attributed user, wall-clock Unix seconds and
+outcome. A scope guard records success, refusal and cancellation; installation
+is marked before the rollback await so a later error/cancellation cannot claim
+custody stayed locked. No proof, cookie, key, envelope or error diagnostics enter
+the guard. Unknown/foreign/replayed ceremonies use `<unattributed>` rather than
+an input-supplied identity. This adds no timer, background task, dependency or
+authority change. HTTP syntax/header refusals outside parsed finish are unchanged.
+
+`unlock_audit_records_principal_time_outcome_without_material` at
+`crates/infraternal-server/src/auth/ca_unlock_audit_tests.rs:26`: **FAIL before**
+(0 events), **PASS after** (4 events: success, replay refusal, wrong wrapping-key
+refusal, database-wait cancellation). It asserts principal/time/outcome and that
+captured output contains no fixture cookie/ceremony or material-bearing field
+names; the guard structurally cannot receive proof or key buffers. Cancellation uses the real SQLite pool with its only connection held.
+Evidence: `before-unlock_audit_records_principal_time_outcome_without_material.txt`
+and `after-unlock_audit_records_principal_time_outcome_without_material.txt`.
+
+## Before/after cost and final targeted results
+
+Same real-passkey benchmark, 100 finishes with 1000 active administrator records,
+1 registered credential and encrypted envelopes in SQLite, GNU debug build on
+infraternal-dev (8 logical CPUs), `systemd-run --user --scope -p CPUWeight=10000`.
+No concurrent build/browser command of this job and no generated host load.
+Capture formats real JSON events in memory; kernel/journal I/O is excluded.
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Finish wall p50 | 3.557 ms | 3.847 ms |
+| Finish wall p99 | 8.205 ms | 9.963 ms |
+| Finish process CPU p50 | 3.806 ms | 4.061 ms |
+| Finish process CPU p99 | 6.921 ms | 6.355 ms |
+| RSS before → after | 36,832 → 37,816 KiB | 35,464 → 36,432 KiB |
+| Audit events / formatted bytes | 0 / 0 | 100 / 26,800 |
+| Load before (1/5/15 min) | 6.90 / 14.64 / 20.30 | 18.56 / 27.23 / 23.88 |
+| Load after (1/5/15 min) | 8.20 / 14.31 / 20.04 | 15.20 / 25.92 / 23.52 |
+
+Observed median wall delta is +0.290 ms (+8.2%); p99 +1.758 ms. Shared-host load
+windows differ, so these are diagnostic observations, not a causal logging
+estimate or a release latency-budget proof. CPU includes harness coordination.
+At 100 unlocks the event volume is 26.8 KB (268 B/event), and the observed summed
+median delta is 29.0 ms. Unlock is a rare custody operation, not a terminal-input
+path; there is no idle task or per-session retained event storage.
+Evidence: `unlock-cost-{before,after}.txt`. No production journal-cost claim.
+
+Fresh whole-workspace test binaries were built before both audit phases. The
+post-change runner matched every expected result: 5 unresolved production-property
+regressions FAIL; repaired audit-event test PASS; ordinary custody 4 PASS,
+replacement paths 2 PASS, handoff 7 PASS, administrator authority 25 PASS/6 ignored,
+and process-dumpability startup PASS. Supplemental signer coverage PASS and all
+3 signer refusal regressions FAIL. Expected failures remain ignored in the
+ordinary gate, and the runner explicitly executes them. `audit-{before,after}.txt`
+records command status, elapsed time, host/load and each transcript path.
+Remote-disabled `cargo check --locked -p infraternal --no-default-features` PASS;
+no foundational library or build-time feature was added.
+
+## Post-instrumentation gate interruption and baseline comparison
+
+First post-change fast run had one ordinary socket-test failure:
+`auth::tests::socket_tests::review_control::pending_mesh_writers_preserve_authority_pool_capacity`
+(`review_control.rs:243`). Control pong passed (17 ms), but a queued Result was
+not successful after this fixture's two-second freshness window. Initial full
+pre-change gate passed it. Both the exact test on detached local `dev` at
+`ded3abd609e5290a7027b6888ecd9864a2d30374` and this branch subsequently **PASS**
+in the same load window, 2.031s versus 2.004s, pong 1ms versus 2ms. Load was
+24.64/28.41/29.30 →25.55/28.53/29.33. This does not reproduce the original failure
+on baseline, so **no #118 waiver or causal host-load conclusion is claimed**.
+Full gate reruns with one harness thread; no timeout/assertion changes.
+Evidence: `fast-final.txt`, `baseline-build.txt`, `socket-baseline-comparison.txt`.
+
+The first serial rerun did not execute tests: after the baseline reused this
+job's target, compilation saw protocol metadata lacking this branch's
+`CLOSE_SESSION_GONE`/`SESSION_GONE_REASON` despite both constants being present
+in its source. Only `infraternal-protocol` debug artifacts in the owned scratch
+target were cleared (`cargo clean --profile dev -p infraternal-protocol`,
+418 files/56.9 MiB); production source and lockfile were unchanged. Rebuilt
+verification is recorded separately; baseline and audit targets should be kept
+separate in future reproductions. Evidence: `fast-final-serial.txt`,
+`cache-recovery.txt`, `fast-final-rebuilt.txt`.
+
+## Final gate and disposition
+
+`scripts/verify fast` on the unchanged final production/test source, rebuilt
+native protocol cache, `umask 022`, `RUST_TEST_THREADS=1`, unique tracer port
+5854 and this job's scratch CARGO_TARGET_DIR: **exit 1 only for the known static
+size ceiling**. Server tests: **297 PASS, 0 FAIL, 35 ignored**. No #118 waiver.
+The earlier socket failure and cache compilation failure remain in evidence.
+Verbatim gate summary:
+
+```text
++---------------------------+--------------+
+| Rust gate                 | Result       |
++---------------------------+--------------+
+| fmt                       | PASS         |
+| VT native fmt             | PASS         |
+| clippy                    | PASS         |
+| test                      | PASS         |
+| cargo-deny                | PASS         |
+| static builds             | FAIL (1)     |
++---------------------------+--------------+
+```
+
+x86_64 artifact is stripped static PIE with no PT_INTERP: **20,067,504 bytes**
+versus **16,404,816** allowed, over by **3,662,688**. Its own pre-logging build
+was 20,064,976 bytes, so the logging change adds **2,528 bytes**. The existing
+ceiling is unchanged. This check returns before ARM, so no final ARM pass is
+claimed. Separate `ts_verify_fast` **PASS** (154 tracer/36 protocol tests,
+compiler, precompression, transfer budget and vendored checksums), because the
+Rust size failure prevents the dispatcher from reaching TypeScript. Evidence:
+`fast-final-rebuilt.txt` and `ts-final.txt`; remote-disabled check is `feature-off.txt`.
+
+Disposition: CA-02 repaired and tested; **five unresolved production-property
+findings and two supplemental signer findings**, with explicit failing tests
+committed. No P0 or observed production material leak. Signature verification
+cannot be called solid at this pin: the actual replacement hook is a no-op.
+No production access, deployment, dependency, decision or other production fix.
+The author checklist accompanies this report; independent review is still a
+separate PROCESS step, and the issue stays open for owner follow-up.
