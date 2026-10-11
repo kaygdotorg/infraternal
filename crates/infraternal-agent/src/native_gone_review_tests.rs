@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// A native peer that accepts AttachTerm but never consumes the final reply.
+/// A native peer that accepts `AttachTerm` but never consumes the final reply.
 struct BlockedNative {
     attach: std::sync::Mutex<Option<Vec<u8>>>,
     retired: std::sync::atomic::AtomicBool,
