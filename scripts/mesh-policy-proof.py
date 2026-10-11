@@ -421,6 +421,15 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
                     for chain in ["incoming", "outgoing", "input", "output", "ingress"]:
                         self.remote("nft", "flush", "chain", "inet", "infraternal_mesh", chain)
                         proof.run("nft", "flush", "chain", "inet", "infraternal_mesh", chain)
+                if policy_on:
+                    if self.fallback:
+                        observed = {tool: sum(line.startswith("-A IFM_") for line in self.remote(tool, "-S").splitlines())
+                                    for tool in ["iptables-nft", "ip6tables-nft"]}
+                    else:
+                        installed = json.loads(self.remote("nft", "-j", "list", "table", "inet", "infraternal_mesh"))
+                        observed = {"inet_rules": sum("rule" in row for row in installed["nftables"]),
+                                    "inet_sets": sum("set" in row for row in installed["nftables"])}
+                    assert observed == counts, "policy measurement has invalid state"
                 values = {}
                 for family in ["ipv4", "ipv6"]:
                     output = proof.run("ping", "-n", "-c", "101", "-i", "0.005", "-W", "2", self.addresses[1][family])
