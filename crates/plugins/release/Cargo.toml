@@ -1,0 +1,24 @@
+# Removable server release settings and verified channel lookup [198,201,226].
+[package]
+name = "infraternal-plugin-release"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["server"]
+server = ["dep:bytes", "dep:infraternal-protocol", "dep:sqlx", "dep:tokio", "dep:uuid", "dep:nix"]
+
+[dependencies]
+infraternal-plugin-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes = { workspace = true, optional = true }
+infraternal-protocol = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+nix = { workspace = true, optional = true }
+
+[lints]
+workspace = true

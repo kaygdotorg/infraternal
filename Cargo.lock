@@ -1328,6 +1328,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infraternal-agent",
+ "infraternal-plugin-release",
  "infraternal-plugin-remote",
  "infraternal-plugin-ssh",
  "infraternal-server",
@@ -1429,6 +1430,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "infraternal-plugin-release"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "infraternal-plugin-api",
+ "infraternal-protocol",
+ "nix",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "infraternal-plugin-remote"
 version = "0.1.0"
 dependencies = [
@@ -1488,6 +1504,7 @@ dependencies = [
  "infraternal-agent",
  "infraternal-plugin-api",
  "infraternal-plugin-mesh",
+ "infraternal-plugin-release",
  "infraternal-plugin-remote",
  "infraternal-plugin-ssh",
  "infraternal-protocol",
