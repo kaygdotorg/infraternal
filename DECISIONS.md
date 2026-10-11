@@ -2188,3 +2188,25 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        (canvas nodes) is settled. Until then no iOS work starts; new
        protocol and sync work keeps native clients in mind (intent-based
        layout edits, byte-buffer frames).
+239. **`infraternal up`: the CLI is a client through the canvas (owner grill, 2026-10-11; extends D235, D237):**
+     - **Commands (Q31):** `infraternal up`, `down` and `status`; the
+       installer also provides `infra` as a short alias.
+     - **The local UI is the canvas (Q32):** the infraternal agent on the
+       machine serves the canvas on loopback; connection state (peers, direct
+       or relayed, latency, connect/disconnect) is one more canvas view, the
+       *Connection* view, that pops up when needed. The same view on the
+       server's embedded infraternal agent manages the server node's own mesh
+       connection.
+     - **Sign-in (Q33):** with a desktop session and a browser, `up` opens the
+       loopback canvas, asks which server, and sends the browser to the
+       server's own page for username and passkey (auth always happens on the
+       server origin); the server redirects back to loopback with a one-time
+       code bound to that attempt (RFC 8252 loopback redirect with PKCE and
+       state), and the CLI exchanges it for the node certificate and the link
+       (D235, D237). Without a desktop, or with `--no-browser`, the terminal
+       link + QR + code flow of D237 runs instead.
+     - **Always running (Q34):** the loopback canvas stays up with the
+       infraternal agent; onboarding starts there. Only the local OS user who
+       ran `up` can use it (one-time token in the opened URL turned into a
+       cookie, peer-UID check of each loopback connection where the OS allows
+       it).
