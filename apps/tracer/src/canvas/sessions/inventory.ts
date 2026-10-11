@@ -35,7 +35,7 @@ export interface SessionRecord {
   activity?: SessionActivity;
   exit?: { code: number };
   /**
-   * The host no longer has this session (#158): it ended while nothing showed it, so there is no exit code or final
+   * The host no longer has this session (#158). A retained exit record may carry a status, but cannot promise a final
    * screen to keep. Shown as exited ("Session ended"); the window offers a new shell on the same host.
    */
   gone?: boolean;

@@ -1,0 +1,109 @@
+2026-10-11T00:17:54.694476Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:54.750365Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:54.820510Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1073167) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="reply_failed" origin="socket"
+2026-10-11T00:17:54.820762Z  WARN infraternal::restart: server restart requester disconnected error_kind=BrokenPipe
+2026-10-11T00:17:59.565448Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074483) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:17:59.580942Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.588834Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.606862Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074505) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+2026-10-11T00:17:59.617982Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+infraternal agent failed: Broken pipe (os error 32)
+2026-10-11T00:17:59.625586Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.640556Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074527) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:17:59.649732Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.658624Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.678437Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074548) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:17:59.690872Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.700474Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.717345Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074576) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:17:59.727234Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.735837Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.755346Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074597) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:17:59.765181Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.773052Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.787957Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074618) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: Broken pipe (os error 32)
+2026-10-11T00:17:59.798174Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.806238Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.820743Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074639) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:17:59.829714Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.836856Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.856565Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074660) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:17:59.867617Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.874777Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.893190Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074681) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+infraternal agent failed: Connection reset by peer (os error 104)
+2026-10-11T00:17:59.905236Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.912118Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.926487Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074702) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:17:59.936458Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.942953Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.956681Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074723) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:17:59.965913Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:17:59.974539Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:17:59.995378Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074744) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:18:00.005283Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.012377Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.027300Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074766) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:18:00.036421Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.043684Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.060053Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074787) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:18:00.071310Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.080361Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.090325Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074808) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:18:00.102852Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.111341Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.126861Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074831) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:18:00.135764Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.143675Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.154304Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074853) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:18:00.164204Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.171427Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.185907Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074874) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: Broken pipe (os error 32)
+2026-10-11T00:18:00.198117Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.206950Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.221890Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074896) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:18:00.234925Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.244853Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.264945Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074918) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:18:00.273798Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.281005Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.294345Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074940) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/round2/infraternal") outcome="warm" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:18:00.306856Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.313604Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.325663Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074961) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+2026-10-11T00:18:00.337248Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+infraternal agent failed: Broken pipe (os error 32)
+2026-10-11T00:18:00.346029Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.358676Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1074982) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="socket"
+infraternal agent failed: Broken pipe (os error 32)
+2026-10-11T00:18:00.369084Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.377242Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.385340Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=None request_uid=None target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/candidate") outcome="warm" origin="SIGHUP"
+infraternal agent failed: Broken pipe (os error 32)
+2026-10-11T00:18:00.395755Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="warm"
+2026-10-11T00:18:00.402289Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:18:00.764987Z  INFO infraternal::restart: server_restart_request service_pid=1073174 request_pid=Some(1075028) request_uid=Some(0) target=Some("/root/.cache/codex-scratch/ca-handoff/p1073167/unmarked-rollback") outcome="cold" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:18:00.774856Z  INFO infraternal::remote_server: server_ca_startup service_pid=1073174 outcome="cold"
+2026-10-11T00:18:00.782321Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:31831 public_origin=https://localhost behind_proxy=true
+infraternal agent failed: unexpected end of file

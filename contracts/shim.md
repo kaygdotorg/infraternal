@@ -90,7 +90,7 @@ the PTY output stream since the session started.
 | 0x1B | agent → shim | `SelectWriter` | u32 nonzero writer identity (cap bit 1; see additive section) |
 | 0x1C | shim → agent | `SnapshotWithFlags` | u64 seq, u8 flags, bytes VT (cap bit 2; see additive section) |
 | 0x20 | shim → agent  | `Exited`   | i32 status or −signal, u64 final_seq |
-| 0x21 | agent → shim  | `ExitAck`  | (empty). The shim deletes its socket and exits. |
+| 0x21 | agent → shim  | `ExitAck`  | (empty). Optional acknowledgement after `Exited`; closes this peer. |
 | 0x7F | both          | `Error`    | u16 code, utf-8 message |
 
 Rules:
@@ -107,10 +107,23 @@ Rules:
   times while the bytes are in the ring (DECISIONS 41: no lost bytes on
   resume).
 - **Signal after exit.** An allowlisted signal after the PTY exits is a no-op;
-  unsupported signals are still refused. This preserves the retained exit and
-  its acknowledgement when host uninstall races shell exit (#87).
-- **Exit is kept.** The shim keeps `Exited` until it gets `ExitAck`, so an
-  agent restart cannot lose the exit status.
+  unsupported signals are still refused. This preserves ordered exit delivery
+  when host uninstall races shell exit (#87).
+- **Exit delivery and retirement (owner brief #151, round 2).** After PTY
+  drain, unowned shims flush `Exited` to data viewers and retire promptly.
+  An ownership-only connection (cap bit 3) retains the final output independently
+  of an output link's 250 ms credit-starvation detach. Release ownership after
+  ordered leg-B delivery or when the window closes. Ownership links cannot
+  backpressure the PTY or select writers. All legacy layouts remain unchanged.
+  Retention ends at 600 seconds from child exit even if an owner or output peer
+  stalls. Before that forced retirement, write the frozen `Exited` frame as a
+  mode-0600 `.ended` record in the private runtime sessions directory. An attach
+  to the retired session returns ordered `terminal.exited` with status/final_seq
+  with additive `retired: true`, followed by final Close 4404 (wire §4), without
+  claiming a final repaint. Ordinary drained exits retain exact cursor equality;
+  saved exits may have `final_seq` beyond the delivered cursor and never advance it.
+  Runtime records survive infraternal agent restarts, not a host reboot; they
+  contain no shell output. D178 still preserves detached *running* shells.
 
 ## 5. Budgets (from DECISIONS 41)
 
@@ -162,7 +175,8 @@ output is `{ "session_id": "UUID" }`. Reject zero dimensions, more than
 200,000 cells, and a different uid in rootless mode before launching a shim.
 Exit is a wire Event on the terminal mux stream, sub_id 0, JSON
 `{ "type": "terminal.exited", "session_id": "UUID", "status": i32,
-"final_seq": u64 }`. The embedded infraternal agent uses the inherited
+"final_seq": u64 }` (saved runtime records add `"retired": true` as described
+in §4). The embedded infraternal agent uses the inherited
 socketpair for leg B; its trusted spawning server owns the channel. This
 introduces no listener or mTLS bypass.
 
@@ -228,3 +242,16 @@ Count each actually forwarded approximate repaint in the process counter
 `approximate_snapshots_total`; a pending repaint does not increment it twice.
 Legacy rejection is reported as a `terminal.snapshot_unavailable` Event with
 session identity and sequence, preserving the live mux stream.
+
+### Capability bit 3: SESSION_OWNER (#151, round 2)
+
+Hello advertises bit 3; an ownership-only Attach selects exactly bit 3.
+This link has no writer or output cursor and accepts no PTY/input requests.
+An `InputStateRequest` on this link receives `InputState(0,0)` solely as an
+ownership-installation barrier; these zeroes are not writer cursors.
+It remains open for one owning window across data-link replacements; socket
+closure releases ownership. An infraternal agent only opens it when advertised.
+Old shims retain their negotiated behavior. The maximum 32 peer sockets includes
+ownership links. Only exited shims use the one-shot 600-second retention timer;
+running idle shims have no timer. The hidden shim startup option may shorten
+this bound for deterministic real-PTY tests, but cannot increase it.

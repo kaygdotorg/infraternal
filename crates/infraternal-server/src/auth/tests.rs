@@ -55,6 +55,8 @@ struct Software {
     prf_key: PKey<Private>,
     counter: u32,
     aaguid: Uuid,
+    // Real listeners use localhost; existing in-process fixtures retain their pinned RP.
+    rp_id: &'static str,
 }
 impl Software {
     fn new() -> Self {
@@ -65,13 +67,14 @@ impl Software {
             prf_key: PKey::hmac(&rand::random::<[u8; 32]>()).unwrap(),
             counter: 0,
             aaguid: Uuid::nil(),
+            rp_id: "auth.example.test",
         }
     }
     fn client_data(start: &Value, kind: &str, origin: &str) -> Vec<u8> {
         serde_json::to_vec(&json!({"type":kind,"challenge":start["options"]["publicKey"]["challenge"],"origin":origin,"crossOrigin":false})).unwrap()
     }
     fn auth_data(&self, flags: u8) -> Vec<u8> {
-        let mut data = Sha256::digest(b"auth.example.test").to_vec();
+        let mut data = Sha256::digest(self.rp_id.as_bytes()).to_vec();
         data.push(flags);
         data.extend_from_slice(&self.counter.to_be_bytes());
         data
@@ -3297,3 +3300,7 @@ mod ca_administration_tests;
 #[cfg(feature = "remote")]
 #[path = "remote_removal_tests.rs"]
 mod remote_removal_tests;
+#[path = "terminal_refusal_tests.rs"]
+mod terminal_refusal_tests;
+#[path = "tls_tests.rs"]
+mod tls_tests;

@@ -139,3 +139,125 @@ fn independent_review_remote_operator_commands_accept_json_output() {
         "remote commands refuse the required JSON output option"
     );
 }
+
+#[test]
+fn failed_cold_configuration_still_disposes_handoff_stdin() {
+    use std::process::{Command, Stdio};
+    const NAME: &str =
+        "remote_server::tests::failed_cold_configuration_still_disposes_handoff_stdin";
+    if std::env::var_os("INFRATERNAL_COLD_FAILURE_TEST").is_some() {
+        let directory = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/ca-handoff/missing-config");
+        let config = infraternal_server::ServerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            data_dir: directory.join("db"),
+            public_origin: "https://localhost".into(),
+            web_root: None,
+            tls: Some(infraternal_server::TlsFiles {
+                certificate: directory.join("missing.pem"),
+                private_key: directory.join("missing.key"),
+            }),
+            behind_proxy: false,
+            trusted_proxies: vec![],
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(
+            runtime
+                .block_on(serve(
+                    config,
+                    Options {
+                        remote_listen: Some("127.0.0.1:7443".parse().unwrap()),
+                        remote_ca_dir: Some(directory.join("ca")),
+                    }
+                ))
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_link("/proc/self/fd/0").unwrap(),
+            std::path::Path::new("/dev/null"),
+            "import cleanup must run before cold_start can fail"
+        );
+        return;
+    }
+    let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(sender);
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_COLD_FAILURE_TEST", "1")
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(receiver)))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn failed_restart_endpoint_does_not_prevent_http_serving() {
+    use std::{
+        os::unix::fs::DirBuilderExt,
+        process::{Command, Stdio},
+        time::Duration,
+    };
+    const NAME: &str =
+        "remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving";
+    if std::env::var_os("INFRATERNAL_CONTROL_FAILURE_TEST").is_some() {
+        let directory = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/ca-handoff")
+            .join(format!("endpoint-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        std::fs::write(directory.join("restart"), b"occupied").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let config = infraternal_server::ServerConfig {
+            listen: address,
+            data_dir: directory.clone(),
+            public_origin: "https://localhost".into(),
+            web_root: None,
+            tls: None,
+            behind_proxy: true,
+            trusted_proxies: vec!["127.0.0.1".parse().unwrap()],
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let serving = tokio::spawn(serve(config, Options { remote_listen: None, remote_ca_dir: None }));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                assert!(!serving.is_finished(), "Control::start failure must not prevent server startup");
+                if let Ok(mut stream) = tokio::net::TcpStream::connect(address).await {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
+                    let mut reply = Vec::new(); stream.read_to_end(&mut reply).await.unwrap();
+                    assert!(reply.starts_with(b"HTTP/1.1 200"));
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "HTTP startup deadline");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            serving.abort(); let _ = serving.await;
+        });
+        runtime.shutdown_timeout(Duration::from_secs(4));
+        std::fs::remove_dir_all(directory).unwrap();
+        return;
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_CONTROL_FAILURE_TEST", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

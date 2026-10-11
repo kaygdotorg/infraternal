@@ -1,0 +1,8 @@
+Running as unit: run-p3264012-i45162409.scope; invocation ID: 3ef8a34fa5df48c09719f5d8e65c16eb
+
+running 1 test
+test ca_handoff::shipping_tests::shipping_restart_reload_rollback_and_cold_start ... METRIC name=ca_handoff_rootless n=1 restart_cold=true reply_cold=true pid_preserved=true fd0_dev_null=true epipe_keeps_server=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 310 filtered out; finished in 0.83s
+

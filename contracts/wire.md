@@ -139,7 +139,10 @@ account never had it. The server and the infraternal agent send it in answer
 to `AttachTerm`, never as a transport failure, and keep the connection and
 every sibling stream up. Frames the viewer had already sent on that stream are
 dropped until its own `Close`. A viewer that receives 4404 does not attach to
-that session again. Every other stream close is transient and may be retried
+that session again. A verified saved exit may precede it on the same ordered
+stream as `terminal.exited` with `status`, `final_seq` and optional `retired: true`
+(shim §4). That status does not advance the viewer cursor or claim a final repaint;
+the viewer presents it in its ended state. Every other stream close is transient and may be retried
 (#158).
 
 Bodies of control frames are JSON. They are not on the hot path, and JSON

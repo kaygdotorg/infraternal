@@ -12,6 +12,7 @@
  */
 import { createCapsuleTabs } from "./capsule-tabs";
 import { createKeyValueList } from "./kv-list";
+import { enhanceSwitch } from "./switch";
 import { mountConfirmTip } from "./tooltip";
 import { LEVEL_NAMES } from "./themes";
 
@@ -23,6 +24,18 @@ export interface AppearanceApi {
   /** Runs a palette action (`theme:ink`, `font:geist-mono`, `card:2`, `bg:mesh`). */
   act(action: string): void;
   /** Called after any appearance change; returns a remover. */
+  onChange(listener: () => void): () => void;
+}
+
+/** One on/off preference: a titled row with a label, a quiet subtitle and a switch. */
+export interface SwitchPref {
+  id: string;
+  title: string;
+  label: string;
+  hint?: string;
+  get(): boolean;
+  set(on: boolean): void;
+  /** Called after the value changes (here or elsewhere); returns a remover. */
   onChange(listener: () => void): () => void;
 }
 
@@ -63,6 +76,89 @@ function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: 
   block.dataset.kind = kind;
   block.dataset.current = current();
   return block;
+}
+
+/** A titled row with a switch for an on/off preference. */
+function switchBlock(pref: SwitchPref): { block: HTMLElement; sync(): void; dispose(): void } {
+  const block = document.createElement("section");
+  block.dataset.kind = pref.id;
+  block.append(heading(pref.title));
+  const row = document.createElement("label");
+  row.className = "ui-sp-row ui-sp-switch";
+  row.innerHTML = '<span class="ui-sp-names"><span class="ui-sp-label"></span><span class="ui-sp-hint"></span></span><input type="checkbox">';
+  (row.querySelector(".ui-sp-label") as HTMLElement).textContent = pref.label;
+  (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = pref.hint ?? "";
+  const input = row.querySelector<HTMLInputElement>("input")!;
+  input.setAttribute("aria-label", pref.label);
+  const toggle = enhanceSwitch(input);
+  input.addEventListener("change", () => pref.set(input.checked));
+  block.append(row);
+  const off = pref.onChange(() => toggle.set(pref.get()));
+  toggle.set(pref.get());
+  return { block, sync: () => toggle.set(pref.get()), dispose: () => { off(); toggle.dispose(); } };
+}
+
+/**
+ * A group of one fact and, when something can be done about it, one action: the host-connection lock. The product
+ * owns the state; the panel only draws it and calls `act`.
+ */
+export interface StatusActionPref {
+  id: string;
+  title: string;
+  /** What is true now, in plain words; undefined hides the whole group (the state is unknown or not the viewer's to see). */
+  text(): string | undefined;
+  /** The button's label, or undefined when there is nothing to do (unlocked, or the viewer may not). */
+  action(): string | undefined;
+  act(): void;
+  /** Asks the product for a fresh answer; called when the panel opens. */
+  refresh(): void;
+  onChange(listener: () => void): () => void;
+}
+
+export interface HostsApi {
+  /** Switches grouped under one title each; `title` is the group's heading. */
+  switches: SwitchPref[];
+  /** Further groups of a state and its action, after the switches. */
+  statuses?: StatusActionPref[];
+}
+
+/** One titled group: a row of words and, at its end, a pill button that fades away when there is nothing to do. */
+function statusBlock(pref: StatusActionPref): { block: HTMLElement; dispose(): void } {
+  const block = document.createElement("section");
+  block.dataset.kind = pref.id;
+  block.append(heading(pref.title));
+  const row = document.createElement("div");
+  row.className = "ui-sp-row ui-sp-status";
+  row.innerHTML = '<span class="ui-sp-names"><span class="ui-sp-label"></span></span><button type="button" class="ui-ts-reset ui-sp-status-action"></button>';
+  const label = row.querySelector<HTMLElement>(".ui-sp-label")!;
+  const button = row.querySelector<HTMLButtonElement>("button")!;
+  button.addEventListener("click", () => pref.act());
+  block.append(row);
+  const paint = (): void => {
+    const text = pref.text();
+    block.hidden = text === undefined;
+    if (text !== undefined) label.textContent = text;
+    const action = pref.action();
+    if (action) button.textContent = action;
+    // The button stays in the layout while it fades so the words do not jump; inert keeps it out of reach.
+    button.dataset.shown = String(Boolean(action));
+    button.toggleAttribute("inert", !action);
+  };
+  paint();
+  const off = pref.onChange(paint);
+  pref.refresh();
+  return { block, dispose: off };
+}
+
+/** Settings, Hosts: what the product shows and does for machines. One titled group per concern: the details popover's facts, then the host-connection lock. */
+export function renderHosts(container: HTMLElement, api: HostsApi): () => void {
+  const root = document.createElement("div");
+  root.className = "ui-sp";
+  container.append(root);
+  const blocks = api.switches.map(switchBlock);
+  const statuses = (api.statuses ?? []).map(statusBlock);
+  root.append(...blocks.map((b) => b.block), ...statuses.map((b) => b.block));
+  return () => { for (const b of blocks) b.dispose(); for (const b of statuses) b.dispose(); root.remove(); };
 }
 
 /** Ticks the row of `current` in a choice block. */

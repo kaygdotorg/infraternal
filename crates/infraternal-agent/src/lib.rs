@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod channel;
 pub mod daemon;
+mod lifecycle;
 pub mod plugins;
 pub mod relay;
 #[cfg(feature = "remote")]

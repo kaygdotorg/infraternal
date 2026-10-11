@@ -11,6 +11,10 @@ pub mod ca_bootstrap;
 #[cfg(feature = "remote")]
 pub mod ca_copies;
 #[cfg(feature = "remote")]
+pub mod ca_handoff;
+#[cfg(feature = "remote")]
+pub mod ca_handoff_binary;
+#[cfg(feature = "remote")]
 pub mod ca_http;
 #[cfg(feature = "remote")]
 pub mod ca_membership;

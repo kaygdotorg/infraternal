@@ -1,0 +1,45 @@
+Running as unit: run-p3074251-i44972662.scope; invocation ID: 53a0b74c64744e4a9b0b6e5b1ff1c29f
+   Compiling syn v2.0.119
+   Compiling futures-util v0.3.34
+   Compiling sha2 v0.10.9
+   Compiling crypto-common v0.1.7
+   Compiling getrandom v0.2.17
+   Compiling rustls-pki-types v1.15.1
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-shim)
+   Compiling uuid v1.27.0
+   Compiling tracing-attributes v0.1.31
+   Compiling openssl-macros v0.1.1
+   Compiling digest v0.10.7
+   Compiling ring v0.17.14
+   Compiling futures-executor v0.3.34
+   Compiling openssl v0.10.81
+   Compiling tracing v0.1.44
+   Compiling rustls-webpki v0.103.15
+   Compiling sqlx-core v0.8.6
+   Compiling quinn-udp v0.5.16
+   Compiling tokio-openssl v0.6.5
+   Compiling rustls v0.23.45
+   Compiling sqlx-sqlite v0.8.6
+   Compiling quinn-proto v0.11.19
+   Compiling sqlx-macros-core v0.8.6
+   Compiling quinn v0.11.12
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-plugin-api)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/host-facts)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 30.16s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal_agent-6314302bd17c9224)
+
+running 7 tests
+test sessions::tests::borrowed_reader_payload_uses_reusable_cancel_safe_storage ... ok
+test sessions::tests::cancelled_fragmented_shim_read_retains_header_and_body_progress ... ok
+test sessions::tests::post_listen_chmod_wakes_a_connection_refused_at_bind ... ok
+test sessions::tests::reader_borrow_measurement ... ignored, release borrowed versus owned asynchronous receive measurement
+test sessions::tests::refused_socket_is_removed_but_insecure_directory_is_rejected ... ok
+test sessions::tests::sequenced_attach_intersects_caps_and_legacy_attach_stays_zero ... ok
+test sessions::tests::symlink_state_cannot_redirect_private_runtime_storage ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 22 filtered out; finished in 0.07s
+

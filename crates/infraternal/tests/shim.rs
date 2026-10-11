@@ -23,9 +23,20 @@ impl Session {
         Self::start(ring, detach, None)
     }
     fn start(ring: usize, detach: bool, units: Option<(&str, &str)>) -> Self {
+        Self::start_retention(ring, detach, units, 600_000)
+    }
+    fn start_retention(
+        ring: usize,
+        detach: bool,
+        units: Option<(&str, &str)>,
+        retention_ms: u64,
+    ) -> Self {
         let counter = NEXT.fetch_add(1, Ordering::Relaxed);
         let id = format!("{:016x}{counter:016x}", std::process::id());
-        let state = PathBuf::from(format!("../../target/t{}-{counter}", std::process::id()));
+        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/session-bounds/t{}-{counter}",
+            std::process::id()
+        ));
         let mut command = if let Some((parent, scope)) = units {
             let mut command = Command::new("systemd-run");
             command.args(["--user","--quiet","--unit",parent,"--property","KillMode=control-group","--working-directory"])
@@ -65,6 +76,9 @@ impl Session {
                 "--state",
             ])
             .arg(&state);
+        command
+            .arg("--exit-retention-ms")
+            .arg(retention_ms.to_string());
         if detach {
             command.arg("--detach");
         }
@@ -133,9 +147,6 @@ impl Session {
             }
         }
         drop(peer);
-        let mut peer = self.attach(seq);
-        assert_eq!(read(&mut peer), Frame::Exited(7, seq));
-        send(&mut peer, Frame::ExitAck);
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.path().exists() {
             assert!(Instant::now() < deadline);
@@ -268,7 +279,7 @@ fn until(peer: &mut UnixStream, seq: &mut u64, needle: &[u8]) -> Vec<u8> {
     output
 }
 #[test]
-fn real_shell_reconnect_resize_and_retained_exit() {
+fn real_shell_reconnect_resize_and_delivered_exit() {
     let mut session = Session::new(8 * 1024 * 1024, false);
     assert_eq!(
         fs::metadata(session.state.join("sessions")).unwrap().mode() & 0o777,
@@ -555,4 +566,235 @@ fn disallowed_signal_only_disconnects_peer() {
     );
     until(&mut peer, &mut seq, b"SIGNAL_ALIVE\r\n");
     session.finish(peer, seq);
+}
+
+/// A dead detached shell cannot retain its shim process or rendezvous socket.
+#[test]
+fn detached_shell_exit_reaps_shim_within_one_second() {
+    let mut session = Session::new(8192, false);
+    let mut peer = session.attach(0);
+    let mut seq = 0;
+    send(
+        &mut peer,
+        Frame::Input(b"printf 'READY_%s\\n' REAP\n".to_vec()),
+    );
+    until(&mut peer, &mut seq, b"READY_REAP\r\n");
+    drop(peer);
+    let children = fs::read_to_string(format!(
+        "/proc/{}/task/{}/children",
+        session.pid, session.pid
+    ))
+    .unwrap();
+    let shell: i32 = children.split_whitespace().next().unwrap().parse().unwrap();
+    let start = Instant::now();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(shell),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    while session.path().exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "dead shim socket retained"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(session.child.as_mut().unwrap().wait().unwrap().success());
+    session.pid = 0;
+}
+
+/// A descendant holding the PTY slave cannot retain a dead shell's shim.
+#[test]
+fn detached_shell_exit_reaps_even_with_a_live_background_descendant() {
+    let mut session = Session::new(8192, false);
+    let mut peer = session.attach(0);
+    let mut seq = 0;
+    send(
+        &mut peer,
+        Frame::Input(b"(trap '' HUP; exec sleep 5) & printf 'READY_%s\\n' REAP\n".to_vec()),
+    );
+    until(&mut peer, &mut seq, b"READY_REAP\r\n");
+    drop(peer);
+    let children = fs::read_to_string(format!(
+        "/proc/{}/task/{}/children",
+        session.pid, session.pid
+    ))
+    .unwrap();
+    let shell: i32 = children.split_whitespace().next().unwrap().parse().unwrap();
+    let start = Instant::now();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(shell),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    while session.path().exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "dead shim socket retained"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(session.child.as_mut().unwrap().wait().unwrap().success());
+    session.pid = 0;
+}
+
+/// Ownership-only peers retain exited shells without consuming a data cursor.
+fn owner(session: &Session) -> UnixStream {
+    let mut peer = session.connect();
+    assert!(
+        matches!(read(&mut peer), Frame::Hello { caps, .. } if caps & infraternal_shim::frame::SESSION_OWNER != 0)
+    );
+    send(
+        &mut peer,
+        Frame::Attach(infraternal_shim::frame::SESSION_OWNER),
+    );
+    send(&mut peer, Frame::InputStateRequest);
+    assert_eq!(read(&mut peer), Frame::InputState(0, 0));
+    peer
+}
+
+/// A control-only request exits the real shell; no output link masks ownership.
+fn exit_without_viewer(session: &Session) {
+    let mut peer = session.connect();
+    assert!(matches!(read(&mut peer), Frame::Hello { .. }));
+    send(
+        &mut peer,
+        Frame::Attach(
+            infraternal_shim::frame::SEQUENCED_INPUT | infraternal_shim::frame::MULTI_WRITER,
+        ),
+    );
+    send(&mut peer, Frame::SelectWriter(999_999));
+    send(
+        &mut peer,
+        Frame::SequencedInput(0, b"printf 'FINAL_%s\\n' OUTPUT; exit 7\n".to_vec()),
+    );
+    // Keep the control connection until the shell disappears: write_all is not
+    // proof the shim consumed the request, and control peers cannot retain exit.
+    let children = format!("/proc/{}/task/{}/children", session.pid, session.pid);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(&children).is_ok_and(|value| !value.trim().is_empty()) {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn unowned_normal_exit_retires_promptly_and_records_status() {
+    let mut session = Session::new(8192, false);
+    exit_without_viewer(&session);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while session.path().exists() {
+        assert!(
+            Instant::now() < deadline,
+            "unowned exit retained a dead shim"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        infraternal_shim::ended::read(&session.path())
+            .unwrap()
+            .unwrap()
+            .0,
+        7
+    );
+    assert!(session.child.as_mut().unwrap().wait().unwrap().success());
+    session.pid = 0;
+}
+
+#[test]
+fn owned_exit_releases_promptly_on_window_close() {
+    let session = Session::new(8192, false);
+    let ownership = owner(&session);
+    exit_without_viewer(&session);
+    thread::sleep(Duration::from_millis(350));
+    assert!(
+        session.path().exists(),
+        "data disconnect must not release ownership"
+    );
+    drop(ownership);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while session.path().exists() {
+        assert!(
+            Instant::now() < deadline,
+            "closed owner retained a dead shim"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        infraternal_shim::ended::read(&session.path())
+            .unwrap()
+            .unwrap()
+            .0,
+        7
+    );
+}
+
+#[test]
+fn owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer() {
+    let session = Session::start_retention(8192, false, None, 700);
+    let _ownership = owner(&session);
+    let _stalled = session.attach(0);
+    exit_without_viewer(&session);
+    assert!(
+        session.path().exists(),
+        "owner must retain exit before bound"
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while session.path().exists() {
+        assert!(
+            Instant::now() < deadline,
+            "owner/data peer extended the maximum"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let (status, seq) = infraternal_shim::ended::read(&session.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 7);
+    assert!(seq > 0);
+    assert_eq!(
+        fs::metadata(session.path().with_extension("ended"))
+            .unwrap()
+            .len(),
+        17
+    );
+}
+
+#[test]
+fn delivered_exit_cannot_release_another_owning_window() {
+    let session = Session::new(8192, false);
+    let first = owner(&session);
+    let second = owner(&session);
+    exit_without_viewer(&session);
+    let mut data = session.attach(0);
+    let mut seq = 0;
+    loop {
+        match read(&mut data) {
+            Frame::Output(offset, bytes) => {
+                assert_eq!(offset, seq);
+                seq += bytes.len() as u64;
+            }
+            Frame::Exited(status, final_seq) => {
+                assert_eq!((status, final_seq), (7, seq));
+                break;
+            }
+            frame => panic!("unexpected {frame:?}"),
+        }
+    }
+    drop(data);
+    drop(first);
+    thread::sleep(Duration::from_millis(350));
+    assert!(
+        session.path().exists(),
+        "the sibling window still owns final output"
+    );
+    drop(second);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while session.path().exists() {
+        assert!(
+            Instant::now() < deadline,
+            "all owners released but shim remains"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
 }

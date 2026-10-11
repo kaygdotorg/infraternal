@@ -78,3 +78,42 @@ test("a dead session ends quietly: one attach, an ended state, and a new shell i
   await page.keyboard.type("echo alive");
   await expect.poll(async () => (await mockState(request)).echoed_text).toContain("echo alive");
 });
+
+for (const status of [7, 0]) test(`a retired session carries exit ${status} through the same final ended path`, async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
+  const request = page.context().request;
+  await openProduct(page);
+  const win = page.locator(".ui-window").first();
+  const before = (await mockState(request)).attach_count;
+  const response = await retry(() => request.post("/__mock/retire-session", { data: { status } }));
+  const dead = (await response.json() as { session_id: string }).session_id;
+  await expect(win.locator(".cl-sx-strip-text")).toHaveText(`Session ended · Exit ${status}`);
+  await expect(win).toHaveAttribute("data-status", "offline");
+  await expect(win.locator(".terminal-host")).toBeHidden();
+  await expect(page.locator(".capsule-session")).toHaveText("· 0 sessions");
+  await page.waitForTimeout(2_000);
+  expect((await mockState(request)).attach_count).toBe(before + 1);
+  const dir = resolve(import.meta.dirname, "..", "captures", "dead-session");
+  await mkdir(dir, { recursive: true });
+  const shot = resolve(dir, `retired-exit-${status}-1440x900-ink.png`);
+  await page.screenshot({ path: shot, animations: "disabled" });
+  await testInfo.attach(`retired-exit-${status}`, { path: shot, contentType: "image/png" });
+  await win.getByRole("button", { name: "New shell" }).click();
+  await expect(win.locator(".cl-sx-strip")).toHaveCount(0);
+  await expect(win).toHaveAttribute("data-status", "live");
+  await expect.poll(async () => (await mockState(request)).session_id).not.toBe(dead);
+});
+
+test("a drop between saved status and final Close resumes to the same ended answer", async ({ page }) => {
+  test.setTimeout(90_000);
+  const request = page.context().request;
+  await openProduct(page);
+  const win = page.locator(".ui-window").first();
+  const before = (await mockState(request)).attach_count;
+  await retry(() => request.post("/__mock/retire-session-drop-close", { data: { status: 7 } }));
+  await expect(win.locator(".cl-sx-strip-text")).toHaveText("Session ended · Exit 7", { timeout: 20_000 });
+  await expect(win).toHaveAttribute("data-status", "offline");
+  expect((await mockState(request)).attach_count).toBe(before + 2);
+  await page.waitForTimeout(2_000);
+  expect((await mockState(request)).attach_count).toBe(before + 2);
+});

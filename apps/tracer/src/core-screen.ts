@@ -91,6 +91,11 @@ export interface CoreScreen {
   /** The one shared toast of the screen: every transient message (recovery, connection, flows) uses it. */
   readonly toast: ToastController;
   /**
+   * Where the sidebar's inbox (D234) attaches. The card and its registry load with the canvas (nothing in them is
+   * needed for the first paint; see canvas/inbox-host.ts); only the toggle's dot and its name live here.
+   */
+  readonly inboxMount: { parent: HTMLElement; before: Element | null; onCount(count: number): void };
+  /**
    * The key tray has two rows, one visible at a time: the keyboard row (always) and a canvas row
    * (when a canvas gives it items). Returns a controller to update item state and remove the row.
    */
@@ -297,6 +302,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     })
     : undefined;
   if (sidebarFoot) { sidebar.append(sidebarFoot.root); sidebar.dataset.foot = ""; }
+  // While the sidebar is closed the toggle carries a dot, and its name says why, so a pending item is never out of
+  // sight and never only a colour. The card itself is made by the canvas (canvas/inbox-host.ts).
+  let pending = 0;
+  const toggleName = (open: boolean): string => `${open ? "Hide hosts" : "Show hosts"}${pending > 0 ? `, ${pending} waiting for you` : ""}`;
+  const inboxMount = {
+    parent: sidebar, before: sidebarFoot?.root ?? null,
+    onCount: (count: number): void => {
+      pending = count;
+      sidebarToggle.toggleAttribute("data-pending", count > 0);
+      sidebarToggle.setAttribute("aria-label", toggleName(!sidebar.hidden));
+    },
+  };
   const capsule = get<HTMLButtonElement>("#capsule");
   const palette = get<HTMLElement>("#palette");
   const scrim = get<HTMLElement>("#scrim");
@@ -657,7 +674,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     else if (reducedMotion.matches) sidebarToggle.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
     sidebar.hidden = !open;
     sidebarToggle.setAttribute("aria-expanded", String(open));
-    sidebarToggle.setAttribute("aria-label", open ? "Hide hosts" : "Show hosts");
+    sidebarToggle.setAttribute("aria-label", toggleName(open));
     sidebar.classList.toggle("instant", instant);
     if (instant) window.setTimeout(() => sidebar.classList.remove("instant"), 0);
   };
@@ -1452,6 +1469,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     showPalette(only) { setPalette(true, "pointer", only); },
     toast,
+    inboxMount,
     act(action) { runAction(action, "pointer"); },
     appearance: () => ({ theme: currentThemeId, font: committedFont.id, card: cardLevel, windows: windowLevel, background }),
     settingsPanels: { get toolbar() { return toolbarSettings; }, shortcuts: shortcutsPanel, about: aboutPanel },

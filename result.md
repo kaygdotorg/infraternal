@@ -1,15 +1,16 @@
-<!-- Records the #158/D206 round-two fixes, verification evidence and remaining gate exception. -->
+<!-- Records #149 production integration under D206, its auth audit, atomic history and measured gates. -->
 
-Round two addresses all four HOLD findings. Code head: `fbc28c18`.
+Merged `origin/tls-session` in `1694e11f`, preserving #158 final Close 4404, #151 session bounds and every production auth path/test. Bootstrap follow-up `0e6899c5` removes its production-only Cookie field-count guard; the shared strict parser now serves every reader. Its real-passkey/SQLite/socket regression fails before (0/1, 1.07 s) and passes after (1/0, 0.70 s), accepting either field order and denying duplicates/malformed/non-text fields. Review tests `59c72a49` replayed as `abb80a05` verify split ceremony reuse and refusal without consuming signed proof.
 
-- DS-03: `d215b3c0` drains queued native final frames before retirement, bounded to one second. `cbabf63e` adds the stuck-peer regression; `3b55079c` fixes its documentation lint.
-- DS-01: `003126ad` keeps known gone inventory records exited when another window selects them.
-- DS-04: `be84bd8f` shares the existing jittered retry policy; `14f0fdca` retries transient shared-stream closes on the same durable writer. `16dc989c` and `fbc28c18` prove stream identity and acknowledged input continuity.
-- DS-02: retained a552bb2e's on-demand logs body. Five fresh default production builds: **44,704 / 44,708 / 44,720 / 44,709 / 44,679 B** deferred Brotli, each below the unchanged **45,056 B** limit.
+Validation: **608 Rust tests passed**, 0 failed, 64 ignored; auth **110 unit + 1 integration** passed; expanded native/proxy TLS **2 passed in 2.38 s** (registration/joined/split session all 200). Tracer check and **142 src tests**, protocol compiler and **36 tests / 34,462 assertions**, production build/transfer pass. Deferred Brotli **44,733 / 45,056 B**. Auth B1/S1/S2/N1 checklist completed; Origin, cookie flags, unlock/revocation, admission and ingress policy retained. Workspace lockfile regeneration is byte-identical; package/version/source sets unchanged.
 
-Imported review tests: `445d4abb`, `48b07c5d`, `796b4f11`, `add06701`, `8cac789a`. Assertions were preserved; inventory, native and transient-browser failures were reproduced before their fixes.
+Static x86_64: exact `04cdc52a` **19,992,512 B** → **19,991,488 B** (**−1,024 B**), no PT_INTERP. The known **16,404,816 B** limit remains unchanged; the size row stops before aarch64.
 
-`scripts/verify fast` summary:
+Local CPUWeight=10000 parser probes, infraternal-dev / 8 CPUs, 3 × 200,000 requests × 50 sessions: production `opt=s` median **287.49 → 313.39 ns/request**, **+1.295 µs/50 requests**; `opt=3` **110.27 → 219.53 ns/request**, **+5.463 µs/50**. Retained **0 B/session × 200 = 0 B**. `opt=s` load **22.76/18.03/17.24 → 24.41/18.72/17.49**. Parser averages, not end-to-end percentiles.
+
+The initial tracer timing failure passed its scoped rerun. One unchanged Mesh snapshot socket-close failure passed two isolated runs and the complete gate retry: **10,000 nodes / 30,000 grants**, **88 pages**, **64,612 B** maximum frame, shared socket Pong. No failure waived or timeout changed.
+
+`scripts/verify fast` summary, verbatim (exit 1 solely for known size):
 
 ```text
 +---------------------------+--------------+
@@ -24,10 +25,4 @@ Imported review tests: `445d4abb`, `48b07c5d`, `796b4f11`, `add06701`, `8cac789a
 +---------------------------+--------------+
 ```
 
-The sole remaining failure is the known static-size overrun: **19,904,800 B**, versus an exact a552bb2e baseline of **19,904,384 B** (**+416 B**); maximum remains 16,404,816 B. No failed test was waived. GNU checks reused this job's locked vendored OpenSSL archive; the static build used the default musl recipe.
-
-TypeScript fast passed separately because the static failure stops the combined dispatcher. Tracer check and src tests: **122 passed, 0 failed, 10,862 assertions**. Protocol tests: **36 passed, 34,462 assertions**. Production browser specs on 5791/5792: **4 passed in 58.5 s** (dead-session, detached-output, both transient retry specs). Real QUIC final-close and stuck-peer tests passed.
-
-The isolated real-channel diagnostic preserved all **200 sequential vanished-session replies**, including late Input/Close/Ping fences: **p50 210 µs / p99 4,526 µs / max 4,777 µs**. Local infraternal-dev, eight CPUs, CPUWeight=10000; initial/final load averages **8.14 / 13.87 / 21.11**. This measures sequential refusals, not 200 live PTYs.
-
-Production screenshot: [ended terminal](apps/tracer/captures/dead-session/ended-1440x900-ink.png). Author checklist and raw findings are recorded on [#158](https://git.kayg.org/kayg/infraternal/issues/158); it remains open. Logs and baseline/final binary artifacts are retained under `$HOME/.cache/codex-scratch/fix-dead-session-round2/`; build targets and temporary source checkouts are removed after verification.
+Every commit pushed to `tls-session-prod`; no deployment. Full evidence and final head: [#149](https://git.kayg.org/kayg/infraternal/issues/149). Raw logs remain under `$HOME/.cache/codex-scratch/tls-session-prod/`; temporary build targets/checkouts are removed at completion.

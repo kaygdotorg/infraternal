@@ -17,7 +17,7 @@ pub trait AdministratorCaUnlock {
 }
 
 /// Process-only secret transfer for automatic update/rollback. Deliberately
-/// has no Debug, serialization or disk constructor; update IPC is a later slice.
+/// has no Debug, serialization or disk constructor; the exec channel lives in `ca_handoff`.
 pub struct CaHandoff {
     material: CaMaterial,
     https: Option<X509>,
@@ -147,7 +147,7 @@ impl MemoryCaSource {
         Ok(source)
     }
 
-    fn install(&self, material: CaMaterial) -> Result<(), CaError> {
+    pub(crate) fn install(&self, material: CaMaterial) -> Result<(), CaError> {
         CertificateAuthority::from_material(material.clone())?;
         if material.issuer().to_der().map_err(|_| CaError)?
             != self.issuer()?.to_der().map_err(|_| CaError)?

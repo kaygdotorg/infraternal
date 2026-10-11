@@ -56,6 +56,9 @@ pub(crate) enum AgentError {
     /// The terminal action was rejected by the embedded infraternal agent.
     #[error("terminal action failed")]
     Rejected,
+    /// A public terminal admission refusal; transport failures remain generic.
+    #[error("terminal open refused")]
+    OpenRefused(infraternal_plugin_api::admission::OpenRefusal),
     /// The remote peer did not negotiate live renewal.
     #[error("remote infraternal agent lacks live renewal")]
     #[cfg(feature = "remote")]
@@ -1107,6 +1110,8 @@ enum TerminalNotice {
         session_id: String,
         status: i32,
         final_seq: u64,
+        #[serde(default)]
+        retired: bool,
     },
 }
 
@@ -1130,8 +1135,9 @@ impl TerminalNotice {
                 session_id,
                 status,
                 final_seq,
+                retired,
             } => {
-                let _ = (status, final_seq);
+                let _ = (status, final_seq, retired);
                 session_id
             }
         }
@@ -1155,7 +1161,14 @@ async fn process_incoming(
             if !ok {
                 match call {
                     PendingCall::Open(reply) => {
-                        let _ = reply.send(Err(AgentError::Rejected));
+                        let error =
+                            if json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON {
+                                serde_json::from_slice(&json)
+                                    .map_or(AgentError::Rejected, AgentError::OpenRefused)
+                            } else {
+                                AgentError::Rejected
+                            };
+                        let _ = reply.send(Err(error));
                     }
                     PendingCall::Action(reply) => {
                         let _ = reply.send(Err(AgentError::Rejected));
@@ -1573,7 +1586,20 @@ fn spawn_socketpair_agent(
             .add_close(child_fd)
             .map_err(|_| AgentError::Unavailable)?;
     }
-    let attributes = PosixSpawnAttr::init().map_err(|_| AgentError::Unavailable)?;
+    // The parent may still be handling an inherited private input channel.
+    // Child stdin is always explicit, independent of startup import cleanup.
+    actions
+        .add_open(
+            0,
+            std::path::Path::new("/dev/null"),
+            nix::fcntl::OFlag::O_RDONLY,
+            nix::sys::stat::Mode::empty(),
+        )
+        .map_err(|_| AgentError::Unavailable)?;
+    let mut attributes = PosixSpawnAttr::init().map_err(|_| AgentError::Unavailable)?;
+    // Runtime workers inherit the server's early blocked reload mask. Child
+    // roles and PTY shells must start with their own normal signal policy.
+    infraternal_shim::prepare_spawn(&mut attributes).map_err(|_| AgentError::Unavailable)?;
     let pid = posix_spawn(path.as_c_str(), &actions, &attributes, &argv, &envp)
         .map_err(|_| AgentError::Unavailable)?;
     drop(child);
@@ -1597,15 +1623,36 @@ fn spawn_socketpair_agent(
 
 #[cfg(unix)]
 async fn stop_child(pid: nix::unistd::Pid) {
-    use nix::{
-        sys::{
-            signal::{Signal, kill},
-            wait::waitpid,
-        },
-        unistd::Pid,
+    use nix::sys::{
+        signal::{Signal, kill},
+        wait::{WaitPidFlag, WaitStatus, waitpid},
     };
-    let _ = kill(pid, Signal::SIGTERM);
-    let _ = tokio::task::spawn_blocking(move || waitpid(Pid::from_raw(pid.as_raw()), None)).await;
+    // Keep escalation inside the blocking task: runtime cancellation may drop
+    // its async waiter, but must not cancel the SIGKILL deadline or reaping.
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = kill(pid, Signal::SIGTERM);
+        let graceful = std::time::Instant::now() + Duration::from_secs(2);
+        let final_deadline = graceful + Duration::from_secs(1);
+        let mut escalated = false;
+        loop {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => {}
+                // Reap only this child. On return, no later signal can target a
+                // reused PID; ECHILD also retires the identity immediately.
+                _ => return,
+            }
+            let now = std::time::Instant::now();
+            if !escalated && now >= graceful {
+                let _ = kill(pid, Signal::SIGKILL);
+                escalated = true;
+            }
+            if now >= final_deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })
+    .await;
 }
 
 #[cfg(not(unix))]

@@ -24,6 +24,8 @@ vt100 = { workspace = true, optional = true }
 
 # Comparison engines are never in the default production dependency graph.
 [features]
+# Audited transient process-transfer buffers are removed with the remote plugin.
+ca-handoff = []
 bench-vt = ["dep:alacritty_terminal", "dep:vt100"]
 bench-ghostty = ["bench-vt", "dep:libghostty-vt"]
 

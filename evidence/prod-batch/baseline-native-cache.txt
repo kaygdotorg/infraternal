@@ -1,0 +1,3 @@
+Snapshot adapter and build recipe byte-identical; same checksum-pinned upstream, Zig 0.15.2, x86_64-linux-musl, ReleaseFast, baseline CPU. Reused own native archive across path-only cache keys:
+current=3fc5f9147e40734862b924bec64e7e7b61bd4a9023f811b3b2b8e35b7018531c
+baseline=edd93f7efa522b811dba0a2c05d7672bb410d4dcb2967d8f2332ecbe5050b0a6

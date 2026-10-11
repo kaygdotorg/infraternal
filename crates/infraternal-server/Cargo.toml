@@ -11,11 +11,12 @@ workspace = true
 [features]
 default = ["mesh", "ssh"]
 mesh = ["dep:infraternal-plugin-mesh"]
-remote = ["dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn"]
+remote = ["infraternal-shim/ca-handoff", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn"]
 
 ssh = ["dep:infraternal-plugin-ssh"]
 
 [dependencies]
+infraternal-shim = { path = "../infraternal-shim", version = "0.1.0", default-features = false }
 infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }
@@ -59,6 +60,8 @@ nix = { workspace = true, features = ["time"] }
 tower.workspace = true
 http-body-util.workspace = true
 tokio-tungstenite.workspace = true
+# Exercise the existing server HTTP/2 and OpenSSL stack over real TLS in auth tests.
+h2 = "0.4"
 
 [[example]]
 name = "remote_ca_bench"

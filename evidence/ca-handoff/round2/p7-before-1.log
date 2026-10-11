@@ -1,0 +1,24 @@
+Running as unit: run-p3974282-i41680988.scope; invocation ID: e9af505e182b4204ad220ef1045d8feb
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-shim)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 13s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal-33f5a90126c3a091)
+
+running 1 test
+
+thread 'restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter' (3983358) panicked at crates/infraternal/src/restart_tests.rs:332:13:
+runtime shutdown waited forever on a blocking waitpid
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter ... FAILED
+
+failures:
+
+failures:
+    restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 8.02s
+
+error: test failed, to rerun pass `-p infraternal --bin infraternal`

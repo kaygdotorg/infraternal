@@ -1,0 +1,18 @@
+Running as unit: run-p3029102-i44927514.scope; invocation ID: e7c3eef31c2a4df98ee6aacbb3361e79
+ENVIRONMENT machine=infraternal-dev cores=8 load=15.83 21.84 24.38 fixture=rootless-real-sshd source_penalties=isolated
+
+running 1 test
+
+thread 'one_physical_connection_erases_helpers_and_refuses_reconnect' (3029146) panicked at crates/plugins/ssh/tests/single_connection.rs:72:10:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test one_physical_connection_erases_helpers_and_refuses_reconnect ... FAILED
+
+failures:
+
+failures:
+    one_physical_connection_erases_helpers_and_refuses_reconnect
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+Command '['/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/single_connection-da56c522c3d0a816', '--ignored', '--nocapture']' returned non-zero exit status 101.

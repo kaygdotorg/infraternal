@@ -23,7 +23,7 @@ function probe(): { client: ExitProbe; statuses: number[] } {
   const client = Object.assign(Object.create(TerminalClient.prototype), {
     attached: true, sessionId: new Uint8Array(16), lastOutSeq: 0n, receivedOutSeq: 0n,
     exitReported: false, outputWriteInFlight: false, snapshotWriteInFlight: false, outputQueue: { length: 0 }, config: { hooks: { onExited: (status: number) => statuses.push(status) } },
-    setStatus: () => {}, protocolFailure: (message: string) => { throw new Error(message); },
+    cancelStreamRetry: () => {}, setStatus: () => {}, protocolFailure: (message: string) => { throw new Error(message); },
   }) as ExitProbe;
   return { client, statuses };
 }
@@ -66,4 +66,21 @@ test("an equal-cursor final snapshot paints before the window is notified", () =
   client.snapshotWriteInFlight = false;
   client.finishExit();
   expect(statuses).toEqual([0]);
+});
+
+test("a retired exit retains status without claiming missing final bytes painted", () => {
+  const { client, statuses } = probe();
+  const eventJson = new TextEncoder().encode(JSON.stringify({ type: "terminal.exited", session_id: "00000000-0000-0000-0000-000000000000", status: 7, final_seq: 42, retired: true }));
+  client.handleTerminalFrame({ type: "Event", subId: 0, eventJson }, new Uint8Array(), 0);
+  expect(statuses).toEqual([]);
+  expect(client.receivedOutSeq).toBe(0n);
+});
+
+test("retired exits still reject a regressed cursor or malformed retirement flag", () => {
+  const { client } = probe();
+  client.receivedOutSeq = 43n;
+  for (const retired of [true, "true"]) {
+    const eventJson = new TextEncoder().encode(JSON.stringify({ type: "terminal.exited", session_id: "00000000-0000-0000-0000-000000000000", status: 7, final_seq: 42, retired }));
+    expect(() => client.handleTerminalFrame({ type: "Event", subId: 0, eventJson }, new Uint8Array(), 0)).toThrow("invalid terminal notice");
+  }
 });

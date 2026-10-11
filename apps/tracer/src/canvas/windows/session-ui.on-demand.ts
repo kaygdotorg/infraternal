@@ -92,14 +92,14 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       const failed = (s.exit?.code ?? 0) !== 0;
       const gone = Boolean(s.gone);
       // Rebuilt only when what it says changes, so a refresh never resets a hover or a press on it.
-      const signature = gone ? `${s.id}:gone` : `${s.id}:${s.exit?.code ?? 0}`;
+      const signature = gone ? `${s.id}:gone:${s.exit?.code ?? ""}` : `${s.id}:${s.exit?.code ?? 0}`;
       if (strip.dataset.signature !== signature) {
         strip.dataset.signature = signature;
         strip.dataset.result = gone ? "ended" : failed ? "fail" : "ok";
         strip.setAttribute("aria-label", gone ? `${s.name} ended` : `${s.name} exited with code ${s.exit?.code ?? 0}`);
         const mark = el("span", "ui-mark");
         mark.dataset.mark = gone ? "ended" : failed ? "fail" : "ok";
-        const text = el("span", "cl-sx-strip-text", gone ? "Session ended" : `Exited ${s.exit?.code ?? 0}`);
+        const text = el("span", "cl-sx-strip-text", gone ? `Session ended${s.exit ? ` · Exit ${s.exit.code}` : ""}` : `Exited ${s.exit?.code ?? 0}`);
         const again = el("button", "cl-sx-again");
         again.type = "button";
         if (gone) {

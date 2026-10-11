@@ -23,7 +23,11 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     return;
   }
   if (m.kind === "terminal") {
-    const binding = cx.adapters.sessions.bind(m, { view: rec.owner.view.id, changed: () => {
+    const binding = cx.adapters.sessions.bind(m, { view: rec.owner.view.id, ...(cx.adapters.inventory ? { showSessions: (event?: MouseEvent) => {
+      // The header's existing manager owns lazy loading, host selection and focus.
+      const anchor = rec.card.root.querySelector<HTMLButtonElement>('[data-action="sessions"]');
+      if (anchor) cx.sessionUi?.toggleManager(rec, anchor, event?.detail === 0 ? "keyboard" : "pointer");
+    } } : {}), changed: () => {
       cx.store.changed();
       // A session id the window just learned (a new shell was created on the server): the inventory knows it is open.
       if (m.sessionId) cx.adapters.inventory?.attach(m.host, m.sessionId, m.session ? { name: m.session } : undefined);

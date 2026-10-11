@@ -1,0 +1,20 @@
+Running as unit: run-p3880312-i41587020.scope; invocation ID: 827b28f5b75c4e6cbf4685e9b2f7159d
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.93s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal_server-f8238eea472c7978)
+
+running 11 tests
+test ca_handoff::shipping_tests::shipping_restart_reload_rollback_and_cold_start ... ignored, explicit shipping-binary integration/benchmark; set INFRATERNAL_TEST_BINARY
+test ca_handoff::shipping_tests::shipping_child ... ok
+test ca_handoff::tests::exec_child ... ok
+test ca_handoff_binary::tests::marker_is_an_exact_versioned_note_not_a_byte_substring ... ok
+test ca_handoff::tests::truncated_wrong_generation_and_wrong_version_leave_successor_locked ... ok
+test ca_handoff::tests::serialized_seed_frame_is_locked_and_excluded_from_core_dumps ... ok
+test ca_handoff::tests::socketpair_preserves_unlock_and_cold_start_still_locks ... ok
+test ca_handoff::tests::failed_null_open_or_duplication_closes_private_stdin ... ok
+test ca_handoff::tests::real_exec_retains_unlock_but_another_process_cannot_import_the_channel ... ok
+test ca_handoff::tests::real_exec_failures_and_killed_receiver_never_unlock_a_cold_successor ... ok
+test ca_handoff::tests::parser_property_corpus_is_bounded_and_never_accepts_trailing_bytes ... ok
+
+test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 298 filtered out; finished in 0.49s
+

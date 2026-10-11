@@ -1,4 +1,5 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
+import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { plainCloseReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
@@ -54,6 +55,8 @@ interface GhosttyActivityControls {
 }
 
 export interface TerminalHooks {
+  /** Return true when a product surface presents the refusal and its session-list action. */
+  onOpenRefused?: (message: string, sessionList: boolean) => boolean;
   /** Only a public session id; writer/resume capabilities remain in memory. */
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
@@ -64,7 +67,7 @@ export interface TerminalHooks {
    * The host no longer has this terminal's session (the server's final Close 4404). The terminal has stopped
    * attaching; the window shows the ended state. Every other close stays transient and retries.
    */
-  onSessionGone?: () => void;
+  onSessionGone?: (status?: number) => void;
   onInput?: (data: string, at: number, sequence: bigint) => boolean | void;
   onTrace?: (keyId: string, hop: TerminalTraceHop, at: number) => void;
   onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint) => void;
@@ -107,6 +110,8 @@ export type TerminalTraceHop =
   | "prediction";
 
 export interface TerminalConfig {
+  /** Readable label for refusal guidance; hostId remains the routing authority. */
+  hostName?: string;
   host: HTMLElement;
   /** Stage that follows the visual viewport when iOS opens its on-screen keyboard. */
   screen?: HTMLElement;
@@ -247,7 +252,8 @@ export class TerminalClient {
   /** Off screen: no drawing and no canvas backing store (see `setSuspended`). */
   private suspended = false;
   private closed = false;
-  private pendingExit: { status: number; finalSeq: bigint } | undefined;
+  /** Saved status survives reconnect until the final Close; a live exit still owns its paint barrier. */
+  private pendingExit: { status: number; finalSeq: bigint; retired?: boolean } | undefined;
   private exitReported = false;
   /** The server's final answer that the session is gone: no attach is ever sent for it again. */
   private sessionGone = false;
@@ -708,7 +714,7 @@ export class TerminalClient {
   private streamHandler(): StreamHandler {
     return {
       onSocketOpen: (resuming) => {
-        if (this.closed || this.pendingExit || this.sessionGone) return;
+        if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone) return;
         this.cancelStreamRetry();
         this.connectionIsResume = this.sessionId !== undefined;
         if (this.sessionId && resuming) {
@@ -719,7 +725,7 @@ export class TerminalClient {
         }
       },
       onWelcome: (resumed) => {
-        if (this.closed || this.pendingExit || this.sessionGone) return;
+        if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone) return;
         this.cancelStreamRetry();
         // A connection the server does not know starts every writer at zero, like a page reload.
         if (!resumed && this.hasAttached) this.restartCursors();
@@ -782,10 +788,12 @@ export class TerminalClient {
             const status = notice.status as number;
             if (status < -2147483648 || status > 2147483647) throw new Error("invalid status");
             const finalSeq = BigInt(notice.final_seq as number);
-            // Exit follows every final Output/Snapshot on this ordered stream.
-            if (finalSeq !== this.receivedOutSeq) throw new Error("exit cursor mismatch");
-            if (this.pendingExit && (this.pendingExit.status !== status || this.pendingExit.finalSeq !== finalSeq)) throw new Error("changed exit");
-            this.pendingExit = { status, finalSeq };
+            // Live exits follow all final bytes; a saved exit proves status without a repaint.
+            if (notice.retired !== undefined && typeof notice.retired !== "boolean") throw new Error("invalid retirement");
+            const retired = notice.retired === true;
+            if (retired ? finalSeq < this.receivedOutSeq : finalSeq !== this.receivedOutSeq) throw new Error("exit cursor mismatch");
+            if (this.pendingExit && (this.pendingExit.status !== status || this.pendingExit.finalSeq !== finalSeq || (this.pendingExit.retired === true) !== retired)) throw new Error("changed exit");
+            this.pendingExit = { status, finalSeq, retired };
             this.finishExit();
           } else {
             throw new Error("unknown terminal notice");
@@ -817,13 +825,13 @@ export class TerminalClient {
     if (this.attached) this.conn.streamAttached(false);
     this.attached = false;
     this.attachRequested = false;
-    if (this.closed || this.pendingExit || this.sessionGone || this.streamRetryTimer !== 0) return;
+    if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone || this.streamRetryTimer !== 0) return;
     if (performance.now() - this.attachedAt >= STABLE_CONNECTION_MS) this.streamRetryAttempt = 0;
     this.config.hooks?.onDisconnected?.(false);
     const delay = reconnectDelay(this.streamRetryAttempt++);
     this.streamRetryTimer = window.setTimeout(() => {
       this.streamRetryTimer = 0;
-      if (this.closed || this.pendingExit || this.sessionGone || !this.conn.isWelcomed) return;
+      if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone || !this.conn.isWelcomed) return;
       // Reuse the stream id: the server's durable writer owns the acknowledged
       // input cursor. A new stream would start a different writer at zero.
       this.connectionIsResume = true;
@@ -856,9 +864,12 @@ export class TerminalClient {
       } catch {
         this.protocolFailure("terminal.open returned an invalid session id");
       }
-    }, () => {
+    }, (error: unknown) => {
       this.openCallSent = false;
-      if (!this.closed && this.conn.isOpen) this.setStatus("The server could not open this terminal.");
+      if (!this.closed && this.conn.isOpen) {
+        const refusal = terminalRefusal(error, this.config.hostName);
+        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList)) this.setStatus(refusal.message);
+      }
     });
   }
 
@@ -957,7 +968,7 @@ export class TerminalClient {
     this.attachRequested = false;
     // The server keeps absorbing this stream's in-flight frames until this Close (contracts/wire.md §4).
     this.conn.closeStream(this.streamId);
-    if (this.config.hooks?.onSessionGone) { this.setStatus(""); this.config.hooks.onSessionGone(); }
+    if (this.config.hooks?.onSessionGone) { this.setStatus(""); this.config.hooks.onSessionGone(this.pendingExit?.status); }
     else this.setStatus("This session has ended. Open a new shell to continue.");
   }
 
@@ -1186,7 +1197,7 @@ export class TerminalClient {
   /** Wait for paint callbacks so a clean exit never discards its final bytes. */
   private finishExit(): void {
     const exit = this.pendingExit;
-    if (!exit || this.exitReported || this.lastOutSeq < exit.finalSeq || this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
+    if (!exit || exit.retired || this.exitReported || this.lastOutSeq < exit.finalSeq || this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
     this.exitReported = true;
     this.cancelStreamRetry();
     this.setStatus(exit.status === 0 ? "Shell exited." : `Shell exited with status ${exit.status}. Open a new shell to continue.`);

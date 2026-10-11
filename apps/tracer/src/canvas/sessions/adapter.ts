@@ -51,7 +51,7 @@ export interface HostEntry {
 
 export interface SessionService {
   /** Binds a terminal window's model to its session (opening one when the model names none). */
-  bind(model: WindowModel, env: { view: ViewId; /** The model gained something worth saving (a session id). */ changed(): void; /** The shell exited after its final output painted. */ exited?(status: number): void }): SessionBinding;
+  bind(model: WindowModel, env: { view: ViewId; /** Open the existing window-header session picker. */ showSessions?: (event?: MouseEvent) => void; /** The model gained something worth saving (a session id). */ changed(): void; /** The shell exited after its final output painted. */ exited?(status: number): void }): SessionBinding;
   /** A model for a new shell on `host` (a split, a sidebar open, the palette). The shell starts when it is bound. */
   open(host: string, options?: { container?: string; from?: WindowModel; /** An existing session of the host to show (the sidebar, the palette, the manager). */ session?: string }): WindowModel;
   /** Hosts the person can open shells on. */

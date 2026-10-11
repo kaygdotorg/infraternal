@@ -1,0 +1,12 @@
+Validated code head: 431ec8a743427a40b7509cd32d7fe712be6eca80
+Comparison ref: origin/tls-session-prod = 5d02b8d6b9f882695d92e1d17f80abb8f6af2e06
+tls-session-prod: bytes=19991456 sha256=9064a9c569cd47e82e481e64315eafd9884ec0808cbddc3d7efa3c980f18aa8e
+ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+PT_INTERP: absent
+prod-batch-final: bytes=20064944 sha256=a265bc649927e8b7654228a30a705fec3a839aa1e4c7f7fbc67a31ece9c27beb
+ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+PT_INTERP: absent
+delta_bytes=73488
+fork_fix_delta_bytes=64
+unchanged_size_ceiling_bytes=16404816
+ceiling_overrun_bytes=3660128

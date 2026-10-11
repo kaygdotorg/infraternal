@@ -51,7 +51,11 @@ test("three stacked windows, the middle focused and locked", async () => {
   await expect(windows()).toHaveCount(2);
   await windows().nth(1).locator('[data-action="split-down"]').evaluate((b) => (b as HTMLElement).click());
   await expect(windows()).toHaveCount(3);
-  await page.waitForTimeout(1500);
+  // A mounted canvas can precede its real attachment. Wait for output from all
+  // three live streams before focusing: a late initial attach focuses its input.
+  await expect.poll(() => server.bridges.filter((bridge) => !bridge.closed).some((bridge) =>
+    [...bridge.attached.keys()].filter((id) => (bridge.output.get(id)?.length ?? 0) > 0).length === 3,
+  )).toBe(true);
   // Tall windows, so the column is a strip that scrolls (as when the person has stacked and resized them).
   await page.evaluate(() => { for (const w of document.querySelectorAll<HTMLElement>('.cl[data-view="console"] .ui-window')) { w.style.height = "560px"; w.style.flex = "none"; } });
   await expect.poll(() => page.evaluate(() => { const c = document.querySelector<HTMLElement>('.cl[data-view="console"] .cl-col')!; return c.scrollHeight - c.clientHeight; })).toBeGreaterThan(200);

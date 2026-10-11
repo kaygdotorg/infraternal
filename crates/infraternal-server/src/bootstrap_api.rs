@@ -155,9 +155,8 @@ async fn authenticate_headers<'a>(
     {
         return Err(StatusCode::FORBIDDEN);
     }
-    if headers.get_all(header::COOKIE).iter().count() != 1 {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    // HTTP/2 may split unrelated cookies into separate fields. The shared reader
+    // enforces capability uniqueness across the entire request.
     let Some(token) = crate::websocket::session_cookie(headers) else {
         return Err(StatusCode::UNAUTHORIZED);
     };

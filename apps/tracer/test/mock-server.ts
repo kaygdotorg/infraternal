@@ -95,6 +95,10 @@ let selectedFixture: Uint8Array | undefined;
 let session = createSession();
 /** Sessions the "host" no longer has (`/__mock/end-session`), and every AttachTerm seen, for the dead-session spec (#158). */
 const goneSessions = new Set<string>();
+/** Retained, content-free host exit records; only the retired-exit fixture creates these. */
+const retiredSessions = new Map<string, { status: number; finalSeq: number }>();
+/** Interrupt exactly the first final answer to test recovery between its two ordered frames. */
+const interruptedRetirements = new Set<string>();
 let attachCount = 0;
 const traceEvents: TraceEvent[] = [];
 
@@ -460,6 +464,16 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   }
   // The host loses the current session (its shim is gone), and the link drops, as when the host's infraternal
   // agent restarts. The page reconnects and its attach gets the server's final answer (#158).
+  if (request.method === "POST" && (url.pathname === "/__mock/retire-session" || url.pathname === "/__mock/retire-session-drop-close")) {
+    const body = await readJson(request);
+    const status = body?.status;
+    if (typeof status !== "number" || !Number.isInteger(status) || status < -2147483648 || status > 2147483647) return sendJson(response, 400, {});
+    retiredSessions.set(session.sessionIdText, { status, finalSeq: session.outputLength + 42 });
+    if (url.pathname.endsWith("drop-close")) interruptedRetirements.add(session.sessionIdText);
+    goneSessions.add(session.sessionIdText);
+    for (const connection of connections) connection.socket.close(1011, "test-double host restarted");
+    return sendJson(response, 200, { session_id: session.sessionIdText });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/end-session") {
     goneSessions.add(session.sessionIdText);
     for (const connection of connections) connection.socket.close(1011, "test-double host restarted");
@@ -704,6 +718,12 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
       attachCount += 1;
       if (goneSessions.has(uuidText(frame.sessionId))) {
         connection.goneStreams.add(streamId);
+        const exit = retiredSessions.get(uuidText(frame.sessionId));
+        if (exit) sendFrame(connection.socket, streamId, { type: "Event", subId: 0, eventJson: new TextEncoder().encode(JSON.stringify({ type: "terminal.exited", session_id: uuidText(frame.sessionId), status: exit.status, final_seq: exit.finalSeq, retired: true })) });
+        if (interruptedRetirements.delete(uuidText(frame.sessionId))) {
+          connection.socket.close(1011, "test-double interrupted final answer");
+          return;
+        }
         sendFrame(connection.socket, streamId, { type: "Close", code: CLOSE_SESSION_GONE, reason: "session ended" });
         return;
       }
@@ -978,6 +998,8 @@ function resetMockState(): void {
   socketOpenCount = 0;
   socketCloseCount = 0;
   goneSessions.clear();
+  retiredSessions.clear();
+  interruptedRetirements.clear();
   attachCount = 0;
   traceEvents.length = 0;
   session = createSession();

@@ -1,0 +1,30 @@
+Running as unit: run-p1540348-i47631811.scope; invocation ID: d2ecf404bd5a4f8bbe21e11dfb1cd840
+   Compiling infraternal-shim v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/infraternal-shim)
+   Compiling hyper-util v0.1.21
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/infraternal-mesh)
+   Compiling webauthn-rs-core v0.5.5
+   Compiling infraternal-server v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/infraternal-server)
+   Compiling axum v0.8.9
+   Compiling axum-server v0.8.0
+   Compiling webauthn-rs v0.5.5
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/plugins/mesh)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/plugins/host-facts)
+   Compiling infraternal-protocol v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/infraternal-protocol)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/plugins/ssh)
+   Compiling infraternal-plugin-backup v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/plugins/backup)
+   Compiling infraternal-plugin-relay v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/plugins/relay)
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/infraternal-plugin-api)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/.cache/codex-scratch/prod-batch/baseline/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 06s
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_agent-42abd22cf9d77027)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_mesh-850732030b85431f)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_plugin_api-3fd14f2bc447abb6)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_plugin_backup-3ecef0badd3fbed3)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_plugin_host_facts-b4ecdc58024bdef7)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_plugin_mesh-511a4bf9a22ffb59)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_plugin_relay-b92e7fc872866129)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_plugin_ssh-23b3a57664c6bc97)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_protocol-e4eeb92d35d69a68)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_server-0a5862be3bc4afdd)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/dev-target/debug/deps/infraternal_shim-67ffc9c8d51fcf5c)

@@ -222,7 +222,7 @@ test("a host that does not answer: what happened, Retry, and the one-line instal
   await page.locator(".ah-row[data-host='archive-01']").click();
   await inWizard(page, "Continue").click();
   await expect(page.getByRole("heading", { name: "archive-01 isn't answering" })).toBeVisible({ timeout: 15_000 });
-  await page.getByText("Details").click();
+  await wizard(page).locator(".ah-details summary").click();
   await expect(page.locator(".ah-details pre")).toContainText("The server said: No SSH answer on port 22");
   await inWizard(page, "Install from the host").click();
   await expect(page.locator(".ah-install .ui-kv-value")).toContainText("curl -fsSL");

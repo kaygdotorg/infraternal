@@ -263,7 +263,7 @@ async fn quic_session(
                 _ = connection.closed() => return Err(io::ErrorKind::BrokenPipe.into()),
                 terminal = &mut next => {
                     let channel = NativeChannel::terminal(terminal?)?;
-                    if terminals.len() >= crate::sessions::MAX_SESSIONS { channel.retire(); break; }
+                    if terminals.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS { channel.retire(); break; }
                     let state = state.clone();
                     terminals.spawn(async move { let _ = daemon::run_bound_terminal(&channel,state).await; });
                     break;

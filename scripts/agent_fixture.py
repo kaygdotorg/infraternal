@@ -34,6 +34,15 @@ def fixture_state(label):
     return state
 
 
+def shim_socket_count(pid, path):
+    """Count a fixture's bound endpoints without ptrace access to protected FDs [217]."""
+    # Accepted Unix sockets keep the listener's pathname in the kernel table.
+    # A unique private rendezvous excludes every unrelated namespace endpoint;
+    # count only that path, never weaken dumpability or replace detach with sleep.
+    return sum(len(fields := line.split(maxsplit=7)) == 8 and fields[7] == str(path)
+               for line in Path(f'/proc/{pid}/net/unix').read_text().splitlines())
+
+
 def process_cpu_weight(pid):
     """Read the actual cgroup weight for one fixture-owned process."""
     group = next(line[3:] for line in Path(f'/proc/{pid}/cgroup').read_text().splitlines()
@@ -378,35 +387,47 @@ class AckBarrier:
         self.on_disconnect = on_disconnect
         self.threshold = None
         self.phase = {}
-        self.active = ()
+        self.active = set()
+        self.workers = set()
+        self.active_lock = threading.Lock()
         self.stopped = False
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
-    def forward(self, source, destination, direction):
+    @staticmethod
+    def classify(connection, direction, body):
+        """Classify before forwarding Attach so its reply cannot race ownership."""
+        if direction == 'input' and body[0] == 0x02:
+            # Owner State(0,0) confirms ownership, not a data writer's cursor.
+            connection['owner'] = struct.unpack('<Q', body[1:9])[0] == 8
+
+    def forward(self, source, destination, direction, connection):
         try:
             while not self.stopped:
-                self.phase[direction] = 'read'
+                if not connection['owner']:
+                    self.phase[direction] = 'read'
                 prefix = exact(source, 4)
                 length = struct.unpack('<I', prefix)[0]
                 assert 0 < length <= 1024 * 1024, 'oversized shim proxy frame'
                 body = exact(source, length)
-                if self.on_frame is not None:
+                self.classify(connection, direction, body)
+                if not connection['owner'] and self.on_frame is not None:
                     self.on_frame(direction, body)
                 if direction == 'output' and body[0] == 1 and self.caps_mask is not None:
                     caps = struct.unpack('<Q', body[3:11])[0] & self.caps_mask
                     body = body[:3] + struct.pack('<Q', caps) + body[11:]
-                if body[0] == self.kind and self.threshold is not None and struct.unpack('<Q', body[1:9])[0] >= self.threshold:
+                if not connection['owner'] and body[0] == self.kind and self.threshold is not None and struct.unpack('<Q', body[1:9])[0] >= self.threshold:
                     self.phase[direction] = 'barrier'
                     self.held.set()
                     assert self.release.wait(20)
                     self.threshold = None
-                self.phase[direction] = f'forward type={body[0]:02x} bytes={length}'
+                if not connection['owner']:
+                    self.phase[direction] = f'forward type={body[0]:02x} bytes={length}'
                 destination.sendall(prefix + body)
         except (EOFError, BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
-            if direction == 'input' and self.on_disconnect is not None:
+            if direction == 'input' and not connection['owner'] and self.on_disconnect is not None:
                 self.on_disconnect()
             # Closing either leg interrupts its companion pump, including a
             # partial frame read/write, before the next connection is accepted.
@@ -416,35 +437,58 @@ class AckBarrier:
                 except OSError:
                     pass
 
+    def serve(self, peer):
+        upstream = socket.socket(socket.AF_UNIX)
+        connection = dict(owner=False)
+        try:
+            with peer, upstream:
+                with self.active_lock:
+                    self.active.update((peer, upstream))
+                if self.stopped:
+                    return
+                upstream.connect(str(self.real))
+                # Each connection retains the two bounded duplex pumps. Separate
+                # owner/data connections must progress concurrently; otherwise
+                # the ownership-installation barrier waits behind its data link.
+                outbound = threading.Thread(target=self.forward,
+                    args=(peer, upstream, 'input', connection), daemon=True)
+                outbound.start()
+                self.forward(upstream, peer, 'output', connection)
+                outbound.join()
+        except (EOFError, BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            with self.active_lock:
+                self.active.difference_update((peer, upstream))
+                self.workers.discard(threading.current_thread())
+
     def run(self):
         while not self.stopped:
             try:
                 peer, _ = self.listener.accept()
-                upstream = socket.socket(socket.AF_UNIX)
-                with peer, upstream:
-                    self.active = (peer, upstream)
-                    upstream.connect(str(self.real))
-                    # Two bounded frame pumps prevent the proxy itself creating
-                    # a duplex deadlock while the daemon sends a large replay
-                    # and the shim simultaneously sends retained output.
-                    outbound = threading.Thread(target=self.forward, args=(peer, upstream, 'input'), daemon=True)
-                    outbound.start()
-                    self.forward(upstream, peer, 'output')
-                    outbound.join()
-                    self.active = ()
+                worker = threading.Thread(target=self.serve, args=(peer,), daemon=True)
+                with self.active_lock:
+                    self.workers.add(worker)
+                worker.start()
             except (EOFError, BrokenPipeError, ConnectionResetError, OSError):
                 continue
 
     def close(self):
         self.stopped = True
         self.release.set()
-        for sock in (*self.active, self.listener):
+        with self.active_lock:
+            active = tuple(self.active)
+        for sock in (*active, self.listener):
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
         self.listener.close()
         self.thread.join(2)
+        with self.active_lock:
+            workers = tuple(self.workers)
+        for worker in workers:
+            worker.join(2)
 
 
 def cleanup(state):

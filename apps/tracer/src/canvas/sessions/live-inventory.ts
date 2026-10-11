@@ -20,7 +20,7 @@ interface Stored { host?: string; id: string; name: string; pinned: boolean; fre
 
 export interface LiveInventory extends SessionInventory {
   /** The server answered that the host no longer has this session (#158): it becomes exited and `gone`. */
-  gone(host: string, id: string): void;
+  gone(host: string, id: string, status?: number): void;
   dispose(): void;
 }
 
@@ -85,9 +85,9 @@ export function createLiveInventory(options: { accountId: string; host: string }
     runAgain() { /* not offered */ },
     dismiss() { /* not offered: an ended session is forgotten at the next load (it is not saved) */ },
     // A final host answer stays exited even when another window selects the session.
-    gone(host, id) {
+    gone(host, id, status) {
       const s = only(host, id) && records.get(id);
-      if (s) { s.state = "exited"; s.gone = true; save(); emit(); }
+      if (s) { s.state = "exited"; s.gone = true; if (status !== undefined) s.exit = { code: status }; save(); emit(); }
     },
     sizedFor: (): DeviceInfo | undefined => undefined,
     takeOver() { /* every window of this account is this device until #99 */ },

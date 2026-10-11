@@ -31,5 +31,11 @@ pub const REMOTE_WRITER_BINDING: u64 = 1 << 1;
 pub const LIVE_RENEWAL: u64 = 1 << 2;
 /// Bound for a single decoded control reply or renewal proof.
 pub const MAX_CONTROL_JSON: usize = 32_768;
-/// Per-host terminal bound shared by local dispatch and native transport credit.
-pub const MAX_TERMINAL_STREAMS: usize = 128;
+/// Per-connection relay metadata reserve, independent of host session admission.
+/// At 200 idle relay tasks the weighted release measurement was 5,140 private
+/// bytes per stream, including paired fixture overhead. A 32 KiB allowance gives
+/// over six times that measured cost inside a 4 MiB reserve (D214), #151.
+/// Payload storage is separately bounded by frame, queue and QUIC byte limits;
+/// this reserve does not claim to include full payload buffers. u32 stream IDs
+/// retain their protocol range; this limits concurrent streams on one connection.
+pub const MAX_TERMINAL_STREAMS: usize = (4 * 1024 * 1024) / (32 * 1024);

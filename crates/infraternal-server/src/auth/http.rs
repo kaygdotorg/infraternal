@@ -103,18 +103,7 @@ struct Revoke {
 }
 
 pub(crate) fn cookie(headers: &HeaderMap) -> super::Result<&str> {
-    let cookies = headers
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .ok_or(Error::Denied)?;
-    let mut matches = cookies
-        .split(';')
-        .filter_map(|c| c.trim().strip_prefix("__Host-infraternal="));
-    let value = matches.next().ok_or(Error::Denied)?;
-    if matches.next().is_some() || value.len() != 43 {
-        return Err(Error::Denied);
-    }
-    Ok(value)
+    super::cookies::capability(headers, "__Host-infraternal=").ok_or(Error::Denied)
 }
 fn body<T: serde::de::DeserializeOwned>(value: Value) -> super::Result<T> {
     serde_json::from_value(value).map_err(|_| Error::Invalid)

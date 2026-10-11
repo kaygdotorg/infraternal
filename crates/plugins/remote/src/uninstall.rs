@@ -215,6 +215,7 @@ impl AgentPlugin for UninstallPlugin {
         }
         let plan = serde_json::to_vec(&self.context).map_err(|_| PluginError::Rejected)?;
         let mut command = Command::new("systemd-run");
+        infraternal_shim::prepare_child(command.as_std_mut());
         if self.uid != 0 {
             command.arg("--user");
         }
@@ -315,6 +316,7 @@ async fn retire_shim(path: &Path, uid: u32) -> io::Result<()> {
 }
 async fn manager(paths: &Layout, args: &[&str]) -> io::Result<()> {
     let mut command = Command::new("systemctl");
+    infraternal_shim::prepare_child(command.as_std_mut());
     if paths.user {
         command.arg("--user");
     }
