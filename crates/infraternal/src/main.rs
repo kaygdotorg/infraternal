@@ -6,6 +6,8 @@ mod embedded_cli;
 mod host_remove;
 mod install;
 mod output;
+#[cfg(feature = "release")]
+mod release_cli;
 #[cfg(feature = "remote")]
 mod remote;
 mod remote_server;
@@ -130,10 +132,34 @@ struct ServerArgs {
 
 #[derive(Debug, Subcommand)]
 enum ServerAction {
+    #[cfg(feature = "release")]
+    #[command(about = infraternal_plugin_release::descriptor::CHANNEL_SET.summary,
+              long_about = infraternal_plugin_release::descriptor::CHANNEL_SET.help())]
+    Channel {
+        #[arg(value_parser = ["stable", "edge"])]
+        channel: Option<String>,
+        /// Explicitly acknowledge that edge builds are unreviewed.
+        #[arg(long)]
+        yes: bool,
+    },
+    #[cfg(feature = "release")]
+    #[command(about = infraternal_plugin_release::descriptor::LATEST.summary)]
+    Release {
+        #[command(subcommand)]
+        action: ReleaseAction,
+    },
     /// Write and enable a systemd unit for this server configuration.
     Install(InstallArgs),
     /// Print the initial owner setup capability through the private local control socket.
     SetupToken,
+}
+
+#[cfg(feature = "release")]
+#[derive(Debug, Subcommand)]
+enum ReleaseAction {
+    #[command(about = infraternal_plugin_release::descriptor::LATEST.summary,
+              long_about = infraternal_plugin_release::descriptor::LATEST.help())]
+    Latest,
 }
 
 #[derive(Debug, Args)]
@@ -308,6 +334,10 @@ fn run_server(mut args: ServerArgs, json: bool) -> ExitCode {
         );
     };
     match args.action.as_ref() {
+        #[cfg(feature = "release")]
+        Some(command @ (ServerAction::Channel { .. } | ServerAction::Release { .. })) => {
+            release_cli::run(&runtime, &args.data, command, json)
+        }
         Some(ServerAction::Install(options)) => match install::install(&args, options) {
             Ok(message) => {
                 if json {
