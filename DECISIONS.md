@@ -2042,3 +2042,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      desktops and app windows), so people who want control get it. Good,
      easy defaults; room to geek out. It lives with the other host settings
      (Settings → Hosts, "Connections").
+234. **An inbox for pending actions (owner, 2026-10-11):**
+     - **Where:** a persistent floating card at the bottom left of the
+       sidebar, inside the sidebar's bounds with minimal padding,
+       responsive. It disappears entirely when it has no items.
+     - **What goes in:** things that wait on the person, never things
+       hidden in Settings. First item: the host-connection unlock (D168,
+       D217) for administrators.
+     - **Toasts first:** while an item waits, every sign-in by someone who
+       can act on it shows a persistent toast with the action. When the
+       toast is dismissed or expires, the item lives in the inbox. Once the
+       action is done (the CA is unlocked), the toast stops appearing for
+       every administrator and the item leaves the inbox on its own.
+     - Settings keeps the state and the action too, as a second place,
+       never the only one.
