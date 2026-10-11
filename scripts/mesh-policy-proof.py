@@ -145,6 +145,7 @@ class Campaign:
 
     def apply(self, policy):
         self.version += 1
+        self.last_apply_us = []
         for proc, template in zip((self.left, self.right), self.chunks):
             chunk = copy.deepcopy(template)
             chunk["version"] = self.version
@@ -152,7 +153,9 @@ class Campaign:
             for peer in chunk["upserted"].values():
                 peer["inbound"] = policy
                 peer["outbound"] = policy
-            assert proof.request(proc, chunk)["applied"]
+            reply = proof.request(proc, chunk)
+            assert reply["applied"]
+            self.last_apply_us.append(reply["apply_us"])
 
     def record(self, name, expected, actual):
         row = {"test": name, "expected": expected, "actual": actual,
@@ -398,6 +401,17 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
         started = time.monotonic_ns()
         self.apply("All")
         apply_us = (time.monotonic_ns() - started) // 1000
+        apply_node_us = self.last_apply_us
+        saved = []
+        for prefix in [[], ["nsenter", "-t", str(self.child.pid), "-n"]]:
+            if self.fallback:
+                for tool in ["iptables-nft", "ip6tables-nft"]:
+                    rules = proof.run(*prefix, f"{tool}-save")
+                    saved.append(([*prefix, f"{tool}-restore"], rules))
+            else:
+                rules = proof.run(*prefix, "nft", "-s", "list", "table", "inet", "infraternal_mesh")
+                saved.append(([*prefix, "nft", "-f", "-"],
+                              "delete table inet infraternal_mesh\n" + rules))
         if self.fallback:
             counts = {tool: sum(line.startswith("-A IFM_") for line in self.remote(tool, "-S").splitlines())
                       for tool in ["iptables-nft", "ip6tables-nft"]}
@@ -411,7 +425,10 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
         for iteration in range(3):
             for policy_on in [True, False]:
                 if policy_on:
-                    self.apply("All")
+                    # Restore the saved namespace-owned rules directly: unchanged
+                    # configuration replay intentionally skips a filter rebuild.
+                    for command, rules in saved:
+                        subprocess.run(command, input=rules, text=True, capture_output=True, check=True)
                 elif self.fallback:
                     for tool in ["iptables-nft", "ip6tables-nft"]:
                         for chain in ["IFM_IN", "IFM_OUT", "IFM_DELIVERY", "IFM_GUARD"]:
@@ -442,7 +459,7 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
         print(json.dumps({"measurement": "policy_path", "machine": "infraternal-dev",
             "kernel": proof.run("uname", "-r").strip(), "cpus": proof.run("getconf", "_NPROCESSORS_ONLN").strip(),
             "profile": "debug fixture; kernel packet path", "peers_per_node": 1000,
-            "live_pairs": 1, "apply_pair_us": apply_us, "rules": counts,
+            "live_pairs": 1, "apply_pair_us": apply_us, "apply_node_us": apply_node_us, "rules": counts,
             "samples": samples}), flush=True)
 
     def close(self):
