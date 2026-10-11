@@ -149,10 +149,11 @@ export function branchedMenu(
   host.setAttribute("role", "tree");
   host.setAttribute("aria-label", "Hosts and sessions");
 
-  const trunk = el("div", "bm-trunk");
-  trunk.setAttribute("aria-hidden", "true");
-  trunk.append(el("span", "bm-marker"));
-  host.append(trunk, ...sections.map(makeSection));
+  // The trunk line itself is drawn by each section (`.bm-sec::before`, see style.css), so it belongs to the content's
+  // own boxes and runs exactly to the last row however long the list is. Only the moving marker is a child of the host.
+  const markerEl = el("span", "bm-marker");
+  markerEl.setAttribute("aria-hidden", "true");
+  host.append(markerEl, ...sections.map(makeSection));
 
   const marker = host.querySelector<HTMLElement>(".bm-marker")!;
   let active = opts.active;
@@ -181,7 +182,8 @@ export function branchedMenu(
       };
     });
     const heads = host.querySelectorAll<HTMLElement>(".bm-sec .bm-head");
-    const headMetrics = [...heads].map((head) => ({ head, top: head.offsetTop, height: head.offsetHeight }));
+    // A section is the head's offset parent (it draws a piece of the trunk), so the head's top is relative to it.
+    const headMetrics = [...heads].map((head) => ({ head, top: head.offsetTop + (head.offsetParent as HTMLElement).offsetTop, height: head.offsetHeight }));
     const markerHeight = marker.offsetHeight;
 
     for (const { section, leaves, x, width, height, centers } of sections) {
@@ -190,11 +192,14 @@ export function branchedMenu(
       const lit = svg.querySelector<SVGPathElement>(".bm-lit")!;
       svg.setAttribute("width", String(width));
       svg.setAttribute("height", String(height));
-      dim.replaceChildren(...centers.map((center) => {
-        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        path.setAttribute("d", pathFor(x, center));
-        return path;
-      }));
+      // One path for the whole group: a stroke is composited once however much its subpaths overlap. One path per leaf,
+      // each running from the top, stacked their translucent strokes, so the line was opaque at the top of a long list
+      // and faded toward its end. The vertical run is drawn once, to the last connector; each leaf adds only its curve.
+      const dimPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      dimPath.setAttribute("d", centers.length
+        ? `M ${x} 0 V ${centers.at(-1)! - RADIUS} ${centers.map((center) => `M ${x} ${center - RADIUS} Q ${x} ${center} ${x + RADIUS} ${center} H ${x + RADIUS + STUB}`).join(" ")}`
+        : "");
+      dim.replaceChildren(dimPath);
       const mineIndex = leaves.findIndex((leaf) => leaf.dataset.id === active);
       lit.style.transition = animate && !reduced() ? `opacity 150ms ${EASE}` : "none";
       // Cancelling by handle: `getAnimations()` flushes style for the whole document.

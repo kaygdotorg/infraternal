@@ -24,6 +24,7 @@ import type { TerminalClient, TerminalHooks } from "../../terminal";
 import { el } from "../dom";
 import { createStatusRelay } from "../status";
 import type { WindowModel } from "../model/types";
+import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { onDemand, whenIdle } from "../../on-demand";
 import type { HostEntry, SessionBinding, SessionService } from "./adapter";
 import type { ScreenCache } from "./screen-cache.on-demand";
@@ -33,8 +34,8 @@ export interface LiveSessionsOptions {
   connection: MuxConnection;
   /** The sockets terminals share (the server takes 32 terminals per socket); without it every terminal uses `connection`. */
   pool?: ConnectionPool;
-  /** The embedded host: its name and the person's login. Remote hosts are registered only after admission. */
-  host: { name: string; user?: string };
+  /** The embedded host: its name, the person's login and, once the host has said, its system (the pill's mark). Remote hosts are registered only after admission. */
+  host: { name: string; user?: string; os?: HostPlatform };
   /** `?predict=1`: the opt-in predictive echo. */
   predictiveEcho?: boolean;
   /** Extra terminal hooks (the latency probe) for the first terminal. */
@@ -266,7 +267,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       const local = !explicit && hostName === host.name && matches.length === 0;
       return {
         id: `t-${crypto.randomUUID()}`, kind: "terminal", host: remote?.name ?? hostName,
-        ...(remote ? { hostId: remote.id, ...(remote.user ? { user: remote.user } : {}), ...(remote.os ? { os: remote.os } : {}), ...(remote.address ? { address: remote.address } : {}) } : local && host.user ? { user: host.user } : { noAccess: !local }),
+        ...(remote ? { hostId: remote.id, ...(remote.user ? { user: remote.user } : {}), ...(remote.os ? { os: remote.os } : {}), ...(remote.address ? { address: remote.address } : {}) } : local && host.user ? { user: host.user, ...(host.os ? { os: host.os } : {}) } : { noAccess: !local }),
         ...(opts?.from ? { splitOf: opts.from.id } : {}),
         ...(opts?.session ? { sessionId: opts.session } : {}),
       };

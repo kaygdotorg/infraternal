@@ -7,7 +7,7 @@
  * - Sizes follow the viewport so a snapped view fills it (`metricsFor`).
  */
 import type { ViewModel } from "../model/types";
-import { DEFAULT_SIZES, columnWidth, type WindowSizes } from "../window-sizes";
+import { DEFAULT_SIZES, columnWidth, peekWidth, type WindowSizes } from "../window-sizes";
 
 export interface Pt { x: number; y: number }
 export interface Rect { x: number; y: number; w: number; h: number }
@@ -17,11 +17,11 @@ export const CELL = 120;
 export const MARGIN = { l: 48, t: 96, r: 48, b: 48 };
 export const COLUMN_GAP = 12;
 
-export interface Metrics { colW: number; clh: number; narrow: boolean; nodeW: number; nodeH: number }
+export interface Metrics { colW: number; /** A column's width in a strip of several on a phone (neighbours peek in); equal to `colW` elsewhere. */ peekW: number; clh: number; narrow: boolean; nodeW: number; nodeH: number }
 
 /**
- * Sizes follow the viewport so a snapped view fills it: on a phone a column is the safe-area width minus a
- * sliver for each neighbour to peek in; on a desktop three columns fill the width; a column is always as tall
+ * Sizes follow the viewport so a snapped view fills it: on a phone a lone column is the safe-area width and a column in a
+ * strip of several is that width minus a sliver for each neighbour to peek in (`peekW`); on a desktop three columns fill the width; a column is always as tall
  * as the viewport (D119: windows tile the pane).
  */
 export const metricsFor = (width: number, height: number, coarse: boolean, sizes: WindowSizes = DEFAULT_SIZES): Metrics => {
@@ -30,7 +30,7 @@ export const metricsFor = (width: number, height: number, coarse: boolean, sizes
   // A view is as tall as the canvas area. It may get short (the on-screen keyboard is up): only the height changes,
   // never the width or a column count, so nothing rewraps and the camera does not scale the window down (D191).
   const clh = Math.max(120, Math.round(height));
-  return { colW, clh, narrow, nodeW: narrow ? 200 : 208, nodeH: 104 };
+  return { colW, peekW: peekWidth(width, narrow, colW, COLUMN_GAP), clh, narrow, nodeW: narrow ? 200 : 208, nodeH: 104 };
 };
 
 /** Size of the content (the tiled columns, or the graph canvas). */
@@ -84,3 +84,8 @@ export function resolve(boxes: Box[], fixedId: string): Map<string, { x: number;
 }
 
 // ---- mock people, grants and content -------------------------------------------------------------
+
+/** The default width of a column in a view of `count` columns: wider when alone, narrower when neighbours peek in. */
+export const defaultWidth = (m: Metrics, count: number): number => (count > 1 ? m.peekW : m.colW);
+/** Whether `w` is one of the default widths of `m` (a column the person never resized). */
+export const isDefaultWidth = (w: number, m: Metrics): boolean => w === m.colW || w === m.peekW;

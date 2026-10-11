@@ -1,6 +1,7 @@
 /** Placement rules of the clusters mockup: grid snapping, pushing and grant reach (src/canvas/layout/geometry.ts). */
 import { expect, test } from "bun:test";
-import { CELL, resolve, snapToGrid, type Box } from "./geometry";
+import { CELL, COLUMN_GAP, defaultWidth, isDefaultWidth, metricsFor, resolve, snapToGrid, type Box } from "./geometry";
+import { PEEK } from "../window-sizes";
 import { reach } from "../mesh/grants";
 import { INITIAL_GRANTS, TAGS } from "../mock/data";
 
@@ -46,4 +47,19 @@ test("reach follows grants through tags and keeps the relay", () => {
   // studio-mac is a member of tag:ops, which may reach build-01 and nix-cache.
   expect(reach("studio-mac", INITIAL_GRANTS, TAGS).map((r) => r.host).sort()).toEqual(["build-01", "nix-cache"]);
   expect(reach("db-never", INITIAL_GRANTS, TAGS)).toEqual([]);
+});
+
+test("a phone column in a strip leaves PEEK px of each neighbour at the edge; a lone window keeps 99%", () => {
+  const m = metricsFor(361, 700, true);
+  expect(m.colW).toBe(Math.round(361 * 0.99));
+  expect(defaultWidth(m, 1)).toBe(m.colW);
+  expect(defaultWidth(m, 3)).toBe(m.peekW);
+  // Centred, the window leaves (width - peekW) / 2 on each side: the gap between columns plus the slice.
+  expect((361 - m.peekW) / 2).toBe(COLUMN_GAP + PEEK);
+  expect(isDefaultWidth(m.colW, m) && isDefaultWidth(m.peekW, m) && !isDefaultWidth(300, m)).toBe(true);
+});
+
+test("a desktop column is the same alone and in a strip", () => {
+  const m = metricsFor(1400, 900, false);
+  expect(m.peekW).toBe(m.colW);
 });

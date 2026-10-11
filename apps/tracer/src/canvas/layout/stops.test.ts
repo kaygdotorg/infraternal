@@ -61,3 +61,10 @@ test("on a narrow screen a big graph does not shrink past where its names can be
   expect(st.lefts[0]!).toBeLessThanOrEqual(r.x);
   expect(st.cy - 852 / (2 * st.z)).toBeLessThanOrEqual(r.y);
 });
+
+test("centred stops (a phone's strip) rest every column mid-screen, the first and last included", () => {
+  const w = 317, r = { x: 48, y: 0, w: 3 * w + 24, h: 700 };
+  const st = stopsFor(view([w, w, w]), r, 361, 700, true);
+  expect(st.lefts).toHaveLength(3);
+  st.lefts.forEach((left, i) => expect(Math.abs(left + st.view / 2 - (r.x + i * (w + 12) + w / 2))).toBeLessThanOrEqual(0.5));
+});

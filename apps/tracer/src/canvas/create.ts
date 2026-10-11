@@ -149,7 +149,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     backdrop?.measure();
     const previous = state.metrics;
     const next = metricsFor(w, h, coarse.matches, sizes);
-    if (next.colW === previous.colW && next.clh === previous.clh && next.narrow === previous.narrow) {
+    if (next.colW === previous.colW && next.peekW === previous.peekW && next.clh === previous.clh && next.narrow === previous.narrow) {
       // Nothing about the windows changed (the area did): keep the framing centred, unless a flight is under way.
       if (performance.now() >= animatingUntil) { if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true); }
       return;
@@ -157,14 +157,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     const first = animate ? [...cx.views.values()].map((c) => cx.flip.measure(cx.flip.targets(c.colsEl))) : [];
     state.metrics = next;
     world.style.setProperty("--clh", `${next.clh}px`);
-    for (const c of cx.views.values()) {
-      if (c.view.layout !== "tiled") continue;
-      for (const colEl of columnEls(c.colsEl)) {
-        if (colEl.dataset.user || colEl.dataset.w !== String(previous.colW)) continue;
-        colEl.dataset.w = String(next.colW);
-        colEl.style.setProperty("--w", `${next.colW}px`);
-      }
-    }
+    for (const c of cx.views.values()) cx.view.fitWidths(c, previous);
     for (const c of cx.views.values()) cx.view.geometry(c);
     for (const c of cx.views.values()) for (const rec of c.wins.values()) rec.binding?.refit();
     if (animate) {

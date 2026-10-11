@@ -51,6 +51,12 @@ export async function createMockInventory(world: MockWorld): Promise<MockInvento
       hosts.set(h.id, copy);
     }
     top = Math.max(0, ...[...hosts.values()].flat().map((s) => s.frecency));
+    // `?shells=N` piles N more detached shells onto the first host: the long list the sidebar must scroll (test double only).
+    const extra = Number(new URLSearchParams(location.search).get("shells")) || 0;
+    const first = [...hosts.keys()][0];
+    for (let i = 0; first && i < extra; i++) {
+      hosts.get(first)!.push({ id: `shell-x${i + 1}`, name: "shell", pinned: false, state: "detached", lastOutput: "", age: "1h", viewers: 0, size: "", frecency: ++top, screen: [`kayg@${first}:~$ `] });
+    }
   };
   const load = async (url: string, seed: boolean): Promise<boolean> => {
     try {

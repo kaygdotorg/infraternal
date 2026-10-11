@@ -429,16 +429,19 @@ button { color: inherit; }
 .sidebar[data-foot] { overflow: hidden; }
 /* With a footer pinned at the bottom, only the host tree scrolls. */
 .sidebar[data-foot] #tree { flex: 0 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
-.sidebar-head { display: flex; align-items: center; gap: 8px; height: var(--pill-h); margin-bottom: 4px; padding: 0 calc(var(--pill-h) + 8px) 0 8px; }
+.sidebar-head { flex: none; display: flex; align-items: center; gap: 8px; height: var(--pill-h); margin-bottom: 4px; padding: 0 calc(var(--pill-h) + 8px) 0 8px; }
 .sidebar-title { font-weight: var(--fw-title); letter-spacing: -0.01em; }
 .bm { --bm-line: color-mix(in oklab, var(--fg) 16%, transparent); position: relative; margin-left: 4px; padding-left: 14px; }
-.bm-trunk { position: absolute; left: 0; top: -10px; bottom: -10px; width: 1.5px; }
-.bm-trunk::before {
-  content: ""; position: absolute; inset: 0; border-radius: 1px; background: var(--bm-line);
-  -webkit-mask-image: linear-gradient(transparent, #000 28px, #000 calc(100% - 28px), transparent);
-  mask-image: linear-gradient(transparent, #000 28px, #000 calc(100% - 28px), transparent);
-}
-.bm-marker { position: absolute; left: 0; top: 10px; width: 1.5px; height: calc(var(--row) - 12px); border-radius: 1px; background: var(--fg); will-change: transform; transition: opacity 150ms var(--ease-out); }
+/* The view-level line is drawn per section, in the section's own box, so it is as long as the content and never as long
+   as the scrollport: each section carries its own stretch, the stretches meet, and the last one ends at its head's centre
+   (its last child's connector). The first fades in from the top. */
+.bm-sec { position: relative; }
+.bm-sec::before { content: ""; position: absolute; left: -14px; top: 0; bottom: 0; width: 1.5px; background: var(--bm-line); }
+.bm > .bm-marker + .bm-sec::before { top: 0; -webkit-mask-image: linear-gradient(transparent, #000 28px); mask-image: linear-gradient(transparent, #000 28px); }
+.bm-sec.cl-divided::before { top: -8px; } /* the divider's gap is bridged: the trunk is one line */
+.bm > .bm-sec:last-child::before { bottom: auto; height: calc(var(--row) / 2 + 0.75px); border-radius: 0 0 1px 1px; }
+.bm > .bm-sec.cl-divided:last-child::before { height: calc(var(--row) / 2 + 8px + 8px + 0.75px); }
+.bm-marker { position: absolute; left: 0; top: 0; width: 1.5px; height: calc(var(--row) - 12px); border-radius: 1px; background: var(--fg); will-change: transform; transition: opacity 150ms var(--ease-out); }
 .bm-sec { list-style: none; }
 .bm-head, .bm-leaf {
   display: flex; align-items: center; gap: 8px; width: 100%; height: var(--row); padding: 0 8px; border-radius: 6px;
@@ -565,11 +568,18 @@ button { color: inherit; }
 [data-focus-ring="on"] .keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .keybar button { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
 .keybar button svg { width: 24px; height: 24px; stroke-width: 1.75; }
+/* The selection circle is its own layer, inset from the 48 px target: the tray's rows are 46 px tall (the capsule's 48 px less
+   its hairline), so a circle as big as the target touched or crossed the capsule edge. 38 px leaves 4 px above and below
+   and 5 px at the sides (TASTE: toolbar selection stays inside the capsule). */
+.keybar button { isolation: isolate; }
+.keybar button::before { content: ""; position: absolute; z-index: -1; inset: 5px; border-radius: 50%; background: transparent; transition: background-color 140ms ease; }
 .keybar .key-word { font: var(--fw-title) 15px/1 var(--font-ui); letter-spacing: 0.01em; }
 /* Armed modifiers use a soft fill; locked modifiers add a small dot as a second cue. */
-.keybar button[data-mod-state="armed"], .keybar button[data-mod-state="locked"] { background: var(--accent-soft); color: var(--accent); }
+.keybar button[data-mod-state="armed"], .keybar button[data-mod-state="locked"] { color: var(--accent); }
+.keybar button[data-mod-state="armed"]::before, .keybar button[data-mod-state="locked"]::before { background: var(--accent-soft); }
 .keybar button[data-mod-state="locked"]::after { content: ""; position: absolute; right: 8px; bottom: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--overlay); }
-.keybar button[data-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.keybar button[data-pressed="true"] { color: var(--accent); }
+.keybar button[data-pressed="true"]::before { background: var(--accent-soft); }
 .keybar button[data-disabled] { opacity: 0.35; }
 .keybar button[data-instant] { transition: none; }
 .keybar .dpad[hidden] { display: none !important; }
@@ -610,7 +620,7 @@ button { color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .sidebar { transition: opacity 180ms ease; }
   .bm-fold { transition: none; }
-  .keybar button { transition: none; }
+  .keybar button, .keybar button::before { transition: none; }
   .sidebar[hidden] { transform: none; }
   .sidebar.instant, .sidebar-toggle { transition: none; }
   .top > .capsule, .top > .tabs > .tab-add { transition: none; }

@@ -12,6 +12,7 @@
  * This module is a lazy chunk, loaded after sign-in and never on the sign-in path.
  */
 import { onDemand } from "../on-demand";
+import { hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
 import { ConnectionPool, MuxConnection } from "../connection";
 import type { CoreScreen } from "../core-screen";
 import type { TerminalClient, TerminalHooks } from "../terminal";
@@ -54,9 +55,22 @@ export interface ProductCanvas {
 }
 
 export async function mountProductCanvas(core: CoreScreen, options: ProductCanvasOptions): Promise<ProductCanvas> {
-  const connection = new MuxConnection({
+  // The embedded host's system names the mark in its windows' pills. It is asked once, after the first welcome, with the
+  // light read (no live figures); until it answers the pill shows the machine glyph.
+  const embedded: { name: string; user?: string; os?: HostPlatform } = { ...options.host };
+  let canvasReady: (() => void) | undefined, osAsked = false;
+  const connection: MuxConnection = new MuxConnection({
     ...(options.onRecoveryPending ? { onRecoveryPending: options.onRecoveryPending } : {}),
-    onConnectionChange: (connected) => core.setConnection(connected),
+    onConnectionChange: (connected) => {
+      core.setConnection(connected);
+      if (!connected || osAsked) return;
+      osAsked = true;
+      connection.call("host.facts.read", { includeLive: false }).then((facts) => {
+        if (typeof facts.os !== "string" || facts.os.length > 256) return;
+        embedded.os = hostPlatformFromOs(facts.os);
+        canvasReady?.();
+      }, () => undefined);
+    },
   });
   // The details source is loaded on a pill press, so keep the last sample for its first read.
   let roundTrip: number | undefined;
@@ -65,7 +79,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const pool = new ConnectionPool(connection);
   const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
   const sessions = createLiveSessions({
-    core, connection, pool, host: options.host,
+    core, connection, pool, host: embedded,
     ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
     ...(options.firstHooks ? { firstHooks: options.firstHooks } : {}),
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
@@ -110,6 +124,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     float: false,
     persisted: (id) => id === "console" || id === "mesh",
   });
+  canvasReady = () => { if (embedded.os) canvas.cx.win.setHostOs(embedded.name, embedded.os); };
   canvas.setViews((m) => {
     const doc = saved?.views.find((v) => v.id === "console");
     const resolve = (target: DocTarget): Partial<WindowModel> | undefined => {
@@ -132,6 +147,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // The Mesh view follows the server's answer (D187).
   const offMeshView = offerMeshView(canvas.cx, mesh, { keep: Boolean(savedMesh) });
   canvas.cx.nav.flyView("console", true);
+  canvasReady();
   const first = [...(canvas.cx.views.get("console")?.wins.values() ?? [])][0];
   if (first) canvas.cx.win.setActive(first);
   return {

@@ -23,7 +23,7 @@ export const FREE_GRAPH_NODES = 40;
 const MIN_FREE_ZOOM = 0.1;
 export const isFreeView = (view: ViewModel): boolean => view.layout === "graph" && view.nodes.length > FREE_GRAPH_NODES;
 
-export function stopsFor(view: ViewModel, r: Rect, vw: number, vh: number): Stops {
+export function stopsFor(view: ViewModel, r: Rect, vw: number, vh: number, centred = false): Stops {
   // A big graph has one stop, at the zoom where all of it fits; from there the person zooms into a cluster.
   // (with a margin, so the view's label above it and the top pill over it stay clear of the content)
   // On a narrow screen it does not shrink below where the names of the clusters can still be read: it starts at the
@@ -38,7 +38,9 @@ export function stopsFor(view: ViewModel, r: Rect, vw: number, vh: number): Stop
     const max = Math.round(r.x + r.w - width);
     let x = r.x;
     const raw = view.layout === "graph" ? view.nodes.map((n) => r.x + n.x - 30) : view.cols.map((col) => { const at = x - Math.max(0, (width - col.w) / 2); x += col.w + COLUMN_GAP; return at; });
-    lefts = [...new Set(raw.map((v) => Math.round(clamp(v, r.x, max))).concat(max))].sort((p, q) => p - q);
+    // `centred` (a phone's tiled view): every column rests in the middle of the screen, the first and last included, so the
+    // slices of the neighbours at the two edges are equal and the strip's ends show empty canvas rather than a wider window.
+    lefts = centred && view.layout !== "graph" ? [...new Set(raw.map(Math.round))].sort((p, q) => p - q) : [...new Set(raw.map((v) => Math.round(clamp(v, r.x, max))).concat(max))].sort((p, q) => p - q);
   }
   return { z, cy: r.h * z <= vh ? r.y + r.h / 2 : r.y + (free ? vh / (2 * z) - 0.04 * vh / z : vh / (2 * z)), lefts, view: width };
 }

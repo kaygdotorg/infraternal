@@ -425,7 +425,8 @@ test("structure: a window dragged by its pill lands in another column", async ({
 
 async function touchPage(browser: Browser, scene: number): Promise<{ page: Page; touch: (type: "touchStart" | "touchMove" | "touchEnd", pts: Array<{ x: number; y: number }>) => Promise<unknown>; close(): Promise<void> }> {
   const context = await browser.newContext({ baseURL: `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}`, viewport: { width: 393, height: 852 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
-  // These specs test the geometry of the Comfortable phone width (a neighbour peeks in, a gap to tap); full width, the
+  // These specs test the geometry of the Comfortable phone width (a neighbour peeks in, a gap to tap: a tap at x=371 lands on the
+  // slice of the next window, 10 px wide at the screen edge, and so leaves the focused terminal); full width, the
   // default (D191), has its own specs in real/phone.spec.ts.
   await context.addInitScript(() => { try { localStorage.setItem("tracer.window-size.phone", "comfortable"); } catch { /* storage blocked */ } });
   const page = await context.newPage();
@@ -559,7 +560,7 @@ test("toolbar: the keyboard row follows terminal focus, the canvas row follows a
     await swipe(t, { x: tray.x + 100, y: tray.y + 12 }, { x: tray.x + 100, y: tray.y + 44 }, 6);
     await expect.poll(row).toBe("canvas");
     // Tap empty canvas: the key row goes away altogether.
-    await page.touchscreen.tap(359, 400);
+    await page.touchscreen.tap(371, 400);
     await expect(page.locator("#keytray")).toHaveAttribute("data-rows", "1");
     await page.waitForTimeout(500);
     // Horizontal swipe scrolls the overflowing canvas row.
@@ -589,7 +590,7 @@ test("toolbar: Ctrl latches (tap arms, double tap holds), snap and lock work fro
     await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
     await expect.poll(state).toBe("locked");
     // Canvas row: snap and lock.
-    await page.touchscreen.tap(359, 400);
+    await page.touchscreen.tap(371, 400);
     await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "canvas");
     await page.waitForTimeout(500);
     await page.evaluate(() => document.querySelector<HTMLElement>('[data-cv="input-lock"]')!.click());
@@ -609,7 +610,7 @@ test("toolbar: a long press edits it in place (hide with a badge, a tray brings 
   const t = await touchPage(browser, 3);
   try {
     const { page } = t;
-    await page.touchscreen.tap(359, 400);
+    await page.touchscreen.tap(371, 400);
     await expect(page.locator("#terminal-screen")).toHaveAttribute("data-row", "canvas");
     await page.waitForTimeout(500);
     const tray = (await page.locator("#keytray").boundingBox())!;
@@ -1108,8 +1109,12 @@ test("window header actions are one pill: as tall as the title pill, on its line
     // TASTE "Phone window headers carry two actions": on a touch device the header holds Close only; the splits and the
     // session manager are in the canvas row while a terminal is focused, and in ⌘K.
     expect(pd.buttons).toEqual(["close"]);
-    expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(0.5);
+    // Header pills are one size (TASTE): on touch both are 36 px visible; the 44 px target is invisible padding (checked below).
+    expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(1);
+    expect(pd.aH).toBeLessThanOrEqual(38);
     expect(Math.abs(pd.aTop - pd.tTop)).toBeLessThan(0.5);
+    // The test double's "Mockup" tag sits over the top right of the first window; it is not the product's chrome.
+    await p.addStyleTag({ content: ".cl-mockup { display: none !important; }" });
     const hits = await p.evaluate(() => {
       const w = document.querySelector('.ui-window[data-window-id="w-build-01"]')!;
       return [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => {
@@ -1140,7 +1145,7 @@ test("toolbar and keyboard: no terminal focused means one row and no dots, a too
       editable: !!document.activeElement?.matches("input, textarea, [contenteditable]"),
       focusIn: (window as unknown as { __focusIn: string[] }).__focusIn.length,
     }));
-    await page.touchscreen.tap(359, 400); // the canvas, not a terminal
+    await page.touchscreen.tap(371, 400); // the canvas, not a terminal
     await page.waitForTimeout(900);
     let s = await state();
     expect(s).toMatchObject({ rows: "1", keysHidden: true, dots: "none", editable: false });

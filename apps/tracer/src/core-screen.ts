@@ -775,6 +775,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     }
     if (event.key === "Escape") {
       if (settings?.isOpen || shortcuts.isOpen) return; // the open overlay takes this Escape itself
+      // A control that holds something open (the inbox's expanded line) collapses it first (`data-owns-escape`).
+      if (event.target instanceof Element && event.target.closest("[data-owns-escape]")) return;
       // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
       // capture phase, after this window listener) stays open. The capture order is what makes stopping necessary.
       if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); event.stopPropagation(); }

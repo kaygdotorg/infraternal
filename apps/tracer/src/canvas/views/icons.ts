@@ -7,7 +7,7 @@ import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import type { WindowModel } from "../model/types";
 
 export const ICON = {
-  close: '<path d="m7 7 10 10M17 7 7 17"/>',
+  close: '<path d="m6 6 12 12M18 6 6 18"/>',
   splitRight: ICONS.splitRight,
   splitDown: ICONS.splitDown,
   terminal: '<path d="m5 8 4 4-4 4M12 16h7"/>',
@@ -15,7 +15,7 @@ export const ICON = {
   logs: '<path d="M5 6h14M5 10h10M5 14h14M5 18h8"/>',
   node: '<circle cx="12" cy="12" r="2.6"/><circle cx="5.5" cy="6" r="1.8"/><circle cx="18.5" cy="7" r="1.8"/><circle cx="17.5" cy="18" r="1.8"/><path d="m10 10.4-3-3M14.4 11l2.6-2.7M13.8 13.9l2.6 2.8"/>',
   tag: '<path d="M4 4h7l9 9-7 7-9-9z"/><circle cx="8" cy="8" r="1.2"/>',
-  console: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 10 3 2-3 2M13 14h4"/>',
+  console: ICONS.terminal,
   chevron: '<path d="m9 6 6 6-6 6"/>',
   port: '<path d="M6 12h10m-4-4 4 4-4 4"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -57,7 +57,7 @@ export const SECTION_ICON: Record<string, string> = {
   discovery: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4M11 8v3l2 1.5"/>',
 };
 
-/** The icon in a window's pill: the host's OS mark for a terminal, a glyph for the other kinds. */
+/** The icon in a window's pill: the host's OS mark for a terminal (the machine glyph until the system is known; never a terminal glyph), a glyph for the other kinds. */
 export const iconFor = (m: WindowModel): string =>
-  m.kind === "terminal" ? (m.os ? hostIconMarkup(m.os, "ui-host-mark") : lineIcon(ICON.terminal))
+  m.kind === "terminal" ? hostIconMarkup(m.os ?? "unknown", "ui-host-mark")
     : m.kind === "settings" ? lineIcon(SECTION_ICON[m.id.slice(2)] ?? viewIcon("settings")) : m.kind === "containers" ? lineIcon(ICON.containers) : m.kind === "logs" ? lineIcon(ICON.logs) : m.kind === "flow" ? lineIcon(ICON.plus) : lineIcon(ICON.node);

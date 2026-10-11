@@ -368,7 +368,7 @@
 .ui-window[data-status="offline"] .ui-window-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
 /* The header's actions are one pill (the shared material, without its blur: windows stay cheap) holding icon
    buttons, the same height as the title pill and on the same line. The pill never shrinks (the title truncates
-   first). On touch the pill is as tall as the title pill (44 px) and each button is 44 px wide and reaches 44 px tall with a transparent hit area. */
+   first). On touch both pills are 36 px tall and each button reaches a 44 px square through an invisible hit area (see below). */
 .ui-window-actions {
   display: flex; flex: none; align-items: center; gap: 2px; margin-left: auto; height: var(--ui-control-h); padding: 0 2px;
   border: 1px solid var(--overlay-line); border-radius: 999px; background: var(--overlay); box-shadow: none;
@@ -378,10 +378,19 @@
   position: relative; display: grid; place-items: center; width: calc(var(--ui-control-h) - 6px); height: calc(var(--ui-control-h) - 6px); padding: 0; border: 0; border-radius: 50%;
   background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
+/* On touch there is no frame lock to leave room for, so the pill may use the whole header less the actions: the host's name is
+   never cut while there is room. The session name is secondary and goes whole (never as a lone "· …") in a phone-width card. */
 @media (pointer: coarse) {
-  .ui-window-actions { gap: 0; padding: 0 3px; }
-  .ui-window-action { width: 44px; }
-  .ui-window-action::after { content: ""; position: absolute; inset: -3px 0; } /* 44 px tall around the 38 px button; the buttons sit on a 44 px pitch */
+  .ui-window-pill { max-width: 100%; }
+  @container (max-width: 400px) { .ui-window-session { display: none; } }
+  /* One visible size for every header pill (TASTE: window header pills are one size): the title pill and the actions pill are
+     36 px tall, and the 44 px touch target comes from invisible padding around each (::after), never from a bigger pill. */
+  .ui-window-pill, .ui-window-actions { height: 36px; }
+  .ui-window-pill { position: relative; }
+  .ui-window-pill::after { content: ""; position: absolute; inset: -4px 0; }
+  .ui-window-actions { gap: 0; padding: 0 3px; position: relative; z-index: 1; } /* above the body, so the hit area below the pill is not covered by it */
+  .ui-window-action { width: 30px; height: 30px; }
+  .ui-window-action::after { content: ""; position: absolute; inset: -7px; } /* 44 px square around the 30 px button */
 }
 .ui-window-action:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -393,14 +402,9 @@
   .ui-window-actions[data-collapsible] > .ui-window-action.ui-window-more { display: grid; }
   /* The title's room is the pill's half of the header: the window's mark and session name give way first, at any narrow
      width (a half on a phone too), so the title is never squeezed out. */
-  .ui-window-mark, .ui-window-session { display: none; }
-  /* On touch, a narrow card's actions are a compact circle (about 32 px visible, a 30 px button in a 32 px pill). The 44 px
-     hit area is kept by padding around the button, so the title gets the room the wide pill took. */
-  @media (pointer: coarse) {
-    .ui-window-actions { height: 32px; padding: 0; gap: 0; }
-    .ui-window-action { width: 30px; height: 30px; }
-    .ui-window-action::after { inset: -7px; }
-  }
+  .ui-window-session { display: none; }
+  /* The mark names the machine's system and leads the pill on a phone, whatever the width (TASTE: the window pill names the machine by its system). */
+  @media (pointer: fine) { .ui-window-mark { display: none; } }
 }
 .ui-window-menu { display: flex; flex-direction: column; gap: 2px; min-width: 168px; padding: 6px; }
 .ui-window-menu-item {
@@ -897,7 +901,7 @@
    sidebar's 8 px padding, as a quiet tinted card (no second glass layer inside the glass). Items stack; each is a
    sentence, a quiet line and one action. Only opacity and transform move, and the transform is cleared at rest. */
 .ui-inbox {
-  display: grid; flex: none; gap: 8px; margin: auto 0 8px; padding: 10px;
+  display: grid; flex: none; gap: 4px; margin: auto 0 8px; padding: 8px;
   border-radius: calc(var(--r-lg, 18px) - 8px); background: color-mix(in oklab, var(--accent) 9%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 22%, transparent);
   transition: opacity 160ms var(--ease-out, ease-out), transform 180ms var(--ease-out, ease-out);
@@ -907,10 +911,29 @@
 .ui-inbox[hidden] { display: none; }
 .ui-inbox[data-open="false"] { opacity: 0; transform: translateY(6px); pointer-events: none; }
 .ui-inbox ~ .ui-sidebar-foot { margin-top: 0; }
-.ui-inbox-item { display: grid; gap: 8px; }
-.ui-inbox-text { display: grid; gap: 2px; min-width: 0; }
-.ui-inbox-title { color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-label); line-height: 1.4; }
-.ui-inbox-detail { color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; }
-.ui-inbox-action { --ui-button-height: 28px; --ui-button-font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); justify-self: stretch; min-height: 28px; padding: 0 12px; border-radius: 8px; }
-@media (pointer: coarse) { .ui-inbox-action { --ui-button-height: 44px; min-height: 44px; } }
-@media (prefers-reduced-motion: reduce) { .ui-inbox, .ui-inbox[data-open="false"] { transform: none; transition: opacity 150ms ease; } }
+.ui-inbox-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 6px 0; color: var(--ui-text-secondary); font-size: var(--text-caption); font-weight: var(--fw-label); line-height: 1.4; }
+.ui-inbox-count { font-variant-numeric: tabular-nums; }
+.ui-inbox-list { display: grid; gap: 2px; }
+.ui-inbox-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--row); padding: 0 6px; border: 0; border-radius: 8px;
+  background: none; color: var(--fg); font: inherit; font-size: var(--text-body); font-weight: var(--fw-label); text-align: left; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color 120ms ease, transform 140ms var(--ease-out, ease-out);
+}
+@media (hover: hover) and (pointer: fine) { .ui-inbox-row:hover { background: color-mix(in oklab, var(--fg) 6%, transparent); } }
+.ui-inbox-row:active { transform: scale(var(--ui-press-scale-soft)); }
+.ui-inbox-glyph, .ui-inbox-chevron { flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-inbox-glyph { color: var(--accent); }
+.ui-inbox-chevron { margin-left: auto; width: 14px; height: 14px; color: var(--ui-text-secondary); transition: transform 180ms var(--ease-out, ease-out); }
+.ui-inbox-item[data-expanded="true"] .ui-inbox-chevron { transform: rotate(90deg); }
+.ui-inbox-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The panel's height is a grid track, so opening is a plain CSS transition: it can be reversed mid-way and costs no script. */
+.ui-inbox-panel { display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows 180ms var(--ease-out, ease-out), visibility 0s 180ms; }
+.ui-inbox-item[data-expanded="true"] .ui-inbox-panel { grid-template-rows: 1fr; visibility: visible; transition-delay: 0s; }
+.ui-inbox-panel-inner { display: grid; gap: 8px; min-height: 0; overflow: hidden; padding: 0 6px 0 30px; opacity: 0; transition: opacity 150ms ease, padding-bottom 180ms var(--ease-out, ease-out); }
+.ui-inbox-item[data-expanded="true"] .ui-inbox-panel-inner { opacity: 1; padding-bottom: 6px; }
+.ui-inbox-body { margin: 0; padding-top: 2px; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; }
+.ui-inbox-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.ui-inbox-action { --ui-button-height: 28px; --ui-button-font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); min-height: 28px; padding: 0 12px; border-radius: 8px; }
+@media (pointer: coarse) { .ui-inbox { padding: 6px; } .ui-inbox-action { --ui-button-height: 44px; min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .ui-inbox, .ui-inbox[data-open="false"] { transform: none; transition: opacity 150ms ease; } .ui-inbox-panel, .ui-inbox-panel-inner, .ui-inbox-chevron, .ui-inbox-row { transition-duration: 1ms; } .ui-inbox-panel-inner { transition: opacity 150ms ease; } }

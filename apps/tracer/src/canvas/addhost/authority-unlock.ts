@@ -38,7 +38,9 @@ const RESUME_MS = 5_000;
 /** The sign-in toast waits this long for the person before it hands the item to the inbox. */
 const TOAST_MS = 30_000;
 export const LOCKED_TITLE = "Host connections are locked";
-export const LOCKED_DETAIL = "Confirm with your passkey to connect to hosts.";
+/** The inbox line: what the person does, not the state. The toast keeps the state wording. */
+export const UNLOCK_TITLE = "Unlock host connections";
+export const LOCKED_DETAIL = "Host connections are locked. Confirm with your passkey to connect to hosts.";
 
 export type AuthorityState = "unknown" | "locked" | "unlocked";
 
@@ -80,8 +82,8 @@ export function createAuthorityControl(core: CoreScreen, options: AuthorityOptio
     const waiting = state === "locked" && toastOver && !busy;
     const inbox = waiting ? inboxFor(core) : existingInbox(core);
     inbox?.set("authority", waiting ? [{
-      id: "authority-locked", title: LOCKED_TITLE, detail: LOCKED_DETAIL, canAct: options.canUnlock?.() ?? true,
-      action: { label: "Unlock", run: () => { void unlock(); } },
+      id: "authority-locked", icon: ICONS.lock, title: UNLOCK_TITLE, body: LOCKED_DETAIL, canAct: options.canUnlock?.() ?? true,
+      actions: [{ label: "Unlock", primary: true, run: () => { void unlock(); } }],
     }] : []);
   };
   const offerToast = (): void => {

@@ -102,3 +102,20 @@ test("a viewer who is not an administrator sees the state and no button", async 
   await expect(row.locator("button")).toHaveAttribute("data-shown", "false");
   await expect(row.locator("button")).toHaveAttribute("inert", "");
 });
+
+test("the inbox line is collapsed, expands to Unlock, and unlocking clears the card", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, "ca=locked");
+  await page.locator(".ui-toast").getByRole("button", { name: "Dismiss" }).click({ timeout: 8000 });
+  await page.locator("#sidebar-toggle").click();
+  const card = page.locator(".ui-inbox:not([hidden])");
+  const line = card.getByRole("button", { name: LABEL });
+  await expect(line).toHaveAttribute("aria-expanded", "false");
+  await expect(card.getByRole("button", { name: "Unlock", exact: true })).toHaveCount(0);
+  await line.click();
+  const unlock = card.getByRole("button", { name: "Unlock", exact: true });
+  await expect(unlock).toBeVisible();
+  await unlock.click();
+  await expect(card).toHaveCount(0);
+  await expect(page.locator(".ui-toast")).toContainText("Host connections unlocked");
+});
