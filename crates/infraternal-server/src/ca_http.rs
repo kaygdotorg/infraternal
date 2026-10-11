@@ -10,8 +10,8 @@ use futures_util::StreamExt;
 use infraternal_shim::locked_bytes::LockedBytes;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
-use tokio::sync::Semaphore;
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{Mutex, Semaphore};
 use zeroize::Zeroizing;
 
 #[derive(Clone)]
@@ -19,6 +19,7 @@ struct Api {
     auth: Auth,
     administration: Arc<CaAdministration>,
     admission: Arc<Semaphore>,
+    starts: Arc<Mutex<HashMap<String, crate::runtime::SourceBucket>>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +47,12 @@ pub fn decode_unlock(input: &[u8]) -> Result<UnlockRequest, crate::ca::CaError> 
 }
 /// Mount only a configured private CA authority; no request can regenerate trust.
 pub fn router(auth: Auth, administration: Arc<CaAdministration>) -> Router {
+    let api = Api {
+        auth,
+        administration,
+        admission: Arc::new(Semaphore::new(8)),
+        starts: Arc::default(),
+    };
     Router::new()
         .route("/remote/ca/status", post(status))
         .route("/remote/ca/administrators/start", post(membership_start))
@@ -55,13 +62,45 @@ pub fn router(auth: Auth, administration: Arc<CaAdministration>) -> Router {
         .route("/remote/ca/unlock/start", post(start))
         .route("/remote/ca/unlock/finish", post(finish))
         .layer(DefaultBodyLimit::max(32768))
+        .layer(axum::middleware::from_fn_with_state(
+            api.clone(),
+            start_budget,
+        ))
         .layer(axum::middleware::from_fn(deadline))
-        .with_state(Api {
-            auth,
-            administration,
-            admission: Arc::new(Semaphore::new(8)),
-        })
+        .with_state(api)
 }
+/// The three start routes share one budget per authenticated principal, across
+/// cookies and ceremony kinds. Finish/status remain available at exhaustion.
+async fn start_budget(
+    State(api): State<Api>,
+    incoming: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !matches!(
+        incoming.uri().path(),
+        "/remote/ca/unlock/start"
+            | "/remote/ca/bootstrap/start"
+            | "/remote/ca/administrators/start"
+    ) {
+        return next.run(incoming).await;
+    }
+    let (token, now) = match request(&api, incoming.headers()) {
+        Ok(request) => request,
+        Err(status) => return status.into_response(),
+    };
+    let principal = match api.auth.session(token, now).await {
+        Ok(session) => session.user_id,
+        Err(_) => return StatusCode::FORBIDDEN.into_response(),
+    };
+    let mut starts = api.starts.lock().await;
+    if let Err(response) = crate::runtime::admit_temporal_request(&mut starts, principal, now, 30) {
+        return response.into_response();
+    }
+    drop(starts);
+    next.run(incoming).await
+}
+
 async fn deadline(
     request: axum::extract::Request,
     next: axum::middleware::Next,
