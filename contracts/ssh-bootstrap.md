@@ -339,3 +339,15 @@ are exact allowlisted public lines, including enrollment DNS and TLS failures;
 arbitrary stderr never becomes UI copy or log output. Re-adding a retained host
 (address or effective application SSH lookup) returns `already_added` before
 issuing another invitation, and the UI directs the person to its existing terminal.
+
+
+## Classified attempt failures (#169)
+
+Failure adds optional `exit_status` from the authenticated command process (a
+signal or unavailable status omits it). Fixed installer codes 71 and 72 retain
+`failed_step` and identify the approved root/rootless directory with ownership
+or lock/rollback guidance. Other failures name the command boundary and next
+check. Arbitrary stdout/stderr remains withheld. One server log line per failed
+attempt contains only host UUID (unassigned before issuance), target id, step,
+exit status and static mode; cleanup warnings do not replace the original phase.
+The existing dialog Details disclosure shows the trusted failed-step label.

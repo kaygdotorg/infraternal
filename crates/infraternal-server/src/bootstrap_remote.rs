@@ -257,6 +257,15 @@ impl Backend for RemoteBackend {
             self.authorize(authority).await
         })
     }
+    fn record_failure(
+        &self,
+        target: &Target,
+        host: Option<Uuid>,
+        phase: infraternal_plugin_ssh::model::Step,
+        failure: &Failure,
+    ) {
+        self.base.record_failure(target, host, phase, failure);
+    }
     fn cleanup_sessions<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
             // Exact batch ownership remains valid after logout, solely for cleanup.

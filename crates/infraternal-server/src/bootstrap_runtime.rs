@@ -11,7 +11,9 @@ use infraternal_plugin_ssh::{
     auth_order::{AuthProvider, AutoAuth, NetworkProvider},
     bootstrap::{Authority, Backend, Bootstrap, Resolved},
     install::{BinaryPaths, JoinMaterial},
-    model::{Destination, Failure, MeshEvidence, Target, TargetAddress},
+    model::{
+        Destination, Failure, InstallMode, InstallStep, MeshEvidence, Step, Target, TargetAddress,
+    },
     openssh::OpenSsh,
     probe::Check,
     transport::{Credentials, Operation, Secret},
@@ -213,10 +215,48 @@ impl Backend for PendingRemoteRuntime {
     fn terminal_canary<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
         not_ready()
     }
+    fn record_failure(
+        &self,
+        target: &Target,
+        host: Option<uuid::Uuid>,
+        phase: Step,
+        failure: &Failure,
+    ) {
+        log_bootstrap_failure(target, host, phase, failure);
+    }
     fn failed<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
         not_ready()
     }
 }
+/// Emit no remote text or credentials: these bounded coordinates describe one failed attempt.
+fn log_bootstrap_failure(
+    target: &Target,
+    host: Option<uuid::Uuid>,
+    phase: Step,
+    failure: &Failure,
+) {
+    let step = match failure.failed_step {
+        Some(InstallStep::Connect) => "connect",
+        Some(InstallStep::Upload) => "upload",
+        Some(InstallStep::Install) => "install",
+        Some(InstallStep::Join) => "join",
+        Some(InstallStep::Start) => "start",
+        None => match phase {
+            Step::Check => "check",
+            Step::Facts => "facts",
+            Step::Connect => "terminal",
+            _ => "install",
+        },
+    };
+    let mode = match target.mode {
+        InstallMode::Rootless => "rootless",
+        InstallMode::Root => "root",
+    };
+    tracing::warn!(host_id = %host.map_or_else(|| "unassigned".into(), |host| host.to_string()),
+        target_id = %target.id, step, exit_status = %failure.exit_status.map_or_else(|| "unavailable".into(), |status| status.to_string()),
+        mode, "host bootstrap failed");
+}
+
 /// The exact queued browser capability is checked immediately before exporting
 /// signing material; Settings access and owner status never unlock a cold key.
 struct ServerAuthentication {
@@ -393,3 +433,68 @@ mod tests {
 #[cfg(test)]
 #[path = "key_authority_tests.rs"]
 mod key_authority_tests;
+
+#[cfg(test)]
+mod failure_log_tests {
+    //! Public failure coordinates are logged once without message, log tail or remote output.
+    use super::*;
+    use std::{io::Write, sync::Mutex};
+
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self {
+            self.clone()
+        }
+    }
+    #[test]
+    fn one_line_contains_only_classified_public_coordinates() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(Capture(bytes.clone()))
+            .finish();
+        let target = Target {
+            id: "one".into(),
+            address: TargetAddress::Manual("user@host".into()),
+            credential: None,
+            mode: InstallMode::Rootless,
+            root_consent: false,
+        };
+        let host = uuid::Uuid::new_v4();
+        let mut failure = Failure::install("private-message-sentinel");
+        failure.failed_step = Some(InstallStep::Upload);
+        failure.exit_status = Some(71);
+        failure.log_tail.push("private-output-sentinel");
+        tracing::subscriber::with_default(subscriber, || {
+            log_bootstrap_failure(&target, Some(host), Step::Install, &failure);
+        });
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        for field in [
+            host.to_string(),
+            "target_id=one".into(),
+            "step=\"upload\"".into(),
+            "exit_status=71".into(),
+            "mode=\"rootless\"".into(),
+        ] {
+            assert!(
+                text.contains(&field),
+                "missing public field {field}: {text}"
+            );
+        }
+        assert!(!text.contains("private-message-sentinel"));
+        assert!(!text.contains("private-output-sentinel"));
+    }
+}

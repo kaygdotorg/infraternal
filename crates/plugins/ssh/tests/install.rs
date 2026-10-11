@@ -43,7 +43,12 @@ impl SshSession for Local {
             drop(stdin);
             let output = child.wait_with_output().await.unwrap();
             if !output.status.success() || written.is_err() {
-                return Err(Failure::install("The synthetic remote command failed."));
+                let mut failure = Failure::install("The synthetic remote command failed.");
+                failure.exit_status = output
+                    .status
+                    .code()
+                    .and_then(|code| u8::try_from(code).ok());
+                return Err(failure);
             }
             Ok(CommandOutput {
                 stdout: output.stdout,
@@ -857,4 +862,19 @@ async fn command_failure_names_upload_join_install_and_start_separately() {
             .unwrap_err();
         assert_eq!(serde_json::to_value(failed).unwrap()["failed_step"], step);
     }
+}
+
+#[tokio::test]
+async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
+    let fixture = Fixture::new();
+    let base = fixture.root.join(".local/share/infraternal");
+    std::fs::create_dir_all(&base).unwrap();
+    let failure = fixture
+        .transaction()
+        .stage(&fixture.binary)
+        .await
+        .unwrap_err();
+    assert_eq!(serde_json::to_value(&failure).unwrap()["exit_status"], 71);
+    assert!(failure.message.contains("~/.local/share/infraternal"));
+    assert!(failure.message.contains("Move it aside"));
 }

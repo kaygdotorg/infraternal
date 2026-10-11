@@ -5,7 +5,7 @@ use crate::{
     auth_order::Authentication,
     install::{BinaryPaths, Cleanup, Installation, JoinMaterial},
     lifecycle::Lifecycle,
-    model::{Destination, Event, Failure, MeshEvidence, Step, Target, identifier},
+    model::{Destination, Event, Failure, InstallStep, MeshEvidence, Step, Target, identifier},
     probe::{CHECK_SCRIPT, Check},
     transport::{
         ConfirmationAuthority, Credentials, Input, Operation, Secret, SshSession, SshTransport,
@@ -79,6 +79,8 @@ pub trait Backend: Send + Sync {
         authority: &'a Authority,
         host: uuid::Uuid,
     ) -> Operation<'a, ()>;
+    /// One public failure record per attempt, before cleanup changes its progress phase.
+    fn record_failure(&self, _: &Target, _: Option<uuid::Uuid>, _: Step, _: &Failure) {}
     /// Finish this attempt's private sessions before SSH rollback stops the service.
     fn cleanup_sessions<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
         Box::pin(async { Ok(()) })
@@ -322,6 +324,10 @@ impl Bootstrap {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep failure recording, session cleanup, rollback and final state ordered in one attempt."
+    )]
     async fn attempt(
         &self,
         batch: Arc<BatchInner>,
@@ -365,7 +371,15 @@ impl Bootstrap {
                 result = tokio::time::timeout(self.deadline, self.run(&batch, &target, attempt, started, &mut resources, auth_once)) => result.unwrap_or_else(|_| Err(Failure::install("Host installation exceeded its time limit."))),
             }
         };
-        if result.is_err() {
+        if let Err(failure) = &result {
+            let phase = lock(&batch.history)
+                .events
+                .iter()
+                .rev()
+                .find(|event| event.target == target.id && event.attempt == attempt)
+                .map_or(Step::Check, |event| event.step);
+            self.backend
+                .record_failure(&target, resources.host, phase, failure);
             if let Some(host) = resources.host {
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
@@ -466,6 +480,10 @@ impl Bootstrap {
         Ok(resolved)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep ordered bootstrap steps and transaction ownership in one cancellation-safe attempt."
+    )]
     async fn run(
         &self,
         batch: &BatchInner,
@@ -488,8 +506,12 @@ impl Bootstrap {
         let session = self
             .transport
             .open(resolved.destination, resolved.credentials, resolved.mesh)
-            .await?;
-        let output = session.run(CHECK_SCRIPT, Input::Empty).await?;
+            .await
+            .map_err(|error| error.at(InstallStep::Connect))?;
+        let output = session
+            .run(CHECK_SCRIPT, Input::Empty)
+            .await
+            .map_err(|error| error.at(InstallStep::Connect))?;
         // Preserve method evidence even if the authenticated host is unsupported.
         // Public metadata only; no provider or private material enters replay state.
         if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
