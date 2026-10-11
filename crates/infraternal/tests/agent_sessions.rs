@@ -67,12 +67,13 @@ async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
 async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset() {
     // Socket fixtures use the short test-state root because build targets can
     // live outside the worktree and Unix sockets have a fixed path limit.
-    let state_root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    let state_root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+        || {
             PathBuf::from(std::env::var_os("HOME").expect("test requires HOME"))
                 .join(".cache/codex-scratch/infraternal")
-        });
+        },
+        PathBuf::from,
+    );
     fs::create_dir_all(&state_root).unwrap();
     let directory = state_root.join(format!("ar{}", std::process::id()));
     let directory = state(Some(directory)).unwrap();
