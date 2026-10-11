@@ -185,3 +185,27 @@ async fn completed_helper_retires_descendants_with_closed_pipes() {
         "owned descendant remained live after helper completion"
     );
 }
+
+#[tokio::test]
+async fn reviewer_ssh_helper_does_not_inherit_server_reload_mask() {
+    use nix::sys::signal::{SigSet, SigmaskHow, Signal};
+    let mut blocked = SigSet::empty();
+    blocked.add(Signal::SIGHUP);
+    let previous = blocked.thread_swap_mask(SigmaskHow::SIG_BLOCK).unwrap();
+    let mut command = Command::new("/usr/bin/python3");
+    command.args([
+        "-c",
+        "import signal; print(int(signal.SIGHUP in signal.pthread_sigmask(signal.SIG_BLOCK, [])))",
+    ]);
+    // Server runtime workers inherit the mask installed before runtime startup.
+    // Exercise the normal helper launcher on that thread, then restore the mask
+    // before any assertion so other tests retain their own signal policy.
+    let result = execute(&mut command, Input::Empty, Duration::from_secs(3)).await;
+    previous.thread_set_mask().unwrap();
+    let output = result.unwrap();
+    assert!(output.success);
+    assert_eq!(
+        output.stdout, b"0\n",
+        "an SSH helper must receive SIGHUP normally rather than inherit the server reload mask"
+    );
+}
