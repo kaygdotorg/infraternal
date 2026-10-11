@@ -137,3 +137,15 @@ path = "fuzz_targets/ssh_auth_once_decode.rs"
 test = false
 doc = false
 bench = false
+
+# Node JSON parsing is optional because its kernel adapter is Linux-only.
+[features]
+mesh-node = ["infraternal-plugin-mesh/agent"]
+
+[[bin]]
+name = "mesh_node_json"
+path = "fuzz_targets/mesh_node_json.rs"
+required-features = ["mesh-node"]
+test = false
+doc = false
+bench = false
