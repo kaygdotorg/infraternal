@@ -35,6 +35,13 @@ impl CaAdministrationConfig {
             bootstrap: None,
         }
     }
+    /// Share the configured process-only signer with the trusted exec lifecycle
+    /// adapter. This never reads an encrypted copy or authorizes an HTTP unlock.
+    #[must_use]
+    pub fn memory_source(&self) -> Arc<MemoryCaSource> {
+        self.source.clone()
+    }
+
     pub(crate) fn with_runtime(
         &self,
         auth: Auth,

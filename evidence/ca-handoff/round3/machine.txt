@@ -1,0 +1,2 @@
+machine=infraternal-dev kernel=6.12.111+deb13-amd64 arch=x86_64 logical_cpus=8 cpu_model=Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz
+Rust=1.99.0 Zig=0.15.2 CPUWeight=10000

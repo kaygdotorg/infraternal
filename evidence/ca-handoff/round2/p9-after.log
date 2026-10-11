@@ -1,0 +1,10 @@
+Running as unit: run-p200962-i42101377.scope; invocation ID: 7839206a9d8046c39c4bc23600c298d8
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.14s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal-33f5a90126c3a091)
+
+running 1 test
+test remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.66s
+

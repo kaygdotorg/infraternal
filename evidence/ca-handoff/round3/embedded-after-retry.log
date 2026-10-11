@@ -1,0 +1,26 @@
+Running as unit: run-p3086740-i44985151.scope; invocation ID: 2419869bc73e422ca3ffccab59ccb365
+    Blocking waiting for file lock on build directory
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 26s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal_server-98c354358e86eb6e)
+
+running 16 tests
+test embedded::regressions::child_spawn_disposes_inherited_stdin ... ok
+test embedded::regressions::credited_bulk_output_survives_forwarder_io_pause ... ok
+test embedded::regressions::credited_output_queue_at_stream_capacity ... ignored, debug actor memory/scheduling measurement; run without concurrent builds
+test embedded::regressions::full_output_queue_must_not_block_shared_actor ... ok
+test embedded::regressions::healthy_receiver_survives_ready_native_output_burst ... ok
+test embedded::regressions::healthy_streams_progress_at_user_attachment_capacity ... ok
+test embedded::regressions::output_and_snapshot_spend_remaining_restart_credit ... ok
+test embedded::regressions::real_agent_canonical_uuid_result_is_accepted ... ok
+test embedded::regressions::real_agent_open_uses_uid_and_character_dimensions ... ok
+test embedded::regressions::reattach_must_restore_output_credit ... ok
+test embedded::regressions::recovery_event_then_snapshot_keeps_embedded_connection_live ... ok
+test embedded::regressions::recovery_notices_preserve_order_credit_and_session_isolation ... ok
+test embedded::regressions::server_reload_mask_is_not_inherited_by_embedded_children ... ok
+test embedded::regressions::stream_close_must_not_restart_all_sessions ... ok
+test embedded::regressions::uncredited_output_or_repaint_is_rejected_before_queueing ... ok
+test embedded::regressions::unresponsive_child_is_killed_and_reaped_within_the_shutdown_bound ... ok
+
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 169 filtered out; finished in 3.04s
+

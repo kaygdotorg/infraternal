@@ -1,0 +1,21 @@
+Running as unit: run-p3106409-i45004820.scope; invocation ID: b49cdf691497457c8b83fa5a6ac828bb
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.66s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal_plugin_remote-804b0fed7bb66b00)
+
+running 12 tests
+test remote_quic::tests::acknowledged_idle_survives_and_a_silent_path_times_out ... ok
+test remote_quic::tests::host_cannot_open_a_second_server_control_stream ... ok
+test remote_quic::tests::repeated_native_id_has_distinct_server_writer_authority_and_preserves_suffix ... ok
+test remote_quic::tests::wrong_server_name_never_yields_authenticated_connection ... ok
+test remote_tls::tests::cancelled_partial_write_cannot_reuse_the_channel ... ok
+test remote_tls::tests::mutual_tls_delivers_exact_bytes_and_verified_leaf_fingerprints ... ok
+test remote_tls::tests::stalled_write_retires_both_directions_without_idle_polling ... ok
+test remote_tls::tests::untrusted_client_never_reaches_server_admission ... ok
+test remote_tls::tests::untrusted_server_or_wrong_server_name_is_refused_before_bytes ... ok
+test uninstall::tests::bootstrap_lock_delays_uninstall_without_omitting_its_handler ... ok
+test uninstall::tests::retirement_signals_the_shell_after_its_foreground_job_exits ... ok
+test uninstall::tests::uninstall_never_accepts_request_selected_paths_or_foreign_identity ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.67s
+

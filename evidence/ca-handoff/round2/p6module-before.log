@@ -1,0 +1,20 @@
+Running as unit: run-p3725735-i41432456.scope; invocation ID: 8642796a29d745fc9beb380c2d2aa1a8
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-shim)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.10s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal_shim-46a4bfd290f8d937)
+
+running 1 test
+
+thread 'locked_bytes::tests::anonymous_transfer_pages_are_locked_and_excluded_from_core_dumps' (3726723) panicked at crates/infraternal-shim/src/locked_bytes.rs:127:17:
+seed frame must be mlocked
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test locked_bytes::tests::anonymous_transfer_pages_are_locked_and_excluded_from_core_dumps ... FAILED
+
+failures:
+
+failures:
+    locked_bytes::tests::anonymous_transfer_pages_are_locked_and_excluded_from_core_dumps
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p infraternal-shim --lib`

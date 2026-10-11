@@ -54,6 +54,7 @@ impl Master {
         mesh: MeshEvidence,
         parent: &PromptParent,
     ) -> Result<Self, Failure> {
+        infraternal_shim::prepare_child(command.as_std_mut());
         command.as_std_mut().process_group(0);
         command
             .stdin(Stdio::null())

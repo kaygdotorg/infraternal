@@ -667,3 +667,131 @@ async fn credited_output_queue_at_stream_capacity() {
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
+
+#[test]
+fn child_spawn_disposes_inherited_stdin() {
+    use std::{
+        os::unix::fs::PermissionsExt,
+        process::{Command, Stdio},
+    };
+    const NAME: &str = "embedded::regressions::child_spawn_disposes_inherited_stdin";
+    if std::env::var_os("INFRATERNAL_STDIN_CHILD_TEST").is_some() {
+        let directory = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/ca-handoff")
+            .join(format!("stdin-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("child");
+        std::fs::write(&script, b"#!/bin/sh\nreadlink /proc/self/fd/0 >&3\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (mut channel, pid) = spawn_socketpair_agent(&script).unwrap();
+            let mut reply = String::new();
+            tokio::io::AsyncReadExt::read_to_string(&mut channel, &mut reply)
+                .await
+                .unwrap();
+            nix::sys::wait::waitpid(pid.unwrap(), None).unwrap();
+            assert_eq!(
+                reply.trim(),
+                "/dev/null",
+                "the infraternal agent inherited stdin"
+            );
+        });
+        std::fs::remove_dir_all(directory).unwrap();
+        return;
+    }
+    let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(sender);
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_STDIN_CHILD_TEST", "1")
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(receiver)))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn unresponsive_child_is_killed_and_reaped_within_the_shutdown_bound() {
+    use std::io::Read;
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "trap '' TERM; printf ready; exec sleep 60"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = [0; 5];
+    child.stdout.take().unwrap().read_exact(&mut ready).unwrap();
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+    let result = tokio::time::timeout(Duration::from_secs(4), stop_child(pid)).await;
+    if result.is_err() {
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+    }
+    // stop_child normally reaps through waitpid; Child::wait then returns ECHILD.
+    // The failure path also waits, releasing the original blocking waiter.
+    let _ = child.wait();
+    assert!(
+        result.is_ok(),
+        "SIGTERM-resistant child must be SIGKILLed and reaped within the bound"
+    );
+}
+
+#[test]
+fn server_reload_mask_is_not_inherited_by_embedded_children() {
+    use std::{
+        os::unix::fs::PermissionsExt,
+        process::{Command, Stdio},
+    };
+    const NAME: &str =
+        "embedded::regressions::server_reload_mask_is_not_inherited_by_embedded_children";
+    if std::env::var_os("INFRATERNAL_CHILD_MASK_TEST").is_some() {
+        let mut mask = nix::sys::signal::SigSet::empty();
+        mask.add(nix::sys::signal::Signal::SIGHUP);
+        nix::sys::signal::sigprocmask(nix::sys::signal::SigmaskHow::SIG_BLOCK, Some(&mask), None)
+            .unwrap();
+        let directory = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/ca-handoff")
+            .join(format!("mask-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("child");
+        std::fs::write(&script, b"#!/usr/bin/python3\nimport os\nvalue=next(line.split()[1] for line in open('/proc/self/status') if line.startswith('SigBlk:'))\nos.write(3,(value+'\\n').encode())\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let blocked = runtime.block_on(async {
+            let (mut channel, pid) = spawn_socketpair_agent(&script).unwrap();
+            let mut reply = String::new();
+            tokio::io::AsyncReadExt::read_to_string(&mut channel, &mut reply)
+                .await
+                .unwrap();
+            nix::sys::wait::waitpid(pid.unwrap(), None).unwrap();
+            u64::from_str_radix(reply.trim(), 16).unwrap()
+        });
+        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(
+            blocked & 1,
+            0,
+            "server reload mask must not leak into child signal policy"
+        );
+        return;
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_CHILD_MASK_TEST", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

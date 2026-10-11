@@ -1,0 +1,27 @@
+Running as unit: run-p481738-i42382124.scope; invocation ID: 7b908d21c2d04971b7c6403687dcd2a1
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.87s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal-7d37d5027a70edb4)
+
+running 1 test
+
+thread 'restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome' (485412) panicked at crates/infraternal/src/restart_tests.rs:408:5:
+restart log must include authenticated peer PID: 
+running 1 test
+test restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.01s
+
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome ... FAILED
+
+failures:
+
+failures:
+    restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p infraternal --bin infraternal`

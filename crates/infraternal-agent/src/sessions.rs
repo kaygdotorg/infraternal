@@ -433,6 +433,8 @@ impl SessionEvents {
 // helper or shim. The target user's shell must never inherit the trusted channel.
 fn isolated(program: &Path) -> Command {
     let mut command = Command::new("/bin/sh");
+    infraternal_shim::prepare_child(command.as_std_mut());
+    command.stdin(Stdio::null());
     command
         .args(["-c", "exec 3<&-; exec \"$@\"", "infraternal-shim-launch"])
         .arg(program);

@@ -1340,6 +1340,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-openssl",
+ "tracing",
  "url",
  "uuid",
  "vt100",
@@ -1452,6 +1453,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "infraternal-plugin-api",
+ "infraternal-shim",
  "nix",
  "serde",
  "serde_json",
@@ -1493,6 +1495,7 @@ dependencies = [
  "infraternal-plugin-remote",
  "infraternal-plugin-ssh",
  "infraternal-protocol",
+ "infraternal-shim",
  "nix",
  "openssl",
  "quinn",

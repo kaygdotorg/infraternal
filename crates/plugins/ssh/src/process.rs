@@ -65,6 +65,7 @@ async fn execute_inner(
     if stdout_limit > 65536 {
         return Err(Failure::install("The SSH helper output limit is invalid."));
     }
+    infraternal_shim::prepare_child(command.as_std_mut());
     command.as_std_mut().process_group(0);
     command
         .stdin(Stdio::piped())

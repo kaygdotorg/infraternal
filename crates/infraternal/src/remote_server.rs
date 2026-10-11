@@ -31,21 +31,83 @@ impl Options {
     }
 }
 
+pub(crate) enum Outcome {
+    Stopped,
+    #[cfg(feature = "remote")]
+    Restart(crate::restart::Replacement),
+}
+
 pub(crate) async fn serve(
     config: infraternal_server::ServerConfig,
     options: Options,
-) -> Result<(), infraternal_server::ServerError> {
+) -> Result<Outcome, infraternal_server::ServerError> {
     #[cfg(feature = "remote")]
     {
-        if let Some(listen) = options.remote_listen {
-            let startup = infraternal_server::RemoteStartup {
-                listen,
-                ca_dir: options.remote_ca_dir,
-            };
-            let remote = startup.cold_start(&config)?;
-            infraternal_server::serve_with_remote(config, remote).await
+        // Detach private stdin before cold_start can return an error or perform
+        // any configuration I/O; install only after retained trust is available.
+        let inherited = infraternal_server::ca_handoff::receive_stdin();
+        let remote = options
+            .remote_listen
+            .map(|listen| {
+                infraternal_server::RemoteStartup {
+                    listen,
+                    ca_dir: options.remote_ca_dir,
+                }
+                .cold_start(&config)
+            })
+            .transpose()?;
+        let warm = if let (Ok(inherited), Some(authority)) = (
+            inherited,
+            remote
+                .as_ref()
+                .and_then(|remote| remote.ca_administration.as_ref()),
+        ) {
+            inherited.install(&authority.memory_source()).is_ok()
         } else {
-            infraternal_server::serve(config).await
+            false
+        };
+        // Correlate the successor's actual retained-trust installation result
+        // with the predecessor's request record using the unchanged service PID.
+        tracing::info!(
+            service_pid = std::process::id(),
+            outcome = if warm { "warm" } else { "cold" },
+            "server_ca_startup"
+        );
+        let source = remote
+            .as_ref()
+            .map(|remote| remote.enrollment.source.clone());
+        let control = crate::restart::Control::start(&config.data_dir);
+        let serving = async move {
+            if let Some(remote) = remote {
+                infraternal_server::serve_with_remote(config, remote).await
+            } else {
+                infraternal_server::serve(config).await
+            }
+        };
+        let mut control = match control {
+            Ok(control) => control,
+            Err(error) => {
+                // The private convenience endpoint is not a dependency of the
+                // HTTP server or retained public CA verification.
+                tracing::warn!(error_kind = ?error.kind(), "server restart control unavailable; continuing without its socket");
+                return serving.await.map(|()| Outcome::Stopped);
+            }
+        };
+        tokio::pin!(serving);
+        loop {
+            tokio::select! {
+                result = &mut serving => return result.map(|()| Outcome::Stopped),
+                replacement = control.requested(source.as_deref()) => {
+                    match replacement {
+                        Ok(replacement) => return Ok(Outcome::Restart(replacement)),
+                        Err(error) => {
+                            tracing::warn!(error_kind = ?error.kind(), "server restart control failed; continuing to serve");
+                            // Keep serving; back off if accept repeatedly fails.
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
         }
     }
     #[cfg(not(feature = "remote"))]
@@ -53,7 +115,9 @@ pub(crate) async fn serve(
         if options.remote_listen.is_some() {
             return Err(infraternal_server::ServerError::InvalidConfiguration);
         }
-        infraternal_server::serve(config).await
+        infraternal_server::serve(config)
+            .await
+            .map(|()| Outcome::Stopped)
     }
 }
 

@@ -203,6 +203,7 @@ impl CredentialSession {
         }
         let agent_socket = directory.join("agent.sock");
         let mut agent_command = Command::new(&adapter.ssh_agent);
+        infraternal_shim::prepare_child(agent_command.as_std_mut());
         agent_command.as_std_mut().process_group(0);
         let agent = agent_command
             .args(["-D", "-a"])
