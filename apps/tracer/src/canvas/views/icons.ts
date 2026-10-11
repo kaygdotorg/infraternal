@@ -22,6 +22,8 @@ export const ICON = {
   retry: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
   offline: '<path d="M3 3l18 18M8.5 8.6A7 7 0 0 0 5 14.5M12 7a6.5 6.5 0 0 1 5.8 3.5A4.5 4.5 0 0 1 17.5 19H9M6.5 19a4 4 0 0 1-1.3-7.2"/>',
   views: ICONS.views,
+  /** A machine: the details popover's Host tab and the Hosts settings section. */
+  host: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
 } as const;
 /** The session manager's glyphs (windows/session-ui.ts), on the same grid. */
 export const SESSION_ICON = {
@@ -44,6 +46,7 @@ export const viewIcon = (id: string): string => VIEW_ICON[id] ?? ICON.views;
 export const SECTION_ICON: Record<string, string> = {
   windows: '<rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M8 9v6M16 9v6M8 12h8"/>',
   appearance: '<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/>',
+  hosts: ICON.host,
   toolbar: '<rect x="3" y="14" width="18" height="6" rx="3"/><path d="M7 17h.01M12 17h.01M17 17h.01"/><path d="M8 9h8M10 5h4"/>',
   shortcuts: '<rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/>',
   devices: '<rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M11 18h2"/>',

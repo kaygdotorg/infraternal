@@ -4,11 +4,12 @@
  * technical name is a subtitle on the row. A value that is not known is left out, never shown as a dash or "unknown".
  */
 import { hostPlatformFromOs, type HostPlatform } from "../../../../../packages/ui/src/host-icons";
+import { ICON } from "../views/icons";
 import type { DetailsFacts, HostFactsSnapshot } from "./details-source";
 
 const OS_NAME: Record<HostPlatform, string> = { ubuntu: "Ubuntu", debian: "Debian", redhat: "Red Hat", proxmox: "Proxmox", nixos: "NixOS", apple: "macOS", unknown: "" };
 
-const ICON_HOST = '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>';
+const ICON_HOST = ICON.host;
 const ICON_CONNECTION = '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>';
 const ICON_SESSION = '<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="m7.5 10 2.5 2-2.5 2M12.5 14h4"/>';
 

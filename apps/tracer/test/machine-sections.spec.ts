@@ -60,6 +60,10 @@ for (const [name, viewport] of [["desktop", { width: 1440, height: 900 }], ["pho
     await page.waitForTimeout(900);
     await expect(input).toHaveCount(1);
     await expect(page.locator('.ui-window[data-window-id="s-hosts"]')).toContainText("Details");
+    // The title pill carries the host mark the details popover's Host tab uses.
+    const pillIcon = page.locator('.ui-window[data-window-id="s-hosts"] .ui-window-pill svg').first();
+    await expect(pillIcon.locator("rect")).toHaveAttribute("width", "18");
+    await expect(pillIcon.locator("path")).toHaveAttribute("d", "M8 20h8M12 16v4");
     // It is not in Appearance.
     await expect(page.locator('.ui-window[data-window-id="s-appearance"]').getByRole("switch")).toHaveCount(0);
     await expect(input).not.toBeChecked();
