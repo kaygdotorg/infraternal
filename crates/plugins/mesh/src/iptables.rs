@@ -15,20 +15,22 @@ const TOOLS: [&str; 2] = [
 ];
 const CHAINS: [&str; 3] = ["IFM_IN", "IFM_OUT", "IFM_FWD"];
 const GUARD: &str = "IFM_GUARD";
+const DELIVERY: &str = "IFM_DELIVERY";
 /// Restore is atomic per table, so adoption records interrupted tables separately.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Ownership {
     filter: bool,
     guard: bool,
+    delivery: bool,
 }
 impl Ownership {
     #[must_use]
     pub fn any(self) -> bool {
-        self.filter || self.guard
+        self.filter || self.guard || self.delivery
     }
     #[must_use]
     pub fn complete(self) -> bool {
-        self.filter && self.guard
+        self.filter && self.guard && self.delivery
     }
 }
 /// Restore both address families. The caller retains a restrictive fence until both succeed.
@@ -41,6 +43,7 @@ pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
         [Ownership {
             filter: true,
             guard: true,
+            delivery: true,
         }; 2]
     } else {
         presence()?
@@ -79,6 +82,12 @@ pub fn remove() -> io::Result<()> {
             }
             for chain in CHAINS {
                 let _ = writeln!(script, "-F {chain}\n-X {chain}");
+            }
+            if owner.delivery {
+                let _ = writeln!(
+                    script,
+                    "-D INPUT -j {DELIVERY}\n-D FORWARD -j {DELIVERY}\n-F {DELIVERY}\n-X {DELIVERY}"
+                );
             }
             script.push_str("COMMIT\n");
         }
@@ -121,9 +130,15 @@ pub fn presence() -> io::Result<[Ownership; 2]> {
             // cannot be our interrupted install and must not be overwritten.
             return Err(io::ErrorKind::AlreadyExists.into());
         }
+        let delivery = owned(tool, "filter", DELIVERY)?;
+        if delivery && !filter[0] {
+            // Delivery and policy chains commit in one filter transaction.
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
         present[index] = Ownership {
             filter: filter[0],
             guard: owned(tool, "raw", GUARD)?,
+            delivery,
         };
     }
     Ok(present)
@@ -194,6 +209,25 @@ fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
         let _ = writeln!(script, "-I PREROUTING 1 -j {GUARD}");
     }
     script.push_str("COMMIT\n*filter\n");
+    if installed.delivery {
+        let _ = writeln!(script, "-F {DELIVERY}");
+    } else {
+        let _ = writeln!(script, ":{DELIVERY} - [0:0]");
+    }
+    // Filter hooks see the translated destination. Run before conntrack or
+    // peer grants, including packets which never entered the mesh interface.
+    let _ = writeln!(
+        script,
+        "-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -d {address} -j DROP"
+    );
+    if !installed.delivery {
+        // Older owned filter chains remain valid; add this fence atomically
+        // when adopting them rather than duplicating their interface hooks.
+        let _ = writeln!(
+            script,
+            "-I INPUT 1 -j {DELIVERY}\n-I FORWARD 1 -j {DELIVERY}"
+        );
+    }
     for chain in CHAINS {
         if installed.filter {
             let _ = writeln!(script, "-F {chain}");
@@ -369,10 +403,11 @@ mod tests {
             Ownership {
                 filter: true,
                 guard: true,
+                delivery: true,
             },
         );
         assert_eq!(rules.matches("ESTABLISHED,RELATED").count(), 2);
-        assert_eq!(rules.matches("-j DROP").count(), 4);
+        assert_eq!(rules.matches("-j DROP").count(), 5);
         assert!(!rules.contains("-I INPUT"));
         assert!(!rules.contains("-m iprange"));
     }
