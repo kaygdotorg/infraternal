@@ -71,6 +71,8 @@ interface Connection {
   stream: number;
   /** Streams this connection ended with the final Close 4404; their in-flight frames are absorbed, as the server does. */
   goneStreams: Set<number>;
+  /** Active session inventory subscriptions receive full snapshots, including after reconnects. */
+  sessionInventorySubscriptions: Set<number>;
   welcomed: boolean;
   resumeAccepted: boolean;
   resumeExpected: boolean;
@@ -92,7 +94,11 @@ let pendingRegistration: { ceremony: string; userId: string; username: string; d
 let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
 let selectedFixture: Uint8Array | undefined;
+const liveSessionIds = new Set<string>();
+let sessionInventoryAvailable = true;
 let session = createSession();
+/** The reset seed is inventory-visible only if a client actually attaches to it. */
+let unclaimedSessionId: string | undefined = session.sessionIdText;
 /** Sessions the "host" no longer has (`/__mock/end-session`), and every AttachTerm seen, for the dead-session spec (#158). */
 const goneSessions = new Set<string>();
 /** Retained, content-free host exit records; only the retired-exit fixture creates these. */
@@ -147,6 +153,7 @@ webSockets.on("connection", (socket, request) => {
     attached: false,
     stream: 1,
     goneStreams: new Set(),
+    sessionInventorySubscriptions: new Set(),
     welcomed: false,
     resumeAccepted: false,
     resumeExpected: false,
@@ -462,22 +469,50 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     }
     return sendJson(response, 200, { closed });
   }
-  // The host loses the current session (its shim is gone), and the link drops, as when the host's infraternal
-  // agent restarts. The page reconnects and its attach gets the server's final answer (#158).
+  // The host loses the current session. A full census may include its saved exit status; the drop-close variant
+  // instead makes the infraternal agent unavailable so the final-answer reconnect path remains covered (#158).
   if (request.method === "POST" && (url.pathname === "/__mock/retire-session" || url.pathname === "/__mock/retire-session-drop-close")) {
     const body = await readJson(request);
     const status = body?.status;
     if (typeof status !== "number" || !Number.isInteger(status) || status < -2147483648 || status > 2147483647) return sendJson(response, 400, {});
     retiredSessions.set(session.sessionIdText, { status, finalSeq: session.outputLength + 42 });
-    if (url.pathname.endsWith("drop-close")) interruptedRetirements.add(session.sessionIdText);
+    if (url.pathname.endsWith("drop-close")) {
+      interruptedRetirements.add(session.sessionIdText);
+      sessionInventoryAvailable = false;
+    }
     goneSessions.add(session.sessionIdText);
+    publishSessionInventory();
     for (const connection of connections) connection.socket.close(1011, "test-double host restarted");
     return sendJson(response, 200, { session_id: session.sessionIdText });
   }
   if (request.method === "POST" && url.pathname === "/__mock/end-session") {
     goneSessions.add(session.sessionIdText);
+    publishSessionInventory();
     for (const connection of connections) connection.socket.close(1011, "test-double host restarted");
     return sendJson(response, 200, { session_id: session.sessionIdText });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/seed-ended-sessions") {
+    const body = await readJson(request);
+    const count = body?.count;
+    if (typeof count !== "number" || !Number.isInteger(count) || count < 0 || count > 100) return sendJson(response, 400, {});
+    const session_ids = Array.from({ length: count }, () => randomUuid());
+    session_ids.forEach((id) => goneSessions.add(id));
+    return sendJson(response, 200, { session_ids });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/remove-session-from-inventory") {
+    goneSessions.add(session.sessionIdText);
+    publishSessionInventory();
+    return sendJson(response, 200, { session_id: session.sessionIdText });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/agent-offline") {
+    sessionInventoryAvailable = false;
+    publishSessionInventory();
+    return sendJson(response, 200, {});
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/agent-online") {
+    sessionInventoryAvailable = true;
+    publishSessionInventory();
+    return sendJson(response, 200, {});
   }
   if (request.method === "POST" && url.pathname === "/__mock/drop-sockets") {
     for (const connection of connections) connection.socket.close(1011, "test-double link dropped");
@@ -691,7 +726,12 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
         return;
       }
       // A fresh open gets fresh terminal state; only Resume reuses an existing session.
+      if (unclaimedSessionId) {
+        liveSessionIds.delete(unclaimedSessionId);
+        unclaimedSessionId = undefined;
+      }
       connection.session = session = createSession(connection.session, selectedFixture);
+      publishSessionInventory();
       sendFrame(connection.socket, 0, {
         type: "Result",
         callId: frame.callId,
@@ -702,6 +742,11 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
     }
     case "Subscribe":
       if (frame.subId === 45 && new TextDecoder().decode(frame.filterJson) === '{"topic":"auth.recovery"}') return;
+      if (JSON.parse(new TextDecoder().decode(frame.filterJson))?.topic === "terminal.sessions") {
+        connection.sessionInventorySubscriptions.add(frame.subId);
+        sendSessionInventory(connection, frame.subId);
+        return;
+      }
       connection.socket.close(1002, "unexpected test-double subscription");
       return;
     case "Ping":
@@ -716,6 +761,7 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
   switch (frame.type) {
     case "AttachTerm":
       attachCount += 1;
+      if (unclaimedSessionId === uuidText(frame.sessionId)) unclaimedSessionId = undefined;
       if (goneSessions.has(uuidText(frame.sessionId))) {
         connection.goneStreams.add(streamId);
         const exit = retiredSessions.get(uuidText(frame.sessionId));
@@ -998,15 +1044,19 @@ function resetMockState(): void {
   socketOpenCount = 0;
   socketCloseCount = 0;
   goneSessions.clear();
+  liveSessionIds.clear();
+  sessionInventoryAvailable = true;
   retiredSessions.clear();
   interruptedRetirements.clear();
   attachCount = 0;
   traceEvents.length = 0;
   session = createSession();
+  unclaimedSessionId = session.sessionIdText;
 }
 
 function createSession(resumeFrom?: MockSession, fixtureOutput: Uint8Array = new Uint8Array()): MockSession {
   const sessionIdText = randomUuid();
+  liveSessionIds.add(sessionIdText);
   return {
     sessionId: uuidBytes(sessionIdText),
     sessionIdText,
@@ -1026,6 +1076,29 @@ function createSession(resumeFrom?: MockSession, fixtureOutput: Uint8Array = new
     echoMode: "normal",
     echoDelayMs: 0,
   };
+}
+
+/** Push the test double's full live set to every current authenticated subscriber. */
+function publishSessionInventory(): void {
+  for (const connection of connections) {
+    for (const subId of connection.sessionInventorySubscriptions) sendSessionInventory(connection, subId);
+  }
+}
+
+function sendSessionInventory(connection: Connection, subId: number): void {
+  const event = sessionInventoryAvailable
+    ? {
+      topic: "terminal.sessions",
+      type: "terminal.sessions.snapshot",
+      session_ids: [...liveSessionIds].filter((id) => !goneSessions.has(id)).sort(),
+      ended_sessions: [...retiredSessions.entries()].slice(-128).map(([session_id, exit]) => ({ session_id, status: exit.status })),
+    }
+    : { topic: "terminal.sessions", type: "terminal.sessions.unavailable" };
+  sendFrame(connection.socket, 0, {
+    type: "Event",
+    subId,
+    eventJson: new TextEncoder().encode(JSON.stringify(event)),
+  });
 }
 
 function themePaletteFixture(): Uint8Array {
