@@ -120,7 +120,7 @@ impl Registry {
         Ok(())
     }
     /// Resolve retained component intent before dialing, without inventing a plugin action.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "remote"))]
     pub(crate) async fn initialize_paths(&self) -> Result<(), PluginError> {
         self.start()?;
         let (result, receive) = tokio::sync::oneshot::channel();
@@ -142,7 +142,7 @@ impl Registry {
             *link = value;
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "remote"))]
     pub(crate) fn server_paths(&self) -> tokio::sync::watch::Receiver<Option<std::net::IpAddr>> {
         self.paths.subscribe()
     }

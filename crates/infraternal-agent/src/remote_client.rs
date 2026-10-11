@@ -27,7 +27,7 @@ pub struct RemoteIdentity {
     pub execution_uid: u32,
 }
 
-/// Run until cancelled. Healthy idle connections have no retry/heartbeat timer.
+/// Run until cancelled. Fallback retries sleep; proven alternative paths own a freshness guard.
 /// # Errors
 /// Refuses local uid mismatch or invalid credentials before contacting the server.
 pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Result<()> {
@@ -60,84 +60,7 @@ async fn run_inner(
     let service =
         crate::plugin_control::Service::start(&state, crate::plugins::ExecutionMode::Remote)
             .await?;
-    let mut backoff = Duration::from_millis(200);
-    loop {
-        let current = match renewal {
-            Some(renewal) => renewal.current()?,
-            None => Identity {
-                certificate: identity.identity.certificate.clone(),
-                key: identity.identity.key.clone(),
-            },
-        };
-        crate::remote_renewal::require_current(&current)?;
-        let identity = RemoteIdentity {
-            identity: current,
-            roots: identity.roots.clone(),
-            endpoint: identity.endpoint,
-            server_name: identity.server_name.clone(),
-            execution_uid: identity.execution_uid,
-        };
-        let identity = &identity;
-        let tls = remote_tls::client_config(&identity.identity, &identity.roots)?;
-        let started = tokio::time::Instant::now();
-        let quic = dial_runtime::DialRuntime::new();
-        let mut endpoint = quinn::Endpoint::new(
-            quinn::EndpointConfig::default(),
-            None,
-            std::net::UdpSocket::bind(if identity.endpoint.is_ipv6() {
-                "[::]:0"
-            } else {
-                "0.0.0.0:0"
-            })?,
-            quic.runtime(),
-        )?;
-        endpoint.set_default_client_config(remote_quic::client_config(
-            &identity.identity,
-            &identity.roots,
-        )?);
-        let connected = dial_preferred(&endpoint, identity, &tls).await;
-        match connected {
-            Ok(Connected::Quic(connection)) => {
-                let _ = quic_session_on(
-                    connection,
-                    identity,
-                    state.clone(),
-                    renewal,
-                    service.registry.clone(),
-                    None,
-                )
-                .await;
-            }
-            Ok(Connected::Tcp(connection)) => {
-                // The losing handshake otherwise retains Quinn drain timers after
-                // Connecting is dropped. Cancel only this attempt's UDP drivers;
-                // the authenticated TCP channel and rootless shims are independent.
-                drop(endpoint);
-                drop(quic);
-                let control = PrefixedControl {
-                    channel: ControlChannel::Tcp(&connection.channel),
-                    prefix: Mutex::new(Vec::new()),
-                    sent_greeting: Mutex::new(None),
-                    receive: Mutex::new(Receive::default()),
-                };
-                let _ = daemon::run_authenticated_with_plugins(
-                    &control,
-                    state.clone(),
-                    identity.execution_uid,
-                    renewal,
-                    service.registry.clone(),
-                )
-                .await;
-            }
-            Err(_) => {}
-        }
-        if started.elapsed() > Duration::from_secs(10) {
-            backoff = Duration::from_millis(200);
-        }
-        let jitter = Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 100);
-        tokio::time::sleep(backoff + jitter).await;
-        backoff = (backoff * 2).min(Duration::from_secs(30));
-    }
+    server_path::run(identity, state, renewal, service.registry.clone()).await
 }
 
 // Keep the race in its own future. Its losing socket is dropped when this
@@ -337,3 +260,6 @@ mod tests;
 
 #[path = "remote_dial_runtime.rs"]
 mod dial_runtime;
+
+#[path = "remote_server_path.rs"]
+mod server_path;
