@@ -2124,6 +2124,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        traffic is allowed. The future reverse proxy must run in userspace in
        the infraternal agent, never as kernel port-forwarding rules, so this
        rule holds.
+     - **Rollout and retention (Q14–Q16).** Login access applies to the web
+       terminal in the same release as SSH: never a period where one path
+       ignores the policy. The community connection log keeps 30 days.
+       A link always needs the person's own passkey; an administrator cannot
+       approve one on their behalf (a visible machine grant is the stopgap).
 236. **Session rows say what is in them (owner, 2026-10-11):** a session's
      label is, in order, the name a person gave it, the foreground program
      (`htop`, `cargo test`), or the current folder's last component (`~` for
