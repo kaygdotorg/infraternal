@@ -2241,3 +2241,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        terminal; full PAM login per terminal 63–65 ms (rejected); reused login
        6–8 ms per later terminal, 19–24 ms for the first; opened in advance
        about 6 ms.
+241. **Auto-started multiplexers give way to infraternal sessions (owner, 2026-10-11; #170):**
+     infraternal sessions already keep shells alive, reattachable and shared,
+     so when a host's startup files would auto-start tmux or zellij inside a
+     session, infraternal skips that start automatically without editing
+     dotfiles (satisfying the multiplexer's own "already inside" check during
+     startup only; running it by hand later still works). Every session
+     exports `INFRATERNAL_SESSION`. The first time on each host one quiet line
+     says so: "zellij start skipped: infraternal keeps this session for you ·
+     [Use zellij here]"; the button turns the skip off for that host. After
+     that, nothing. A global switch exists as well.
