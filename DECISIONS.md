@@ -2013,3 +2013,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      display name (optional, a real name). Sign-in asks only for the
      username, then the passkey. Display name and other details are edited
      later in Settings → Account.
+231. **Preferred user default and the server's own host (owner, 2026-10-11, Q11b–c; extends D229):**
+     - **Default user:** the global preferred user defaults to the owner's
+       own infraternal username. On a host without that user, a terminal
+       opens as root and says so in the window ("No user kayg here, opened
+       as root"); the per-host override changes it from the window menu.
+     - **The server's own host** opens terminals through the embedded
+       infraternal agent like every other host, never by SSH to itself.
+       Opening must feel instant: a real login that stays lean (measured,
+       with a budget), because this is infrastructure.
+     - **SSH to the server's own host stays possible** as an option; its
+       design is grilled separately.
