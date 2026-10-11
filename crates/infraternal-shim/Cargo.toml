@@ -18,6 +18,8 @@ expect_used = "deny"
 [dependencies]
 alacritty_terminal = { workspace = true, optional = true }
 vte.workspace = true
+# Reuse the server's pinned OpenSSL at the audited secure-allocation FFI boundary.
+openssl = { workspace = true, optional = true }
 nix.workspace = true
 
 vt100 = { workspace = true, optional = true }
@@ -25,7 +27,7 @@ vt100 = { workspace = true, optional = true }
 # Comparison engines are never in the default production dependency graph.
 [features]
 # Audited transient process-transfer buffers are removed with the remote plugin.
-ca-handoff = []
+ca-handoff = ["dep:openssl"]
 bench-vt = ["dep:alacritty_terminal", "dep:vt100"]
 bench-ghostty = ["bench-vt", "dep:libghostty-vt"]
 
