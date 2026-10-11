@@ -1,0 +1,18 @@
+
+running 6 tests
+test ca_update_audit_tests::every_ciphertext_byte_and_tag_mutation_refuses_without_material_in_errors ... ok
+test ca_update_audit_tests::handoff_descriptor_is_close_on_exec_and_prepare_failure_preserves_source ... ok
+test ca_update_audit_tests::handoff_memory_protection_failure_keeps_the_existing_signer ... ok
+test ca_update_audit_tests::no_timer_locks_signing_and_wrong_issuer_cannot_replace_the_unlocked_source ... ok
+test ca_update_audit_tests::secure_heap_capacity_at_10000_live_keys ... ignored, isolated secure heap sizing at 10000 live keys; run with no own builds/browser overlap
+test ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages ... 
+running 1 test
+test ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages ... METRIC unlocked_ca_vm_lck_kib=1024 rss_before_kib=11224 rss_unlocked_kib=18984 secure_before_bytes=0 secure_unlocked_bytes=832 servers=1 heap_bytes=1048576
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 337 filtered out; finished in 0.02s
+
+ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 332 filtered out; finished in 0.50s
+

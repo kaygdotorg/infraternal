@@ -1,0 +1,153 @@
+   Compiling openssl-sys v0.9.117
+   Compiling crossbeam-utils v0.8.23
+   Compiling libsqlite3-sys v0.30.1
+    Checking either v1.18.0
+    Checking ring v0.17.14
+    Checking regex-automata v0.4.18
+    Checking crossbeam-queue v0.3.14
+    Checking matchers v0.2.0
+    Checking sqlx-core v0.8.6
+    Checking tracing-subscriber v0.3.23
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+    Checking rustls-webpki v0.103.15
+    Checking rustls v0.23.45
+    Checking sqlx v0.8.6
+    Checking infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-plugin-api)
+    Checking infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/host-facts)
+    Checking infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/mesh)
+    Checking quinn-proto v0.11.19
+    Checking quinn v0.11.12
+   Compiling openssl v0.10.81
+   Compiling tokio-openssl v0.6.5
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling webauthn-rs-core v0.5.5
+    Checking infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-shim)
+    Checking axum-server v0.8.0
+    Checking infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/remote)
+    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/ssh)
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-agent)
+    Checking webauthn-rs v0.5.5
+    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+    Checking infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 41s
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-shim)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.27s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_shim-197c4e7170e4b7b6)
+
+running 77 tests
+test ended::tests::bounded_record_preserves_status_and_rejects_malformed_or_linked_data ... ok
+test frame::checks::approximate_snapshot_codec_is_bounded_and_canonical ... ok
+test frame::checks::borrowed_and_owned_decoders_agree_at_every_fragment_boundary ... ok
+test frame::checks::codec_reuse_measurement ... ignored, release codec and allocation-path measurement
+test frame::checks::golden::every_frozen_message ... ok
+test frame::checks::golden::exact_maximum_and_coalesced_frames ... ok
+test frame::checks::tests::golden_and_fragmented ... ok
+test frame::checks::tests::invalid_lengths_types_and_utf8 ... ok
+test pty::child_signal_tests::child_reset_restores_ignored_dispositions_and_leaves_parent_mask ... 
+running 1 test
+test pty::child_signal_tests::child_reset_restores_ignored_dispositions_and_leaves_parent_mask ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.00s
+
+ok
+test pty::child_signal_tests::child_signal_reset_spawn_cost_at_128_children ... ignored, child spawn diagnostic; run locally in a weighted scope without own build overlap
+test ring::checks::tests::wrap_and_exact_offsets ... ok
+test session::inputs::tests::identity_cap_preserves_all_existing_cursors ... ok
+test session::inputs::tests::partial_writes_credit_only_the_owner_and_replay_trims_per_writer ... ok
+test session::measurements::budgets::allowlisted_signal_after_real_pty_exit_keeps_exit_ack_available ... ok
+test session::measurements::budgets::input_to_pty_write ... ignored, real-PTY performance measurement; set ZDOTDIR to tests/profile
+test session::measurements::poll_storage_measurement ... ignored, release poll-storage allocation measurement
+test session::resize_checks::native_resize_refusal_preserves_peer_and_pty ... ok
+test session::resize_checks::resize_refusal_session_probe ... ignored, isolated session probe invoked by its parent with a controlled shell profile
+test session::sequenced_checks::coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss ... ok
+test session::sequenced_checks::new_frames_roundtrip_and_refuse_noncanonical_payloads ... ok
+test session::sequenced_checks::reusable_encoder_retains_capacity_and_refuses_growth_before_mutation ... ok
+test session::sequenced_checks::trim_duplicates_gaps_overflow_and_capacity_are_transactional ... ok
+test session::sequenced_checks::writer_selection_has_a_frozen_little_endian_layout ... ok
+test terminal::checks::approximate_repaint_is_bounded_clips_at_complete_cells_and_preserves_source ... ok
+test terminal::checks::approximate_repaint_keeps_complete_pending_syntax_or_omits_it_whole ... ok
+test terminal::checks::tests::alternate_variants_and_nested_switches_repaint ... ok
+test terminal::checks::tests::byte_budget_prunes_history_and_resize_remains_repaintable ... ok
+test terminal::checks::tests::fixtures_and_continuations_repaint ... ok
+test terminal::checks::tests::implicit_hyperlinks_retain_groups_across_rows_and_continuation ... ok
+test terminal::checks::tests::long_unfinished_hyperlink_and_control_strings_continue ... ok
+test terminal::checks::tests::margins_tabs_charsets_and_modes_continue ... ok
+test terminal::checks::tests::partial_csi_and_utf8_continue ... ok
+test terminal::checks::tests::pending_wrap_and_saved_wrap_continue_with_wide_cells ... ok
+test terminal::checks::tests::retained_alternate_saved_cursor_and_keyboard_stack_continue ... ok
+test terminal::checks::tests::saved_origin_survives_changed_margins ... ok
+test terminal::checks::tests::unfinished_sequence_over_frame_limit_fails_without_losing_runtime_state ... ok
+test terminal::fidelity::fidelity_charset_mapped_wide_space_is_explicitly_rejected ... ok
+test terminal::fidelity::fidelity_cursor ... ok
+test terminal::fidelity::fidelity_diagnostic_fixture ... ignored, diagnostic replay of an explicitly selected fixture file
+test terminal::fidelity::fidelity_edge ... ok
+test terminal::fidelity::fidelity_extended_nightly ... ignored, nightly expanded differential corpus: 20,000 deterministic cases
+test terminal::fidelity::fidelity_extended_smoke ... ok
+test terminal::fidelity::fidelity_f1_rep ... ok
+test terminal::fidelity::fidelity_fresh_c_redraw_default_is_explicitly_rejected ... ok
+test terminal::fidelity::fidelity_handwritten ... ok
+test terminal::fidelity::fidelity_inherited_protection_off_mode_is_explicitly_rejected ... ok
+test terminal::fidelity::fidelity_iso_protection_does_not_keep_rep_scratch ... ok
+test terminal::fidelity::fidelity_iso_protection_erase ... ok
+test terminal::fidelity::fidelity_mouse_effective_fields_follow_order_independently_of_booleans ... ok
+test terminal::fidelity::fidelity_oracle_detects_hidden_state ... ok
+test terminal::fidelity::fidelity_oracle_observes_archived_cells_with_equal_active_screens ... ok
+test terminal::fidelity::fidelity_orphaned_spacer_head ... ok
+test terminal::fidelity::fidelity_prompt_resize_requires_explicit_rejection ... ok
+test terminal::fidelity::fidelity_recorded_corpus ... ok
+test terminal::fidelity::fidelity_rejects_unrepresentable_rep_without_mutating_source ... ok
+test terminal::fidelity::fidelity_saved_cursor_over_changed_edge ... ok
+test terminal::fidelity::fidelity_saved_modes_future_restore ... ok
+test terminal::fidelity::fidelity_screen_entry_consumes_inherited_shift_before_saving ... ok
+test terminal::fidelity::fidelity_seeded_nightly ... ignored, nightly differential corpus: 20,000 deterministic cases
+test terminal::fidelity::fidelity_seeded_smoke ... ok
+test terminal::fidelity::fidelity_semantic_validation_matches_exported_history_extent ... ok
+test terminal::fidelity::fidelity_single_shift_survives_rep_seed ... ok
+test terminal::fidelity::fidelity_snapshot_history_tail_contains_no_padding_rows ... ok
+test terminal::fidelity::fidelity_snapshot_resets_stale_viewer_color_overrides ... ok
+test terminal::fidelity::fidelity_spacer_head_attributes ... ok
+test terminal::fidelity::fidelity_variation_tail_attributes ... ok
+test terminal::fidelity::fidelity_variation_wrap_attributes ... ok
+test terminal::fidelity::fresh_captures::fidelity_fresh_real_program_captures ... ignored, manual fresh capture oracle; set VT_CAPTURE_DIR after real program capture
+test terminal::measurements::budgets::snapshot_200x60 ... ignored, performance measurement; run release on the perf host
+test terminal::measurements::memory::measured_terminal_rss ... ignored, RSS measurement; run this filter alone in a fresh release process
+test terminal::measurements::throughput::measured_parser ... ignored, VT observer and history throughput measurement
+test terminal::recovery_measurements::measured_full_ring_reconstruction ... ignored, release reconstruction measurement; old healthy handles permit repeated cleanup
+test terminal::resize_recovery::absent_ring_keeps_last_good_size_and_later_output_usable ... ok
+test terminal::resize_recovery::complete_ring_restores_screens_mouse_and_unfinished_syntax ... ok
+test terminal::resize_recovery::earlier_geometry_changes_require_approximation_even_with_origin_coverage ... ok
+test terminal::resize_recovery::ring_gap_requires_clean_approximate_recovery ... ok
+test terminal_native::allocation::resize_allocation_refusal_retires_native_handle ... ok
+
+test result: ok. 64 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 133.01s
+
+     Running tests/detach.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/detach-55b03bad999b8224)
+
+running 2 tests
+test closed_standard_descriptors_become_dev_null ... ok
+test detached_child_restores_default_signals_without_changing_parent ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.37s
+
+     Running tests/mouse.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mouse-e981bb264acf02ea)
+
+running 1 test
+test faithful_snapshot_preserves_public_mouse_encoder_reports ... FAILED
+
+failures:
+
+---- faithful_snapshot_preserves_public_mouse_encoder_reports stdout ----
+
+thread 'faithful_snapshot_preserves_public_mouse_encoder_reports' (109873) panicked at crates/infraternal-shim/tests/mouse.rs:18:5:
+public mouse encoder probe failed; see t2-gate-public
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    faithful_snapshot_preserves_public_mouse_encoder_reports
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+error: test failed, to rerun pass `-p infraternal-shim --test mouse`
