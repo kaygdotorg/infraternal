@@ -897,6 +897,8 @@
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 22%, transparent);
   transition: opacity 160ms var(--ease-out, ease-out), transform 180ms var(--ease-out, ease-out);
 }
+/* A card of its own, like the toast: the glass halo would only smear its glyphs (and the solid action takes none). */
+.ui-inbox, .ui-inbox * { text-shadow: none; }
 .ui-inbox[hidden] { display: none; }
 .ui-inbox[data-open="false"] { opacity: 0; transform: translateY(6px); pointer-events: none; }
 .ui-inbox ~ .ui-sidebar-foot { margin-top: 0; }
