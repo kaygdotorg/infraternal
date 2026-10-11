@@ -100,6 +100,9 @@ impl Node {
                 Device::delete()?;
                 node.owned = false;
                 node.firewall.remove()?;
+                if !node.enabled {
+                    node.retire_routes()?;
+                }
                 return Ok(node);
             }
             let (public_key, port) = identity?;
@@ -124,6 +127,10 @@ impl Node {
         }
         if !node.owned && !node.enabled {
             node.firewall.remove()?;
+            // A stopped process may already have deleted the link but not the
+            // policy or journal. Disabled intent fences adoption; finish that
+            // cleanup instead of leaving durable ownership behind forever.
+            node.retire_routes()?;
         }
         Ok(node)
     }
@@ -161,6 +168,16 @@ impl Node {
                 backend: self.firewall.backend(),
             })?;
         }
+        Ok(())
+    }
+    fn retire_routes(&mut self) -> io::Result<()> {
+        // Publish an empty inventory only after kernel teardown is complete.
+        // Keep the in-memory inventory on failure so an explicit retry remains
+        // ordered. Store's canonical cache makes completed replay write-free.
+        if let Some(store) = &self.store {
+            store.record_routes(&BTreeSet::new())?;
+        }
+        self.routes.clear();
         Ok(())
     }
     /// Generate the key on the node and configure its owned kernel interface once.
@@ -213,23 +230,33 @@ impl Node {
     /// # Errors
     /// Reports failed kernel cleanup rather than claiming the component is disabled.
     pub fn down(&mut self) -> io::Result<()> {
+        // This durable intent precedes every kernel operation. A process stop
+        // between the independent kernel transactions must reconcile as Off.
         self.save(None, false)?;
         self.enabled = false;
         if self.owned {
             // Confirmed absence is idempotent; a foreign replacement or a
             // privilege error must never be treated as successful deletion.
             if Device::owned()? {
+                // Retire peers in one generic-netlink request before the link
+                // deletion removes all addresses/routes in one route request.
+                // Reuse the live client; partial startup may not have one yet.
+                if let Some(client) = &mut self.client {
+                    client.clear_peers()?;
+                } else {
+                    Client::new()?.clear_peers()?;
+                }
                 Device::delete()?;
             }
             self.owned = false;
         }
         self.firewall.remove()?;
+        self.retire_routes()?;
         self.firewall = Firewall::default();
         self.client = None;
         self.identity = None;
         self.config = None;
         self.pending = None;
-        self.routes.clear();
         Ok(())
     }
     /// Read the retained applied configuration, never partial incoming chunks.
