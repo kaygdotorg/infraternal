@@ -235,18 +235,7 @@ except TimeoutError: pass
             self.udp(f"identity_positive_{family}", self.addresses[0][family], dst, 5500, True)
             for source in sources:
                 self.udp(f"source_identity_{source}", source, dst, 5500, False)
-        # Independently prove local output denial with a permissive receiver.
-        chunk = copy.deepcopy(self.chunks[0])
-        chunk.update(from_version=self.version, version=self.version + 1)
-        chunk["upserted"]["2"]["outbound"] = "None"
-        assert proof.request(self.left, chunk)["applied"]
-        for family in ["ipv4", "ipv6"]:
-            self.udp(f"output_udp_denied_{family}", self.addresses[0][family], self.addresses[1][family], 5510, False)
-            self.tcp(f"output_tcp_denied_{family}", self.addresses[1][family], 5511, False)
-        chunk.update(from_version=self.version + 1, version=self.version + 2)
-        chunk["upserted"]["2"]["outbound"] = "All"
-        assert proof.request(self.left, chunk)["applied"]
-        self.transit(self.version + 2)
+        self.transit(self.output())
         # Removal must retire the cryptokey even if a sender retains the tunnel.
         chunk = copy.deepcopy(self.chunks[1])
         chunk.update(from_version=self.version, version=self.version + 1, upserted={}, removed=[1])
@@ -254,6 +243,39 @@ except TimeoutError: pass
         for family in ["ipv4", "ipv6"]:
             self.udp(f"removed_peer_{family}", self.addresses[0][family], self.addresses[1][family], 5501, False)
         return self.rows
+
+    def output(self):
+        """Independent outbound checks keep the receiving node permissive."""
+        version = self.version
+        for policy in ["All", "None", {"Ports": [
+                {"protocol": "Tcp", "number": 65535},
+                {"protocol": "Udp", "number": 65535},
+                *({"protocol": "Udp", "number": p} for p in range(5400, 5403))]}]:
+            chunk = copy.deepcopy(self.chunks[0])
+            chunk.update(from_version=version, version=version + 1)
+            chunk["upserted"]["2"]["outbound"] = policy
+            assert proof.request(self.left, chunk)["applied"]
+            version += 1
+            label = policy if isinstance(policy, str) else "Ports"
+            for family in ["ipv4", "ipv6"]:
+                src, dst = (a[family] for a in self.addresses)
+                suffix = f"output_{label}_{family}"
+                for port in [0, 5399, 5400, 5401, 5402, 5403, 65535]:
+                    self.udp(f"udp_{port}_{suffix}", src, dst, port,
+                             policy == "All" or label == "Ports" and port in [5400, 5401, 5402, 65535])
+                for port in [5400, 65535]:
+                    self.tcp(f"tcp_{port}_{suffix}", dst, port,
+                             policy == "All" or label == "Ports" and port == 65535)
+                self.udp(f"fragments_allowed_port_{suffix}", src, dst, 65535, policy != "None", True)
+                self.udp(f"fragments_denied_port_{suffix}", src, dst, 5410, policy == "All", True)
+                ping = subprocess.run(["ping", "-n", "-c", "1", "-W", "1", dst],
+                                      capture_output=True).returncode == 0
+                self.record(f"icmp_{suffix}", policy == "All", ping)
+        # Transit checks need a live sender; restoring it is a new version.
+        chunk.update(from_version=version, version=version + 1)
+        chunk["upserted"]["2"]["outbound"] = "All"
+        assert proof.request(self.left, chunk)["applied"]
+        return version + 1
 
     def ingress(self):
         """Published underlay ports must not become authenticated mesh ingress."""
