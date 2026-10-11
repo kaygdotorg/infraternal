@@ -2024,3 +2024,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        with a budget), because this is infrastructure.
      - **SSH to the server's own host stays possible** as an option; its
        design is grilled separately.
+232. **App-window stream transport (owner, 2026-10-11, T1–T2; extends D104, D107, D185, D214):**
+     - **Path (T1):** desktop and app-window streams use the same path
+       selection as terminals: direct when measurably faster, the server
+       relay otherwise, switching up or down automatically as conditions
+       change, with no setting. The server still holds the session (D104),
+       so reconnecting and extra viewers keep working.
+     - **Lost frames (T2):** both a reliable stream and unreliable
+       datagrams (skip a lost frame, repair with the next keyframe) are
+       built behind one interface on our QUIC transport and measured on a
+       lossy India↔Germany link; the owner picks from the numbers.
