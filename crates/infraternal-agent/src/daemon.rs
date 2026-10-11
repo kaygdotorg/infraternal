@@ -524,10 +524,21 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
                 .map_err(|_| sessions::invalid("native terminal command queue unavailable"))?;
         }
     };
+    let writer = writer(channel, rx, None, false, false);
+    tokio::pin!(writer);
     tokio::select! {
         result = dispatch => result,
-        result = writer(channel, rx, None, false, false) => result,
-        result = terminal(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx) => result,
+        result = &mut writer => result,
+        result = terminal(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx) => {
+            result?;
+            // Successful terminal returns can queue a final Close (gone session,
+            // unsupported shim or refused request). Its sole sender is now gone:
+            // drain the FIFO before RetireChannel cancels the native writes.
+            // Bound the whole drain so an unread peer cannot pin this stream.
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut writer)
+                .await
+                .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+        },
     }
 }
 
