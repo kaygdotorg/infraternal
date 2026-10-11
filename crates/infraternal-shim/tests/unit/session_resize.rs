@@ -69,6 +69,7 @@ fn resize_refusal_session_probe() {
             caps: APPROXIMATE_SNAPSHOT,
             input_reply: None,
             writer: Some(0),
+            shared_writer: false,
             ack_queued: 0,
             size: (80, 24, 0, 0),
             cursor: Some(ring.head()),
@@ -87,7 +88,7 @@ fn resize_refusal_session_probe() {
         }
         let mut config = Config::new([0; 16], uid);
         let mut input = VecDeque::new();
-        let mut cursors = Inputs::default();
+        let mut cursors = Inputs::with_geometry(peer.size);
         if case == "readfrom" {
             // The terminal can lose state while no peer remains to receive the
             // initial recovery repaint. A new peer requesting the current head
@@ -115,6 +116,8 @@ fn resize_refusal_session_probe() {
                 "native resize error must keep the peer usable"
             );
             assert_eq!((config.cols, config.rows), (80, 24));
+            assert_eq!(cursors.get(Some(0)).unwrap().requested_size, (80, 24, 0, 0));
+            assert_eq!(cursors.get(Some(0)).unwrap().accepted_size, (80, 24, 0, 0));
             if case == "control" {
                 assert!(
                     peer.request.is_none(),

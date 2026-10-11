@@ -3,6 +3,7 @@
 use crate::{
     frame::{
         APPROXIMATE_SNAPSHOT, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT,
+        SHARED_WRITER,
     },
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
@@ -86,6 +87,8 @@ struct Peer {
     caps: u64,
     input_reply: Option<InputReply>,
     writer: Option<u32>,
+    // Selection mode belongs to this socket, never to the retained writer cursor.
+    shared_writer: bool,
     ack_queued: u64,
     size: (u16, u16, u16, u16),
     cursor: Option<u64>,
@@ -95,6 +98,22 @@ struct Peer {
     request: Option<Request>,
 }
 impl Peer {
+    /// Capability dependencies are checked before attachment mutates peer state.
+    fn attach(&mut self, caps: u64) -> io::Result<()> {
+        let caps = caps & (SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SHARED_WRITER);
+        if self.attached
+            || (caps & MULTI_WRITER != 0 && caps & SEQUENCED_INPUT == 0)
+            || (caps & SHARED_WRITER != 0 && caps & MULTI_WRITER == 0)
+        {
+            return Err(invalid_request());
+        }
+        self.attached = true;
+        self.caps = caps;
+        if caps & MULTI_WRITER != 0 {
+            self.writer = None;
+        }
+        Ok(())
+    }
     fn queue(&mut self, frame: &Frame) -> io::Result<()> {
         frame.encode_into(&mut self.pending)?;
         self.written = 0;
@@ -266,7 +285,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
     let mut terminal = Terminal::new(config.cols, config.rows)?;
     let mut ring = Ring::new(config.ring_capacity);
     let mut input = VecDeque::new();
-    let mut cursors = Inputs::default();
+    let mut cursors = Inputs::with_geometry((config.cols, config.rows, 0, 0));
     let mut peers: Vec<Peer> = Vec::new();
     let mut exit = None;
     let mut drained = false;
@@ -399,6 +418,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
                             caps: 0,
                             input_reply: None,
                             writer: Some(0),
+                            shared_writer: false,
                             ack_queued: 0,
                             size: (config.cols, config.rows, 0, 0),
                             cursor: None,
@@ -409,7 +429,10 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
-                            caps: SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT,
+                            caps: SEQUENCED_INPUT
+                                | MULTI_WRITER
+                                | APPROXIMATE_SNAPSHOT
+                                | SHARED_WRITER,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -523,17 +546,25 @@ pub fn run(mut config: Config) -> io::Result<()> {
             }
             disconnects[index] = disconnect;
         }
-        // A reattachment supersedes only the same writer. Legacy writer zero
-        // keeps v1 replacement semantics; selected viewers never evict siblings.
-        for index in (0..peers.len()).rev() {
+        // Coexisting ordinary/shared sockets use the same durable input cursor.
+        // Replacement stays within a mode, including legacy writer zero. Decide
+        // before removal so rejected successors and shifting indices cannot evict
+        // a live peer; no admission failure mutates retained writer ownership.
+        for index in 0..peers.len() {
             let p = &peers[index];
             let duplicate = p.attached
                 && p.writer.is_some_and(|id| {
-                    peers[index + 1..]
-                        .iter()
-                        .any(|next| next.attached && next.writer == Some(id))
+                    peers[index + 1..].iter().enumerate().any(|(offset, next)| {
+                        !disconnects[index + 1 + offset]
+                            && next.attached
+                            && next.writer == Some(id)
+                            && next.shared_writer == p.shared_writer
+                    })
                 });
-            if disconnects[index] || duplicate {
+            disconnects[index] |= duplicate;
+        }
+        for index in (0..peers.len()).rev() {
+            if disconnects[index] {
                 peers.remove(index);
             }
         }
@@ -551,29 +582,18 @@ fn handle<'a>(
     cursors: &mut Inputs,
     exited: bool,
 ) -> io::Result<bool> {
-    let invalid = || {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid shim request ordering or payload",
-        )
-    };
+    let invalid = invalid_request;
     let frame = frame.into();
     if let FrameRef::Owned(Frame::Attach(caps)) = frame {
-        if p.attached {
-            return Err(invalid());
-        }
-        p.attached = true;
-        p.caps = caps & (SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT);
-        if p.caps & MULTI_WRITER != 0 {
-            if p.caps & SEQUENCED_INPUT == 0 {
-                return Err(invalid());
-            }
-            p.writer = None;
-        }
+        p.attach(caps)?;
         return Ok(false);
     }
     if !p.attached
-        || (p.writer.is_none() && !matches!(&frame, FrameRef::Owned(Frame::SelectWriter(_))))
+        || (p.writer.is_none()
+            && !matches!(
+                &frame,
+                FrameRef::Owned(Frame::SelectWriter(_) | Frame::SelectSharedWriter(_))
+            ))
     {
         return Err(invalid());
     }
@@ -588,8 +608,12 @@ fn handle<'a>(
             // Only newly accepted input changes the active size [74]. Replayed
             // duplicate bytes cannot steal the last typist's terminal geometry.
             if cursors.active_writer != Some(writer) {
-                p.resize(pty, terminal, ring, config)?;
-                cursors.active_writer = Some(writer);
+                p.size = cursors.get(p.writer)?.requested_size;
+                let applied = p.resize(pty, terminal, ring, config)?;
+                p.size = cursors.finish_resize(p.writer, applied)?;
+                if applied {
+                    cursors.active_writer = Some(writer);
+                }
             }
         }
         if offset.is_some() && p.input_reply.is_none() {
@@ -616,8 +640,17 @@ fn handle<'a>(
     };
     match frame {
         Frame::SelectWriter(id) if p.caps & MULTI_WRITER != 0 && p.writer.is_none() && id != 0 => {
-            cursors.select(id)?;
+            cursors.select(id, p.size)?;
             p.writer = Some(id);
+        }
+        Frame::SelectSharedWriter(id)
+            if p.caps & SHARED_WRITER != 0 && p.writer.is_none() && id != 0 =>
+        {
+            // Priming cannot invent a cursor or alter geometry, accepted input,
+            // or an existing peer. Its input is deduplicated by this same writer.
+            cursors.get(Some(id))?;
+            p.writer = Some(id);
+            p.shared_writer = true;
         }
         Frame::InputStateRequest if p.caps & SEQUENCED_INPUT != 0 && p.writer.is_some() => {
             p.input_reply = Some(InputReply::State);
@@ -632,10 +665,13 @@ fn handle<'a>(
                 return Err(invalid());
             }
             p.size = (cols, rows, px_w, px_h);
-            if (cursors.active_writer.is_none() || cursors.active_writer == p.writer)
-                && p.resize(pty, terminal, ring, config)?
-            {
-                cursors.active_writer = p.writer;
+            cursors.request_resize(p.writer, p.size)?;
+            if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
+                let applied = p.resize(pty, terminal, ring, config)?;
+                p.size = cursors.finish_resize(p.writer, applied)?;
+                if applied {
+                    cursors.active_writer = p.writer;
+                }
             }
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
@@ -667,6 +703,10 @@ mod measurements;
 struct InputCursors {
     written: u64,
     accepted: u64,
+    // Inactive Resize is staged for the next typist. Keep the last successful
+    // size separately so allocation refusal cannot overwrite durable geometry.
+    requested_size: (u16, u16, u16, u16),
+    accepted_size: (u16, u16, u16, u16),
 }
 impl InputCursors {
     fn accept(&mut self, seq: u64, bytes: &[u8], queue: &mut VecDeque<u8>) -> io::Result<()> {
@@ -702,6 +742,13 @@ mod sequenced_checks;
 /// Static error copy keeps malformed writer data out of diagnostics.
 fn invalid_input() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid shim writer input")
+}
+
+fn invalid_request() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid shim request ordering or payload",
+    )
 }
 #[cfg(test)]
 #[path = "../tests/unit/session_resize.rs"]

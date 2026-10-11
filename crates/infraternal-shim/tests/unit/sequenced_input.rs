@@ -56,6 +56,7 @@ fn coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss
         caps: SEQUENCED_INPUT,
         input_reply: None,
         writer: Some(0),
+        shared_writer: false,
         ack_queued: 0,
         size: (200, 60, 0, 0),
         cursor: None,

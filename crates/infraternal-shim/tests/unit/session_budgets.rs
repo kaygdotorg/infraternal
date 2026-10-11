@@ -31,6 +31,7 @@ mod budgets {
             caps: 0,
             input_reply: None,
             writer: Some(0),
+            shared_writer: false,
             ack_queued: 0,
             size: (200, 60, 0, 0),
             cursor: None,
@@ -43,7 +44,7 @@ mod budgets {
         let ring = Ring::new(DEFAULT_CAPACITY);
         let mut config = Config::new([0; 16], Uid::effective().as_raw());
         let mut input = VecDeque::new();
-        let mut cursors = Inputs::default();
+        let mut cursors = Inputs::with_geometry(peer.size);
         let mut samples = Vec::new();
         let wire = Frame::Input(vec![b'x']).encode().unwrap();
         for _ in 0..10000 {
