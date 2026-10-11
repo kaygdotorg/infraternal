@@ -115,6 +115,15 @@ async function invoke(client: MeshClient, vector: ActionVector): Promise<void> {
     case "mesh.role.assign":
       await client.assignRole(input as unknown as Parameters<MeshClient["assignRole"]>[0]);
       break;
+    case "mesh.default.get":
+      await client.getDefault();
+      break;
+    case "mesh.default.preview":
+      await client.previewDefault(input as unknown as Parameters<MeshClient["previewDefault"]>[0]);
+      break;
+    case "mesh.default.set":
+      await client.setDefault(input as unknown as Parameters<MeshClient["setDefault"]>[0]);
+      break;
   }
 }
 

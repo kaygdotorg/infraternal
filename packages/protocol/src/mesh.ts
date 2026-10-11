@@ -90,7 +90,22 @@ export type MeshActionId =
   | "mesh.grant.delete"
   | "mesh.grant.rename"
   | "mesh.role.define"
-  | "mesh.role.assign";
+  | "mesh.role.assign"
+  | "mesh.default.get"
+  | "mesh.default.preview"
+  | "mesh.default.set";
+
+/** Edition default or persisted owner choice for new Mesh connections [216]. */
+export type MeshDefaultPolicy = "Allow" | "Deny";
+
+/** One bounded page of directed pairs that would lose new-connection reach. */
+export interface MeshDefaultPreview {
+  default_policy: MeshDefaultPolicy;
+  revision: number;
+  loses_reach: readonly (readonly [MeshNodeId, MeshNodeId])[];
+  total_pairs: number;
+  next_cursor: MeshCursor | null;
+}
 
 /** An invalidation or snapshot delivered by a `topic: mesh` subscription. */
 export type MeshSubscriptionEvent =
@@ -134,6 +149,27 @@ class SnapshotSuperseded extends Error {}
 /** Typed action and subscription client for the Mesh control plane. */
 export class MeshClient {
   constructor(private readonly transport: MeshTransport) {}
+
+  /** Read the current Mesh default; the server checks owner authority. */
+  getDefault(): Promise<{ default_policy: MeshDefaultPolicy }> {
+    return this.transport.call("mesh.default.get", {});
+  }
+
+  /** Preview one revision-bound page before applying a new default. */
+  previewDefault(input: {
+    default_policy: MeshDefaultPolicy;
+    cursor?: MeshCursor;
+  }): Promise<MeshDefaultPreview> {
+    return this.transport.call("mesh.default.preview", input);
+  }
+
+  /** Apply the preview's revision; fresh authentication remains a server check. */
+  setDefault(input: {
+    default_policy: MeshDefaultPolicy;
+    expected_revision: number;
+  }): Promise<MeshEditResult> {
+    return this.transport.call("mesh.default.set", input);
+  }
 
   /** List the caller's authorized inventory, optionally restricted to one tag. */
   async list(filter: MeshFilter = {}): Promise<MeshSnapshot> {
