@@ -206,6 +206,20 @@ class Binary:
             # travels exclusively over the fixture socket and is never logged.
             raise AssertionError(f'daemon exit {self.child.returncode}: {self.child.stderr.read().decode()}') from error
 
+    def read_ignoring_replay_complete(self, sessions):
+        """Skip only validated attach markers, preserving all other event frames."""
+        while True:
+            frame = self.read()
+            stream, kind, body = frame
+            if kind != 0x33:
+                return frame
+
+            assert body[:4] == bytes(4), (stream, kind)
+            event = json.loads(body[4:])
+            assert event.get('type') == 'terminal.replay_complete', (stream, event)
+            assert event.get('session_id') == str(sessions.get(stream)), (stream, event)
+            assert isinstance(event.get('out_seq'), str) and event['out_seq'].isdecimal(), (stream, event)
+
     def inherit_scope_priority(self, weight=None):
         """Apply this test's CPU weight only to its own transient shim scope."""
         weight = fixture_cpu_weight() if weight is None else weight
