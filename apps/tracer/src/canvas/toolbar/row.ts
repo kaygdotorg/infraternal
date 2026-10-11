@@ -4,7 +4,7 @@
  * right and down, new window right and below (D212), sessions (only with an inventory), add host (only when the flow exists), sidebar. Items disable while the input lock is on, and
  * the window actions when the active window is not a terminal.
  */
-import { ICONS, iconSvg } from "../../../../../packages/ui/src/icons";
+import { ICONS, iconSvg, withLockBadge } from "../../../../../packages/ui/src/icons";
 import { isMacPlatform } from "../../../../../packages/ui/src/platform";
 import { refreshTip } from "../../../../../packages/ui/src/tooltip";
 import type { ToolbarItem, ToolbarRow } from "../../core-screen";
@@ -27,7 +27,7 @@ export function createToolbar(cx: Ctx): ToolbarModule {
   // Desktop: the canvas lock toggle and the view switcher sit next to the top pill.
   const lockBtn = el("button", "ui-pill ui-pill-icon cl-snap");
   lockBtn.type = "button";
-  lockBtn.innerHTML = iconSvg("snap");
+  lockBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${withLockBadge(ICONS.canvas)}</svg>`;
   const viewsBtn = el("button", "ui-pill ui-pill-icon cl-viewsbtn");
   viewsBtn.type = "button";
   viewsBtn.innerHTML = iconSvg("views");
@@ -58,9 +58,9 @@ export function createToolbar(cx: Ctx): ToolbarModule {
     { id: "views", label: "Views", icon: ICONS.views, onSelect: () => cx.viewList.toggle() },
     { id: "previous", label: "Previous window", icon: ICONS.previous, onSelect: () => { if (!cx.inputLock.state) cx.win.step(-1); } },
     { id: "next", label: "Next window", icon: ICONS.next, onSelect: () => { if (!cx.inputLock.state) cx.win.step(1); } },
-    { id: "canvas-lock", label: "Canvas lock", icon: ICONS.snap, pressed: true, onSelect: () => { if (!cx.inputLock.state) cx.nav.setCanvasLock(!state.canvasLock); } },
+    { id: "canvas-lock", label: "Canvas lock", icon: withLockBadge(ICONS.canvas), pressed: true, onSelect: () => { if (!cx.inputLock.state) cx.nav.setCanvasLock(!state.canvasLock); } },
     { id: "overview", label: "All views", icon: ICONS.overview, onSelect: () => { if (!cx.inputLock.state) cx.nav.showOverview(); } },
-    { id: "input-lock", label: "Input lock", icon: ICONS.lock, onSelect: () => cx.inputLock.toggle() },
+    { id: "input-lock", label: "Input lock", icon: ICONS.terminal, onSelect: () => cx.inputLock.toggle() },
     { id: "split-right", label: "Split right", icon: ICONS.splitRight, onSelect: () => windowAction((w) => cx.win.split(w, "right")) },
     { id: "split-down", label: "Split down", icon: ICONS.splitDown, onSelect: () => windowAction((w) => cx.win.split(w, "down")) },
     { id: "new-window-right", label: "New window right", icon: ICONS.newRight, onSelect: () => windowAction((w) => cx.win.newWindow(w, "right")) },
@@ -78,11 +78,12 @@ export function createToolbar(cx: Ctx): ToolbarModule {
     lockBtn.dataset.tip = `${state.canvasLock ? "Canvas lock on" : "Canvas lock off"} (${bindingText("canvas-lock")})`;
     lockBtn.setAttribute("aria-label", lockBtn.dataset.tip);
     refreshTip(lockBtn);
-    row.update("canvas-lock", { pressed: state.canvasLock, label: state.canvasLock ? "Canvas lock on" : "Canvas lock off", disabled: locked });
+    lockBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${state.canvasLock ? withLockBadge(ICONS.canvas) : ICONS.canvas}</svg>`;
+    row.update("canvas-lock", { pressed: state.canvasLock, label: state.canvasLock ? "Canvas lock on" : "Canvas lock off", disabled: locked, icon: state.canvasLock ? withLockBadge(ICONS.canvas) : ICONS.canvas });
     row.update("previous", { disabled: locked });
     row.update("next", { disabled: locked });
     row.update("overview", { disabled: locked });
-    row.update("input-lock", { pressed: locked, disabled: !terminal && !locked, label: locked ? "Input lock on" : "Input lock off", icon: locked ? ICONS.lock : ICONS.unlock });
+    row.update("input-lock", { pressed: locked, disabled: !terminal && !locked, label: locked ? "Input lock on" : "Input lock off", icon: locked ? withLockBadge(ICONS.terminal) : ICONS.terminal });
     row.update("split-right", { disabled: !terminal });
     row.update("split-down", { disabled: !terminal });
     row.update("new-window-right", { disabled: !terminal });

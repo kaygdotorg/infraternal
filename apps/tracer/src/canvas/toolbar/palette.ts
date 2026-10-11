@@ -7,7 +7,7 @@
  * this module handles. A row's `source` is "keyboard" when it was picked without the pointer, and keyboard
  * flights are the short version (camera.keyFlight).
  */
-import { ICONS } from "../../../../../packages/ui/src/icons";
+import { ICONS, withLockBadge } from "../../../../../packages/ui/src/icons";
 import { shortcutLabel } from "../../../../../packages/ui/src/platform";
 import type { PaletteEntry } from "../../core-screen";
 import type { Ctx, ViewRec, WinRec } from "../context";
@@ -61,7 +61,7 @@ export function installPalette(cx: Ctx): () => void {
     }
     if (cx.sharing) out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.next, label: "Share layout…", hint: "send views to a person or a group", action: "canvas:share" });
     if (views.get(state.currentView)?.view.team) out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.unlock, label: "Unlink team layout to edit", hint: "keep your own copy", action: "canvas:unlink" });
-    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.snap, label: "Canvas lock on", hint: `${state.canvasLock ? "on now · " : ""}${bindingText("canvas-lock")}`, action: "canvas:canvaslock:on" });
+    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.canvas, label: "Canvas lock on", hint: `${state.canvasLock ? "on now · " : ""}${bindingText("canvas-lock")}`, action: "canvas:canvaslock:on" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free pan and zoom, in place", action: "canvas:canvaslock:off" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "All views", hint: "fit every view · Esc", action: "canvas:overview" });
     if (state.activeWin && isTerminal(state.activeWin)) {
@@ -71,7 +71,7 @@ export function installPalette(cx: Ctx): () => void {
       out.push({ group: "Canvas", glyph: "▤", icon: ICONS.newBelow, label: "New window below", hint: `full size, under · ${bindingText("new-window-below")}`, action: "canvas:new:below" });
     }
     if (state.activeWin) out.push({ group: "Canvas", glyph: "▢", icon: ICONS.close, label: "Close window", hint: `the session keeps running · ${bindingText("close-window")}`, action: "canvas:close" });
-    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.lock, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
+    out.push({ group: "Canvas", glyph: "▦", icon: cx.inputLock.state ? withLockBadge(ICONS.terminal) : ICONS.terminal, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
     // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
     for (const host of cx.adapters.sessions.hosts()) {
       if (host.id !== "embedded" && cx.adapters.hostRemoval?.label()) out.push({ group: "Hosts", glyph: "×", label: `${cx.adapters.hostRemoval.label()}: ${host.name}`, hint: "revoke access · uninstall", action: `canvas:removehost:${host.id}` });

@@ -10,9 +10,10 @@ export const ICONS = {
   views: '<rect x="3.5" y="4" width="17" height="6" rx="2"/><rect x="3.5" y="14" width="7.5" height="6" rx="2"/><rect x="14" y="14" width="6.5" height="6" rx="2"/>',
   previous: '<path d="M15 5l-7 7 7 7"/>',
   next: '<path d="M9 5l7 7-7 7"/>',
-  // Canvas lock (windows snap in place): a horseshoe magnet. Not a padlock (that is the input lock), not the overview's
-  // brackets, and not a window shape that could be taken for a split.
-  snap: '<path d="M6 4h3.5v8a2.5 2.5 0 0 0 5 0V4H18v8a6 6 0 0 1-12 0z"/><path d="M6 8h3.5M14.5 8H18"/>',
+  // The canvas: a rounded plane with the dots of its backdrop. The canvas lock toggle draws it, and adds the lock badge when on.
+  canvas: '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M8.5 9.5h.01M15.5 9.5h.01M8.5 14.5h.01M15.5 14.5h.01"/>',
+  // A terminal window with its prompt: the glyph of Console and of the input lock toggle (badged when locked).
+  terminal: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 10 3 2-3 2M13 14h4"/>',
   overview: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/>',
   more: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>',
   lock: '<rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/>',
@@ -30,6 +31,29 @@ export const ICONS = {
 } as const;
 
 export type IconName = keyof typeof ICONS;
+
+/**
+ * The lock toggles (TASTE: lock icons are the thing plus a lock): a toggle shows the plain icon of what it locks when off,
+ * and the same icon with this badge when on. One drawing for every toggle: a small padlock at the top right of the 24 px
+ * grid, and a knock-out around it so the icon's own lines stop short of the badge and it reads on any fill behind
+ * (the selection circle, a pill). The knock-out is a mask held once in the document (`ensureKnockout`): a mask defined inside
+ * an svg that is later hidden would stop applying to every other svg that refers to it.
+ */
+export const LOCK_BADGE = '<rect x="14.2" y="6.2" width="8" height="6.3" rx="1.6" fill="currentColor" stroke="none"/><path d="M16.2 6.2V5a2 2 0 0 1 4 0v1.2" stroke-width="1.5"/>';
+const KNOCKOUT = "ui-lock-knockout";
+function ensureKnockout(): void {
+  if (typeof document === "undefined" || !document.body || document.getElementById(KNOCKOUT)) return;
+  const holder = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  holder.setAttribute("width", "0"); holder.setAttribute("height", "0"); holder.setAttribute("aria-hidden", "true"); holder.setAttribute("focusable", "false");
+  holder.style.cssText = "position:absolute;width:0;height:0;overflow:hidden";
+  holder.innerHTML = `<defs><mask id="${KNOCKOUT}" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24"><rect width="24" height="24" fill="#fff"/><circle cx="18.2" cy="8" r="6.8" fill="#000"/></mask></defs>`;
+  document.body.append(holder);
+}
+/** `inner` (an icon of this set) with the lock badge on top and the knock-out behind it. */
+export function withLockBadge(inner: string): string {
+  ensureKnockout();
+  return `<g mask="url(#${KNOCKOUT})">${inner}</g>${LOCK_BADGE}`;
+}
 export const iconSvg = (name: IconName): string => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 
 /**
