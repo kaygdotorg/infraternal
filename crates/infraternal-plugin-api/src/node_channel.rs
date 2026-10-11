@@ -9,4 +9,12 @@ pub trait NodeChannel: Send + Sync {
     fn is_server(&self) -> bool;
     fn changes(&self) -> tokio::sync::watch::Receiver<()>;
     fn call(&self, action: &str, input: Vec<u8>) -> PluginOperation<'_, Vec<u8>>;
+    /// Lease an additional authenticated listener on an explicitly created server.
+    /// Dropping the lease stops admission; ordinary nodes cannot create listeners.
+    fn listen_server(
+        &self,
+        _address: IpAddr,
+    ) -> PluginOperation<'_, Option<Box<dyn crate::server_path::ListenerLease>>> {
+        Box::pin(async { Ok(None) })
+    }
 }
