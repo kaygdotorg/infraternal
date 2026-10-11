@@ -88,22 +88,22 @@ fn snapshot_change(fallback: bool, identity: bool) {
 }
 
 #[test]
-#[ignore = "P2 known failure #173: run in a disposable user/network namespace."]
+#[ignore = "Run in a disposable user/network namespace, #173."]
 fn nft_equal_version_conflicting_snapshot_is_refused() {
     snapshot_change(false, false);
 }
 #[test]
-#[ignore = "P2 known failure #173: run in a disposable user/network namespace."]
+#[ignore = "Run in a disposable user/network namespace, #173."]
 fn nf_tables_equal_version_conflicting_snapshot_is_refused() {
     snapshot_change(true, false);
 }
 #[test]
-#[ignore = "P2 known failure #173: run in a disposable user/network namespace."]
+#[ignore = "Run in a disposable user/network namespace, #173."]
 fn nft_snapshot_cannot_replace_local_node_identity() {
     snapshot_change(false, true);
 }
 #[test]
-#[ignore = "P2 known failure #173: run in a disposable user/network namespace."]
+#[ignore = "Run in a disposable user/network namespace, #173."]
 fn nf_tables_snapshot_cannot_replace_local_node_identity() {
     snapshot_change(true, true);
 }
