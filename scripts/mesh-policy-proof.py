@@ -70,7 +70,7 @@ def packet(source, destination, port, sequence, fragmented=False):
 
 class Campaign:
     """One independent real pair; each check has a fresh socket and tuple."""
-    def __init__(self, fixture, fallback):
+    def __init__(self, fixture, fallback, coordinator=None):
         self.fallback = fallback
         self.processes = []
         self.rows = []
@@ -112,8 +112,18 @@ class Campaign:
                 "key": identities[other]["public_key"], "addresses": self.addresses[other],
                 "endpoint": f"10.220.0.{other + 1}:{identities[other]['port']}"},
                 "inbound": "All", "outbound": "All"}}, "removed": []})
-        self.apply("All")
-        proof.run("ping", "-n", "-c", "1", "-W", "5", self.addresses[1]["ipv4"])
+        if coordinator:
+            result = subprocess.run([coordinator], input=json.dumps({
+                "mode": "unbound-identity", "identities": identities}) + "\n",
+                capture_output=True, text=True, check=True)
+            self.enrollment = json.loads(result.stdout)
+            self.addresses = self.enrollment["addresses"]
+            for proc, chunks in zip((self.left, self.right), self.enrollment["denied"]):
+                for chunk in chunks:
+                    proof.request(proc, chunk)
+        else:
+            self.apply("All")
+            proof.run("ping", "-n", "-c", "1", "-W", "5", self.addresses[1]["ipv4"])
         self.remove_sender_filter()
 
     def remote(self, *args):
@@ -200,6 +210,21 @@ except TimeoutError: pass
             actual = False
         assert listener.wait(timeout=5) == 0, "TCP receiver failed"
         self.record(name, expected, actual)
+
+    def enrollment_check(self):
+        """Check compiled public enrollment policy on an actual encrypted path."""
+        self.record("unbound_identity_refused", True, self.enrollment["refused"])
+        for family in ["ipv4", "ipv6"]:
+            self.udp(f"unbound_identity_not_permitted_{family}", self.addresses[0][family],
+                     self.addresses[1][family], 5540, False)
+        for proc, chunks in zip((self.left, self.right), self.enrollment["allowed"]):
+            for chunk in chunks:
+                proof.request(proc, chunk)
+        self.remove_sender_filter()
+        for family in ["ipv4", "ipv6"]:
+            self.udp(f"explicit_grant_permitted_{family}", self.addresses[0][family],
+                     self.addresses[1][family], 5540, True)
+        return self.rows
 
     def check(self):
         for policy in ["All", "None", {"Ports": [
@@ -423,6 +448,7 @@ def main():
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--nf-tables", action="store_true")
     parser.add_argument("--measure", action="store_true")
+    parser.add_argument("--enrollment-fixture")
     args = parser.parse_args()
     if Path("/proc/self/uid_map").read_text().split()[2:] != ["1"]:
         parser.error("run inside unshare -Urn")
@@ -431,11 +457,11 @@ def main():
     try:
         # Assign before initialization so a failed setup also retires namespaces.
         campaign = Campaign.__new__(Campaign)
-        campaign.__init__(args.fixture, args.nf_tables)
+        campaign.__init__(args.fixture, args.nf_tables, args.enrollment_fixture)
         if args.measure:
             campaign.measure()
             return 0
-        rows = campaign.check()
+        rows = campaign.enrollment_check() if args.enrollment_fixture else campaign.check()
         print(json.dumps({"backend": "nf_tables" if args.nf_tables else "nft",
                           "checks": len(rows), "failures": sum(r["result"] == "FAIL" for r in rows),
                           "machine": "infraternal-dev", "load": Path("/proc/loadavg").read_text().strip()}))
