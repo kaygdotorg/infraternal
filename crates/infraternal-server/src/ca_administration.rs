@@ -232,6 +232,35 @@ impl CaAdministration {
         scoped_key: Zeroizing<[u8; 32]>,
         now: i64,
     ) -> Result<(), CaError> {
+        // Cancellation can drop this future at any await. Keep the custody event
+        // outside the operation so even an interrupted proof has a safe outcome.
+        let mut audit = UnlockAudit {
+            user: None,
+            outcome: "cancelled",
+            installed: false,
+        };
+        let result = self
+            .finish_audited(token, id, proof, scoped_key, now, &mut audit)
+            .await;
+        audit.outcome = if result.is_ok() {
+            "unlocked"
+        } else if audit.installed {
+            "unlocked_error"
+        } else {
+            "refused"
+        };
+        result
+    }
+
+    async fn finish_audited(
+        &self,
+        token: &str,
+        id: &str,
+        proof: Value,
+        scoped_key: Zeroizing<[u8; 32]>,
+        now: i64,
+        audit: &mut UnlockAudit,
+    ) -> Result<(), CaError> {
         let session_hash = crate::auth::hash(token);
         let entry = {
             let mut pending = self.pending.lock().await;
@@ -239,6 +268,9 @@ impl CaAdministration {
             if !openssl::memcmp::eq(entry.session_hash.as_bytes(), session_hash.as_bytes()) {
                 return Err(CaError);
             }
+            // Attribute only a server-held ceremony bound to this exact session;
+            // foreign/replayed IDs never become attacker-supplied audit identities.
+            audit.user = Some(entry.membership.user().to_owned());
             pending.remove(id).ok_or(CaError)?
         };
         if entry.expires <= now || entry.salt.is_some() || entry.role.is_some() {
@@ -302,6 +334,9 @@ impl CaAdministration {
             return Err(CaError);
         }
         self.source.unlock_from(&VerifiedMaterial(material))?;
+        // Installation is synchronous. Mark custody before rollback can suspend,
+        // fail or be canceled, so none of those paths reports a locked signer.
+        audit.installed = true;
         // No authority changes are made by unlock. Retain the writer lock through
         // installation; rollback then lets a following revocation commit.
         tx.rollback().await.map_err(|_| CaError)
@@ -311,5 +346,29 @@ struct VerifiedMaterial(CaMaterial);
 impl AdministratorCaUnlock for VerifiedMaterial {
     fn unlock(&self) -> Result<CaMaterial, CaError> {
         Ok(self.0.clone())
+    }
+}
+
+/// Content-free completion evidence; proof, token and wrapping material cannot
+/// enter this guard. Drop also records cancellation without an idle audit task.
+struct UnlockAudit {
+    user: Option<String>,
+    outcome: &'static str,
+    installed: bool,
+}
+impl Drop for UnlockAudit {
+    fn drop(&mut self) {
+        let outcome = if self.installed && self.outcome == "cancelled" {
+            "unlocked_cancelled"
+        } else {
+            self.outcome
+        };
+        tracing::info!(
+            event = "server_ca_unlock",
+            user = self.user.as_deref().unwrap_or("<unattributed>"),
+            unix_seconds = crate::runtime::unix_seconds().unwrap_or(0),
+            outcome,
+            "server CA unlock"
+        );
     }
 }
