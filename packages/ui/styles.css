@@ -792,6 +792,14 @@
 .ui-sp-kind svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-sp-dot { position: absolute; right: 1px; bottom: 1px; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); }
 .ui-sp-dot[data-online="false"] { background: var(--fg-3); }
+/* A static row (a fact and its action): no press scale or hover fill, because the row itself does nothing. The action fades
+   instead of vanishing so the words keep their place. */
+.ui-sp-status { cursor: default; min-height: var(--ui-row-h, 32px); }
+.ui-sp-status:active { transform: none; }
+@media (hover: hover) and (pointer: fine) { .ui-sp-status:hover { background: none; } }
+.ui-sp-status-action { flex: none; transition: opacity 160ms ease, background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-sp-status-action[data-shown="false"] { opacity: 0; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .ui-sp-status-action { transition: none; } }
 .ui-sp-names { display: grid; flex: 1; min-width: 0; gap: 2px; }
 .ui-sp-name-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .ui-sp-name { min-width: 0; max-width: 100%; padding: 0 2px; margin: 0 -2px; border: 0; border-radius: 6px; background: none; outline: none; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); }
