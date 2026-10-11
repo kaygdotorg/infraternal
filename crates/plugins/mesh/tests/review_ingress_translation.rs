@@ -12,7 +12,7 @@ use std::{collections::BTreeMap, process::Command};
 
 // Both ends of this veth are disposable namespace fixtures. AF_PACKET avoids
 // the local route shortcut and injects exactly one packet on the receiving end.
-const PACKET: &str = r#"
+const PACKET: &str = r"
 import json, socket, struct, subprocess
 def run(*args):
  return subprocess.run(args, check=True, capture_output=True, text=True).stdout
@@ -43,7 +43,7 @@ finally:
  s.close()
  run('/usr/sbin/nft','delete','table','ip','review_nat')
  run('ip','link','delete','underlay0')
-"#;
+";
 
 fn check(firewall: Firewall) {
     assert!(
