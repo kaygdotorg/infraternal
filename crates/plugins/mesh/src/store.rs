@@ -62,7 +62,7 @@ impl Store {
             cache: std::sync::Arc::default(),
         }
     }
-    /// Bind an already-authenticated node identity to inventory; never accept a browser-supplied host binding.
+    /// Attach an authenticated host using its approved inventory binding, never a public key as authority.
     /// # Errors
     /// Returns fixed public errors, not database input or authentication data.
     pub async fn attach(
@@ -81,17 +81,23 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|_| "Mesh storage unavailable.")?;
-        let existing = sqlx::query("SELECT id,public_key,endpoint,dataplane_host FROM mesh_nodes WHERE dataplane_host=? OR (public_key=? AND dataplane_host IS NULL)").bind(host).bind(key.0.as_slice()).fetch_optional(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
+        // Public enrollment keys identify inventory, never authorize host binding.
+        // The authenticated host is the sole selector; uniqueness refuses any
+        // conflicting key without changing another node's grants [164,166,235].
+        let existing = sqlx::query(
+            "SELECT id,public_key,endpoint,dataplane_host FROM mesh_nodes WHERE dataplane_host=?",
+        )
+        .bind(host)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| "Mesh storage unavailable.")?;
         let removed: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mesh_dataplane_removed WHERE host=?)")
                 .bind(host)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|_| "Mesh storage unavailable.")?;
-        let authorized_enrollment = existing
-            .as_ref()
-            .is_some_and(|row| row.get::<Option<String>, _>("dataplane_host").is_none());
-        if removed && !authorized_enrollment {
+        if removed {
             return Err("Mesh membership was removed; authorized enrollment is required.");
         }
         let id = if let Some(row) = existing {
@@ -129,13 +135,6 @@ impl Store {
             sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,dataplane_host,endpoint) VALUES(?,?,?,?,?)").bind(high).bind(name).bind(key.0.as_slice()).bind(host).bind(&endpoint).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
             high
         };
-        if removed {
-            sqlx::query("DELETE FROM mesh_dataplane_removed WHERE host=?")
-                .bind(host)
-                .execute(&mut *tx)
-                .await
-                .map_err(|_| "Mesh storage unavailable.")?;
-        }
         sqlx::query_scalar::<_,i64>("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
         tx.commit().await.map_err(|_| "Mesh storage unavailable.")?;
         Ok((
