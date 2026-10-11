@@ -341,3 +341,6 @@ async fn real_pty_resumes_native_writer_after_25_connection_replacements() {
 
 #[path = "native_credit_tests.rs"]
 mod credits;
+
+#[path = "native_gone_review_tests.rs"]
+mod gone_review;

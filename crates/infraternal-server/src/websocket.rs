@@ -21,7 +21,8 @@ use futures_util::{
 };
 use infraternal_plugin_api::{ActionDef, Operation, Permission, PluginDescriptor, SocketHost};
 use infraternal_protocol::{
-    DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
+    CLOSE_SESSION_GONE, DecodeError, Frame, MAX_FRAME_LEN, SESSION_GONE_REASON, decode_muxed_frame,
+    encode_muxed_frame_into,
 };
 use rand::random;
 use serde::Deserialize;
@@ -29,7 +30,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -337,6 +338,7 @@ async fn run_socket(
     let mut output_open = true;
     let mut receive_deadline = None;
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
+    let mut ended = EndedStreams::default();
     let mut loop_result = Ok(());
     let mut expiry = socket_deadline(&state, &user_id, &session_token)
         .await
@@ -420,6 +422,7 @@ async fn run_socket(
                             &mut pending_plugin_calls,
                             &connection_id,
                             &mut attachments,
+                            &mut ended,
                             &output_tx,
                             &mut sink,
                             &mut encode,
@@ -437,7 +440,7 @@ async fn run_socket(
                 };
                 if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
                     &state, &user_id, &session_token, &connection_id, stream_id, output,
-                    &mut attachments, &mut sink, &mut encode,
+                    &mut attachments, &mut ended, &mut sink, &mut encode,
                 )).await.is_err() { break; }
             }
             plugin_call = pending_plugin_calls.next(), if !pending_plugin_calls.is_empty() => {
@@ -586,6 +589,7 @@ async fn handle_terminal_output<K>(
     stream_id: u32,
     output: TerminalOutput,
     attachments: &mut HashMap<u32, ClientAttachment>,
+    ended: &mut EndedStreams,
     sink: &mut K,
     encode: &mut Vec<u8>,
 ) -> Result<(), ()>
@@ -718,18 +722,21 @@ where
                 .is_ok()
         }
         TerminalOutput::Closed { code } => {
-            let sent = send_frame(
-                sink,
-                stream_id,
-                &Frame::Close {
-                    code,
-                    reason: "attachment ended",
-                },
-                encode,
-            )
-            .await
-            .is_ok();
+            // The host's infraternal agent found no shim for the session: a final
+            // answer, distinct from every transient close (wire §4, #158).
+            let gone = code == CLOSE_SESSION_GONE;
+            let reason = if gone {
+                SESSION_GONE_REASON
+            } else {
+                "attachment ended"
+            };
+            let sent = send_frame(sink, stream_id, &Frame::Close { code, reason }, encode)
+                .await
+                .is_ok();
             attachments.remove(&stream_id);
+            if gone {
+                ended.insert(stream_id)?;
+            }
             sent
         }
     };
@@ -992,6 +999,7 @@ async fn handle_client_frame<K>(
     pending_plugin_calls: &mut FuturesUnordered<PendingPluginCall>,
     connection_id: &[u8; 16],
     attachments: &mut HashMap<u32, ClientAttachment>,
+    ended: &mut EndedStreams,
     output_tx: &mpsc::Sender<(u32, TerminalOutput)>,
     sink: &mut K,
     encode: &mut Vec<u8>,
@@ -1002,6 +1010,9 @@ where
     let decoded = decode_muxed_frame(&wire).map_err(|_| ())?;
     let stream_id = decoded.stream_id;
     let passthrough = wire.clone();
+    if ended.absorbs(stream_id, &decoded.frame)? {
+        return Ok(());
+    }
     // The surrounding watchdog authenticates every frame, including attach, input and credit.
     match decoded.frame {
         Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
@@ -1143,7 +1154,7 @@ where
             }
             let mut session = [0_u8; 16];
             session.copy_from_slice(session_id);
-            let (input_acked, writer_stream) = owned_writer(
+            let Ok((input_acked, writer_stream)) = owned_writer(
                 &state.pool,
                 user_id,
                 connection_id,
@@ -1151,7 +1162,24 @@ where
                 &session,
                 Some(&crate::auth::hash(session_token)),
             )
-            .await?;
+            .await
+            else {
+                // A session that ended, or one this account never had, gets the final
+                // stream Close instead of losing the whole socket: the browser would
+                // reconnect and attach again at once, forever (#158). Every other
+                // refusal (authority, the writer limit, the database) still closes it.
+                if session_is_live(state, user_id, session_token).await
+                    && session_gone(&state.pool, user_id, &session).await?
+                {
+                    ended.insert(stream_id)?;
+                    let gone = Frame::Close {
+                        code: CLOSE_SESSION_GONE,
+                        reason: SESSION_GONE_REASON,
+                    };
+                    return send_frame(sink, stream_id, &gone, encode).await;
+                }
+                return Err(());
+            };
             if last_in_seq > input_acked {
                 return Err(());
             }
@@ -1449,6 +1477,60 @@ async fn terminal_agent(
 }
 
 /// Writer identity survives reconnect and supervision; output remains session-wide.
+/// True when the account has no live record of this session: it never had it,
+/// or its shell's exit was recorded. Either way an attach can never succeed.
+async fn session_gone(pool: &SqlitePool, user: &str, session: &[u8; 16]) -> Result<bool, ()> {
+    let closed: Option<bool> = sqlx::query_scalar(
+        "SELECT closed_at IS NOT NULL FROM terminal_sessions WHERE id=? AND user_id=?",
+    )
+    .bind(session.as_slice())
+    .bind(user)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ())?;
+    Ok(closed.unwrap_or(true))
+}
+
+/// Browser streams this socket ended with the final session-gone Close (wire §4).
+///
+/// The browser sends Credit and Resize right behind its `AttachTerm`, and may type
+/// before the Close reaches it. Those frames are dropped rather than treated as a
+/// protocol error, which would cut every sibling terminal on the socket. The entry
+/// lives until the browser's own Close for the stream, or until the stream id
+/// attaches again. Bounded like attachments: a browser that never closes them
+/// loses the socket.
+#[derive(Default)]
+struct EndedStreams(HashSet<u32>);
+
+impl EndedStreams {
+    fn insert(&mut self, stream_id: u32) -> Result<(), ()> {
+        if self.0.len() >= MAX_ATTACHMENTS && !self.0.contains(&stream_id) {
+            return Err(());
+        }
+        self.0.insert(stream_id);
+        Ok(())
+    }
+
+    /// Whether `frame` belongs to an ended stream and is consumed here.
+    fn absorbs(&mut self, stream_id: u32, frame: &Frame<'_>) -> Result<bool, ()> {
+        if stream_id == CONTROL_STREAM || !self.0.contains(&stream_id) {
+            return Ok(false);
+        }
+        match frame {
+            Frame::Close { .. } => {
+                self.0.remove(&stream_id);
+                Ok(true)
+            }
+            Frame::Input { .. } | Frame::Credit { .. } | Frame::Resize { .. } => Ok(true),
+            Frame::AttachTerm { .. } => {
+                self.0.remove(&stream_id);
+                Ok(false)
+            }
+            _ => Err(()),
+        }
+    }
+}
+
 async fn owned_writer(
     pool: &SqlitePool,
     user: &str,

@@ -62,14 +62,15 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); });
   // More windows than one socket takes (the server allows 32 attachments per socket) open on further sockets.
   const pool = new ConnectionPool(connection);
+  const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
   const sessions = createLiveSessions({
     core, connection, pool, host: options.host,
     ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
     ...(options.firstHooks ? { firstHooks: options.firstHooks } : {}),
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
+    onSessionGone: inventory.gone,
   });
   const store = new LocalCanvasStore(options.accountId);
-  const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
     .then((m) => m.createLiveDetails({ host: options.host, connection, inventory, roundTrip: () => roundTrip }));
   // A ready result carries the admitted UUID; labels are only presentation.
