@@ -427,6 +427,10 @@
   min-height: var(--ui-row-h); padding: 4px 0; border-bottom: 1px solid var(--line);
 }
 .ui-kv-row:last-child { border-bottom: 0; }
+/* Titled sections inside one list: the quiet eyebrow of the settings headings, no box or rule of its own. */
+.ui-kv-section + .ui-kv-section { margin-top: 12px; }
+.ui-kv-rows { display: flex; flex-direction: column; }
+.ui-kv-group { padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-kv-cell {
   display: block; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
   transition: transform 140ms var(--ease-out, ease-out);

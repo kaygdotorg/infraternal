@@ -10,6 +10,9 @@
  * The cell confirms through the shared copy feedback (copy-feedback.ts: the tick that morphs in,
  * plus the "Copied" tooltip), exactly as the sign-in and recovery copy buttons do.
  *
+ * Rows may carry a `group`: consecutive rows with the same group sit under one quiet title (the machine tab's
+ * System, Resources and Access). A list with no groups is the flat list it always was.
+ *
  * Meters (memory, disk) are a thin bar under the value; they span the value column.
  */
 import { copyFeedback, inlineTickNode } from "./copy-feedback";
@@ -22,6 +25,8 @@ export interface KeyValueRow {
   copy?: string;
   /** A technical subtitle under the key, for a plainly named row ("Connection delay": "Round-trip time to the server"). */
   hint?: string;
+  /** A short title for the group this row starts or continues. Rows with the same consecutive group share one titled section. */
+  group?: string;
 }
 
 export interface KeyValueList {
@@ -93,27 +98,61 @@ export function createKeyValueList(label: string): KeyValueList {
     return button;
   };
 
+  const rowNode = (row: KeyValueRow): HTMLElement => {
+    const item = document.createElement("div");
+    item.className = "ui-kv-row";
+    item.setAttribute("role", "listitem");
+    item.append(cell("key", row.key, row.key, row.hint), cell("value", row.value, row.copy ?? row.value));
+    if (row.meter !== undefined) {
+      const meter = document.createElement("span");
+      meter.className = "ui-kv-meter";
+      meter.setAttribute("role", "meter");
+      meter.setAttribute("aria-valuemin", "0");
+      meter.setAttribute("aria-valuemax", "100");
+      meter.setAttribute("aria-valuenow", String(Math.round(row.meter)));
+      meter.setAttribute("aria-label", `${row.key} used`);
+      meter.style.setProperty("--meter", String(Math.max(0, Math.min(100, row.meter)) / 100));
+      item.append(meter);
+    }
+    return item;
+  };
+
+  let titleSeq = 0;
   return {
     root,
     set(rows) {
-      root.replaceChildren(...rows.map((row) => {
-        const item = document.createElement("div");
-        item.className = "ui-kv-row";
-        item.setAttribute("role", "listitem");
-        item.append(cell("key", row.key, row.key, row.hint), cell("value", row.value, row.copy ?? row.value));
-        if (row.meter !== undefined) {
-          const meter = document.createElement("span");
-          meter.className = "ui-kv-meter";
-          meter.setAttribute("role", "meter");
-          meter.setAttribute("aria-valuemin", "0");
-          meter.setAttribute("aria-valuemax", "100");
-          meter.setAttribute("aria-valuenow", String(Math.round(row.meter)));
-          meter.setAttribute("aria-label", `${row.key} used`);
-          meter.style.setProperty("--meter", String(Math.max(0, Math.min(100, row.meter)) / 100));
-          item.append(meter);
+      if (!rows.some((row) => row.group)) {
+        root.setAttribute("role", "list");
+        root.replaceChildren(...rows.map(rowNode));
+        return;
+      }
+      // Titled sections: the root becomes a plain container, each section a labelled group holding its own list.
+      root.setAttribute("role", "group");
+      const sections: HTMLElement[] = [];
+      let current: { group: string | undefined; list: HTMLElement } | undefined;
+      for (const row of rows) {
+        if (!current || current.group !== row.group) {
+          const section = document.createElement("div");
+          section.className = "ui-kv-section";
+          section.setAttribute("role", "group");
+          const list = document.createElement("div");
+          list.className = "ui-kv-rows";
+          list.setAttribute("role", "list");
+          if (row.group) {
+            const title = document.createElement("div");
+            title.className = "ui-kv-group";
+            title.id = `ui-kv-group-${titleSeq++}`;
+            title.textContent = row.group;
+            section.setAttribute("aria-labelledby", title.id);
+            section.append(title);
+          }
+          section.append(list);
+          sections.push(section);
+          current = { group: row.group, list };
         }
-        return item;
-      }));
+        current.list.append(rowNode(row));
+      }
+      root.replaceChildren(...sections);
     },
     dispose() {
       root.removeEventListener("pointerdown", pointerdown);
