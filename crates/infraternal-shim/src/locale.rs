@@ -49,10 +49,34 @@ fn system_locale_files() -> Vec<String> {
         .collect()
 }
 
-// macOS obtains the user's locale from the environment installed by that user's
-// launch context. Keep those values in `environment`; only the POSIX fallback
-// below is consulted when the launch context supplied no locale.
-#[cfg(not(target_os = "linux"))]
+// macOS stores the user's region locale in AppleLocale. Query it only when the
+// launch context supplied no LANG; inherited LC_* overrides remain untouched.
+#[cfg(target_os = "macos")]
+fn system_locale_files() -> Vec<String> {
+    let Ok(output) = Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleLocale"])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let Ok(value) = String::from_utf8(output.stdout) else {
+        return Vec::new();
+    };
+    value
+        .lines()
+        .next()
+        .and_then(macos_locale_to_posix)
+        .map(|locale| vec![format!("LANG={locale}")])
+        .unwrap_or_default()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn system_locale_files() -> Vec<String> {
     Vec::new()
 }
@@ -162,6 +186,16 @@ fn select_environment(
     inherited
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_locale_to_posix(identifier: &str) -> Option<String> {
+    let locale = locale_value(identifier)?;
+    if locale.contains('.') {
+        Some(locale)
+    } else {
+        Some(format!("{locale}.UTF-8"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +289,17 @@ mod tests {
             locale == "C.UTF-8"
         });
         assert_eq!(actual, pairs(&[("LANG", "C.UTF-8")]));
+    }
+
+    #[test]
+    fn macos_locale_identifier_gets_a_utf8_codeset() {
+        assert_eq!(
+            macos_locale_to_posix("en_US"),
+            Some("en_US.UTF-8".to_owned())
+        );
+        assert_eq!(
+            macos_locale_to_posix("fr_FR.ISO8859-1"),
+            Some("fr_FR.ISO8859-1".to_owned())
+        );
     }
 }
