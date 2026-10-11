@@ -29,6 +29,7 @@ pub(super) struct Attempt {
     owner: String,
     batch: Uuid,
     uid: u32,
+    canary: Option<(EmbeddedAgent, [u8; 16])>,
 }
 // Cancellation before JoinMaterial reaches the installer has no Resources.host
 // to clean up. Release its unpublished ownership synchronously on every exit.
@@ -166,6 +167,7 @@ impl Backend for RemoteBackend {
                         owner: authority.owner.clone(),
                         batch: authority.batch,
                         uid,
+                        canary: None,
                     },
                 );
             }
@@ -244,12 +246,31 @@ impl Backend for RemoteBackend {
     fn terminal_canary<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
             let actor = self.actor(authority, host).await?;
-            tokio::time::timeout(Duration::from_secs(10), canary(&actor))
-                .await
-                .map_err(|_| {
-                    Failure::install("The host connected, but its terminal did not answer.")
-                })??;
+            canary_registered(&actor, |session| {
+                self.uid(authority, host)?;
+                let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
+                let attempt = attempts.get_mut(&host).ok_or_else(unavailable)?;
+                attempt.canary = Some((actor.clone(), session));
+                Ok(())
+            })
+            .await?;
             self.authorize(authority).await
+        })
+    }
+    fn cleanup_sessions<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
+        Box::pin(async move {
+            // Exact batch ownership remains valid after logout, solely for cleanup.
+            self.uid(authority, host)?;
+            let canary = self
+                .attempts
+                .lock()
+                .map_err(|_| unavailable())?
+                .get(&host)
+                .and_then(|attempt| attempt.canary.clone());
+            if let Some((actor, session)) = canary {
+                finish_canary(&actor, session).await?;
+            }
+            Ok(())
         })
     }
     fn failed<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
@@ -277,8 +298,15 @@ fn unavailable() -> Failure {
         "Remote host readiness is unavailable. Check the host's service and try again.",
     )
 }
+#[cfg(test)]
 async fn canary(actor: &EmbeddedAgent) -> Result<(), Failure> {
-    use infraternal_protocol::{Frame, encode_muxed_frame_into};
+    canary_registered(actor, |_| Ok(())).await
+}
+
+async fn canary_registered(
+    actor: &EmbeddedAgent,
+    opened: impl FnOnce([u8; 16]) -> Result<(), Failure>,
+) -> Result<(), Failure> {
     let session = actor
         .open_readiness(TerminalSize {
             cols: 80,
@@ -288,6 +316,19 @@ async fn canary(actor: &EmbeddedAgent) -> Result<(), Failure> {
         })
         .await
         .map_err(|_| unavailable())?;
+    // Publish ownership before the next await: cancellation cannot lose this id.
+    if let Err(error) = opened(session) {
+        let _ = finish_canary(actor, session).await;
+        return Err(error);
+    }
+    let result = tokio::time::timeout(Duration::from_secs(10), canary_output(actor, session)).await
+        .unwrap_or_else(|_| Err(Failure::install("The host connected, but its terminal did not answer. Check its service and try again.")));
+    let cleanup = finish_canary(actor, session).await;
+    result.and(cleanup)
+}
+
+async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), Failure> {
+    use infraternal_protocol::{Frame, encode_muxed_frame_into};
     let (handle, mut output) = actor
         .attach(session, 0, 0, 2)
         .await
@@ -334,6 +375,57 @@ async fn canary(actor: &EmbeddedAgent) -> Result<(), Failure> {
         }
     }
     Err(unavailable())
+}
+
+/// A second writer can finish the fixed read even if the first attachment failed.
+/// No shell command, signal or arbitrary user session is selected by this path.
+async fn finish_canary(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), Failure> {
+    use infraternal_protocol::{CLOSE_SESSION_GONE, Frame, encode_muxed_frame_into};
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (handle, mut output) = actor
+            .attach(session, 0, 0, 4)
+            .await
+            .map_err(|_| unavailable())?
+            .split();
+        let mut wire = Vec::new();
+        for frame in [
+            Frame::Credit { bytes: 65536 },
+            Frame::Input {
+                in_seq: 0,
+                bytes: b"\n",
+            },
+        ] {
+            encode_muxed_frame_into(1, &frame, &mut wire).map_err(|_| unavailable())?;
+            // A retired session can close input before its queued session-gone
+            // notice is read. That notice, rather than a send race, proves cleanup.
+            if handle
+                .send_frame(bytes::Bytes::copy_from_slice(&wire))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        while let Some(event) = output.recv().await {
+            match event {
+                TerminalOutput::Event { event_json } => {
+                    let notice: serde_json::Value =
+                        serde_json::from_slice(&event_json).map_err(|_| unavailable())?;
+                    if notice["type"] == "terminal.exited" {
+                        return Ok(());
+                    }
+                }
+                TerminalOutput::Closed {
+                    code: CLOSE_SESSION_GONE,
+                } => return Ok(()),
+                TerminalOutput::Closed { .. } => return Err(unavailable()),
+                _ => {}
+            }
+        }
+        Err(unavailable())
+    })
+    .await
+    .map_err(|_| unavailable())?
 }
 
 #[cfg(test)]
@@ -558,6 +650,7 @@ mod tests {
                 owner: "owner".into(),
                 batch: Uuid::new_v4(),
                 uid: 1002,
+                canary: None,
             },
         );
         f.backend.attempts.lock().unwrap().insert(
@@ -566,6 +659,7 @@ mod tests {
                 owner: "other-owner".into(),
                 batch: Uuid::new_v4(),
                 uid: 1003,
+                canary: None,
             },
         );
         let guard = Unpublished {

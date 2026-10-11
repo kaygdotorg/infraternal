@@ -79,6 +79,10 @@ pub trait Backend: Send + Sync {
         authority: &'a Authority,
         host: uuid::Uuid,
     ) -> Operation<'a, ()>;
+    /// Finish this attempt's private sessions before SSH rollback stops the service.
+    fn cleanup_sessions<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
     fn failed<'a>(&'a self, authority: &'a Authority, host: uuid::Uuid) -> Operation<'a, ()>;
     /// Retire only transient attempt ownership after durable installation commits.
     fn completed<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
@@ -362,6 +366,13 @@ impl Bootstrap {
             }
         };
         if result.is_err() {
+            if let Some(host) = resources.host {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    self.backend.cleanup_sessions(&batch.authority, host),
+                )
+                .await;
+            }
             if let Some(installation) = resources.installation {
                 let cleanup =
                     tokio::time::timeout(Duration::from_secs(30), installation.rollback()).await;

@@ -7,7 +7,12 @@ use tokio::{
     net::UnixStream,
 };
 
-async fn terminal_peer(mut socket: UnixStream, snapshot: bool) {
+async fn terminal_peer(
+    mut socket: UnixStream,
+    snapshot: bool,
+    fail_attach: bool,
+    mut cleaned: Option<tokio::sync::oneshot::Sender<()>>,
+) {
     let mut pending = BytesMut::new();
     let mut reply = Vec::new();
     loop {
@@ -44,6 +49,10 @@ async fn terminal_peer(mut socket: UnixStream, snapshot: bool) {
                     json: br#"{"session_id":"11111111111111111111111111111111"}"#,
                 })
             }
+            Frame::AttachTerm { .. } if fail_attach && frame.stream_id == 2 => Some(Frame::Close {
+                code: 1,
+                reason: "fixture attachment failure",
+            }),
             Frame::AttachTerm { .. } => Some(Frame::Ack { in_seq_acked: 0 }),
             _ => None,
         };
@@ -54,6 +63,26 @@ async fn terminal_peer(mut socket: UnixStream, snapshot: bool) {
         if let Frame::Input { bytes, .. } = frame.frame {
             // The controlled peer emits a marker only after the actual actor forwards the input.
             assert_eq!(bytes, b"\n");
+            if frame.stream_id == 2 && cleaned.is_some() && !fail_attach {
+                // A held private command lets cancellation land after ownership.
+                pending.advance(length);
+                continue;
+            }
+            if frame.stream_id == 4 {
+                if let Some(cleaned) = cleaned.take() {
+                    let _ = cleaned.send(());
+                }
+                encode_muxed_frame_into(
+                    4,
+                    &Frame::Event {
+                        sub_id: 0,
+                        event_json: br#"{"type":"terminal.exited","session_id":"11111111111111111111111111111111","status":0,"final_seq":0}"#,
+                    },
+                    &mut reply,
+                )
+                .unwrap();
+                socket.write_all(&reply).await.unwrap();
+            }
             let marker = "infraternal-ready";
             let response = if snapshot {
                 Frame::Snapshot {
@@ -76,7 +105,7 @@ async fn terminal_peer(mut socket: UnixStream, snapshot: bool) {
 #[tokio::test]
 async fn readiness_input_preserves_the_terminal_actor_and_host_connection() {
     let (socket, peer) = UnixStream::pair().unwrap();
-    let task = tokio::spawn(terminal_peer(peer, false));
+    let task = tokio::spawn(terminal_peer(peer, false, false, None));
     let actor = EmbeddedAgent::from_test_socket(socket);
     tokio::time::timeout(Duration::from_secs(5), canary(&actor))
         .await
@@ -96,7 +125,7 @@ async fn readiness_input_preserves_the_terminal_actor_and_host_connection() {
 #[tokio::test]
 async fn readiness_accepts_authoritative_snapshot_output() {
     let (socket, peer) = UnixStream::pair().unwrap();
-    let task = tokio::spawn(terminal_peer(peer, true));
+    let task = tokio::spawn(terminal_peer(peer, true, false, None));
     let actor = EmbeddedAgent::from_test_socket(socket);
     tokio::time::timeout(Duration::from_secs(5), canary(&actor))
         .await
@@ -105,4 +134,44 @@ async fn readiness_accepts_authoritative_snapshot_output() {
     drop(actor);
     task.abort();
     let _ = task.await;
+}
+
+#[tokio::test]
+async fn failed_attachment_finishes_the_private_command() {
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let (cleaned, done) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(terminal_peer(peer, false, true, Some(cleaned)));
+    let actor = EmbeddedAgent::from_test_socket(socket);
+    assert!(canary(&actor).await.is_err());
+    tokio::time::timeout(Duration::from_secs(1), done)
+        .await
+        .expect("failed canary left its private session open")
+        .unwrap();
+    task.abort();
+}
+
+#[tokio::test]
+async fn cancellation_keeps_the_owned_session_available_for_cleanup() {
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let (cleaned, done) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(terminal_peer(peer, false, false, Some(cleaned)));
+    let actor = EmbeddedAgent::from_test_socket(socket);
+    let (opened, session) = tokio::sync::oneshot::channel();
+    let proof_actor = actor.clone();
+    let proof = tokio::spawn(async move {
+        canary_registered(&proof_actor, |id| {
+            opened.send(id).unwrap();
+            Ok(())
+        })
+        .await
+    });
+    let id = session.await.unwrap();
+    proof.abort();
+    let _ = proof.await;
+    finish_canary(&actor, id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), done)
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
 }

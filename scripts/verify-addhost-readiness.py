@@ -16,6 +16,15 @@ sys.dont_write_bytecode = True
 from agent_fixture import Binary, cleanup, fixture_state, varint
 
 
+def open_readiness(engine):
+    action = b'terminal.open'
+    request = json.dumps(dict(uid=os.getuid(), cols=80, rows=24, readiness=True)).encode()
+    engine.send(0, 0x30, struct.pack('<I', 1) + varint(len(action)) + action + request)
+    stream, kind, body = engine.read()
+    assert (stream, kind) == (0, 0x31) and body[4] == 1, 'readiness open refused'
+    engine.id = uuid.UUID(json.loads(body[5:])['session_id'])
+
+
 def run(binary):
     original = subprocess.Popen
     for index, startup in enumerate(('tmux', 'zellij', 'menu', 'bash')):
@@ -47,12 +56,7 @@ def run(binary):
         try:
             with patch('subprocess.Popen', spawn):
                 engine = Binary(binary, state)
-            action = b'terminal.open'
-            request = json.dumps(dict(uid=os.getuid(), cols=80, rows=24, readiness=True)).encode()
-            engine.send(0, 0x30, struct.pack('<I', 1) + varint(len(action)) + action + request)
-            stream, kind, body = engine.read()
-            assert (stream, kind) == (0, 0x31) and body[4] == 1, 'readiness open refused'
-            engine.id = uuid.UUID(json.loads(body[5:])['session_id'])
+            open_readiness(engine)
             engine.send(1, 0x16, engine.id.bytes + struct.pack('<QQ', 0, 0))
             engine.send(1, 0x14, struct.pack('<I', 65536))
             engine.input(b'\n')
@@ -70,8 +74,45 @@ def run(binary):
             cleanup(state)
 
 
+def cleanup_cases(binary):
+    for abandoned in (False, True):
+        state = fixture_state('l' if abandoned else 'c')
+        state.mkdir(mode=0o700)
+        engine = Binary(binary, state)
+        try:
+            open_readiness(engine)
+            path = state / 'sessions' / f'{engine.id.hex}.sock'
+            started = time.monotonic()
+            if abandoned:
+                engine.kill()
+            else:
+                engine.send(4, 0x16, engine.id.bytes + struct.pack('<QQ', 0, 0))
+                engine.send(4, 0x14, struct.pack('<I', 65536))
+                engine.send(4, 0x10, struct.pack('<Q', 0) + b'\n')
+                while True:
+                    stream, kind, body = engine.read()
+                    if stream == 4 and kind == 0x33 and json.loads(body[4:]).get('type') == 'terminal.exited':
+                        break
+                    if stream == 4 and kind == 0x0f:
+                        break
+            deadline = started + 12
+            while path.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert not path.exists(), 'private readiness shim still running'
+            assert not path.with_suffix('.ended').exists(), 'private probe retained rollback-blocking data'
+            unit = f'infraternal-session-{engine.id.hex}.scope'
+            status = subprocess.run(['systemctl', '--user', 'show', unit, '-p', 'ActiveState', '--value'],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout.strip()
+            assert status in ('', 'inactive', 'failed'), f'private scope still {status}'
+            print(f'CLEANUP abandoned={abandoned} real_pty=true scope_active=false artifacts=0 elapsed_ms={(time.monotonic()-started)*1000:.1f}', flush=True)
+        finally:
+            engine.kill()
+            cleanup(state)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, required=True)
     args = parser.parse_args()
     run(args.binary.resolve())
+    cleanup_cases(args.binary.resolve())

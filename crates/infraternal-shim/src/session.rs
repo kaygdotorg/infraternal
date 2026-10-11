@@ -32,7 +32,7 @@ use std::{
         },
     },
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 const CHUNK: usize = 16 * 1024;
 const MAX_PEERS: usize = 32;
@@ -274,7 +274,19 @@ pub fn run(mut config: Config) -> io::Result<()> {
     let mut peers: Vec<Peer> = Vec::new();
     let mut exit = None;
     let mut drained = false;
+    // A private probe owns no durable terminal. A lost open reply or server
+    // transport cannot leave its read waiting forever; ordinary PTYs have no timer.
+    let readiness_deadline = config
+        .readiness
+        .then(|| Instant::now() + Duration::from_secs(10));
     loop {
+        if readiness_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if exit.is_none() {
+                pty.child.kill()?;
+                let _ = pty.child.wait()?;
+            }
+            return Ok(());
+        }
         if exit.is_none()
             && let Some(status) = pty.child.try_wait()?
         {
@@ -330,6 +342,18 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 }
             }
         }
+        // Private probes are not resumable: retire once confirmed exit delivery
+        // has drained. Ordinary terminal ownership and exit acknowledgment stay unchanged.
+        if config.readiness
+            && exit.is_some()
+            && drained
+            && peers
+                .iter()
+                .filter(|p| p.cursor.is_some())
+                .all(|p| p.exited_sent && p.pending.is_empty())
+        {
+            return Ok(());
+        }
         // Borrow descriptors only through poll. Every queue and ownership
         // mutation happens after this scope, so replacement cannot leave a
         // PollFd referring to a closed/reused file descriptor.
@@ -373,7 +397,15 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 }
                 fds[index + 3] = PollFd::new(p.stream.as_fd(), flags);
             }
-            match poll(&mut fds[..peers.len() + 3], None::<u16>) {
+            // Only private probes wake on a deadline; normal PTYs remain event-driven.
+            let timeout = readiness_deadline.map_or(nix::poll::PollTimeout::NONE, |deadline| {
+                // Round upward so a submillisecond remainder cannot busy-loop.
+                nix::poll::PollTimeout::try_from(
+                    deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+                )
+                .unwrap_or(nix::poll::PollTimeout::MAX)
+            });
+            match poll(&mut fds[..peers.len() + 3], timeout) {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => return Err(e.into()),
