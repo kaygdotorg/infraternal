@@ -1,32 +1,46 @@
-<!-- Documents in-memory server replacement and rollback without cold-locking the CA [168][217], #154. -->
+<!-- Documents root-only in-memory server replacement, cold compatibility and rollback [168][184][217][224], #154. -->
 # Updating a server
 
-Updates and rollbacks use `infraternal server restart`. Do not stop/start the
-service for a deployment: that is a cold start and locks the CA until an
-administrator unlocks it with a passkey. A crash, reboot or failed handoff also
-starts locked. Existing host verification and reconnection need only public trust.
+Updates and rollbacks use `infraternal server restart`. A root system server can
+retain an unlocked CA across an eligible replacement. A non-root server still
+replaces its executable, but always restarts cold and reports `CA locked` in its
+reply. Stop/start, crash and reboot also start locked until an administrator
+unlocks the CA with a passkey. Public trust still permits host verification and
+reconnection while locked.
 
-Both releases must implement the handoff protocol for a warm replacement. The
-first deployment from a release without restart support requires a cold transition
-and administrator unlock. Rolling back to a release without the import adapter
-starts cold-locked; it cannot recover the departed process's signing key.
+Warm handoff requires the versioned infraternal ELF capability note in the target,
+a root-owned executable without group/world write or set-ID, and root ownership
+without group/world write on **every** parent directory. Symlinks and `..` path
+components are refused. The receiver opens the target once and execs that same
+descriptor, preserving the validated inode across a pathname replacement.
+The checked image descriptor is kept above the standard descriptors so a
+closed stdin cannot cause redirection to overwrite it. Cold stdin stays open
+through exec, including when opening `/dev/null` reused fd 0.
+The note proves protocol compatibility; it does not authenticate a release.
+D184/D224 release-signature verification is deliberately deferred at the opened-fd
+hook. The development signing policy uses `release/allowed_signers`, SSHSIG
+namespace `infraternal-release`; verify the staged release externally until that
+hook is implemented.
 
-Use the service account for these commands (root for a system service). Keep the
-existing binary and configuration until the new release passes its health checks.
-Never place signing keys in files, command arguments or environment variables.
+Both releases must implement handoff for a warm replacement. The first transition
+from a release without restart support is cold. Rolling back to an executable
+without the capability note passes `/dev/null` as stdin and starts cold-locked.
+An already locked source remains locked: restart never creates an issuer or
+bypasses administrator authorization.
 
-1. Verify the release signature according to the release procedure, then stage
-   the executable beside the old executable, on the same filesystem. Preserve
-   the old path for rollback and leave the old inode intact. For example, with
-   the current executable at `/var/lib/infraternal/bin/infraternal.previous` and
-   a verified candidate at `/var/lib/infraternal/bin/infraternal.next`, make the
-   candidate executable and owned by the service account. Keep the directory
-   private and prevent other users from changing either file. The executable and
-   every parent directory must be owned by the service account or root and
-   must not permit other writes. Group-writable directories are accepted only
-   below an owned private ancestor inaccessible to other users; executable
-   files must never be group-writable. Symlinks, set-ID executables and parent-directory (`..`) path components are
-   refused; stage a regular executable at its final path.
+Use the running service account for these commands (root for a system service).
+Keep the previous executable and configuration until the new release passes its
+checks. Never place signing keys in files, command arguments or environment
+variables.
+
+1. Verify the release signature according to the release procedure. Stage a
+   regular executable on the same filesystem, retaining the old inode for
+   rollback. For example, keep the old image at
+   `/var/lib/infraternal/bin/infraternal.previous` and stage the candidate at
+   `/var/lib/infraternal/bin/infraternal.next`. For warm deployment, root must own
+   both the candidate and every parent directory, with no group/world write.
+   A user-mode install may use its service-owned private directory, but replaces
+   cold. Do not modify an executable inode in place.
 2. Ask the running server to exec the candidate, using its existing data root:
 
    ```sh
@@ -35,31 +49,23 @@ Never place signing keys in files, command arguments or environment variables.
      --binary /var/lib/infraternal/bin/infraternal.next
    ```
 
-   The command acknowledgement means replacement was requested. The service PID
-   remains the same; startup flags and configuration are retained.
-3. Poll `/healthz` through the normal HTTPS/reverse-proxy route until it responds
-   successfully, with a deployment deadline (for example 30 seconds). Check
-   the release version, remote host reconnection and a resumed terminal. From
-   an administrator session, check `/remote/ca/status` for `locked: false` if
-   it was unlocked before the update. Health alone does not prove CA handoff.
-4. If the new process is serving but the deployment checks fail, use its restart
-   command with `--binary /var/lib/infraternal/bin/infraternal.previous` to roll
-   back through the same handoff. If the new process has already crashed, there
-   is no in-memory signer left: recover service with the retained old executable
-   and unlock the CA with an administrator passkey. Do not recover a signing
-   seed from disk or attempt to place it in a restart request.
+   The acknowledgement reports a warm handoff or a cold replacement. It confirms
+   intent; the service retains its PID, startup flags and configuration.
+3. Poll `/healthz` through the normal HTTPS/reverse-proxy route with a deployment
+   deadline, for example 30 seconds. Check the release version, remote host
+   reconnection and a resumed terminal. Check `/remote/ca/status` from an
+   administrator session: an intended warm deployment must report `locked: false`.
+   Health alone does not establish a successful CA handoff.
+4. If the successor is serving but checks fail, use its restart command with
+   `--binary /var/lib/infraternal/bin/infraternal.previous`. The same eligibility
+   checks govern rollback. If it has crashed, recover with the retained image and
+   unlock the cold CA with an administrator passkey. Never extract a seed from
+   disk or include one in a restart request.
 5. After checks pass, update the unit's `ExecStart` path to the accepted release
-   and run `systemctl daemon-reload`, so a later cold boot uses that release.
-   Keep the previous binary for the rollback window.
+   and run `systemctl daemon-reload`, so later cold boots use it. Retain the
+   previous release for the rollback window.
 
-A cold-locked server remains cold-locked across handoff; restart never creates an
-issuer or bypasses administrator authorization. The inherited handoff is tied to
-the same service UID and PID, accepts one bounded frame, and requires the exact
-retained issuer. The transfer endpoint is anonymous and inherited as stdin;
-ordinary local restart requests carry only an executable pathname.
-
-For systemd, add the following to the service. Builds with the remote feature
-include it in generated installations:
+For systemd, generated installations with the remote feature include:
 
 ```ini
 [Service]
@@ -67,23 +73,43 @@ ExecReload=/bin/kill -HUP $MAINPID
 KillMode=process
 ```
 
-`systemctl reload infraternal-server` execs the current executable through the
-same handoff. To switch to a separately staged path, use the restart command with
-`--binary`. `systemctl restart` performs stop/start and is a cold start. Keep
-`KillMode=process`: session shims must survive the server's replacement.
+`systemctl reload infraternal-server` reopens the current install path and uses
+the same handoff policy. If the running inode was renamed over and appears as
+`(deleted)`, reload reopens the configured invocation path. Use `--binary` to
+select a separately staged path. `systemctl restart` is a cold stop/start. Keep
+`KillMode=process` so session shims survive replacement.
 
+An invalid restart target, failed reply or failed reload request is logged and
+leaves the live server running. Requests record kernel peer PID/UID, target and
+outcome without private transfer data. SIGHUP has no socket peer credentials;
+it is identified as a signal request. Early reloads are queued across exec and
+startup. If the restart endpoint cannot start, the server logs that failure and
+continues serving without it.
 
-The old process writes a frame of at most 2,090 bytes into an anonymous socket,
-closes the writer, drops its runtime and execs the verified replacement. Exec
-removes the old address space before the receiver imports the key, so there is
-no old signer awaiting acknowledgement and no surviving courier process. Kernel
-peer credentials must match the preserved PID and service UID before any bytes
-are read. Import validates the frame and exact retained issuer, clears temporary
-buffers, and replaces stdin with `/dev/null` before child processes start. Failed
-imports remain locked. Crash dumps and ordinary same-UID descriptor inspection
-are disabled for this path.
+The old process queues one frame of at most 2090 bytes into an anonymous socket
+and closes the writer. Runtime shutdown is bounded to four seconds; owned child
+cleanup escalates from SIGTERM to SIGKILL after two seconds and bounds reaping
+at three seconds. The same opened executable descriptor is then execed. Exec
+removes the old address space before import; no signer or courier remains awaiting
+an acknowledgement.
 
-Keep deployment acknowledgement separate from health confirmation. A failed exec
-ends the old service; its supervisor may start the configured executable cold.
-A successful exec with an invalid handoff also serves cold-locked. Neither result
-should be accepted as a warm deployment merely because `/healthz` responds.
+The successor disables dumpability as its first main action, checks the anonymous
+channel's preserved PID and UID, and consumes/detaches stdin before loading cold
+configuration. Installation requires the exact retained issuer. Invalid imports
+stay locked; stdin becomes `/dev/null`, or is closed if descriptor cleanup fails.
+Child launch paths explicitly detach stdin, including the embedded infraternal
+agent. The short-lived SSH prompt helper retains the existing proc-based peer
+authentication policy; it never receives the CA transfer descriptor.
+
+Dedicated seed, transport and receive mappings require `mlock` and
+`MADV_DONTDUMP`; protection failure makes handoff cold. On a 4 KiB page host,
+serialization peaks at two pages (8 KiB) per server, independently of host/PTY
+count; receiving uses one page. Full mappings are cleared before release.
+OpenSSL still owns the persistent signing key and briefly returns an allocator
+copy during export, which is immediately zeroized. Kernel socket buffers carry
+the bounded transfer frame and cannot be zeroized or excluded with userspace
+mapping advice. These protections do not remove those residual copies.
+
+A failed exec ends the old service; its supervisor may start the configured image
+cold. A successful exec with an invalid handoff also serves cold-locked. Treat
+either outcome according to the administrator CA status and deployment checks.
