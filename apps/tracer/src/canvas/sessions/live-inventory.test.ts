@@ -110,3 +110,36 @@ test("superseding a sidecar preserves status for a window opened on this device"
   inventory.dispose();
 });
 
+test("a census predating a new shell does not permanently retire its confirmed live ID", () => {
+  const inventory = createLiveInventory({ accountId: "ordering-review", host: "server" });
+  const id = "a23432f2-3875-4e12-867a-8943df233f1c";
+  // Open Results have priority over census Events in the daemon writer. The
+  // new shell can therefore be known before the pre-open census is consumed.
+  inventory.attach("server", id);
+  inventory.reconcile("server", []);
+  inventory.reconcile("server", [id]);
+  expect(inventory.get("server", id)?.gone).not.toBe(true);
+  expect(inventory.list("server").map((row) => row.id)).toEqual([id]);
+  inventory.dispose();
+});
+
+test("a final Close before the first positive census never revives a new ID", () => {
+  const inventory = createLiveInventory({ accountId: "close-fence", host: "server" });
+  inventory.attach("server", "new-id");
+  inventory.gone("server", "new-id", 7);
+  inventory.reconcile("server", ["new-id"]);
+  expect(inventory.get("server", "new-id")?.gone).toBe(true);
+  expect(inventory.get("server", "new-id")?.exit?.code).toBe(7);
+  expect(inventory.list("server")).toEqual([]);
+  inventory.dispose();
+});
+
+test("a later absence retires a new ID after its first positive census", () => {
+  const inventory = createLiveInventory({ accountId: "confirmed-absence", host: "server" });
+  inventory.attach("server", "new-id");
+  expect(inventory.reconcile("server", [])).toEqual([]);
+  inventory.reconcile("server", ["new-id"]);
+  expect(inventory.reconcile("server", [])).toEqual([{ id: "new-id" }]);
+  expect(inventory.get("server", "new-id")?.gone).toBe(true);
+  inventory.dispose();
+});

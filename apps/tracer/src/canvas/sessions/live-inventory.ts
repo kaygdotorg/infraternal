@@ -8,7 +8,7 @@
  * `can` leaves those verbs out and the manager does not draw them. Renaming works: the name is the window's
  * name, saved in the canvas document, and a rename pins it.
  *
- * A complete host census is final for missing shims: absent rows become exited and `gone`, and are removed from
+ * After a new local session has appeared in a census, a complete host census is final for missing shims: absent rows become exited and `gone`, and are removed from
  * local storage so a later load never offers them as running. Its bounded exit-status sidecar keeps a saved code
  * on any matching open window. An unavailable host only hides rows; it does not end them before a fresh census.
  *
@@ -37,6 +37,8 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const owners = new Map<string, string>();
   // Only windows opened on this device need status after its sidecar is superseded.
   const opened = new Set<string>();
+  // A Result can overtake a pre-open census; only a positive census makes absence conclusive.
+  const awaitingCensus = new Set<string>();
   const verifiedHosts = new Set<string>();
   let top = 0;
   const emit = (): void => { for (const l of listeners) l(); };
@@ -67,7 +69,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
       // Selecting a remembered session is not proof that the host can attach it.
       // The final gone state survives another window's selection (#158).
       if (s?.gone) return;
-      if (!s) { s = blank(id, hint?.name ?? "shell"); records.set(id, s); }
+      if (!s) { s = blank(id, hint?.name ?? "shell"); records.set(id, s); awaitingCensus.add(id); }
       else if (hint?.name && !s.pinned) s.name = hint.name;
       if (s.state === "open") { if (hint?.name && s.name !== hint.name && !s.pinned) emit(); return; }
       s.state = "open";
@@ -97,6 +99,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
     // A final host answer stays exited even when another window selects the session.
     gone(host, id, status) {
       const s = only(host, id) && records.get(id);
+      awaitingCensus.delete(id);
       if (s && (!s.gone || (status !== undefined && s.exit?.code !== status))) {
         s.state = "exited";
         s.gone = true;
@@ -120,7 +123,8 @@ export function createLiveInventory(options: { accountId: string; host: string }
       }
       verifiedHosts.add(host);
       for (const record of records.values()) {
-        if (only(host, record.id) && !live.has(record.id) && !record.gone) {
+        if (only(host, record.id) && !live.has(record.id) && !record.gone && (!awaitingCensus.has(record.id) || statuses.has(record.id))) {
+          awaitingCensus.delete(record.id);
           record.state = "exited";
           record.gone = true;
           const status = statuses.get(record.id);
@@ -134,6 +138,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
         let record = records.get(id);
         if (!record) { record = blank(id, "shell"); records.set(id, record); }
         if (!record.gone || record.exit?.code !== status) {
+          awaitingCensus.delete(record.id);
           record.state = "exited";
           record.gone = true;
           record.exit = { code: status };
@@ -141,6 +146,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
         }
       }
       for (const id of live) {
+        awaitingCensus.delete(id);
         if (owners.has(id) && !only(host, id)) continue;
         owners.set(id, host);
         let record = records.get(id);
