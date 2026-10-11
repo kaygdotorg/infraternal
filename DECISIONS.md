@@ -2034,3 +2034,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        datagrams (skip a lost frame, repair with the next keyframe) are
        built behind one interface on our QUIC transport and measured on a
        lossy India↔Germany link; the owner picks from the numbers.
+233. **"Automatically upgrade connections" (owner, 2026-10-11; amends D232 T1 and D214):**
+     one switch, **on by default**: terminals, desktops and app windows
+     pick the fastest path themselves (direct when measurably faster, the
+     server relay otherwise) and switch both ways as conditions change.
+     Turning it off reveals a path choice per window type (terminals,
+     desktops and app windows), so people who want control get it. Good,
+     easy defaults; room to geek out. It lives with the other host settings
+     (Settings → Hosts, "Connections").
