@@ -474,6 +474,18 @@ impl Client {
         let family = socket.family("wireguard")?;
         Ok(Self { socket, family })
     }
+    /// Retire every peer on the owned interface, preserving its identity and routes.
+    /// # Errors
+    /// Reports a failed kernel replacement; callers must retain disabled intent for replay.
+    pub fn clear_peers(&mut self) -> io::Result<()> {
+        let mut payload = header();
+        // WGDEVICE_F_REPLACE_PEERS with no peer list uses the kernel's bulk
+        // retirement under the route lock. Deleting a populated link drops
+        // that lock before retirement and makes quiescence costly at scale.
+        attribute(&mut payload, 5, &1_u32.to_ne_bytes())?;
+        self.socket.request(self.family, 4, &payload)?;
+        Ok(())
+    }
     /// Update only an authenticated peer's direct endpoint, preserving routes and handshake state.
     /// # Errors
     /// Reports a failed kernel update.

@@ -1,4 +1,4 @@
-//! Real-kernel privilege probe, chunked 1,000-peer application and one-peer update measurement [169].
+//! Real-kernel privilege, chunked application, incremental update and bulk peer-retirement proofs [169], #129.
 #![cfg(all(feature = "agent", target_os = "linux"))]
 #![allow(clippy::unwrap_used)]
 use infraternal_plugin_mesh::{
@@ -8,8 +8,55 @@ use infraternal_plugin_mesh::{
 };
 use std::{
     net::{Ipv4Addr, Ipv6Addr},
+    process::Command,
     time::Instant,
 };
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn bulk_retirement_preserves_identity_and_routes_at_1000_peers() {
+    Device::create().unwrap();
+    let (local, _) = Key::generate().unwrap();
+    Device::configure(&local, 0).unwrap();
+    let identity = Device::identity().unwrap();
+    let peers: Vec<_> = (1_u32..=1000)
+        .map(|id| Peer {
+            key: Key::generate().unwrap().1,
+            addresses: Addresses {
+                ipv4: Ipv4Addr::from(0x0aff_0000 + id),
+                ipv6: Ipv6Addr::from((0xfd02_u128 << 112) + u128::from(id)),
+            },
+            endpoint: None,
+        })
+        .collect();
+    let mut client = Client::new().unwrap();
+    client.peers(&peers, &[]).unwrap();
+    Device::routes(&peers[..1], false).unwrap();
+    assert_eq!(Device::counters().unwrap().len(), 1000);
+    let started = Instant::now();
+    client.clear_peers().unwrap();
+    let elapsed = started.elapsed();
+    assert!(Device::counters().unwrap().is_empty());
+    assert_eq!(Device::identity().unwrap(), identity);
+    for args in [
+        vec!["-j", "route", "show", "10.255.0.1/32"],
+        vec!["-j", "-6", "route", "show", "fd02::1/128"],
+    ] {
+        let output = Command::new("ip").args(args).output().unwrap();
+        assert!(output.status.success());
+        let routes: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(routes.as_array().unwrap().len(), 1);
+        assert_eq!(routes[0]["dev"], "infraternal0");
+    }
+    client.clear_peers().unwrap();
+    assert_eq!(Device::identity().unwrap(), identity);
+    Device::delete().unwrap();
+    assert!(!Device::owned().unwrap());
+    println!(
+        "METRIC bulk_peer_retirement machine=infraternal-dev peers=1000 clear_us={} load={}",
+        elapsed.as_micros(),
+        std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+    );
+}
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn real_kernel_chunked_peers() {
