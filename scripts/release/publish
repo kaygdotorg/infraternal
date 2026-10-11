@@ -13,10 +13,19 @@ files=(VERSION infraternal infraternal-x86_64-musl infraternal-aarch64-musl)
 for name in "${files[@]}"; do [[ -f "$bundle/$name" ]] || { printf 'build the release bundle first\n' >&2; exit 1; }; done
 printf '%s\n' "$1" | cmp - "$bundle/VERSION" || { printf 'the built bundle belongs to another version\n' >&2; exit 1; }
 api="$release_api/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/infraternal-builds/objects/releases/$1"
-lock="$release_scratch/publish-$1.lock"
-mkdir "$lock" || { printf 'a publisher for this version is already running\n' >&2; exit 1; }
+# All build directories for this user share one inode. Never unlink the lock:
+# replacing it could admit a new writer while an older process still holds it.
+umask 077
+lock_directory="${XDG_STATE_HOME:-$HOME/.local/state}/infraternal/release-publish"
+[[ "$lock_directory" == /* ]] || { printf 'the publication state directory must be absolute\n' >&2; exit 1; }
+mkdir -p -- "$lock_directory"
+[[ -d "$lock_directory" && ! -L "$lock_directory" && -O "$lock_directory" && "$(stat -c '%a' "$lock_directory")" == 700 ]] || { printf 'the publication lock directory is unsafe\n' >&2; exit 1; }
+lock="$lock_directory/$1.lock"
+[[ ! -e "$lock" && ! -L "$lock" ]] || [[ -f "$lock" && ! -L "$lock" && -O "$lock" && "$(stat -c '%h:%a' "$lock")" == 1:600 ]] || { printf 'the publication lock file is unsafe\n' >&2; exit 1; }
+exec 9>> "$lock"
+flock -n 9 || { printf 'a publisher for this version is already running\n' >&2; exit 1; }
 staging=""
-trap '[[ -z "$staging" ]] || rm -rf -- "$staging"; rmdir -- "$lock"' EXIT
+trap '[[ -z "$staging" ]] || rm -rf -- "$staging"' EXIT
 staging="$(mktemp -d "$release_scratch/publish.XXXXXX")"
 # Query the authoritative API prefix, including unrelated or partial objects.
 # A provider error or ambiguous response never becomes permission to overwrite.
