@@ -2056,3 +2056,77 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        every administrator and the item leaves the inbox on its own.
      - Settings keeps the state and the action too, as a second place,
        never the only one.
+235. **SSH over the mesh: identity, access and linking (owner grill, 2026-10-11; extends D197 M1, D215, D227, D228, D229–D231; research #162):**
+     - **Two checks, always (Q1).** A login needs the machine allowed by the
+       network policy and the person allowed by login access. Machine trust
+       alone never lets one local account act as another.
+     - **Two policies (Q1b).** *Network policy* (TCP, UDP, ICMP) is
+       allow-all by default (D228 M2). *Login access* (who may be which
+       account on which host) covers every way to a shell: plain SSH,
+       infraternal terminals, app windows and files.
+     - **Plain `ssh` upgrades itself (Q2).** The local infraternal agent
+       holds each linked person's SSH certificate and serves it through an
+       SSH key socket, checking the asking process every time. One file in
+       `ssh_config.d`, scoped to mesh names and addresses, points `ssh` at
+       that socket and trusts our host certificates (no host-key prompt).
+       On the target, port 22 of the mesh address reaches the embedded SSH
+       server (D197); host `sshd` is never touched (Q3). The target checks
+       the certificate, the network policy and login access. The target
+       account's `authorized_keys` keeps working, without a person identity.
+     - **Certificates (Q2b, Q2d, Q2e, Q12).** Valid only from the node they
+       were issued to (source address), with the key in the Secure Enclave
+       or TPM when present, otherwise memory only. Lifetime **24 h by
+       default**, an admin setting from 1 to 24 h; renewed quietly while the
+       CA is unlocked. After a restart that locks the CA, a countdown toast,
+       push and inbox item ask an administrator to unlock. Revocation (node
+       removed, link removed, person disabled) is pushed to every node at
+       once.
+     - **Forwarded agents refuse.** The local infraternal agent never signs a
+       request that arrives through SSH agent forwarding.
+     - **Who a process is (Q2f, "session-carried").** In order: a process
+       started inside an infraternal session acts as the person who opened
+       that session; otherwise the original login user (Linux login uid,
+       macOS audit user, kept through `sudo`/`su`) if that account is
+       linked; otherwise machine identity (only what an admin granted to
+       that node and account), or nothing. Root is never linked.
+     - **Linking a local account to a person (Q2a).** Automatic when a node
+       joins (the account used to add it). Otherwise, on the first
+       interactive `ssh` over the mesh from an unlinked account, the
+       pre-connection check prints a plain-language description with the
+       chips UI, a link, a QR code and a short code; the browser page shows
+       the same description ("Let `agents` on `mbp` act as you (kayg)"),
+       asks the person to pick the code shown in the terminal, and confirms
+       with their passkey. Links expire in 5 minutes, work once and are
+       rate-limited. Without a terminal it prints one line and continues
+       with ordinary keys; it never hangs. Root, system accounts and shared
+       accounts (`deploy`, `ci`) are never person-linked; they use machine
+       identity. The person and any administrator can remove a link
+       (Settings → Account, Settings → Access), effective immediately (Q2g).
+     - **Which accounts (Q4, Q10).** Setup creates two ordinary, visible,
+       editable policies: "everyone → all hosts → their own username"
+       (matches only ordinary user accounts: UID ≥ 1000 on Linux, ≥ 501 on
+       macOS; sign-up refuses reserved and system names) and a starter grant
+       "first administrator → all hosts → any account". Being an
+       administrator manages policy; it grants no hidden login rights.
+       Every grant change is logged.
+     - **Reattach (Q2c).** A later `ssh` to the same host can reattach a
+       session that is still running; dropped links never end sessions
+       unintentionally.
+     - **Audit (Q6, Q6b).** Free and on by default: the connection log (who,
+       from where, as whom, when, how long), link approvals, grant changes,
+       issued certificates. Enterprise (`ee/`): session recording, long
+       retention, export, refusing sessions when recording is unavailable,
+       time-limited grants and second-person approval (Q11), identity-
+       provider group sync and deprovisioning, shorter certificate lifetimes
+       and hardware-held CA keys.
+     - **Packets (Q7).** IPv4 and IPv6 behave the same. Packets the kernel
+       rewrites onto a mesh address (port publishing) are refused; node-local
+       traffic is allowed. The future reverse proxy must run in userspace in
+       the infraternal agent, never as kernel port-forwarding rules, so this
+       rule holds.
+236. **Session rows say what is in them (owner, 2026-10-11):** a session's
+     label is, in order, the name a person gave it, the foreground program
+     (`htop`, `cargo test`), or the current folder's last component (`~` for
+     home). The infraternal agent reads the foreground process and working
+     directory from the operating system and reports changes (at most about
+     once a second); it needs no shell configuration.
