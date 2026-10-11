@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 /// The server supplies its existing download/signature engines; a disabled plugin owns no work.
 pub trait ReleaseLookup: Send + Sync {
@@ -15,6 +16,7 @@ pub trait ReleaseLookup: Send + Sync {
 pub struct ReleaseService {
     pool: SqlitePool,
     lookup: Arc<dyn ReleaseLookup>,
+    writer_admission: Arc<Semaphore>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,7 +31,11 @@ struct Empty {}
 impl ReleaseService {
     #[must_use]
     pub fn new(pool: SqlitePool, lookup: Arc<dyn ReleaseLookup>) -> Self {
-        Self { pool, lookup }
+        Self {
+            pool,
+            lookup,
+            writer_admission: Arc::new(Semaphore::new(1)),
+        }
     }
     /// Local operator authority uses the existing private database; socket authority is rechecked at commit.
     /// # Errors
@@ -62,6 +68,13 @@ impl ReleaseService {
             if setting.channel == "edge" && !setting.confirmed {
                 return Err(EDGE_WARNING);
             }
+            // BEGIN IMMEDIATE may wait on another writer for SQLite's busy timeout.
+            // Admit one release writer so waiters do not occupy shared authority slots.
+            let _writer = self
+                .writer_admission
+                .acquire()
+                .await
+                .map_err(|_| "release unavailable")?;
             let mut tx = self
                 .pool
                 .begin_with("BEGIN IMMEDIATE")
