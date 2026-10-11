@@ -24,12 +24,30 @@ impl Opened {
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        // O_NOFOLLOW also prevents the final component from being substituted by
-        // a symlink. Rust opens with O_CLOEXEC; this fd is passed to fexecve itself.
+        // Refuse FIFO/device candidates without waiting for a writer before
+        // fstat can validate the inode. Never follow the final symlink, and keep
+        // the checked image close-on-exec until fexecve consumes this exact fd.
         let mut file = OpenOptions::new()
             .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW)
+            .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&path)?;
+        let metadata = file.metadata()?;
+        let owner = nix::unistd::Uid::effective().as_raw();
+        if !metadata.is_file()
+            || metadata.mode() & 0o111 == 0
+            || metadata.mode() & 0o6022 != 0
+            || (metadata.uid() != owner && metadata.uid() != 0)
+        {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        // Only a regular inode reaches any read/signature/ELF probe. Preserve
+        // every other status flag when returning to ordinary blocking reads.
+        let flags = nix::fcntl::fcntl(&file, nix::fcntl::FcntlArg::F_GETFL)?;
+        let flags = nix::fcntl::OFlag::from_bits_retain(flags);
+        nix::fcntl::fcntl(
+            &file,
+            nix::fcntl::FcntlArg::F_SETFL(flags & !nix::fcntl::OFlag::O_NONBLOCK),
+        )?;
         // A closed standard descriptor can be reused by open. Keep the checked
         // image above fd2 so stdin redirection cannot overwrite its inode handle.
         // Clones retain this exact inode; the target pathname is still opened once.
@@ -40,15 +58,6 @@ impl Opened {
             file = duplicate;
         }
         drop(reserved);
-        let metadata = file.metadata()?;
-        let owner = nix::unistd::Uid::effective().as_raw();
-        if !metadata.is_file()
-            || metadata.mode() & 0o111 == 0
-            || metadata.mode() & 0o6022 != 0
-            || (metadata.uid() != owner && metadata.uid() != 0)
-        {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
         let mut root_protected = metadata.uid() == 0;
         let mut private = false;
         let ancestors: Vec<_> = path
