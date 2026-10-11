@@ -13,15 +13,15 @@ use std::{
     thread,
 };
 
-struct Bucket {
-    origin: String,
-    files: Arc<StdMutex<HashMap<String, Vec<u8>>>>,
-    requests: Arc<AtomicUsize>,
+pub(crate) struct Bucket {
+    pub(crate) origin: String,
+    pub(crate) files: Arc<StdMutex<HashMap<String, Vec<u8>>>>,
+    pub(crate) requests: Arc<AtomicUsize>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     task: Option<thread::JoinHandle<()>>,
 }
 impl Bucket {
-    fn new(files: HashMap<String, Vec<u8>>) -> Self {
+    pub(crate) fn new(files: HashMap<String, Vec<u8>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -80,13 +80,19 @@ impl Drop for Bucket {
     }
 }
 
-struct Release {
-    root: PathBuf,
-    files: HashMap<String, Vec<u8>>,
-    trust: String,
+pub(crate) struct Release {
+    pub(crate) root: PathBuf,
+    pub(crate) files: HashMap<String, Vec<u8>>,
+    pub(crate) trust: String,
 }
 impl Release {
-    fn new(size: usize) -> Self {
+    pub(crate) fn new(size: usize) -> Self {
+        Self::with_version(size, "0.1.0")
+    }
+    pub(crate) fn with_version(size: usize, version: &str) -> Self {
+        Self::with_manifest_entries(size, version, 0)
+    }
+    pub(crate) fn with_manifest_entries(size: usize, version: &str, extra: usize) -> Self {
         use sha2::{Digest, Sha256};
         use std::process::Command;
         let root =
@@ -110,13 +116,19 @@ impl Release {
         );
         let payload = vec![0x42; size];
         let name = "infraternal-aarch64-musl";
-        let version = b"0.1.0\n".to_vec();
-        let sums = format!(
+        let version_name = version;
+        let version = format!("{version}\n").into_bytes();
+        let mut sums = format!(
             "{:x}  {name}\n{:x}  VERSION\n",
             Sha256::digest(&payload),
             Sha256::digest(&version)
         )
         .into_bytes();
+        for index in 0..extra {
+            sums.extend_from_slice(
+                format!("{:x}  fixture-{index:04}\n", Sha256::digest([])).as_bytes(),
+            );
+        }
         let sums_file = root.join("SHA256SUMS");
         std::fs::write(&sums_file, &sums).unwrap();
         assert!(
@@ -139,7 +151,7 @@ impl Release {
             ("SHA256SUMS.sig", signature),
         ]
         .into_iter()
-        .map(|(name, bytes)| (format!("/releases/0.1.0/{name}"), bytes))
+        .map(|(name, bytes)| (format!("/releases/{version_name}/{name}"), bytes))
         .collect();
         Self { root, files, trust }
     }
@@ -513,4 +525,27 @@ fn resolver_startup_removes_only_owned_inactive_private_staging() {
         assert!(retained.exists(), "preserve {}", retained.display());
     }
     drop(active_lock);
+}
+
+#[tokio::test]
+async fn edge_add_host_keeps_exact_server_version_and_verified_cache() {
+    let version = "edge-20261011T071500Z";
+    let release = Release::with_version(1024, version);
+    let bucket = Bucket::new(release.files.clone());
+    let mut resolver = release.resolver(bucket.origin.clone(), "edge", false);
+    resolver.version = version.into();
+    assert_eq!(
+        resolver.resolve(Architecture::X86_64).await.unwrap(),
+        resolver.executable
+    );
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 0);
+    let payload = resolver.resolve(Architecture::Aarch64).await.unwrap();
+    assert!(payload.to_string_lossy().contains(version));
+    assert_eq!(std::fs::read(&payload).unwrap(), vec![0x42; 1024]);
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
+    assert_eq!(
+        resolver.resolve(Architecture::Aarch64).await.unwrap(),
+        payload
+    );
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
 }

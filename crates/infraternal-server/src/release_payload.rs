@@ -349,4 +349,4 @@ impl ReleasePayload {
 
 #[cfg(test)]
 #[path = "release_payload_tests.rs"]
-mod tests;
+pub(crate) mod tests;

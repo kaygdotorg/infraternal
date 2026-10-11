@@ -12,10 +12,55 @@ import threading
 import tempfile
 import unittest
 import tomllib
+from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[2]
 
 class ReleaseScripts(unittest.TestCase):
+    def test_version_grammar_and_explicit_build_channel(self):
+        scratch = Path(os.environ.get('CARGO_TARGET_DIR', Path.home() / '.cache/codex-scratch/release-channels/target'))
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            repo = Path(directory)
+            shutil.copytree(ROOT / 'scripts/release', repo / 'scripts/release')
+            shutil.copy(ROOT / 'Cargo.toml', repo / 'Cargo.toml')
+            # This isolated packaging stand-in observes build inputs; real binaries are checked separately.
+            for name, body in (
+                ('auth-toolchain', '#!/usr/bin/env bash\nexit 0\n'),
+                ('package-release', '#!/usr/bin/env bash\nset -eu\n[[ "$INFRATERNAL_RELEASE_BUILD" == 1 ]]\nmkdir -p "$1"\nfor name in infraternal infraternal-x86_64-musl infraternal-aarch64-musl; do printf "%s\\n" "$INFRATERNAL_RELEASE_VERSION" > "$1/$name"; done\n'),
+            ):
+                script = repo / 'scripts' / name
+                script.write_text(body)
+                script.chmod(0o755)
+            env = dict(os.environ, CARGO_TARGET_DIR=str(repo / 'target'))
+            def build(*args):
+                return subprocess.run([str(repo / 'scripts/release/build'), *args], env=env, text=True, capture_output=True)
+            for args in ((), ('--channel',), ('--channel','other'), ('--channel','stable','extra')):
+                result = build(*args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+            stable = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
+            for channel in ('stable', 'edge'):
+                started = datetime.now(timezone.utc).replace(microsecond=0)
+                result = build('--channel',channel)
+                finished = datetime.now(timezone.utc)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                bundles = list((repo / 'target/releases').iterdir())
+                bundle = next(p for p in bundles if (p.name.startswith('edge-')) == (channel == 'edge'))
+                if channel == 'stable': self.assertEqual(bundle.name, stable)
+                else:
+                    self.assertRegex(bundle.name, r'^edge-[0-9]{8}T[0-9]{6}Z$')
+                    stamp = datetime.strptime(bundle.name, 'edge-%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+                    self.assertGreaterEqual(stamp, started)
+                    self.assertLessEqual(stamp, finished)
+                for name in ('VERSION','infraternal','infraternal-x86_64-musl','infraternal-aarch64-musl'):
+                    self.assertEqual((bundle / name).read_text(), bundle.name+'\n')
+                if channel == 'stable':
+                    self.assertNotEqual(build('--channel',channel).returncode, 0)
+            for version in ('1.2','1.2.3-rc1','edge-20261011t071500Z','edge-20261011T071500z','../1.2.3','1.2.3\n'):
+                for name in ('publish','verify'):
+                    result = subprocess.run([str(repo / 'scripts/release' / name),version],env=env,text=True,capture_output=True)
+                    self.assertEqual(result.returncode,2,result.stderr)
+
     def test_scripts_exist(self):
         for name in ('build', 'publish', 'verify'):
             self.assertTrue((ROOT / 'scripts/release' / name).is_file(), name)
@@ -41,6 +86,12 @@ class ReleaseScripts(unittest.TestCase):
                 self.assertEqual(result.stderr, 'duplicate JSON fields in the release response\n')
 
     def test_local_publication_is_verified_and_immutable(self):
+        self.local_publication(tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version'])
+
+    def test_edge_publication_is_verified_and_immutable(self):
+        self.local_publication('edge-20261011T071500Z')
+
+    def local_publication(self, version):
         scratch = Path(os.environ.get('CARGO_TARGET_DIR', Path.home() / '.cache/codex-scratch/release-pipeline/target'))
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as directory:
@@ -53,7 +104,6 @@ class ReleaseScripts(unittest.TestCase):
             public = key.with_suffix('.pub').read_text().split()
             (repo / 'release/allowed_signers').write_text('release@infraternal.com namespaces="infraternal-release" ' + ' '.join(public[:2]) + ' test\n')
             # Only this isolated copy trusts the generated fixture key.
-            version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
             target = repo / 'target'
             bundle = target / 'releases' / version
             bundle.mkdir(parents=True)
@@ -119,7 +169,7 @@ class ReleaseScripts(unittest.TestCase):
             server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
             worker = threading.Thread(target=server.serve_forever, daemon=True)
             worker.start()
-            env = dict(os.environ, CARGO_TARGET_DIR=str(target), CLOUDFLARE_ACCOUNT_ID='fixture', CLOUDFLARE_API_TOKEN='fixture-cloudflare+/~=', RELEASE_CALLER_TOKEN='fixture-caller+/~=', RELEASE_TEST_ORIGIN=f'http://127.0.0.1:{server.server_port}')
+            env = dict(os.environ, CARGO_TARGET_DIR=str(target), XDG_STATE_HOME=str(repo / 'state'), CLOUDFLARE_ACCOUNT_ID='fixture', CLOUDFLARE_API_TOKEN='fixture-cloudflare+/~=', RELEASE_CALLER_TOKEN='fixture-caller+/~=', RELEASE_TEST_ORIGIN=f'http://127.0.0.1:{server.server_port}')
             def run(script, requested=version):
                 return subprocess.run([str(repo / 'scripts/release' / script), requested], env=env, capture_output=True, text=True)
             try:

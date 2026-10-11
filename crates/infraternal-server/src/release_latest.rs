@@ -79,3 +79,7 @@ pub(crate) async fn plugin(
         );
     Ok(ReleasePlugin(release_service(pool, &state)))
 }
+
+#[cfg(all(test, feature = "ssh"))]
+#[path = "release_latest_tests.rs"]
+mod tests;

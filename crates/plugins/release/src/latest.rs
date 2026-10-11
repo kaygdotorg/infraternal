@@ -154,3 +154,7 @@ impl ReleaseLookup for VerifiedLookup {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "latest_tests.rs"]
+mod tests;

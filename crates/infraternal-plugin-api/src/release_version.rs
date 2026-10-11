@@ -25,3 +25,7 @@ pub fn channel(version: &str) -> Option<&'static str> {
     });
     (valid && parts.next().is_none()).then_some("stable")
 }
+
+#[cfg(test)]
+#[path = "release_version_tests.rs"]
+mod tests;
