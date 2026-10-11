@@ -16,6 +16,7 @@ import { ConnectionPool, MuxConnection } from "../connection";
 import type { CoreScreen } from "../core-screen";
 import type { TerminalClient, TerminalHooks } from "../terminal";
 import { createAddHost } from "./addhost";
+import { createAuthorityControl } from "./addhost/authority-unlock";
 import { createOverlayFlowHost } from "./addhost/flow-host";
 import type { ProvisioningService } from "./addhost/service";
 import { createWindowFlowHost } from "./addhost/window-host";
@@ -88,6 +89,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     } },
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
   });
+  const authority = createAuthorityControl(core, { service: loadProvisioning });
   let readyRemoval: import("./context").Adapters["hostRemoval"];
   const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), remove: (id, name, anchor) => readyRemoval?.remove(id, name, anchor) };
   // Registry metadata is optional chrome: load it without delaying the first terminal.
@@ -104,7 +106,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // fetch in createCanvas and does not wait for it.
   if (saved && docHasGroups(saved)) await loadGroups();
   const canvas = createCanvas(core, {
-    adapters: { sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => addHost.open() },
+    adapters: { sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => addHost.open(), authority },
     float: false,
     persisted: (id) => id === "console" || id === "mesh",
   });
@@ -137,6 +139,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     dispose() {
       canvas.flush();
       offRoundTrip();
+      authority.dispose();
       offMeshView();
       addHost.dispose();
       canvas.dispose();

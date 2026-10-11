@@ -35,6 +35,7 @@ import { failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget,
 import type { Guide, ParsedTarget } from "./model";
 import { matchListed } from "./model";
 import { ServiceError } from "./service";
+import { runUnlock } from "./authority-run.on-demand";
 import type { AddHostSink, DiscoveredHost, EnrolledHost, InstallCommand, ProvisioningService, SavedKey, ServerKey } from "./service";
 
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -523,12 +524,12 @@ export class Wizard {
     if (this.busy || !this.deps.service.unlockAuthority) return;
     this.setBusy(true);
     try {
-      await this.deps.service.unlockAuthority();
+      // The same call and failure wording as the palette row and Settings → Hosts (authority-unlock.ts).
+      const result = await runUnlock(this.deps.service);
       if (!this.alive || this.closing) return;
+      if (!result.ok) { this.showError(result.message); return; }
       this.authorityReady = true;
       this.beginBatch(this.authorityRoot);
-    } catch (error: unknown) {
-      if (this.alive && !this.closing) this.showError(error instanceof ServiceError ? error.message : "Passkey confirmation did not finish. Try again.");
     } finally { this.setBusy(false); }
   }
 

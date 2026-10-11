@@ -11,7 +11,8 @@
  */
 import { FONTS } from "../../../../../packages/ui/src/fonts";
 import { THEMES } from "../../../../../packages/ui/src/themes";
-import { renderAppearance, renderHosts, renderWindowSizes, type AppearanceApi, type HostsApi, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
+import { renderAppearance, renderHosts, renderWindowSizes, type AppearanceApi, type HostsApi, type StatusActionPref, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
+import type { AuthorityControl } from "../addhost/authority-unlock";
 import { SIZE_EVENT, readSizes, writeSize, type DesktopSize, type PhoneSize } from "../window-sizes";
 import type { Ctx } from "../context";
 import { el } from "../dom";
@@ -22,6 +23,20 @@ export interface SettingsSource {
   /** Section ids this source renders (besides the four built-in ones). */
   sections: readonly string[];
   render(section: string, pane: HTMLElement, cx: Ctx): (() => void) | void;
+}
+
+/** The host-connection lock as a Settings group: plain words for the state, and the button only for an administrator while it is locked. */
+function authorityPref(control: AuthorityControl): StatusActionPref {
+  return {
+    id: "host-connections", title: "Host connections",
+    text: () => control.state() === "unknown" ? undefined
+      : control.state() === "unlocked" ? "Unlocked"
+      : "Locked until an administrator confirms with a passkey",
+    action: () => control.state() === "locked" && control.canUnlock() ? "Unlock" : undefined,
+    act: () => { void control.unlock(); },
+    refresh: () => { void control.refresh(); },
+    onChange: (listener) => control.onChange(listener),
+  };
 }
 
 export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement): () => void {
@@ -57,6 +72,7 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
       get: readExtendedInfo, set: writeExtendedInfo,
       onChange(listener) { window.addEventListener(EXTENDED_INFO_EVENT, listener); return () => window.removeEventListener(EXTENDED_INFO_EVENT, listener); },
     }],
+    ...(cx.adapters.authority ? { statuses: [authorityPref(cx.adapters.authority)] } : {}),
   };
   const pane = el("div", "ui-settings-pane");
   pane.setAttribute("role", "region");

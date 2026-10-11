@@ -21,6 +21,7 @@ import { CONTAINERS, LOG_BACKLOG, buildViews, logLine, type Role } from "./data"
 import { offerMeshView } from "../mesh/offer";
 import { DEFAULT_SESSION, createMockInventory } from "./inventory";
 import { createAddHost } from "../addhost";
+import { createAuthorityControl } from "../addhost/authority-unlock";
 import { createOverlayFlowHost } from "../addhost/flow-host";
 import { createWindowFlowHost } from "../addhost/window-host";
 import type { EnrolledHost } from "../addhost/service";
@@ -53,9 +54,12 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
 
   // The add-host wizard runs on the real adapter against the test double. A host that finishes enrolling gets a
   // shell window in Console, which is also how the sidebar inventory learns of it (the tree lists windows).
+  const provisioning = createMockProvisioning({ savedKey: new URLSearchParams(location.search).get("savedkey") === "1", authority: new URLSearchParams(location.search).get("ca") ?? "ready" });
+  // The lock on host connections: administrators (the operator role) can unlock it, anyone else only sees the state.
+  const authority = createAuthorityControl(core, { service: async () => provisioning, canUnlock: () => world.role === "operator" });
   const addHost = createAddHost(core, {
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
-    service: createMockProvisioning({ savedKey: new URLSearchParams(location.search).get("savedkey") === "1", authority: new URLSearchParams(location.search).get("ca") ?? "ready" }),
+    service: provisioning,
     sink: { enrolled: (hosts) => enrol(hosts) },
   });
   function enrol(hosts: EnrolledHost[]): void {
@@ -75,6 +79,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       sessions, inventory, details: () => onDemand(() => import("./details.on-demand")).then((m) => m.createMockDetails(world, inventory)), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       addHost: () => addHost.open(),
+      authority,
     },
   });
   const cx = canvas.cx;
@@ -269,6 +274,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
 
   return {
     dispose() {
+      authority.dispose();
       events.abort();
       window.clearInterval(streamTimer);
       window.clearInterval(seedTimer);
