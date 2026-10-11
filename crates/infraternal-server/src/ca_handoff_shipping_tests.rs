@@ -213,8 +213,9 @@ async fn shipping_restart_reload_rollback_and_cold_start() {
         )
         .env("XDG_RUNTIME_DIR", root.join("r"))
         .env("ZDOTDIR", &profile)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(std::fs::File::create(root.join("shipping-server.log")).unwrap())
         .spawn()
         .unwrap();
     let mut fixture = Fixture { child, directory };
@@ -252,14 +253,59 @@ async fn shipping_restart_reload_rollback_and_cold_start() {
             .unwrap()["locked"],
         false
     );
+
+    // Exercise the real process after the socket reply has become unwritable.
+    // Shutting down the read half before sending makes EPIPE deterministic.
+    let endpoint = data.join("restart/control.sock");
+    let before_reply_failure = std::fs::metadata(&endpoint).unwrap();
+    let mut closed = UnixStream::connect(&endpoint).unwrap();
+    closed.shutdown(std::net::Shutdown::Read).unwrap();
+    let request_path = binary.as_os_str().as_encoded_bytes();
+    closed
+        .write_all(&u16::try_from(request_path.len()).unwrap().to_be_bytes())
+        .unwrap();
+    closed.write_all(request_path).unwrap();
+    closed.shutdown(std::net::Shutdown::Write).unwrap();
+    drop(closed);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    healthy(address).await;
+    assert!(
+        std::fs::read_to_string(root.join("shipping-server.log"))
+            .unwrap()
+            .contains("reply_failed"),
+        "shipping EPIPE must reach and exercise the reply failure branch"
+    );
+    assert_eq!(
+        std::fs::metadata(&endpoint).unwrap().ino(),
+        before_reply_failure.ino(),
+        "failed reply restarted the real server"
+    );
+    assert_eq!(
+        http(address, "/remote/ca/status", Some(&token))
+            .await
+            .unwrap()["locked"],
+        false
+    );
+    assert!(fixture.child.try_wait().unwrap().is_none());
+
+    if !nix::unistd::Uid::effective().is_root() {
+        // A real user-mode server still replaces its image, but never exports.
+        cold_replacement(&binary, &binary, &data, address, &token, &mut fixture).await;
+        println!(
+            "METRIC name=ca_handoff_rootless n=1 restart_cold=true reply_cold=true pid_preserved=true fd0_dev_null=true epipe_keeps_server=true"
+        );
+        pool.close().await;
+        return;
+    }
+
     let mut transaction = pool.begin().await.unwrap();
     for index in 0..49 {
         sqlx::query("INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES(?, 'Fixture', ?, 'Fixture',0,'unused')")
             .bind(format!("fixture-{index}")).bind(format!("fixture-{index}")).execute(&mut *transaction).await.unwrap();
     }
     for _ in 0..10000 {
-        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'test-owner','rootless',?,unixepoch())")
-            .bind(uuid::Uuid::new_v4().as_bytes().as_slice()).bind(nix::unistd::Uid::effective().as_raw()).execute(&mut *transaction).await.unwrap();
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'test-owner',?,?,unixepoch())")
+            .bind(uuid::Uuid::new_v4().as_bytes().as_slice()).bind(if nix::unistd::Uid::effective().is_root() { "rootful" } else { "rootless" }).bind(nix::unistd::Uid::effective().as_raw()).execute(&mut *transaction).await.unwrap();
     }
     transaction.commit().await.unwrap();
     let sessions = terminals(address, &token).await;
@@ -400,6 +446,61 @@ async fn shipping_restart_reload_rollback_and_cold_start() {
         }
     }
     attached.clear();
+
+    // Remove only the compatibility record from PT_NOTE, keeping the actual
+    // executable otherwise identical. This models a pre-import rollback.
+    let rollback = fixture.directory.join("unmarked-rollback");
+    let mut bytes = std::fs::read(&binary).unwrap();
+    let table = usize::try_from(u64::from_le_bytes(bytes[32..40].try_into().unwrap())).unwrap();
+    let count = usize::from(u16::from_le_bytes(bytes[56..58].try_into().unwrap()));
+    let marker = b"\x0c\0\0\0\x04\0\0\0ACFIINFRATERNAL\0\x01\0\0\0";
+    let mut removed = false;
+    for index in 0..count {
+        let program = table + index * 56;
+        if bytes[program..program + 4] != 4u32.to_le_bytes() {
+            continue;
+        }
+        let offset = usize::try_from(u64::from_le_bytes(
+            bytes[program + 8..program + 16].try_into().unwrap(),
+        ))
+        .unwrap();
+        let length = usize::try_from(u64::from_le_bytes(
+            bytes[program + 32..program + 40].try_into().unwrap(),
+        ))
+        .unwrap();
+        if let Some(position) = bytes[offset..offset + length]
+            .windows(marker.len())
+            .position(|record| record == marker)
+        {
+            bytes[offset + position + 24] = 0;
+            removed = true;
+        }
+    }
+    assert!(removed);
+    std::fs::write(&rollback, bytes).unwrap();
+    std::fs::set_permissions(
+        &rollback,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    assert!(!crate::ca_handoff_binary::capable(&std::fs::File::open(&rollback).unwrap()).unwrap());
+    cold_replacement(&binary, &rollback, &data, address, &token, &mut fixture).await;
+    let audit = std::fs::read_to_string(root.join("shipping-server.log")).unwrap();
+    assert!(
+        audit
+            .lines()
+            .any(|line| line.contains("server_ca_startup") && line.contains("warm"))
+    );
+    assert!(
+        audit
+            .lines()
+            .any(|line| line.contains("server_ca_startup") && line.contains("cold"))
+    );
+    assert!(audit.contains(&format!("service_pid={}", fixture.child.id())));
+    println!(
+        "METRIC name=ca_handoff_unmarked_rollback root_owned=true restart_cold=true reply_cold=true pid_preserved=true fd0_dev_null=true epipe_keeps_server=true"
+    );
+
     fixture.child.kill().unwrap();
     fixture.child.wait().unwrap();
     fixture.child = Command::new(&binary)
@@ -648,4 +749,67 @@ fn shim_pids(directory: &std::path::Path, sessions: &[[u8; 16]]) -> Vec<i32> {
             getsockopt(&socket, sockopt::PeerCredentials).unwrap().pid()
         })
         .collect()
+}
+
+/// The reply and the successor's CA state must agree on a deliberately cold exec.
+async fn cold_replacement(
+    binary: &std::path::Path,
+    target: &std::path::Path,
+    data: &std::path::Path,
+    address: std::net::SocketAddr,
+    token: &str,
+    fixture: &mut Fixture,
+) {
+    use std::os::unix::fs::MetadataExt;
+    let endpoint = data.join("restart/control.sock");
+    let previous = std::fs::metadata(&endpoint).unwrap();
+    let output = tokio::process::Command::new(binary)
+        .arg("server")
+        .arg("--data")
+        .arg(data)
+        .arg("restart")
+        .arg("--binary")
+        .arg(target)
+        .arg("--json")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout).unwrap().contains("cold"),
+        "cold restart reply omitted CA state"
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let replaced = std::fs::metadata(&endpoint).is_ok_and(|now| {
+            (now.ino(), now.ctime_nsec()) != (previous.ino(), previous.ctime_nsec())
+        });
+        if replaced
+            && http(address, "/remote/ca/status", Some(token))
+                .await
+                .is_some_and(|status| status["locked"] == true)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cold successor did not serve locked CA"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(fixture.child.try_wait().unwrap().is_none());
+    let descriptor = format!("/proc/{}/fd/0", fixture.child.id());
+    let null = if nix::unistd::Uid::effective().is_root() {
+        std::fs::read_link(&descriptor).unwrap()
+    } else {
+        // Inspect only this fixture's fd 0: dumpability blocks same-UID proc reads.
+        let inspected = Command::new("sudo")
+            .args(["-n", "readlink", &descriptor])
+            .output()
+            .unwrap();
+        assert!(inspected.status.success());
+        PathBuf::from(String::from_utf8(inspected.stdout).unwrap().trim())
+    };
+    assert_eq!(null, std::path::Path::new("/dev/null"));
 }
