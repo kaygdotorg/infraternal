@@ -6,7 +6,11 @@ use crate::{
 use nix::sys::socket::SockProtocol;
 use openssl::pkey::PKey;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, io, net::SocketAddr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+};
 use zeroize::Zeroizing;
 
 /// A node-local ephemeral secret. It cannot be serialized, cloned or debug printed.
@@ -205,6 +209,59 @@ impl Device {
                 {
                     return Err(error);
                 }
+            }
+        }
+        Ok(())
+    }
+    /// Retire orphan static host routes after adopting durable peer state [206,228].
+    /// # Errors
+    /// Reports malformed route dumps or kernel deletion errors.
+    pub fn retain_routes(addresses: &[Addresses]) -> io::Result<()> {
+        let desired: BTreeSet<IpAddr> = addresses
+            .iter()
+            .flat_map(|address| [IpAddr::V4(address.ipv4), IpAddr::V6(address.ipv6)])
+            .collect();
+        let owned = index()?;
+        let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        for reply in socket.request(26, 0x300, &[0; 12])? {
+            let header = reply.get(..12).ok_or(io::ErrorKind::InvalidData)?;
+            // Only the main-table static unicast host routes installed by routes()
+            // are ours. Local addresses, subnet routes and operator tables survive.
+            if header[4] != 254 || header[5] != 4 || header[7] != 1 {
+                continue;
+            }
+            let mut interface = None;
+            let mut destination = None;
+            let mut table = 254;
+            for field in netlink::attributes(&reply[12..])? {
+                match field.kind {
+                    1 => destination = Some(field.payload),
+                    4 => interface = Some(netlink::u32_at(field.payload, 0)?),
+                    15 => table = netlink::u32_at(field.payload, 0)?,
+                    _ => {}
+                }
+            }
+            if interface != Some(owned) || table != 254 {
+                continue;
+            }
+            let address = match (header[0], header[1]) {
+                (2, 32) => IpAddr::V4(Ipv4Addr::from(
+                    <[u8; 4]>::try_from(destination.ok_or(io::ErrorKind::InvalidData)?)
+                        .map_err(io::Error::other)?,
+                )),
+                (10, 128) => IpAddr::V6(Ipv6Addr::from(
+                    <[u8; 16]>::try_from(destination.ok_or(io::ErrorKind::InvalidData)?)
+                        .map_err(io::Error::other)?,
+                )),
+                _ => continue,
+            };
+            // Reuse the dumped attributes so route priority and IPv6 kernel
+            // normalization remain exact. A replay may already have removed it.
+            if !desired.contains(&address)
+                && let Err(error) = socket.request(25, 4, &reply)
+                && !matches!(error.raw_os_error(), Some(2 | 3))
+            {
+                return Err(error);
             }
         }
         Ok(())
