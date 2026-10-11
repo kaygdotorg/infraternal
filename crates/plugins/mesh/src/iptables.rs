@@ -216,9 +216,10 @@ fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
     }
     // Filter hooks see the translated destination. Run before conntrack or
     // peer grants, including packets which never entered the mesh interface.
+    // Translation preserves the incoming interface; lo remains node-local [231].
     let _ = writeln!(
         script,
-        "-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -d {address} -j DROP"
+        "-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN\n-A {DELIVERY} -d {address} -j DROP"
     );
     if !installed.delivery {
         // Older owned filter chains remain valid; add this fence atomically
