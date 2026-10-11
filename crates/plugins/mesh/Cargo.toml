@@ -29,3 +29,8 @@ uuid = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+# The production-schema proof needs coordinator storage, never an agent-only build.
+[[example]]
+name = "coordinator_fixture"
+required-features = ["server"]
