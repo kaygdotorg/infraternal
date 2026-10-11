@@ -37,7 +37,7 @@ for name in "${files[@]}"; do
         python3 "$release_root/scripts/release/response.py" uploaded
 done
 request "$RELEASE_CALLER_TOKEN" --request POST --header 'Content-Type: application/json' \
-    --data "{\"version\":\"$1\"}" "$release_signer/sign" --output /dev/null
+    --data "{\"version\":\"$1\"}" "$release_signer/sign" | python3 "$release_root/scripts/release/response.py" signed
 verify_download "$1" "$staging"
 for name in "${files[@]}"; do
     cmp -- "$bundle/$name" "$staging/$name" || { printf 'published bytes differ from the built bundle\n' >&2; exit 1; }
