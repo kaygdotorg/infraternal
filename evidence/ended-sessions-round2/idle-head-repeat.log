@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/ended-sessions/scripts/verify-agent.py", line 218, in <module>
+    run(args.binary.resolve(), fixture_state('tb'), args.functional, args.seed)
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/kayg/Developer/infraternal/.worktrees/ended-sessions/scripts/verify-agent.py", line 33, in run
+    idle_agent = assert_process_idle(client.child.pid, 'idle infraternal agent')
+  File "/home/kayg/Developer/infraternal/.worktrees/ended-sessions/scripts/idle_canary.py", line 99, in assert_process_idle
+    raise AssertionError(
+    ...<2 lines>...
+    )
+AssertionError: idle infraternal agent scheduled 10 times in 2.201 s: infraternal (tid 3984243): 10

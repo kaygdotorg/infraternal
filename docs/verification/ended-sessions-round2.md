@@ -5,6 +5,8 @@ Baseline: `a23432f2387dcbff5f19429966feb65c8d9abb35`. Independent acceptance
 source: `origin/review-ended-sessions` at `87e53fc5`. Fixes and acceptance
 commits: `bc656a96`, `8230b4e3`, `a6c60d8a`, `281160bf`, `92b9f49b`,
 `c251f3fd`, `b5beff06`, `b7ee41f9`, `b4e70c8c`, `9c88d6a0`.
+Additional control-frame fixture corrections: `1e3e5862`, `2ad79ae0`,
+`6d34eacd`, `63392d9c`.
 
 ## Behavior and acceptance
 
@@ -104,6 +106,44 @@ The unchanged gate ceiling is **16,404,816 bytes** and already fails on the
 baseline. No size gate or D188 budget was raised or waived. The final full
 `scripts/verify fast` is run on the evidence commit; its exact output and head
 SHA are recorded in the final #168 issue comment.
+
+The full gate also exposes an **unresolved idle failure**: the unchanged
+400 ms census timer schedules the infraternal agent while completely idle.
+The repaired startup fixture reaches the existing zero-activation canary
+instead of failing earlier on the unsolicited census. Initial full gate:
+11 scheduler entries / 2.201 s. Weighted sequential comparison using the same
+repaired fixture: exact baseline static binary **12 / 2.200 s**, head debug
+binary **10 / 2.201 s** (`idle-baseline.log`, `idle-head-repeat.log`). Both
+contain the unconditional timer. This is deterministic idle work, not a
+load-dependent timeout. The canary and 400 ms contract are unchanged.
+
+The branch remains **HOLD** for a fully green gate. The owner needs to reconcile
+the recorded census contract with D81's zero-idle default; this job does not
+choose a new foundational process-death mechanism, disable SIGKILL discovery
+or relax the idle assertion. The first full gate's Rust rows are fmt PASS,
+VT native fmt PASS, clippy PASS, test FAIL (101), cargo-deny PASS and static
+builds FAIL (1). The final full gate on the last evidence commit is recorded
+verbatim on #168; neither failure is waived.
+
+Checking beyond that first failing integration binary found three more
+fixtures assuming that the next frame was a terminal reply or Pong. Their
+existing security, exact-byte and typed-retention assertions are preserved:
+the UID fixture now validates the exact startup census; queue probes reuse
+the correlated bounded ping helper; retained exit/Close checks reuse a
+census-validating reader with one original socket deadline. Green evidence:
+`remote-fixture-green.log` (5 remote daemon tests),
+`queue-fixture-green.log` (2,640,000 bytes exactly once across 12 streams),
+`retention-fixture-green.log` (typed exit, restart and retirement race).
+`ts-fast-separate.log` additionally records **166 tracer/shared tests** and
+**36 protocol tests** passing, including Rust/TypeScript differential decoding.
+The broader run (`workspace-remaining-final.log`) passed server library
+**297/297 (33 ignored)** and shim library **65/65 (13 ignored)**, including the
+deterministic seeded corpus. It stopped at the mouse integration probe because
+the manual command omitted the pinned Zig PATH that `scripts/verify` supplies;
+`mouse-corrected-env.log` records the corrected environment rerun (**1 passed**).
+Separate workspace doc tests also pass (`doc-tests.log`). Every other
+CLI integration suite passed, with the two corrected census assumptions having
+their separate green reruns above (`cli-remaining.log`). No failure was waived.
 
 ## Reproduction and self-review
 
