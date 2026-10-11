@@ -4,6 +4,29 @@ use super::*;
 #[cfg(feature = "remote")]
 use std::sync::{Mutex, atomic::AtomicBool};
 
+#[test]
+fn replay_prefix_stops_at_the_shim_hello_head() {
+    assert_eq!(replay_prefix_len(100, 50, Some(125)), 25);
+    assert_eq!(replay_prefix_len(125, 50, Some(125)), 0);
+    assert_eq!(replay_prefix_len(130, 50, Some(125)), 0);
+    assert_eq!(replay_prefix_len(100, 50, None), 50);
+}
+
+#[tokio::test]
+async fn replay_complete_preserves_the_full_output_cursor_as_decimal() {
+    let id = [0x5a; 16];
+    let (tx, mut messages) = mpsc::channel(1);
+    replay_complete(&tx, 17, id, u64::MAX).await.unwrap();
+    let Some(Message::Event(stream, json)) = messages.recv().await else {
+        panic!("replay completion was not emitted as an Event");
+    };
+    let event: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(stream, 17);
+    assert_eq!(event["type"], "terminal.replay_complete");
+    assert_eq!(event["session_id"], uuid::Uuid::from_bytes(id).to_string());
+    assert_eq!(event["out_seq"], u64::MAX.to_string());
+}
+
 #[cfg(feature = "remote")]
 struct StalledWriter {
     input: Mutex<(Vec<u8>, usize)>,

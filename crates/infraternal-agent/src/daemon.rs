@@ -649,6 +649,29 @@ async fn input_state(link: &mut Link) -> io::Result<u64> {
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim input state timed out"))?
 }
 
+/// Limits one affordable raw suffix so a shim frame cannot cross the replay boundary.
+fn replay_prefix_len(cursor: u64, available: usize, fence: Option<u64>) -> usize {
+    let Some(fence) = fence else {
+        return available;
+    };
+    usize::try_from(fence.saturating_sub(cursor)).map_or(available, |length| available.min(length))
+}
+
+/// Sends the ordered end of bytes present when this shim link was opened.
+async fn replay_complete(
+    tx: &mpsc::Sender<Message>,
+    stream: u32,
+    id: [u8; 16],
+    out_seq: u64,
+) -> io::Result<()> {
+    let json = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.replay_complete",
+        "session_id": uuid::Uuid::from_bytes(id),
+        "out_seq": out_seq.to_string(),
+    }))?;
+    emit(tx, Message::Event(stream, json)).await
+}
+
 /// Final event is ordered through the writer before ownership can be released.
 async fn exited(
     tx: &mpsc::Sender<Message>,
@@ -780,6 +803,9 @@ async fn terminal_run(
         None
     };
     let mut session = Some(link);
+    // Hello.head is a stable split between bytes already present on this shim
+    // link and output produced while the attach is being established.
+    let mut replay_until = session.as_ref().map(|link| link.session.head.max(cursor));
     if session
         .as_ref()
         .is_none_or(|s| s.session.caps & SEQUENCED_INPUT == 0)
@@ -811,6 +837,10 @@ async fn terminal_run(
     #[cfg(feature = "plugin-host-facts")]
     let _window = crate::lifecycle::windows::Attachment::new(path.clone());
     let mut output = relay::Output::attach(cursor);
+    if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+        replay_complete(&tx, stream, id, output.cursor()).await?;
+        replay_until = None;
+    }
     let mut pending: Option<Shim> = None;
     let mut deadline = None;
     let mut finished_peer = false;
@@ -818,14 +848,18 @@ async fn terminal_run(
         if let Some(frame) = pending.take() {
             match frame {
                 Shim::Output(seq, bytes) => {
+                    let frame_len = bytes.len();
                     let range = output
                         .suffix(seq, bytes.len())
                         .map_err(|_| sessions::invalid("output gap"))?;
-                    let length = range.len();
+                    // Stop an Output exactly at the Hello.head boundary. A shim
+                    // frame may contain both retained history and newer bytes.
+                    let length = replay_prefix_len(output.cursor(), range.len(), replay_until);
+                    let end = range.start + length;
                     if length > 0 {
                         // Whole frames transfer their payload ownership to the
                         // writer. Only partial credit/overlap needs a suffix copy.
-                        if range.start == 0 && range.end == bytes.len() {
+                        if range.start == 0 && end == frame_len {
                             emit(
                                 &tx,
                                 Message::Shim(stream, Shim::Output(output.cursor(), bytes)),
@@ -834,13 +868,17 @@ async fn terminal_run(
                             output
                                 .forward(length)
                                 .map_err(|_| sessions::invalid("output credit invariant"))?;
+                            if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+                                replay_complete(&tx, stream, id, output.cursor()).await?;
+                                replay_until = None;
+                            }
                             continue;
                         }
                         emit(
                             &tx,
                             Message::Shim(
                                 stream,
-                                Shim::Output(output.cursor(), bytes[range.clone()].to_vec()),
+                                Shim::Output(output.cursor(), bytes[range.start..end].to_vec()),
                             ),
                         )
                         .await?;
@@ -848,7 +886,11 @@ async fn terminal_run(
                             .forward(length)
                             .map_err(|_| sessions::invalid("output credit invariant"))?;
                     }
-                    if range.end < bytes.len() {
+                    if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+                        replay_complete(&tx, stream, id, output.cursor()).await?;
+                        replay_until = None;
+                    }
+                    if end < frame_len {
                         pending = Some(Shim::Output(seq, bytes));
                         deadline = output
                             .pending(Instant::now())
@@ -875,6 +917,12 @@ async fn terminal_run(
                             emit(&tx, Message::Event(stream, json)).await?;
                         }
                         emit(&tx, Message::Shim(stream, frame)).await?;
+                        if replay_until.is_some_and(|fence| seq >= fence) {
+                            // Repaint bytes contain state through seq, so the
+                            // ordered completion event uses the repaint cursor.
+                            replay_complete(&tx, stream, id, seq).await?;
+                            replay_until = None;
+                        }
                     } else {
                         pending = Some(frame);
                         // A repaint is indivisible. Positive credit below its
@@ -905,6 +953,11 @@ async fn terminal_run(
             // first, then faithful or negotiated approximate repaint on a gap.
             next.send(&Shim::ReadFrom(output.cursor())).await?;
             output.resume_replay();
+            replay_until = Some(next.session.head.max(output.cursor()));
+            if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+                replay_complete(&tx, stream, id, output.cursor()).await?;
+                replay_until = None;
+            }
             session = Some(next);
         }
         tokio::select! {
