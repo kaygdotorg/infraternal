@@ -42,13 +42,23 @@ bundle, asks the Worker to sign, downloads the manifest, signature and payloads,
 and verifies the signature and all hashes before reporting success. Interrupted
 publication leaves an immutable partial release; investigate it rather than
 repeating uploads over existing objects. The uploader checks the authoritative R2 object prefix, including partial or
-unrelated objects, and uses a local per-version publisher lock. PUTs also send
+unrelated objects, and holds a nonblocking `flock` for the entire publication,
+including signing and public verification. The fixed per-user lock path is
+`${XDG_STATE_HOME:-$HOME/.local/state}/infraternal/release-publish/<version>.lock`,
+independent of `CARGO_TARGET_DIR` and the worktree. The state path must be
+absolute; the lock directory and file must be owned and private. Lock files
+remain in place: unlinking a held lock would allow a second writer to lock a
+new inode. The kernel releases the lock when its last descriptor closes;
+in-flight child requests retain it after an abrupt publisher stop. PUTs also send
 `If-None-Match: *` as a precaution. The REST upload reference does not promise
 conditional-write semantics, so the orchestrator must serialize publishers
 across machines; the preflight is not a distributed lock. See the official
 [object list](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/methods/list/)
 and [upload](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/methods/upload/)
-API definitions.
+API definitions. Storage listing/upload JSON and Worker replies are bounded
+and reject duplicate fields recursively, including nested objects. An
+ambiguous response stops publication with a plain reason; no provider
+diagnostics are echoed. This pipeline does not consume `releases/index.json`.
 
 Anyone can verify a published release, without credentials:
 
@@ -79,7 +89,16 @@ configured server state directory determines the rootful/rootless location;
 verified files live under `releases/<version>/<architecture>/`. Each cache hit
 reverifies the signed manifest, exact version and payload. A cold miss makes
 four bounded requests (manifest, signature, VERSION, payload); warm reuse
-makes none. No background task runs for this
+makes none. Downloads use private `download-<canonical UUID>/` staging
+in the same version directory. Only after signature, version and payload
+verification does one atomic directory rename publish the complete bundle.
+At resolver startup and before a newly verified bundle is published, cleanup
+reclaims abandoned staging for that version. It only unlinks recognized,
+owned, private regular files with a single link inside owned private staging.
+Other names, symlinks, shared files and unknown contents remain untouched.
+A lifetime directory flock protects each active download; creation and cleanup
+also share a short version-directory flock to avoid collecting a just-created
+directory before its lifetime lock is acquired. No background task runs for this
 resolver. A failed fetch or check stops at “Get the arm64 binary” (or x86_64)
 with a plain reason. Payload resolution has a 60-second maximum, shortened to
 finish before the enclosing installation deadline, so a stalled builds host
@@ -99,6 +118,7 @@ caller must prevent file writes until it uses the verified descriptor.
 
 ```sh
 python3 scripts/release/test.py
+TRACER_TEST_PORT=4299 bun test scripts/release/review.test.ts
 cargo test -p infraternal-server release_verify
 cargo test -p infraternal-server release_payload
 systemd-run --user --scope -p CPUWeight=10000 \
@@ -138,7 +158,9 @@ bucket or Worker.
   release work runs while the component is off.
 - Environment tokens reach curl through stdin, with tracing disabled. No signing
   key, credential file, secret argument or provider diagnostic is recorded.
-- R2 preflight plus the local lock refuse existing versions; cross-machine
+- R2 preflight and Worker JSON reject duplicate fields at every depth. The
+  fixed per-user flock refuses concurrent same-version publishers even with
+  different build directories; cross-machine
   serialization is required because REST conditional PUT is not guaranteed.
 - Independent visual judgment remains a reviewer responsibility. Production-build
   screenshots accompany the browser test evidence; no new UI primitive is added.
