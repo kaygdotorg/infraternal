@@ -36,6 +36,9 @@ for (const [name, viewport, scale] of [["desktop", { width: 1440, height: 900 },
     await signIn(page, "ca=locked");
     await expect(toast(page)).toContainText(TITLE, { timeout: 8000 });
     await expect(toast(page).getByRole("button", { name: "Unlock" })).toBeVisible();
+    // A waiting state is not success: the lock glyph shows, not the tick.
+    await expect(toast(page).locator(".ui-toast-glyph")).toBeVisible();
+    await expect(toast(page).locator(".ui-toast-marker")).toBeHidden();
     // The item waits behind its toast: no card, no dot yet.
     await expect(card(page)).toHaveCount(0);
     await expect(toggle(page)).not.toHaveAttribute("data-pending", "");
@@ -61,6 +64,9 @@ for (const [name, viewport, scale] of [["desktop", { width: 1440, height: 900 },
     await expect(card(page)).toHaveCount(0);
     await expect(toggle(page)).not.toHaveAttribute("data-pending", "");
     await expect(toast(page)).toContainText("Host connections unlocked");
+    // The outcome keeps the success look.
+    await expect(toast(page).locator(".ui-toast-marker")).toBeVisible();
+    await expect(toast(page).locator(".ui-toast-glyph")).toBeHidden();
     await page.waitForTimeout(500);
     await page.screenshot({ path: resolve(CAPTURES, `unlocked-${name}.png`) });
 

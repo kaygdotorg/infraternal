@@ -14,7 +14,9 @@
  *   asks again, in the background, each time it is built from an answer older than `STALE_MS`.
  *
  * The lock is also a pending item (D234). When a page learns for the first time that the CA is locked and the viewer
- * can unlock it, one persistent toast offers "Unlock" (at every sign-in, because every sign-in is a fresh page).
+ * can unlock it, one persistent toast offers "Unlock" (at every sign-in, because every sign-in is a fresh page). It
+ * carries the lock glyph, not the success tick: a locked state is waiting, not done. It expires after `TOAST_MS`
+ * (the owner allows this: the item then lives in the inbox, so nothing is lost) or when the person dismisses it.
  * When that toast is dismissed or expires the item moves to the sidebar inbox and stays there until the state
  * changes, however it changes: the same refresh points as above (page start, Settings, the palette, an unlock, and the
  * page becoming visible again, which is how another tab's unlock reaches this one) make the card and the dot
@@ -26,6 +28,7 @@
 import type { CoreScreen } from "../../core-screen";
 import { ICONS } from "../../../../../packages/ui/src/icons";
 import { onDemand } from "../../on-demand";
+import { existingInbox, inboxFor } from "../inbox-host";
 import type { ProvisioningService } from "./service";
 
 export const ACTION_UNLOCK = "canvas:unlockauthority";
@@ -75,7 +78,8 @@ export function createAuthorityControl(core: CoreScreen, options: AuthorityOptio
   let toastOpen = false;
   const publish = (): void => {
     const waiting = state === "locked" && toastOver && !busy;
-    core.inbox.set("authority", waiting ? [{
+    const inbox = waiting ? inboxFor(core) : existingInbox(core);
+    inbox?.set("authority", waiting ? [{
       id: "authority-locked", title: LOCKED_TITLE, detail: LOCKED_DETAIL, canAct: options.canUnlock?.() ?? true,
       action: { label: "Unlock", run: () => { void unlock(); } },
     }] : []);
@@ -85,7 +89,7 @@ export function createAuthorityControl(core: CoreScreen, options: AuthorityOptio
     offered = true;
     toastOpen = true;
     core.toast.show({
-      message: LOCKED_TITLE, duration: TOAST_MS, dismissible: true,
+      message: LOCKED_TITLE, duration: TOAST_MS, dismissible: true, icon: ICONS.lock,
       action: { label: "Unlock", onSelect: () => { void unlock(); } },
       onClose: () => { toastOpen = false; toastOver = true; publish(); },
     });
@@ -136,6 +140,6 @@ export function createAuthorityControl(core: CoreScreen, options: AuthorityOptio
   return {
     state: () => state, canUnlock, refresh, unlock,
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    dispose() { window.clearTimeout(first); window.removeEventListener("tracer:canvas-action", onAction); document.removeEventListener("visibilitychange", onVisible); removeProvider(); core.inbox.set("authority", []); listeners.clear(); },
+    dispose() { window.clearTimeout(first); window.removeEventListener("tracer:canvas-action", onAction); document.removeEventListener("visibilitychange", onVisible); removeProvider(); existingInbox(core)?.set("authority", []); listeners.clear(); },
   };
 }
