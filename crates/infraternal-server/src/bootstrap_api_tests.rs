@@ -846,3 +846,55 @@ async fn component_off_retires_idle_sockets_and_refuses_new_admission() {
     let _ = replacement.close(None).await;
     serving.abort();
 }
+
+#[tokio::test]
+async fn split_cookie_fields_preserve_bootstrap_owner_authority() {
+    let (_, _, cookie, _, address, serving, _, api) = fixture(false).await;
+    for session_first in [false, true] {
+        let fields = if session_first {
+            [cookie.as_str(), "ceremony=unrelated"]
+        } else {
+            ["ceremony=unrelated", cookie.as_str()]
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, ORIGIN.parse().unwrap());
+        for field in fields {
+            headers.append(header::COOKIE, field.parse().unwrap());
+        }
+        // Settings and bootstrap upgrades share this admission adapter; check
+        // live SQLite authority and the real socket without printing capabilities.
+        assert!(authenticate_headers(&api, &headers).await.is_ok());
+        let mut upgrade = request(address, ORIGIN, None);
+        for field in fields {
+            upgrade
+                .headers_mut()
+                .append(header::COOKIE, field.parse().unwrap());
+        }
+        let (mut socket, _) = connect_async(upgrade).await.unwrap();
+        socket.close(None).await.unwrap();
+    }
+    for invalid in [
+        cookie.parse().unwrap(),
+        "__Host-infraternal=short".parse().unwrap(),
+        axum::http::HeaderValue::from_bytes(b"other=\xff").unwrap(),
+    ] {
+        for invalid_first in [false, true] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, ORIGIN.parse().unwrap());
+            let valid = cookie.parse().unwrap();
+            let fields = if invalid_first {
+                [invalid.clone(), valid]
+            } else {
+                [valid, invalid.clone()]
+            };
+            for field in fields {
+                headers.append(header::COOKIE, field);
+            }
+            assert!(matches!(
+                authenticate_headers(&api, &headers).await,
+                Err(StatusCode::UNAUTHORIZED)
+            ));
+        }
+    }
+    serving.abort();
+}
