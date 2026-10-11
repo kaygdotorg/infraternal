@@ -23,6 +23,8 @@ def namespace(pid, *args):
 
 
 def request(proc, value):
+    if hasattr(proc, "request"):
+        return proc.request(value)
     proc.stdin.write(value if isinstance(value, str) else json.dumps(value))
     proc.stdin.write("\n")
     proc.stdin.flush()
@@ -103,10 +105,24 @@ def ping(address):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fixture", required=True)
+    parser.add_argument("--fixture")
+    parser.add_argument("--binary")
+    parser.add_argument("--coordinator")
+    parser.add_argument("--scratch")
+    parser.add_argument("--extra-members", type=int, default=0)
     parser.add_argument("--nf-tables", action="store_true")
     args = parser.parse_args()
+    if bool(args.fixture) == bool(args.binary):
+        parser.error("choose --fixture or --binary")
+    if args.binary and (not args.coordinator or not args.scratch or args.nf_tables):
+        parser.error("--binary requires --coordinator and --scratch; fallback is tested with --fixture")
+    if args.extra_members < 0 or (args.extra_members and not args.binary):
+        parser.error("--extra-members requires the production coordinator")
+    from pathlib import Path
+    if Path("/proc/self/uid_map").read_text().split()[2:] != ["1"]:
+        parser.error("run inside a disposable user/network namespace: unshare -Urn")
     frontend = ["--nf-tables"] if args.nf_tables else []
+    coordinator = None
     child = subprocess.Popen(["unshare", "-n", "sleep", "600"])
     left = right = held = None
     echoes = []
@@ -123,21 +139,34 @@ def main():
         underlay_ping = ping("10.220.0.2")
         underlay_mbps = throughput(child.pid, "10.220.0.2", 5201)
         started = time.monotonic_ns()
-        left = subprocess.Popen([args.fixture, *frontend], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        right = subprocess.Popen(["nsenter", "-t", str(child.pid), "-n", args.fixture, *frontend], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        if args.binary:
+            from mesh_agent_fixture import BinaryNode, CoordinatorFixture
+            left = BinaryNode(args.binary, args.scratch)
+            right = BinaryNode(args.binary, args.scratch, child.pid)
+            coordinator = CoordinatorFixture(args.coordinator, args.extra_members)
+        else:
+            left = subprocess.Popen([args.fixture, *frontend], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            right = subprocess.Popen(["nsenter", "-t", str(child.pid), "-n", args.fixture, *frontend], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         identities = [json.loads(proc.stdout.readline()) for proc in (left, right)]
         addresses = [{"ipv4": "10.254.0.1", "ipv6": "fd01:203:405::1"}, {"ipv4": "10.254.0.2", "ipv6": "fd01:203:405::2"}]
+        compiled = coordinator.configuration("allow", identities) if coordinator else None
+        if compiled:
+            addresses = compiled["addresses"]
         chunks = []
         applies = []
         for index, proc in enumerate((left, right)):
             other = 1 - index
             chunk = {"node": index + 1, "from_version": None, "version": 1, "index": 0, "last": True, "addresses": addresses[index], "default_policy": "Allow", "upserted": {str(other + 1): {"peer": {"key": identities[other]["public_key"], "addresses": addresses[other], "endpoint": f"10.220.0.{other + 1}:{identities[other]['port']}"}, "inbound": "All", "outbound": "All"}}, "removed": []}
             chunks.append(chunk)
-            applies.append(request(proc, chunk))
+            if compiled:
+                for part in compiled["chunks"][index]:
+                    applies.append(request(proc, part))
+            else:
+                applies.append(request(proc, chunk))
         run("ping", "-n", "-c", "1", "-W", "5", "10.254.0.2")
         join_us = (time.monotonic_ns() - started) // 1000
         mesh_ping = ping("10.254.0.2")
-        mesh_ipv6_ping = ping("fd01:203:405::2")
+        mesh_ipv6_ping = ping(addresses[1]["ipv6"])
         mesh_mbps = throughput(child.pid, "10.254.0.2", 5202)
         echoes.append(echo_server(child.pid, 5203))
         echoes.append(echo_server(child.pid, 5211))
@@ -146,6 +175,7 @@ def main():
         held.sendall(b"before")
         assert held.recv(6) == b"before"
         # The established flow must survive while new flows lose reach.
+        compiled = coordinator.configuration("deny") if coordinator else None
         for index, proc in enumerate((left, right)):
             chunk = chunks[index]
             chunk["from_version"] = 1
@@ -154,14 +184,21 @@ def main():
             for peer in chunk["upserted"].values():
                 peer["inbound"] = "None"
                 peer["outbound"] = "None"
-            request(proc, chunk)
+            if compiled:
+                for part in compiled["chunks"][index]:
+                    request(proc, part)
+            else:
+                request(proc, chunk)
         denied = subprocess.run(["ping", "-n", "-c", "1", "-W", "1", "10.254.0.2"], capture_output=True).returncode != 0
         assert denied
+        if coordinator:
+            assert subprocess.run(["nsenter", "-t", str(child.pid), "-n", "ping", "-n", "-c", "1", "-W", "2", addresses[0]["ipv4"]], capture_output=True).returncode == 0
         held.sendall(b"after")
         established_survives = held.recv(5) == b"after"
         assert established_survives
         denied_tcp = new_tcp_denied("10.254.0.2", 5203)
         assert denied_tcp
+        compiled = coordinator.configuration("port") if coordinator else None
         for index, proc in enumerate((left, right)):
             chunk = chunks[index]
             chunk["from_version"] = 2
@@ -169,7 +206,11 @@ def main():
             for peer in chunk["upserted"].values():
                 peer["inbound"] = {"Ports": [{"protocol": "Tcp", "number": 5211}]}
                 peer["outbound"] = {"Ports": [{"protocol": "Tcp", "number": 5211}]}
-            request(proc, chunk)
+            if compiled:
+                for part in compiled["chunks"][index]:
+                    request(proc, part)
+            else:
+                request(proc, chunk)
         allowed = socket.create_connection(("10.254.0.2", 5211), 2)
         allowed.sendall(b"grant")
         port_grant = allowed.recv(5) == b"grant"
@@ -179,14 +220,26 @@ def main():
         def ticks(proc):
             return sum(int(field) for field in open(f"/proc/{proc.pid}/stat").read().split()[13:15])
         before = [ticks(proc) for proc in (left, right)]
-        time.sleep(2)
+        idle_seconds = 10 if args.binary else 2
+        time.sleep(idle_seconds)
         idle_ticks = [ticks(proc) - count for proc, count in zip((left, right), before)]
         rss = [int(open(f"/proc/{proc.pid}/statm").read().split()[1]) * os.sysconf("SC_PAGE_SIZE") for proc in (left, right)]
-        print(json.dumps({"machine": "infraternal-dev", "load": open("/proc/loadavg").read().strip(), "rootless_userns": True, "real_kernel": True, "pairs": 1, "direct_pairs": 1, "needs_later_paths": 0, "underlay_ping": underlay_ping, "mesh_ping": mesh_ping, "mesh_ipv6_ping": mesh_ipv6_ping, "deny_new_tcp": denied_tcp, "established_survives_switch": established_survives, "port_grant_and_other_port_denial": port_grant, "underlay_mbps": underlay_mbps, "mesh_mbps": mesh_mbps, "join_to_first_packet_us": join_us, "apply": applies, "deny_new_ping": denied, "fixture_idle_ticks_2s": idle_ticks, "fixture_rss_bytes": rss, "fixture_rss_at_1000_nodes_bytes": sum(rss) * 500}, sort_keys=True))
+        report = {"machine": "infraternal-dev", "load": open("/proc/loadavg").read().strip(), "rootless_userns": True, "real_kernel": True, "pairs": 1, "direct_pairs": 1, "needs_later_paths": 0, "underlay_ping": underlay_ping, "mesh_ping": mesh_ping, "mesh_ipv6_ping": mesh_ipv6_ping, "deny_new_tcp": denied_tcp, "established_survives_switch": established_survives, "port_grant_and_other_port_denial": port_grant, "underlay_mbps": underlay_mbps, "mesh_mbps": mesh_mbps, "join_to_first_packet_us": join_us, "apply": applies, "deny_new_ping": denied, "fixture_idle_ticks_2s": idle_ticks, "fixture_rss_bytes": rss, "fixture_rss_at_1000_nodes_bytes": sum(rss) * 500}
+        if args.binary:
+            report["peer_count_per_node"] = args.extra_members + 1
+            report["additional_public_members"] = args.extra_members
+            report["full_infraternal_agent"] = True
+            report["production_coordinator"] = True
+            report["agent_idle_ticks_10s"] = report.pop("fixture_idle_ticks_2s")
+            report["agent_rss_bytes"] = report.pop("fixture_rss_bytes")
+            report["agent_rss_at_1000_nodes_bytes"] = report.pop("fixture_rss_at_1000_nodes_bytes")
+        print(json.dumps(report, sort_keys=True))
         for proc in (left, right):
             assert request(proc, "quit")["off"]
             proc.wait(timeout=5)
     finally:
+        if coordinator:
+            coordinator.close()
         if held:
             held.close()
         for proc in (left, right, child, *echoes):
