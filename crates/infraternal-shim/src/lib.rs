@@ -42,3 +42,6 @@ pub use session::{Config, run, run_with_retention};
 
 #[cfg(feature = "ca-handoff")]
 pub mod locked_bytes;
+
+#[cfg(feature = "ca-handoff")]
+pub mod openssl_secure;
