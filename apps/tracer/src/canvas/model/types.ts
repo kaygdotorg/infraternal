@@ -6,8 +6,8 @@
  */
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 
-/** What a window shows. Only a `terminal` window is bound to a session and can split. */
-export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings";
+/** What a window shows. A `flow` window holds a short guided task (add a host); it is never saved and closes itself when done. Only a `terminal` window is bound to a session and can split. */
+export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings" | "flow";
 
 /** The built-in views have fixed ids; a view someone shared with you gets an id of its own. */
 export type ViewId = string;
@@ -17,6 +17,9 @@ export interface WindowModel {
   kind: WindowKind;
   /** Host (or tag) name shown in the pill. */
   host: string;
+  /** Server-owned remote host identity; absence selects the embedded host only for known local windows. */
+  hostId?: string;
+  address?: string;
   /** The session's readable name (D178); the stable target is `sessionId`. */
   session?: string;
   /** The session this window shows (a terminal window): stable across renames and reloads (D180). */
@@ -29,11 +32,21 @@ export interface WindowModel {
   lines?: string[];
   /** Set on a window made by a split: it shares its column with the window it came from and is not resized on its own. */
   splitOf?: string;
+  /**
+   * Columns this window covers, from its own (D212). Absent means one. A window that covers more than one column makes its
+   * columns a group, drawn as one grid with the bands below.
+   */
+  span?: number;
+  /** Row bands this window covers, from `row` (D212). Absent means one. */
+  rows?: number;
+  /** The band this window starts in, inside its group (D212). Only set for a window in a group; a plain column stacks its windows. */
+  row?: number;
   /** The window's host is not covered by the viewer's grants (a shared layout connects through your own access). */
   noAccess?: boolean;
 }
 
-export interface ColumnModel { id: string; w: number; wins: WindowModel[] }
+/** A column. `half` names the two halves of one split (D212): closing one returns its width to the other. Runtime only. */
+export interface ColumnModel { id: string; w: number; half?: string; wins: WindowModel[] }
 
 export interface NodeModel {
   id: string; kind: "host" | "tag"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform;

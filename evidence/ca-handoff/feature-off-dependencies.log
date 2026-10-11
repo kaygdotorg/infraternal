@@ -1,0 +1,605 @@
+# Records successful feature-off compilation and existing dependency duplicates for #154.
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p1571041-i39279257.scope; invocation ID: d93ee3d8b40549e99bd27aeb67217a32
+    Checking tokio v1.53.2
+    Checking crypto-common v0.1.7
+    Checking getrandom v0.4.3
+    Checking nix v0.30.1
+    Checking infraternal-protocol v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-protocol)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+    Checking digest v0.10.7
+    Checking uuid v1.27.0
+    Checking sha2 v0.10.9
+    Checking sha1 v0.10.7
+    Checking blake2 v0.10.6
+    Checking webauthn-attestation-ca v0.5.5
+    Checking argon2 v0.5.3
+    Checking tungstenite v0.29.0
+    Checking webauthn-rs-core v0.5.5
+    Checking infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-shim)
+    Checking webauthn-rs v0.5.5
+    Checking tokio-util v0.7.19
+    Checking tokio-stream v0.1.19
+    Checking fs-err v3.3.2
+    Checking tower v0.5.3
+    Checking tokio-tungstenite v0.29.0
+    Checking tokio-openssl v0.6.5
+    Checking sqlx-core v0.8.6
+    Checking h2 v0.4.19
+    Checking tower-http v0.6.11
+    Checking sqlx-sqlite v0.8.6
+    Checking sqlx v0.8.6
+    Checking infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-plugin-api)
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent)
+    Checking hyper v1.11.1
+    Checking hyper-util v0.1.21
+    Checking axum v0.8.9
+    Checking axum-server v0.8.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.82s
+base64 v0.21.7
+├── base64urlsafedata v0.5.5
+│   ├── webauthn-attestation-ca v0.5.5
+│   │   └── webauthn-rs-core v0.5.5
+│   │       └── webauthn-rs v0.5.5
+│   │           └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server)
+│   │               └── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│   ├── webauthn-rs v0.5.5 (*)
+│   ├── webauthn-rs-core v0.5.5 (*)
+│   └── webauthn-rs-proto v0.5.5
+│       └── webauthn-rs-core v0.5.5 (*)
+├── webauthn-rs-core v0.5.5 (*)
+└── webauthn-rs-proto v0.5.5 (*)
+
+base64 v0.22.1
+├── axum v0.8.9
+│   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+└── sqlx-core v0.8.6
+    ├── sqlx v0.8.6
+    │   ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+    │   ├── infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-plugin-api)
+    │   │   ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent)
+    │   │   │   ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+    │   │   │   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+    │   │   ├── infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/host-facts)
+    │   │   │   └── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+    │   │   ├── infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/mesh)
+    │   │   │   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+    │   │   ├── infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote)
+    │   │   │   ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+    │   │   │   ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+    │   │   │   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+    │   │   ├── infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/ssh)
+    │   │   │   ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+    │   │   │   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+    │   │   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+    │   ├── infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/mesh) (*)
+    │   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+    └── sqlx-sqlite v0.8.6
+        └── sqlx v0.8.6 (*)
+
+base64 v0.22.1
+└── sqlx-core v0.8.6
+    ├── sqlx-macros v0.8.6 (proc-macro)
+    │   └── sqlx v0.8.6 (*)
+    ├── sqlx-macros-core v0.8.6
+    │   └── sqlx-macros v0.8.6 (proc-macro) (*)
+    └── sqlx-sqlite v0.8.6
+        └── sqlx-macros-core v0.8.6 (*)
+
+cpufeatures v0.2.17
+├── argon2 v0.5.3
+│   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+├── sha1 v0.10.7
+│   ├── axum v0.8.9 (*)
+│   └── tungstenite v0.29.0
+│       └── tokio-tungstenite v0.29.0
+│           └── axum v0.8.9 (*)
+└── sha2 v0.10.9
+    ├── infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/ssh) (*)
+    ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+    ├── sqlx-core v0.8.6 (*)
+    ├── sqlx-core v0.8.6 (*)
+    └── sqlx-macros-core v0.8.6 (*)
+
+cpufeatures v0.3.1
+└── chacha20 v0.10.2
+    └── rand v0.10.3
+        └── quinn-proto v0.11.19
+            └── quinn v0.11.12
+                ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+                ├── infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote) (*)
+                └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+
+futures-channel v0.3.34
+├── hyper v1.11.1
+│   ├── axum v0.8.9 (*)
+│   ├── axum-server v0.8.0
+│   │   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   ├── hyper-util v0.1.21
+│   │   ├── axum v0.8.9 (*)
+│   │   ├── axum-server v0.8.0 (*)
+│   │   └── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│   └── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+└── sqlx-sqlite v0.8.6 (*)
+
+futures-channel v0.3.34
+└── sqlx-sqlite v0.8.6 (*)
+
+futures-sink v0.3.34
+├── flume v0.11.1
+│   ├── sqlx-sqlite v0.8.6 (*)
+│   └── sqlx-sqlite v0.8.6 (*)
+├── futures-channel v0.3.34 (*)
+└── futures-util v0.3.34
+    ├── futures-executor v0.3.34
+    │   ├── sqlx-sqlite v0.8.6 (*)
+    │   └── sqlx-sqlite v0.8.6 (*)
+    ├── sqlx-core v0.8.6 (*)
+    └── sqlx-sqlite v0.8.6 (*)
+
+futures-sink v0.3.34
+├── futures-channel v0.3.34 (*)
+├── futures-util v0.3.34
+│   ├── axum v0.8.9 (*)
+│   ├── infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/mesh) (*)
+│   ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   ├── sqlx-core v0.8.6 (*)
+│   ├── sqlx-sqlite v0.8.6 (*)
+│   ├── tokio-tungstenite v0.29.0 (*)
+│   ├── tower v0.5.3
+│   │   └── axum v0.8.9 (*)
+│   └── tower-http v0.6.11
+│       └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+├── h2 v0.4.19
+│   └── hyper v1.11.1 (*)
+└── tokio-util v0.7.19
+    ├── h2 v0.4.19 (*)
+    └── tower-http v0.6.11 (*)
+
+futures-util v0.3.34 (*)
+
+futures-util v0.3.34 (*)
+
+getrandom v0.2.17
+├── rand_core v0.6.4
+│   ├── bip39 v2.2.2
+│   │   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   ├── password-hash v0.5.0
+│   │   └── argon2 v0.5.3 (*)
+│   ├── rand v0.8.8
+│   │   └── bip39 v2.2.2 (*)
+│   └── rand_chacha v0.3.1
+│       └── rand v0.8.8 (*)
+└── ring v0.17.14
+    ├── quinn-proto v0.11.19 (*)
+    ├── rustls v0.23.45
+    │   ├── infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote) (*)
+    │   ├── quinn v0.11.12 (*)
+    │   └── quinn-proto v0.11.19 (*)
+    └── rustls-webpki v0.103.15
+        └── rustls v0.23.45 (*)
+
+getrandom v0.3.4
+└── rand_core v0.9.5
+    ├── rand v0.9.5
+    │   ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+    │   ├── tungstenite v0.29.0 (*)
+    │   └── webauthn-rs-core v0.5.5 (*)
+    └── rand_chacha v0.9.0
+        ├── rand v0.9.5 (*)
+        └── webauthn-rs-core v0.5.5 (*)
+
+getrandom v0.4.3
+├── rand v0.10.3 (*)
+└── uuid v1.27.0
+    ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+    ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+    ├── infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/ssh) (*)
+    ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+    ├── webauthn-attestation-ca v0.5.5 (*)
+    ├── webauthn-rs v0.5.5 (*)
+    └── webauthn-rs-core v0.5.5 (*)
+
+hashbrown v0.15.5
+├── hashlink v0.10.0
+│   ├── sqlx-core v0.8.6 (*)
+│   └── sqlx-core v0.8.6 (*)
+├── sqlx-core v0.8.6 (*)
+└── sqlx-core v0.8.6 (*)
+
+hashbrown v0.17.1
+└── indexmap v2.14.2
+    ├── h2 v0.4.19 (*)
+    ├── sqlx-core v0.8.6 (*)
+    └── sqlx-core v0.8.6 (*)
+
+libc v0.2.190
+├── errno v0.3.14
+│   └── signal-hook-registry v1.4.8
+│       └── tokio v1.53.2
+│           ├── axum v0.8.9 (*)
+│           ├── axum-server v0.8.0 (*)
+│           ├── fs-err v3.3.2
+│           │   └── axum-server v0.8.0 (*)
+│           ├── h2 v0.4.19 (*)
+│           ├── hyper v1.11.1 (*)
+│           ├── hyper-util v0.1.21 (*)
+│           ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│           ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+│           ├── infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-plugin-api) (*)
+│           ├── infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/mesh) (*)
+│           ├── infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote) (*)
+│           ├── infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/ssh) (*)
+│           ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│           ├── quinn v0.11.12 (*)
+│           ├── sqlx-core v0.8.6 (*)
+│           ├── tokio-openssl v0.6.5
+│           │   ├── axum-server v0.8.0 (*)
+│           │   ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│           │   ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+│           │   └── infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote) (*)
+│           ├── tokio-stream v0.1.19
+│           │   ├── sqlx-core v0.8.6 (*)
+│           │   └── sqlx-core v0.8.6 (*)
+│           ├── tokio-tungstenite v0.29.0 (*)
+│           ├── tokio-util v0.7.19 (*)
+│           ├── tower v0.5.3 (*)
+│           └── tower-http v0.6.11 (*)
+├── getrandom v0.2.17 (*)
+├── getrandom v0.3.4 (*)
+├── getrandom v0.4.3 (*)
+├── mio v1.2.4
+│   ├── tokio v1.53.2 (*)
+│   └── tokio v1.53.2
+│       ├── sqlx-core v0.8.6 (*)
+│       └── sqlx-macros-core v0.8.6 (*)
+├── nix v0.30.1
+│   ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│   ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+│   ├── infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/host-facts) (*)
+│   ├── infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote) (*)
+│   ├── infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/ssh) (*)
+│   ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   └── infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-shim)
+│       ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│       ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+│       └── infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote) (*)
+├── openssl v0.10.81
+│   ├── axum-server v0.8.0 (*)
+│   ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│   ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+│   ├── infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote) (*)
+│   ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   ├── tokio-openssl v0.6.5 (*)
+│   ├── webauthn-attestation-ca v0.5.5 (*)
+│   └── webauthn-rs-core v0.5.5 (*)
+├── openssl-sys v0.9.117
+│   ├── axum-server v0.8.0 (*)
+│   ├── openssl v0.10.81 (*)
+│   ├── tokio-openssl v0.6.5 (*)
+│   ├── webauthn-attestation-ca v0.5.5 (*)
+│   └── webauthn-rs-core v0.5.5 (*)
+├── parking_lot_core v0.9.12
+│   └── parking_lot v0.12.5
+│       └── futures-intrusive v0.5.0
+│           ├── sqlx-core v0.8.6 (*)
+│           ├── sqlx-core v0.8.6 (*)
+│           ├── sqlx-sqlite v0.8.6 (*)
+│           └── sqlx-sqlite v0.8.6 (*)
+├── quinn-udp v0.5.16
+│   └── quinn v0.11.12 (*)
+├── rand v0.8.8 (*)
+├── signal-hook-registry v1.4.8 (*)
+├── socket2 v0.6.5
+│   ├── quinn v0.11.12 (*)
+│   ├── quinn-udp v0.5.16 (*)
+│   ├── tokio v1.53.2 (*)
+│   └── tokio v1.53.2 (*)
+├── tokio v1.53.2 (*)
+└── tokio-util v0.7.19 (*)
+
+libc v0.2.190
+└── tokio v1.53.2 (*)
+
+log v0.4.34
+├── sqlx-core v0.8.6 (*)
+└── sqlx-sqlite v0.8.6 (*)
+
+log v0.4.34
+├── sqlx-core v0.8.6 (*)
+├── sqlx-sqlite v0.8.6 (*)
+├── tokio-tungstenite v0.29.0 (*)
+├── tracing v0.1.44
+│   ├── axum v0.8.9 (*)
+│   ├── axum-core v0.5.6
+│   │   └── axum v0.8.9 (*)
+│   ├── h2 v0.4.19 (*)
+│   ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   ├── quinn v0.11.12 (*)
+│   ├── quinn-proto v0.11.19 (*)
+│   ├── quinn-udp v0.5.16 (*)
+│   ├── sqlx-core v0.8.6 (*)
+│   ├── sqlx-core v0.8.6 (*)
+│   ├── sqlx-sqlite v0.8.6 (*)
+│   ├── sqlx-sqlite v0.8.6 (*)
+│   ├── tower v0.5.3 (*)
+│   ├── tracing-subscriber v0.3.23
+│   │   └── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   ├── webauthn-attestation-ca v0.5.5 (*)
+│   ├── webauthn-rs v0.5.5 (*)
+│   └── webauthn-rs-core v0.5.5 (*)
+├── tracing-log v0.2.0
+│   └── tracing-subscriber v0.3.23 (*)
+└── tungstenite v0.29.0 (*)
+
+num-traits v0.2.19
+├── asn1-rs v0.6.2
+│   ├── der-parser v9.0.0
+│   │   ├── webauthn-rs-core v0.5.5 (*)
+│   │   └── x509-parser v0.16.0
+│   │       └── webauthn-rs-core v0.5.5 (*)
+│   ├── oid-registry v0.7.1
+│   │   └── x509-parser v0.16.0 (*)
+│   └── x509-parser v0.16.0 (*)
+├── der-parser v9.0.0 (*)
+├── num-bigint v0.4.8
+│   └── der-parser v9.0.0 (*)
+└── num-integer v0.1.47
+    └── num-bigint v0.4.8 (*)
+
+num-traits v0.2.19
+└── atoi v2.0.0
+    ├── sqlx-sqlite v0.8.6 (*)
+    └── sqlx-sqlite v0.8.6 (*)
+
+rand v0.8.8 (*)
+
+rand v0.9.5 (*)
+
+rand v0.10.3 (*)
+
+rand_chacha v0.3.1 (*)
+
+rand_chacha v0.9.0 (*)
+
+rand_core v0.6.4 (*)
+
+rand_core v0.9.5 (*)
+
+rand_core v0.10.1
+├── chacha20 v0.10.2 (*)
+├── getrandom v0.4.3 (*)
+├── rand v0.10.3 (*)
+└── rand_pcg v0.10.2
+    └── quinn-proto v0.11.19 (*)
+
+serde_core v1.0.229
+├── axum v0.8.9 (*)
+├── serde v1.0.229
+│   ├── base64urlsafedata v0.5.5 (*)
+│   ├── bip39 v2.2.2 (*)
+│   ├── either v1.18.0
+│   │   ├── axum-server v0.8.0 (*)
+│   │   ├── sqlx-core v0.8.6 (*)
+│   │   ├── sqlx-core v0.8.6 (*)
+│   │   └── sqlx-macros-core v0.8.6 (*)
+│   ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│   ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+│   ├── infraternal-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-mesh)
+│   │   └── infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/mesh) (*)
+│   ├── infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-plugin-api) (*)
+│   ├── infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/host-facts) (*)
+│   ├── infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/mesh) (*)
+│   ├── infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote) (*)
+│   ├── infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/ssh) (*)
+│   ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   ├── serde_cbor_2 v0.13.0
+│   │   ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   │   └── webauthn-rs-core v0.5.5 (*)
+│   ├── serde_urlencoded v0.7.1
+│   │   ├── axum v0.8.9 (*)
+│   │   ├── sqlx-sqlite v0.8.6 (*)
+│   │   └── sqlx-sqlite v0.8.6 (*)
+│   ├── sqlx-core v0.8.6 (*)
+│   ├── sqlx-core v0.8.6 (*)
+│   ├── sqlx-macros-core v0.8.6 (*)
+│   ├── sqlx-sqlite v0.8.6 (*)
+│   ├── tracing-serde v0.2.0
+│   │   └── tracing-subscriber v0.3.23 (*)
+│   ├── tracing-subscriber v0.3.23 (*)
+│   ├── url v2.5.8
+│   │   ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│   │   ├── infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/ssh) (*)
+│   │   ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   │   ├── sqlx-core v0.8.6 (*)
+│   │   ├── sqlx-sqlite v0.8.6 (*)
+│   │   ├── webauthn-rs v0.5.5 (*)
+│   │   ├── webauthn-rs-core v0.5.5 (*)
+│   │   └── webauthn-rs-proto v0.5.5 (*)
+│   ├── webauthn-attestation-ca v0.5.5 (*)
+│   ├── webauthn-rs v0.5.5 (*)
+│   ├── webauthn-rs-core v0.5.5 (*)
+│   ├── webauthn-rs-proto v0.5.5 (*)
+│   └── zeroize v1.9.0
+│       ├── infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/ssh) (*)
+│       ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│       ├── rustls v0.23.45 (*)
+│       └── rustls-pki-types v1.15.1
+│           ├── rustls v0.23.45 (*)
+│           └── rustls-webpki v0.103.15 (*)
+├── serde_json v1.0.151
+│   ├── axum v0.8.9 (*)
+│   ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│   ├── infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent) (*)
+│   ├── infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-plugin-api) (*)
+│   ├── infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/host-facts) (*)
+│   ├── infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/mesh) (*)
+│   ├── infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote) (*)
+│   ├── infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/ssh) (*)
+│   ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│   ├── tracing-subscriber v0.3.23 (*)
+│   ├── webauthn-rs-core v0.5.5 (*)
+│   └── webauthn-rs-proto v0.5.5 (*)
+├── serde_path_to_error v0.1.20
+│   └── axum v0.8.9 (*)
+└── uuid v1.27.0 (*)
+
+serde_core v1.0.229
+└── serde_json v1.0.151
+    └── sqlx-macros-core v0.8.6 (*)
+
+serde_json v1.0.151 (*)
+
+serde_json v1.0.151 (*)
+
+slab v0.4.12
+├── futures-util v0.3.34 (*)
+├── h2 v0.4.19 (*)
+└── quinn-proto v0.11.19 (*)
+
+slab v0.4.12
+└── futures-util v0.3.34 (*)
+
+smallvec v1.16.2
+└── sqlx-core v0.8.6 (*)
+
+smallvec v1.16.2
+├── hyper v1.11.1 (*)
+├── icu_normalizer v2.3.0
+│   └── idna_adapter v1.2.2
+│       └── idna v1.1.0
+│           ├── url v2.5.8 (*)
+│           └── url v2.5.8
+│               ├── sqlx-core v0.8.6 (*)
+│               ├── sqlx-macros-core v0.8.6 (*)
+│               └── sqlx-sqlite v0.8.6 (*)
+├── idna v1.1.0 (*)
+├── parking_lot_core v0.9.12 (*)
+├── sqlx-core v0.8.6 (*)
+└── tracing-subscriber v0.3.23 (*)
+
+sqlx-core v0.8.6 (*)
+
+sqlx-core v0.8.6 (*)
+
+sqlx-sqlite v0.8.6 (*)
+
+sqlx-sqlite v0.8.6 (*)
+
+syn v2.0.119
+├── asn1-rs-derive v0.5.1 (proc-macro)
+│   └── asn1-rs v0.6.2 (*)
+├── asn1-rs-impl v0.2.0 (proc-macro)
+│   └── asn1-rs v0.6.2 (*)
+├── openssl-macros v0.1.1 (proc-macro)
+│   └── openssl v0.10.81 (*)
+├── sqlx-macros v0.8.6 (proc-macro) (*)
+├── sqlx-macros-core v0.8.6 (*)
+├── synstructure v0.13.2
+│   └── asn1-rs-derive v0.5.1 (proc-macro) (*)
+├── thiserror-impl v1.0.69 (proc-macro)
+│   └── thiserror v1.0.69
+│       ├── asn1-rs v0.6.2 (*)
+│       ├── webauthn-rs-core v0.5.5 (*)
+│       └── x509-parser v0.16.0 (*)
+├── tracing-attributes v0.1.31 (proc-macro)
+│   └── tracing v0.1.44 (*)
+└── zerocopy-derive v0.8.60 (proc-macro)
+    └── zerocopy v0.8.60
+        ├── half v2.7.1
+        │   └── serde_cbor_2 v0.13.0 (*)
+        └── ppv-lite86 v0.2.21
+            ├── rand_chacha v0.3.1 (*)
+            └── rand_chacha v0.9.0 (*)
+
+syn v3.0.6
+├── clap_derive v4.6.7 (proc-macro)
+│   └── clap v4.6.7
+│       └── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+├── displaydoc v0.2.7 (proc-macro)
+│   ├── asn1-rs v0.6.2 (*)
+│   ├── der-parser v9.0.0 (*)
+│   ├── icu_collections v2.3.0
+│   │   ├── icu_normalizer v2.3.0 (*)
+│   │   └── icu_properties v2.3.0
+│   │       └── idna_adapter v1.2.2 (*)
+│   ├── icu_locale_core v2.3.0
+│   │   ├── icu_properties v2.3.0 (*)
+│   │   └── icu_provider v2.3.1
+│   │       ├── icu_normalizer v2.3.0 (*)
+│   │       └── icu_properties v2.3.0 (*)
+│   ├── icu_properties v2.3.0 (*)
+│   ├── icu_provider v2.3.1 (*)
+│   ├── tinystr v0.8.4
+│   │   └── icu_locale_core v2.3.0 (*)
+│   └── zerotrie v0.2.5
+│       ├── icu_properties v2.3.0 (*)
+│       └── icu_provider v2.3.1 (*)
+├── futures-macro v0.3.34 (proc-macro)
+│   └── futures-util v0.3.34 (*)
+├── serde_derive v1.0.229 (proc-macro)
+│   ├── serde v1.0.229 (*)
+│   └── url v2.5.8 (*)
+├── synstructure v0.14.0
+│   ├── yoke-derive v0.8.4 (proc-macro)
+│   │   └── yoke v0.8.3
+│   │       ├── icu_collections v2.3.0 (*)
+│   │       ├── icu_provider v2.3.1 (*)
+│   │       ├── zerotrie v0.2.5 (*)
+│   │       └── zerovec v0.11.8
+│   │           ├── icu_collections v2.3.0 (*)
+│   │           ├── icu_locale_core v2.3.0 (*)
+│   │           ├── icu_normalizer v2.3.0 (*)
+│   │           ├── icu_properties v2.3.0 (*)
+│   │           ├── icu_provider v2.3.1 (*)
+│   │           ├── potential_utf v0.1.6
+│   │           │   └── icu_collections v2.3.0 (*)
+│   │           └── tinystr v0.8.4 (*)
+│   └── zerofrom-derive v0.1.8 (proc-macro)
+│       └── zerofrom v0.1.8
+│           ├── icu_collections v2.3.0 (*)
+│           ├── icu_provider v2.3.1 (*)
+│           ├── yoke v0.8.3 (*)
+│           ├── zerotrie v0.2.5 (*)
+│           └── zerovec v0.11.8 (*)
+├── thiserror-impl v2.0.21 (proc-macro)
+│   └── thiserror v2.0.21
+│       ├── infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal)
+│       ├── infraternal-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-mesh) (*)
+│       ├── infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server) (*)
+│       ├── quinn v0.11.12 (*)
+│       ├── quinn-proto v0.11.19 (*)
+│       ├── sqlx-core v0.8.6 (*)
+│       ├── sqlx-core v0.8.6 (*)
+│       ├── sqlx-sqlite v0.8.6 (*)
+│       ├── sqlx-sqlite v0.8.6 (*)
+│       └── tungstenite v0.29.0 (*)
+├── tokio-macros v2.7.2 (proc-macro)
+│   └── tokio v1.53.2 (*)
+├── yoke-derive v0.8.4 (proc-macro) (*)
+├── zerofrom-derive v0.1.8 (proc-macro) (*)
+└── zerovec-derive v0.11.6 (proc-macro)
+    └── zerovec v0.11.8 (*)
+
+synstructure v0.13.2 (*)
+
+synstructure v0.14.0 (*)
+
+thiserror v1.0.69 (*)
+
+thiserror v2.0.21 (*)
+
+thiserror-impl v1.0.69 (proc-macro) (*)
+
+thiserror-impl v2.0.21 (proc-macro) (*)
+
+tokio v1.53.2 (*)
+
+tokio v1.53.2 (*)
+
+url v2.5.8 (*)
+
+url v2.5.8 (*)

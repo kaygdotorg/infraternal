@@ -21,7 +21,8 @@ use futures_util::{
 };
 use infraternal_plugin_api::{ActionDef, Operation, Permission, PluginDescriptor, SocketHost};
 use infraternal_protocol::{
-    DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
+    CLOSE_SESSION_GONE, DecodeError, Frame, MAX_FRAME_LEN, SESSION_GONE_REASON, decode_muxed_frame,
+    encode_muxed_frame_into,
 };
 use rand::random;
 use serde::Deserialize;
@@ -29,7 +30,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -75,6 +76,8 @@ pub(crate) struct WebSocketState {
     pub(crate) plugins: PluginRuntime,
     agent: EmbeddedAgent,
     plugin_descriptors: &'static [&'static PluginDescriptor],
+    #[cfg(feature = "remote")]
+    remote_hosts: crate::remote_runtime::RemoteHosts,
     #[cfg(test)]
     handshake_timeout: Duration,
     #[cfg(test)]
@@ -99,6 +102,8 @@ impl WebSocketState {
             plugins,
             agent,
             plugin_descriptors: &[],
+            #[cfg(feature = "remote")]
+            remote_hosts: crate::remote_runtime::RemoteHosts::default(),
             #[cfg(test)]
             handshake_timeout: HANDSHAKE_TIMEOUT,
             #[cfg(test)]
@@ -136,6 +141,12 @@ impl WebSocketState {
             .flat_map(|descriptor| descriptor.actions)
             .find(|action| action.id == action_id)
             .copied()
+    }
+
+    #[cfg(feature = "remote")]
+    pub(crate) fn with_remote_hosts(mut self, hosts: crate::remote_runtime::RemoteHosts) -> Self {
+        self.remote_hosts = hosts;
+        self
     }
 
     /// Keep production's terminal deadline fixed while allowing deadline tests to run quickly.
@@ -218,22 +229,9 @@ async fn upgrade(
         })
 }
 
-/// The auth route's cookie parser is intentionally private; this socket uses the same strict cookie shape.
-fn session_cookie(headers: &HeaderMap) -> Option<&str> {
-    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
-    let mut values = cookies
-        .split(';')
-        .filter_map(|cookie| cookie.trim().strip_prefix("__Host-infraternal="));
-    let value = values.next()?;
-    if values.next().is_some()
-        || value.len() != 43
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-    {
-        return None;
-    }
-    Some(value)
+/// Socket upgrades use exactly the same cookie shape and request-wide uniqueness as HTTP auth.
+pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    crate::auth::cookies::capability(headers, "__Host-infraternal=")
 }
 
 // Plugin work has independent bounded admission; this loop dispatches shared control and terminal frames.
@@ -327,6 +325,7 @@ async fn run_socket(
     let mut output_open = true;
     let mut receive_deadline = None;
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
+    let mut ended = EndedStreams::default();
     let mut loop_result = Ok(());
     let mut expiry = socket_deadline(&state, &user_id, &session_token)
         .await
@@ -410,6 +409,7 @@ async fn run_socket(
                             &mut pending_plugin_calls,
                             &connection_id,
                             &mut attachments,
+                            &mut ended,
                             &output_tx,
                             &mut sink,
                             &mut encode,
@@ -427,7 +427,7 @@ async fn run_socket(
                 };
                 if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
                     &state, &user_id, &session_token, &connection_id, stream_id, output,
-                    &mut attachments, &mut sink, &mut encode,
+                    &mut attachments, &mut ended, &mut sink, &mut encode,
                 )).await.is_err() { break; }
             }
             plugin_call = pending_plugin_calls.next(), if !pending_plugin_calls.is_empty() => {
@@ -576,6 +576,7 @@ async fn handle_terminal_output<K>(
     stream_id: u32,
     output: TerminalOutput,
     attachments: &mut HashMap<u32, ClientAttachment>,
+    ended: &mut EndedStreams,
     sink: &mut K,
     encode: &mut Vec<u8>,
 ) -> Result<(), ()>
@@ -641,17 +642,28 @@ where
             .await
             .is_ok()
         }
-        TerminalOutput::Event { event_json } => send_frame(
-            sink,
-            stream_id,
-            &Frame::Event {
-                sub_id: 0,
-                event_json: &event_json,
-            },
-            encode,
-        )
-        .await
-        .is_ok(),
+        TerminalOutput::Event { event_json } => {
+            crate::terminal_exit::record(
+                &state.pool,
+                user_id,
+                session_token,
+                &attachment.session_id,
+                attachment.last_out_seq,
+                &event_json,
+            )
+            .await?;
+            send_frame(
+                sink,
+                stream_id,
+                &Frame::Event {
+                    sub_id: 0,
+                    event_json: &event_json,
+                },
+                encode,
+            )
+            .await
+            .is_ok()
+        }
         TerminalOutput::Ack { in_seq_acked } => {
             if in_seq_acked < attachment.last_in_acked
                 || (!attachment.awaiting_ack && in_seq_acked > attachment.input_sent_end)
@@ -697,18 +709,21 @@ where
                 .is_ok()
         }
         TerminalOutput::Closed { code } => {
-            let sent = send_frame(
-                sink,
-                stream_id,
-                &Frame::Close {
-                    code,
-                    reason: "attachment ended",
-                },
-                encode,
-            )
-            .await
-            .is_ok();
+            // The host's infraternal agent found no shim for the session: a final
+            // answer, distinct from every transient close (wire §4, #158).
+            let gone = code == CLOSE_SESSION_GONE;
+            let reason = if gone {
+                SESSION_GONE_REASON
+            } else {
+                "attachment ended"
+            };
+            let sent = send_frame(sink, stream_id, &Frame::Close { code, reason }, encode)
+                .await
+                .is_ok();
             attachments.remove(&stream_id);
+            if gone {
+                ended.insert(stream_id)?;
+            }
             sent
         }
     };
@@ -971,6 +986,7 @@ async fn handle_client_frame<K>(
     pending_plugin_calls: &mut FuturesUnordered<PendingPluginCall>,
     connection_id: &[u8; 16],
     attachments: &mut HashMap<u32, ClientAttachment>,
+    ended: &mut EndedStreams,
     output_tx: &mpsc::Sender<(u32, TerminalOutput)>,
     sink: &mut K,
     encode: &mut Vec<u8>,
@@ -981,6 +997,9 @@ where
     let decoded = decode_muxed_frame(&wire).map_err(|_| ())?;
     let stream_id = decoded.stream_id;
     let passthrough = wire.clone();
+    if ended.absorbs(stream_id, &decoded.frame)? {
+        return Ok(());
+    }
     // The surrounding watchdog authenticates every frame, including attach, input and credit.
     match decoded.frame {
         Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
@@ -997,27 +1016,32 @@ where
             action_id: action_id @ ("terminal.open" | "ssh.session.open"),
             input_json,
         } if stream_id == CONTROL_STREAM => {
-            let size = if action_id == "ssh.session.open" {
-                // The tracer defaults to the embedded host. Explicit remote
-                // hosts require the inventory/plugin path; never silently run
-                // a requested remote command on the local server host [9].
+            let request = if action_id == "ssh.session.open" {
                 serde_json::from_slice::<BrowserTerminalOpen>(input_json)
                     .ok()
-                    .filter(|input| input.host_id.is_none())
-                    .map(|_| TerminalOpen {
-                        cols: 80,
-                        rows: 24,
-                        px_w: 0,
-                        px_h: 0,
+                    .map(|input| {
+                        (
+                            TerminalOpen {
+                                cols: 80,
+                                rows: 24,
+                                px_w: 0,
+                                px_h: 0,
+                            },
+                            input.host_id,
+                        )
                     })
             } else {
-                serde_json::from_slice::<TerminalOpen>(input_json).ok()
+                serde_json::from_slice::<TerminalOpen>(input_json)
+                    .ok()
+                    .map(|size| (size, None))
             };
-            let result = match size {
-                Some(size) if size.valid() => {
-                    open_terminal(state, user_id, session_token, size).await
+            let result = match request {
+                Some((size, host)) if size.valid() => {
+                    open_terminal(state, user_id, session_token, size, host).await
                 }
-                _ => Err(()),
+                _ => Err(crate::embedded::AgentError::OpenRefused(
+                    infraternal_plugin_api::admission::OpenRefusal::Invalid,
+                )),
             };
             if !session_is_live(state, user_id, session_token).await {
                 return Err(());
@@ -1043,14 +1067,19 @@ where
                     )
                     .await
                 }
-                Err(()) => {
+                Err(error) => {
+                    let refusal = match error {
+                        crate::embedded::AgentError::OpenRefused(reason) => reason,
+                        _ => infraternal_plugin_api::admission::OpenRefusal::Unavailable,
+                    };
+                    let json = refusal.json().map_err(|_| ())?;
                     send_frame(
                         sink,
                         CONTROL_STREAM,
                         &Frame::Result {
                             call_id,
                             ok: false,
-                            json: br#"{"error":"terminal unavailable"}"#,
+                            json: &json,
                         },
                         encode,
                     )
@@ -1119,7 +1148,7 @@ where
             }
             let mut session = [0_u8; 16];
             session.copy_from_slice(session_id);
-            let (input_acked, writer_stream) = owned_writer(
+            let Ok((input_acked, writer_stream)) = owned_writer(
                 &state.pool,
                 user_id,
                 connection_id,
@@ -1127,18 +1156,50 @@ where
                 &session,
                 Some(&crate::auth::hash(session_token)),
             )
-            .await?;
+            .await
+            else {
+                // A session that ended, or one this account never had, gets the final
+                // stream Close instead of losing the whole socket: the browser would
+                // reconnect and attach again at once, forever (#158). Every other
+                // refusal (authority, the writer limit, the database) still closes it.
+                if session_is_live(state, user_id, session_token).await
+                    && session_gone(&state.pool, user_id, &session).await?
+                {
+                    ended.insert(stream_id)?;
+                    let gone = Frame::Close {
+                        code: CLOSE_SESSION_GONE,
+                        reason: SESSION_GONE_REASON,
+                    };
+                    return send_frame(sink, stream_id, &gone, encode).await;
+                }
+                return Err(());
+            };
             if last_in_seq > input_acked {
                 return Err(());
             }
             if !session_is_live(state, user_id, session_token).await {
                 return Err(());
             }
+            let host: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT remote_host_id FROM terminal_sessions WHERE id=? AND user_id=?",
+            )
+            .bind(session.as_slice())
+            .bind(user_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|_| ())?;
+            let agent = terminal_agent(
+                state,
+                user_id,
+                host.as_deref()
+                    .map(uuid::Uuid::from_slice)
+                    .transpose()
+                    .map_err(|_| ())?,
+            )
+            .await?;
             let attachment = tokio::time::timeout(
                 BACKEND_TIMEOUT,
-                state
-                    .agent
-                    .attach(session, last_out_seq, input_acked, writer_stream),
+                agent.attach(session, last_out_seq, input_acked, writer_stream),
             )
             .await
             .map_err(|_| ())?
@@ -1337,14 +1398,18 @@ async fn open_terminal(
     user_id: &str,
     session_token: &str,
     size: TerminalOpen,
-) -> Result<[u8; 16], ()> {
+    host: Option<uuid::Uuid>,
+) -> Result<[u8; 16], crate::embedded::AgentError> {
     #[cfg(test)]
     let connect_timeout = state.terminal_connect_timeout;
     #[cfg(not(test))]
     let connect_timeout = TERMINAL_CONNECT_TIMEOUT;
+    let agent = terminal_agent(state, user_id, host)
+        .await
+        .map_err(|()| crate::embedded::AgentError::Unavailable)?;
     let session_id = tokio::time::timeout(
         connect_timeout,
-        state.agent.open(TerminalSize {
+        agent.open(TerminalSize {
             cols: size.cols,
             rows: size.rows,
             px_w: size.px_w,
@@ -1352,28 +1417,115 @@ async fn open_terminal(
         }),
     )
     .await
-    .map_err(|_| ())?
-    .map_err(|_| ())?;
+    .map_err(|_| crate::embedded::AgentError::Unavailable)??;
     if !session_is_live(state, user_id, session_token).await {
-        return Err(());
+        return Err(crate::embedded::AgentError::Unavailable);
     }
-    let now = unix_seconds()?;
-    let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) SELECT ?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch()")
+    let now = unix_seconds().map_err(|()| crate::embedded::AgentError::Unavailable)?;
+    let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND (? IS NULL OR EXISTS (SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL))")
         .bind(session_id.as_slice())
         .bind(user_id)
         .bind(now)
         .bind(now)
+        .bind(host.map(|id| id.as_bytes().to_vec()))
         .bind(crate::auth::hash(session_token)).bind(user_id)
+        .bind(host.map(|id| id.as_bytes().to_vec())).bind(host.map(|id| id.as_bytes().to_vec())).bind(user_id)
         .execute(&state.pool)
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| crate::embedded::AgentError::Unavailable)?;
     if changed.rows_affected() != 1 {
-        return Err(());
+        return Err(crate::embedded::AgentError::Unavailable);
     }
     Ok(session_id)
 }
 
+/// Core-only builds select the local host and refuse every remote selection.
+#[cfg(not(feature = "remote"))]
+fn terminal_agent(
+    state: &WebSocketState,
+    _user: &str,
+    host: Option<uuid::Uuid>,
+) -> std::future::Ready<Result<EmbeddedAgent, ()>> {
+    std::future::ready(if host.is_some() {
+        Err(())
+    } else {
+        Ok(state.agent.clone())
+    })
+}
+
+/// Host selection is a durable authority check; a missing remote host never falls back locally.
+#[cfg(feature = "remote")]
+async fn terminal_agent(
+    state: &WebSocketState,
+    user: &str,
+    host: Option<uuid::Uuid>,
+) -> Result<EmbeddedAgent, ()> {
+    let Some(host) = host else {
+        return Ok(state.agent.clone());
+    };
+    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
+        .bind(host.as_bytes().as_slice()).bind(user).fetch_one(&state.pool).await.map_err(|_|())?;
+    if !allowed {
+        return Err(());
+    }
+    state.remote_hosts.actor(host).await.ok_or(())
+}
+
 /// Writer identity survives reconnect and supervision; output remains session-wide.
+/// True when the account has no live record of this session: it never had it,
+/// or its shell's exit was recorded. Either way an attach can never succeed.
+async fn session_gone(pool: &SqlitePool, user: &str, session: &[u8; 16]) -> Result<bool, ()> {
+    let closed: Option<bool> = sqlx::query_scalar(
+        "SELECT closed_at IS NOT NULL FROM terminal_sessions WHERE id=? AND user_id=?",
+    )
+    .bind(session.as_slice())
+    .bind(user)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ())?;
+    Ok(closed.unwrap_or(true))
+}
+
+/// Browser streams this socket ended with the final session-gone Close (wire §4).
+///
+/// The browser sends Credit and Resize right behind its `AttachTerm`, and may type
+/// before the Close reaches it. Those frames are dropped rather than treated as a
+/// protocol error, which would cut every sibling terminal on the socket. The entry
+/// lives until the browser's own Close for the stream, or until the stream id
+/// attaches again. Bounded like attachments: a browser that never closes them
+/// loses the socket.
+#[derive(Default)]
+struct EndedStreams(HashSet<u32>);
+
+impl EndedStreams {
+    fn insert(&mut self, stream_id: u32) -> Result<(), ()> {
+        if self.0.len() >= MAX_ATTACHMENTS && !self.0.contains(&stream_id) {
+            return Err(());
+        }
+        self.0.insert(stream_id);
+        Ok(())
+    }
+
+    /// Whether `frame` belongs to an ended stream and is consumed here.
+    fn absorbs(&mut self, stream_id: u32, frame: &Frame<'_>) -> Result<bool, ()> {
+        if stream_id == CONTROL_STREAM || !self.0.contains(&stream_id) {
+            return Ok(false);
+        }
+        match frame {
+            Frame::Close { .. } => {
+                self.0.remove(&stream_id);
+                Ok(true)
+            }
+            Frame::Input { .. } | Frame::Credit { .. } | Frame::Resize { .. } => Ok(true),
+            Frame::AttachTerm { .. } => {
+                self.0.remove(&stream_id);
+                Ok(false)
+            }
+            _ => Err(()),
+        }
+    }
+}
+
 async fn owned_writer(
     pool: &SqlitePool,
     user: &str,
@@ -1662,3 +1814,7 @@ impl SocketHost for PluginHost {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "websocket_cookie_tests.rs"]
+mod cookie_tests;

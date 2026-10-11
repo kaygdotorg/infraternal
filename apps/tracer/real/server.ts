@@ -1,7 +1,7 @@
 /**
  * The real-server fixture for the canvas specs: the production `infraternal` binary serving a production build of
  * the tracer, behind a local TLS front (passkeys need a secure context), with a WebSocket bridge that records the
- * wire frames of every browser socket. No test double stands in for the server, the agent, the shim or the PTY.
+ * wire frames of every browser socket. No test double stands in for the server, the infraternal agent, the shim or the PTY.
  *
  * - The binary comes from `INFRATERNAL_BIN` (default: the release musl binary of the repository's `target`).
  * - The web root is a copy of `TRACER_DIST` (default `dist`), frozen so a rebuild cannot change it mid-run.
@@ -47,6 +47,8 @@ export interface RealServer {
   bridges: Bridge[];
   token: string;
   binary: string;
+  dataDir: string;
+  pid: number;
   dispose(): Promise<void>;
 }
 
@@ -56,10 +58,22 @@ const text = new TextDecoder();
  * `latencyMs` (or `REAL_ONE_WAY_MS`) delays every browser-socket message by that many milliseconds in each direction
  * (so 150 is the 300 ms round-trip profile of docs/PROCESS.md); order is kept. Page loads are not delayed.
  */
-export async function startRealServer(options: { latencyMs?: number; lean?: boolean } = {}): Promise<RealServer> {
-  // `lean`: the bridge does not decode or keep the server's output (benchmarks with busy terminals: the recording of every
-  // output frame made this single-threaded relay slower than the server's one-second write limit allows, and the server
-  // then closed the socket).
+export async function startRealServer(options: {
+  latencyMs?: number;
+  /** The bridge does not decode or keep the server's output (benchmarks with busy terminals). */
+  lean?: boolean;
+  address?: string;
+  port?: number;
+  hostname?: string;
+  stateRoot?: string;
+  remoteListen?: string;
+  /** Public fixture certificate only; private TLS material remains in memory. */
+  certificate?: (pem: string) => Promise<void>;
+  /** Seeds controlled public host trust before any bootstrap operation. */
+  prepareData?: (directory: string) => Promise<void>;
+} = {}): Promise<RealServer> {
+  // `lean`: the recording of every output frame made this single-threaded relay slower than the server's one-second
+  // write limit allows under busy terminals, and the server then closed the socket.
   const lean = options.lean ?? process.env.REAL_BRIDGE_LEAN === "1";
   const delay = options.latencyMs ?? Number(process.env.REAL_ONE_WAY_MS ?? 0);
   const later = (run: () => void): void => { if (delay > 0) setTimeout(run, delay); else run(); };
@@ -75,7 +89,9 @@ export async function startRealServer(options: { latencyMs?: number; lean?: bool
     await rm(runtime, { recursive: true, force: true });
     throw new Error("real-server runtime path is too long; use a shorter INFRATERNAL_TEST_STATE_ROOT");
   }
-  const state = await mkdtemp(resolve(tmpdir(), "infraternal-real-"));
+  const stateRoot = options.stateRoot ?? process.env.INFRATERNAL_TEST_DATA_ROOT ?? tmpdir();
+  await mkdir(stateRoot, { recursive: true, mode: 0o700 });
+  const state = await mkdtemp(resolve(stateRoot, "r"));
   await cp(dist, `${state}/web`, { recursive: true });
   const reservation = createServer();
   await new Promise<void>((r) => reservation.listen(0, "127.0.0.1", r));
@@ -84,14 +100,18 @@ export async function startRealServer(options: { latencyMs?: number; lean?: bool
   const backend = `http://127.0.0.1:${port}`;
 
   // The certificate is generated into memory and handed straight to the TLS server.
-  const ssl = spawn("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-keyout", "-", "-out", "-"], { stdio: ["ignore", "pipe", "ignore"] });
+  const hostname = options.hostname ?? "localhost";
+  const address = options.address ?? "127.0.0.1";
+  const ssl = spawn("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1", "-subj", `/CN=${hostname}`, "-addext", `subjectAltName=DNS:${hostname},IP:${address}`, "-keyout", "-", "-out", "-"], { stdio: ["ignore", "pipe", "ignore"] });
   let pem = "";
   ssl.stdout.on("data", (b) => { pem += b; });
   const [code] = await once(ssl, "exit");
   if (code !== 0) throw new Error("test certificate generation failed");
+  const certificate = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0] ?? "";
+  await options.certificate?.(certificate);
   const tls = createHttpsServer({
     key: pem.match(/-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----/)?.[0] ?? "",
-    cert: pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0] ?? "",
+    cert: certificate,
   }, (req, res) => {
     const upstream = httpRequest(backend + (req.url ?? "/"), { method: req.method, headers: req.headers, agent: false }, (response) => {
       res.writeHead(response.statusCode ?? 500, response.headers);
@@ -101,10 +121,10 @@ export async function startRealServer(options: { latencyMs?: number; lean?: bool
     req.pipe(upstream);
   });
   pem = "";
-  await new Promise<void>((r) => tls.listen(0, "127.0.0.1", r));
-  const origin = `https://localhost:${(tls.address() as AddressInfo).port}`;
+  await new Promise<void>((r) => tls.listen(options.port ?? 0, address, r));
+  const origin = `https://${hostname}:${(tls.address() as AddressInfo).port}`;
 
-  const child: ChildProcess = spawn(binary, ["server", "--listen", `127.0.0.1:${port}`, "--data", `${state}/data`, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`], {
+  const child: ChildProcess = spawn(binary, ["server", "--listen", `127.0.0.1:${port}`, "--data", state, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`, ...(options.remoteListen ? ["--remote-listen", options.remoteListen, "--remote-ca-dir", `${state}/ca`] : [])], {
     cwd: root, detached: true,
     env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
     stdio: ["ignore", process.env.REAL_SERVER_LOG === "1" ? "pipe" : "ignore", "pipe"],
@@ -115,27 +135,29 @@ export async function startRealServer(options: { latencyMs?: number; lean?: bool
   const front = new WebSocketServer({ noServer: true });
   tls.on("upgrade", (request, socket, head) => {
     front.handleUpgrade(request, socket, head, (browser) => {
-      const upstream = new WebSocket(backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
+      const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
       const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), detached: [], control: [], cookie: request.headers.cookie ?? "" };
-      bridges.push(bridge);
+      // Bootstrap frames can contain private sign-in inputs. Only protocol sockets enter diagnostics.
+      const protocol = request.url === "/v1/ws";
+      if (protocol) bridges.push(bridge);
       const inbound = new WebSocketFrameDecoder();
       const outbound = new WebSocketFrameDecoder();
-      const queued: Buffer[] = [];
-      browser.on("message", (data) => {
+      const queued: Array<{ bytes: Buffer; binary: boolean }> = [];
+      browser.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
-        inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+        if (protocol && binary) inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Input" && f.type !== "Credit" && f.type !== "Pong") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} up s${stream} ${f.type}`);
           if (f.type === "AttachTerm") bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
           if (f.type === "Close" && stream !== 0) bridge.detached.push(stream);
           if (f.type === "Call") bridge.control.push({ dir: "up", type: "Call", detail: f.actionId, callId: f.callId });
           if (f.type === "Subscribe") bridge.control.push({ dir: "up", type: "Subscribe", detail: (() => { try { return String((JSON.parse(text.decode(f.filterJson)) as { topic?: unknown }).topic); } catch { return "?"; } })() });
         });
-        later(() => { if (upstream.readyState === WebSocket.OPEN) upstream.send(bytes); else queued.push(bytes); });
+        later(() => { if (bridge.closed) return; if (upstream.readyState === WebSocket.OPEN) upstream.send(bytes, { binary }); else queued.push({ bytes, binary }); });
       });
-      upstream.on("open", () => { for (const q of queued.splice(0)) upstream.send(q); });
-      upstream.on("message", (data) => {
+      upstream.on("open", () => { for (const q of queued.splice(0)) { if (!bridge.closed) upstream.send(q.bytes, { binary: q.binary }); } });
+      upstream.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
-        if (!lean) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+        if (!lean && protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack" && f.type !== "Ping") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
           if (f.type === "Output") bridge.output.set(stream, (bridge.output.get(stream) ?? "") + text.decode(f.bytes, { stream: true }));
           if (f.type === "Snapshot") bridge.output.set(stream, text.decode(f.bytes));
@@ -143,11 +165,12 @@ export async function startRealServer(options: { latencyMs?: number; lean?: bool
           if (f.type === "Close") bridge.serverClose = `s${stream === 0 ? 0 : "n"} ${typeof (f as { reason?: unknown }).reason === "string" ? (f as { reason: string }).reason : JSON.stringify((f as { reason?: unknown }).reason)}`;
           if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
         });
-        later(() => { if (browser.readyState === WebSocket.OPEN) browser.send(bytes); });
+        later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary }); });
       });
-      upstream.on("close", (code) => { bridge.closed = true; bridge.closedBy = `server ${code}`; browser.close(); });
+      const eraseQueue = (): void => { for (const entry of queued.splice(0)) entry.bytes.fill(0); };
+      upstream.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy = `server ${code}`; browser.close(); });
       upstream.on("error", () => browser.close());
-      browser.on("close", (code) => { bridge.closed = true; bridge.closedBy ??= `browser ${code}`; upstream.close(); });
+      browser.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy ??= `browser ${code}`; upstream.close(); });
     });
   });
 
@@ -157,7 +180,8 @@ export async function startRealServer(options: { latencyMs?: number; lean?: bool
     if (Date.now() > deadline) throw new Error("server startup failed");
     await new Promise((r) => setTimeout(r, 50));
   }
-  const setup = spawn(binary, ["server", "setup-token", "--data", `${state}/data`, "--json"], { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
+  await options.prepareData?.(state);
+  const setup = spawn(binary, ["server", "setup-token", "--data", state, "--json"], { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
   let token = "";
   setup.stdout.on("data", (b) => { token += b; });
   const [setupCode] = await once(setup, "exit");
@@ -177,7 +201,7 @@ export async function startRealServer(options: { latencyMs?: number; lean?: bool
   token = "";
 
   return {
-    origin, backend, bridges, token: setupToken, binary,
+    origin, backend, bridges, token: setupToken, binary, dataDir: state, pid: child.pid!,
     async dispose() {
       front.close();
       tls.close();

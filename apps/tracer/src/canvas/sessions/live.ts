@@ -6,6 +6,9 @@
  * the canvas document re-attaches to the session it names. Closing a window detaches its stream and never ends
  * the session (D178).
  *
+ * A session the host no longer has is final (the server's Close 4404, #158): its terminal stops attaching and the
+ * window shows the ended state, with one action that starts a new shell on the same host in the same window.
+ *
  * Costs, because several terminals live on one page:
  * - A binding starts its terminal when the window first exists, but a window that is off screen or in another
  *   view is suspended (`setVisible(false)`): no drawing and no canvas backing store, so a phone holds about one
@@ -14,6 +17,7 @@
  *   and font (`core.registerTerminal`).
  * - The first window uses the screen's own terminal host element, so the page still has one `#terminal-host`.
  */
+import { isCanonicalUuid } from "../../identifiers";
 import type { CoreScreen } from "../../core-screen";
 import type { ConnectionPool, MuxConnection } from "../../connection";
 import type { TerminalClient, TerminalHooks } from "../../terminal";
@@ -29,7 +33,7 @@ export interface LiveSessionsOptions {
   connection: MuxConnection;
   /** The sockets terminals share (the server takes 32 terminals per socket); without it every terminal uses `connection`. */
   pool?: ConnectionPool;
-  /** The embedded host: its name and the person's login. Remote hosts join the list as #78 lands. */
+  /** The embedded host: its name and the person's login. Remote hosts are registered only after admission. */
   host: { name: string; user?: string };
   /** `?predict=1`: the opt-in predictive echo. */
   predictiveEcho?: boolean;
@@ -39,11 +43,16 @@ export interface LiveSessionsOptions {
   onFirstClient?: (client: TerminalClient) => void;
   /** Called when the window shows a session (restored or new). */
   onSessionCreated?: (sessionId: string) => void;
+  /** The host no longer has a window's session (#158): the inventory marks it ended and the window paints that. */
+  onSessionGone?: (host: string, sessionId: string, status?: number) => void;
 }
 
 export interface LiveSessions extends SessionService {
   /** The terminal of the active window, for callers outside the canvas. */
   activeClient(): TerminalClient | undefined;
+  /** Registers only an admitted UUID; readable labels never become routing authority. */
+  registerHost(host: HostEntry & { address?: string }): void;
+  forgetHost(id: string): void;
   dispose(): void;
 }
 
@@ -51,6 +60,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
   const { core, connection, host, pool } = options;
   const listeners = new Set<() => void>();
   const bindings = new Set<Binding>();
+  const remotes = new Map<string, HostEntry & { address?: string }>();
   let firstHostUsed = false;
   let firstReported = false;
   let active: Binding | undefined;
@@ -80,7 +90,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private readonly n = ++serial;
     private mark(step: string): void { performance.mark(`sw:${this.n}:${step}`); }
 
-    constructor(private readonly model: WindowModel, private readonly changed: () => void) {}
+    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void) {}
 
     /** Keeps a picture of this terminal's screen as its session's last known one (only while it is drawn). */
     private keepScreen(): void {
@@ -101,7 +111,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
     retarget(model: WindowModel): boolean {
       const client = this.client;
-      if (!client || !model.sessionId || this.disposed) return false;
+      if (!client || !model.sessionId || this.disposed || model.hostId !== this.model.hostId) return false;
       this.keepScreen();
       this.painted = false;
       this.mark("retarget");
@@ -143,6 +153,16 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         ...(first ? options.firstHooks : {}),
         onAttached: (resumed, terminal) => { this.mark("attached"); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
         onPaintedOutput: (bytes, at, sequence) => { if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
+        onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
+        // The ghost of the last screen sits in the host element, which the ended state hides.
+        onSessionGone: (status) => options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status),
+        onOpenRefused: (message, sessionList) => {
+          if (this.disposed) return true;
+          core.toast.show({ message, tone: "error", ...(sessionList ? { duration: 0 } : {}),
+            ...(sessionList && this.showSessions ? { action: { label: "Sessions", onSelect: this.showSessions } } : {}),
+          });
+          return true;
+        },
         onSessionCreated: (id) => {
           this.model.sessionId = id;
           this.changed();
@@ -156,12 +176,14 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         if (this.disposed) return;
         const client = await TerminalClient.open({
           host: hostEl,
+          hostName: this.model.host,
           screen: core.stage,
           status: this.status.element,
           theme: core.theme(),
           font: core.font(),
           connection: conn,
           hooks,
+          ...(this.model.hostId ? { hostId: this.model.hostId } : {}),
           ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
           ...(this.model.sessionId ? { attachSessionId: this.model.sessionId } : {}),
           onInputActivity: () => core.onInputActivity(),
@@ -209,6 +231,11 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
     refit(): void { this.client?.refit(); }
 
+    openNew(): void {
+      this.painted = false;
+      this.client?.openNewSession();
+    }
+
     dispose(): void {
       this.keepScreen();
       this.endGhost();
@@ -227,21 +254,30 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
   return {
     bind(model, env): SessionBinding {
-      const b = new Binding(model, env.changed);
+      const b = new Binding(model, env.changed, env.exited, env.showSessions);
       bindings.add(b);
       return b;
     },
     open(hostName, opts): WindowModel {
-      // A new window, a new shell: the server opens it when the window is bound (a split never reuses a session).
+      // Explicit UUIDs and splits preserve affinity even when host labels are duplicated.
+      const explicit = opts?.from?.hostId ?? (isCanonicalUuid(hostName) ? hostName : undefined);
+      const matches = [...remotes.values()].filter((entry) => entry.name === hostName);
+      const remote = explicit ? remotes.get(explicit) : matches.length === 1 && hostName !== host.name ? matches[0] : undefined;
+      const local = !explicit && hostName === host.name && matches.length === 0;
       return {
-        id: `t-${crypto.randomUUID()}`, kind: "terminal", host: hostName,
-        ...(host.user ? { user: host.user } : {}),
+        id: `t-${crypto.randomUUID()}`, kind: "terminal", host: remote?.name ?? hostName,
+        ...(remote ? { hostId: remote.id, ...(remote.user ? { user: remote.user } : {}), ...(remote.os ? { os: remote.os } : {}), ...(remote.address ? { address: remote.address } : {}) } : local && host.user ? { user: host.user } : { noAccess: !local }),
         ...(opts?.from ? { splitOf: opts.from.id } : {}),
-        // Showing a session that already exists: the window attaches to it instead of opening a new shell.
         ...(opts?.session ? { sessionId: opts.session } : {}),
       };
     },
-    hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}) }]; },
+    registerHost(entry) {
+      if (!isCanonicalUuid(entry.id)) throw new Error("Host identity is not valid.");
+      remotes.set(entry.id, { ...entry });
+      for (const listener of listeners) listener();
+    },
+    forgetHost(id) { remotes.delete(id); for (const listener of listeners) listener(); },
+    hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}) }, ...remotes.values()]; },
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     activeClient: () => active?.client,
     freeze(frozen) { for (const b of bindings) b.setFrozen(frozen); },

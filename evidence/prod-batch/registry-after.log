@@ -1,0 +1,69 @@
+Running as unit: run-p445536-i46537583.scope; invocation ID: 8fe1af43f68248e6be3f4b5524e54b6e
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/infraternal-agent)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.41s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_agent-c125bbd12d7c2678)
+
+running 4 tests
+test lifecycle::tests::directory_inode_changes_do_not_retire_the_same_process ... ok
+test lifecycle::tests::nondumpable_process_keeps_its_authenticated_lifetime ... protected_lifetime: followed_image_denied=true
+ok
+test lifecycle::tests::process_birth_parser_handles_command_bytes_and_numeric_bounds ... ok
+test lifecycle::tests::window_ownership_and_process_identity_bound_live_counts ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_mesh-3f967587718407e9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_plugin_api-5c728191785f01c7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_plugin_host_facts-92fb8980e23d63eb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_plugin_mesh-65b6dee3ae44f8e9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_plugin_remote-ce4b7bb3a4c213ff)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_plugin_ssh-02a30dda6db1246b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_protocol-e4eeb92d35d69a68)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_server-4da00085bcd99910)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 323 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_shim-8d88872fb599c816)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.00s
+

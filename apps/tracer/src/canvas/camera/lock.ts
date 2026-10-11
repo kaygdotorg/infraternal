@@ -12,7 +12,7 @@
 import type { Ctx, ViewRec, WinRec } from "../context";
 import type { ViewId } from "../model/types";
 import { COLUMN_GAP, type Rect } from "../layout/geometry";
-import { scrollToWindow } from "../layout/columns";
+import { columnEls, scrollToWindow } from "../layout/columns";
 import { isFreeView, nearestStop as nearest, stopsFor as stops, type Stops } from "../layout/stops";
 import { bounds, clamp, type Cam } from "./camera";
 
@@ -89,7 +89,7 @@ export function createNav(cx: Ctx): Nav {
       if (c.view.layout !== "tiled") { flyView(c.view.id, instant); return; }
       state.currentView = c.view.id; applyCanvasLock(true); cx.pill.paint();
       const colEl = rec.card.root.parentElement as HTMLElement;
-      const cols = [...c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")];
+      const cols = columnEls(c.colsEl);
       let left = 0;
       for (const col of cols) { if (col === colEl) break; left += (Number(col.dataset.w) || state.metrics.colW) + COLUMN_GAP; }
       // The stop that frames this column: stops are centred on their column (when the viewport is wider than it), so the
@@ -97,8 +97,27 @@ export function createNav(cx: Ctx): Nav {
       // NEXT column's stop on a wide viewport, which left the window at the screen's left edge, or off it, with its
       // neighbour out of view (#141).
       const colW = Number(colEl.dataset.w) || state.metrics.colW;
-      const best = nearest(stopsFor(c), cx.view.contentRect(c).x + left + colW / 2);
-      goStop(c, best, instant);
+      const st = stopsFor(c);
+      const content = cx.view.contentRect(c).x;
+      // A window of a group (D212): when the whole group fits the viewport, the camera rests on the group's middle, so a
+      // half is never framed with the other half and the spanning window's header cut off the screen (the minimum shift).
+      const group = colEl.parentElement?.classList.contains("cl-group") ? colEl.parentElement : undefined;
+      const members = group ? [...group.querySelectorAll<HTMLElement>(":scope > .cl-col")] : [];
+      const gw = members.reduce((sum, col) => sum + (Number(col.dataset.w) || 0), 0) + COLUMN_GAP * Math.max(0, members.length - 1);
+      if (group && gw <= st.view) {
+        const first = members[0]!;
+        let gLeft = 0;
+        for (const col of cols) { if (col === first) break; gLeft += (Number(col.dataset.w) || state.metrics.colW) + COLUMN_GAP; }
+        const centre = content + gLeft + gw / 2;
+        state.snapIdx = nearest(st, centre);
+        camera.flyTo(() => ({ cx: centre, cy: st.cy, z: st.z }), instant);
+      } else {
+        // The stop that frames this column: stops are centred on their column (when the viewport is wider than it), so the
+        // column's centre is compared with the stops' centres. Comparing its left edge with a stop's left edge picked the
+        // NEXT column's stop on a wide viewport, which left the window at the screen's left edge, or off it, with its
+        // neighbour out of view (#141).
+        goStop(c, nearest(st, content + left + colW / 2), instant);
+      }
       scrollToWindow(colEl, rec.card.root, instant);
     },
     updateCurrentView() {

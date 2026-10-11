@@ -136,9 +136,34 @@ fn compatibility_fields_are_kept_in_the_rust_shape_and_architecture_on_wire() {
 fn descriptor_declares_default_settings_actions_and_no_hidden_role_dependency() {
     assert_eq!(DESCRIPTOR.id, "host");
     assert!(DESCRIPTOR.roles[0].default_enabled);
-    let settings: serde_json::Value = serde_json::from_str(DESCRIPTOR.settings).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(DESCRIPTOR.settings.unwrap().0).unwrap();
     assert_eq!(settings["properties"]["enabled"]["default"], true);
-    assert_eq!(DESCRIPTOR.actions[1].id, "host.facts.configure");
-    assert_eq!(DESCRIPTOR.actions.len(), 2);
+    assert_eq!(DESCRIPTOR.actions[2].id, "host.facts.configure");
+    assert_eq!(DESCRIPTOR.actions.len(), 3);
     assert_eq!(DESCRIPTOR.roles[0].requires, &[] as &[&str]);
+}
+
+#[test]
+fn configured_memory_floor_refuses_with_current_host_counters() {
+    use infraternal_plugin_api::admission::{NodeContext, OpenRefusal};
+    let mut plugin = HostFactsPlugin::new(AgentMode::Embedded);
+    plugin
+        .call(
+            "host.memory.configure",
+            br#"{"terminalMemoryFloorMiB":17592186044415,"terminalMemoryFloorPercent":5}"#,
+        )
+        .unwrap();
+    assert!(matches!(
+        plugin.admit(
+            "terminal.open",
+            NodeContext {
+                session_count: 200,
+                background_session_count: 200
+            }
+        ),
+        Err(OpenRefusal::HostMemoryLow {
+            session_count: 200,
+            ..
+        })
+    ));
 }

@@ -36,9 +36,12 @@ async function splitTen(page: Page, label: string, phone: boolean): Promise<void
   await page.locator('.cl[data-view="console"] .ui-window .ui-window-body').first().click({ position: { x: 20, y: 40 } });
   await page.waitForTimeout(400);
   for (let i = 0; i < 10; i++) {
+    // Right is a new window beside (D212): split right needs a window with its column to itself, and the alternating
+    // splits down stack the active window. Splits divide in clusters-window-actions.spec.ts.
     const direction = i % 2 === 0 ? "right" : "down";
+    const action = i % 2 === 0 ? "canvas:new:right" : "canvas:split:down";
     const before = await state(page);
-    await page.evaluate((d) => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:split:${d}`, source: "pointer" } })), direction);
+    await page.evaluate((a) => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: a, source: "pointer" } })), action);
     // Settled: the active window's box has not moved for 300 ms (a slow host takes longer than any fixed wait).
     let s = await state(page);
     for (let k = 0; k < 40; k++) {

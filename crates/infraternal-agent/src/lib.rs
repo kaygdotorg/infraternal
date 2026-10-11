@@ -1,9 +1,21 @@
 //! Runs on each managed host and owns its local PTY and engine work [9][13][18].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+pub mod channel;
 pub mod cli;
 pub mod daemon;
+mod lifecycle;
 pub mod plugins;
 pub mod relay;
+#[cfg(feature = "remote")]
+pub mod remote_client;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::remote_native;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::remote_quic;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::remote_renewal;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::remote_tls;
 pub mod sessions;
 pub mod transport;
 
@@ -18,3 +30,10 @@ pub fn run_embedded(fd: i32, state: Option<std::path::PathBuf>) -> std::io::Resu
         .build()?;
     runtime.block_on(daemon::run(fd, state))
 }
+
+#[cfg(all(test, feature = "remote"))]
+mod transport_diagnostics;
+
+#[cfg(all(test, feature = "remote"))]
+#[path = "remote_native_tests.rs"]
+mod remote_native_tests;

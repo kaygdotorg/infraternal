@@ -20,7 +20,8 @@
  * (shortcuts.ts): current area first, then global, one shortcut per action for this platform.
  */
 import { Spring } from "./spring";
-import { keyCaps, shortcutSections } from "./shortcuts";
+import { comboLabel, isOverridden, isTypingTarget, keyCaps, shortcutSections } from "./shortcuts";
+export { isTypingTarget } from "./shortcuts";
 
 export interface ShortcutsViewOptions {
   /** The pill that morphs (the session capsule). */
@@ -39,10 +40,6 @@ export interface ShortcutsView {
   dispose(): void;
 }
 
-/** True for keystrokes that belong to something being typed into (a terminal, a field). */
-export function isTypingTarget(target: EventTarget | null): boolean {
-  return !!(target as Element | null)?.closest?.("input, textarea, select, [contenteditable], .terminal-host, [role='textbox'], [role='searchbox']");
-}
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
 const smooth = (from: number, to: number, value: number): number => { const t = clamp01((value - from) / (to - from)); return t * t * (3 - 2 * t); };
@@ -107,6 +104,16 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
           const key = document.createElement("kbd");
           key.textContent = cap;
           keys.append(key);
+        }
+        // The other bindings that run the same action (they work while the primary is not rebound) sit on the same row,
+        // quieter: the same keycaps, dimmed. They show nothing when the person has rebound the primary.
+        for (const alternate of isOverridden(shortcut.id) ? [] : shortcut.alternates ?? []) {
+          for (const cap of keyCaps(comboLabel(alternate))) {
+            const key = document.createElement("kbd");
+            key.className = "ui-shortcuts-alt";
+            key.textContent = cap;
+            keys.append(key);
+          }
         }
         row.append(label, keys);
         list.append(row);

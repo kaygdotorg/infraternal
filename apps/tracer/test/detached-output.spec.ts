@@ -7,6 +7,12 @@ test("owned output drains while detached before the next Attach", async ({ page 
   await context.request.post("/__mock/open-terminal");
   await page.goto("/?mock=1&theme=ink&bg=none");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected())).toBe(true);
+  // Welcome marks the socket connected before Attach reaches the host at 300 ms RTT.
+  // Hold renderer callbacks only once the fixture can actually deliver output.
+  await expect.poll(async () => {
+    const state = await (await context.request.get("/__mock/state")).json() as { attached_stream_ids: number[] };
+    return state.attached_stream_ids.length;
+  }).toBeGreaterThan(0);
   await page.evaluate(() => {
     const real = window.requestAnimationFrame.bind(window);
     const held: FrameRequestCallback[] = [];

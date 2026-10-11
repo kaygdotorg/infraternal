@@ -1,0 +1,12 @@
+# Public local boundary measurement for #78; debug build, not complete phase-1 acceptance.
+7.32 8.21 11.56 12/861 1982084
+Running as unit: run-p1982085-i10369832.scope; invocation ID: 1e0fdb1bc0fd4dd99eeca35869f2754a
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running unittests src/lib.rs (target/debug/deps/infraternal_server-f591f295d3e59a1b)
+
+running 1 test
+signing_boundary n=1000 p50_us=347 p99_us=654 cpu_ticks=39 retained_der_bytes=398000 baseline_rss_kib=12380 retained_rss_kib=15560 rss_delta_per_identity_kib=3.184 scale=1000 load=7.32 8.21 11.56 13/864 1982203
+test ca::tests::signing_boundary_at_1000_public_identities ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 125 filtered out; finished in 0.45s
+

@@ -34,6 +34,11 @@ export interface SessionRecord {
   frecency: number;
   activity?: SessionActivity;
   exit?: { code: number };
+  /**
+   * The host no longer has this session (#158). A retained exit record may carry a status, but cannot promise a final
+   * screen to keep. Shown as exited ("Session ended"); the window offers a new shell on the same host.
+   */
+  gone?: boolean;
   /** The screen to show when no live renderer does (an exited session's final screen, a detached preview). */
   screen: string[];
 }

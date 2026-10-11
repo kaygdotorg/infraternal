@@ -1,0 +1,8 @@
+Running as unit: run-p1528802-i47620265.scope; invocation ID: 3b55ad170ffd449cab6d529945f9472d
+
+running 2 tests
+test closed_standard_descriptors_become_dev_null ... ok
+test detached_child_restores_default_signals_without_changing_parent ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.62s
+

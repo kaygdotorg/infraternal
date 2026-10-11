@@ -11,11 +11,14 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
 const ACTIONS: &[ActionDef] = &[ActionDef {
+    target: infraternal_plugin_api::Target::Node,
+    dry_run: infraternal_plugin_api::DryRun::Unsupported,
+    opens: None,
     id: "probe.wait",
     summary: "Wait",
     instructions: &[],
-    input: "Empty",
-    output: "Empty",
+    input: infraternal_plugin_api::SchemaRef("Empty"),
+    output: infraternal_plugin_api::SchemaRef("Empty"),
     permission: Permission::One("authenticated"),
     effect: Effect::Read,
 }];
@@ -25,11 +28,16 @@ const ROLES: &[RoleDef] = &[RoleDef {
     default_enabled: true,
 }];
 static PROBE: PluginDescriptor = PluginDescriptor {
+    defaults: &[],
+    dependencies: &[],
+    can_enable_components: &[],
+    events: &[],
+    streams: &[],
     id: "probe",
     api: 1,
     actions: ACTIONS,
     topics: &["probe"],
-    settings: "{}",
+    settings: Some(infraternal_plugin_api::SchemaRef("{}")),
     roles: ROLES,
     max_frame_len: 64 * 1024,
     unavailable: br#"{"error":"probe unavailable"}"#,
@@ -303,11 +311,16 @@ async fn review_completed_call_survives_normal_worker_exit() {
     ));
 }
 static OTHER: PluginDescriptor = PluginDescriptor {
+    defaults: &[],
+    dependencies: &[],
+    can_enable_components: &[],
+    events: &[],
+    streams: &[],
     id: "other",
     api: 1,
     actions: &[],
     topics: &["other"],
-    settings: "{}",
+    settings: Some(infraternal_plugin_api::SchemaRef("{}")),
     roles: ROLES,
     max_frame_len: 64 * 1024,
     unavailable: br#"{"error":"other unavailable"}"#,
@@ -354,6 +367,11 @@ async fn review_undeclared_topic_is_left_to_the_core() {
 }
 
 static CLAIMS_CORE: PluginDescriptor = PluginDescriptor {
+    defaults: &[],
+    dependencies: &[],
+    can_enable_components: &[],
+    events: &[],
+    streams: &[],
     id: "core-claim",
     topics: &["auth.recovery"],
     ..OTHER

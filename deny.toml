@@ -21,6 +21,8 @@ allow = [
     "CC0-1.0",
     "BSD-3-Clause",
     "Zlib",
+    # The decided quinn stack uses the permissive rustls-ring provider.
+    "ISC",
 ]
 confidence-threshold = 0.8
 

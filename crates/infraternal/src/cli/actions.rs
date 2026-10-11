@@ -1,8 +1,8 @@
 //! Builds the validated action registry from built-in and enabled component plugins.
 
 use infraternal_plugin_api::{
-    ActionContract, ActionDefinition, ActionEffect, ActionRegistry, ActionTarget, CliHandler,
-    DryRun, JsonSchema, PluginDefinition, RegistryError,
+    ActionContract, ActionDefinition, ActionEffect, ActionRegistry, ActionTarget,
+    CliDryRun as DryRun, CliHandler, JsonSchema, PluginDefinition, RegistryError,
 };
 
 /// Create the action registry for the plugins enabled in this binary.
@@ -107,7 +107,7 @@ fn mesh_plugin() -> PluginDefinition {
 }
 
 fn cli_plugin() -> PluginDefinition {
-    PluginDefinition::new(
+    let mut plugin = PluginDefinition::new(
         "cli",
         "Inspect this node and manage its configured components.",
         [
@@ -116,7 +116,14 @@ fn cli_plugin() -> PluginDefinition {
             skill_action(),
             session_shim_action(),
         ],
-    )
+    );
+    #[cfg(feature = "remote")]
+    plugin
+        .actions
+        .push(infraternal_plugin_remote::cli::remove_action());
+    #[cfg(feature = "ssh")]
+    plugin.actions.push(ssh_askpass_action());
+    plugin
 }
 
 fn status_action() -> ActionDefinition {
@@ -251,6 +258,7 @@ fn session_shim_action() -> ActionDefinition {
                     "detach".to_owned(),
                     JsonSchema::boolean("Detach from the parent process."),
                 ),
+                ("exit_retention_ms".to_owned(), JsonSchema::integer("Exited session retention in milliseconds, clamped to the production ceiling.")),
                 (
                     "ring_capacity".to_owned(),
                     JsonSchema::integer("Replay ring capacity; defaults to 8388608 bytes."),
@@ -470,7 +478,7 @@ mod tests {
 mod hosted_tests {
     //! Ensures every production descriptor is discoverable with its original authority.
     use super::registry;
-    use infraternal_plugin_api::{ActionEffect, ActionTarget, DryRun, Permission};
+    use infraternal_plugin_api::{ActionEffect, ActionTarget, CliDryRun as DryRun, Permission};
 
     #[test]
     fn production_descriptors_share_cli_registry_and_skills() {
@@ -498,11 +506,12 @@ mod hosted_tests {
                 let skill = crate::cli::skills::render_action(action).expect("generated skill");
                 assert!(skill.contains(source.id));
                 assert!(
-                    skill.contains(&serde_json::to_string(source.input).expect("input reference"))
+                    skill.contains(&serde_json::to_string(&source.input).expect("input reference"))
                 );
                 assert!(
-                    skill
-                        .contains(&serde_json::to_string(source.output).expect("output reference"))
+                    skill.contains(
+                        &serde_json::to_string(&source.output).expect("output reference")
+                    )
                 );
                 if action.contract.effect == ActionEffect::Destructive {
                     assert_eq!(action.contract.dry_run, DryRun::Required);
@@ -548,4 +557,25 @@ mod factory_tests {
             assert!(registry.find(&["mesh", "list"]).is_some());
         }
     }
+}
+
+/// The private prompt responder stays hidden and executes before any credential output is formatted.
+#[cfg(feature = "ssh")]
+fn ssh_askpass_action() -> ActionDefinition {
+    ActionDefinition::new(
+        ["__ssh-askpass"],
+        "Answer a private SSH prompt.",
+        "Used only by the owned OpenSSH bootstrap subprocess.",
+        ["Write the requested credential to the inherited private pipe."],
+        JsonSchema::empty_object(),
+        JsonSchema::command_result(),
+        ActionContract::new(
+            ActionTarget::Host,
+            ActionEffect::Read,
+            "ssh.internal.askpass",
+            DryRun::Unsupported,
+        ),
+    )
+    .hidden()
+    .with_cli_handler(CliHandler::SshAskpass)
 }

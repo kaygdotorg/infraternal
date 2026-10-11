@@ -1,0 +1,25 @@
+Running as unit: run-p3868633-i12256378.scope; invocation ID: ad88921bf83442529052aeafb73b1859
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/remote-agents/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.25s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/remote-agents/target/debug/deps/infraternal_server-1a408e36adb2d6d0)
+
+running 1 test
+remote_host_artifact target=aarch64-unknown-linux-musl sha256=ae23f392d7638686a9adc9ea4cbded1b457e5a9a12d059ac0803ce1b3d566663 uid=1002 host_load=0.13 0.14 0.16 1/742 417182
+remote_host_before_open certificate_count=0 previously_tls_admitted=false
+
+thread 'runtime::remote_demo_tests::real_host::o1_rootless_join_terminal_and_cleanup' (3869131) panicked at crates/infraternal-server/src/remote_demo_tests.rs:308:9:
+remote host did not register
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+remote_host_failed_open certificate_count=1 previously_tls_admitted=false ssh_wrapper_exited=false
+remote_host_state identity_exists=True pid_alive=True session_sockets=0
+remote_host_cleanup processes=0 data_absent=true state_absent=true
+test runtime::remote_demo_tests::real_host::o1_rootless_join_terminal_and_cleanup ... FAILED
+
+failures:
+
+failures:
+    runtime::remote_demo_tests::real_host::o1_rootless_join_terminal_and_cleanup
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 148 filtered out; finished in 22.41s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`

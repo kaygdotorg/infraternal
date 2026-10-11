@@ -1,0 +1,222 @@
+{
+  "description": "Final SB-01 and retirement-handshake repair, 200 real shells, ownership links, private memory and live registry recovery/admission/reaping; #151, D13/D41/D214/D218.",
+  "source_head": "b3ddf6fc",
+  "cpu_scope": "CPUWeight=10000",
+  "synthetic_cpu_load": false,
+  "rows": [
+    {
+      "machine": "infraternal-dev",
+      "binary": "/home/kayg/.cache/codex-scratch/session-bounds/round2-target/x86_64-unknown-linux-musl/release/infraternal",
+      "binary_sha256": "b1c8fcface143e0d2e0dae4fde67c2076106fedfdcadc52e671a8364e03833f4",
+      "binary_bytes": 19699392,
+      "dimensions": "80x24",
+      "load": "23.58 26.49 27.21 35/3234 110234"
+    },
+    {
+      "phase": "registry",
+      "recovered": 200,
+      "admitted": 201,
+      "after_reap": 200
+    },
+    {
+      "phase": "facts-latency",
+      "sessions": 200,
+      "samples": 31,
+      "p50_ms": 309.192,
+      "maximum_ms": 336.49,
+      "load": "27.22 27.15 27.41 43/3624 112230"
+    },
+    {
+      "phase": "empty-200",
+      "role": "shim",
+      "count": 200,
+      "total_kib": {
+        "Pss": 217816,
+        "Private_Dirty": 213616,
+        "Private_Clean": 0
+      },
+      "mean_kib": {
+        "Pss": 1089.08,
+        "Private_Dirty": 1068.08,
+        "Private_Clean": 0.0
+      },
+      "load": "27.22 27.15 27.41 42/3628 112343"
+    },
+    {
+      "phase": "empty-200",
+      "role": "shell",
+      "count": 200,
+      "total_kib": {
+        "Pss": 122109,
+        "Private_Dirty": 118888,
+        "Private_Clean": 16
+      },
+      "mean_kib": {
+        "Pss": 610.54,
+        "Private_Dirty": 594.44,
+        "Private_Clean": 0.08
+      },
+      "load": "27.22 27.15 27.41 46/3629 112352"
+    },
+    {
+      "phase": "owned-empty-200",
+      "role": "shim",
+      "count": 200,
+      "total_kib": {
+        "Pss": 217816,
+        "Private_Dirty": 213616,
+        "Private_Clean": 0
+      },
+      "mean_kib": {
+        "Pss": 1089.08,
+        "Private_Dirty": 1068.08,
+        "Private_Clean": 0.0
+      },
+      "load": "27.22 27.15 27.41 19/3637 112400"
+    },
+    {
+      "phase": "owned-empty-200",
+      "role": "shell",
+      "count": 200,
+      "total_kib": {
+        "Pss": 122109,
+        "Private_Dirty": 118888,
+        "Private_Clean": 16
+      },
+      "mean_kib": {
+        "Pss": 610.54,
+        "Private_Dirty": 594.44,
+        "Private_Clean": 0.08
+      },
+      "load": "27.22 27.15 27.41 30/3648 112416"
+    },
+    {
+      "phase": "shim-attribution",
+      "threads": 1
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "55558f093000-55558f094000 rw-p 00000000 00:00 0                          [heap]",
+      "pss_kib": 4,
+      "private_dirty_kib": 4
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f80fb3f7000-7f80fb600000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 56,
+      "private_dirty_kib": 56
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f80fc7e9000-7f80fc8be000 rw-p 011e7000 08:01 5769287                    /home/kayg/.cache/codex-scratch/session-bounds/round2-target/x86_64-unknown-linux-musl/release/infraternal",
+      "pss_kib": 852,
+      "private_dirty_kib": 852
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f80fc8be000-7f80fc8cc000 rw-p 012bb000 08:01 5769287                    /home/kayg/.cache/codex-scratch/session-bounds/round2-target/x86_64-unknown-linux-musl/release/infraternal",
+      "pss_kib": 56,
+      "private_dirty_kib": 56
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f80fc8cc000-7f80fc8d1000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 16,
+      "private_dirty_kib": 16
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f80fc923000-7f80fc924000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 4,
+      "private_dirty_kib": 4
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f80fc92a000-7f80fc92b000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 4,
+      "private_dirty_kib": 4
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f80fc934000-7f80fc93d000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 24,
+      "private_dirty_kib": 24
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f80fc940000-7f80fc941000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 4,
+      "private_dirty_kib": 4
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7ffc2ee36000-7ffc2ee57000 rw-p 00000000 00:00 0                          [stack]",
+      "pss_kib": 48,
+      "private_dirty_kib": 48
+    },
+    {
+      "phase": "scrollback-200",
+      "role": "shim",
+      "count": 200,
+      "total_kib": {
+        "Pss": 3578700,
+        "Private_Dirty": 3574500,
+        "Private_Clean": 0
+      },
+      "mean_kib": {
+        "Pss": 17893.5,
+        "Private_Dirty": 17872.5,
+        "Private_Clean": 0.0
+      },
+      "load": "44.38 31.13 28.72 34/3569 113571"
+    },
+    {
+      "phase": "scrollback-200",
+      "role": "shell",
+      "count": 200,
+      "total_kib": {
+        "Pss": 134147,
+        "Private_Dirty": 130888,
+        "Private_Clean": 16
+      },
+      "mean_kib": {
+        "Pss": 670.74,
+        "Private_Dirty": 654.44,
+        "Private_Clean": 0.08
+      },
+      "load": "44.38 31.13 28.72 29/3574 113581"
+    },
+    {
+      "phase": "released-scrollback-200",
+      "role": "shim",
+      "count": 200,
+      "total_kib": {
+        "Pss": 3578700,
+        "Private_Dirty": 3574500,
+        "Private_Clean": 0
+      },
+      "mean_kib": {
+        "Pss": 17893.5,
+        "Private_Dirty": 17872.5,
+        "Private_Clean": 0.0
+      },
+      "load": "44.38 31.13 28.72 31/3578 113609"
+    },
+    {
+      "phase": "released-scrollback-200",
+      "role": "shell",
+      "count": 200,
+      "total_kib": {
+        "Pss": 134156,
+        "Private_Dirty": 130888,
+        "Private_Clean": 16
+      },
+      "mean_kib": {
+        "Pss": 670.78,
+        "Private_Dirty": 654.44,
+        "Private_Clean": 0.08
+      },
+      "load": "44.38 31.13 28.72 30/3566 113612"
+    }
+  ]
+}

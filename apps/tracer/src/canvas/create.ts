@@ -22,6 +22,7 @@ import type { Adapters, CanvasState, Ctx } from "./context";
 import { SVG_NS, coarse, el } from "./dom";
 import { createFlip } from "./layout/flip";
 import { metricsFor, type Metrics } from "./layout/geometry";
+import { columnEls } from "./layout/columns";
 import { SIZE_EVENT, edgeToEdge, readSizes } from "./window-sizes";
 import { createMesh } from "./mesh";
 import { createDocumentSync } from "./model/sync";
@@ -41,6 +42,7 @@ import { createInputLock } from "./windows/input-lock";
 import { createWindows } from "./windows/lifecycle";
 import { createSessionHooks } from "./windows/session-hooks";
 import { setPerfProbe } from "../perf-activity";
+import { loadGroups } from "./layout/groups-handle";
 import { createVisibility } from "./windows/visibility";
 
 export interface CanvasOptions {
@@ -64,6 +66,9 @@ export interface CanvasController {
 
 export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasController {
   const { stage } = core;
+  // The grouped layout's chunk starts at mount, for every canvas (the product and the test double both come through here).
+  // A key press that splits a stacked window must act at once, and an idle callback does not come on a busy canvas (D212).
+  void loadGroups().catch(() => undefined);
   stage.dataset.canvas = "on";
   stage.dataset.clusters = "";
   core.panes.querySelector(".pane-card")?.remove();
@@ -154,7 +159,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     world.style.setProperty("--clh", `${next.clh}px`);
     for (const c of cx.views.values()) {
       if (c.view.layout !== "tiled") continue;
-      for (const colEl of c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")) {
+      for (const colEl of columnEls(c.colsEl)) {
         if (colEl.dataset.user || colEl.dataset.w !== String(previous.colW)) continue;
         colEl.dataset.w = String(next.colW);
         colEl.style.setProperty("--w", `${next.colW}px`);

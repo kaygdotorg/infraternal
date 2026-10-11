@@ -18,6 +18,9 @@ export const ICONS = {
   // Split right: the new window opens beside (a vertical divider). Split down: it opens below (a horizontal one).
   splitRight: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 4v16"/>',
   splitDown: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M4 12h16"/>',
+  // New window right and below (D212): a full-size window with a plus, beside or under the current one.
+  newRight: '<rect x="3.5" y="4.5" width="8" height="15" rx="2.5"/><path d="M17 9.5v5M14.5 12h5"/>',
+  newBelow: '<rect x="4.5" y="3.5" width="15" height="8" rx="2.5"/><path d="M12 16.5v5M9.5 19h5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   sidebar: '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/>',
   close: '<path d="m7 7 10 10M17 7 7 17"/>',

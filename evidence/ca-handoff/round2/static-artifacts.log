@@ -1,0 +1,12 @@
+x86_64-unknown-linux-musl: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped; PT_INTERP absent; size=19974896 bytes
+
+Displaying notes found in: .note.infraternal
+  Owner                Data size 	Description
+  INFRATERNAL          0x00000004	Unknown note type: (0x49464341)
+   description data: 01 00 00 00 
+aarch64-unknown-linux-musl: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped; PT_INTERP absent; size=17796824 bytes
+
+Displaying notes found in: .note.infraternal
+  Owner                Data size 	Description
+  INFRATERNAL          0x00000004	Unknown note type: (0x49464341)
+   description data: 01 00 00 00 

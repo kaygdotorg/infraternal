@@ -58,8 +58,8 @@ for (const [w, h, keyboard] of [[393, 852, 336], [375, 667, 300]] as const) {
     // A fresh profile shows the Plain background.
     expect(await page.evaluate(() => document.documentElement.dataset.bg)).toBe("none");
 
-    // 99% of the screen, within a pixel.
-    expect(Math.abs((await width(page)) - 0.99 * w)).toBeLessThanOrEqual(1);
+    // The default keeps the gutter (TASTE: windows keep the gutter on phones): 99% of the space between the 16 px margins.
+    expect(Math.abs((await width(page)) - 0.99 * (w - 32))).toBeLessThanOrEqual(1);
 
     // The cursor does not pretend: nothing is focused, so it waits; one tap focuses the input in that gesture.
     await expect.poll(() => grid(page).then((g) => g.cols)).toBeGreaterThan(10);
@@ -98,7 +98,11 @@ for (const [w, h, keyboard] of [[393, 852, 336], [375, 667, 300]] as const) {
     await expect.poll(async () => Math.round(await width(page)), { timeout: 5000 }).toBe(w - 24 - 28);
     await expect(row("phone", "comfortable")).toHaveAttribute("aria-checked", "true");
     await row("phone", "full").evaluate((b) => (b as HTMLElement).click());
+    await expect.poll(async () => Math.abs((await width(page)) - 0.99 * (w - 32)), { timeout: 5000 }).toBeLessThanOrEqual(1);
+    // Edge to edge is an explicit choice: 99% of the screen, touching both edges.
+    await row("phone", "edge").evaluate((b) => (b as HTMLElement).click());
     await expect.poll(async () => Math.abs((await width(page)) - 0.99 * w), { timeout: 5000 }).toBeLessThanOrEqual(1);
+    await row("phone", "full").evaluate((b) => (b as HTMLElement).click());
     await context.close();
   });
 }

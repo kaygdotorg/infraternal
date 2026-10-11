@@ -1,0 +1,50 @@
+   Compiling sqlx-core v0.8.6
+   Compiling sqlx-sqlite v0.8.6
+   Compiling tokio-openssl v0.6.5
+   Compiling sqlx-macros-core v0.8.6
+   Compiling quinn v0.11.12
+   Compiling sqlx-macros v0.8.6
+   Compiling axum-server v0.8.0
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-plugin-api)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/remote)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/mesh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-agent)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/plugins/ssh)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16m 58s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal_server-08d90eadf47e8c21)
+
+running 1 test
+
+thread 'embedded::regressions::child_spawn_disposes_inherited_stdin' (2480123) panicked at crates/infraternal-server/src/embedded_regressions.rs:714:5:
+
+running 1 test
+test embedded::regressions::child_spawn_disposes_inherited_stdin ... FAILED
+
+failures:
+
+failures:
+    embedded::regressions::child_spawn_disposes_inherited_stdin
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 306 filtered out; finished in 0.44s
+
+
+
+thread 'embedded::regressions::child_spawn_disposes_inherited_stdin' (2480284) panicked at crates/infraternal-server/src/embedded_regressions.rs:697:13:
+assertion `left == right` failed: the infraternal agent inherited stdin
+  left: "socket:[110991048]"
+ right: "/dev/null"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test embedded::regressions::child_spawn_disposes_inherited_stdin ... FAILED
+
+failures:
+
+failures:
+    embedded::regressions::child_spawn_disposes_inherited_stdin
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 306 filtered out; finished in 1.55s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`

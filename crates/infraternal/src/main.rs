@@ -2,6 +2,24 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 mod cli;
+#[cfg(feature = "plugin-agent")]
+mod embedded_cli;
+#[cfg(feature = "remote")]
+mod host_remove;
+
+#[cfg(feature = "remote")]
+mod output;
+#[cfg(feature = "remote")]
+mod remote;
+#[cfg(feature = "plugin-server")]
+mod remote_server;
+#[cfg(feature = "remote")]
+mod restart;
+#[cfg(feature = "remote")]
+mod restart_binary;
+#[cfg(feature = "ssh")]
+mod ssh_askpass;
+
 #[cfg(feature = "plugin-server")]
 mod install;
 
@@ -26,6 +44,7 @@ use serde_json::json;
 #[cfg(feature = "plugin-server")]
 #[derive(Debug)]
 struct ServerArgs {
+    remote: remote_server::Options,
     listen: SocketAddr,
     data: PathBuf,
     public_origin: Option<String>,
@@ -49,6 +68,21 @@ struct InstallArgs {
 }
 
 fn main() -> ExitCode {
+    if harden_startup().is_err() {
+        return ExitCode::FAILURE;
+    }
+    #[cfg(target_os = "linux")]
+    if nix::sys::prctl::set_name(c"infraternal").is_err() {
+        return ExitCode::FAILURE;
+    }
+    #[cfg(feature = "remote")]
+    if let Some(result) = remote::uninstall_if_requested() {
+        return result;
+    }
+    #[cfg(feature = "plugin-agent")]
+    if let Some(result) = embedded_cli::run_if_requested() {
+        return result;
+    }
     // Global JSON is a flag; plugin ownership selects lazy metadata, while
     // root help and core discovery need all compiled definitions. Parsing and
     // execution still come solely from the resulting action registry.
@@ -73,7 +107,43 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let matches = cli::command_tree::build(&registry).get_matches();
+    let requested_json = std::env::args_os().any(|argument| argument == "--json");
+    let matches = match cli::command_tree::build(&registry).try_get_matches() {
+        Ok(matches) => matches,
+        Err(error)
+            if requested_json
+                && !matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+        {
+            // Invalid private transport coordinates must not leak through Clap diagnostics.
+            #[cfg(feature = "remote")]
+            return output::refuse(
+                true,
+                "cli",
+                "Invalid command arguments",
+                "Read the command help and retry.",
+                2,
+            );
+            #[cfg(not(feature = "remote"))]
+            {
+                print_result(
+                    &CommandResult::new(
+                        "cli",
+                        CommandState::Failed,
+                        "Invalid command arguments.",
+                        json!({}),
+                    )
+                    .with_next_step("Read the command help and retry."),
+                    true,
+                    false,
+                );
+                return ExitCode::from(2);
+            }
+        }
+        Err(error) => error.exit(),
+    };
     let json_output = matches.get_flag("json");
     let selected = cli::command_tree::selected(&matches);
     dispatch_selected_action(&registry, &selected, json_output)
@@ -152,6 +222,10 @@ fn dispatch_action(
             }
         }
         CliHandler::SessionShim => run_shim_command(matches),
+        CliHandler::RemoteAgent
+        | CliHandler::ServerRestart
+        | CliHandler::RemoveHost
+        | CliHandler::SshAskpass => run_operator_action(action, matches, json_output),
     }
 }
 
@@ -468,7 +542,7 @@ fn run_server(matches: &ArgMatches, json_output: bool) -> ExitCode {
             json_output,
         );
     };
-    run_server_foreground(args, &runtime, json_output)
+    run_server_foreground(args, runtime, json_output)
 }
 
 #[cfg(feature = "plugin-server")]
@@ -480,6 +554,8 @@ fn server_configuration_was_supplied(matches: &ArgMatches) -> bool {
         "web_root",
         "tls_cert",
         "tls_key",
+        "remote_listen",
+        "remote_ca_dir",
     ]
     .iter()
     .any(|name| matches.get_one::<String>(name).is_some())
@@ -507,7 +583,29 @@ fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
                 .map_err(|_| "trusted proxy address or CIDR is invalid".to_owned())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let remote_listen = matches
+        .try_get_one::<String>("remote_listen")
+        .ok()
+        .flatten()
+        .map(|value| {
+            value
+                .parse::<SocketAddr>()
+                .map_err(|_| "remote listener is invalid".to_owned())
+        })
+        .transpose()?;
+    let remote_ca_dir = matches
+        .try_get_one::<String>("remote_ca_dir")
+        .ok()
+        .flatten()
+        .map(PathBuf::from);
+    if remote_ca_dir.is_some() && remote_listen.is_none() {
+        return Err("--remote-ca-dir requires --remote-listen".to_owned());
+    }
     Ok(ServerArgs {
+        remote: remote_server::Options {
+            remote_listen,
+            remote_ca_dir,
+        },
         listen,
         data: matches
             .get_one::<String>("data")
@@ -536,7 +634,17 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
     };
     let dry_run = matches.get_flag("dry_run");
     let yes = matches.get_flag("yes");
-    if let Err(error) = confirm_server_setup(yes, dry_run, args.listen, &args.data) {
+    if let Err(error) = confirm_server_setup(
+        yes,
+        dry_run,
+        args.listen,
+        &args.data,
+        if matches.get_flag("system") {
+            "system"
+        } else {
+            "user"
+        },
+    ) {
         return report_failure(
             "server init",
             "Server setup needs confirmation.",
@@ -548,9 +656,17 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
         .get_one::<String>("name")
         .cloned()
         .unwrap_or_else(|| "infraternal-server".to_owned());
+    if matches.get_flag("system") && matches.get_flag("user") {
+        return report_failure(
+            "server init",
+            "Choose one service scope.",
+            "--system conflicts with --user".to_owned(),
+            json_output,
+        );
+    }
     let install_args = InstallArgs {
-        system: false,
-        user: true,
+        system: matches.get_flag("system"),
+        user: !matches.get_flag("system"),
         dry_run,
         force: matches.get_flag("force"),
         name: name.clone(),
@@ -564,6 +680,7 @@ fn confirm_server_setup(
     dry_run: bool,
     listen: SocketAddr,
     data_dir: &Path,
+    scope: &str,
 ) -> Result<(), String> {
     if yes || dry_run {
         return Ok(());
@@ -572,7 +689,7 @@ fn confirm_server_setup(
         return Err("pass --yes in non-interactive mode, or use --dry-run first".to_owned());
     }
     print!(
-        "Create and start the user server service on {listen} with data in {}? [y/N] ",
+        "Create and start the {scope} server service on {listen} with data in {}? [y/N] ",
         data_dir.display()
     );
     io::stdout()
@@ -686,10 +803,13 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
 
 #[cfg(feature = "plugin-server")]
 fn run_server_foreground(
-    args: ServerArgs,
-    runtime: &tokio::runtime::Runtime,
+    mut args: ServerArgs,
+    runtime: tokio::runtime::Runtime,
     json_output: bool,
 ) -> ExitCode {
+    let options = std::mem::take(&mut args.remote);
+    let action_id = options.action_id();
+    let remote_requested = options.remote_listen.is_some();
     let config = match server_config(args) {
         Ok(config) => config,
         Err(error) => {
@@ -705,17 +825,14 @@ fn run_server_foreground(
         "listen": config.listen.to_string(),
         "public_origin": config.public_origin,
     });
-    // Pass only compiled node providers to the generic server host; server-only
-    // builds must not advertise a collector absent from their embedded process.
-    #[cfg(feature = "plugin-agent")]
-    let descriptors = infraternal_agent::plugins::descriptors();
-    #[cfg(not(feature = "plugin-agent"))]
-    let descriptors = &[];
-    match runtime.block_on(infraternal_server::serve_with_plugin_descriptors(
-        config,
-        descriptors,
-    )) {
-        Ok(()) => {
+    infraternal_server::configure_logging(json_output);
+    match runtime.block_on(remote_server::serve(config, options)) {
+        #[cfg(feature = "remote")]
+        Ok(remote_server::Outcome::Restart(replacement)) => {
+            // Same-PID exec consumes the runtime after cancelling server tasks.
+            restart::replace(runtime, replacement, json_output)
+        }
+        Ok(remote_server::Outcome::Stopped) => {
             print_result(
                 &CommandResult::new(
                     "server",
@@ -728,12 +845,26 @@ fn run_server_foreground(
             );
             ExitCode::SUCCESS
         }
-        Err(error) => report_failure(
-            "server",
-            "The server stopped after an error.",
-            error.to_string(),
-            json_output,
-        ),
+        Err(error) => {
+            #[cfg(feature = "remote")]
+            if remote_requested {
+                return output::refuse(
+                    json_output,
+                    action_id,
+                    &error.to_string(),
+                    "Check configuration and retained public server trust.",
+                    1,
+                );
+            }
+            #[cfg(not(feature = "remote"))]
+            let _ = (action_id, remote_requested);
+            report_failure(
+                "server",
+                "The server stopped after an error.",
+                error.to_string(),
+                json_output,
+            )
+        }
     }
 }
 
@@ -789,7 +920,21 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
     };
     let state = matches.get_one::<String>("state").map(PathBuf::from);
     let detach = matches.get_flag("detach");
-    match run_shim(session, uid, cols, rows, state, detach, ring_capacity) {
+    match run_shim(
+        session,
+        uid,
+        cols,
+        rows,
+        state,
+        detach,
+        ring_capacity,
+        matches
+            .get_one::<i64>("exit_retention_ms")
+            .copied()
+            .unwrap_or(600_000)
+            .try_into()
+            .unwrap_or(600_000),
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("shim startup/session failed: {error}");
@@ -1044,38 +1189,43 @@ mod setup_token_tests {
 }
 
 /// Validate the session identifier before any fork or filesystem operation.
+/// Validate identifiers before forking; clamp exited-screen retention inside the shim.
 #[allow(clippy::too_many_arguments)]
 fn run_shim(
     session: &str,
     uid: u32,
     cols: u16,
     rows: u16,
-    state: Option<PathBuf>,
+    state: Option<std::path::PathBuf>,
     detach: bool,
     ring_capacity: usize,
+    exit_retention_ms: u64,
 ) -> std::io::Result<()> {
-    if session.len() != 32 || !session.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if session.len() != 32 || !session.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "session must be 32 hexadecimal characters",
         ));
     }
     let mut id = [0; 16];
-    for (index, value) in id.iter_mut().enumerate() {
-        *value = u8::from_str_radix(&session[index * 2..index * 2 + 2], 16)
-            .map_err(std::io::Error::other)?;
+    for (i, value) in id.iter_mut().enumerate() {
+        *value =
+            u8::from_str_radix(&session[i * 2..i * 2 + 2], 16).map_err(std::io::Error::other)?;
     }
     if detach && !infraternal_shim::detach()? {
         return Ok(());
     }
-    infraternal_shim::run(infraternal_shim::Config {
-        session: id,
-        uid,
-        cols,
-        rows,
-        state,
-        ring_capacity,
-    })
+    infraternal_shim::run_with_retention(
+        infraternal_shim::Config {
+            session: id,
+            uid,
+            cols,
+            rows,
+            state,
+            ring_capacity,
+        },
+        std::time::Duration::from_millis(exit_retention_ms),
+    )
 }
 
 #[cfg(test)]
@@ -1105,4 +1255,212 @@ mod dispatch_tests {
             ExitCode::from(1)
         );
     }
+}
+
+#[cfg(test)]
+#[path = "startup_tests.rs"]
+mod startup_tests;
+
+/// First userspace entry protection applies equally to server and child modes.
+fn harden_startup() -> Result<(), nix::errno::Errno> {
+    nix::sys::prctl::set_dumpable(false)?;
+    #[cfg(feature = "remote")]
+    if std::env::args_os()
+        .skip(1)
+        .find(|argument| argument != "--json")
+        .is_some_and(|argument| argument == "server")
+    {
+        crate::restart::queue_reload().map_err(|_| nix::errno::Errno::EIO)?;
+    }
+    Ok(())
+}
+
+/// Startup reads an invitation once; reconnects use only the private local identity.
+#[cfg(feature = "remote")]
+fn run_remote_agent(
+    action: AgentAction,
+    fd: Option<i32>,
+    state: Option<PathBuf>,
+    data: Option<PathBuf>,
+    json: bool,
+) -> ExitCode {
+    let enroll_only = matches!(
+        &action,
+        AgentAction::Join {
+            enroll_only: true,
+            ..
+        }
+    );
+    let operation = match &action {
+        AgentAction::Join { .. } => infraternal_plugin_remote::JOIN.id,
+        AgentAction::Run => infraternal_plugin_remote::RUN.id,
+    };
+    if fd.is_some() {
+        return output::refuse(
+            json,
+            operation,
+            "Incompatible infraternal agent modes",
+            "Choose one infraternal agent mode.",
+            2,
+        );
+    }
+    let Ok(data) = data.map_or_else(remote::default_data, Ok) else {
+        return output::refuse(
+            json,
+            operation,
+            "Infraternal agent data directory unavailable",
+            "Set a private identity directory with --data.",
+            1,
+        );
+    };
+    output::report(
+        json,
+        operation,
+        "starting",
+        "Preparing the enrolled host connection",
+        "Keep invitation material on private stdin; retain private identity locally.",
+    );
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Read;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        if let AgentAction::Join { url, .. } = action {
+            let mut invitation = Vec::with_capacity(8192);
+            std::io::stdin().take(8193).read_to_end(&mut invitation)?;
+            runtime.block_on(remote::join(&url, &data, &invitation))?;
+            // SSH publishes staged state only after enrollment returns. Running
+            // here would hold its transaction until the service was cancelled.
+            if enroll_only {
+                return Ok(());
+            }
+            output::report(
+                json,
+                operation,
+                "enrolled",
+                "Private host identity retained",
+                "Keep this process running to maintain the connection.",
+            );
+        }
+        runtime.block_on(remote::run(&data, state))
+    })();
+    if result.is_ok() {
+        if enroll_only {
+            output::report(
+                json,
+                operation,
+                "enrolled",
+                "Private host identity retained",
+                "Start the service with infraternal agent run using this identity directory.",
+            );
+        } else {
+            output::report(
+                json,
+                operation,
+                "stopped",
+                "Remote infraternal agent stopped",
+                "Reconnect with the retained enrolled identity when needed.",
+            );
+        }
+        ExitCode::SUCCESS
+    } else {
+        output::refuse(
+            json,
+            operation,
+            result.as_ref().err().map_or(
+                "Remote infraternal agent operation failed",
+                remote::public_error,
+            ),
+            "Check the enrolled identity and existing server trust.",
+            1,
+        )
+    }
+}
+
+/// Remote node modes never create a server or accept an invitation through argv.
+#[cfg(feature = "remote")]
+enum AgentAction {
+    Join { url: String, enroll_only: bool },
+    Run,
+}
+
+/// Adapt schema-parsed operator inputs to the production transport handlers.
+fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bool) -> ExitCode {
+    #[cfg(feature = "ssh")]
+    if action.cli_handler == CliHandler::SshAskpass {
+        return ssh_askpass::run();
+    }
+    #[cfg(feature = "remote")]
+    {
+        if action.cli_handler == CliHandler::RemoteAgent {
+            let fd = matches
+                .try_get_one::<i64>("fd")
+                .ok()
+                .flatten()
+                .and_then(|fd| i32::try_from(*fd).ok());
+            let state = matches
+                .try_get_one::<String>("state")
+                .ok()
+                .flatten()
+                .map(PathBuf::from);
+            let data = matches
+                .try_get_one::<String>("data")
+                .ok()
+                .flatten()
+                .map(PathBuf::from);
+            let mode = if action.command.last().is_some_and(|part| part == "join") {
+                AgentAction::Join {
+                    url: matches
+                        .get_one::<String>("url")
+                        .cloned()
+                        .unwrap_or_default(),
+                    enroll_only: matches.get_flag("enroll_only"),
+                }
+            } else {
+                AgentAction::Run
+            };
+            return run_remote_agent(mode, fd, state, data, json);
+        }
+        if action.cli_handler == CliHandler::ServerRestart {
+            let data = matches
+                .get_one::<String>("data")
+                .map_or_else(|| PathBuf::from("./data"), PathBuf::from);
+            let options = restart::Options {
+                binary: matches.get_one::<String>("binary").map(PathBuf::from),
+            };
+            return match tokio::runtime::Runtime::new() {
+                Ok(runtime) => restart::run(&runtime, &data, &options, json),
+                Err(_) => report_failure(
+                    "server restart",
+                    "Could not start the async runtime.",
+                    "runtime initialization failed".to_owned(),
+                    json,
+                ),
+            };
+        }
+        if action.cli_handler == CliHandler::RemoveHost {
+            let host = matches
+                .get_one::<String>("host")
+                .and_then(|host| host.parse().ok());
+            let Some(host) = host else {
+                return report_failure(
+                    "remove-host",
+                    "Invalid host identifier.",
+                    "expected a host UUID".to_owned(),
+                    json,
+                );
+            };
+            return host_remove::run(
+                matches
+                    .get_one::<String>("server")
+                    .map_or("", String::as_str),
+                host,
+                matches.get_flag("finish"),
+                matches.get_flag("retain"),
+                json,
+            );
+        }
+    }
+    let _ = matches;
+    run_unavailable(action, json)
 }

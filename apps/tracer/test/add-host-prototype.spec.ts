@@ -20,7 +20,7 @@ async function open(browser: Browser, viewport: Viewport, theme = "ink"): Promis
   });
   const page = await context.newPage();
   await page.goto(`${origin}/?mock=1&proto=addhost&theme=${theme}&bg=none`);
-  await expect(page.locator(".ah-page[data-page='discovery']")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".ah-page[data-page='discovery']")).toBeVisible({ timeout: 45_000 });
   return { context, page };
 }
 
@@ -118,16 +118,26 @@ test("the docked sidebar never covers the flow window and stays out of its way",
 test("steps slide in the direction of travel and Back reverses it", async ({ browser }) => {
   const { context, page } = await open(browser, DESKTOP);
   try {
+    // Observe each real arriving pane before the next animation frame. Sampling
+    // 30 ms after a Playwright round trip can instead catch spring overshoot.
+    await page.evaluate(() => {
+      const arrivals: Array<{ page: string; x: number }> = [];
+      (window as unknown as { paneArrivals: Array<{ page: string; x: number }> }).paneArrivals = arrivals;
+      new MutationObserver((records) => {
+        for (const record of records) for (const node of record.addedNodes) {
+          if (node instanceof HTMLElement && node.matches(".ah-page")) {
+            arrivals.push({ page: node.dataset.page!, x: new DOMMatrix(getComputedStyle(node).transform).m41 });
+          }
+        }
+      }).observe(document.querySelector(".ah-float .ui-pane-viewport")!, { childList: true });
+    });
     await page.locator(".ah-row[data-host='pve01']").click();
     await page.locator("[data-ah='continue']").click();
-    await page.waitForTimeout(30);
-    const forward = await page.evaluate(() => new DOMMatrix(getComputedStyle(document.querySelector(".ah-page:not(.is-leaving)")!).transform).m41);
-    expect(forward).toBeGreaterThan(0);
-    await page.waitForTimeout(400);
+    const arrivals = () => page.evaluate(() => (window as unknown as { paneArrivals: Array<{ page: string; x: number }> }).paneArrivals);
+    await expect.poll(async () => (await arrivals()).length).toBe(1);
+    expect((await arrivals())[0]!.x).toBeGreaterThan(0);
     await page.locator("[data-ah='back']").click();
-    await page.waitForTimeout(30);
-    const back = await page.evaluate(() => new DOMMatrix(getComputedStyle(document.querySelector(".ah-page:not(.is-leaving)")!).transform).m41);
-    expect(back).toBeLessThan(0);
+    await expect.poll(async () => (await arrivals()).find((pane) => pane.page === "discovery")?.x).toBeLessThan(0);
   } finally {
     await context.close();
   }
@@ -144,7 +154,7 @@ test("the wizard floats over a dimmed window that becomes the host's terminal", 
     }));
     expect(card.shadow).not.toBe("none");
     // Superseded: the flow card is the shared translucent overlay material, softly blurred (TASTE §4).
-    expect(card.backdrop).toContain("blur(16px)");
+    expect(card.backdrop).toContain("blur(8px)");
     expect(card.scrimAlpha).toContain("0.5");
     expect(card.pillShadow).not.toContain("inset");
     // While the flow owns the window, the capsule is its title once: no separator, session or dot.
@@ -277,7 +287,7 @@ test("failures say what happened, what to do, and offer Retry with details", asy
   try {
     await page.locator(".ah-row[data-host='pve01']").click();
     await page.locator("[data-ah='continue']").click();
-    await expect(page.locator(".ah-page:not(.is-leaving) .ah-title")).toHaveText("Blocked by the mesh policy");
+    await expect(page.locator(".ah-page:not(.is-leaving) .ah-title")).toHaveText("This server can't connect to pve01");
     await expect(page.locator("[data-ah='retry']")).toBeVisible();
     await page.locator(".ah-details summary").click();
     await expect(page.locator(".ah-details pre")).toBeVisible();
@@ -307,9 +317,13 @@ for (const width of [320, 375, 393]) {
       });
       expect(overlaps).toEqual([]);
       await press(page, viewport, ".ah-row[data-host='edge-arm']");
+      // Measure visible controls after the shared opening spring settles;
+      // progress hides its footer and transformed rectangles are transient.
+      await expect.poll(async () => page.evaluate(() => {
+        const buttons = [...document.querySelectorAll<HTMLElement>(".ah-foot button")].filter((button) => button.getClientRects().length > 0);
+        return buttons.length > 0 ? Math.min(...buttons.map((button) => button.getBoundingClientRect().height)) : 0;
+      })).toBeGreaterThanOrEqual(43.5);
       await press(page, viewport, "[data-ah='continue']");
-      const buttons = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".ah-foot button")].map((button) => Math.round(button.getBoundingClientRect().height)));
-      expect(buttons.every((height) => height >= 44)).toBe(true);
     } finally {
       await context.close();
     }

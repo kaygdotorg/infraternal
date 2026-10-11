@@ -103,8 +103,12 @@ export interface CanvasState {
 }
 
 export interface Adapters {
+  /** Registry-labelled removal, shared by the palette and machine popover. */
+  hostRemoval?: { label(): string | undefined; remove(id: string, name: string, anchor: HTMLElement): void };
   /** Binds terminal windows to sessions (real in the product, previews in mockups). */
   sessions: SessionService;
+  /** The terminal of the active window, for keyboard font size (D222); absent in mockups, where the font keys do nothing. */
+  activeTerminal?(): { adjustFontSize(step: number | "reset"): void } | undefined;
   /** Lists, names and ends sessions (D178, D183); absent until the lifecycle API exists, and the manager, the markers and the final-screen strip are then not offered. */
   inventory?: import("./sessions/inventory").SessionInventory;
   /** The canvas document's home (local storage today, the server sync of #98 later). */
@@ -121,6 +125,8 @@ export interface Adapters {
   details?: import("./windows/details-source").DetailsSourceLoader;
   /** Starts the add-host flow (#78); absent until it exists, and the empty-state button is then not drawn. */
   addHost?: () => void;
+  /** The lock on host connections (D168, D217): its state, the palette row and Settings → Hosts; absent when the server has none. */
+  authority?: import("./addhost/authority-unlock").AuthorityControl;
 }
 
 export interface Ctx {

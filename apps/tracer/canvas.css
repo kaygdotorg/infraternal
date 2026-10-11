@@ -85,9 +85,8 @@
 
 
 /* The canvas is the overview, so the top bar keeps only the session capsule and "+" even on
-   a phone; the other sessions' tab strip stays hidden there. */
+   a phone; the other sessions' tab strip stays hidden there. The top bar's three-column grid (style.css) is shared. */
 @media (max-width: 720px) {
-  .terminal-screen[data-canvas="on"] .top { grid-template-columns: auto minmax(0, 1fr) auto; }
   .terminal-screen[data-canvas="on"] .tabs { display: flex; }
   .terminal-screen[data-canvas="on"] .tabs .tab:not(.tab-add) { display: none; }
 }

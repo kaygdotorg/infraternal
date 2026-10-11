@@ -1,0 +1,9 @@
+tls-session-prod: bytes=19991456 sha256=9064a9c569cd47e82e481e64315eafd9884ec0808cbddc3d7efa3c980f18aa8e
+ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+PT_INTERP: absent
+CA handoff note present: False
+protected-shim: bytes=20064880 sha256=b887c4eace727fb3b98cf9570f528c1d1a4a2f80f2d7915cc7cbe7a0e6e54318
+ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+PT_INTERP: absent
+CA handoff note present: True
+fresh protected delta_bytes=73424

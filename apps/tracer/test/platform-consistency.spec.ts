@@ -76,12 +76,12 @@ async function trackSpread(page: Page): Promise<number> {
   }, png);
 }
 
-test("Windows: the top pill shows Ctrl K keycaps and no Apple glyph is visible anywhere", async ({ browser }) => {
+test("Windows: the top pill shows Ctrl+Shift+K keycaps and no Apple glyph is visible anywhere", async ({ browser }) => {
   const context = await platformContext(browser, WINDOWS);
   const page = await openTerminal(context);
-  await expect(page.locator("#capsule kbd")).toHaveText(["Ctrl", "K"]);
+  await expect(page.locator("#capsule kbd")).toHaveText(["Ctrl", "Shift", "K"]);
   expect(await visibleText(page)).not.toMatch(APPLE_GLYPHS);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeVisible();
   expect(await visibleText(page)).not.toMatch(APPLE_GLYPHS);
   await page.keyboard.press("Escape");
@@ -91,7 +91,7 @@ test("Windows: the top pill shows Ctrl K keycaps and no Apple glyph is visible a
 test("Windows: the palette shows no scroll bar at rest, the scrolling state during a wheel scroll, and it fades out", async ({ browser }) => {
   const context = await platformContext(browser, WINDOWS);
   const page = await openTerminal(context);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeVisible();
   await expect.poll(async () => (await scrollState(page)).overflows).toBe(true);
 
@@ -121,7 +121,7 @@ test("Windows: the palette shows no scroll bar at rest, the scrolling state duri
 test("keyboard scrolling in the palette still moves the selection and the list, and focus stays in the search field", async ({ browser }) => {
   const context = await platformContext(browser, WINDOWS);
   const page = await openTerminal(context);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeVisible();
   const input = page.locator("#palette-input");
   await expect(input).toBeFocused();
@@ -146,7 +146,7 @@ test("captures: Windows and Mac, ink, 1440x900: the top pill, the palette and th
     await page.waitForTimeout(300);
     await page.locator("#capsule").screenshot({ path: `${dir}/${name}-pill-ink-1440x900.png` });
     await page.screenshot({ path: `${dir}/${name}-top-ink-1440x900.png` });
-    await page.keyboard.press(name === "mac" ? "Meta+k" : "Control+k");
+    await page.keyboard.press(name === "mac" ? "Meta+k" : "Control+Shift+K");
     await expect(page.locator("#palette")).toBeVisible();
     await expect.poll(async () => (await scrollState(page)).overflows).toBe(true);
     await page.waitForTimeout(400);
@@ -169,7 +169,7 @@ test("Windows: the shortcuts panel names every key in words, with no Apple glyph
   const page = await context.newPage();
   await page.goto("/?mock=1&proto=windows&theme=ink&bg=none&fixture=none");
   await expect.poll(() => page.evaluate(() => (window as unknown as { __tracerCanvas?: { windows(): string[] } }).__tracerCanvas?.windows().length ?? 0), { timeout: 30_000 }).toBeGreaterThan(2);
-  await page.keyboard.press("Shift+Slash");
+  await page.keyboard.press("?");
   const panel = page.locator(".ui-shortcuts");
   await expect(panel).toBeVisible();
   await expect(panel.locator(".ui-shortcuts-row", { hasText: "Lock or unlock" }).locator("kbd")).toHaveText(["Ctrl", "Shift", "L"]);
@@ -188,7 +188,7 @@ for (const [width, height, theme] of [[393, 852, "paper"], [375, 667, "ink"]] as
     await page.setViewportSize({ width, height });
     await page.goto(`/?mock=1&theme=${theme}&bg=none`);
     await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await expect(page.locator("#palette")).toBeVisible();
     await expect.poll(async () => (await scrollState(page)).overflows).toBe(true);
     expect(await trackSpread(page)).toBeLessThan(6);

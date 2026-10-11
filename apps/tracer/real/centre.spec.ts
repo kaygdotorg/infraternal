@@ -86,7 +86,7 @@ async function scenarios(page: Page, label: string): Promise<void> {
 
   // font and theme
   for (const choice of ["Paper", "Geist Mono", "Ink", "Maple Mono"]) {
-    await page.keyboard.press("Control+K");
+    await page.keyboard.press("Control+Shift+K");
     await page.locator("#palette-input").fill(choice);
     await page.locator("#palette-results [role=option]", { hasText: choice }).first().click();
     await page.waitForTimeout(700);

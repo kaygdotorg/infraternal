@@ -7,7 +7,9 @@
  * - the control stream (0): actions as `Call`/`Result`, the account's recovery notices, and pings;
  * - the stream table: odd stream ids are the client's, one per terminal, allocated by `openStream`; frames are
  *   dispatched to the stream's handler by id, so the hot path (decode, then hand the frame over) does not change;
- * - reconnecting with backoff, forced drops for the resume probe, and protocol failures.
+ * - reconnecting with a bounded, jittered exponential backoff, forced drops for the resume probe, and protocol
+ *   failures. The backoff starts over only once a socket has stayed up for a while, so a socket that is welcomed
+ *   and then dropped at once (a request the server keeps refusing) backs off instead of reconnecting every 50 ms.
  *
  * A terminal (`TerminalClient`) keeps its own cursors (output, input, acknowledged input) and re-attaches itself
  * with them on every welcome, so a reconnect restores every stream independently. Closing a stream detaches it
@@ -32,7 +34,7 @@ export const CONTROL_STREAM = 0;
  * sent one; it never carries input or internal detail.
  */
 export class ActionRefused extends Error {
-  constructor(message = "the server refused the action", readonly reason?: string) { super(message); this.name = "ActionRefused"; }
+  constructor(message = "the server refused the action", readonly reason?: string, readonly memory?: { availableMiB: number; sessionCount: number }) { super(message); this.name = "ActionRefused"; }
 }
 /**
  * The server keeps a writer row for every stream that ever attached on a connection and allows 32. A closed window
@@ -48,6 +50,17 @@ const WRITER_ROTATE_AT = 28;
  * leaves room for the rotation above.
  */
 export const STREAMS_PER_SOCKET = 28;
+/** Reconnect pauses: the first retry is quick (a dropped mobile link), repeats double up to the ceiling. */
+const RECONNECT_FIRST_MS = 50;
+const RECONNECT_CEILING_MS = 5000;
+/** A socket that stayed welcomed this long ended for a new reason; the next reconnect is quick again. */
+export const STABLE_CONNECTION_MS = 10_000;
+
+/** Socket and shared-stream retries use the same bounded steps and positive jitter (#158). */
+export function reconnectDelay(attempt: number): number {
+  const step = Math.min(RECONNECT_CEILING_MS, RECONNECT_FIRST_MS * 2 ** Math.min(attempt, 10));
+  return step + Math.random() * (step / 2);
+}
 const MAX_SOCKETS = 12;
 const VERSION = 1;
 const SEND_BUFFER_SIZE = 32 * 1024;
@@ -114,6 +127,8 @@ export class MuxConnection {
   private lastPingAt = -Infinity;
   private retryTimer = 0;
   private retryAttempt = 0;
+  /** When the current socket was welcomed (`performance.now()`), for the backoff's reset. */
+  private welcomedAt = 0;
   private forcedDrop = false;
   private closed = false;
   private welcomed = false;
@@ -139,6 +154,7 @@ export class MuxConnection {
       this.credentials?.connectionId.fill(0);
       this.credentials?.resumeToken.fill(0);
       this.credentials = undefined;
+      this.retryAttempt = 0;
       this.socket.close(4001, "tracer connection rotation");
       return id;
     }
@@ -332,6 +348,7 @@ export class MuxConnection {
     socket.onerror = () => this.status("Connection interrupted. Reconnecting…");
     socket.onclose = () => {
       if (this.socket !== socket || this.closed) return;
+      const lived = this.welcomed && performance.now() - this.welcomedAt >= STABLE_CONNECTION_MS;
       this.socket = undefined;
       this.decoder = undefined;
       this.welcomed = false;
@@ -342,6 +359,8 @@ export class MuxConnection {
       this.calls.clear();
       const forced = this.forcedDrop;
       this.forcedDrop = false;
+      // A drop we asked for, or the end of a socket that worked for a while, is not a repeat failure.
+      if (lived || forced) this.retryAttempt = 0;
       for (const s of [...this.streams.values()]) s.onDisconnected(forced);
       this.status("Connection lost. Reconnecting…");
       // With no stream left there is nothing to restore; the next `openStream` connects again.
@@ -376,7 +395,7 @@ export class MuxConnection {
           deadline: Date.now() + frame.resumeWindowSeconds * 1000,
         };
         this.welcomed = true;
-        this.retryAttempt = 0;
+        this.welcomedAt = performance.now();
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         for (const l of [...this.welcomeListeners]) l();
         if (!this.resumeSent) this.writersUsed.clear();
@@ -386,7 +405,7 @@ export class MuxConnection {
         const pending = this.calls.get(frame.callId);
         if (!pending) { this.fail("server returned an unexpected action result"); return; }
         this.calls.delete(frame.callId);
-        if (!frame.ok) { pending.reject(new ActionRefused(undefined, refusalReason(frame.json))); return; }
+        if (!frame.ok) { const refusal = refusalReason(frame.json); pending.reject(new ActionRefused(undefined, refusal.reason, refusal.memory)); return; }
         try {
           pending.resolve(asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.json)) as unknown));
         } catch { pending.reject(new Error("the server returned an unreadable result")); }
@@ -426,7 +445,9 @@ export class MuxConnection {
 
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer !== 0) return;
-    const delay = Math.min(1000, 50 * 2 ** Math.min(this.retryAttempt, 4));
+    // Jitter only lengthens a step (by up to half), so the first retry is never sooner than 50 ms and pages dropped
+    // together do not return in step.
+    const delay = reconnectDelay(this.retryAttempt);
     this.retryAttempt += 1;
     this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, delay);
   }
@@ -438,13 +459,20 @@ export class MuxConnection {
   }
 }
 
-/** The `error` word of a refusal body (`{"error":"forbidden"}`), if the body is one. */
-function refusalReason(body: Uint8Array): string | undefined {
+/** Fixed reason codes are additive to the legacy error word; only validated counters reach product copy. */
+function refusalReason(body: Uint8Array): { reason?: string; memory?: { availableMiB: number; sessionCount: number } } {
+  if (body.byteLength > 32 * 1024) return {};
   try {
-    const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as unknown;
-    const reason = typeof parsed === "object" && parsed !== null ? (parsed as { error?: unknown }).error : undefined;
-    return typeof reason === "string" && reason.length <= 64 ? reason : undefined;
-  } catch { return undefined; }
+    const parsed = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as unknown);
+    const reason = parsed.reason ?? parsed.error;
+    if (typeof reason !== "string" || reason.length > 64) return {};
+    const available = parsed.available_mib, count = parsed.session_count;
+    if (reason === "host_memory_low" && typeof available === "number" && Number.isSafeInteger(available) && available >= 0
+      && typeof count === "number" && Number.isSafeInteger(count) && count >= 0) {
+      return { reason, memory: { availableMiB: available, sessionCount: count } };
+    }
+    return { reason };
+  } catch { return {}; }
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

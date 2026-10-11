@@ -109,8 +109,12 @@ def run(binary, state, functional=False, seed=20):
             fence = f'<REPLAY_FENCE_{iteration:02d}>'.encode()
             client.input(fence)
             try:
+                # Attach funds 1MiB, more than this <=512KiB replay and fence.
+                # Refunding this burst adds commands behind the replay and can
+                # retire a valid stream at its eight-command admission bound.
+                # Each next restart attaches with its own fresh funded window.
                 while len(client.data) < len(payload) + len(fence) or client.acked < client.entered:
-                    client.process()
+                    client.process(credit=False)
             except Exception:
                 print(f'restart oracle stalled: iteration={iteration}, position={position}, payload={len(payload)}, observed={observed}, received={len(client.data)}, input sent={client.entered}, input acked={client.acked}, output cursor={client.out}, proxy alive={barrier.thread.is_alive()}, proxy threshold={barrier.threshold}, proxy phase={barrier.phase}', flush=True)
                 raise

@@ -46,3 +46,13 @@ fn last_typist_selects_its_own_real_pty_dimensions() {
 fn initial_attach_requires_explicit_credit_before_replay() {
     probe("scripts/verify-agent-attach-credit.py");
 }
+
+#[test]
+fn reaped_shim_exit_survives_credit_after_starvation_deadline() {
+    probe("scripts/verify-session-exit-credit.py");
+}
+
+#[test]
+fn local_session_counts_and_memory_refusals_follow_real_lifecycle() {
+    probe("scripts/verify-session-bounds.py");
+}

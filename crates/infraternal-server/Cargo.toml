@@ -9,11 +9,18 @@ license.workspace = true
 workspace = true
 
 [features]
-default = ["mesh", "cli-plugin"]
+default = ["mesh", "cli-plugin", "ssh"]
 cli-plugin = []
 mesh = ["dep:infraternal-plugin-mesh"]
+remote = ["infraternal-shim/ca-handoff", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn"]
+
+ssh = ["dep:infraternal-plugin-ssh"]
 
 [dependencies]
+infraternal-shim = { path = "../infraternal-shim", version = "0.1.0", default-features = false }
+infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
+infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
+infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }
 argon2.workspace = true
 axum.workspace = true
 axum-server.workspace = true
@@ -25,6 +32,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_cbor_2.workspace = true
 sha2.workspace = true
+zeroize.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -34,14 +42,18 @@ tracing-subscriber.workspace = true
 futures-util.workspace = true
 nix.workspace = true
 infraternal-protocol.workspace = true
-infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
 infraternal-plugin-mesh = { version = "0.1.0", path = "../plugins/mesh", optional = true, default-features = false, features = ["server"] }
 url.workspace = true
 uuid.workspace = true
 webauthn-rs.workspace = true
 openssl.workspace = true
+infraternal-agent = { path = "../infraternal-agent", version = "0.1.0", default-features = false }
+quinn = { workspace = true, optional = true }
 
 [dev-dependencies]
+hyper.workspace = true
+hyper-util.workspace = true
+tokio-openssl.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 aes-gcm.workspace = true
 hkdf.workspace = true
@@ -49,3 +61,9 @@ nix = { workspace = true, features = ["time"] }
 tower.workspace = true
 http-body-util.workspace = true
 tokio-tungstenite.workspace = true
+# Exercise the existing server HTTP/2 and OpenSSL stack over real TLS in auth tests.
+h2 = "0.4"
+
+[[example]]
+name = "remote_ca_bench"
+required-features = ["remote"]

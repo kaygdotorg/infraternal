@@ -7,7 +7,6 @@
 import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
 import { onDemand } from "../../on-demand";
-import { mountLogBody } from "./log-body";
 
 /** True for kinds whose window is a terminal session: the only kind that can split or take input. */
 export const isTerminal = (rec: WinRec): boolean => rec.model.kind === "terminal" && !rec.model.noAccess;
@@ -24,10 +23,16 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     return;
   }
   if (m.kind === "terminal") {
-    const binding = cx.adapters.sessions.bind(m, { view: rec.owner.view.id, changed: () => {
+    const binding = cx.adapters.sessions.bind(m, { view: rec.owner.view.id, ...(cx.adapters.inventory ? { showSessions: (event?: MouseEvent) => {
+      // The header's existing manager owns lazy loading, host selection and focus.
+      const anchor = rec.card.root.querySelector<HTMLButtonElement>('[data-action="sessions"]');
+      if (anchor) cx.sessionUi?.toggleManager(rec, anchor, event?.detail === 0 ? "keyboard" : "pointer");
+    } } : {}), changed: () => {
       cx.store.changed();
       // A session id the window just learned (a new shell was created on the server): the inventory knows it is open.
       if (m.sessionId) cx.adapters.inventory?.attach(m.host, m.sessionId, m.session ? { name: m.session } : undefined);
+    }, exited: (status) => {
+      if (status === 0) cx.win.close(rec);
     } });
     rec.binding = binding;
     binding.mount(body);
@@ -43,10 +48,22 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     });
     return;
   }
+  if (m.kind === "flow") {
+    // A flow fills its own body (the add-host wizard); the window only gives it a frame and a place on the canvas.
+    body.classList.add("cl-flow");
+    return;
+  }
   if (m.kind === "logs") {
-    const log = mountLogBody(body, m.lines ?? []);
-    rec.stream = log.scroller;
-    rec.pushLog = log.push;
+    // Logs windows are rare (no product path opens one yet), so their body loads on demand (D188), like Settings.
+    // A feed pushes only to a window with `pushLog`, so nothing arrives before the body has mounted its backlog.
+    let gone = false;
+    rec.cleanup = () => { gone = true; };
+    void onDemand(() => import("./log-body.on-demand")).then((mod) => {
+      if (gone) return;
+      const log = mod.mountLogBody(body, m.lines ?? []);
+      rec.stream = log.scroller;
+      rec.pushLog = log.push;
+    });
     return;
   }
   if (m.kind === "containers") {

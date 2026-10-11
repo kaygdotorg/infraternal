@@ -1,0 +1,20 @@
+# Local real-engine verification for #78; see remote-agents-run7.md for scope.
+Running as unit: run-p2854394-i11242141.scope; invocation ID: 16153b12f6ff43788b19a9f4a6374631
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/infraternal_server-1a408e36adb2d6d0)
+
+running 1 test
+test runtime::remote_demo_tests::remote_cli_enrollment_and_browser_terminal_two_processes ... remote_idle VmRSS:	   13384 kB scale=1 full_daemon=true harness_profile=debug cli_profile=external_artifact
+remote infraternal agent: 0 scheduler activations / 10.001s (0.000/min); RSS=13384 KiB; threads=2
+remote_demo control_processes=2 rootless=true join_to_terminal_us=108918 keystroke_roundtrip_us=7086 output_bytes=337 lost=0 duplicated=0 load=0.44 0.75 0.85 1/626 2854470
+remote_authority foreign_owner_denied=true session_count_unchanged=true
+remote_browser viewport=desktop real_server=true real_host_daemon=true production_renderer=true enter_to_glyph_ms=72.937
+remote_browser_probe viewport=desktop n=25 keydown_to_glyph_p50_ms=15.00 p99_ms=17.80
+remote_browser viewport=iphone real_server=true real_host_daemon=true production_renderer=true enter_to_glyph_ms=73.228
+remote_browser_probe viewport=iphone n=25 keydown_to_glyph_p50_ms=14.40 p99_ms=29.70
+remote_browser durable_writers=3 independently_acked=true
+remote_restart recovery_us=33593 disconnected_us=688031 output_bytes=1313 lost=0 duplicated=0 shims=1 load=0.40 0.74 0.84 2/640 2854583
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 133 filtered out; finished in 14.39s
+

@@ -6,7 +6,19 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
+infraternal-plugin-api.workspace = true
+infraternal-shim.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+url.workspace = true
+uuid.workspace = true
+zeroize = "1.9"
+
+[dev-dependencies]
+futures-util.workspace = true
 
 [lints]
 workspace = true

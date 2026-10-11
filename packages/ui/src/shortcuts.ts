@@ -10,17 +10,26 @@
  *   });
  *
  * One shortcut per action: `keys` is a single string, or one string per platform
- * (`{ mac: "⌘K", other: "Ctrl+K" }`), and only the one that works here is ever shown.
+ * (`{ mac: "⌘K", other: "Ctrl+Shift+K" }`), and only the one that works here is ever shown.
  */
 import { isMacPlatform, shortcutLabel, type PlatformKeys } from "./platform";
 import { readLocal, writeLocal } from "./local-pref";
 
 /**
- * A key combination, platform-neutral: `mod` is Command on macOS and Control elsewhere, `code` is the
- * physical key (`KeyG`, `ArrowLeft`, `Digit1`), so a binding means the same key on every layout.
+ * A key combination, platform-neutral: `mod` is Command on macOS and Control elsewhere.
+ *
+ * Two ways to name the key (D222). A printable shortcut names the character it types: `key` is what the
+ * person's layout produces ("k", "/", "?", "]", "Enter"), so "Ctrl+Shift+/" means the slash on a German
+ * keyboard too, and the label reads from the same character. A shortcut without `key` matches the physical
+ * key `code` (`ArrowLeft`, `Digit1`, or a letter on a Mac chord with Option, where Option rewrites the
+ * character). `code` is always set: it is the physical key a key-named combo also stands for, and what
+ * terminalNeeds reads.
+ *
+ * `shift` is compared exactly when set. A key-named combo with `shift` left unset ignores Shift, which is how
+ * "Ctrl++" accepts both "+" and "=" on a US keyboard.
  */
 export interface Combo {
-  code: string; mod?: boolean; shift?: boolean; alt?: boolean;
+  code: string; key?: string; mod?: boolean; shift?: boolean; alt?: boolean;
   /** The Control key itself on macOS, where `mod` is Command (so Control+Option chords can be written). Ignored elsewhere. */
   ctrl?: boolean;
 }
@@ -47,6 +56,11 @@ export interface ShortcutSection {
   shortcuts: Shortcut[];
 }
 
+/** True for keystrokes that belong to something being typed into (a terminal, a field). */
+export function isTypingTarget(target: EventTarget | null): boolean {
+  return !!(target as Element | null)?.closest?.("input, textarea, select, [contenteditable], .terminal-host, [role='textbox'], [role='searchbox']");
+}
+
 /** The area whose sections are always shown, after the current area's. */
 export const GLOBAL_AREA = "global";
 
@@ -54,7 +68,14 @@ export const GLOBAL_AREA = "global";
  * The command palette key, written once. Every surface that names it (the top pill, the view popover,
  * the palette hints, the shortcuts panel) takes it from here so Mac and PC always agree.
  */
-export const PALETTE_KEYS: PlatformKeys = { mac: "⌘K", other: "Ctrl+K" };
+export const PALETTE_KEYS: PlatformKeys = { mac: "⌘K", other: "Ctrl+Shift+K" };
+
+/**
+ * The palette's default chords (D222). Plain Ctrl+K on PC is the terminal's (kill line, clear), so the palette takes
+ * Ctrl+Shift+K there; a Mac keeps ⌘K, which never reaches a terminal. ⌘⇧P and Ctrl+Shift+P are the alternates.
+ */
+export const paletteCombo = (): Combo => platformCombo({ code: "KeyK", key: "k", mod: true, shift: false }, { code: "KeyK", key: "k", mod: true, shift: true });
+export const paletteAlternate = (): Combo => ({ code: "KeyP", key: "p", mod: true, shift: true });
 
 const registered = new Map<string, ShortcutSection>();
 
@@ -73,6 +94,13 @@ export function shortcutSections(areas: string[]): ShortcutSection[] {
 /** The caps of one shortcut: "Ctrl+Shift+L" → Ctrl, Shift, L; "⌘K" → ⌘, K; "Esc" → Esc. */
 export function keyCaps(keys: PlatformKeys | string): string[] {
   const label = shortcutLabel(keys);
+  // A label that ends in the plus key ("Ctrl++", "⌘+") keeps that key as its own cap, not an empty one between separators.
+  if (label.length > 1 && label.endsWith("+")) {
+    const head = label.slice(0, -1);
+    const body = head.endsWith("+") ? head.slice(0, -1) : head;
+    const mods = body.includes("+") ? body.split("+") : /^[⌃⌥⌘⇧]+$/.test(body) ? [...body] : body ? [body] : [];
+    return [...mods, "+"];
+  }
   if (label.length > 1 && label.includes("+")) return label.split("+");
   // Mac modifier glyphs are one cap each (⌘K → ⌘, K); any other single label (Esc, F6) is one cap.
   const modifiers = /^[⌘⌥⌃⇧]+/.exec(label)?.[0] ?? "";
@@ -103,15 +131,59 @@ export function terminalNeeds(combo: Combo): string | undefined {
 const KEY_NAMES: Record<string, string> = { ArrowLeft: "←", ArrowRight: "→", ArrowUp: "↑", ArrowDown: "↓", Escape: "Esc", Enter: "Enter", Space: "Space", Backslash: "\\", Slash: "/", Comma: ",", Period: ".", Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]", Tab: "Tab" };
 export const keyName = (code: string): string => KEY_NAMES[code] ?? code.replace(/^Key/, "").replace(/^Digit/, "");
 
+/**
+ * The character a shifted key types on a US keyboard. Shift changes `event.key` ("]" becomes "}", "/" becomes
+ * "?"), so a chord written with the unshifted character still matches when Shift is held. Other layouts type
+ * their own shifted characters; the combo then names the one the layout types with Shift.
+ */
+const SHIFTED: Record<string, string> = { "/": "?", "]": "}", "[": "{", "=": "+", "-": "_", "0": ")" };
+/** Characters that already carry Shift: a label shows "?" and not "⇧?". */
+const SHIFT_CHARACTERS = new Set(Object.values(SHIFTED).concat("?"));
+
+/**
+ * Whether a keystroke is AltGr (the Ctrl+Alt pair some layouts use to type characters such as @ or €). AltGr
+ * never triggers a shortcut: on those layouts it is how the person types, and Ctrl+Alt is never a default (D206, D222).
+ */
+export const isAltGraph = (event: KeyboardEvent): boolean => event.getModifierState?.("AltGraph") === true;
+
+/** The key label of a combo as people read it: "K", "+", "Enter" ("↩" on a Mac), or the physical key's name. */
+function keyLabelOf(combo: Combo): string {
+  if (combo.key === undefined) return keyName(combo.code);
+  if (combo.key === "Enter") return isMacPlatform() ? "↩" : "Enter";
+  return combo.key.length === 1 ? combo.key.toUpperCase() : combo.key;
+}
+
 /** The label of a combination on this platform: ⌘⇧G on a Mac, Ctrl+Shift+G elsewhere. */
 export function comboLabel(combo: Combo): string {
-  const key = keyName(combo.code);
-  if (isMacPlatform()) return `${combo.ctrl ? "⌃" : ""}${combo.alt ? "⌥" : ""}${combo.shift ? "⇧" : ""}${combo.mod ? "⌘" : ""}${key}`.replace(/^(⌥?⇧?)(⌘)/, "$1$2");
-  return [combo.mod ? "Ctrl" : "", combo.alt ? "Alt" : "", combo.shift ? "Shift" : "", key].filter(Boolean).join("+");
+  // A legacy combo that names "/" with Shift alone is the "?" key; it is shown as the glyph people type.
+  if (combo.code === "Slash" && combo.shift && !combo.mod && !combo.alt && !combo.ctrl && combo.key === undefined) return "?";
+  const key = keyLabelOf(combo);
+  // Shift is written only when the key itself does not already carry it ("?" is typed with Shift, shown without).
+  const shift = combo.shift && !(combo.key !== undefined && SHIFT_CHARACTERS.has(combo.key));
+  // Mac glyphs in the order the reference table writes them: ⌘⇧D, ⌥⌘W, ⌘⇧↩.
+  if (isMacPlatform()) return `${combo.ctrl ? "⌃" : ""}${combo.alt ? "⌥" : ""}${combo.mod ? "⌘" : ""}${shift ? "⇧" : ""}${key}`;
+  // Written in the order the reference table uses on PC: Ctrl+Shift+Alt+Enter.
+  return [combo.mod ? "Ctrl" : "", shift ? "Shift" : "", combo.alt ? "Alt" : "", key].filter(Boolean).join("+");
 }
 export const sameCombo = (a: Combo, b: Combo): boolean => a.code === b.code && Boolean(a.mod) === Boolean(b.mod) && Boolean(a.shift) === Boolean(b.shift) && Boolean(a.alt) === Boolean(b.alt) && Boolean(a.ctrl) === Boolean(b.ctrl);
+/** The combination a keystroke makes, read by physical key (how a rebinding is recorded). */
 export const comboOf = (event: KeyboardEvent): Combo => ({ code: event.code, mod: isMacPlatform() ? event.metaKey : event.ctrlKey, shift: event.shiftKey, alt: event.altKey, ctrl: isMacPlatform() && event.ctrlKey });
-export const matchesCombo = (event: KeyboardEvent, combo: Combo): boolean => sameCombo(comboOf(event), combo);
+
+/** Whether the keystroke is the combo. AltGr never matches; key-named combos compare the character, others the physical key. */
+export function matchesCombo(event: KeyboardEvent, combo: Combo): boolean {
+  if (isAltGraph(event)) return false;
+  const mac = isMacPlatform();
+  if (Boolean(combo.mod) !== (mac ? event.metaKey : event.ctrlKey)) return false;
+  if (Boolean(combo.alt) !== event.altKey) return false;
+  if (Boolean(combo.ctrl) !== (mac && event.ctrlKey)) return false;
+  if (combo.key === undefined) return event.code === combo.code && Boolean(combo.shift) === event.shiftKey;
+  if (combo.shift !== undefined && combo.shift !== event.shiftKey) return false;
+  const typed = event.key.toLowerCase();
+  return typed === combo.key.toLowerCase() || (combo.shift === true && SHIFTED[combo.key] === event.key);
+}
+
+/** The Mac chord or the PC chord, whichever this platform uses. Read where a binding is registered, never cached. */
+export const platformCombo = (mac: Combo, other: Combo): Combo => (isMacPlatform() ? mac : other);
 
 /** The binding in force: the user's, else the default. */
 export function bindingOf(shortcut: Shortcut): Combo | undefined { return overrides[shortcut.id] ?? shortcut.combo; }
@@ -124,6 +196,13 @@ export function setBinding(id: string, combo: Combo | undefined): void {
 export function resetBindings(): void { overrides = {}; writeLocal(STORE, "{}"); for (const l of listeners) l(); }
 export function onBindingsChange(listener: () => void): () => void { listeners.add(listener); return () => { listeners.delete(listener); }; }
 
+/** The label of a shortcut's current binding ("⌘/", "Ctrl+Shift+/"), or "" when it has none. */
+export function bindingLabel(id: string): string {
+  const found = allShortcuts().find((entry) => entry.shortcut.id === id);
+  const combo = found && bindingOf(found.shortcut);
+  return combo ? comboLabel(combo) : "";
+}
+
 /** Every registered shortcut, with the user's binding applied to what is shown (`keys`). */
 export function allShortcuts(): Array<{ section: ShortcutSection; shortcut: Shortcut }> {
   return [...registered.values()].flatMap((section) => section.shortcuts.map((shortcut) => ({ section, shortcut })));
@@ -131,16 +210,38 @@ export function allShortcuts(): Array<{ section: ShortcutSection; shortcut: Shor
 
 /**
  * Runs `handler` when the binding of shortcut `id` is pressed (capture phase, before a terminal sees it),
- * honouring the user's rebinding live. Returns a remover.
+ * honouring the user's rebinding live. Returns a remover. `when` may decline a press (a locked window, a
+ * closed panel): a declined press is not consumed, so it reaches the terminal as it would without the shortcut.
  */
-export function bindShortcut(id: string, handler: (event: KeyboardEvent) => void): () => void {
+export function bindShortcut(id: string, handler: (event: KeyboardEvent) => void, when?: (event: KeyboardEvent) => boolean): () => void {
   const onKey = (event: KeyboardEvent): void => {
     if (document.querySelector("[data-capturing]")) return; // Settings, Shortcuts is listening for a new binding
     const found = allShortcuts().find((entry) => entry.shortcut.id === id);
     const combo = found && bindingOf(found.shortcut);
     // A rebinding replaces the primary combo; the alternates stay only while the shortcut still has its default.
     const spare = found && !isOverridden(id) ? found.shortcut.alternates ?? [] : [];
-    if (!combo || ![combo, ...spare].some((c) => matchesCombo(event, c))) return;
+    const hit = combo && [combo, ...spare].find((c) => matchesCombo(event, c));
+    if (!hit) return;
+    // A key that is typed (no Command, Control or Option: "?", a plain letter) belongs to a text field or a terminal
+    // that has focus. Only a chord reaches the shortcut from inside them, so ⌘/ works in a terminal and "?" does not.
+    if (!hit.mod && !hit.alt && !hit.ctrl && isTypingTarget(event.target)) return;
+    if (when && !when(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    handler(event);
+  };
+  window.addEventListener("keydown", onKey, true);
+  return () => window.removeEventListener("keydown", onKey, true);
+}
+
+/**
+ * Runs `handler` for one fixed combination that is not a rebindable shortcut: a keyboard-lock alternate (D222),
+ * for example. Same capture-phase and `when` rules as bindShortcut.
+ */
+export function bindCombo(combo: Combo, handler: (event: KeyboardEvent) => void, when?: (event: KeyboardEvent) => boolean): () => void {
+  const onKey = (event: KeyboardEvent): void => {
+    if (!matchesCombo(event, combo)) return;
+    if (when && !when(event)) return;
     event.preventDefault();
     event.stopPropagation();
     handler(event);

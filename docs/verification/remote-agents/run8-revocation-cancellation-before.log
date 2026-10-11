@@ -1,0 +1,20 @@
+Running as unit: run-p3796495-i12184240.scope; invocation ID: c6854181bfa24b7a8776cf7c409b5c96
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/remote-agents/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.99s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/remote-agents/target/debug/deps/infraternal_server-1a408e36adb2d6d0)
+
+running 1 test
+
+thread 'remote_http::tests::revocation::abandoned_revocation_write_cannot_leave_committed_authority_live' (3796948) panicked at crates/infraternal-server/src/remote_revocation_http_tests.rs:64:5:
+cancelled caller left a committed revocation active
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test remote_http::tests::revocation::abandoned_revocation_write_cannot_leave_committed_authority_live ... FAILED
+
+failures:
+
+failures:
+    remote_http::tests::revocation::abandoned_revocation_write_cannot_leave_committed_authority_live
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 147 filtered out; finished in 0.09s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`

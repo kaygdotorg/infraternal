@@ -40,6 +40,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `sessions/` | binding terminal windows to sessions | adapter `SessionService` / `SessionBinding`; `live.ts` is the product one |
 | `product.ts` | the product canvas: Console on real sessions + Settings with the sections that exist; a lazy chunk loaded after sign-in | `mountProductCanvas` |
 | `status.ts` | a terminal's status text to the one shared toast | `createStatusRelay` |
+| `addhost/` | the add-host wizard: detect-first sign-in (D183), progress from provisioning events, host key and credential pages | `createAddHost`, adapter `ProvisioningService`, hook `AddHostSink`, `FlowHost` (window kind `flow`, `cx.win.openFlow`) |
 | `backdrop.ts` | the dotted canvas behind the views | `createBackdrop` |
 | `mock/` | everything fake: scenes, roles, fake hosts, a fake Mesh server (`mesh-server.ts`: large meshes, slow, refusing, lossy), devices, probe | `mountMockup` |
 
@@ -52,7 +53,10 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `MeshSource` (`mesh/source.ts`) | `mesh/api.ts` over the one connection (`mesh.list`, `mesh.grant.*`, a `mesh` event topic); mockups run the same code against `mock/mesh-server.ts`; the view is offered only when the server says the person may see it | what #108 adds (access flags, node extras, deltas) |
 | `SharingAdapter` (`sharing/adapter.ts`) | mock only; product offers no sharing | instance sharing (#93, D182) |
 | `SettingsSource` (`views/settings-body.ts`) | built-in sections only | devices, account, users, grants, discovery as their APIs land |
-| `Adapters.containers`, `Adapters.addHost` | absent in the product (view and button not offered) | host API; add-host flow (#78) |
+| `ProvisioningService` (`addhost/service.ts`) | `real.ts`: `/v1/bootstrap/ws` and `/v1/bootstrap/ssh-key` of contracts/ssh-bootstrap.md, plus the endpoints proposed on #87; mockups: the same adapter against the test double | one service, no change |
+| `AddHostSink` (`addhost/service.ts`) | mockups: opens a Console window for each enrolled host (`cx.win.open`), which is how the sidebar tree learns of it | the sessions service adds the host to `hosts()` and calls `onChange`, then `cx.win.open(host)` |
+| `Adapters.containers` | absent in the product (view not offered) | host API |
+| `Adapters.addHost` | `createAddHost(...).open` in `product.ts` (real service, flow window) and in the mockup (test double). The wizard's code is on-demand (`addhost/add-host.on-demand.ts`) | add-host flow (#78, #87) |
 
 A feature whose adapter is missing is **not offered at all** (no view, no button, no palette row). The product
 never shows mockup UI.

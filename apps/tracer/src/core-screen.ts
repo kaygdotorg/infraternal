@@ -6,7 +6,8 @@ import { Spring } from "../../../packages/ui/src/spring";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
-import { keyCaps, PALETTE_KEYS, registerShortcuts } from "../../../packages/ui/src/shortcuts";
+import { bindTerminalFont, TERMINAL_FONT_SHORTCUTS } from "./terminal-font-shortcuts";
+import { bindShortcut, bindingLabel, keyCaps, PALETTE_KEYS, paletteAlternate, paletteCombo, platformCombo, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
 import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
@@ -21,6 +22,11 @@ import { initialFont, rememberFont } from "./font-preference";
 import type { InputModifierState, InputModifiers, TerminalClient } from "./terminal";
 import type { ITheme } from "../vendor/ghostty-web";
 import { recoveryUiEnabled } from "./recovery-ui";
+import { titled } from "./palette-entry";
+
+/** True only in preview builds (see build.ts): there a palette row without a title is an error, in production it is repaired. */
+declare const __CLUSTERS_PREVIEW__: boolean;
+const STRICT_ROWS = typeof __CLUSTERS_PREVIEW__ !== "undefined" && __CLUSTERS_PREVIEW__;
 import { quarterDevicePx, restAt } from "./canvas/springs";
 
 const ROOT = document.documentElement;
@@ -84,6 +90,11 @@ export interface CoreScreen {
   /** Replaces the host/session tree (the canvas lists its windows here); returns the new tree. */
   /** The one shared toast of the screen: every transient message (recovery, connection, flows) uses it. */
   readonly toast: ToastController;
+  /**
+   * Where the sidebar's inbox (D234) attaches. The card and its registry load with the canvas (nothing in them is
+   * needed for the first paint; see canvas/inbox-host.ts); only the toggle's dot and its name live here.
+   */
+  readonly inboxMount: { parent: HTMLElement; before: Element | null; onCount(count: number): void };
   /**
    * The key tray has two rows, one visible at a time: the keyboard row (always) and a canvas row
    * (when a canvas gives it items). Returns a controller to update item state and remove the row.
@@ -237,7 +248,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   app.innerHTML = SCREEN;
   // The modifier names are read per mount, not in the template: "Option" is the Mac key, "Alt" elsewhere.
   for (const mod of ["ctrl", "alt"] as const) get<HTMLElement>(`[data-mod="${mod}"]`).setAttribute("aria-label", modifierName(mod));
-  // The palette key is written per platform (⌘K on a Mac keyboard, Ctrl K elsewhere): one keycap per part.
+  // The palette key is written per platform (⌘K on a Mac keyboard, Ctrl+Shift+K elsewhere): one keycap per part.
   get<HTMLElement>("#capsule-keys").replaceChildren(...keyCaps(shortcutLabel(PALETTE_KEYS)).map((cap) => { const kbd = document.createElement("kbd"); kbd.className = "capsule-kbd"; kbd.textContent = cap; return kbd; }));
   const stage = get<HTMLElement>("#terminal-screen");
   // The canvas preview never draws the status line, from the first frame (the canvas chunk loads a
@@ -291,6 +302,18 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     })
     : undefined;
   if (sidebarFoot) { sidebar.append(sidebarFoot.root); sidebar.dataset.foot = ""; }
+  // While the sidebar is closed the toggle carries a dot, and its name says why, so a pending item is never out of
+  // sight and never only a colour. The card itself is made by the canvas (canvas/inbox-host.ts).
+  let pending = 0;
+  const toggleName = (open: boolean): string => `${open ? "Hide hosts" : "Show hosts"}${pending > 0 ? `, ${pending} waiting for you` : ""}`;
+  const inboxMount = {
+    parent: sidebar, before: sidebarFoot?.root ?? null,
+    onCount: (count: number): void => {
+      pending = count;
+      sidebarToggle.toggleAttribute("data-pending", count > 0);
+      sidebarToggle.setAttribute("aria-label", toggleName(!sidebar.hidden));
+    },
+  };
   const capsule = get<HTMLButtonElement>("#capsule");
   const palette = get<HTMLElement>("#palette");
   const scrim = get<HTMLElement>("#scrim");
@@ -447,7 +470,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
     ...(options.canvas ? [
-      { group: "Help", glyph: "?", label: "Keyboard shortcuts", hint: "?", action: "shortcuts:open" },
+      { group: "Help", glyph: "?", label: "Show keyboard shortcuts", hint: bindingLabel("shortcuts") || "?", action: "shortcuts:open" },
       // The hint carries the aliases, so "version", "build" and "commit" find it.
       { group: "Help", glyph: "⌨", label: "Settings: Shortcuts", hint: "keys · rebind · reset", action: "settings:shortcuts" },
       ...(canvasItems.size ? [{ group: "Help", glyph: "▭", label: "Settings: Toolbar", hint: "rows · order · show · hide", action: "settings:toolbar" }] : []),
@@ -466,7 +489,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // state (Lock or Unlock) are new at each open, so opening the palette re-attaches rows instead of rebuilding them.
   let staticEntries = baseEntries();
   const indexEntry = (entry: PaletteEntry, index: number): void => {
-    paletteSearchText.set(entry, `${entry.group} ${entry.label} ${entry.hint}`.toLocaleLowerCase());
+    // A row without a title throws in preview builds; in production the repaired title is what is searched and shown.
+    const { label } = titled(entry, STRICT_ROWS);
+    paletteSearchText.set(entry, `${entry.group} ${label} ${entry.hint}`.toLocaleLowerCase());
     // Normalize IDs once so typing never sanitizes every matching result.
     paletteOptionIds.set(entry, `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`);
     if (!paletteGroupIds.has(entry.group)) paletteGroupIds.set(entry.group, `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`);
@@ -592,7 +617,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         }
         const label = document.createElement("span");
         label.className = "result-label";
-        label.textContent = entry.label;
+        label.textContent = titled(entry, false).label;
         const hint = document.createElement("span");
         hint.className = "result-hint";
         hint.textContent = entry.hint;
@@ -649,11 +674,25 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     else if (reducedMotion.matches) sidebarToggle.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
     sidebar.hidden = !open;
     sidebarToggle.setAttribute("aria-expanded", String(open));
-    sidebarToggle.setAttribute("aria-label", open ? "Hide hosts" : "Show hosts");
+    sidebarToggle.setAttribute("aria-label", toggleName(open));
     sidebar.classList.toggle("instant", instant);
     if (instant) window.setTimeout(() => sidebar.classList.remove("instant"), 0);
   };
 
+  // The palette owns the top bar while it is open (TASTE): a top-bar control whose box the palette covers fades out
+  // (opacity, 120 ms in style.css) and takes no pointer, and the rest stay. The overlap is measured once, when the
+  // palette opens, so no layout is read per frame; on close every control comes back. Only the top bar's controls are
+  // listed: the canvas's corner buttons (the sidebar toggle, the "+") and the capsule the palette grows from.
+  const PALETTE_COVERABLE = [sidebarToggle, capsule, ...document.querySelectorAll<HTMLElement>(".top > .tabs > .tab-add")];
+  const coverTopBar = (open: boolean): void => {
+    if (!open) { for (const control of PALETTE_COVERABLE) delete control.dataset.paletteCovered; return; }
+    const box = palette.getBoundingClientRect();
+    for (const control of PALETTE_COVERABLE) {
+      const r = control.getBoundingClientRect();
+      const overlaps = r.left < box.right && box.left < r.right && r.top < box.bottom && box.top < r.bottom;
+      if (overlaps) control.dataset.paletteCovered = ""; else delete control.dataset.paletteCovered;
+    }
+  };
   const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer", only?: PaletteEntry[]): void => {
     // The source of the last open or close decides its motion (a key-triggered open is the shorter one).
     palette.dataset.openKind = source;
@@ -671,12 +710,14 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       renderPalette();
       palette.hidden = false;
       scrim.hidden = false;
+      coverTopBar(true);
       paletteInput.focus({ preventScroll: true });
     } else {
       indexScoped(false);
       scopedEntries = undefined;
       palette.hidden = true;
       scrim.hidden = true;
+      coverTopBar(false);
       paletteInput.removeAttribute("aria-activedescendant");
       syncFontPreview();
     }
@@ -684,10 +725,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const sidebarClick = (event: MouseEvent): void => setSidebar(sidebar.hidden, event.detail === 0);
   // The `?` view: the capsule morphs into the shortcut list. Sections come from the registry; the
   // canvas registers its own, and a future container or cluster area registers its sections the same way.
+  // The panel lists the area it was opened in first: from a focused terminal the Terminal section leads (D160).
+  let shortcutsFromTerminal = false;
   const shortcuts = mountShortcutsView({
     pill: capsule,
     stage,
-    areas: () => stage.dataset.canvas === "on" ? ["canvas", "terminal"] : ["terminal"],
+    areas: () => stage.dataset.canvas !== "on" ? ["terminal"] : shortcutsFromTerminal ? ["terminal", "canvas"] : ["canvas", "terminal"],
   });
   const removeShortcuts = [
     registerShortcuts({ id: "terminal", title: "Terminal", area: "terminal", shortcuts: [
@@ -695,11 +738,26 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       { id: "back", label: "Back to the terminal", keys: "Shift+F6" },
     ] }),
     registerShortcuts({ id: "global", title: "Everywhere", area: "global", shortcuts: [
-      { id: "palette", label: "Open the command palette", keys: PALETTE_KEYS },
-      { id: "shortcuts", label: "Show these shortcuts", keys: "?" },
+      { id: "palette", label: "Open the command palette", keys: PALETTE_KEYS, combo: paletteCombo(), alternates: [paletteAlternate()] },
+      // ⌘/ on a Mac and Ctrl+Shift+/ elsewhere work inside a focused terminal, where "?" is typed into the shell; "?" stays
+      // as the alternate outside text fields.
+      { id: "shortcuts", label: "Show these shortcuts", keys: "?", combo: platformCombo({ code: "Slash", key: "/", mod: true, shift: false }, { code: "Slash", key: "/", mod: true, shift: true }), alternates: [{ code: "Slash", key: "?" }] },
       { id: "close", label: "Close the open panel", keys: "Esc" },
+      ...TERMINAL_FONT_SHORTCUTS,
     ] }),
   ];
+  // The palette's chords come from the registry too (D222). A locked window owns every key, but a Mac's ⌘K still opens
+  // the palette, since a terminal never receives ⌘; a declined press goes through to the terminal (Ctrl+K stays the shell's).
+  // The font chords act on the one terminal here; on the canvas the canvas binds them to its active window.
+  if (!options.canvas) removeShortcuts.push(...bindTerminalFont(() => client));
+  removeShortcuts.push(bindShortcut("palette", () => setPalette(palette.hidden, "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
+  // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
+  // screen has the panel, as before.
+  if (options.canvas) removeShortcuts.push(bindShortcut("shortcuts", (event) => {
+    if (!palette.hidden) return;
+    shortcutsFromTerminal = !!(event.target as Element | null)?.closest?.(".terminal-host");
+    shortcuts.toggle();
+  }));
   const capsuleClick = (event: MouseEvent): void => setPalette(true, event.detail === 0 ? "keyboard" : "pointer");
   const scrimClick = (): void => setPalette(false, "pointer");
 
@@ -715,24 +773,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       event.stopPropagation();
       return;
     }
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-      // A locked window owns every key. Terminals never receive ⌘K, so it still opens the palette
-      // on macOS; Ctrl+K belongs to the terminal (kill-line, clear) and goes through.
-      if (stage.hasAttribute("data-locked") && !(isMacPlatform() && event.metaKey)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      setPalette(palette.hidden, "keyboard");
-      return;
-    }
-    if (options.canvas && event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isTypingTarget(event.target) && palette.hidden) {
-      event.preventDefault();
-      event.stopPropagation();
-      shortcuts.toggle();
-      return;
-    }
     if (event.key === "Escape") {
       if (settings?.isOpen || shortcuts.isOpen) return; // the open overlay takes this Escape itself
-      if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); }
+      // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
+      // capture phase, after this window listener) stays open. The capture order is what makes stopping necessary.
+      if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); event.stopPropagation(); }
       else if (!sidebar.hidden) { setSidebar(false, true); event.preventDefault(); }
     }
   };
@@ -1371,6 +1416,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else if (kind === "shortcuts") {
       // After the palette has gone, so the morph starts from the settled pill.
       setPalette(false, source);
+      shortcutsFromTerminal = false;
       requestAnimationFrame(() => shortcuts.open());
       return true;
     } else if (kind === "session" || kind === "host") {
@@ -1423,6 +1469,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     showPalette(only) { setPalette(true, "pointer", only); },
     toast,
+    inboxMount,
     act(action) { runAction(action, "pointer"); },
     appearance: () => ({ theme: currentThemeId, font: committedFont.id, card: cardLevel, windows: windowLevel, background }),
     settingsPanels: { get toolbar() { return toolbarSettings; }, shortcuts: shortcutsPanel, about: aboutPanel },

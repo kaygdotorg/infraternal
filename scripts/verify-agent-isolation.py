@@ -31,8 +31,11 @@ def run(binary):
         client.send(1, 0x16, stalled.bytes + struct.pack('<QQ', cursor, 0))
         assert barrier.held.wait(20)
         started = time.monotonic()
-        for _ in range(9):
-            client.send(1, 0x14, struct.pack('<I', 1))
+        # Credit is fungible flow allowance, so overload the ordered Input
+        # FIFO while this shim cannot drain it. Its eight-slot bound and the
+        # one-second control/sibling deadline remain unchanged.
+        for seq in range(9):
+            client.send(1, 0x10, struct.pack('<Q', seq) + b'x')
         client.send(3, 0x10, struct.pack('<Q', 0) + b"printf 'SIBLING_%s' OK\n")
         client.send(0, 8, struct.pack('<QQ', 123, 456))
         client.sock.settimeout(1)
@@ -53,7 +56,7 @@ def run(binary):
         assert elapsed < 1, elapsed
         assert not barrier.release.is_set()
         assert client.child.poll() is None
-        print(f'held shim State + 9 commands: overloaded stream Close, sibling input/output, control Pong before barrier release in {elapsed*1000:.3f} ms: PASS', flush=True)
+        print(f'held shim State + 9 ordered inputs: overloaded stream Close, sibling input/output, control Pong before barrier release in {elapsed*1000:.3f} ms: PASS', flush=True)
     finally:
         if barrier:
             barrier.close()

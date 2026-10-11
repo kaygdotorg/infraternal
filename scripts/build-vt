@@ -5,7 +5,11 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 output="${1:?Cargo OUT_DIR required}"
 version=a887df42c56f6de86c0fe6da9c4eeca37931e083
 checksum=fb4b2f9ffa0af125983041fdbe4ef94d3fa79fb9f2d22b9c213c0e3847a866b6
-[[ "$(zig version)" == 0.15.2 ]] || { printf 'libghostty-vt requires Zig 0.15.2\n' >&2; exit 1; }
+target_root="${CARGO_TARGET_DIR:-$root/target}"
+[[ "$target_root" = /* ]] || target_root="$root/$target_root"
+"$root/scripts/auth-toolchain"
+zig="$target_root/auth-tools/zig/zig"
+[[ "$("$zig" version)" == 0.15.2 ]] || { printf 'libghostty-vt requires Zig 0.15.2\n' >&2; exit 1; }
 case "${TARGET:?Cargo target required}" in
     x86_64-unknown-linux-musl) vt_target=x86_64-linux-musl ;;
     aarch64-unknown-linux-musl) vt_target=aarch64-linux-musl ;;
@@ -13,8 +17,6 @@ case "${TARGET:?Cargo target required}" in
     aarch64-unknown-linux-gnu) vt_target=aarch64-linux-gnu ;;
     *) printf 'unsupported libghostty-vt target: %s\n' "$TARGET" >&2; exit 1 ;;
 esac
-target_root="${CARGO_TARGET_DIR:-$root/target}"
-[[ "$target_root" = /* ]] || target_root="$root/$target_root"
 vt_tools="$target_root/vt-tools"
 mkdir -p "$vt_tools"
 archive="$vt_tools/$version.tar.gz"
@@ -61,7 +63,7 @@ ZIG
 # Baseline CPU keeps distributed binaries valid on hosts older than the builder.
 # ReleaseSafe retains bounds checks in development; release uses ReleaseFast.
 cd "$source_dir"
-zig build -j2 -Demit-lib-vt=true -Doptimize="$optimize" -Dcpu=baseline \
+"$zig" build -j2 -Demit-lib-vt=true -Doptimize="$optimize" -Dcpu=baseline \
     -Dtarget="$vt_target" -Demit-xcframework=false -Dapp-runtime=none \
     --prefix "$cache_dir/native" --cache-dir "$cache_dir/zig-cache" \
     --global-cache-dir "$vt_tools/zig-cache"

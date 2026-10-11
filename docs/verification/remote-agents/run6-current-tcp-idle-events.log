@@ -1,0 +1,32 @@
+# Records real rootless remote transport regression evidence for #78; diagnostic sample, not fleet certification.
+Running as unit: run-p2717243-i11104990.scope; invocation ID: 175bb279e99a48dc88e54a6f1b3d646e
+
+running 1 test
+remote_idle VmRSS:	   12664 kB scale=1 full_daemon=true harness_profile=debug cli_profile=external_artifact
+remote infraternal agent: +1 activation(s) at 0.502s; tid=2717250
+remote infraternal agent: +2 activation(s) at 2.512s; tid=2717250
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/remote-agents/crates/infraternal-server/../../scripts/idle_canary.py", line 149, in <module>
+    main()
+    ~~~~^^
+  File "/home/kayg/Developer/infraternal/.worktrees/remote-agents/crates/infraternal-server/../../scripts/idle_canary.py", line 138, in main
+    measurement = assert_process_idle(args.pid, args.label, args.seconds,
+                                      report_activation if args.events else None)
+  File "/home/kayg/Developer/infraternal/.worktrees/remote-agents/crates/infraternal-server/../../scripts/idle_canary.py", line 99, in assert_process_idle
+    raise AssertionError(
+    ...<2 lines>...
+    )
+AssertionError: remote infraternal agent scheduled 3 times in 10.001 s: infraternal (tid 2717250): 3
+
+thread 'runtime::remote_demo_tests::remote_cli_enrollment_and_browser_terminal_two_processes' (2717245) panicked at crates/infraternal-server/src/remote_demo_tests.rs:366:5:
+remote infraternal agent idle canary failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test runtime::remote_demo_tests::remote_cli_enrollment_and_browser_terminal_two_processes ... FAILED
+
+failures:
+
+failures:
+    runtime::remote_demo_tests::remote_cli_enrollment_and_browser_terminal_two_processes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 133 filtered out; finished in 10.68s
+

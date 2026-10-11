@@ -1,0 +1,6 @@
+# Read-only o1 trust prerequisite for #78; no SSH or host-key scan performed.
+NetBird ssh --help: default known_hosts ~/.ssh/known_hosts; strict-host-key-checking default true.
+known_hosts_exists=True
+host=10.69.69.51 exit=1 matching_records=0
+host=o1 exit=1 matching_records=0
+host=[10.69.69.51]:22 exit=1 matching_records=0

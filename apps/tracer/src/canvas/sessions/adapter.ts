@@ -30,6 +30,11 @@ export interface SessionBinding {
    * (its terminal is not ready yet), and the caller then disposes it and binds a new one.
    */
   retarget?(model: WindowModel): boolean;
+  /**
+   * Starts a new shell on the same host in this binding, after its session ended (the ended state's one action).
+   * The renderer stays; the new session's id arrives through `changed`, as for any new shell.
+   */
+  openNew?(): void;
   /** The window's box changed; the renderer refits to the new cell grid. */
   refit(): void;
   /** The window closed. The session is not ended. */
@@ -46,7 +51,7 @@ export interface HostEntry {
 
 export interface SessionService {
   /** Binds a terminal window's model to its session (opening one when the model names none). */
-  bind(model: WindowModel, env: { view: ViewId; /** The model gained something worth saving (a session id). */ changed(): void }): SessionBinding;
+  bind(model: WindowModel, env: { view: ViewId; /** Open the existing window-header session picker. */ showSessions?: (event?: MouseEvent) => void; /** The model gained something worth saving (a session id). */ changed(): void; /** The shell exited after its final output painted. */ exited?(status: number): void }): SessionBinding;
   /** A model for a new shell on `host` (a split, a sidebar open, the palette). The shell starts when it is bound. */
   open(host: string, options?: { container?: string; from?: WindowModel; /** An existing session of the host to show (the sidebar, the palette, the manager). */ session?: string }): WindowModel;
   /** Hosts the person can open shells on. */

@@ -1,0 +1,41 @@
+//! Abstracts an already-authenticated leg-B byte channel; inherited socket trust and remote mTLS admission stay with callers [9][64], #78.
+
+use std::{future::Future, io};
+
+/// A full-duplex channel with exactly one reader and one serialized writer.
+/// Implementations retain partial-read progress; cancellation of a partial write
+/// requires retiring the entire connection to avoid frame interleaving.
+pub trait Channel: Send + Sync {
+    /// Native QUIC channels carry raw frames for one externally bound writer.
+    /// TCP and inherited sockets retain the unchanged mux envelope.
+    fn native_stream_id(&self) -> Option<u32> {
+        None
+    }
+
+    /// Active incomplete-frame budget; inherited trusted channels have none.
+    /// Remote adapters supply five seconds. Wholly idle reads arm no timer.
+    fn frame_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+    /// Retire all directions after partial-frame expiry; remote adapters wake readers/writers.
+    fn retire(&self) {}
+    /// Read ready bytes; an empty result is EOF.
+    fn read(&self, bytes: &mut [u8]) -> impl Future<Output = io::Result<usize>> + Send;
+    /// Complete one already-encoded bounded frame.
+    fn write(&self, bytes: &[u8]) -> impl Future<Output = io::Result<()>> + Send;
+}
+
+/// Native writer binding capability; independent of the browser resume bit.
+pub const REMOTE_WRITER_BINDING: u64 = 1 << 1;
+/// Live certificate renewal capability on the authenticated control channel.
+pub const LIVE_RENEWAL: u64 = 1 << 2;
+/// Bound for a single decoded control reply or renewal proof.
+pub const MAX_CONTROL_JSON: usize = 32_768;
+/// Per-connection relay metadata reserve, independent of host session admission.
+/// At 200 idle relay tasks the weighted release measurement was 5,140 private
+/// bytes per stream, including paired fixture overhead. A 32 KiB allowance gives
+/// over six times that measured cost inside a 4 MiB reserve (D214), #151.
+/// Payload storage is separately bounded by frame, queue and QUIC byte limits;
+/// this reserve does not claim to include full payload buffers. u32 stream IDs
+/// retain their protocol range; this limits concurrent streams on one connection.
+pub const MAX_TERMINAL_STREAMS: usize = (4 * 1024 * 1024) / (32 * 1024);

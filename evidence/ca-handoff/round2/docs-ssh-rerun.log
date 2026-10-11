@@ -1,0 +1,7 @@
+Running as unit: run-p1300676-i43200915.scope; invocation ID: 788737b1aa2345c9a153ae7b01837f8a
+
+running 1 test
+test real_cli_askpass_refuses_unregistered_parent_and_cleans_helper ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+

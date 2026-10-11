@@ -25,7 +25,7 @@ async function open(page: Page): Promise<void> {
   await page.context().request.post("/__mock/open-terminal");
   await page.goto("/?mock=1&theme=ink&bg=none");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.fill("#palette-input", "font");
 }
 
