@@ -1,0 +1,60 @@
+Load before: 5.43 15.34 20.51 5/2909 341949
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p341950-i50625615.scope; invocation ID: 1daab21dc4724b94b728906c1f2f32cd
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-erm46te8.js, chunk-tvynw18r.js, chunk-jfr7mp0k.js, chunk-b5qzwpce.js, chunk-b198twp8.js, chunk-8nya9sb3.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-qefz2727.js, chunk-541at500.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-6tdnq4n8.js, chunk-7nczvd3c.js, chunk-q447by66.js, chunk-vb3mny5j.js, chunk-yvhhqffe.js, chunk-0h3m6qd5.js, chunk-za6436fm.js, chunk-zghvwd50.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-cb7b2fhc.js, chunk-j4ddnbxm.js, chunk-7gnyt074.js, chunk-ehq66hqh.js, chunk-8gqdshxw.js, chunk-z3cfkp02.js, chunk-ke02dwy4.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-c92ary8f.js, chunk-2dkpysxm.js, chunk-mg3tp5fb.js, chunk-ad4ddhpe.js, chunk-1d0qvnvb.js, chunk-1va2a3cx.js, chunk-axbkkqp1.js, chunk-nyr62gy5.js, chunk-3sqartcs.js, chunk-mbj3kz84.js, chunk-c1178mf4.js, chunk-c914xt82.js, chunk-czaeccpe.js, chunk-v86b5paa.js, chunk-qm8n00yj.js, chunk-d24pb0pb.js, chunk-6wcw3bp3.js, chunk-e00wr1pf.js, chunk-2e4yh13p.js, chunk-mtkczp5n.js, chunk-r7eg22j8.js, chunk-8a3vcr8j.js, chunk-gh6k6n6e.js, chunk-awxpas01.js, chunk-e76mf7ny.js, chunk-0ttkfpv1.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-d82kjbd4.js, chunk-ket8t2d2.js, chunk-0sxn500c.js, chunk-mmv5bk4h.js, chunk-rnarvcxr.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 2 tests using 1 worker
+
+(node:342244) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/predictive-echo.spec.ts:329:1 › predicted glyph and cursor pixels match confirmed cells at DPR 1 (8.3s)
+  ✘  2 test/predictive-echo.spec.ts:522:1 › predictive echo captures pending and confirmed glyphs across production viewports and themes (19.1s)
+
+
+  1) test/predictive-echo.spec.ts:522:1 › predictive echo captures pending and confirmed glyphs across production viewports and themes 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: "visible"
+    Received: "hidden"
+
+      559 |       // The canvas draws predicted text at the theme's prediction alpha; the cursor stays opaque.
+      560 |       expect(await capturePage.locator(".terminal-text-overlay").evaluate((node) => getComputedStyle(node).visibility))
+    > 561 |         .toBe("visible");
+          |          ^
+      562 |
+      563 |       await expect.poll(async () => {
+      564 |         const state = await (await context.request.get("/__mock/state")).json() as { echoed_text: string };
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/predictive-echo.spec.ts:561:10
+
+    attachment #1: predictive-mobile-ink-pending (image/png) ───────────────────────────────────────
+    test-results/predictive-echo-predictive-5c604-uction-viewports-and-themes/attachments/predictive-mobile-ink-pending-da7dd55b38c3b74917026255e191f55ff79cddce.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: predictive-mobile-ink-confirmed (image/png) ─────────────────────────────────────
+    test-results/predictive-echo-predictive-5c604-uction-viewports-and-themes/attachments/predictive-mobile-ink-confirmed-13a5d73b0a4416f61c8e68c098609f7bb7a8211b.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #3: predictive-mobile-paper-pending (image/png) ─────────────────────────────────────
+    test-results/predictive-echo-predictive-5c604-uction-viewports-and-themes/attachments/predictive-mobile-paper-pending-85217083c45cd77bec42800b7604972898fb1846.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #4: predictive-mobile-paper-confirmed (image/png) ───────────────────────────────────
+    test-results/predictive-echo-predictive-5c604-uction-viewports-and-themes/attachments/predictive-mobile-paper-confirmed-c0e4bca84f580107a78501fea539ecf58b37f389.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #5: predictive-desktop-ink-pending (image/png) ──────────────────────────────────────
+    test-results/predictive-echo-predictive-5c604-uction-viewports-and-themes/attachments/predictive-desktop-ink-pending-2bfb2c40dca8950c660ff62bdf943fbc5b1354d3.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/predictive-echo-predictive-5c604-uction-viewports-and-themes/error-context.md
+
+  1 failed
+    test/predictive-echo.spec.ts:522:1 › predictive echo captures pending and confirmed glyphs across production viewports and themes 
+  1 passed (34.2s)
+
+Invocation exit: 1
+Load after: 5.68 14.28 19.96 12/2946 343531

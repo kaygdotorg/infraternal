@@ -1,0 +1,20 @@
+Running as unit: run-p3956371-i41663077.scope; invocation ID: f04aae90003c48d38f3bfebe3650935e
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 28s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal_server-f8238eea472c7978)
+
+running 1 test
+
+thread 'embedded::regressions::unresponsive_child_is_killed_and_reaped_within_the_shutdown_bound' (3973514) panicked at crates/infraternal-server/src/embedded_regressions.rs:740:5:
+SIGTERM-resistant child must be SIGKILLed and reaped within the bound
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test embedded::regressions::unresponsive_child_is_killed_and_reaped_within_the_shutdown_bound ... FAILED
+
+failures:
+
+failures:
+    embedded::regressions::unresponsive_child_is_killed_and_reaped_within_the_shutdown_bound
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 309 filtered out; finished in 4.01s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`

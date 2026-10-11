@@ -1,8 +1,8 @@
 //! Declares server role commands and their stable CLI contracts.
 
 use infraternal_plugin_api::{
-    ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliHandler, DryRun, JsonSchema,
-    PluginDefinition, SafetyNotes,
+    ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun as DryRun, CliHandler,
+    JsonSchema, PluginDefinition, SafetyNotes,
 };
 
 /// Stable plugin owner used to materialize only the requested CLI definitions.
@@ -11,7 +11,7 @@ pub const ID: &str = "server";
 #[cfg(feature = "cli-plugin")]
 #[must_use]
 pub fn plugin() -> PluginDefinition {
-    PluginDefinition::new(
+    let mut plugin = PluginDefinition::new(
         ID,
         "Create and run the infraternal control plane.",
         [
@@ -21,7 +21,19 @@ pub fn plugin() -> PluginDefinition {
             server_install_compat_action(),
             server_setup_token_action(),
         ],
-    )
+    );
+    for action in &mut plugin.actions {
+        if action.input_schema.properties.contains_key("remote_ca_dir") {
+            action
+                .cli_requires
+                .insert("remote_ca_dir".to_owned(), "remote_listen".to_owned());
+        }
+    }
+    #[cfg(feature = "remote")]
+    plugin
+        .actions
+        .push(infraternal_plugin_remote::cli::restart_action());
+    plugin
 }
 
 #[cfg(feature = "cli-plugin")]
@@ -66,6 +78,14 @@ fn server_init_action() -> ActionDefinition {
     let mut inputs = server_input_fields();
     inputs.extend([
         (
+            "system".to_owned(),
+            JsonSchema::boolean("Install a system service after confirmation."),
+        ),
+        (
+            "user".to_owned(),
+            JsonSchema::boolean("Install a user service after confirmation."),
+        ),
+        (
             "yes".to_owned(),
             JsonSchema::boolean("Confirm server setup."),
         ),
@@ -84,7 +104,7 @@ fn server_init_action() -> ActionDefinition {
     ]);
     ActionDefinition::new(
         ["server", "init"],
-        "Create and start a user service for this server.",
+        "Create and start a service for this server.",
         "Use this command to explicitly set up a persistent server on this node.",
         [
             "Choose the listener, data directory, and public origin.",
@@ -105,7 +125,7 @@ fn server_init_action() -> ActionDefinition {
         destructive: false,
         dry_run_first: true,
         notes: vec![
-            "Without --dry-run, setup enables and starts a user service after confirmation."
+            "Without --dry-run, setup enables and starts the selected service after confirmation."
                 .to_owned(),
         ],
     })
@@ -209,6 +229,12 @@ fn server_setup_token_action() -> ActionDefinition {
         )],
         ["token".to_owned()],
     );
+    let mut output = JsonSchema::command_result_with(token);
+    // The additive alias preserves the deployed local reader without changing data.token.
+    output.properties.insert(
+        "token".to_owned(),
+        JsonSchema::string("Compatibility alias of the one-time capability in data.token."),
+    );
     ActionDefinition::new(
         ["server", "setup-token"],
         "Read the active one-time owner setup capability.",
@@ -225,7 +251,7 @@ fn server_setup_token_action() -> ActionDefinition {
             )],
             std::iter::empty(),
         ),
-        JsonSchema::command_result_with(token),
+        output,
         ActionContract::new(
             ActionTarget::Global,
             ActionEffect::Read,
@@ -273,6 +299,14 @@ fn server_init_result_schema() -> JsonSchema {
 #[cfg(feature = "cli-plugin")]
 fn server_input_fields() -> Vec<(String, JsonSchema)> {
     vec![
+        (
+            "remote_listen".to_owned(),
+            JsonSchema::string("Explicit QUIC and TCP/TLS host listener."),
+        ),
+        (
+            "remote_ca_dir".to_owned(),
+            JsonSchema::string("Retained public CA trust directory; requires remote listener."),
+        ),
         (
             "listen".to_owned(),
             JsonSchema::string("HTTP(S) listener address."),

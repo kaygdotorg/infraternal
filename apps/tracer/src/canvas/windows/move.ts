@@ -7,8 +7,12 @@
  * The gesture listens on `window` because re-parenting the card into the lift layer drops its pointer capture.
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
-import type { Ctx, WinRec } from "../context";
+import type { Ctx, ViewRec, WinRec } from "../context";
 import { el } from "../dom";
+import { columnEls, columnRect, freshColumnId } from "../layout/columns";
+import { COLUMN_GAP } from "../layout/geometry";
+import { groupsLoaded } from "../layout/groups-handle";
+
 import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
 import { endActivity, setActivity } from "../../perf-activity";
 
@@ -28,6 +32,11 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
     slot.style.height = `${rect0.height / cam.z}px`;
     slot.style.flex = "none";
     const colEl = root.parentElement as HTMLElement;
+    // A window in a group, or one that spans, lands through the grid (D212): the layout as it is now, before the lift, is
+    // what the landing works from. A plain window keeps the flat path.
+    // A group's DOM exists only once the grouped module has run (layout/groups.on-demand.ts), so a grouped window finds it loaded.
+    const groupedNow = groupsLoaded();
+    const grid0 = groupedNow && ((rec.model.span ?? 1) > 1 || colEl.parentElement?.classList.contains("cl-group")) ? { g: groupedNow, cols: groupedNow.readColumns(cx, c), w: Number(colEl.dataset.w) || state.metrics.colW, h: root.offsetHeight } : undefined;
     colEl.insertBefore(slot, root);
     const fixedH = root.style.height;
     root.classList.add("is-lifted");
@@ -40,8 +49,8 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
     lift.set(1.025);
     const target = { col: colEl as HTMLElement | undefined, index: 0, fresh: false };
     const place = (clientX: number, clientY: number): void => {
-      const cols = [...c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")];
-      const rects = cols.map((x) => x.getBoundingClientRect());
+      const cols = columnEls(c.colsEl);
+      const rects = cols.map((x) => columnRect(x));
       let nextCol: HTMLElement | undefined, fresh = false;
       if (rects.length && clientX < rects[0]!.left - 20 * cam.z) fresh = true;
       else if (rects.length && clientX > rects[rects.length - 1]!.right + 20 * cam.z) fresh = true;
@@ -53,7 +62,7 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
       let slotCol: HTMLElement;
       if (fresh || !nextCol) {
         const atStart = rects.length > 0 && clientX < rects[0]!.left;
-        slotCol = cx.view.newCol({ id: `c${++state.serial}`, w: Number((colEl as HTMLElement).dataset.w) || state.metrics.colW, wins: [] });
+        slotCol = cx.view.newCol({ id: freshColumnId(cx, c), w: Number((colEl as HTMLElement).dataset.w) || state.metrics.colW, wins: [] });
         if (atStart) c.colsEl.prepend(slotCol); else c.colsEl.append(slotCol);
         slotCol.append(slot);
       } else {
@@ -65,7 +74,7 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
         slotCol.insertBefore(slot, ref);
       }
       // Columns left empty collapse; the ones to their right glide over.
-      for (const x of c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")) if (!x.children.length) x.remove();
+      for (const x of columnEls(c.colsEl)) if (!x.children.length) x.remove();
       target.col = slotCol;
       cx.view.geometry(c);
       flip.play(before);
@@ -97,7 +106,10 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
         if (p !== 0) return;
         root.style.cssText = fixedH ? `height:${fixedH}` : "";
         root.classList.remove("is-lifted");
+        // Through the grid when the window was in one (D212): where it landed is read from the slot and the windows around it.
+        const landedAt = grid0 ? grid0.g.landing({ cols0: grid0.cols, gap: COLUMN_GAP, id: rec.model.id, root, h: grid0.h, w: grid0.w, view: c.colsEl, newId: () => freshColumnId(cx, c), slot }) : undefined;
         slot.replaceWith(root);
+        if (grid0) grid0.g.applyCols(cx, c, grid0.g.fromGrid(c, landedAt ?? grid0.g.settle(grid0.cols)));
         state.movingWindow = false;
         endActivity("drag");
         cx.view.geometry(c);
@@ -114,3 +126,4 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
     window.addEventListener("pointercancel", finish);
     move(first);
   }
+

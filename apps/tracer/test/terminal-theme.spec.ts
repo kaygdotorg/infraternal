@@ -194,7 +194,7 @@ async function saveThemeScreenshot(page: Page, testInfo: TestInfo, themeId: stri
 }
 
 async function chooseTheme(page: Page, id: string, name: string): Promise<void> {
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill(name);
   const option = page.locator(`[role="option"][data-action="theme:${id}"]`);
   await expect(option).toBeVisible();
@@ -247,7 +247,7 @@ test("every curated theme recolors the initial terminal and its existing ANSI te
   for (let index = 0; index < 50; index += 1) {
     const id = THEME_IDS[(index + 1) % THEME_IDS.length]!;
     const active = THEMES[id]!;
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await page.locator("#palette-input").fill(active.name);
     const option = page.locator(`[role="option"][data-action="theme:${id}"]`);
     await expect(option).toBeVisible();

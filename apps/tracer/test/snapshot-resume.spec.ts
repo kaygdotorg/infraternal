@@ -87,7 +87,7 @@ test("a wrapped-ring Snapshot paints echoes and keeps resize, scrollback, and th
 
   const beforeThemeState = await readTerminalState(page);
   const beforeThemePixels = await canvasFingerprint(page);
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("dracula");
   await page.keyboard.press("Enter");
   await expect(page.locator("#terminal-screen")).toHaveAttribute("data-theme", "dracula");

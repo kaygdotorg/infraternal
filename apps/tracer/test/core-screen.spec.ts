@@ -131,7 +131,7 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     paths.push(await saveScreenshot(page, testInfo, `${prefix}-sidebar-open`));
     await page.locator("#sidebar-toggle").click();
     await expect(page.locator("#sidebar")).toBeHidden();
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("Control+Shift+K");
     await expect(page.getByRole("dialog", { name: "Go to anything" })).toBeVisible();
     const paletteMaterial = await page.locator("#palette").evaluate((element) => {
       const style = getComputedStyle(element);
@@ -190,7 +190,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   await page.keyboard.press("Escape");
   await expect(page.locator("#sidebar")).toBeHidden();
 
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   const palette = page.locator("#palette");
   await expect(palette).toBeVisible();
   await expect(palette).not.toContainText(/static example|STATIC|name unavailable|not available yet|not connected/i);
@@ -210,7 +210,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).getPropertyValue("--mesh-image"))).not.toBe(previousMesh);
   expect(backdropWorkers).toHaveLength(1);
 
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("background: plain");
   await page.keyboard.press("Enter");
   await expect(page.locator("#terminal-screen")).toHaveAttribute("data-bg", "none");
@@ -318,7 +318,7 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
       await pageToUse.locator("#sidebar-toggle").click();
       await expect(pageToUse.locator("#sidebar")).toBeVisible();
     } else {
-      await pageToUse.keyboard.press("Control+k");
+      await pageToUse.keyboard.press("Control+Shift+K");
       await expect(pageToUse.getByRole("dialog", { name: "Go to anything" })).toBeVisible();
     }
     const name = `ui-${width}x${height}-${state}-${font}`;

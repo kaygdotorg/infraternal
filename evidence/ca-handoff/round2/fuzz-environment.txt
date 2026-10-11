@@ -1,0 +1,9 @@
+Fuzz execution environment observed during the active run
+timestamp=2026-10-10T20:47:36.658425+00:00
+machine=infraternal-dev
+kernel=6.12.111+deb13-amd64
+arch=x86_64
+logical_cpus=8
+load_observed=19.62 35.74 37.53 13/3210 3498824
+CPUWeight=30; ASan and sanitizer coverage enabled; max_total_time=310 seconds.
+Command-only CARGO_PROFILE_RELEASE_LTO=false and STRIP=none work around nightly sanitizer/fat-LTO link failure; production profiles unchanged.

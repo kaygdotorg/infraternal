@@ -1,0 +1,13 @@
+Running as unit: run-p3429583-i49519640.scope; invocation ID: 44af354c1e8c4da5840546526853576b
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/infraternal-plugin-api)
+   Compiling infraternal-shim v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/infraternal-shim)
+   Compiling infraternal-protocol v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/infraternal-protocol)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/plugins/host-facts)
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/infraternal-mesh)
+   Compiling infraternal-server v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/infraternal-server)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/plugins/mesh)
+   Compiling infraternal v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/infraternal)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/plugins/remote)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/plugins/ssh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/crates/infraternal-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9m 45s

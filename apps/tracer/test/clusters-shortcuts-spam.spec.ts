@@ -27,7 +27,7 @@ for (const gap of [30, 120]) {
       await boot(page);
       let most = 0;
       for (let i = 0; i < presses; i++) {
-        await page.keyboard.press("Shift+Slash");
+        await page.keyboard.press("?");
         most = Math.max(most, (await panels(page)).length);
         await page.waitForTimeout(gap);
       }
@@ -45,7 +45,7 @@ for (const gap of [30, 120]) {
         expect(end).toHaveLength(0);
       }
       // And one more press brings it to the opposite state, whatever came before.
-      await page.keyboard.press("Shift+Slash");
+      await page.keyboard.press("?");
       await page.waitForTimeout(1000);
       expect((await panels(page)).length).toBe(presses % 2 ? 0 : 1);
     });

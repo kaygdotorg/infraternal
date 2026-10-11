@@ -132,8 +132,8 @@ impl RenderOptions {
     }
 }
 
-/// Serialize a command result with stable field ordering and a trailing newline.
-pub fn render_json<T: Serialize>(result: &CommandResult<T>) -> Result<String, serde_json::Error> {
+/// Serialize CLI output, including action-specific compatibility fields, with a trailing newline.
+pub fn render_json<T: Serialize>(result: &T) -> Result<String, serde_json::Error> {
     let mut output = serde_json::to_string_pretty(result)?;
     output.push('\n');
     Ok(output)
@@ -701,10 +701,11 @@ mod tests {
                 let has_allowed_keys = schema.additional_properties != Some(false)
                     || object.keys().all(|key| schema.properties.contains_key(key));
                 let has_valid_values = object.iter().all(|(key, value)| {
-                    schema
-                        .properties
-                        .get(key)
-                        .is_some_and(|property| matches_schema(property, value))
+                    // Only declared fields have value constraints; extra fields follow the schema policy.
+                    match schema.properties.get(key) {
+                        Some(property) => matches_schema(property, value),
+                        None => schema.additional_properties != Some(false),
+                    }
                 });
                 has_required && has_allowed_keys && has_valid_values
             }),

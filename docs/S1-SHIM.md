@@ -4,6 +4,11 @@
 Historical Alacritty implementation and measurements. DECISIONS 94 replaces its
 terminal-state engine; see [the Ghostty migration evidence](S1-VT-GHOSTTY.md)
 for the current serializer, byte budget, build and release comparisons (#22).
+The retained-Exited/ExitAck lifetime evidence below is historical: owner brief
+#151 now retires a dead shell's shim after ordered exit delivery, or within one
+second without a data viewer. See [the current shim contract](../contracts/shim.md)
+and [the session bounds evidence](perf/session-bounds/README.md). Detached live
+shells still survive under D178.
 
 Branch `lane-shim`, base `386acfd3dc6255c7f58f98b4f114d5d7326292ad`.
 Implements DECISIONS 5, 12, 13, 17, 40 and 41 without changing a decision or

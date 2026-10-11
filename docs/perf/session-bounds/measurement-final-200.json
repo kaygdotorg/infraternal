@@ -1,0 +1,155 @@
+{
+  "description": "Final static build, real 200-session PSS/private-dirty measurement and live registry admission/reaping; #151.",
+  "rows": [
+    {
+      "machine": "infraternal-dev",
+      "binary": "/home/kayg/.cache/codex-scratch/session-bounds/target/x86_64-unknown-linux-musl/release/infraternal",
+      "binary_sha256": "4939fc4d3a09c62a3b80febbb7a7fdfa1cef846189cbdb6618899ddcf271f32b",
+      "binary_bytes": 19656320,
+      "dimensions": "80x24",
+      "load": "12.31 11.42 16.24 19/3044 1318596"
+    },
+    {
+      "phase": "registry",
+      "recovered": 200,
+      "admitted": 201,
+      "after_reap": 200
+    },
+    {
+      "phase": "facts-latency",
+      "sessions": 200,
+      "samples": 31,
+      "p50_ms": 317.434,
+      "p99_ms": 347.89,
+      "load": "12.37 11.47 16.18 16/3466 1322062"
+    },
+    {
+      "phase": "empty-200",
+      "role": "shim",
+      "count": 200,
+      "total_kib": {
+        "Pss": 217152,
+        "Private_Dirty": 212952,
+        "Private_Clean": 0
+      },
+      "mean_kib": {
+        "Pss": 1085.76,
+        "Private_Dirty": 1064.76,
+        "Private_Clean": 0.0
+      },
+      "load": "12.37 11.47 16.18 16/3433 1322133"
+    },
+    {
+      "phase": "empty-200",
+      "role": "shell",
+      "count": 200,
+      "total_kib": {
+        "Pss": 122187,
+        "Private_Dirty": 118868,
+        "Private_Clean": 16
+      },
+      "mean_kib": {
+        "Pss": 610.93,
+        "Private_Dirty": 594.34,
+        "Private_Clean": 0.08
+      },
+      "load": "12.37 11.47 16.18 14/3433 1322136"
+    },
+    {
+      "phase": "shim-attribution",
+      "threads": 1
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "5555853ad000-5555853ae000 rw-p 00000000 00:00 0                          [heap]",
+      "pss_kib": 4,
+      "private_dirty_kib": 4
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f73d0c8c000-7f73d0e00000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 48,
+      "private_dirty_kib": 48
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f73d1fde000-7f73d20b3000 rw-p 011dc000 08:01 3976548                    /home/kayg/.cache/codex-scratch/session-bounds/target/x86_64-unknown-linux-musl/release/infraternal",
+      "pss_kib": 852,
+      "private_dirty_kib": 852
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f73d20b3000-7f73d20c2000 rw-p 012b0000 08:01 3976548                    /home/kayg/.cache/codex-scratch/session-bounds/target/x86_64-unknown-linux-musl/release/infraternal",
+      "pss_kib": 60,
+      "private_dirty_kib": 60
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f73d20c2000-7f73d20c7000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 8,
+      "private_dirty_kib": 8
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f73d2110000-7f73d21a6000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 12,
+      "private_dirty_kib": 12
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f73d21ac000-7f73d21ad000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 4,
+      "private_dirty_kib": 4
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f73d21b6000-7f73d21bf000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 24,
+      "private_dirty_kib": 24
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7f73d21c2000-7f73d21c3000 rw-p 00000000 00:00 0 ",
+      "pss_kib": 4,
+      "private_dirty_kib": 4
+    },
+    {
+      "phase": "shim-attribution",
+      "mapping": "7fff4c968000-7fff4c989000 rw-p 00000000 00:00 0                          [stack]",
+      "pss_kib": 48,
+      "private_dirty_kib": 48
+    },
+    {
+      "phase": "scrollback-200",
+      "role": "shim",
+      "count": 200,
+      "total_kib": {
+        "Pss": 3576532,
+        "Private_Dirty": 3572332,
+        "Private_Clean": 0
+      },
+      "mean_kib": {
+        "Pss": 17882.66,
+        "Private_Dirty": 17861.66,
+        "Private_Clean": 0.0
+      },
+      "load": "22.11 13.50 16.81 18/3470 1322842"
+    },
+    {
+      "phase": "scrollback-200",
+      "role": "shell",
+      "count": 200,
+      "total_kib": {
+        "Pss": 134202,
+        "Private_Dirty": 130868,
+        "Private_Clean": 16
+      },
+      "mean_kib": {
+        "Pss": 671.01,
+        "Private_Dirty": 654.34,
+        "Private_Clean": 0.08
+      },
+      "load": "22.11 13.50 16.81 15/3470 1322842"
+    }
+  ]
+}

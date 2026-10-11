@@ -52,7 +52,7 @@ for (const gap of [330, 50]) {
     await api(page, "flyView", "console");
     await page.waitForTimeout(1500);
     await page.locator('.cl[data-view="console"] .ui-window .ui-window-body').first().click({ position: { x: 20, y: 40 } });
-    for (let i = 0; i < 12; i++) { await page.keyboard.press("Control+Shift+Alt+D"); await page.waitForTimeout(150); }
+    for (let i = 0; i < 12; i++) { await page.keyboard.press("Control+Shift+E"); await page.waitForTimeout(150); }
     await page.waitForTimeout(500);
     const col = page.locator('.cl[data-view="console"] .cl-col').first();
     const box = (await col.boundingBox())!;

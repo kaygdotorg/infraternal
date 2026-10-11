@@ -63,11 +63,15 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     }
 
     let mut command = Command::new("systemctl");
+    infraternal_shim::prepare_child(&mut command);
+    command.stdin(std::process::Stdio::null());
     command.args(&scope_args).arg("daemon-reload");
     if !command.status().map_err(InstallError::Io)?.success() {
         return Err(InstallError::Systemctl);
     }
     let mut command = Command::new("systemctl");
+    infraternal_shim::prepare_child(&mut command);
+    command.stdin(std::process::Stdio::null());
     command
         .args(&scope_args)
         .args(["enable", "--now", &service]);
@@ -133,6 +137,14 @@ fn render_unit(
         command.push(OsString::from("--tls-key"));
         command.push(absolute(key)?.into_os_string());
     }
+    if let Some(listen) = args.remote.remote_listen {
+        command.push(OsString::from("--remote-listen"));
+        command.push(OsString::from(listen.to_string()));
+    }
+    if let Some(directory) = &args.remote.remote_ca_dir {
+        command.push(OsString::from("--remote-ca-dir"));
+        command.push(absolute(directory)?.into_os_string());
+    }
     if args.behind_proxy {
         command.push(OsString::from("--behind-proxy"));
         for proxy in &args.trusted_proxies {
@@ -150,8 +162,13 @@ fn render_unit(
     } else {
         "multi-user.target"
     };
+    let reload = if cfg!(feature = "remote") {
+        "ExecReload=/bin/kill -HUP $MAINPID\n"
+    } else {
+        ""
+    };
     Ok(format!(
-        "[Unit]\nDescription=infraternal server ({name})\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy={target}\n"
+        "[Unit]\nDescription=infraternal server ({name})\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={command}\n{reload}Restart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy={target}\n"
     ))
 }
 
@@ -224,6 +241,7 @@ mod tests {
     #[test]
     fn dry_run_prints_a_process_surviving_user_unit() {
         let args = ServerArgs {
+            remote: super::super::remote_server::Options::default(),
             listen: SocketAddr::from(([127, 0, 0, 1], 47361)),
             data: PathBuf::from("./state"),
             public_origin: Some("https://localhost:47361".to_owned()),

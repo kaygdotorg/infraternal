@@ -1,0 +1,12 @@
+ENVIRONMENT phase=before machine=infraternal-dev cores=8 load=8.87 13.04 17.37
+Running as unit: run-p3308388-i45206736.scope; invocation ID: 9fe9555f3ac44c7d99b575f61ae566ab
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal_shim-197c4e7170e4b7b6)
+
+running 1 test
+test pty::child_signal_tests::child_signal_reset_spawn_cost_at_128_children ... METRIC name=child_signal_reset_spawn n=128 rounds=7 baseline_batch_p50_ms=204.024 reset_batch_p50_ms=277.006 delta_per_child_us=570.173 delta_at_128_children_ms=72.982 idle_wakeups=0 retained_bytes_per_child=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 75 filtered out; finished in 3.42s
+
+ENVIRONMENT phase=after load=9.92 13.19 17.40

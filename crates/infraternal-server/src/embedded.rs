@@ -1,5 +1,9 @@
-//! Relays control calls and resumable terminal streams through the local socketpair infraternal agent [9][13].
+//! Relays control calls and resumable terminal streams through local socketpair or admitted remote infraternal agents [9][13][64].
 
+#[cfg(feature = "remote")]
+use crate::remote_link::RemoteLink;
+#[cfg(not(feature = "remote"))]
+type RemoteLink = ();
 use bytes::{Buf, Bytes, BytesMut};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
@@ -34,6 +38,11 @@ const MAX_OUTPUT_CREDIT: u64 = 8 * 1024 * 1024;
 const INPUT_CAPACITY: usize = 4;
 const READ_CHUNK: usize = 16 * 1024;
 const MAX_BUFFERED_WIRE: usize = MAX_FRAME_LEN + READ_CHUNK + 10;
+/// Reconnect pauses for a lost infraternal agent link, and how long a link must
+/// live before a loss counts as fresh rather than as the same failure again.
+const RECONNECT_FLOOR: Duration = Duration::from_millis(200);
+const RECONNECT_CEILING: Duration = Duration::from_secs(30);
+const STABLE_LINK: Duration = Duration::from_secs(10);
 
 /// Protocol or process failures are deliberately independent of user input and agent log output.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -47,6 +56,13 @@ pub(crate) enum AgentError {
     /// The terminal action was rejected by the embedded infraternal agent.
     #[error("terminal action failed")]
     Rejected,
+    /// A public terminal admission refusal; transport failures remain generic.
+    #[error("terminal open refused")]
+    OpenRefused(infraternal_plugin_api::admission::OpenRefusal),
+    /// The remote peer did not negotiate live renewal.
+    #[error("remote infraternal agent lacks live renewal")]
+    #[cfg(feature = "remote")]
+    Unsupported,
 }
 
 /// Dimensions passed to the core terminal.open action.
@@ -77,7 +93,7 @@ pub(crate) enum TerminalOutput {
     Closed { code: u16 },
 }
 
-/// A single client attachment to a terminal session owned by the embedded infraternal agent.
+/// A single client attachment to a terminal session owned by its host infraternal agent.
 pub(crate) struct TerminalAttachment {
     handle: AttachmentHandle,
     output: mpsc::Receiver<TerminalOutput>,
@@ -137,11 +153,76 @@ impl EmbeddedAgent {
     /// Start the on-demand agent supervisor for the server's own executable.
     pub fn spawn(executable: PathBuf) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-        tokio::spawn(run_actor(executable, None, receiver));
+        tokio::spawn(run_actor(
+            Source::Embedded {
+                executable,
+                initial: None,
+            },
+            receiver,
+        ));
         Self {
             commands,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// Fail the unused embedded route in remote-only fixtures; fallback must not create local PTYs.
+    #[cfg(all(test, feature = "remote"))]
+    pub(crate) fn unavailable() -> Self {
+        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        drop(receiver);
+        Self {
+            commands,
+            next_attachment_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    /// Reuse the terminal actor for an enrolled host; only admitted listeners supply links.
+    #[cfg(feature = "remote")]
+    pub(crate) fn remote(uid: u32) -> (Self, mpsc::Sender<RemoteLink>) {
+        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (accepts, incoming) = mpsc::channel(1);
+        tokio::spawn(run_actor(
+            Source::Remote {
+                incoming,
+                uid,
+                pending: None,
+            },
+            receiver,
+        ));
+        (
+            Self {
+                commands,
+                next_attachment_id: Arc::new(AtomicU64::new(1)),
+            },
+            accepts,
+        )
+    }
+
+    /// A bounded control call shares the existing id allocator and reply dispatcher.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn control_call(
+        &self,
+        action: &'static str,
+        json: Vec<u8>,
+    ) -> Result<Vec<u8>, AgentError> {
+        if json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON {
+            return Err(AgentError::Rejected);
+        }
+        let (reply, result) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            self.commands
+                .send(Command::Control {
+                    action,
+                    json,
+                    reply,
+                })
+                .await
+                .map_err(|_| AgentError::Unavailable)?;
+            result.await.map_err(|_| AgentError::Unavailable)?
+        })
+        .await
+        .map_err(|_| AgentError::Unavailable)?
     }
 
     /// Open a terminal on the embedded infraternal agent's host.
@@ -221,7 +302,13 @@ impl EmbeddedAgent {
     #[cfg(test)]
     pub(crate) fn from_test_socket(stream: UnixStream) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-        tokio::spawn(run_actor(PathBuf::new(), Some(stream), receiver));
+        tokio::spawn(run_actor(
+            Source::Embedded {
+                executable: PathBuf::new(),
+                initial: Some(stream),
+            },
+            receiver,
+        ));
         Self {
             commands,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
@@ -230,6 +317,12 @@ impl EmbeddedAgent {
 }
 
 enum Command {
+    #[cfg(feature = "remote")]
+    Control {
+        action: &'static str,
+        json: Vec<u8>,
+        reply: oneshot::Sender<Result<Vec<u8>, AgentError>>,
+    },
     Open {
         size: TerminalSize,
         reply: oneshot::Sender<Result<[u8; 16], AgentError>>,
@@ -268,9 +361,126 @@ struct AttachmentState {
     output: mpsc::Sender<TerminalOutput>,
 }
 
+enum Peer {
+    Local {
+        reader: OwnedReadHalf,
+        writer: OwnedWriteHalf,
+    },
+    #[cfg(feature = "remote")]
+    Remote(Box<RemoteLink>),
+}
+
+enum Source {
+    Embedded {
+        executable: PathBuf,
+        initial: Option<UnixStream>,
+    },
+    #[cfg(feature = "remote")]
+    Remote {
+        incoming: mpsc::Receiver<RemoteLink>,
+        uid: u32,
+        pending: Option<Box<RemoteLink>>,
+    },
+}
+
+impl Source {
+    async fn connect(&mut self) -> Result<AgentConnection, AgentError> {
+        match self {
+            Self::Embedded {
+                executable,
+                initial,
+            } => connect_agent(executable, initial.take()).await,
+            #[cfg(feature = "remote")]
+            Self::Remote {
+                incoming,
+                uid,
+                pending,
+            } => {
+                let link = if let Some(link) = pending.take() {
+                    *link
+                } else {
+                    incoming.recv().await.ok_or(AgentError::Unavailable)?
+                };
+                let mut receive = BytesMut::with_capacity(4096);
+                let mut scratch = vec![0; READ_CHUNK];
+                let hello = Frame::Hello {
+                    version: 1,
+                    caps: infraternal_agent::remote_quic::REMOTE_WRITER_BINDING,
+                    client_info: "infraternal-server/0.1",
+                };
+                let mut encode = Vec::new();
+                encode_muxed_frame_into(0, &hello, &mut encode)
+                    .map_err(|_| AgentError::Protocol)?;
+                let handshake = async {
+                    link.write(0, &hello, &encode)
+                        .await
+                        .map_err(|_| AgentError::Unavailable)?;
+                    loop {
+                        match decode_muxed_frame(&receive) {
+                            Ok(decoded) => {
+                                if decoded.stream_id != 0
+                                    || !matches!(decoded.frame, Frame::Hello { version: 1, .. })
+                                {
+                                    return Err(AgentError::Protocol);
+                                }
+                                link.hello(&decoded.frame)
+                                    .await
+                                    .map_err(|_| AgentError::Protocol)?;
+                                receive.advance(decoded.wire_len);
+                                return Ok(());
+                            }
+                            Err(DecodeError::Incomplete) => {}
+                            Err(_) => return Err(AgentError::Protocol),
+                        }
+                        if link
+                            .read(&mut receive, &mut scratch)
+                            .await
+                            .map_err(|_| AgentError::Unavailable)?
+                            == 0
+                        {
+                            return Err(AgentError::Unavailable);
+                        }
+                    }
+                };
+                tokio::time::timeout(Duration::from_secs(5), handshake)
+                    .await
+                    .map_err(|_| AgentError::Unavailable)??;
+                Ok(AgentConnection {
+                    peer: Peer::Remote(Box::new(link)),
+                    execution_uid: *uid,
+                    pid: None,
+                    receive,
+                    scratch,
+                    encode: Vec::new(),
+                    next_call_id: 1,
+                })
+            }
+        }
+    }
+    async fn replacement(&mut self) -> Option<RemoteLink> {
+        match self {
+            #[cfg(feature = "remote")]
+            Self::Remote { incoming, .. } => incoming.recv().await,
+            Self::Embedded { .. } => std::future::pending().await,
+        }
+    }
+    fn closed(&self) -> bool {
+        match self {
+            Self::Embedded { .. } => false,
+            #[cfg(feature = "remote")]
+            Self::Remote {
+                incoming, pending, ..
+            } => pending.is_none() && incoming.is_closed() && incoming.is_empty(),
+        }
+    }
+    fn remote(&self) -> bool {
+        !matches!(self, Self::Embedded { .. })
+    }
+}
+
 struct AgentConnection {
-    reader: OwnedReadHalf,
-    writer: OwnedWriteHalf,
+    peer: Peer,
+    execution_uid: u32,
     pid: Option<nix::unistd::Pid>,
     receive: BytesMut,
     scratch: Vec<u8>,
@@ -316,13 +526,27 @@ enum Incoming {
     Disconnected,
 }
 
-struct PendingCall {
-    reply: PendingReply,
-}
-
-enum PendingReply {
-    Open(oneshot::Sender<Result<[u8; 16], AgentError>>),
+enum PendingCall {
     Action(oneshot::Sender<Result<Vec<u8>, AgentError>>),
+    Open(oneshot::Sender<Result<[u8; 16], AgentError>>),
+    #[cfg(feature = "remote")]
+    Control(oneshot::Sender<Result<Vec<u8>, AgentError>>),
+}
+impl PendingCall {
+    fn refuse(self, error: AgentError) {
+        match self {
+            Self::Open(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Action(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            #[cfg(feature = "remote")]
+            Self::Control(reply) => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -351,29 +575,28 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
-async fn run_actor(
-    executable: PathBuf,
-    initial_connection: Option<UnixStream>,
-    mut commands: mpsc::Receiver<Command>,
-) {
-    let mut initial_connection = initial_connection;
+async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
     let mut attachments = HashMap::<u64, AttachmentState>::new();
     let mut routes = HashMap::<u32, u64>::new();
     let mut pending = HashMap::<u32, PendingCall>::new();
     let mut connection: Option<AgentConnection> = None;
-    let mut backoff = Duration::from_millis(200);
+    let mut backoff = RECONNECT_FLOOR;
+    let mut connected_at = std::time::Instant::now();
     let mut first_attempt = true;
 
     loop {
         if connection.is_none() {
+            if source.closed() {
+                return;
+            }
             if commands.is_closed() {
                 return;
             }
-            if !first_attempt {
+            if !first_attempt && !source.remote() {
                 tokio::time::sleep(backoff).await;
             }
             first_attempt = false;
-            if let Ok(mut fresh) = connect_agent(&executable, initial_connection.take()).await {
+            if let Ok(mut fresh) = source.connect().await {
                 if !reattach_all(&mut fresh, &mut attachments, &mut routes).await {
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                     routes.clear();
@@ -381,11 +604,9 @@ async fn run_actor(
                     continue;
                 }
                 connection = Some(fresh);
-                backoff = Duration::from_millis(200);
+                connected_at = std::time::Instant::now();
             } else {
-                tracing::warn!(
-                    "embedded infraternal agent connection failed; retrying with backoff"
-                );
+                tracing::warn!("infraternal agent connection failed; awaiting reconnect");
                 backoff = (backoff * 2).min(Duration::from_secs(30));
                 continue;
             }
@@ -395,6 +616,15 @@ async fn run_actor(
             continue;
         };
         tokio::select! {
+            replacement = source.replacement(), if source.remote() => {
+                #[cfg(feature = "remote")]
+                let Some(replacement) = replacement else { return; };
+                #[cfg(not(feature = "remote"))]
+                let Some(()) = replacement else { return; };
+                #[cfg(feature = "remote")]
+                if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
+                if let Some(old) = connection.take() { connection_lost(old,&mut attachments,&mut routes,&mut pending).await; }
+            }
             command = commands.recv() => {
                 let Some(command) = command else { return; };
                 let ok = process_command(
@@ -408,7 +638,7 @@ async fn run_actor(
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
                 }
@@ -418,7 +648,7 @@ async fn run_actor(
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
                     continue;
@@ -427,12 +657,25 @@ async fn run_actor(
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
                 }
             }
         }
+    }
+}
+
+/// The pause before the next infraternal agent start after a lost link. A link
+/// that lived for a while starts over at the floor; one that died young doubles
+/// the pause, up to the ceiling. Resetting on every successful connect let a
+/// request that kills each new process (a dead session's re-sent `AttachTerm`
+/// did) restart it about twice a second, forever (#158).
+fn after_loss(backoff: Duration, connected_at: std::time::Instant) -> Duration {
+    if connected_at.elapsed() >= STABLE_LINK {
+        RECONNECT_FLOOR
+    } else {
+        (backoff * 2).min(RECONNECT_CEILING)
     }
 }
 
@@ -483,8 +726,8 @@ async fn connect_agent(
     };
     let (reader, writer) = socket.into_split();
     Ok(AgentConnection {
-        reader,
-        writer,
+        peer: Peer::Local { reader, writer },
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
         pid,
         receive,
         scratch,
@@ -539,7 +782,51 @@ async fn process_command(
     pending: &mut HashMap<u32, PendingCall>,
 ) -> bool {
     match command {
+        #[cfg(feature = "remote")]
+        Command::Control {
+            action,
+            json,
+            reply,
+        } => {
+            if reply.is_closed() {
+                return true;
+            }
+            if !matches!(&connection.peer, Peer::Remote(link) if link.supports_renewal()) {
+                let _ = reply.send(Err(AgentError::Unsupported));
+                return true;
+            }
+            if json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON
+                || pending
+                    .values()
+                    .any(|call| matches!(call, PendingCall::Control(_)))
+            {
+                let _ = reply.send(Err(AgentError::Rejected));
+                return true;
+            }
+            let Some(call_id) = allocate_call_id(connection, pending) else {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return true;
+            };
+            let frame = Frame::Call {
+                call_id,
+                action_id: action,
+                input_json: &json,
+            };
+            if !write_frame(connection, CONTROL_STREAM, &frame).await {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
+            pending.insert(call_id, PendingCall::Control(reply));
+            true
+        }
         Command::Open { size, reply } => {
+            #[cfg(feature = "remote")]
+            if let Peer::Remote(link) = &connection.peer
+                && link.admit_operation().await.is_err()
+            {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
             if pending.len() >= COMMAND_CAPACITY {
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
@@ -548,11 +835,11 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
             };
-            // The trusted local host identity never comes from browser JSON.
+            // The trusted enrolled or local host identity never comes from browser JSON.
             // Pixel geometry is sent later through Resize; the daemon opens a
             // PTY using its approved {uid, cols, rows} action schema [9][13].
             let request = serde_json::json!({
-                "uid": nix::unistd::Uid::effective().as_raw(),
+                "uid": connection.execution_uid,
                 "cols": size.cols,
                 "rows": size.rows,
             });
@@ -569,12 +856,7 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return false;
             }
-            pending.insert(
-                call_id,
-                PendingCall {
-                    reply: PendingReply::Open(reply),
-                },
-            );
+            pending.insert(call_id, PendingCall::Open(reply));
             true
         }
         Command::Call {
@@ -599,12 +881,7 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return false;
             }
-            pending.insert(
-                call_id,
-                PendingCall {
-                    reply: PendingReply::Action(reply),
-                },
-            );
+            pending.insert(call_id, PendingCall::Action(reply));
             true
         }
         Command::Attach {
@@ -616,6 +893,13 @@ async fn process_command(
             output,
             reply,
         } => {
+            #[cfg(feature = "remote")]
+            if let Peer::Remote(link) = &connection.peer
+                && link.admit_operation().await.is_err()
+            {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
             if stream_id == 0 || stream_id % 2 != 0 {
                 let _ = reply.send(Err(AgentError::Protocol));
                 return true;
@@ -826,6 +1110,8 @@ enum TerminalNotice {
         session_id: String,
         status: i32,
         final_seq: u64,
+        #[serde(default)]
+        retired: bool,
     },
 }
 
@@ -849,8 +1135,9 @@ impl TerminalNotice {
                 session_id,
                 status,
                 final_seq,
+                retired,
             } => {
-                let _ = (status, final_seq);
+                let _ = (status, final_seq, retired);
                 session_id
             }
         }
@@ -872,18 +1159,29 @@ async fn process_incoming(
                 return false;
             };
             if !ok {
-                match call.reply {
-                    PendingReply::Open(reply) => {
+                match call {
+                    PendingCall::Open(reply) => {
+                        let error =
+                            if json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON {
+                                serde_json::from_slice(&json)
+                                    .map_or(AgentError::Rejected, AgentError::OpenRefused)
+                            } else {
+                                AgentError::Rejected
+                            };
+                        let _ = reply.send(Err(error));
+                    }
+                    PendingCall::Action(reply) => {
                         let _ = reply.send(Err(AgentError::Rejected));
                     }
-                    PendingReply::Action(reply) => {
+                    #[cfg(feature = "remote")]
+                    PendingCall::Control(reply) => {
                         let _ = reply.send(Err(AgentError::Rejected));
                     }
                 }
                 return true;
             }
-            match call.reply {
-                PendingReply::Open(reply) => {
+            match call {
+                PendingCall::Open(reply) => {
                     let session = serde_json::from_slice::<OpenResult>(&json);
                     let result = session
                         .ok()
@@ -891,7 +1189,11 @@ async fn process_incoming(
                         .ok_or(AgentError::Protocol);
                     let _ = reply.send(result);
                 }
-                PendingReply::Action(reply) => {
+                #[cfg(feature = "remote")]
+                PendingCall::Control(reply) => {
+                    let _ = reply.send(Ok(json));
+                }
+                PendingCall::Action(reply) => {
                     let result = if json.len() <= infraternal_plugin_api::MAX_ACTION_BYTES {
                         Ok(json)
                     } else {
@@ -1109,11 +1411,15 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                 };
                 let stream_id = decoded.stream_id;
                 let frame = match decoded.frame {
-                    Frame::Result { call_id, ok, json } => Incoming::Result {
-                        call_id,
-                        ok,
-                        json: json.to_vec(),
-                    },
+                    Frame::Result { call_id, ok, json }
+                        if json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON =>
+                    {
+                        Incoming::Result {
+                            call_id,
+                            ok,
+                            json: json.to_vec(),
+                        }
+                    }
                     Frame::Output { out_seq, bytes } => Incoming::Output {
                         stream_id,
                         out_seq,
@@ -1164,13 +1470,23 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
         if connection.receive.len() >= MAX_BUFFERED_WIRE {
             return None;
         }
-        let read = connection.reader.read(&mut connection.scratch).await.ok()?;
+        let read = match &mut connection.peer {
+            Peer::Local { reader, .. } => {
+                let count = reader.read(&mut connection.scratch).await.ok()?;
+                connection
+                    .receive
+                    .extend_from_slice(&connection.scratch[..count]);
+                count
+            }
+            #[cfg(feature = "remote")]
+            Peer::Remote(link) => link
+                .read(&mut connection.receive, &mut connection.scratch)
+                .await
+                .ok()?,
+        };
         if read == 0 {
             return Some(Incoming::Disconnected);
         }
-        connection
-            .receive
-            .extend_from_slice(&connection.scratch[..read]);
     }
 }
 
@@ -1185,12 +1501,19 @@ fn share_payload(wire: &Bytes, payload: &[u8]) -> Option<Bytes> {
 }
 
 async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &Frame<'_>) -> bool {
-    let (writer, encode) = (&mut connection.writer, &mut connection.encode);
+    let (peer, encode) = (&mut connection.peer, &mut connection.encode);
     if encode_muxed_frame_into(stream_id, frame, encode).is_err() {
         return false;
     }
     matches!(
-        tokio::time::timeout(Duration::from_secs(1), writer.write_all(encode)).await,
+        tokio::time::timeout(Duration::from_secs(1), async {
+            match peer {
+                Peer::Local { writer, .. } => writer.write_all(encode).await,
+                #[cfg(feature = "remote")]
+                Peer::Remote(link) => link.write(stream_id, frame, encode).await,
+            }
+        })
+        .await,
         Ok(Ok(()))
     )
 }
@@ -1203,14 +1526,7 @@ async fn connection_lost(
 ) {
     routes.clear();
     for (_, call) in pending.drain() {
-        match call.reply {
-            PendingReply::Open(reply) => {
-                let _ = reply.send(Err(AgentError::Unavailable));
-            }
-            PendingReply::Action(reply) => {
-                let _ = reply.send(Err(AgentError::Unavailable));
-            }
-        }
+        call.refuse(AgentError::Unavailable);
     }
     if let Some(pid) = connection.pid.take() {
         stop_child(pid).await;
@@ -1270,7 +1586,20 @@ fn spawn_socketpair_agent(
             .add_close(child_fd)
             .map_err(|_| AgentError::Unavailable)?;
     }
-    let attributes = PosixSpawnAttr::init().map_err(|_| AgentError::Unavailable)?;
+    // The parent may still be handling an inherited private input channel.
+    // Child stdin is always explicit, independent of startup import cleanup.
+    actions
+        .add_open(
+            0,
+            std::path::Path::new("/dev/null"),
+            nix::fcntl::OFlag::O_RDONLY,
+            nix::sys::stat::Mode::empty(),
+        )
+        .map_err(|_| AgentError::Unavailable)?;
+    let mut attributes = PosixSpawnAttr::init().map_err(|_| AgentError::Unavailable)?;
+    // Runtime workers inherit the server's early blocked reload mask. Child
+    // roles and PTY shells must start with their own normal signal policy.
+    infraternal_shim::prepare_spawn(&mut attributes).map_err(|_| AgentError::Unavailable)?;
     let pid = posix_spawn(path.as_c_str(), &actions, &attributes, &argv, &envp)
         .map_err(|_| AgentError::Unavailable)?;
     drop(child);
@@ -1294,15 +1623,36 @@ fn spawn_socketpair_agent(
 
 #[cfg(unix)]
 async fn stop_child(pid: nix::unistd::Pid) {
-    use nix::{
-        sys::{
-            signal::{Signal, kill},
-            wait::waitpid,
-        },
-        unistd::Pid,
+    use nix::sys::{
+        signal::{Signal, kill},
+        wait::{WaitPidFlag, WaitStatus, waitpid},
     };
-    let _ = kill(pid, Signal::SIGTERM);
-    let _ = tokio::task::spawn_blocking(move || waitpid(Pid::from_raw(pid.as_raw()), None)).await;
+    // Keep escalation inside the blocking task: runtime cancellation may drop
+    // its async waiter, but must not cancel the SIGKILL deadline or reaping.
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = kill(pid, Signal::SIGTERM);
+        let graceful = std::time::Instant::now() + Duration::from_secs(2);
+        let final_deadline = graceful + Duration::from_secs(1);
+        let mut escalated = false;
+        loop {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => {}
+                // Reap only this child. On return, no later signal can target a
+                // reused PID; ECHILD also retires the identity immediately.
+                _ => return,
+            }
+            let now = std::time::Instant::now();
+            if !escalated && now >= graceful {
+                let _ = kill(pid, Signal::SIGKILL);
+                escalated = true;
+            }
+            if now >= final_deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })
+    .await;
 }
 
 #[cfg(not(unix))]

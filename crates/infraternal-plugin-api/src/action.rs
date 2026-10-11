@@ -337,6 +337,14 @@ pub enum CliHandler {
     EmbeddedAgent,
     /// Run the internal session shim process.
     SessionShim,
+    /// Enroll or reconnect an existing remote node.
+    RemoteAgent,
+    /// Request a CA-preserving server replacement.
+    ServerRestart,
+    /// Remove a host using fresh administrator proof.
+    RemoveHost,
+    /// Answer a private SSH authentication prompt.
+    SshAskpass,
 }
 
 /// Example invocation and its user-facing result.
@@ -388,6 +396,12 @@ pub struct ActionDefinition {
     /// Original hosted descriptor, retaining schema references and any-of permissions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hosted: Option<crate::ActionDef>,
+    /// Named input dependencies checked before a CLI handler runs.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub cli_requires: BTreeMap<String, String>,
+    /// Ordered positional CLI inputs; other inputs remain named options.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cli_positionals: Vec<String>,
     /// CLI implementation selected by this registered action.
     #[serde(skip)]
     pub cli_handler: CliHandler,
@@ -419,6 +433,8 @@ impl ActionDefinition {
             contract,
             hosted: None,
             cli_handler: CliHandler::Unavailable,
+            cli_positionals: Vec::new(),
+            cli_requires: BTreeMap::new(),
         }
     }
 
@@ -426,6 +442,16 @@ impl ActionDefinition {
     #[must_use]
     pub const fn with_cli_handler(mut self, handler: CliHandler) -> Self {
         self.cli_handler = handler;
+        self
+    }
+
+    /// Preserve an operator command's positional arguments in generated adapters.
+    #[must_use]
+    pub fn with_cli_positionals(
+        mut self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.cli_positionals = names.into_iter().map(Into::into).collect();
         self
     }
 

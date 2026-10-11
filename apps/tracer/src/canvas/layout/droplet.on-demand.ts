@@ -24,12 +24,18 @@
  * the animation only moves the contents with their shapes (translate) and clips the content of a
  * shape that is shorter than its frame. The layer is at most a few thousand pixels, one draw call.
  */
+import { scrollerOf } from "./columns";
 import { Spring } from "../../../../../packages/ui/src/spring";
 
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
 const smooth = (a: number, b: number, v: number): number => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 
 const K = 64; // how far apart (px) the shapes are when the neck lets go
+// Scale frequency, preserving damping ratios and the physical overshoot. The
+// two phases settle in about 600 ms, leaving room for missed rendering frames
+// inside the one-second interaction budget [41][70][81].
+const MOTION_RATE = 1.5;
+const physics = (stiffness: number, damping: number) => ({ stiffness: stiffness * MOTION_RATE ** 2, damping: damping * MOTION_RATE });
 const VERT = `attribute vec2 a; void main() { gl_Position = vec4(a, 0.0, 1.0); }`;
 const FRAG = `precision highp float;
 uniform vec2 uRes; uniform float uDpr; uniform vec4 uA; uniform vec4 uB; uniform vec4 uRA; uniform vec4 uRB; uniform float uR; uniform float uK; uniform vec4 uFill; uniform vec4 uLine;
@@ -100,6 +106,15 @@ function createGl(): Gl | undefined {
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   const U = Object.fromEntries(UNIFORMS.map((n) => [n, gl.getUniformLocation(prog, n)!])) as Gl["U"];
   canvas.width = canvas.height = 1;
+  // Drivers may defer shader compilation until the first draw. Prepare that
+  // single pixel with the context so animated frames only submit warm drawing
+  // work. Desktop context preparation already runs during browser idle time.
+  gl.viewport(0, 0, 1, 1);
+  gl.uniform2f(U.uRes ?? null, 1, 1);
+  gl.uniform1f(U.uDpr ?? null, 1);
+  gl.uniform1f(U.uK ?? null, K);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.finish();
   return { canvas, gl, prog, U };
 }
 
@@ -135,7 +150,8 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" |
       b.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: "ease-out" }).onfinish = () => resolve();
       return;
     }
-    const column = direction === "right" ? host! : a.parentElement!;
+    // A column of a group has no box of its own (D212): its scroller is the box the split happens in.
+    const column = direction === "right" ? host! : scrollerOf(a.parentElement as HTMLElement);
     const right = direction === "right";
     // Rects relative to the layer's parent, in its own (unzoomed) pixels, whatever camera zoom is applied above it.
     const origin = column.getBoundingClientRect();
@@ -252,12 +268,12 @@ export function dropletSplit(a: HTMLElement, b: HTMLElement, direction: "down" |
     const spring = new Spring(0, (gap) => {
       if (!brokeAt && gap >= K * 1.2) {
         brokeAt = performance.now();
-        spring.configure({ stiffness: 500, damping: 28 });
+        spring.configure(physics(500, 28));
         spring.set(g);
       }
       if (brokeAt && gap === g) { finish(); return; }
       draw(gap);
-    }, { stiffness: 90, damping: 15 });
+    }, physics(90, 15));
     spring.restDelta = 0.3; // sub-pixel: the last wobble is not worth another half second of frames
     spring.restVelocity = 3;
     running = finish;

@@ -1,0 +1,4 @@
+Running as unit: run-p1746002-i47837463.scope; invocation ID: 872018ba5b01451680340f7c7f4ce360
+{"machine": "infraternal-dev", "binary": "/home/kayg/.cache/codex-scratch/prod-batch/artifacts/prod-batch-final", "binary_sha256": "a265bc649927e8b7654228a30a705fec3a839aa1e4c7f7fbc67a31ece9c27beb", "binary_bytes": 20064944, "dimensions": "80x24", "load": "14.20 22.66 21.65 33/3174 1746056"}
+{"phase": "registry", "recovered": 200, "admitted": 201, "after_reap": 200}
+{"phase": "facts-latency", "sessions": 200, "samples": 101, "p50_ms": 4.706, "maximum_ms": 14.941, "load": "16.03 22.90 21.73 27/3567 1747286"}

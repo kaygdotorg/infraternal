@@ -54,7 +54,7 @@ test("keyboard splits stay in view: split right x53, then right and down from th
   const rectOf = (id: string) => page.evaluate((id) => { const r = document.querySelector<HTMLElement>(`.cl[data-view="console"] .ui-window[data-window-id="${id}"]`)!.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom }; }, id);
   const press = async (dir: "right" | "down") => {
     const before = await active();
-    await page.keyboard.press(dir === "right" ? "Control+Shift+KeyD" : "Control+Alt+Shift+KeyD");
+    await page.keyboard.press(dir === "right" ? "Control+Shift+KeyD" : "Control+Shift+KeyE");
     await expect.poll(async () => (await active()).n).toBe(before.n + 1);
     await page.waitForTimeout(Number(process.env.SPLIT_SETTLE ?? 250));
     return before;

@@ -1,0 +1,81 @@
+{
+  "description": "Fixture-owned real shim/shell PSS and private memory on infraternal-dev; CPUWeight=10000; source 24216c32; #151",
+  "samples": [
+    {
+      "machine": "infraternal-dev",
+      "binary": "/home/kayg/.cache/codex-scratch/session-bounds/target/x86_64-unknown-linux-musl/release/infraternal",
+      "dimensions": "80x24",
+      "load": "22.73 20.75 18.05 32/3093 292548"
+    },
+    {
+      "phase": "registry",
+      "recovered": 200,
+      "admitted": 201,
+      "after_reap": 200
+    },
+    {
+      "phase": "empty-200",
+      "role": "shim",
+      "count": 200,
+      "total_kib": {
+        "Pss": 217747,
+        "Private_Dirty": 213748,
+        "Private_Clean": 0
+      },
+      "mean_kib": {
+        "Pss": 1088.73,
+        "Private_Dirty": 1068.74,
+        "Private_Clean": 0.0
+      },
+      "load": "25.58 21.43 18.30 16/3460 293712"
+    },
+    {
+      "phase": "empty-200",
+      "role": "shell",
+      "count": 200,
+      "total_kib": {
+        "Pss": 122183,
+        "Private_Dirty": 118884,
+        "Private_Clean": 20
+      },
+      "mean_kib": {
+        "Pss": 610.91,
+        "Private_Dirty": 594.42,
+        "Private_Clean": 0.1
+      },
+      "load": "25.58 21.43 18.30 21/3460 293712"
+    },
+    {
+      "phase": "scrollback-200",
+      "role": "shim",
+      "count": 200,
+      "total_kib": {
+        "Pss": 3577471,
+        "Private_Dirty": 3573472,
+        "Private_Clean": 0
+      },
+      "mean_kib": {
+        "Pss": 17887.35,
+        "Private_Dirty": 17867.36,
+        "Private_Clean": 0.0
+      },
+      "load": "38.18 24.12 19.18 34/3508 294279"
+    },
+    {
+      "phase": "scrollback-200",
+      "role": "shell",
+      "count": 200,
+      "total_kib": {
+        "Pss": 134219,
+        "Private_Dirty": 130884,
+        "Private_Clean": 16
+      },
+      "mean_kib": {
+        "Pss": 671.1,
+        "Private_Dirty": 654.42,
+        "Private_Clean": 0.08
+      },
+      "load": "38.18 24.12 19.18 32/3507 294282"
+    }
+  ]
+}

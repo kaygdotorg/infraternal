@@ -43,3 +43,4 @@ export * from "./canvas-backdrop";
 export * from "./settings-panels";
 export * from "./entity-palette";
 export * from "./entity-chip";
+export * from "./inbox";

@@ -11,6 +11,7 @@ import { createPillMorph, type PillMorph } from "../../../../../packages/ui/src/
 import type { Ctx, ViewRec } from "../context";
 import { el } from "../dom";
 import type { ViewModel, WindowModel } from "../model/types";
+import { loadGroups } from "../layout/groups-handle";
 import { copyForRecipient } from "./copy";
 import { buildShareDialog, type ShareChoice } from "./dialog";
 import type { IncomingShare, SharingAdapter } from "./adapter";
@@ -98,33 +99,25 @@ export function createSharing(cx: Ctx, adapter: SharingAdapter): SharingControll
 
   /** A team layout changed: the follower's copy takes the publisher's arrangement, moving there (FLIP on the shared spring). */
   const applyTeamSnapshot = (c: ViewRec, fresh: ViewModel): void => {
-    const before = flip.measure(flip.targets(c.colsEl));
-    const keep = new Set<string>();
-    const colEls = new Map([...c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")].map((e) => [e.dataset.id ?? "", e] as const));
-    const order: HTMLElement[] = [];
-    for (const col of fresh.cols) {
-      const colEl = colEls.get(col.id) ?? cx.view.newCol(col);
-      colEls.delete(col.id);
-      colEl.dataset.w = String(col.w);
-      colEl.style.setProperty("--w", `${col.w}px`);
-      for (const w of col.wins) {
+    // The arrangement, spans and bands included, goes into the DOM the one way every layout change does (D212). The
+    // grouped module loads first: the whole change waits for it, so the measure, the change and the motion stay in order.
+    void loadGroups().then((grouped) => {
+      const before = flip.measure(flip.targets(c.colsEl));
+      const keep = new Set<string>();
+      for (const col of fresh.cols) for (const w of col.wins) {
         let rec = c.wins.get(w.id);
         if (!rec) { rec = cx.win.make(c, w as WindowModel); c.wins.set(w.id, rec); }
         keep.add(w.id);
-        colEl.append(rec.card.root);
-        if (w.h) { rec.card.root.style.height = w.h <= 1 ? `calc(var(--clh) * ${w.h})` : `${w.h}px`; rec.card.root.style.flex = "none"; } else { rec.card.root.style.height = ""; rec.card.root.style.flex = ""; }
       }
-      order.push(colEl);
-    }
-    for (const [id, rec] of [...c.wins]) if (!keep.has(id)) { rec.stopResize?.(); cx.visibility.unwatch(rec); rec.binding?.dispose(); rec.cleanup?.(); rec.card.dispose(); c.wins.delete(id); }
-    for (const e of colEls.values()) e.remove();
-    for (const e of order) c.colsEl.append(e);
-    c.view.cols = fresh.cols;
-    cx.view.geometry(c);
-    cx.view.settle(c.view.id);
-    flip.play(before, true);
-    cx.tree.render();
-    if (state.canvasLock && state.currentView === c.view.id) cx.nav.goStop(c, cx.nav.nearestStop(c, cx.camera.cam.cx));
+      for (const [id, rec] of [...c.wins]) if (!keep.has(id)) { rec.stopResize?.(); cx.visibility.unwatch(rec); rec.binding?.dispose(); rec.cleanup?.(); rec.card.dispose(); c.wins.delete(id); }
+      grouped.applyCols(cx, c, fresh.cols);
+      c.view.cols = fresh.cols;
+      cx.view.geometry(c);
+      cx.view.settle(c.view.id);
+      flip.play(before, true);
+      cx.tree.render();
+      if (state.canvasLock && state.currentView === c.view.id) cx.nav.goStop(c, cx.nav.nearestStop(c, cx.camera.cam.cx));
+    });
   };
 
   const onIncoming = (shares: IncomingShare[]): void => {

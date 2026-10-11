@@ -1,0 +1,52 @@
+Load before: 10.07 13.57 19.19 6/3056 350024
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p350025-i50633690.scope; invocation ID: d56135e4e58d493fa40c95080cf90111
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-reh1e067.js, chunk-tvynw18r.js, chunk-c9ddz61b.js, chunk-b5qzwpce.js, chunk-pqzggm11.js, chunk-a156me8y.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-z9z9den2.js, chunk-8yc68rxk.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-kntnx0eh.js, chunk-7nczvd3c.js, chunk-xxywtj51.js, chunk-bw941ztg.js, chunk-yvhhqffe.js, chunk-1n47ker1.js, chunk-95c35ts6.js, chunk-ve7ee9h6.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-4n3tmk0q.js, chunk-8gd288y3.js, chunk-ptqrxypx.js, chunk-m4kmx4qn.js, chunk-8gqdshxw.js, chunk-9340et5w.js, chunk-8sdp0fsj.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-5rve9ax1.js, chunk-1m3y847t.js, chunk-m8qbmm4h.js, chunk-jcnqjh7p.js, chunk-1d0qvnvb.js, chunk-2sgja9fv.js, chunk-axbkkqp1.js, chunk-cka4e7zh.js, chunk-n2448fjj.js, chunk-2syc3600.js, chunk-rmx81my2.js, chunk-we2nhnv6.js, chunk-55pb5nv2.js, chunk-v86b5paa.js, chunk-ahfygeq4.js, chunk-0j3t320g.js, chunk-w2yhx6fy.js, chunk-e73xen6p.js, chunk-2e4yh13p.js, chunk-fhak2dr4.js, chunk-ertqn2sb.js, chunk-ss1y7df9.js, chunk-gkypae50.js, chunk-kd6k18w2.js, chunk-tetv89e3.js, chunk-mjyq4xvq.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-egesw7k8.js, chunk-yr9k5p92.js, chunk-0sxn500c.js, chunk-f4x6ka2n.js, chunk-by2z0b4k.js
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+
+Running 3 tests using 1 worker
+
+(node:350178) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+minimal-combining-5679.bin before canary: grid=205x56, configuredScrollback=10000, retainedRows=279, wasm=11730944 B
+minimal-combining-5679.bin: grid=205x56, scrollback=0, wasm=11730944 B
+  ✓  1 test/renderer-regression.spec.ts:17:3 › renderer survives minimal-combining-5679.bin and paints a canary (8.0s)
+binary.bin before canary: grid=205x56, configuredScrollback=10000, retainedRows=10, wasm=11534336 B
+binary.bin: grid=205x56, scrollback=0, wasm=11534336 B
+  ✓  2 test/renderer-regression.spec.ts:17:3 › renderer survives binary.bin and paints a canary (46.2s)
+METRIC name=browser_bulk_output_throughput_prediction_off source=tracer-production-build bytes=50000000 sample=1 elapsed_ms=20239 throughput_mbps=2.47
+  ✘  3 test/renderer-regression.spec.ts:148:1 › predictive echo keeps 50 MB output throughput within five percent (33.3s)
+
+
+  1) test/renderer-regression.spec.ts:148:1 › predictive echo keeps 50 MB output throughput within five percent 
+
+    Error: apiRequestContext.post: socket hang up
+    Call log:
+      - → POST http://localhost:4643/__mock/fixture
+        - user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36
+        - accept: */*
+        - accept-encoding: gzip,deflate,br
+        - content-type: application/json
+        - content-length: 23
+        - cookie: __Host-infraternal=ncUcuh8YK4xAw6A8BazCYt8QSOSgQ8_RrRo2aagByTg
+
+
+      170 |       await page.setViewportSize({ width: 1440, height: 900 });
+      171 |       const startedAt = Date.now();
+    > 172 |       const response = await context.request.post("/__mock/fixture", { data: { name: fixtureName } });
+          |                                              ^
+      173 |       expect(response.status()).toBe(200);
+      174 |       await expect.poll(async () => BigInt(await page.evaluate(
+      175 |         () => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0",
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/renderer-regression.spec.ts:172:46
+
+    Error Context: test-results/renderer-regression-predic-2f890-oughput-within-five-percent/error-context.md
+
+  1 failed
+    test/renderer-regression.spec.ts:148:1 › predictive echo keeps 50 MB output throughput within five percent 
+  2 passed (1.6m)
+
+Invocation exit: 1
+Load after: 13.43 13.35 18.53 15/3042 355081

@@ -1,14 +1,16 @@
-//! Descriptors and bounded socket interfaces for compiled plugins [15,16,28,198,201].
+//! Shares one descriptor between server socket work and node component lifecycle [15,16,28,198,201].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod action;
 
 pub use action::{
     ActionAvailability, ActionContract, ActionDefinition, ActionEffect, ActionExample,
-    ActionPermission, ActionRegistry, ActionTarget, CliHandler, DryRun, JsonSchema, JsonSchemaType,
-    PluginDefinition, RegisteredAction, RegistryError, SafetyNotes,
+    ActionPermission, ActionRegistry, ActionTarget, CliHandler, DryRun as CliDryRun, JsonSchema,
+    JsonSchemaType, PluginDefinition, RegisteredAction, RegistryError, SafetyNotes,
 };
 
+pub mod admission;
+pub mod channel;
 pub mod routing;
 
 #[cfg(feature = "socket-host")]
@@ -45,10 +47,13 @@ pub struct ActionDef {
     pub id: &'static str,
     pub summary: &'static str,
     pub instructions: &'static [&'static str],
-    pub input: &'static str,
-    pub output: &'static str,
+    pub input: SchemaRef,
+    pub output: SchemaRef,
     pub permission: Permission,
     pub effect: Effect,
+    pub target: Target,
+    pub dry_run: DryRun,
+    pub opens: Option<&'static str>,
 }
 /// Read visibility may follow any management action without introducing a view-only role [187].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -57,20 +62,25 @@ pub enum Permission {
     Any(&'static [&'static str]),
 }
 /// A server feature and a node component share an id but cannot create each other.
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct RoleDef {
     pub id: &'static str,
     pub requires: &'static [&'static str],
     pub default_enabled: bool,
 }
 /// Pure metadata: inspecting a disabled plugin starts no work.
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct PluginDescriptor {
     pub id: &'static str,
     pub api: u16,
     pub actions: &'static [ActionDef],
     pub topics: &'static [&'static str],
-    pub settings: &'static str,
+    pub settings: Option<SchemaRef>,
+    pub events: &'static [EventDef],
+    pub streams: &'static [StreamDef],
+    pub defaults: &'static [SettingDefault],
+    pub dependencies: &'static [Dependency],
+    pub can_enable_components: &'static [&'static str],
     pub roles: &'static [RoleDef],
     pub max_frame_len: usize,
     #[serde(skip)]
@@ -184,8 +194,244 @@ pub async fn fresh_session_tx(
         .bind(token_hash).bind(user).bind(now).bind(now).bind(fresh_seconds).bind(now).fetch_one(&mut **tx).await
 }
 
+/// A contract type name or inline settings schema, serialized as the existing string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct SchemaRef(pub &'static str);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum Target {
+    Global,
+    Node,
+    Host,
+    Session,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum DryRun {
+    Unsupported,
+    Supported,
+    Required,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct EventDef {
+    pub id: &'static str,
+    pub schema: SchemaRef,
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct StreamDef {
+    pub id: &'static str,
+    pub schema: SchemaRef,
+    pub resumable: bool,
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+pub enum DefaultValue {
+    Null,
+    Bool(bool),
+    Unsigned(u64),
+    Text(&'static str),
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SettingDefault {
+    pub id: &'static str,
+    pub value: DefaultValue,
+}
+
+/// A confirmed server is a prerequisite, never an implicit node component [201].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum Dependency {
+    ExistingServer,
+    Component(&'static str),
+}
+
+impl PluginDescriptor {
+    /// Check declaration invariants before exposing a plugin through any adapter.
+    /// # Errors
+    /// Refuses incompatible versions, duplicate actions, missing instructions,
+    /// destructive calls without a required dry run, or implicit server creation.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.api != API_VERSION || self.id.is_empty() {
+            return Err("The plugin definition is unavailable.");
+        }
+        if self.can_enable_components.contains(&"server")
+            || self.dependencies.contains(&Dependency::Component("server"))
+        {
+            return Err("A node component cannot create a server.");
+        }
+        for (index, action) in self.actions.iter().enumerate() {
+            if !action.id.starts_with(self.id)
+                || action.id.as_bytes().get(self.id.len()) != Some(&b'.')
+                || self.actions[..index]
+                    .iter()
+                    .any(|other| other.id == action.id)
+                || action.summary.is_empty()
+                || action.instructions.is_empty()
+                || action.instructions.iter().any(|step| step.is_empty())
+                || action.input.0.is_empty()
+                || action.output.0.is_empty()
+                || match action.permission {
+                    Permission::One(permission) => permission.is_empty(),
+                    Permission::Any(permissions) => {
+                        permissions.is_empty()
+                            || permissions.iter().any(|permission| permission.is_empty())
+                    }
+                }
+                || action.effect == Effect::Destructive && action.dry_run != DryRun::Required
+            {
+                return Err("The plugin action definition is unavailable.");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum PluginState {
+    On,
+    Stopping,
+    Off,
+}
+impl PluginState {
+    /// Shared plain state labels for human adapters [202].
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::On => "On",
+            Self::Stopping => "Stopping",
+            Self::Off => "Off",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct PluginStatus {
+    pub state: PluginState,
+    pub active_work: usize,
+}
+
+/// Node lifecycle is distinct from server socket work; both use the same descriptor [201].
+/// Trusted core authorizes control calls before invoking a node's plugin.
+/// Disable returns only after owned work, sockets and timers have retired [198].
+pub trait ComponentPlugin: Send + Sync {
+    fn descriptor(&self) -> &'static PluginDescriptor;
+    fn status(&self) -> PluginStatus;
+    fn set_enabled(&self, enabled: bool) -> PluginOperation<'_, ()>;
+}
+
+/// Control failures contain fixed public text, never transport data or login material.
+pub type PluginOperation<'a, T> = Operation<'a, Result<T, &'static str>>;
+
+impl ActionDef {
+    /// Render the declared steps for operator help without a second copy of the instructions.
+    #[must_use]
+    pub fn help(&self) -> String {
+        use std::fmt::Write;
+        let mut help = self.summary.to_owned();
+        for (index, step) in self.instructions.iter().enumerate() {
+            // Formatting into an owned String cannot fail; only static metadata is included.
+            let _ = write!(help, "\n{}. {step}", index + 1);
+        }
+        help
+    }
+}
+
+#[cfg(test)]
+mod component_tests {
+    use super::*;
+    const ACTION: ActionDef = ActionDef {
+        id: "fixture.read",
+        summary: "Read status",
+        instructions: &["Read the current status."],
+        input: SchemaRef("fixture.empty"),
+        output: SchemaRef("fixture.status"),
+        target: Target::Node,
+        effect: Effect::Read,
+        permission: Permission::One("fixture.read"),
+        dry_run: DryRun::Unsupported,
+        opens: None,
+    };
+    const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
+        id: "fixture",
+        api: API_VERSION,
+        actions: &[ACTION],
+        events: &[],
+        streams: &[],
+        settings: None,
+        defaults: &[],
+        dependencies: &[Dependency::ExistingServer],
+        can_enable_components: &["ssh"],
+        topics: &[],
+        roles: &[],
+        max_frame_len: 0,
+        unavailable: &[],
+        unavailable_event: &[],
+    };
+    #[test]
+    fn component_declarations_cannot_create_servers() {
+        assert!(DESCRIPTOR.validate().is_ok());
+        let invalid = PluginDescriptor {
+            can_enable_components: &["server"],
+            ..DESCRIPTOR
+        };
+        assert!(invalid.validate().is_err());
+        let invalid = PluginDescriptor {
+            dependencies: &[Dependency::Component("server")],
+            ..DESCRIPTOR
+        };
+        assert!(invalid.validate().is_err());
+    }
+    #[test]
+    fn destructive_actions_require_a_dry_run_and_every_action_has_instructions() {
+        const DESTRUCTIVE: [ActionDef; 1] = [ActionDef {
+            effect: Effect::Destructive,
+            ..ACTION
+        }];
+        const MISSING: [ActionDef; 1] = [ActionDef {
+            instructions: &[],
+            ..ACTION
+        }];
+        const REQUIRED: [ActionDef; 1] = [ActionDef {
+            effect: Effect::Destructive,
+            dry_run: DryRun::Required,
+            ..ACTION
+        }];
+        assert!(
+            PluginDescriptor {
+                actions: &DESTRUCTIVE,
+                ..DESCRIPTOR
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            PluginDescriptor {
+                actions: &MISSING,
+                ..DESCRIPTOR
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            PluginDescriptor {
+                actions: &REQUIRED,
+                ..DESCRIPTOR
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+}
+
 /// Maximum encoded node-side plugin action body.
 pub const MAX_ACTION_BYTES: usize = 8 * 1024;
+
+/// A nonblocking continuation released only after its successful result frame is written.
+/// Dropping it on cancellation must leave the deferred effect unstarted.
+pub type AfterReply = Box<dyn FnOnce() + Send + 'static>;
+
+/// Bounded JSON plus an optional handoff that needs its reply transmitted first.
+pub struct ActionReply {
+    pub json: Vec<u8>,
+    pub after_write: Option<AfterReply>,
+}
 
 /// A plugin implementation that can be routed without feature-specific agent code.
 pub trait AgentPlugin: Send {
@@ -195,6 +441,31 @@ pub trait AgentPlugin: Send {
     /// # Errors
     /// Returns a bounded plugin error for a rejected action, unknown action, or oversized body.
     fn call(&mut self, action_id: &str, input: &[u8]) -> Result<Vec<u8>, PluginError>;
+    /// Prepare an effect that can interrupt the current transport after its reply.
+    /// # Errors
+    /// Returns the same bounded dispatch failures as `call`.
+    fn call_with_reply(
+        &mut self,
+        action_id: &str,
+        input: &[u8],
+    ) -> Result<ActionReply, PluginError> {
+        self.call(action_id, input).map(|json| ActionReply {
+            json,
+            after_write: None,
+        })
+    }
+    /// Apply a compiled resource policy to a core transport action.
+    /// # Errors
+    /// Returns a fixed public refusal without implementation details.
+    fn admit(
+        &self,
+        _action_id: &str,
+        _context: admission::NodeContext,
+    ) -> Result<(), admission::OpenRefusal> {
+        Ok(())
+    }
+    /// Refresh host-owned facts only when a control action requests them.
+    fn update_context(&mut self, _context: admission::NodeContext) {}
 }
 
 /// A bounded registry that dispatches actions only to declared plugin handlers.
@@ -206,6 +477,26 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    /// Consult resource policies without selecting a feature in core dispatch.
+    /// # Errors
+    /// Returns the first policy refusal.
+    pub fn admit(
+        &self,
+        action_id: &str,
+        context: admission::NodeContext,
+    ) -> Result<(), admission::OpenRefusal> {
+        for plugin in &self.plugins {
+            plugin.admit(action_id, context)?;
+        }
+        Ok(())
+    }
+
+    /// Publish trusted counts before an on-request fact read.
+    pub fn update_context(&mut self, context: admission::NodeContext) {
+        for plugin in &mut self.plugins {
+            plugin.update_context(context);
+        }
+    }
     /// Registers one plugin whose descriptor is internally consistent.
     /// # Errors
     /// Rejects unsupported API versions, duplicate ids, or actions outside the plugin namespace.
@@ -231,6 +522,21 @@ impl PluginRegistry {
     /// # Errors
     /// Returns a bounded error for an unknown action, oversized message, or plugin rejection.
     pub fn call(&mut self, action_id: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
+        let reply = self.call_with_reply(action_id, input)?;
+        if reply.after_write.is_some() {
+            return Err(PluginError::Rejected);
+        }
+        Ok(reply.json)
+    }
+
+    /// Dispatch with a continuation owned by the transport writer until transmission.
+    /// # Errors
+    /// Refuses undeclared actions, oversized bodies and rejected plugin calls.
+    pub fn call_with_reply(
+        &mut self,
+        action_id: &str,
+        input: &[u8],
+    ) -> Result<ActionReply, PluginError> {
         if input.len() > MAX_ACTION_BYTES {
             return Err(PluginError::MessageTooLarge);
         }
@@ -244,8 +550,8 @@ impl PluginRegistry {
         let Some(plugin) = plugin else {
             return Err(PluginError::UnknownAction);
         };
-        let output = plugin.call(action_id, input)?;
-        if output.len() > MAX_ACTION_BYTES {
+        let output = plugin.call_with_reply(action_id, input)?;
+        if output.json.len() > MAX_ACTION_BYTES {
             return Err(PluginError::MessageTooLarge);
         }
         Ok(output)
@@ -298,15 +604,15 @@ impl PluginDescriptor {
                     source.instructions.iter().copied(),
                     JsonSchema::object(
                         [("input_file".to_owned(), JsonSchema::string(format!(
-                            "File containing the action JSON body described by {}.", source.input
+                            "File containing the action JSON body described by {}.", source.input.0
                         )))],
                         std::iter::empty(),
                     ),
                     JsonSchema::command_result(),
                     ActionContract::new(target, effect, permission, if destructive {
-                        DryRun::Required
+                        CliDryRun::Required
                     } else {
-                        DryRun::Unsupported
+                        CliDryRun::Unsupported
                     }),
                 ).not_available_yet().with_safety(SafetyNotes {
                     destructive,

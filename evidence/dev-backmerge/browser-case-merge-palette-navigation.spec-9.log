@@ -1,0 +1,42 @@
+Load before: 20.82 23.24 23.43 26/3001 302858
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p302859-i50586524.scope; invocation ID: 3acccecb58d247f9bf2478e390c443c9
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-ndv8bgp1.js, chunk-tvynw18r.js, chunk-q4ctyexr.js, chunk-b5qzwpce.js, chunk-p5h7tq0c.js, chunk-7v6pssbk.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-8bp5gcsc.js, chunk-xpk77qvx.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-71ye35ad.js, chunk-7nczvd3c.js, chunk-vr3qew4x.js, chunk-z2jjxswv.js, chunk-yvhhqffe.js, chunk-gfm60qaf.js, chunk-tnx6f2yt.js, chunk-h3xc1x48.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-vytvfat3.js, chunk-1e8xxgcs.js, chunk-af5frcx6.js, chunk-rfrdanqm.js, chunk-8gqdshxw.js, chunk-jhsc4475.js, chunk-j2mktgzr.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-vfjymsyb.js, chunk-81p265bw.js, chunk-4nb71mrs.js, chunk-4cze4c07.js, chunk-1d0qvnvb.js, chunk-3j0jp4ng.js, chunk-axbkkqp1.js, chunk-v5s7kmth.js, chunk-e4xqam9t.js, chunk-rty1c87s.js, chunk-jrtxtqw3.js, chunk-zn9v157c.js, chunk-jr61bp2r.js, chunk-v86b5paa.js, chunk-nhcwfsnq.js, chunk-mnmr9m0b.js, chunk-pp6snz1k.js, chunk-7agqw8b1.js, chunk-2e4yh13p.js, chunk-khp8xtbt.js, chunk-gagtxk8e.js, chunk-pt9mx2ng.js, chunk-gemnv3z9.js, chunk-qscss6me.js, chunk-t05v25jb.js, chunk-v74e4mh9.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-cwhv9xs2.js, chunk-0erqcde8.js, chunk-0sxn500c.js, chunk-54wpb14e.js, chunk-r3wtkx03.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:306653) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ENVIRONMENT machine=infraternal-dev cores=8 load_1_5_15=24.83,23.97,23.66
+METRIC name=palette_arrow_handler_ms_per_press value=3.5900 presses=100 viewport=1440x900
+METRIC name=palette_filter_handler_ms_per_input value=0.3580 inputs=100 viewport=1440x900
+  ✘  1 test/palette-navigation.spec.ts:166:1 › palette keyboard navigation stays visible and accessible on desktop and mobile (10.1s)
+
+
+  1) test/palette-navigation.spec.ts:166:1 › palette keyboard navigation stays visible and accessible on desktop and mobile 
+
+    Error: expect(received).toBeLessThanOrEqual(expected)
+
+    Expected: <= 0.13
+    Received:    0.35800000071525573
+
+      117 |   console.log(`METRIC name=palette_filter_handler_ms_per_input value=${millisecondsPerFilter.toFixed(4)} inputs=100 viewport=1440x900`);
+      118 |   expect(millisecondsPerArrow).toBeGreaterThanOrEqual(0);
+    > 119 |   expect(millisecondsPerFilter).toBeLessThanOrEqual(0.13);
+          |                                 ^
+      120 | }
+      121 |
+      122 | async function walkDownAndUp(page: Page): Promise<void> {
+        at measureHandlers (/home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/palette-navigation.spec.ts:119:33)
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/palette-navigation.spec.ts:169:3
+
+    Error Context: test-results/palette-navigation-palette-08dcc-sible-on-desktop-and-mobile/error-context.md
+
+  1 failed
+    test/palette-navigation.spec.ts:166:1 › palette keyboard navigation stays visible and accessible on desktop and mobile 
+
+Invocation exit: 1
+Load after: 25.64 24.16 23.72 34/3083 309543

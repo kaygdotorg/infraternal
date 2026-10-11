@@ -1,0 +1,71 @@
+Running as unit: run-p3327276-i49417334.scope; invocation ID: 15bfb020cd934fbb98761ca7e3d0cd50
+
+Running 2 tests using 1 worker
+
+(node:3327588) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 real/host-facts.spec.ts:50:1 › the Host popover reports this server's OS release and kernel (5.6s)
+(node:3329771) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  2 real/host-facts.spec.ts:115:1 › low memory explains the refusal and opens the existing host sessions picker (6.0s)
+
+
+  1) real/host-facts.spec.ts:50:1 › the Host popover reports this server's OS release and kernel ───
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Locator: locator('.canvas-popover').locator('.ui-kv-key').filter({ hasText: 'Kernel' }).locator('..').locator('.ui-kv-value')
+    Expected: "6.12.111+deb13-amd64"
+    Timeout: 5000ms
+    Error: element(s) not found
+
+    Call log:
+      - Expect "toHaveText" with timeout 5000ms
+      - waiting for locator('.canvas-popover').locator('.ui-kv-key').filter({ hasText: 'Kernel' }).locator('..').locator('.ui-kv-value')
+
+
+      72 |     .locator(".ui-kv-value");
+      73 |   await expect(valueByKey("System")).toHaveText(expectedSystem, { timeout: 15_000 });
+    > 74 |   await expect(valueByKey("Kernel")).toHaveText(expectedKernel);
+         |                                      ^
+      75 |   await expect(popover.locator(".canvas-popover-logo svg.ui-host-mark")).toBeVisible();
+      76 |   await expect.poll(factsReadCount).toBeGreaterThan(0);
+      77 |
+        at /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/apps/tracer/real/host-facts.spec.ts:74:38
+
+    Error Context: test-results-real/host-facts-the-Host-popove-c15d2-ver-s-OS-release-and-kernel/error-context.md
+
+    Error Context: test-results-real/host-facts-the-Host-popove-c15d2-ver-s-OS-release-and-kernel/error-context.md
+
+  2) real/host-facts.spec.ts:115:1 › low memory explains the refusal and opens the existing host sessions picker 
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Locator: locator('.ui-toast').locator('.ui-toast-message')
+    Expected pattern: /.+ is low on memory \(\d+ MiB free, 1 session running\)\. Close sessions you no longer need\./
+    Received string:  "infraternal-dev is low on memory (10790 MiB free, 0 sessions running). Close sessions you no longer need."
+    Timeout: 5000ms
+
+    Call log:
+      - Expect "toHaveText" with timeout 5000ms
+      - waiting for locator('.ui-toast').locator('.ui-toast-message')
+        13 × locator resolved to <span role="status" aria-live="polite" class="ui-toast-message">infraternal-dev is low on memory (10790 MiB free,…</span>
+           - unexpected value "infraternal-dev is low on memory (10790 MiB free, 0 sessions running). Close sessions you no longer need."
+
+
+      119 |     const toast = page.locator(".ui-toast");
+      120 |     await expect(toast).toBeVisible();
+    > 121 |     await expect(toast.locator(".ui-toast-message")).toHaveText(/.+ is low on memory \(\d+ MiB free, 1 session running\)\. Close sessions you no longer need\./);
+          |                                                      ^
+      122 |     await expect(toast.getByRole("button", { name: "Sessions", exact: true })).toBeVisible();
+      123 |     const captures = resolve(import.meta.dirname, "../captures/session-bounds");
+      124 |     await mkdir(captures, { recursive: true });
+        at /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/apps/tracer/real/host-facts.spec.ts:121:54
+
+    Error Context: test-results-real/host-facts-low-memory-expl-62deb-isting-host-sessions-picker/error-context.md
+
+    Error Context: test-results-real/host-facts-low-memory-expl-62deb-isting-host-sessions-picker/error-context.md
+
+  2 failed
+    real/host-facts.spec.ts:50:1 › the Host popover reports this server's OS release and kernel ────
+    real/host-facts.spec.ts:115:1 › low memory explains the refusal and opens the existing host sessions picker 

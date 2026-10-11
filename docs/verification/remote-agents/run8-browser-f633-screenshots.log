@@ -1,0 +1,32 @@
+Running as unit: run-p4028419-i12416164.scope; invocation ID: 4da77d69705d4b459c386b7dd7ef5d98
+[WebServer] $ bun run build.ts
+[WebServer] built main.js, chunk-0gjma2ke.js, chunk-566673p4.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-vfjy0kzh.js, chunk-5hf4zvs5.js, chunk-cdfbtn3m.js, chunk-axbkkqp1.js, chunk-c43rw71e.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4702
+[WebServer] latency proxy listening on http://localhost:4701; upstream port=4702
+
+Running 3 tests using 1 worker
+
+(node:4028522) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/core-screen.spec.ts:64:1 › curated overlay materials preserve foreground contrast in every theme (26ms)
+Core-screen screenshots (production build):
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-paper-sidebar-closed.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-paper-sidebar-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-paper-palette-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-ink-sidebar-closed.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-ink-sidebar-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-ink-palette-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-paper-sidebar-closed.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-paper-sidebar-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-paper-palette-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-ink-sidebar-closed.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-ink-sidebar-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-ink-palette-open.png
+  ✓  2 test/core-screen.spec.ts:146:1 › core screen themes, tree, RTT, mobile tray, and screenshots (35.8s)
+UI font comparison (production build): /home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/ui-1440x900-sidebar-open-comparison.png
+UI font comparison (production build): /home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/ui-1440x900-palette-open-comparison.png
+UI font comparison (production build): /home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/ui-393x852-sidebar-open-comparison.png
+UI font comparison (production build): /home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/ui-393x852-palette-open-comparison.png
+  ✓  3 test/core-screen.spec.ts:244:1 › UI font choice persists and captures ink screenshots at phone and desktop sizes (52.7s)
+
+  3 passed (1.5m)

@@ -1,0 +1,29 @@
+# Build-removable remote host transport, using the owner-selected engines [198], #78.
+[package]
+name = "infraternal-plugin-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+transport = ["dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol"]
+agent = ["transport", "dep:infraternal-shim", "dep:nix"]
+server = ["transport"]
+test-support = ["transport"]
+
+[dependencies]
+infraternal-shim = { workspace = true, optional = true }
+nix = { workspace = true, optional = true }
+infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
+infraternal-protocol = { workspace = true, optional = true }
+openssl = { workspace = true, optional = true }
+tokio-openssl = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[lints]
+workspace = true

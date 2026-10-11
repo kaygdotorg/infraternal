@@ -1,0 +1,83 @@
+Load before: 59.71 54.34 46.08 59/3309 3541113
+Running as unit: run-p3541195-i49631251.scope; invocation ID: cdef7a9044224aa3ad6c8db4611f0720
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-kvbkg612.js, chunk-tvynw18r.js, chunk-xaqxbh2y.js, chunk-b5qzwpce.js, chunk-1y4t0gj3.js, chunk-s2f1vb5a.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-22cazb50.js, chunk-3wr63xwy.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-5b4cgdfr.js, chunk-7nczvd3c.js, chunk-7gg0qkfb.js, chunk-6raxyrn5.js, chunk-yvhhqffe.js, chunk-jfvz1hrx.js, chunk-ayhm3kcr.js, chunk-tcrezm5t.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-frqdnbdw.js, chunk-f3t2n8m6.js, chunk-tk0gx2y9.js, chunk-cra634da.js, chunk-8gqdshxw.js, chunk-rnphp18a.js, chunk-t4q76gkm.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-x65zejqf.js, chunk-aaykh48a.js, chunk-jqtq7vc0.js, chunk-w0xgmt1y.js, chunk-1d0qvnvb.js, chunk-6vqrt0jx.js, chunk-axbkkqp1.js, chunk-0a2vth8c.js, chunk-rbjq9rpf.js, chunk-2pczqgfd.js, chunk-5h8b097b.js, chunk-kwgm7hqq.js, chunk-65qkjqpa.js, chunk-v86b5paa.js, chunk-j4rkr0nc.js, chunk-qwb4wa09.js, chunk-bhddpafr.js, chunk-tqhz8x3g.js, chunk-2e4yh13p.js, chunk-jn02w5ba.js, chunk-b19fdjb2.js, chunk-rk0fhha7.js, chunk-vcf9j146.js, chunk-ndpbbm83.js, chunk-hzv811gx.js, chunk-61p2rcas.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-db0fpxxh.js, chunk-kw0em7w9.js, chunk-0sxn500c.js, chunk-nr9nyxc8.js, chunk-hex255cf.js
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+
+Running 14 tests using 1 worker
+
+(node:3545158) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   1 test/add-host-prototype.spec.ts:33:1 › one chip field: typed hosts become chips, checkboxes and chips stay in sync (15.9s)
+(node:3549391) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   2 test/add-host-prototype.spec.ts:65:1 › the field autofocuses on desktop but not on touch (15.8s)
+  ✓   3 test/add-host-prototype.spec.ts:77:1 › mouse and shortcut focus draw no rings; Tab navigation does (9.5s)
+  ✘   4 test/add-host-prototype.spec.ts:96:1 › the docked sidebar never covers the flow window and stays out of its way (9.4s)
+(node:3555467) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   5 test/add-host-prototype.spec.ts:118:1 › steps slide in the direction of travel and Back reverses it (13.9s)
+  ✓   6 test/add-host-prototype.spec.ts:146:1 › the wizard floats over a dimmed window that becomes the host's terminal (16.7s)
+  ✓   7 test/add-host-prototype.spec.ts:207:1 › ten hosts install together; failures stay listed and the rest open as windows (25.9s)
+  ✓   8 test/add-host-prototype.spec.ts:238:1 › the shared confirmation is compact, icon-only and quiet on open (14.8s)
+  ✓   9 test/add-host-prototype.spec.ts:285:1 › failures say what happened, what to do, and offer Retry with details (11.8s)
+  ✓  10 test/add-host-prototype.spec.ts:300:3 › phone rows never overlap at 320 px (9.2s)
+  ✓  11 test/add-host-prototype.spec.ts:300:3 › phone rows never overlap at 375 px (8.2s)
+  ✓  12 test/add-host-prototype.spec.ts:300:3 › phone rows never overlap at 393 px (8.8s)
+  ✓  13 test/add-host-prototype.spec.ts:348:3 › flow card: shared overlay material, inside its window with one inset, lists end with padding (1440×900) (12.7s)
+  ✓  14 test/add-host-prototype.spec.ts:348:3 › flow card: shared overlay material, inside its window with one inset, lists end with padding (393×852) (12.1s)
+
+
+  1) test/add-host-prototype.spec.ts:33:1 › one chip field: typed hosts become chips, checkboxes and chips stay in sync 
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.ui-chip')
+    Expected: 3
+    Received: 0
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" with timeout 5000ms
+      - waiting for locator('.ui-chip')
+        13 × locator resolved to 0 elements
+           - unexpected value "0"
+
+
+      40 |     // The owner's own input: no Enter needed; commas and spaces end tokens.
+      41 |     await page.keyboard.type("kayg@o2, kayg@o1, kayg@remoternal ", { delay: 10 });
+    > 42 |     await expect(page.locator(".ui-chip")).toHaveCount(3);
+         |                                            ^
+      43 |     await expect(page.locator(".ah-count")).toHaveText("3 selected");
+      44 |     for (const id of ["o1", "o2", "remoternal"]) await expect(page.locator(`.ah-row[data-host='${id}'] input`)).toBeChecked();
+      45 |     // Ticking a row adds a chip; removing a chip unticks the row.
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/add-host-prototype.spec.ts:42:44
+
+    Error Context: test-results/add-host-prototype-one-chi-88eb4-oxes-and-chips-stay-in-sync/error-context.md
+
+  2) test/add-host-prototype.spec.ts:96:1 › the docked sidebar never covers the flow window and stays out of its way 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: true
+    Received: false
+
+      109 |       }));
+      110 |       expect(geometry.windowLeft).toBeGreaterThanOrEqual(geometry.sidebarRight);
+    > 111 |       expect(geometry.closeReachable).toBe(true);
+          |                                       ^
+      112 |     } finally {
+      113 |       await context.close();
+      114 |     }
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/add-host-prototype.spec.ts:111:39
+
+    Error Context: test-results/add-host-prototype-the-doc-38ffb-ow-and-stays-out-of-its-way/error-context.md
+
+  2 failed
+    test/add-host-prototype.spec.ts:33:1 › one chip field: typed hosts become chips, checkboxes and chips stay in sync 
+    test/add-host-prototype.spec.ts:96:1 › the docked sidebar never covers the flow window and stays out of its way 
+  12 passed (3.6m)
+
+Invocation exit: 1
+Load after: 51.00 55.50 48.45 38/3205 3580150

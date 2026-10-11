@@ -21,11 +21,15 @@ class StateBarrier(AckBarrier):
         self.state = None
         super().__init__(*args)
 
-    def forward(self, source, destination, direction):
+    def forward(self, source, destination, direction, connection):
         try:
             while not self.stopped:
                 prefix = exact(source, 4)
                 body = exact(source, struct.unpack('<I', prefix)[0])
+                self.classify(connection, direction, body)
+                if connection['owner']:
+                    destination.sendall(prefix + body)
+                    continue
                 if direction == 'input' and body[0] == 0x17 and len(body) > 500000 and not self.restart:
                     destination.sendall(prefix + body)
                     self.probe = True

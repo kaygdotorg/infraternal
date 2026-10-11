@@ -1,0 +1,9 @@
+Running as unit: run-p3574069-i49664125.scope; invocation ID: e8b6f74ad6f341f5aaa01542cde3369a
+
+Running 1 test using 1 worker
+
+(node:3574731) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 real/canvas.spec.ts:300:1 › captures: ink and paper at desktop and phone size (16.3s)
+
+  1 passed (29.4s)

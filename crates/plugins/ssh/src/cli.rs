@@ -1,7 +1,7 @@
 //! Declares SSH component actions for CLI, help, and generated skill adapters.
 
 use infraternal_plugin_api::{
-    ActionContract, ActionDefinition, ActionEffect, ActionTarget, DryRun, JsonSchema,
+    ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun as DryRun, JsonSchema,
     PluginDefinition, SafetyNotes,
 };
 

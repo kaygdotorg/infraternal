@@ -129,7 +129,7 @@ fn build_node(node: &CommandNode<'_>) -> Command {
             if action.command == ["skill"] && name == "command" {
                 continue;
             }
-            command = command.arg(input_argument(
+            let mut argument = input_argument(
                 name,
                 schema,
                 action
@@ -138,7 +138,21 @@ fn build_node(node: &CommandNode<'_>) -> Command {
                     .iter()
                     .any(|field| field == name),
                 action.visible,
-            ));
+            );
+            if let Some(required) = action.cli_requires.get(name) {
+                argument = argument.requires(required.clone());
+            }
+            if let Some(index) = action
+                .cli_positionals
+                .iter()
+                .position(|field| field == name)
+            {
+                argument = argument.long(None::<&str>).index(index + 1);
+            } else if !node.children.is_empty() && !action.input_schema.required.contains(name) {
+                // Inherited server/node coordinates work before or after an operator subcommand.
+                argument = argument.global(true);
+            }
+            command = command.arg(argument);
         }
         if action.command == ["skill"] {
             command = command.arg(
@@ -355,6 +369,98 @@ mod tests {
             build(&registry)
                 .try_get_matches_from(["infraternal", "mesh", "up"])
                 .is_err()
+        );
+    }
+}
+
+#[cfg(all(test, feature = "remote"))]
+mod backmerge_tests {
+    //! Keeps deployed transport invocations on the metadata-driven command path.
+
+    use super::{build, selected};
+    use crate::cli::actions::registry;
+    use infraternal_plugin_api::CliHandler;
+
+    #[test]
+    fn restart_inherits_private_state_before_or_after_the_command() {
+        let registry = registry().unwrap();
+        for args in [
+            vec![
+                "infraternal",
+                "server",
+                "--data",
+                "/private/server",
+                "restart",
+                "--binary",
+                "/verified/replacement",
+                "--json",
+            ],
+            vec![
+                "infraternal",
+                "server",
+                "restart",
+                "--data",
+                "/private/server",
+                "--binary",
+                "/verified/replacement",
+                "--json",
+            ],
+        ] {
+            let matches = build(&registry).try_get_matches_from(args).unwrap();
+            let command = selected(&matches);
+            assert_eq!(command.path, ["server", "restart"]);
+            assert_eq!(
+                command.matches.get_one::<String>("data").unwrap(),
+                "/private/server"
+            );
+            assert_eq!(
+                registry
+                    .find(&["server", "restart"])
+                    .unwrap()
+                    .action
+                    .cli_handler,
+                CliHandler::ServerRestart
+            );
+        }
+    }
+
+    #[test]
+    fn removal_and_retention_inputs_keep_the_production_runtime_bindings() {
+        let registry = registry().unwrap();
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "remove-host",
+                "00000000-0000-0000-0000-000000000001",
+                "--server",
+                "https://localhost",
+                "--finish",
+                "--retain",
+                "--json",
+            ])
+            .unwrap();
+        assert_eq!(selected(&matches).path, ["remove-host"]);
+        assert_eq!(
+            registry.find(&["remove-host"]).unwrap().action.cli_handler,
+            CliHandler::RemoveHost
+        );
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "__shim",
+                "--session",
+                "00000000000000000000000000000001",
+                "--uid",
+                "1000",
+                "--exit-retention-ms",
+                "700",
+            ])
+            .unwrap();
+        assert_eq!(
+            selected(&matches)
+                .matches
+                .get_one::<i64>("exit_retention_ms"),
+            Some(&700)
         );
     }
 }

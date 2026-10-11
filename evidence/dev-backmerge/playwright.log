@@ -1,0 +1,173 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-vjrgw21y.js, chunk-tvynw18r.js, chunk-s64wtvhh.js, chunk-b5qzwpce.js, chunk-e5rzv0y3.js, chunk-3enspxey.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-2a0cm9tr.js, chunk-7nmnneyq.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-r0qpf520.js, chunk-7nczvd3c.js, chunk-th3r4apk.js, chunk-grh294tc.js, chunk-yvhhqffe.js, chunk-2c27m91w.js, chunk-x67w5aas.js, chunk-kq16b80e.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-0q6w0s0c.js, chunk-8a0n26jx.js, chunk-fm6bw6xr.js, chunk-txyrv3zt.js, chunk-8gqdshxw.js, chunk-hr4r0nn7.js, chunk-9d3qyw9k.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-z9t6qdpd.js, chunk-g35vtqg9.js, chunk-gdsg56z3.js, chunk-yq7ey9rh.js, chunk-1d0qvnvb.js, chunk-07vhzys8.js, chunk-axbkkqp1.js, chunk-wcwf1bfz.js, chunk-p0s4bae4.js, chunk-q347p4e2.js, chunk-3ds84w70.js, chunk-17fyzjsy.js, chunk-2gc6zyt3.js, chunk-v86b5paa.js, chunk-wgedq5fb.js, chunk-xbebaptv.js, chunk-d5e4g6bf.js, chunk-5dad8d6z.js, chunk-2e4yh13p.js, chunk-b44f4n8e.js, chunk-671vmffd.js, chunk-22e8zt9f.js, chunk-58a0x4b2.js, chunk-qaew06z9.js, chunk-2sffzn3p.js, chunk-bbxm5yt8.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-4851sntr.js, chunk-mzcjfrw3.js, chunk-0sxn500c.js, chunk-e8xpfccd.js, chunk-3wtze5qp.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4638
+[WebServer] latency proxy listening on http://localhost:4637; upstream port=4638
+
+Running 542 tests using 1 worker
+
+(node:2630497) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓    1 test/access-states.spec.ts:43:5 › 1440x900 › sign-in, unreachable and loading share the lede-to-action gap and equal padding (20.8s)
+  ✓    2 test/access-states.spec.ts:85:7 › 1440x900 › sign-in failure (cancelled passkey) sits centred above the action with the card's gap (8.3s)
+  ✓    3 test/access-states.spec.ts:85:7 › 1440x900 › sign-in failure (rate limited) sits centred above the action with the card's gap (12.7s)
+  ✓    4 test/access-states.spec.ts:85:7 › 1440x900 › sign-in failure (offline) sits centred above the action with the card's gap (8.2s)
+  ✓    5 test/access-states.spec.ts:43:5 › 393x852 › sign-in, unreachable and loading share the lede-to-action gap and equal padding (12.6s)
+  ✓    6 test/access-states.spec.ts:85:7 › 393x852 › sign-in failure (cancelled passkey) sits centred above the action with the card's gap (8.5s)
+  ✓    7 test/access-states.spec.ts:85:7 › 393x852 › sign-in failure (rate limited) sits centred above the action with the card's gap (3.6s)
+  ✓    8 test/access-states.spec.ts:85:7 › 393x852 › sign-in failure (offline) sits centred above the action with the card's gap (4.9s)
+  ✓    9 test/access-states.spec.ts:43:5 › 375x667 › sign-in, unreachable and loading share the lede-to-action gap and equal padding (6.9s)
+  ✓   10 test/access-states.spec.ts:85:7 › 375x667 › sign-in failure (cancelled passkey) sits centred above the action with the card's gap (3.4s)
+  ✓   11 test/access-states.spec.ts:85:7 › 375x667 › sign-in failure (rate limited) sits centred above the action with the card's gap (4.7s)
+  ✓   12 test/access-states.spec.ts:85:7 › 375x667 › sign-in failure (offline) sits centred above the action with the card's gap (3.2s)
+  ✘   13 test/add-host-prototype.spec.ts:33:1 › one chip field: typed hosts become chips, checkboxes and chips stay in sync (15.3s)
+(node:2649618) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   14 test/add-host-prototype.spec.ts:65:1 › the field autofocuses on desktop but not on touch (13.6s)
+  ✓   15 test/add-host-prototype.spec.ts:77:1 › mouse and shortcut focus draw no rings; Tab navigation does (12.2s)
+  ✓   16 test/add-host-prototype.spec.ts:96:1 › the docked sidebar never covers the flow window and stays out of its way (14.1s)
+  ✓   17 test/add-host-prototype.spec.ts:118:1 › steps slide in the direction of travel and Back reverses it (16.0s)
+  ✓   18 test/add-host-prototype.spec.ts:146:1 › the wizard floats over a dimmed window that becomes the host's terminal (16.3s)
+  ✓   19 test/add-host-prototype.spec.ts:207:1 › ten hosts install together; failures stay listed and the rest open as windows (29.7s)
+  ✓   20 test/add-host-prototype.spec.ts:238:1 › the shared confirmation is compact, icon-only and quiet on open (18.0s)
+  ✓   21 test/add-host-prototype.spec.ts:285:1 › failures say what happened, what to do, and offer Retry with details (11.0s)
+  ✓   22 test/add-host-prototype.spec.ts:300:3 › phone rows never overlap at 320 px (12.5s)
+  ✓   23 test/add-host-prototype.spec.ts:300:3 › phone rows never overlap at 375 px (10.8s)
+  ✓   24 test/add-host-prototype.spec.ts:300:3 › phone rows never overlap at 393 px (14.6s)
+  ✘   25 test/add-host-prototype.spec.ts:348:3 › flow card: shared overlay material, inside its window with one inset, lists end with padding (1440×900) (30.0s)
+(node:2679425) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   26 test/add-host-prototype.spec.ts:348:3 › flow card: shared overlay material, inside its window with one inset, lists end with padding (393×852) (20.4s)
+  -   27 test/addhost-captures.spec.ts:73:5 › captures 1440x900 ink
+  -   28 test/addhost-captures.spec.ts:73:5 › captures 1440x900 paper
+  -   29 test/addhost-captures.spec.ts:73:5 › captures 393x852 ink
+  -   30 test/addhost-captures.spec.ts:73:5 › captures 393x852 paper
+  ✓   31 test/addhost-chips.spec.ts:43:1 › typing kayg@o2 and clicking Continue proceeds with that host, with no tick (23.1s)
+  ✓   32 test/addhost-chips.spec.ts:57:1 › a@h1 b@h2,c@h3 gives chips for the ended targets; the last one waits as text until it is ended (15.1s)
+  ✓   33 test/addhost-chips.spec.ts:72:1 › pasting three lines gives three chips (20.5s)
+  ✓   34 test/addhost-chips.spec.ts:82:1 › an invalid token shows the hint and never blocks the chips beside it (16.9s)
+  ✓   35 test/addhost-chips.spec.ts:101:1 › with only an invalid token the hint shows once it is ended, and Continue stays disabled (14.4s)
+  ✘   36 test/addhost-chips.spec.ts:114:1 › a token that names a discovered host chips at once and is ticked in the list (15.1s)
+(node:2699291) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   37 test/addhost-chips.spec.ts:125:1 › Backspace on an empty field turns the last chip back into text (34.2s)
+(node:2704628) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   38 test/addhost-chips.spec.ts:137:1 › Tab ends a typed token (20.4s)
+  ✓   39 test/addhost-chips.spec.ts:148:1 › a listed host ticked in the list becomes a chip, and removing the chip unticks it (20.2s)
+  -   40 test/addhost-chips.spec.ts:159:5 › captures 1440x900 ink
+  -   41 test/addhost-chips.spec.ts:159:5 › captures 1440x900 paper
+  -   42 test/addhost-chips.spec.ts:159:5 › captures 393x852 ink
+  -   43 test/addhost-chips.spec.ts:159:5 › captures 393x852 paper
+  ✓   44 test/addhost-chips.spec.ts:179:1 › a token typed while the host list is still loading chips when the list arrives (27.5s)
+  ✘   45 test/addhost-wizard.spec.ts:46:1 › the toolbar button and the palette open the wizard (39.8s)
+(node:2722990) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   46 test/addhost-wizard.spec.ts:60:1 › network access: detected, shown by name, and the host lands in Console and the sidebar (26.2s)
+  ✓   47 test/addhost-wizard.spec.ts:81:1 › closing the flow window from its own frame ends the wizard (9.2s)
+  ✓   48 test/addhost-wizard.spec.ts:90:1 › the server's own key is the fallback when the network does not sign in (15.5s)
+  ✓   49 test/addhost-wizard.spec.ts:99:1 › a batch shows every host's own progress and opens every host (16.7s)
+  ✘   50 test/addhost-wizard.spec.ts:110:1 › all automatic methods refused: asked to choose, and a password is sent once and never kept (32.3s)
+(node:2734671) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   51 test/addhost-wizard.spec.ts:136:1 › a pasted private key signs in as the user's key (32.6s)
+(node:2740065) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   52 test/addhost-wizard.spec.ts:149:1 › a saved key (unlocked with the passkey) is offered only when the browser holds one (14.8s)
+  ✓   53 test/addhost-wizard.spec.ts:162:1 › without a saved key the choice does not offer one (12.9s)
+  ✓   54 test/addhost-wizard.spec.ts:170:1 › the server key is shown to copy; adding it and trying again signs in (23.5s)
+  ✘   55 test/addhost-wizard.spec.ts:185:1 › a locked server key is still shown, with the reason (32.1s)
+(node:2752056) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   56 test/addhost-wizard.spec.ts:193:1 › no server key to show: the choice is paste or password only (35.8s)
+(node:2758675) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   57 test/addhost-wizard.spec.ts:202:1 › an unknown host key shows its fingerprint and is never trusted without a click (35.5s)
+(node:2770132) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   58 test/addhost-wizard.spec.ts:219:1 › a host that does not answer: what happened, Retry, and the one-line install from the host (32.8s)
+(node:2777113) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   59 test/addhost-wizard.spec.ts:235:1 › a mesh policy block says possible, not certain (36.5s)
+(node:2789952) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   60 test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can (38.3s)
+(node:2798633) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   61 test/addhost-wizard.spec.ts:265:1 › one refusal without choose_method still offers another way to sign in (27.4s)
+  ✘   62 test/addhost-wizard.spec.ts:272:1 › empty, loading and error states of discovery (31.8s)
+(node:2814457) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   63 test/addhost-wizard.spec.ts:297:1 › an SSH config pasted into the field becomes chips (21.8s)
+  ✘   64 test/addhost-wizard.spec.ts:311:1 › closing mid-install asks first, and cancelling ends the run (35.6s)
+(node:2826156) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   65 test/addhost-wizard.spec.ts:326:1 › the wizard works on a phone and keeps the footer on screen (30.2s)
+(node:2835040) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   66 test/addhost-wizard.spec.ts:350:3 › fresh CA explains passkey confirmation before starting SSH (36.6s)
+(node:2846343) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   67 test/addhost-wizard.spec.ts:350:3 › locked CA explains passkey confirmation before starting SSH (33.7s)
+(node:2856790) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   68 test/addhost-wizard.spec.ts:368:1 › a canvas flow remains nonmodal (39.7s)
+(node:2865836) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   69 test/addhost-wizard.spec.ts:374:1 › Escape in the palette leaves the add-host flow open (31.8s)
+(node:2871783) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   70 test/addhost-wizard.spec.ts:388:1 › Tab can leave a canvas flow (15.7s)
+  ✓   71 test/addhost-wizard.spec.ts:397:1 › a typed root login requires consent and cannot pretend to install as a user (19.4s)
+  -   72 test/audit-recovery.spec.ts:7:1 › audit recovery words remain inside the browser
+  -   73 test/audit-recovery.spec.ts:34:1 › successful verifier path sends no legacy words
+  -   74 test/audit-recovery.spec.ts:58:3 › retryable verifier failure 429 never sends legacy words
+  -   75 test/audit-recovery.spec.ts:58:3 › retryable verifier failure 503 never sends legacy words
+  ✓   76 test/auth-binary.spec.ts:15:3 › auth binary boundary: buffer (2.7s)
+  ✓   77 test/auth-binary.spec.ts:15:3 › auth binary boundary: view (1.2s)
+  ✓   78 test/auth-binary.spec.ts:15:3 › auth binary boundary: data-view (1.4s)
+  ✓   79 test/auth-binary.spec.ts:15:3 › auth binary boundary: wide-view (2.4s)
+  ✓   80 test/auth-binary.spec.ts:15:3 › auth binary boundary: array (1.4s)
+  ✓   81 test/auth-binary.spec.ts:15:3 › auth binary boundary: realm (2.6s)
+  ✓   82 test/auth-binary.spec.ts:15:3 › auth binary boundary: realm-view (2.1s)
+  ✓   83 test/auth-binary.spec.ts:15:3 › auth binary boundary: invalid (4.3s)
+AUTH_BINARY_TIMING {"old_us":0.38799999952316283,"normalized_us":0.2530000001192093,"count":100000}
+  ✓   84 test/auth-binary.spec.ts:80:1 › binary normalization cost at 50 concurrent login equivalents (3.3s)
+  ✓   85 test/ca-unlock.spec.ts:42:3 › locked then unlocked (desktop) (18.3s)
+  ✓   86 test/ca-unlock.spec.ts:42:3 › locked then unlocked (phone) (14.2s)
+  ✓   87 test/ca-unlock.spec.ts:71:1 › the palette row runs the ceremony and the lock clears (9.8s)
+  ✓   88 test/ca-unlock.spec.ts:84:1 › already unlocked: no palette row, Settings says Unlocked with no button (8.3s)
+  ✓   89 test/ca-unlock.spec.ts:94:1 › a viewer who is not an administrator sees the state and no button (8.4s)
+  ✓   90 test/canvas.spec.ts:30:1 › desktop: horizontal trackpad scrolling pans the canvas over a terminal and rests on whole pixels (7.9s)
+  ✓   91 test/canvas.spec.ts:50:1 › desktop: a click on an inactive window activates it without moving focus into it (7.9s)
+  ✓   92 test/canvas.spec.ts:63:1 › touch: a tap activates without the keyboard, two fingers pan the canvas (9.7s)
+  ✓   93 test/canvas.spec.ts:88:1 › details popover: keys left, values right, each cell copies with a tick (8.5s)
+  ✓   94 test/canvas.spec.ts:111:1 › live terminal: the cursor stays on its text inside the window card (9.3s)
+  ✓   95 test/canvas.spec.ts:124:3 › live terminal: an 86-character line puts the cursor at column 86 with 8 px cells at DPR 1 (a window wide enough for 87 columns) (8.5s)
+  ✓   96 test/canvas.spec.ts:124:3 › live terminal: an 86-character line puts the cursor at column 86 with 8 px cells at DPR 2 (a window wide enough for 87 columns) (11.9s)
+  ✘   97 test/canvas.spec.ts:143:3 › details popover stays inside its window with an equal inset at 1440×900 (30.2s)
+(node:2918871) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   98 test/canvas.spec.ts:143:3 › details popover stays inside its window with an equal inset at 393×852 (21.0s)
+  ✓   99 test/canvas.spec.ts:143:3 › details popover stays inside its window with an equal inset at 375×667 (13.7s)
+  ✓  100 test/canvas.spec.ts:172:1 › every floating card uses the one overlay material (13.8s)
+  ✓  101 test/canvas.spec.ts:191:1 › a connection failure shows in the shared toast, never as a floating status box (16.4s)
+  ✓  102 test/canvas.spec.ts:208:1 › desktop: edges and corners resize with the right cursors, neighbours shift and never overlap (25.2s)
+  ✓  103 test/canvas.spec.ts:250:1 › desktop: a window cannot shrink below about 40 columns by 10 rows (22.4s)
+resize frame cost over 40 frames: median 0.80 ms, p95 8.90 ms, max 125.20 ms
+  ✓  104 test/canvas.spec.ts:265:1 › desktop: the live terminal refits once on release, not on every frame, and each frame costs under 16 ms (23.3s)
+  ✘  105 test/canvas.spec.ts:301:1 › touch: press and hold on a header reveals corner handles; a handle resizes; a tap outside ends it (17.1s)
+(node:2934581) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  106 test/canvas.spec.ts:344:1 › sidebar footer: the person and settings pills line up, press, and open Settings with About; no version pill (36.3s)
+(node:2941557) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  107 test/canvas.spec.ts:401:1 › palette: About infraternal opens Settings, About, and is found by version, build and commit (30.5s)
+(node:2956498) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  108 test/canvas.spec.ts:418:1 › lock: the icon appears near a window's top edge, locks with a click, stays, and unlocks with Ctrl+Shift+L (24.3s)
+  ✘  109 test/canvas.spec.ts:464:1 › lock: wheel and canvas gestures inside the locked window never pan; outside it still does; other windows are ignored (35.2s)
+(node:2982536) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  110 test/canvas.spec.ts:494:1 › lock: Ctrl+K reaches the terminal on Linux and Windows while locked, and opens the palette when unlocked (32.8s)
+(node:3006503) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)

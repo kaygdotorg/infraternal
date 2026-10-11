@@ -15,13 +15,15 @@ import { allowedHosts, type MockWorld } from "./world";
 /** The window that holds the live terminal in mockups. */
 export const LIVE_WINDOW = "w-build-01";
 
-export function createMockSessions(core: CoreScreen, world: MockWorld, inventory?: MockInventory): SessionService & { dispose(): void } {
+export function createMockSessions(core: CoreScreen, world: MockWorld, inventory?: MockInventory): SessionService & { enroll(host: string): void; dispose(): void } {
   // The one live terminal (the real renderer) is parked here while no window holds it.
   const holder = el("div", "cl-holder");
   holder.setAttribute("aria-hidden", "true");
   core.stage.append(holder);
   holder.append(core.terminalHost);
   let splits = 0;
+  // Enrollment belongs to the current mock person, never every role in a scene.
+  const enrolled = new Map<string, typeof world.role>();
   const listeners = new Set<() => void>();
   return {
     bind(model: WindowModel): SessionBinding {
@@ -58,10 +60,14 @@ export function createMockSessions(core: CoreScreen, world: MockWorld, inventory
         if (rec) return { ...m, id: `${m.id}-s${n}`, session: rec.name, sessionId: rec.id, splitOf: m.id, lines: rec.screen };
         return { ...m, id: `${m.id}-s${n}`, session: `split ${n}`, splitOf: m.id, lines: shellLines(m.user ?? "kayg", m.host, "echo ready") };
       }
-      const first = inventory?.get(host, DEFAULT_SESSION[host] ?? "");
+      const first = DEFAULT_SESSION[host] ? inventory?.get(host, DEFAULT_SESSION[host]!) : inventory?.list(host)[0];
       return { id: `w-${host}`, kind: "terminal", host, user: s?.user ?? "kayg", os: s?.os ?? "unknown", ...(first ? { session: first.name, sessionId: first.id } : {}), lines: s?.screen ?? [`kayg@${host}:~$ `] };
     },
-    hosts(): HostEntry[] { return allowedHosts(world.role).map((name) => ({ id: name, name })); },
+    enroll(host) { enrolled.set(host, world.role); for (const listener of listeners) listener(); },
+    hosts(): HostEntry[] {
+      const names = new Set([...allowedHosts(world.role), ...[...enrolled].filter(([, role]) => role === world.role).map(([name]) => name)]);
+      return [...names].map((name) => ({ id: name, name }));
+    },
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     dispose() { holder.remove(); },
   };

@@ -1,8 +1,8 @@
 //! Declares agent component actions shared by CLI help and generated skills.
 
 use infraternal_plugin_api::{
-    ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliHandler, DryRun, JsonSchema,
-    PluginDefinition, SafetyNotes,
+    ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun as DryRun, CliHandler,
+    JsonSchema, PluginDefinition, SafetyNotes,
 };
 
 /// Stable plugin owner used to materialize only the requested CLI definitions.
@@ -11,7 +11,7 @@ pub const ID: &str = "agent";
 /// Register the agent component actions exposed by this plugin.
 #[must_use]
 pub fn plugin() -> PluginDefinition {
-    PluginDefinition::new(
+    let mut plugin = PluginDefinition::new(
         ID,
         "Manage the infraternal agent component on this node.",
         [
@@ -97,7 +97,18 @@ pub fn plugin() -> PluginDefinition {
             .not_available_yet()
             .with_example("agent status", "Check the agent component state."),
         ],
-    )
+    );
+    #[cfg(feature = "remote")]
+    {
+        plugin.actions[0].input_schema.properties.insert(
+            "data".to_owned(),
+            JsonSchema::string("Private enrolled identity directory."),
+        );
+        plugin
+            .actions
+            .extend(infraternal_plugin_remote::cli::agent_actions());
+    }
+    plugin
 }
 
 #[cfg(test)]
@@ -111,10 +122,13 @@ mod tests {
     fn agent_actions_are_complete_and_unavailable_until_lifecycle_exists() {
         let plugin = plugin();
         assert_eq!(plugin.id, "agent");
-        assert_eq!(plugin.actions.len(), 4);
+        assert_eq!(
+            plugin.actions.len(),
+            if cfg!(feature = "remote") { 6 } else { 4 }
+        );
         assert_eq!(plugin.actions[0].command, ["agent"]);
         assert!(!plugin.actions[0].visible);
-        for action in plugin.actions.iter().skip(1) {
+        for action in plugin.actions.iter().skip(1).take(3) {
             assert_eq!(action.command[0], "agent");
             assert!(
                 action

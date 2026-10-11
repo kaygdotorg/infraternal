@@ -1,0 +1,14 @@
+{
+  "description": "Weighted local x86 musl release measurement of 200 actual relay futures with paired authenticated legacy-capability Unix fixtures; no PTYs and no active owner connection, #151 D214.",
+  "source_head": "b3ddf6fc",
+  "cpu_scope": "CPUWeight=10000",
+  "relay_future_bytes": 2552,
+  "streams": 200,
+  "private_before_kib": 1948,
+  "private_after_kib": 3396,
+  "delta_kib": 1448,
+  "bytes_per_stream": 7413,
+  "load": "24.53 28.22 28.55",
+  "allowance_bytes_per_stream": 32768,
+  "connection_metadata_reserve_bytes": 4194304
+}

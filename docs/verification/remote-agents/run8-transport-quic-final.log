@@ -1,0 +1,8 @@
+Running as unit: run-p4038695-i12426440.scope; invocation ID: 2f547b65e9094e2fbe1cb2e4f454eeab
+
+running 1 test
+test transport_diagnostics::quic_300ms_and_1000_connection_pairs ... transport_diagnostic kind=quic_bbr simulated_rtt_ms=300 handshake_n=25 admitted_p50_us=454762 admitted_p99_us=456677 connection_pairs=1000 baseline_rss_kib=10764 retained_rss_kib=78432 combined_client_server_delta_kib_per_pair=67.668 combined_delta_kib_at1000=67668 connect_cpu_ticks=85 machine=infraternal-dev load=2.21 3.03 3.10 4/979 4038860
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 12.27s
+

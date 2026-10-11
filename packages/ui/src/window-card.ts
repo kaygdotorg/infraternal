@@ -20,6 +20,8 @@
  *   card.dispose()
  */
 import { createLockToggle, trackLockReveal, type LockSource, type LockToggle } from "./lock-toggle";
+import type { AnchoredPopover } from "./anchored-popover";
+import type { WindowMenuItem } from "./window-menu.on-demand";
 
 /** `none` hides the dot: a window that is not a connection yet (a flow in progress). */
 export type WindowStatus = "live" | "connecting" | "offline" | "none";
@@ -105,6 +107,32 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     handlers.push([button, handler]);
     actions.append(button);
   }
+  // Title first (TASTE): a header too narrow for the title and every action keeps the title. With more than one action,
+  // a narrow card (styles.css, a container query) shows one ⋯ instead, and the ⋯ opens the same actions in the anchored
+  // popover. A card with one action never collapses (a phone header keeps its Close).
+  const actionList = options.actions ?? [];
+  let menu: AnchoredPopover | undefined;
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "ui-window-action ui-window-more";
+  more.setAttribute("aria-label", "More window actions");
+  more.setAttribute("aria-haspopup", "menu");
+  more.dataset.tip = "More";
+  more.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg>';
+  const openMenu = (event: MouseEvent): void => {
+    if (menu) { menu.close("pointer"); return; }
+    const source = event.detail === 0 ? "keyboard" : "pointer";
+    void import("./window-menu.on-demand").then((m) => {
+      if (menu) return;
+      const items: WindowMenuItem[] = actionList.map((action) => ({ id: action.id, label: action.label, icon: action.icon, run: (e) => action.onSelect(e) }));
+      menu = m.openWindowMenu(root, more, items, source, () => { menu = undefined; });
+    });
+  };
+  if (actionList.length > 1) {
+    actions.dataset.collapsible = "";
+    actions.append(more);
+    more.addEventListener("click", openMenu);
+  }
   header.append(pill, actions);
 
   const body = document.createElement("div");
@@ -167,6 +195,8 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     dispose() {
       stopReveal();
       lock.dispose();
+      menu?.close("keyboard");
+      more.removeEventListener("click", openMenu);
       for (const [button, handler] of handlers) button.removeEventListener("click", handler);
       root.remove();
     },

@@ -1,0 +1,59 @@
+{
+  "description": "Paired zero-RTT 200-session host-facts check, 101 samples; maximum is the highest observed duration, not an interpolated percentile. No own build/browser ran during either sample.",
+  "measurements": [
+    {
+      "version": "before",
+      "rows": [
+        {
+          "machine": "infraternal-dev",
+          "binary": "/home/kayg/.cache/codex-scratch/session-bounds/artifacts/before-birth-infraternal",
+          "binary_sha256": "af89445548229de63d8094dfd0561e51e5e1514df2094d86aa7a53bda67e7d25",
+          "binary_bytes": 19652384,
+          "dimensions": "80x24",
+          "load": "14.76 13.04 15.77 24/2943 1355485"
+        },
+        {
+          "phase": "registry",
+          "recovered": 200,
+          "admitted": 201,
+          "after_reap": 200
+        },
+        {
+          "phase": "facts-latency",
+          "sessions": 200,
+          "samples": 101,
+          "p50_ms": 2.521,
+          "load": "14.76 13.04 15.77 26/3350 1356423",
+          "maximum_ms": 8.613
+        }
+      ]
+    },
+    {
+      "version": "after",
+      "rows": [
+        {
+          "machine": "infraternal-dev",
+          "binary": "/home/kayg/.cache/codex-scratch/session-bounds/target/x86_64-unknown-linux-musl/release/infraternal",
+          "binary_sha256": "4939fc4d3a09c62a3b80febbb7a7fdfa1cef846189cbdb6618899ddcf271f32b",
+          "binary_bytes": 19656320,
+          "dimensions": "80x24",
+          "load": "17.20 13.86 15.95 18/2932 1362296"
+        },
+        {
+          "phase": "registry",
+          "recovered": 200,
+          "admitted": 201,
+          "after_reap": 200
+        },
+        {
+          "phase": "facts-latency",
+          "sessions": 200,
+          "samples": 101,
+          "p50_ms": 3.999,
+          "load": "17.20 13.86 15.95 22/3351 1363486",
+          "maximum_ms": 13.941
+        }
+      ]
+    }
+  ]
+}

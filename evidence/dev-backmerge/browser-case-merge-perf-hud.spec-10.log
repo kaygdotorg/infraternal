@@ -1,0 +1,42 @@
+Load before: 29.02 25.02 24.02 28/3028 314101
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p314102-i50597767.scope; invocation ID: b99032d8b5734ad399e5014aaf3e12c3
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-19z4hfg8.js, chunk-tvynw18r.js, chunk-vakev5hx.js, chunk-b5qzwpce.js, chunk-btz24xam.js, chunk-8k16snct.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-n2bmt896.js, chunk-365kkmk6.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-qq714h8a.js, chunk-7nczvd3c.js, chunk-09ze69rs.js, chunk-5f23qkyw.js, chunk-yvhhqffe.js, chunk-14fd7mg0.js, chunk-yjqsaxnn.js, chunk-567saa9w.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-h19ebwh2.js, chunk-b9v9mvq4.js, chunk-mnpafrx4.js, chunk-dsj72kr9.js, chunk-8gqdshxw.js, chunk-vx9dd0f1.js, chunk-zw537hra.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-ms5k733e.js, chunk-89e2fta6.js, chunk-7rjbz01a.js, chunk-eftsbh04.js, chunk-1d0qvnvb.js, chunk-x33p6e7j.js, chunk-axbkkqp1.js, chunk-v8ynfr3g.js, chunk-2qqxez93.js, chunk-bnm67kge.js, chunk-6nh4v0f1.js, chunk-6aa5kbh6.js, chunk-kk9cnf15.js, chunk-v86b5paa.js, chunk-j89jng27.js, chunk-nnk6bg85.js, chunk-3604rnhn.js, chunk-v4h3tfv6.js, chunk-2e4yh13p.js, chunk-ddvj5ec1.js, chunk-ehz2xc3m.js, chunk-fzc6ae4r.js, chunk-3012t88k.js, chunk-0y7xj7cp.js, chunk-ts19v7a3.js, chunk-73an271b.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-42r4wdqj.js, chunk-e6zw3b2p.js, chunk-0sxn500c.js, chunk-y2gewc34.js, chunk-wkt23szj.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:316784) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+PERF-BENCH {"meanUs":0.18299999952316284,"p99Us":1.000000238418579,"maxUs":130}
+PERF-RECALC none (3 rounds x 3 s idle): layouts 12, style recalcs 84, style 39.9 ms, layout 42.5 ms, script 150.6 ms
+PERF-RECALC empty-raf (3 rounds x 3 s idle): layouts 8, style recalcs 179, style 39.6 ms, layout 22.9 ms, script 127.8 ms
+PERF-RECALC meter (3 rounds x 3 s idle): layouts 10, style recalcs 308, style 58.8 ms, layout 48.5 ms, script 149.8 ms
+  ✘  1 test/perf-hud.spec.ts:75:1 › the frame body costs under 0.05 ms and the meter causes no layout or style work between repaints (1.6m)
+
+
+  1) test/perf-hud.spec.ts:75:1 › the frame body costs under 0.05 ms and the meter causes no layout or style work between repaints 
+
+    Error: expect(received).toBeLessThanOrEqual(expected)
+
+    Expected: <= 191
+    Received:    308
+
+      114 |   }
+      115 |   expect(sum("meter", "layout")).toBeLessThanOrEqual(sum("empty-raf", "layout") + 3);
+    > 116 |   expect(sum("meter", "style")).toBeLessThanOrEqual(Math.ceil(sum("empty-raf", "style") * 1.05) + 3);
+          |                                 ^
+      117 |   await hud(page).call((h) => { h.pauseRepaint(); return 0; });
+      118 |   // Nothing in the meter's own subtree changes while the repaint is stopped: the loop writes the ring and nothing else.
+      119 |   const mutations = await page.evaluate(() => new Promise<number>((done) => {
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/perf-hud.spec.ts:116:33
+
+    Error Context: test-results/perf-hud-the-frame-body-co-c2992-style-work-between-repaints/error-context.md
+
+  1 failed
+    test/perf-hud.spec.ts:75:1 › the frame body costs under 0.05 ms and the meter causes no layout or style work between repaints 
+
+Invocation exit: 1
+Load after: 18.04 23.84 23.81 8/2982 330813

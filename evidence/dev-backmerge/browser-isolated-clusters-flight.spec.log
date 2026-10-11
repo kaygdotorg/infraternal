@@ -1,0 +1,18 @@
+Load before: 20.54 29.47 33.60 29/3153 3789064
+Running as unit: run-p3789065-i49879094.scope; invocation ID: cc30692d4f88427c801508b97e595802
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-wja99j0n.js, chunk-tvynw18r.js, chunk-1f35k304.js, chunk-b5qzwpce.js, chunk-xhpxq0bt.js, chunk-vmzwt2s7.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-bht39rzb.js, chunk-3qcp0g97.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-yq83tq1j.js, chunk-7nczvd3c.js, chunk-a68v58e4.js, chunk-1dy3ezvc.js, chunk-yvhhqffe.js, chunk-nhwsgvrk.js, chunk-b05b3c7g.js, chunk-fhjc376x.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-zx0d16e3.js, chunk-5tmyt6yr.js, chunk-dn7twrfs.js, chunk-x43zq1dj.js, chunk-8gqdshxw.js, chunk-gaxvqe6b.js, chunk-wc3h139s.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-5qbrk5j6.js, chunk-s5mt7efx.js, chunk-967t3f9q.js, chunk-z444w67v.js, chunk-1d0qvnvb.js, chunk-1823t7ab.js, chunk-axbkkqp1.js, chunk-epshqda7.js, chunk-vz0za4j7.js, chunk-g7b5g6va.js, chunk-vt95h7g3.js, chunk-9hwb2z8q.js, chunk-kr7dzrge.js, chunk-v86b5paa.js, chunk-7qem2mc2.js, chunk-zrtp28yn.js, chunk-5xw8xeb3.js, chunk-8sqj1507.js, chunk-2e4yh13p.js, chunk-15zh6sa3.js, chunk-q2a58p8q.js, chunk-d4x52s8v.js, chunk-5s2dmj7y.js, chunk-pkwx1tn8.js, chunk-d12mzw06.js, chunk-42thykz5.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-2qmvaxqp.js, chunk-g65g57f2.js, chunk-0sxn500c.js, chunk-2gefc922.js, chunk-ck6t4agm.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:3793349) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+FLIGHT {"pointer":328,"pointerBack":433,"key":232,"key2":208}
+  ✓  1 test/clusters-flight.spec.ts:32:1 › view flights settle quickly: pointer about 350 ms, key about 180 ms (24.4s)
+
+  1 passed (33.6s)
+
+Invocation exit: 0
+Load after: 20.53 28.51 33.13 19/3074 3796265

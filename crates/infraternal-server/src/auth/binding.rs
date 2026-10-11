@@ -1,23 +1,11 @@
 //! HTTP transaction binding keeps a signed ceremony in the browser that started it [24,53].
 use super::{Auth, Error, Result, hash, random};
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue};
 
 const COOKIE: &str = "__Host-infraternal-ceremony=";
 
 fn cookie(headers: &HeaderMap) -> Option<&str> {
-    let mut values = headers
-        .get(header::COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .filter_map(|value| value.trim().strip_prefix(COOKIE));
-    let value = values.next()?;
-    (values.next().is_none()
-        && value.len() == 43
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
-    .then_some(value)
+    super::cookies::capability(headers, COOKIE)
 }
 
 impl Auth {

@@ -1,7 +1,7 @@
 //! Declares the backup component actions shared by CLI help and generated skills.
 
 use infraternal_plugin_api::{
-    ActionContract, ActionDefinition, ActionEffect, ActionTarget, DryRun, JsonSchema,
+    ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun as DryRun, JsonSchema,
     PluginDefinition, SafetyNotes,
 };
 

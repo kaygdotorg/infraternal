@@ -1,0 +1,26 @@
+Running as unit: run-p3521682-i11909429.scope; invocation ID: d18e73e531894a60a00c0fa26fdcc0a3
+[WebServer] $ bun run build.ts
+[WebServer] built main.js, chunk-0gjma2ke.js, chunk-566673p4.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-m6qq9aqh.js, chunk-5hf4zvs5.js, chunk-e1bh66a6.js, chunk-axbkkqp1.js, chunk-3s29n6h3.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4702
+[WebServer] latency proxy listening on http://localhost:4701; upstream port=4702
+
+Running 1 test using 1 worker
+
+(node:3522038) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+Core-screen screenshots (production build):
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-paper-sidebar-closed.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-paper-sidebar-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-paper-palette-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-ink-sidebar-closed.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-ink-sidebar-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-1440x900-ink-palette-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-paper-sidebar-closed.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-paper-sidebar-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-paper-palette-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-ink-sidebar-closed.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-ink-sidebar-open.png
+/home/kayg/Developer/infraternal/.worktrees/remote-agents/apps/tracer/test-results/core-screen/tracer-core-393x852-ink-palette-open.png
+  ✓  1 test/core-screen.spec.ts:146:1 › core screen themes, tree, RTT, mobile tray, and screenshots (32.8s)
+
+  1 passed (36.2s)

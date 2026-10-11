@@ -1,0 +1,19 @@
+Load before: 15.40 30.70 28.90 8/3000 473019
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p473020-i50756633.scope; invocation ID: 542539f8015144829f5b2a9063dca859
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-n6nbcaf4.js, chunk-tvynw18r.js, chunk-92r48ezm.js, chunk-b5qzwpce.js, chunk-n4wtzm7r.js, chunk-2qht927j.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-s0vzswcx.js, chunk-7dfspw0f.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-jqe100tn.js, chunk-7nczvd3c.js, chunk-rbev6s4y.js, chunk-fx2472j6.js, chunk-yvhhqffe.js, chunk-m054kxqv.js, chunk-f1d8n8k8.js, chunk-ad5d540v.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-tx040cp2.js, chunk-96pn6n29.js, chunk-dg9ktq7p.js, chunk-sace9ttv.js, chunk-8gqdshxw.js, chunk-3whhfek9.js, chunk-mg0baqay.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-fftv3v7v.js, chunk-dj4tq5ym.js, chunk-xdjr1hpr.js, chunk-2b5sawqk.js, chunk-1d0qvnvb.js, chunk-p3c3ryqh.js, chunk-axbkkqp1.js, chunk-q48fsd4j.js, chunk-969mydty.js, chunk-yfa57dyd.js, chunk-0fv9tdw2.js, chunk-fcg0d38d.js, chunk-v0en0321.js, chunk-v86b5paa.js, chunk-7q0a39zw.js, chunk-e97npye0.js, chunk-6xhf94zz.js, chunk-5a6y4dvp.js, chunk-2e4yh13p.js, chunk-cmp443f3.js, chunk-tpb9kcnh.js, chunk-8dzdhy37.js, chunk-pmr4vd0s.js, chunk-cbtkx7s3.js, chunk-dc8ssser.js, chunk-0v5n434p.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-88qg2eq4.js, chunk-5cwp9yeg.js, chunk-0sxn500c.js, chunk-hved2gqj.js, chunk-prs7b7vq.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:474091) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+MESH-PERF load/core=3.21 {"zoom":{"top":"UpdateLayoutTree=65ms Layout=17ms PrePaint=18ms Paint=70ms Layerize=88ms FireAnimationFrame=32ms EventDispatch=21ms RunTask=362ms","n":38,"p50":5.6,"p95":24.14,"max":56.54,"over8":9},"pan":{"top":"UpdateLayoutTree=108ms Layout=49ms PrePaint=22ms Paint=183ms Layerize=232ms FireAnimationFrame=124ms EventDispatch=27ms RunTask=865ms","n":89,"p50":6.92,"p95":27.02,"max":50.61,"over8":37},"drag":{"top":"UpdateLayoutTree=1ms Layout=3ms PrePaint=7ms Paint=5ms Layerize=2ms FireAnimationFrame=64ms EventDispatch=37ms RunTask=510ms","n":269,"p50":0.84,"p95":2.51,"max":6.1,"over8":0}}
+  ✓  1 test/mesh-perf.spec.ts:47:1 › 1,000 nodes: the main thread's work per frame of a zoom, a pan and a drag (39.4s)
+
+  1 passed (51.3s)
+
+Invocation exit: 0
+Load after: 25.68 30.66 28.97 42/3205 481318

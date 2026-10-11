@@ -1,0 +1,19 @@
+Load before: 32.14 24.88 23.70 7/3071 270410
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p270411-i50554076.scope; invocation ID: 2f33312bd0c24d8785f0e797bfeb0b0d
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-peggscx1.js, chunk-tvynw18r.js, chunk-x42jh8rh.js, chunk-b5qzwpce.js, chunk-g988tr0n.js, chunk-r88frfr8.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-k1s010n9.js, chunk-a0wh4wqv.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-neqtdens.js, chunk-7nczvd3c.js, chunk-3pkbbrd0.js, chunk-rb8ck3kk.js, chunk-yvhhqffe.js, chunk-16b4tbgs.js, chunk-a6faghya.js, chunk-1btaw03p.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-65xvrj2c.js, chunk-mcxyne01.js, chunk-05zkj7v6.js, chunk-mzez5nwn.js, chunk-8gqdshxw.js, chunk-n55qhfv4.js, chunk-d6mvwmtt.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-8ay2rz05.js, chunk-btvf3kay.js, chunk-7rv9en9p.js, chunk-sq1zeesh.js, chunk-1d0qvnvb.js, chunk-1ksv0gy0.js, chunk-axbkkqp1.js, chunk-rqcgbyr4.js, chunk-9acgrv5x.js, chunk-y59dvbqc.js, chunk-t0g1wwyy.js, chunk-zd73rd2y.js, chunk-w2ddqnfw.js, chunk-v86b5paa.js, chunk-xjb2c5sg.js, chunk-7xqk5sbr.js, chunk-tefcf9zf.js, chunk-jab8vzqa.js, chunk-2e4yh13p.js, chunk-qcg5y7yz.js, chunk-5gs6bzs4.js, chunk-dcdpqgxy.js, chunk-8asfrarf.js, chunk-x9693n1m.js, chunk-mqnkq3n0.js, chunk-bhp6y1zc.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-zp8g2r7p.js, chunk-9yy91ydp.js, chunk-0sxn500c.js, chunk-8kgcsxwh.js, chunk-trxd70x2.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:271942) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+FONT_WEIGHT {"font":"maple-mono-nf","dpr":1,"loaded":true,"canvasFont":"500 14px \"Maple Mono NF\", \"Nerd Symbols\", \"Maple Mono NF Fallback\", ui-monospace, monospace","regularInk":1085.503267973856,"boldInk":1327.0588235294117,"ratio":1.222528630435568,"rendererFamily":"\"Maple Mono NF\", \"Nerd Symbols\", \"Maple Mono NF Fallback\", ui-monospace, monospace","rootFont":"\"Maple Mono NF\", \"Nerd Symbols\", \"Maple Mono NF Fallback\", ui-monospace, monospace","tokens":["450","500","550","650"]}
+  ✓  1 test/font-weight.spec.ts:15:5 › Maple Mono NF draws terminal and UI text at its registry weights at DPR 1 (9.2s)
+
+  1 passed (24.4s)
+
+Invocation exit: 0
+Load after: 32.59 25.54 23.94 45/3066 274560

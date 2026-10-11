@@ -17,6 +17,8 @@ import type { WindowModel } from "../model/types";
 import { ICON, SESSION_ICON, iconFor } from "../views/icons";
 import { isTerminal, makeBody } from "../views/body";
 import { beginMove } from "./move";
+import { coarse } from "../dom";
+import { scrollerOf } from "../layout/columns";
 import { RecentList } from "../recency";
 
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
@@ -24,12 +26,15 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   const rec: WinRec = {} as WinRec;
   // The window's kind decides what it can do: only a terminal has a split control.
   const readOnly = Boolean(c.view.team);
-  if (m.kind === "terminal" && !m.noAccess && !readOnly) {
+  // On a touch device the header keeps only Close (TASTE: phone headers carry two actions at most); splits and the
+  // session manager are in the canvas row while a terminal is focused, and in ⌘K.
+  const header = !coarse.matches;
+  if (m.kind === "terminal" && !m.noAccess && !readOnly && header) {
     actions.push({ id: "split-right", label: "Split right", icon: ICON.splitRight, onSelect: () => { void cx.win.split(rec, "right"); } });
     actions.push({ id: "split-down", label: "Split down", icon: ICON.splitDown, onSelect: () => { void cx.win.split(rec, "down"); } });
   }
   // The session manager sits beside the splits when the canvas has an inventory (D127); a team layout's windows are read-only.
-  if (m.kind === "terminal" && !m.noAccess && cx.adapters.inventory) {
+  if (m.kind === "terminal" && !m.noAccess && cx.adapters.inventory && header) {
     actions.push({ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: (e) => cx.sessionUi?.toggleManager(rec, e.currentTarget as HTMLElement, e.detail === 0 ? "keyboard" : "pointer") });
   }
   if (m.kind !== "node" && m.kind !== "settings" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });
@@ -47,6 +52,10 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   Object.assign(rec, { model: m, card, owner: c });
   card.root.dataset.kind = m.kind;
   if (m.h) { card.root.style.height = m.h <= 1 ? `calc(var(--clh) * ${m.h})` : `${m.h}px`; card.root.style.flex = "none"; }
+  // Where a window stands in its group (D212) is read back from these; the tracks module writes them from then on.
+  if (m.span && m.span > 1) card.root.dataset.span = String(m.span);
+  if (m.rows && m.rows > 1) card.root.dataset.rows = String(m.rows);
+  if (m.row !== undefined) card.root.dataset.row = String(m.row);
   makeBody(cx, rec);
   wireWindow(cx, rec);
   // A window showing a session means that session is open (D178); the surfaces about it follow the inventory.
@@ -147,11 +156,12 @@ function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
     holdOnPill: false,
     begin(): ResizeStart {
       const colEl = rec.card.root.parentElement as HTMLElement;
-      const width = colEl.offsetWidth * cam.z - 28 * cam.z;
+      // A column in a group has no box of its own (D212): its width is the one it was given.
+      const width = (Number(colEl.dataset.w) || colEl.offsetWidth) * cam.z;
       origin = { x: rec.owner.x, w: Math.round(width / cam.z) };
       const top = (parseFloat(rec.card.root.style.marginTop) || 0) * cam.z;
       const widest = Math.max(480, Math.round(cx.viewport.clientWidth * 0.99));
-      return { width, height: rec.card.root.offsetHeight * cam.z, top, minWidth: 300 * cam.z, minHeight: 160 * cam.z, maxWidth: widest * cam.z, areaHeight: (colEl.clientHeight - 28) * cam.z };
+      return { width, height: rec.card.root.offsetHeight * cam.z, top, minWidth: 300 * cam.z, minHeight: 160 * cam.z, maxWidth: widest * cam.z, areaHeight: (scrollerOf(colEl).clientHeight - 28) * cam.z };
     },
     apply(f: ResizeFrame): void {
       const colEl = rec.card.root.parentElement as HTMLElement;
@@ -160,10 +170,18 @@ function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
       colEl.dataset.user = "1";
       colEl.style.setProperty("--w", `${w}px`);
       const root = rec.card.root;
-      root.style.height = `${Math.round(f.height / cam.z)}px`;
+      const h = Math.round(f.height / cam.z);
+      root.style.height = `${h}px`;
       root.style.marginTop = f.top > 0 ? `${Math.round(f.top / cam.z)}px` : "";
       root.style.flex = "none";
       const c = rec.owner;
+      // A band of a group (D212) is one height: every window of the band takes the one the person set.
+      const scroller = scrollerOf(colEl);
+      if (scroller !== colEl) {
+        for (const n of scroller.querySelectorAll<HTMLElement>(":scope > .cl-col > .ui-window")) {
+          if (n.dataset.row !== undefined && n.dataset.row === root.dataset.row && !n.dataset.rows) { const other = c.wins.get(n.dataset.windowId ?? ""); if (other) other.model.h = h; }
+        }
+      }
       c.sx.set(origin.x + (f.shiftX ? origin.w - w : 0), true);
       cx.view.geometry(c);
       cx.invalidate();

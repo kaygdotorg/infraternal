@@ -81,6 +81,32 @@ async function type(page: Page, window: number, command: string): Promise<void> 
   await page.keyboard.type(command + "\n", { delay: 5 });
 }
 
+test("the bootstrap socket keeps text routing and stays outside protocol diagnostics", async () => {
+  // The signed-in canvas can mount before its initial protocol socket opens.
+  await expect.poll(() => live().at(-1)?.attached.size ?? 0).toBe(1);
+  const before = server.bridges.length;
+  const response = await page.evaluate(() => new Promise<{ text: boolean; refused: boolean }>((resolve) => {
+    const socket = new WebSocket(`${location.origin.replace("https:", "wss:")}/v1/bootstrap/ws`);
+    const finish = (text: boolean, refused: boolean): void => {
+      clearTimeout(timer);
+      socket.close();
+      resolve({ text, refused });
+    };
+    const timer = setTimeout(() => finish(false, false), 5_000);
+    socket.onopen = () => socket.send(JSON.stringify({ action: "retry", target: "one" }));
+    socket.onmessage = ({ data }) => {
+      if (typeof data !== "string") { finish(false, false); return; }
+      try {
+        const message = JSON.parse(data) as { error?: { message?: string } };
+        finish(true, message.error?.message === "Start a host batch first.");
+      } catch { finish(true, false); }
+    };
+    socket.onerror = () => finish(false, false);
+  }));
+  expect(response).toEqual({ text: true, refused: true });
+  expect(server.bridges.length).toBe(before);
+});
+
 test("signing in shows the canvas with a Console view and one real shell", async () => {
   await expect(page.locator('.cl[data-view="console"]')).toBeVisible();
   await expect(windows(page)).toHaveCount(1);
@@ -94,7 +120,7 @@ test("signing in shows the canvas with a Console view and one real shell", async
 });
 
 test("windows are sessions on one WebSocket: open from the palette, type in each, nothing crosses", async () => {
-  await page.keyboard.press("Control+K");
+  await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("open shell on");
   await page.locator("#palette-results [role=option]").first().click();
   await expect(windows(page)).toHaveCount(2);
@@ -235,7 +261,7 @@ test("memory on a phone: windows off screen hold no canvas, and the layer memory
   // Four windows, one column each: on a phone only one column is on screen at a time.
   const have = await windows(page).count();
   for (let i = have; i < 4; i++) {
-    await page.keyboard.press("Control+K");
+    await page.keyboard.press("Control+Shift+K");
     await page.locator("#palette-input").fill("open shell on");
     await page.locator("#palette-results [role=option]").first().click();
     await page.waitForTimeout(500);

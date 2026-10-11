@@ -1,0 +1,25 @@
+Load before: 18.71 17.66 21.85 11/2945 239915
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p239916-i50523581.scope; invocation ID: 462d515e0e8f42cfb51131eef5f1309e
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-zbvx3hdw.js, chunk-tvynw18r.js, chunk-6x2hw81x.js, chunk-b5qzwpce.js, chunk-x7faw08h.js, chunk-0phr3w7b.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-8wwc18b9.js, chunk-k6xh1gvt.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-vxggjhgm.js, chunk-7nczvd3c.js, chunk-r5c4bfkz.js, chunk-23zj2qk3.js, chunk-yvhhqffe.js, chunk-v34hdqbq.js, chunk-dax33rpg.js, chunk-zt1vx6ah.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-dgmxt3gh.js, chunk-rtgqtpt2.js, chunk-emzqn6vr.js, chunk-zwvkr9cw.js, chunk-8gqdshxw.js, chunk-kd4qhgc0.js, chunk-r83md3xg.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-frhs9px3.js, chunk-nvtry9qm.js, chunk-eztz2cz4.js, chunk-6hsr7egd.js, chunk-1d0qvnvb.js, chunk-t0t72aw1.js, chunk-axbkkqp1.js, chunk-8vk90v97.js, chunk-rd3fq7bd.js, chunk-wbs4am26.js, chunk-j2j0a6b2.js, chunk-xvpkg930.js, chunk-y1f05ydh.js, chunk-v86b5paa.js, chunk-mcyyfwa5.js, chunk-3x0k0356.js, chunk-nqr5cgrz.js, chunk-dspk1t7c.js, chunk-2e4yh13p.js, chunk-42422bj2.js, chunk-021s5fsp.js, chunk-j63433mb.js, chunk-mh8ng01z.js, chunk-xs6t686t.js, chunk-cw683nmc.js, chunk-2dcdjh1z.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-2t33h42k.js, chunk-3wvf0gk6.js, chunk-0sxn500c.js, chunk-5h9nrvac.js, chunk-js25n7kt.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:240097) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ZOOMTOP Frosted zoom out (23 windows): Paint 8.9, UpdateLayoutTree 2.8, Commit 2.4, Layerize 2.4, EventDispatch 2.2, FunctionCall 1.5, PrePaint 1.4, FireAnimationFrame 0.9, Layout 0.5, TimerFire 0.3
+ZOOMSUM Frosted zoom out (23 windows) total 1099 ms main 408 raster 691 per step 30.5 ms, restyled/step 5
+ZOOM Frosted zoom out (23 windows): 15 frames | per frame: main 27.2 ms, raster 46.1 ms, total 73.3 ms | Layerize 2.4 Commit 2.4 style 2.8 ms/frame (11 elements) | main breakdown ms/frame: FunctionCall 1.5 Layout 0.5 PrePaint 1.4 Paint 8.9 FireAnimationFrame 0.9 HitTest 0.0 UpdateLayer 0.1
+ZOOMTOP Frosted zoom in: Paint 6.3, Commit 4.1, V8.GC_MC_INCREMENTAL 3.1, V8.GC_MC_INCREMENTAL_EMBEDDER_TRACING 3.0, Layerize 2.7, UpdateLayoutTree 1.8, EventDispatch 1.7, V8.GC_MC_INCREMENTAL_START 1.2, MajorGC 1.0, V8.GC_MARK_COMPACTOR 1.0
+ZOOMSUM Frosted zoom in total 761 ms main 528 raster 234 per step 21.1 ms, restyled/step 5
+ZOOM Frosted zoom in: 17 frames | per frame: main 31.0 ms, raster 13.7 ms, total 44.8 ms | Layerize 2.7 Commit 4.1 style 1.8 ms/frame (10 elements) | main breakdown ms/frame: FunctionCall 0.9 Layout 0.7 PrePaint 0.8 Paint 6.3 FireAnimationFrame 0.6 HitTest 0.0 UpdateLayer 0.3
+ZOOM Frosted zoom 0.75 -> 0.32 -> 0.75
+  ✓  1 test/clusters-zoom-bench.spec.ts:44:3 › zoom with 21 windows, Frosted (15.3s)
+
+  1 passed (22.8s)
+
+Invocation exit: 0
+Load after: 19.50 17.89 21.81 13/2966 240945

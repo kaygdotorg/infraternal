@@ -1,0 +1,276 @@
+//! Persists remote host-bound join capabilities and public certificate authority [64][133][134].
+//!
+//! This is storage, not a network authentication adapter. Trusted callers must
+//! authorize the owner before issuing invitations, and authenticate the pinned
+//! enrollment channel and validate/sign the CSR before redemption. No private
+//! key or raw join capability enters SQLite. The certificate record and token
+//! consumption commit together; a signing/storage failure leaves the invitation
+//! usable. Transport admission must additionally consult the host tombstone.
+
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use sha2::{Digest, Sha256};
+use sqlx::SqlitePool;
+use uuid::Uuid;
+
+#[path = "remote_authority.rs"]
+pub(crate) mod authority;
+pub use authority::HostAuthority;
+
+/// A host's immutable execution mode, bound into its invitation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Runs as the enrolled non-root user.
+    Rootless,
+    /// Runs as uid zero after explicit owner consent.
+    Rootful,
+}
+
+impl Mode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rootless => "rootless",
+            Self::Rootful => "rootful",
+        }
+    }
+}
+
+/// Public identity produced by the trusted CSR signer, never supplied by a client.
+pub struct CertificateRecord {
+    /// SHA-256 of the exact signed certificate DER.
+    pub fingerprint: [u8; 32],
+    /// SHA-256 of the signing issuer's certificate DER.
+    pub issuer_fingerprint: [u8; 32],
+    /// The validated CSR's Ed25519 public key.
+    pub public_key: [u8; 32],
+    /// Inclusive certificate validity start, Unix seconds.
+    pub not_before: i64,
+    /// Exclusive certificate validity end, exactly seven days later.
+    pub not_after: i64,
+}
+
+/// A secret capability intentionally lacking Debug, Display and serialization.
+pub struct JoinToken(String);
+
+impl JoinToken {
+    /// Explicitly access the secret for a private stdin/descriptor handoff.
+    #[must_use]
+    pub fn secret(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Content-free errors safe for operator diagnostics.
+#[derive(Debug, thiserror::Error)]
+pub enum EnrollmentError {
+    /// Invalid, expired, replaced, consumed or revoked invitation/identity.
+    #[error("enrollment refused")]
+    Denied,
+    /// SQLite failed; no raw capability is embedded in queries or errors.
+    #[error("enrollment storage unavailable")]
+    Storage(#[from] sqlx::Error),
+}
+
+/// Storage using the server's existing bounded SQLite pool; no idle worker.
+/// Construct once per configured runtime and pass clones to authority writers
+/// and transports so committed revocation reaches their shared event scope.
+#[derive(Clone)]
+pub struct EnrollmentStore(
+    pub(crate) SqlitePool,
+    pub(crate) std::sync::Arc<crate::remote_guard::Revocations>,
+);
+
+impl EnrollmentStore {
+    /// Use an already migrated server database. This creates no listener/timer.
+    /// Each construction creates a distinct revocation scope; cloning retains it.
+    #[must_use]
+    pub fn new(pool: SqlitePool) -> Self {
+        Self(
+            pool,
+            std::sync::Arc::new(crate::remote_guard::Revocations::default()),
+        )
+    }
+
+    /// Cheap public-authority preflight before CSR verification or private signing.
+    /// Redemption repeats these checks atomically; this read grants no authority.
+    /// # Errors
+    /// Refuses noncanonical, stale, consumed, wrong-mode or revoked invitations.
+    pub async fn preflight(
+        &self,
+        secret: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+    ) -> Result<(), EnrollmentError> {
+        if secret.len() != 43 || now < 0 {
+            return Err(EnrollmentError::Denied);
+        }
+        let decoded = URL_SAFE_NO_PAD
+            .decode(secret)
+            .map_err(|_| EnrollmentError::Denied)?;
+        if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&decoded) != secret {
+            return Err(EnrollmentError::Denied);
+        }
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM remote_join_tokens t JOIN remote_hosts h ON h.id=t.host_id \
+             WHERE t.host_id=? AND t.mode=? AND h.mode=t.mode AND t.digest=? \
+             AND t.consumed_at IS NULL AND t.issued_at<=? AND t.expires_at>? AND h.revoked_at IS NULL)",
+        ).bind(host.as_bytes().as_slice()).bind(mode.as_str())
+            .bind(Sha256::digest(secret.as_bytes()).as_slice()).bind(now).bind(now)
+            .fetch_one(&self.0).await?;
+        if !valid {
+            return Err(EnrollmentError::Denied);
+        }
+        Ok(())
+    }
+
+    /// Replace a host's invitation only for its authorized owner and fixed mode.
+    ///
+    /// # Errors
+    /// Refuses absent/revoked hosts, ownership or mode mismatch and invalid time;
+    /// returns storage failure without exposing the newly generated capability.
+    pub async fn issue(
+        &self,
+        owner: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+    ) -> Result<JoinToken, EnrollmentError> {
+        self.issue_authorized(owner, host, mode, now, None).await
+    }
+
+    /// Issue only while the exact authenticated browser session remains live at publication.
+    /// # Errors
+    /// Refuses revoked, pending, expired or switched browser authority and invalid hosts.
+    pub(crate) async fn issue_for_session(
+        &self,
+        owner: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+        session_hash: &str,
+    ) -> Result<JoinToken, EnrollmentError> {
+        self.issue_authorized(owner, host, mode, now, Some(session_hash))
+            .await
+    }
+
+    async fn issue_authorized(
+        &self,
+        owner: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+        session_hash: Option<&str>,
+    ) -> Result<JoinToken, EnrollmentError> {
+        let expires = now
+            .checked_add(900)
+            .filter(|_| now >= 0)
+            .ok_or(EnrollmentError::Denied)?;
+        let secret = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+        let digest = Sha256::digest(secret.as_bytes());
+        // INSERT SELECT checks authority in the same write statement as replacement;
+        // a concurrent revocation cannot race a separate read/check.
+        let changed = sqlx::query(
+            "INSERT INTO remote_join_tokens (host_id, mode, digest, issued_at, expires_at) \
+             SELECT id, mode, ?, ?, ? FROM remote_hosts \
+             WHERE id = ? AND owner_id = ? AND mode = ? AND revoked_at IS NULL \
+             AND (? IS NULL OR EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
+             WHERE s.token_hash=? AND s.user_id=remote_hosts.owner_id AND s.unlocked=1 \
+             AND s.expires>unixepoch() AND u.owner=1)) \
+             ON CONFLICT(host_id) DO UPDATE SET digest=excluded.digest, \
+             issued_at=excluded.issued_at, expires_at=excluded.expires_at, consumed_at=NULL",
+        )
+        .bind(digest.as_slice())
+        .bind(now)
+        .bind(expires)
+        .bind(host.as_bytes().as_slice())
+        .bind(owner)
+        .bind(mode.as_str())
+        .bind(session_hash)
+        .bind(session_hash)
+        .execute(&self.0)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(EnrollmentError::Denied);
+        }
+        Ok(JoinToken(secret))
+    }
+
+    /// Atomically consume an invitation and retain its signed public identity.
+    ///
+    /// The caller must derive `certificate` from its own validated CSR signer.
+    /// Never use untrusted client-provided certificate fields here.
+    /// # Errors
+    /// Refuses invalid capability/host/mode/time, concurrent redemption and
+    /// revocation. An insert failure rolls back consumption rather than burning
+    /// an invitation whose certificate was not durably recorded.
+    pub async fn redeem(
+        &self,
+        secret: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+        certificate: &CertificateRecord,
+    ) -> Result<(), EnrollmentError> {
+        // Canonical spelling matters: hash only the one URL-safe encoding of
+        // exactly 32 bytes, rejecting aliases and oversized inputs before decode.
+        if secret.len() != 43 || now < 0 {
+            return Err(EnrollmentError::Denied);
+        }
+        let decoded = URL_SAFE_NO_PAD
+            .decode(secret)
+            .map_err(|_| EnrollmentError::Denied)?;
+        if decoded.len() != 32
+            || URL_SAFE_NO_PAD.encode(&decoded) != secret
+            || certificate.not_before < 0
+            || certificate.not_before > now
+            || certificate.not_after <= now
+            || certificate.not_before.checked_add(604_800) != Some(certificate.not_after)
+        {
+            return Err(EnrollmentError::Denied);
+        }
+        let digest = Sha256::digest(secret.as_bytes());
+        let mut transaction = self.0.begin().await?;
+        // The first operation is a write. SQLite serializes writers, so two
+        // redeem transactions cannot both validate an unconsumed invitation.
+        let changed = sqlx::query(
+            "UPDATE remote_join_tokens SET consumed_at = ? \
+             WHERE host_id = ? AND mode = ? AND digest = ? AND consumed_at IS NULL \
+             AND issued_at <= ? AND expires_at > ? \
+             AND EXISTS (SELECT 1 FROM remote_hosts h WHERE h.id = host_id \
+             AND h.mode = remote_join_tokens.mode AND h.revoked_at IS NULL)",
+        )
+        .bind(now)
+        .bind(host.as_bytes().as_slice())
+        .bind(mode.as_str())
+        .bind(digest.as_slice())
+        .bind(now)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            transaction.rollback().await?;
+            return Err(EnrollmentError::Denied);
+        }
+        sqlx::query(
+            "INSERT INTO remote_certificates (fingerprint, host_id, issuer_fingerprint, \
+             public_key, not_before, not_after) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(certificate.fingerprint.as_slice())
+        .bind(host.as_bytes().as_slice())
+        .bind(certificate.issuer_fingerprint.as_slice())
+        .bind(certificate.public_key.as_slice())
+        .bind(certificate.not_before)
+        .bind(certificate.not_after)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "remote_migration_tests.rs"]
+mod migration_tests;

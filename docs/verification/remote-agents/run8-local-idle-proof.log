@@ -1,0 +1,11 @@
+Running as unit: run-p3466157-i11853904.scope; invocation ID: 3a856742ce5d42148838ab17b65423fd
+
+running 1 test
+test runtime::remote_demo_tests::remote_cli_enrollment_and_browser_terminal_two_processes ... remote_idle VmRSS:	   14628 kB scale=1 full_daemon=true harness_profile=debug cli_profile=external_artifact
+remote infraternal agent: 0 scheduler activations / 10.001s (0.000/min); RSS=14628 KiB; threads=2
+remote_demo control_processes=2 rootless=true join_to_terminal_us=100758 keystroke_roundtrip_us=6376 output_bytes=337 lost=0 duplicated=0 load=2.38 5.23 12.52 3/1061 3466366
+remote_authority foreign_owner_denied=true session_count_unchanged=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out; finished in 10.67s
+

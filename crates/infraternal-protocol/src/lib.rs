@@ -10,6 +10,14 @@ mod tests;
 /// Maximum length of a frame's type byte and body, as specified by wire §2.
 pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
 
+/// `Close` code on a terminal stream meaning the session no longer exists on
+/// its host: its shim is gone, or the account never had it. The answer is
+/// final. A viewer must not attach to that session again, unlike every other
+/// stream close, which a viewer may retry (wire §4, #158).
+pub const CLOSE_SESSION_GONE: u16 = 4404;
+/// The reason sent with [`CLOSE_SESSION_GONE`]; logs read it, people never do.
+pub const SESSION_GONE_REASON: &str = "session ended";
+
 const MAX_VARINT_BYTES: usize = 5;
 
 /// A decoded frame borrows its variable-sized fields from the input buffer.

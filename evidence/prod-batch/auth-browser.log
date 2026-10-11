@@ -1,0 +1,50 @@
+Running as unit: run-p779195-i46871228.scope; invocation ID: 98b1ea3bc8904039bce3776f74aa6435
+METRIC name=network_rtt_selftest configured_rtt_ms=300 jitter_ms=30 loss=unsupported transport=tcp-stream n=3 p50_ms=317.14 p99_ms=317.87 result=PASS
+   Compiling openssl-sys v0.9.117
+   Compiling either v1.18.0
+   Compiling sqlx-core v0.8.6
+   Compiling getrandom v0.4.3
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling uuid v1.27.0
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/infraternal-plugin-api)
+   Compiling regex-automata v0.4.18
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/infraternal-shim)
+   Compiling matchers v0.2.0
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/infraternal-server)
+   Compiling tracing-subscriber v0.3.23
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/plugins/ssh)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/plugins/mesh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/infraternal-agent)
+   Compiling openssl v0.10.81
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling webauthn-rs-core v0.5.5
+   Compiling tokio-openssl v0.6.5
+   Compiling axum-server v0.8.0
+   Compiling webauthn-rs v0.5.5
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 20m 59s
+bun install v1.4.2 (744846f84)
+
++ @scure/bip39@2.2.0
++ playwright@1.61.1
+
+5 packages installed [103.00ms]
+Bundled 11 modules in 57ms
+
+  entropy.js  38.28 KB  (entry point)
+
+supported: server rejected native browser assertion without UV
+supported: discoverable resident UV passkey, PRF fallback get, stripped proofs, native HKDF/AES-GCM, login DEK roundtrip, wrong origin rejected
+unsupported-prf: abort before finish; owner not created
+nonresident: browser refused registration; owner not created
+no-uv: browser refused registration; owner not created
+auth browser: PASS (4 isolated scenarios; Chromium 149.0.7827.55)
+Bundled 23 modules in 92ms
+
+  recovery.js  97.81 KB  (entry point)
+
+native recovery same-account live session: PASS (original DEK preserved, capability consumed, replacement passkey signs in)
+native recovery no session, enforced delay then elapsed: PASS (original DEK preserved, capability consumed, replacement passkey signs in)
+native recovery: PASS (2 real-verifier scenarios; Chromium 149.0.7827.55)

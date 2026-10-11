@@ -59,7 +59,7 @@ test.describe("a server that does not serve the Mesh (yet)", () => {
     await expect.poll(() => controls().some((c) => c.dir === "down" && c.type === "Result" && c.detail === "refused")).toBe(true);
     await expect(page.locator('.cl[data-view="mesh"]')).toHaveCount(0);
     await expect(page.locator(".cl-port:not([hidden])")).toHaveCount(0);
-    await page.keyboard.press("Control+K");
+    await page.keyboard.press("Control+Shift+K");
     await page.locator("#palette-input").fill("Go to Mesh");
     await expect(page.locator("#palette-results [role=option]").filter({ hasText: "Go to Mesh" })).toHaveCount(0);
     await page.keyboard.press("Escape");
@@ -97,7 +97,7 @@ test.describe("a server that serves the Mesh", () => {
     test.skip(!meshServed(), "this binary does not serve the Mesh API yet (branch mesh-api, #108)");
     await expect(page.locator('.cl[data-view="mesh"]')).toBeVisible();
     expect(controls().filter((c) => c.type === "Subscribe").map((c) => c.detail)).toContain("mesh");
-    await page.keyboard.press("Control+2");
+    await page.keyboard.press("Control+Shift+Digit2");
     await expect(page.locator(".cl-meshstate")).toContainText("No hosts in the mesh yet");
     for (const [i, name] of ["alpha", "bravo"].entries()) {
       const r = await act("mesh.node.enroll", { name, public_key: Array.from({ length: 32 }, (_, k) => (k + i + 1) % 255 + 1) });

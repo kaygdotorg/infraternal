@@ -55,6 +55,31 @@
   cursor: pointer;
   transition: background 140ms ease, color 140ms ease;
 }
+/* Optional button kinds share states and motion; instances supply only geometry
+   and typography through variables. Plain ui-button callers keep their defaults. */
+.ui-button[data-button] {
+  display: inline-flex;
+  min-width: var(--ui-button-min-width, 0);
+  height: var(--ui-button-height, 44px);
+  align-items: center;
+  justify-content: center;
+  gap: var(--ui-button-gap, 10px);
+  border: 0;
+  font: var(--ui-button-font, inherit);
+  letter-spacing: var(--ui-button-letter-spacing, normal);
+  transition: var(--ui-button-transition, transform 140ms var(--ease-out, ease), background-color 160ms ease, color 120ms ease);
+}
+/* A solid fill carries no text halo: the glass halo (above) would glow into the fill around every glyph, the
+   "blurred or doubled" label of the disabled and enabled primary alike (TASTE: button text is crisp in every state). */
+.ui-button[data-button="primary"] { background: var(--ui-button-background, var(--fg)); color: var(--ui-button-color, var(--bg)); text-shadow: none; }
+.ui-button[data-button="secondary"] { background: var(--ui-button-background, none); color: var(--ui-button-color, var(--fg-2, var(--fg))); }
+.ui-button[data-button]:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
+.ui-button[data-button]:disabled { cursor: default; }
+/* Disabled solid buttons remain opaque over content beneath their surface. */
+/* Lower emphasis comes from colour alone. The label keeps at least 3:1 against its fill in both themes: the fill is a
+   quiet tint of the foreground, and the label a stronger one (measured in test/top-centre.spec.ts). */
+.ui-button[data-button="primary"]:disabled { background: var(--ui-button-disabled-background, color-mix(in oklab, var(--fg) 12%, var(--bg))); color: var(--ui-button-disabled-color, color-mix(in oklab, var(--fg) 58%, var(--bg))); }
+@media (hover: hover) and (pointer: fine) { .ui-button[data-button="secondary"]:hover:not(:disabled) { color: var(--ui-button-hover-color, var(--fg)); } }
 .ui-source-icon { display: block; width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 /* One native switch keeps pointer, keyboard, and assistive-technology state aligned. */
@@ -138,7 +163,18 @@
 .ui-toast-marker .tick svg { width: 14px; height: 14px; stroke: var(--bg); }
 .ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
 .ui-toast-marker .tick { width: 18px; height: 18px; }
+/* A glyph in place of the tick (toast icon): neutral, so a waiting state never reads as success. */
+.ui-toast-glyph { display: grid; width: 22px; height: 22px; flex: none; place-items: center; color: var(--fg-2); }
+.ui-toast-glyph[hidden] { display: none; }
+.ui-toast-glyph svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ui-toast[data-icon="true"] .ui-toast-marker { display: none; }
+/* The optional dismiss control: a quiet icon, the same height as the action. */
+.ui-toast-close { display: grid; width: 32px; min-height: 32px; flex: none; place-items: center; padding: 0; border-radius: 8px; color: var(--fg-3); }
+.ui-toast-close[hidden] { display: none; }
+.ui-toast-close svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
+@media (hover: hover) and (pointer: fine) { .ui-toast-close:hover { background: var(--hover); color: var(--fg); } }
 @media (pointer: coarse) {
+  .ui-toast-close { width: 44px; min-height: 44px; }
   .ui-toast { min-height: 54px; gap: 12px; padding: 7px 9px 7px 12px; border-radius: 15px; }
   .ui-toast-action { min-height: 44px; padding: 0 10px; }
   .ui-toast-marker .tick { width: 20px; height: 20px; }
@@ -349,6 +385,30 @@
 }
 .ui-window-action:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* Title first (TASTE): in a header this narrow the actions give way to one ⋯, so the title keeps its room. A card with one
+   action never collapses (the actions container says so with data-collapsible). The ⋯ opens the same actions in a menu. */
+.ui-window-action.ui-window-more { display: none; }
+@container (max-width: 320px) {
+  .ui-window-actions[data-collapsible] > .ui-window-action:not(.ui-window-more) { display: none; }
+  .ui-window-actions[data-collapsible] > .ui-window-action.ui-window-more { display: grid; }
+  /* The title's room is the pill's half of the header: the window's mark and session name give way first, at any narrow
+     width (a half on a phone too), so the title is never squeezed out. */
+  .ui-window-mark, .ui-window-session { display: none; }
+  /* On touch, a narrow card's actions are a compact circle (about 32 px visible, a 30 px button in a 32 px pill). The 44 px
+     hit area is kept by padding around the button, so the title gets the room the wide pill took. */
+  @media (pointer: coarse) {
+    .ui-window-actions { height: 32px; padding: 0; gap: 0; }
+    .ui-window-action { width: 30px; height: 30px; }
+    .ui-window-action::after { inset: -7px; }
+  }
+}
+.ui-window-menu { display: flex; flex-direction: column; gap: 2px; min-width: 168px; padding: 6px; }
+.ui-window-menu-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 10px; border: 0; border-radius: 10px;
+  background: none; color: var(--fg-2); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; text-align: left; cursor: pointer;
+}
+.ui-window-menu-item svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+@media (hover: hover) and (pointer: fine) { .ui-window-menu-item:hover { background: var(--hover); color: var(--fg); } }
 .ui-window-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 calc(var(--r-lg, 18px) - 1px) calc(var(--r-lg, 18px) - 1px); }
 @media (hover: hover) and (pointer: fine) {
   .ui-window-pill:hover { background: var(--hover); }
@@ -378,6 +438,10 @@
   min-height: var(--ui-row-h); padding: 4px 0; border-bottom: 1px solid var(--line);
 }
 .ui-kv-row:last-child { border-bottom: 0; }
+/* Titled sections inside one list: the quiet eyebrow of the settings headings, no box or rule of its own. */
+.ui-kv-section + .ui-kv-section { margin-top: 12px; }
+.ui-kv-rows { display: flex; flex-direction: column; }
+.ui-kv-group { padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-kv-cell {
   display: block; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
   transition: transform 140ms var(--ease-out, ease-out);
@@ -466,7 +530,6 @@
 .ui-chip-remove { display: grid; width: 22px; height: 22px; flex: none; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-3); cursor: pointer; }
 .ui-chip-remove svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 @media (hover: hover) and (pointer: fine) { .ui-chip-remove:hover { background: rgb(from var(--fg) r g b / 0.1); color: var(--fg); } }
-.ui-chip[data-armed] { background: rgb(from var(--fg) r g b / 0.2); }
 @media (pointer: coarse) { .ui-chip { height: 34px; font-size: 15px; } .ui-chip-remove { width: 28px; height: 28px; } }
 /* Pill: the one container for floating capsule controls (the top-bar capsule, icon buttons, the
    sidebar toggle, session tabs). Instances set only their size and content layout; the material,
@@ -585,6 +648,8 @@
 .ui-shortcuts-label { min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .ui-shortcuts-keys { display: inline-flex; flex: none; gap: 4px; }
 .ui-shortcuts kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
+/* An alternate binding: the same keycap, quieter, so the primary reads first (TASTE: hierarchy by weight and tone). */
+.ui-shortcuts kbd.ui-shortcuts-alt { color: var(--fg-3); opacity: 0.7; }
 @media (pointer: coarse) { .ui-shortcuts-label { font-size: var(--text-body); } .ui-shortcuts-head { padding-right: 14px; } }
 
 /* Settings overlay (settings-overlay.ts): one centred card in the shared overlay material. */
@@ -738,6 +803,14 @@
 .ui-sp-kind svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-sp-dot { position: absolute; right: 1px; bottom: 1px; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); }
 .ui-sp-dot[data-online="false"] { background: var(--fg-3); }
+/* A static row (a fact and its action): no press scale or hover fill, because the row itself does nothing. The action fades
+   instead of vanishing so the words keep their place. */
+.ui-sp-status { cursor: default; min-height: var(--ui-row-h, 32px); }
+.ui-sp-status:active { transform: none; }
+@media (hover: hover) and (pointer: fine) { .ui-sp-status:hover { background: none; } }
+.ui-sp-status-action { flex: none; transition: opacity 160ms ease, background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-sp-status-action[data-shown="false"] { opacity: 0; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .ui-sp-status-action { transition: none; } }
 .ui-sp-names { display: grid; flex: 1; min-width: 0; gap: 2px; }
 .ui-sp-name-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .ui-sp-name { min-width: 0; max-width: 100%; padding: 0 2px; margin: 0 -2px; border: 0; border-radius: 6px; background: none; outline: none; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); }
@@ -766,6 +839,8 @@
 .ui-mark[data-mark="output"] { width: 6px; height: 6px; margin: 0 3px; border-radius: 50%; background: var(--accent); }
 .ui-mark[data-mark="ok"], .ui-mark[data-mark="fail"] { background: currentColor; -webkit-mask: var(--ui-mark-icon) center / contain no-repeat; mask: var(--ui-mark-icon) center / contain no-repeat; }
 .ui-mark[data-mark="ok"] { color: var(--ok); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E"); }
+/* Ended: the session is gone without an exit code to report. Quiet, not an error: a stopped square. */
+.ui-mark[data-mark="ended"] { color: var(--fg-2); background: currentColor; -webkit-mask: var(--ui-mark-icon) center / contain no-repeat; mask: var(--ui-mark-icon) center / contain no-repeat; --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linejoin='round'%3E%3Crect x='6.5' y='6.5' width='11' height='11' rx='2.5'/%3E%3C/svg%3E"); }
 .ui-mark[data-mark="fail"] { color: var(--danger); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M6.5 6.5l11 11M17.5 6.5l-11 11'/%3E%3C/svg%3E"); }
 /* In a branched menu the mark sits on the right, against the note beside it. */
 .bm-leaf .ui-mark { margin-left: auto; }
@@ -817,3 +892,25 @@
 @media (prefers-reduced-motion: reduce) {
   :where(*:not(.terminal-host)), *:not(.terminal-host)::-webkit-scrollbar-thumb { transition: none; }
 }
+
+/* Inbox (inbox.ts): the sidebar's card of things that wait on the person. It sits above the footer, inside the
+   sidebar's 8 px padding, as a quiet tinted card (no second glass layer inside the glass). Items stack; each is a
+   sentence, a quiet line and one action. Only opacity and transform move, and the transform is cleared at rest. */
+.ui-inbox {
+  display: grid; flex: none; gap: 8px; margin: auto 0 8px; padding: 10px;
+  border-radius: calc(var(--r-lg, 18px) - 8px); background: color-mix(in oklab, var(--accent) 9%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 22%, transparent);
+  transition: opacity 160ms var(--ease-out, ease-out), transform 180ms var(--ease-out, ease-out);
+}
+/* A card of its own, like the toast: the glass halo would only smear its glyphs (and the solid action takes none). */
+.ui-inbox, .ui-inbox * { text-shadow: none; }
+.ui-inbox[hidden] { display: none; }
+.ui-inbox[data-open="false"] { opacity: 0; transform: translateY(6px); pointer-events: none; }
+.ui-inbox ~ .ui-sidebar-foot { margin-top: 0; }
+.ui-inbox-item { display: grid; gap: 8px; }
+.ui-inbox-text { display: grid; gap: 2px; min-width: 0; }
+.ui-inbox-title { color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-label); line-height: 1.4; }
+.ui-inbox-detail { color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; }
+.ui-inbox-action { --ui-button-height: 28px; --ui-button-font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); justify-self: stretch; min-height: 28px; padding: 0 12px; border-radius: 8px; }
+@media (pointer: coarse) { .ui-inbox-action { --ui-button-height: 44px; min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .ui-inbox, .ui-inbox[data-open="false"] { transform: none; transition: opacity 150ms ease; } }

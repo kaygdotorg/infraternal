@@ -43,7 +43,9 @@ export function createPill(cx: Ctx): PillModule {
     const sep = stage.querySelector<HTMLElement>(".capsule-sep");
     if (sep) sep.style.display = "none";
     if (host) host.textContent = free ? "All views" : (c?.view.name ?? "");
-    const n = !c ? 0 : c.view.layout === "graph" ? c.view.nodes.filter((v) => v.kind === "host").length : c.wins.size;
+    // Console counts sessions, so a window whose session the host no longer has (#158) is not one.
+    const n = !c ? 0 : c.view.layout === "graph" ? c.view.nodes.filter((v) => v.kind === "host").length
+      : c.view.id === "console" ? [...c.wins.values()].filter((w) => !cx.adapters.inventory?.get(w.model.host, w.model.sessionId ?? "")?.gone).length : c.wins.size;
     const noun = !c ? "" : c.view.id === "console" ? "session" : c.view.layout === "graph" ? "host" : "window";
     if (sess) sess.innerHTML = free || !c ? `· ${views.size}<span class="cl-noun"> views</span>` : `· ${n}<span class="cl-noun"> ${noun}${n === 1 ? "" : "s"}</span>${c.view.team ? " · team" : ""}`;
     capsule.removeAttribute("data-flow");

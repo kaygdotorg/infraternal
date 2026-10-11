@@ -1,0 +1,39 @@
+Load before: 14.48 13.28 18.29 17/3187 4026599
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p4026600-i50116551.scope; invocation ID: 4ea2e6812b05420caae2722902f39a2e
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-bfff5wtq.js, chunk-tvynw18r.js, chunk-88wgkjzk.js, chunk-b5qzwpce.js, chunk-p2qx9q4c.js, chunk-fknfytmk.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-g5020qny.js, chunk-j9cvy8dn.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-gyfn45sm.js, chunk-7nczvd3c.js, chunk-4kn4tys4.js, chunk-pzzb0vhq.js, chunk-yvhhqffe.js, chunk-ardtw2tw.js, chunk-skmpygf7.js, chunk-n638s7q2.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-t69pw984.js, chunk-4dq47v50.js, chunk-01kqgfpn.js, chunk-x6peshp6.js, chunk-8gqdshxw.js, chunk-89027t6n.js, chunk-pkh0t1dc.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-50e7ys8t.js, chunk-ctskwp2z.js, chunk-6x6e62ns.js, chunk-0j78nevz.js, chunk-1d0qvnvb.js, chunk-2w8zwd6m.js, chunk-axbkkqp1.js, chunk-kzkd5jgb.js, chunk-xdm3vth5.js, chunk-zq2zbbzk.js, chunk-dzrsqpha.js, chunk-58vez6nj.js, chunk-t8qd5an1.js, chunk-v86b5paa.js, chunk-mbt2zgk6.js, chunk-111vtyhr.js, chunk-rr4k70za.js, chunk-m5xva5y8.js, chunk-2e4yh13p.js, chunk-mcm59f9e.js, chunk-4af8drw5.js, chunk-s9he15a2.js, chunk-satq3959.js, chunk-prcvn17d.js, chunk-7gmq62tv.js, chunk-4895mz54.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-qyy486h6.js, chunk-kpgkpfp0.js, chunk-0sxn500c.js, chunk-6r6sy3q6.js, chunk-1vxx1b3d.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 16 tests using 1 worker
+
+(node:4027759) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+GHOST view switcher | level 1 | ink | dpr 1 | 0.0000
+GHOST palette | level 1 | ink | dpr 1 | 0.0000
+GHOST sidebar | level 1 | ink | dpr 1 | 0.0005
+GHOST share dialog | level 1 | ink | dpr 1 | 0.0000
+  ✘   1 test/glass-ghost.spec.ts:45:3 › ghost text: every glass surface at level 1, ink, DPR 1 (2.0m)
+(node:4048575) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+GHOST view switcher | level 2 | ink | dpr 1 | 0.0055
+GHOST palette | level 2 | ink | dpr 1 | 0.0007
+GHOST sidebar | level 2 | ink | dpr 1 | 0.0049
+GHOST share dialog | level 2 | ink | dpr 1 | 0.0053
+  ✘   2 test/glass-ghost.spec.ts:45:3 › ghost text: every glass surface at level 2, ink, DPR 1 (2.0m)
+(node:4064551) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+GHOST view switcher | level 3 | ink | dpr 1 | 0.0023
+GHOST palette | level 3 | ink | dpr 1 | 0.0011
+GHOST sidebar | level 3 | ink | dpr 1 | 0.0012
+GHOST share dialog | level 3 | ink | dpr 1 | 0.0022
+  ✘   3 test/glass-ghost.spec.ts:45:3 › ghost text: every glass surface at level 3, ink, DPR 1 (2.0m)
+(node:4080617) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+GHOST view switcher | level 4 | ink | dpr 1 | 0.0024
+GHOST palette | level 4 | ink | dpr 1 | 0.0012
+GHOST sidebar | level 4 | ink | dpr 1 | 0.0009
+GHOST share dialog | level 4 | ink | dpr 1 | 0.0024
+
+Superseded broad diagnostic after common stale toast selector was identified. Not a complete gate.

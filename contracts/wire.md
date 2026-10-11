@@ -133,6 +133,18 @@ frame IDs or change the frozen frame codec.
 only that logical stream; code 1000 is a normal detach. This lets a socketpair
 peer release one terminal attachment while keeping the user's session alive.
 
+Code 4404 on a terminal stream (reason `session ended`) is final: the session
+no longer exists on its host, either because its shim is gone or because the
+account never had it. The server and the infraternal agent send it in answer
+to `AttachTerm`, never as a transport failure, and keep the connection and
+every sibling stream up. Frames the viewer had already sent on that stream are
+dropped until its own `Close`. A viewer that receives 4404 does not attach to
+that session again. A verified saved exit may precede it on the same ordered
+stream as `terminal.exited` with `status`, `final_seq` and optional `retired: true`
+(shim §4). That status does not advance the viewer cursor or claim a final repaint;
+the viewer presents it in its ended state. Every other stream close is transient and may be retried
+(#158).
+
 Bodies of control frames are JSON. They are not on the hot path, and JSON
 lets the HTTP API, CLI, MCP and the wire share one schema per action. Terminal
 frames are binary, because they carry each keystroke and each output chunk.

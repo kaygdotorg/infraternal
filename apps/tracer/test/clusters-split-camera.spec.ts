@@ -51,8 +51,9 @@ async function select(page: Page, index: number): Promise<void> {
 test("keyboard splits at 54 windows land fully on screen, beside or below the old window, which stays in view", async ({ page }) => {
   test.setTimeout(400_000);
   await boot(page);
-  const RIGHT = "Control+Shift+KeyD", DOWN = "Control+Alt+Shift+KeyD";
-  while ((await snap(page)).n < 54) { await page.keyboard.press(RIGHT); await page.waitForTimeout(30); }
+  const RIGHT = "Control+Shift+KeyD", DOWN = "Control+Shift+KeyE";
+  // Fill with full-size columns (new window right): a split right would halve the same window again and again (D212).
+  while ((await snap(page)).n < 54) { await page.keyboard.press("Control+Shift+Enter"); await page.waitForTimeout(30); }
   await page.waitForTimeout(1000);
   const problems: string[] = [];
   for (const where of ["first", "middle", "last"] as const) {

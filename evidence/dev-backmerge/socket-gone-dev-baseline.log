@@ -1,0 +1,20 @@
+Running as unit: run-p4178678-i50268542.scope; invocation ID: 0acb588f02c341e0a44af532c3f68dd7
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling hyper v1.11.1
+   Compiling nix v0.30.1
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/baseline/crates/infraternal-plugin-api)
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/baseline/crates/infraternal-mesh)
+   Compiling hyper-util v0.1.21
+   Compiling infraternal-server v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/baseline/crates/infraternal-server)
+   Compiling infraternal-protocol v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/baseline/crates/infraternal-protocol)
+   Compiling axum v0.8.9
+   Compiling axum-server v0.8.0
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/dev-backmerge/baseline/crates/plugins/mesh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 52s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-backmerge/target/debug/deps/infraternal_server-2e762f2bc8cf85aa)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 151 filtered out; finished in 0.00s
+

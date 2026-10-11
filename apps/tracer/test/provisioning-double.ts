@@ -8,12 +8,25 @@
  * per-attempt elapsed time that includes queue time, a 1024-event replay window with the
  * resync notice, retry limited to failed targets (eight attempts), cancellation on close.
  *
- * What is scripted (the double's only invention, all keyed on the fixture, never on the
- * client): per-host step timings are staggered; `unreachable` and `mesh-policy` fixtures
- * fail, and the `authentication: "refused"` fixture fails with `auth`. A retry or a fresh
- * attempt for a failed target succeeds, as if the person had fixed the cause.
+ * What is scripted (the double's only invention, all keyed on the fixture or the host name,
+ * never on the client): per-host step timings are staggered; `unreachable` and `mesh-policy`
+ * fixtures fail, and the `authentication: "refused"` fixture fails with `auth` and
+ * `choose_method` until a one-connection credential is supplied. A retry or a fresh attempt
+ * for a failed target succeeds, as if the person had fixed the cause.
+ *
+ * D183 paths, by host (a typed host name matches the same patterns):
+ * - network: edge-arm (Tailscale), o1 and mon-02 (NetBird), remoternal (Tailscale)
+ * - dedicated server key: every other host that signs in
+ * - saved key / password: one-use `auth_once` inputs on the bootstrap socket
+ * - `needs-key*` / nix-cache: every automatic method refused (auth + choose_method) until a credential is given
+ * - `refused*`: one refusal without `choose_method`; the retry signs in
+ * - `newkey*`: unknown host key (host-key + fingerprint) until confirmed on the same bootstrap socket
+ * - `unsupported*`: reported after sign-in, never succeeds; `broken*`: install fails, the retry works
+ * HTTP side (`handleBootstrapHttp`): the proposed endpoints of #87 (ssh-key, discovery, credential, host-key,
+ * install-command) plus `/__mock/bootstrap/*` switches the specs use to reach empty and error states.
  */
-import type { IncomingMessage } from "node:http";
+import { createHash } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { WebSocket } from "ws";
 import type { AddHostFixture } from "../src/add-host-contract";
 import { addHostFixtures } from "./prototype-fixtures";
@@ -42,11 +55,16 @@ interface BootstrapEvent {
   message: string;
   elapsed_ms: number;
   log_tail: string[];
-  failure?: { kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[] };
+  failure?: { kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean };
+  authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
 interface Target {
   id: string;
+  /** The host name the scripted patterns match: the fixture id or the typed host. */
+  name: string;
+  /** Kind of the one-connection credential this target was started with. */
+  credential: "private-key" | "password" | undefined;
   fixture: AddHostFixture | undefined;
   mode: "rootless" | "root";
   attempt: number;
@@ -72,6 +90,12 @@ function release(): void {
   if (next) next(); else active -= 1;
 }
 
+/** The host part of an address: a discovered id, or the host of `user@host:port`. */
+function hostNameOf(address: { kind: string; value: string }): string {
+  if (address.kind === "discovered") return address.value;
+  return ((/^(?:[^@]+@)?(\[[^\]]+\]|[^:]+)(?::\d+)?$/.exec(address.value) ?? [])[1] ?? address.value).toLowerCase();
+}
+
 function fixtureFor(address: { kind: string; value: string }): AddHostFixture | undefined {
   if (address.kind === "discovered") return addHostFixtures.find((host) => host.id === address.value);
   const host = (/^(?:[^@]+@)?(\[[^\]]+\]|[^:]+)(?::\d+)?$/.exec(address.value) ?? [])[1];
@@ -83,14 +107,49 @@ function fixtureFor(address: { kind: string; value: string }): AddHostFixture | 
   return known;
 }
 
-/** Scripted outcome of one attempt for a fixture: undefined succeeds. */
-function outcomeOf(target: Target): { kind: FailureKind; message: string; evidence: string } | undefined {
-  if (target.fixed) return undefined;
+interface Failure { phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[] }
+
+/** Host keys the person trusted on the same bootstrap socket, until `reset`. */
+const trusted = new Set<string>();
+let sshKeyMode: "ok" | "locked" | "missing" = "ok";
+let discoveryMode: "ok" | "empty" | "error" | "hang" | "off" = "ok";
+let installMode: "ok" | "off" = "ok";
+
+export function resetBootstrapDouble(): void {
+  trusted.clear();
+  sshKeyMode = "ok";
+  discoveryMode = "ok";
+  installMode = "ok";
+}
+
+const fingerprintOf = (name: string): string => `SHA256:${createHash("sha256").update(`host-key:${name}`).digest("base64").replace(/=+$/, "")}`;
+
+/** Scripted outcome of one attempt for a host: undefined succeeds. */
+function failureOf(target: Target): Failure | undefined {
   const host = target.fixture;
-  if (host?.reachability === "unreachable") return { kind: "unreachable", message: "No SSH answer on port 22", evidence: host.evidence };
-  if (host?.reachability === "mesh-policy") return { kind: "mesh-policy", message: "Blocked by the mesh policy", evidence: host.evidence };
-  if (host?.authentication === "refused") return { kind: "auth", message: "SSH key refused", evidence: "The host answered on port 22 and refused the SSH identity." };
+  const name = target.name;
+  if (/^unsupported/.test(name)) return { phase: 0, beforeLogin: false, kind: "unsupported", message: "This host does not run systemd as a user service.", evidence: "init: openrc\nuser systemd: unavailable" };
+  if (/^newkey/.test(name) && !trusted.has(name)) {
+    return { phase: 0, beforeLogin: true, kind: "host-key", message: "The SSH host key is not trusted.", evidence: "Checking SSH and host support.", fingerprints: [fingerprintOf(name)] };
+  }
+  if (target.fixed) return undefined;
+  if (host?.reachability === "unreachable") return { phase: 0, beforeLogin: true, kind: "unreachable", message: "No SSH answer on port 22", evidence: host.evidence };
+  if (host?.reachability === "mesh-policy") return { phase: 0, beforeLogin: true, kind: "mesh-policy", message: "Blocked by the mesh policy", evidence: host.evidence };
+  if ((host?.authentication === "refused" || /^needs-key/.test(name)) && !target.credential) {
+    return { phase: 0, beforeLogin: true, kind: "auth", message: "No sign-in method was accepted.", evidence: "Network access, the server key and a saved key were not accepted.", choose: true };
+  }
+  if (/^refused/.test(name)) return { phase: 0, beforeLogin: true, kind: "auth", message: "The host refused the server key.", evidence: "The host answered on port 22 and refused the SSH identity." };
+  if (/^broken/.test(name)) return { phase: 1, beforeLogin: false, kind: "install", message: "The installation did not finish and was rolled back.", evidence: "Uploaded the binary.\nThe unit failed to start." };
   return undefined;
+}
+
+const NETWORK: Record<string, "netbird" | "tailscale"> = { "edge-arm": "tailscale", o1: "netbird", "mon-02": "netbird", remoternal: "tailscale" };
+
+function authOf(target: Target): NonNullable<BootstrapEvent["authentication"]> {
+  if (target.credential === "password") return { method: "password" };
+  if (target.credential === "private-key") return { method: "user-key" };
+  const network = NETWORK[target.name];
+  return network ? { method: "network", network } : { method: "server-key" };
 }
 
 export function serveProvisioning(socket: WebSocket, _request: IncomingMessage): void {
@@ -103,13 +162,14 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
   const send = (value: unknown): void => { if (!closed && socket.readyState === socket.OPEN) socket.send(JSON.stringify(value)); };
   const refuse = (message: string): void => send({ error: { kind: "unsupported", message, log_tail: [] } });
 
-  function emit(target: Target, step: Step, message: string, failure?: BootstrapEvent["failure"]): void {
+  function emit(target: Target, step: Step, message: string, failure?: BootstrapEvent["failure"], authentication?: BootstrapEvent["authentication"]): void {
     target.breadcrumbs = [...target.breadcrumbs, message].slice(-8);
     const event: BootstrapEvent = {
       sequence: ++sequence, target: target.id, attempt: target.attempt, step, message,
       elapsed_ms: Date.now() - target.enteredAt, log_tail: [...target.breadcrumbs],
     };
     if (failure) event.failure = failure;
+    if (authentication) event.authentication = authentication;
     events.push(event);
     if (events.length > RETAINED_EVENTS) events.shift();
     send(event);
@@ -121,7 +181,9 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
   };
 
   /** Staggered, host-dependent pace so a batch looks like separate machines. */
-  const pace = (target: Target, phase: number): number => 420 + ((target.id.length * 97 + phase * 53) % 380);
+  // Cancellation owns a deliberately pending fixture; it must not turn into a
+  // successful install while a loaded browser is opening the confirmation.
+  const pace = (target: Target, phase: number): number => target.name === "cancellation.lab" && phase === 1 ? 60_000 : 420 + ((target.id.length * 97 + phase * 53) % 380);
 
   function schedule(target: Target): void {
     target.state = "queued";
@@ -134,7 +196,17 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
   function begin(target: Target): void {
     if (closed) { release(); return; }
     target.state = "active";
-    const outcome = outcomeOf(target);
+    const failure = failureOf(target);
+    const fail = (): void => {
+      if (!failure) return;
+      emit(target, "failed", failure.message, {
+        kind: failure.kind, message: failure.message, log_tail: [failure.evidence],
+        ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id, host_key_type: "ssh-ed25519" } : {}), ...(failure.choose ? { choose_method: true } : {}),
+      });
+      target.state = "failed";
+      target.fixed = true;
+      release();
+    };
     const walk = (phase: number): void => {
       if (phase >= PHASES.length) {
         emit(target, "done", target.mode === "root" ? "Ready · root" : "Ready");
@@ -143,16 +215,17 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
         return;
       }
       emit(target, PHASES[phase]!.step, PHASES[phase]!.message);
-      // A failing host stops after its first phase, once the failure has had time to show.
-      if (outcome) {
-        later(target, pace(target, phase) + 400, () => {
-          emit(target, "failed", outcome.message, { kind: outcome.kind, message: outcome.message, log_tail: [outcome.evidence] });
-          target.state = "failed";
-          target.fixed = true;
-          release();
+      if (phase === 0) {
+        // The server reports how it signed in as soon as it has; failures before that never do.
+        if (failure?.beforeLogin) { later(target, pace(target, 0) + 400, fail); return; }
+        later(target, pace(target, 0) / 2, () => {
+          emit(target, "check", "Signed in. Checking the system.", undefined, authOf(target));
+          if (failure?.phase === 0) later(target, 300, fail); else later(target, pace(target, 0) / 2, () => walk(1));
         });
         return;
       }
+      // A failing host stops at its phase, once the failure has had time to show.
+      if (failure?.phase === phase) { later(target, pace(target, phase) + 400, fail); return; }
       later(target, pace(target, phase), () => walk(phase + 1));
     };
     walk(0);
@@ -171,10 +244,12 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
         return send({ error: "invalid bootstrap request" });
       }
       const mode = entry.mode === "root" ? "root" : "rootless";
-      // Start validates every target before scheduling anything; root needs explicit consent.
+      const auth = Array.isArray(command.auth_once) ? command.auth_once.find((item) => item?.target === entry.id)?.auth : undefined;
+      const credential = auth?.password ? "password" as const : auth?.key ? "private-key" as const : undefined;
       if (mode === "root" && entry.root_consent !== true) return refuse("Root access needs your explicit consent.");
       parsed.push({
-        id: entry.id, fixture: fixtureFor({ kind: address.kind, value: address.value }), mode, attempt: 1, state: "queued",
+        id: entry.id, name: hostNameOf(address as { kind: string; value: string }), credential,
+        fixture: fixtureFor({ kind: address.kind, value: address.value }), mode, attempt: 1, state: "queued",
         enteredAt: Date.now(), breadcrumbs: [], timers: new Set(), fixed: false, order: index,
       });
     }
@@ -214,12 +289,17 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("not an object");
       command = value as Record<string, unknown>;
     } catch { return send({ error: "invalid bootstrap request" }); }
-    const known = { start: ["action", "targets", "credential"], retry: ["action", "target"], replay: ["action", "after"] } as const;
+    const known = { start: ["action", "targets", "credential", "auth_once"], "confirm-host-key": ["action", "target", "challenge", "fingerprint"], retry: ["action", "target"], replay: ["action", "after"] } as const;
     const action = command.action;
-    if (action !== "start" && action !== "retry" && action !== "replay") return send({ error: "invalid bootstrap request" });
+    if (action !== "start" && action !== "retry" && action !== "replay" && action !== "confirm-host-key") return send({ error: "invalid bootstrap request" });
     // Unknown fields are rejected, as the contract says.
     if (Object.keys(command).some((key) => !(known[action] as readonly string[]).includes(key))) return send({ error: "invalid bootstrap request" });
-    if (action === "start") start(command); else if (action === "retry") retry(command); else replay(command);
+    if (action === "confirm-host-key") {
+      const target = typeof command.target === "string" ? targets.get(command.target) : undefined;
+      if (!target || target.state !== "failed" || command.challenge !== target.id || command.fingerprint !== fingerprintOf(target.name)) return refuse("Check the host key again.");
+      trusted.add(target.name);
+      send({ host_key_confirmed: { target: target.id, fingerprint: command.fingerprint } });
+    } else if (action === "start") start(command); else if (action === "retry") retry(command); else replay(command);
   });
 
   // Disconnect cancels outstanding work; hosts that were running free their slot.
@@ -232,4 +312,79 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       if (wasRunning) release();
     }
   });
+}
+
+// ── HTTP side: the endpoints around the socket ───────────────────────────────
+
+const SERVER_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFh2R0N1c3RvbVRlc3REb3VibGVLZXlPbmx5SW5NZW1vcnk infraternal-server";
+const SERVER_KEY_FINGERPRINT = `SHA256:${createHash("sha256").update(SERVER_KEY).digest("base64").replace(/=+$/, "")}`;
+
+const json = (response: ServerResponse, status: number, value: unknown): void => {
+  response.statusCode = status;
+  response.setHeader("Content-Type", "application/json; charset=utf-8");
+  response.setHeader("Cache-Control", "no-store");
+  response.end(JSON.stringify(value));
+};
+
+async function bodyOf(request: IncomingMessage): Promise<Record<string, unknown> | undefined> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of request) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += bytes.byteLength;
+    if (total > MAX_COMMAND_BYTES) return undefined;
+    chunks.push(bytes);
+  }
+  try {
+    const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  } catch { return undefined; }
+}
+
+/** Discovery rows in the proposed wire shape (snake_case), from the add-host fixtures. */
+function discoveryRows(): unknown[] {
+  return addHostFixtures.map((host) => ({
+    id: host.id, user: host.user, address: host.address, operating_system: host.operatingSystem, architecture: host.architecture,
+    sources: host.sources, reach: host.reachability, evidence: host.evidence, already_added: host.alreadyAdded, root_available: host.rootAvailable,
+  }));
+}
+
+/**
+ * The HTTP endpoints of the provisioning API that are not the socket. `authorized` is the same check the
+ * socket upgrade makes (exact Origin, unlocked owner session). Returns true when it answered.
+ */
+export async function handleBootstrapHttp(request: IncomingMessage, response: ServerResponse, path: string, authorized: boolean): Promise<boolean> {
+  if (path === "/__mock/bootstrap/reset" && request.method === "POST") { resetBootstrapDouble(); json(response, 200, { ok: true }); return true; }
+  if (path === "/__mock/bootstrap/config" && request.method === "POST") {
+    const body = await bodyOf(request);
+    if (body?.sshKey === "ok" || body?.sshKey === "locked" || body?.sshKey === "missing") sshKeyMode = body.sshKey;
+    if (body?.discovery === "ok" || body?.discovery === "empty" || body?.discovery === "error" || body?.discovery === "hang" || body?.discovery === "off") discoveryMode = body.discovery;
+    if (body?.install === "ok" || body?.install === "off") installMode = body.install;
+    json(response, 200, { ok: true });
+    return true;
+  }
+  if (!path.startsWith("/v1/bootstrap/") || path === "/v1/bootstrap/ws") return false;
+  if (!authorized) { json(response, 401, { error: "authorization failed" }); return true; }
+
+  if (path === "/v1/bootstrap/ssh-key" && request.method === "GET") {
+    if (sshKeyMode === "missing") json(response, 503, { error: "custody unavailable" });
+    else json(response, 200, { public_key: SERVER_KEY, fingerprint: SERVER_KEY_FINGERPRINT, locked: sshKeyMode === "locked" });
+    return true;
+  }
+  if (path === "/v1/bootstrap/discovery" && request.method === "GET") {
+    if (discoveryMode === "off") json(response, 404, { error: "not found" });
+    else if (discoveryMode === "error") json(response, 500, { error: "discovery failed" });
+    // Answers late, so the loading state stays on screen long enough to read, then ends: an answer that never
+    // came would pin the test proxy's connection.
+    else if (discoveryMode === "hang") setTimeout(() => json(response, 200, { hosts: discoveryRows() }), 5000);
+    else json(response, 200, { hosts: discoveryMode === "empty" ? [] : discoveryRows() });
+    return true;
+  }
+  if (path === "/v1/bootstrap/install-command" && request.method === "POST") {
+    if (installMode === "off") json(response, 404, { error: "not found" });
+    else json(response, 200, { command: "curl -fsSL https://infraternal.test/join | sh -s -- --one-time", expires_in_seconds: 900 });
+    return true;
+  }
+  json(response, 404, { error: "not found" });
+  return true;
 }

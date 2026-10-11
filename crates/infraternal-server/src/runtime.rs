@@ -36,6 +36,26 @@ use tokio::{
 };
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "remote")]
+use crate::{
+    remote_http::EnrollmentService,
+    remote_runtime::{RemoteListeners, RemoteService},
+};
+#[cfg(not(feature = "remote"))]
+type EnrollmentService = ();
+#[cfg(not(feature = "remote"))]
+type RemoteService = ();
+#[cfg(not(feature = "remote"))]
+type RemoteListeners = ();
+#[cfg(feature = "ssh")]
+type BootstrapFactory = crate::bootstrap_runtime::BootstrapFactory;
+#[cfg(not(feature = "ssh"))]
+type BootstrapFactory = ();
+#[cfg(feature = "ssh")]
+type KeyInitialization = crate::bootstrap_runtime::KeyInitialization;
+#[cfg(not(feature = "ssh"))]
+type KeyInitialization = ();
+
 /// A CIDR network whose peers are permitted to supply `X-Forwarded-For` [keywrap.md].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyNetwork {
@@ -181,24 +201,86 @@ pub enum ServerError {
 ///
 /// Returns a sanitized startup, storage, migration, TLS, or listener error.
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
-    serve_with_plugin_descriptors(config, &[]).await
+    serve_inner(config, None, None, None, None, None).await
 }
 
-/// Start the control plane with the plugin action catalog compiled into its infraternal agent.
-///
-/// Descriptors stay in one source of truth, while the server can refuse undeclared actions and
-/// authorize declared permissions before any request reaches the embedded infraternal agent.
-///
+/// Start with the caller's compiled infraternal agent action catalog, preserving the production adapter.
 /// # Errors
-///
-/// Returns a configuration, storage, migration, authentication, TLS, setup-token socket, or listener error.
+/// Returns sanitized configuration, storage, authentication, TLS and listener failures.
 pub async fn serve_with_plugin_descriptors(
     config: ServerConfig,
-    plugin_descriptors: &'static [&'static PluginDescriptor],
+    catalog: &'static [&'static PluginDescriptor],
 ) -> Result<(), ServerError> {
-    init_logging();
-    let (app, setup_token) =
-        build_router_with_plugin_descriptors(config.clone(), None, plugin_descriptors).await?;
+    serve_inner(config, None, None, None, None, Some(catalog)).await
+}
+
+/// Mount host enrollment using the trusted runtime's D168 signing source.
+/// # Errors
+/// Returns sanitized startup, storage, migration, TLS or listener failures.
+#[cfg(feature = "remote")]
+pub async fn serve_with_enrollment(
+    config: ServerConfig,
+    enrollment: Option<EnrollmentService>,
+) -> Result<(), ServerError> {
+    serve_inner(config, enrollment, None, None, None, None).await
+}
+
+/// Serve enrollment, host transports and browser routing using trusted D168 sources.
+/// # Errors
+/// Returns sanitized configuration, storage, TLS or listener failures.
+#[cfg(feature = "remote")]
+pub async fn serve_with_remote(
+    config: ServerConfig,
+    remote: crate::remote_runtime::RemoteService,
+) -> Result<(), ServerError> {
+    serve_inner(
+        config,
+        Some(remote.enrollment.clone()),
+        Some(remote),
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Preserve one startup path for independent remote and SSH components.
+#[cfg(feature = "ssh")]
+pub(crate) async fn serve_with_bootstrap(
+    config: ServerConfig,
+    factory: Option<BootstrapFactory>,
+) -> Result<(), ServerError> {
+    serve_with_key_setup(config, factory, None).await
+}
+
+#[cfg(feature = "ssh")]
+pub(crate) async fn serve_with_key_setup(
+    config: ServerConfig,
+    factory: Option<BootstrapFactory>,
+    key_setup: Option<KeyInitialization>,
+) -> Result<(), ServerError> {
+    serve_inner(config, None, None, factory, key_setup, None).await
+}
+
+async fn serve_inner(
+    config: ServerConfig,
+    enrollment: Option<EnrollmentService>,
+    remote: Option<RemoteService>,
+    factory: Option<BootstrapFactory>,
+    key_setup: Option<KeyInitialization>,
+    catalog: Option<&'static [&'static PluginDescriptor]>,
+) -> Result<(), ServerError> {
+    configure_logging(false);
+    let (app, setup_token, _listeners) = build_router_core(
+        config.clone(),
+        None,
+        enrollment,
+        remote,
+        factory,
+        key_setup,
+        catalog,
+    )
+    .await?;
     if let Some(token) = setup_token {
         start_setup_token_socket(&config.data_dir, token)?;
     }
@@ -212,7 +294,8 @@ pub async fn serve_with_plugin_descriptors(
     if let Some(tls) = config.tls {
         let tls_config = OpenSSLConfig::from_pem_file(tls.certificate, tls.private_key)
             .map_err(|_| ServerError::TlsConfiguration)?;
-        axum_server::bind_openssl(config.listen, tls_config)
+        axum_server::Server::bind(config.listen)
+            .acceptor(crate::server_tls::acceptor(tls_config))
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .map_err(ServerError::Listener)
@@ -253,18 +336,153 @@ async fn build_router(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
 ) -> Result<(Router, Option<String>), ServerError> {
-    build_router_with_plugin_descriptors(config, supplied_agent, &[]).await
+    build_router_with_enrollment(config, supplied_agent, None).await
 }
 
-async fn build_router_with_plugin_descriptors(
+#[cfg(test)]
+async fn build_router_with_enrollment(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
-    plugin_descriptors: &'static [&'static PluginDescriptor],
+    enrollment: Option<EnrollmentService>,
 ) -> Result<(Router, Option<String>), ServerError> {
+    let (app, setup, _) =
+        build_router_core(config, supplied_agent, enrollment, None, None, None, None).await?;
+    Ok((app, setup))
+}
+
+/// Assemble configured CA authority before any listener starts; unsafe copy
+/// storage refuses startup, while an absent configuration grants no authority.
+#[cfg(feature = "remote")]
+fn ca_router(
+    remote: Option<&RemoteService>,
+    auth: &Auth,
+    pool: &SqlitePool,
+    hosts: crate::remote_runtime::RemoteHosts,
+    store: crate::enrollment::EnrollmentStore,
+) -> Result<Router, ServerError> {
+    remote
+        .and_then(|service| service.ca_administration.as_ref())
+        .map(|configuration| {
+            configuration
+                .with_runtime(auth.clone(), pool.clone(), hosts, store)
+                .map(|authority| crate::ca_http::router(auth.clone(), authority))
+                .map_err(|_| ServerError::TlsConfiguration)
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+/// Build the optional plugin adapter and retain listener ownership for the serving lifetime.
+#[cfg(feature = "remote")]
+async fn remote_router(
+    auth: Auth,
+    pool: SqlitePool,
+    mut enrollment: Option<EnrollmentService>,
+    remote: Option<RemoteService>,
+    trust: std::path::PathBuf,
+) -> Result<
+    (
+        Router,
+        Router,
+        crate::remote_runtime::RemoteHosts,
+        Option<RemoteListeners>,
+        Option<crate::remote_http::InvitationIssuer>,
+    ),
+    ServerError,
+> {
+    let hosts = crate::remote_runtime::RemoteHosts::from_source(
+        enrollment.as_ref().map(|service| service.source.clone()),
+    );
+    let enrollment_store = crate::enrollment::EnrollmentStore::new(pool.clone());
+    let ca_api = ca_router(
+        remote.as_ref(),
+        &auth,
+        &pool,
+        hosts.clone(),
+        enrollment_store.clone(),
+    )?;
+    let listeners = if let Some(remote) = remote.filter(|remote| remote.identity.is_some()) {
+        Some(
+            crate::remote_runtime::RemoteListeners::start(
+                remote.enrollment.endpoint.endpoint,
+                &remote.identity.ok_or(ServerError::TlsConfiguration)?,
+                &remote.roots,
+                enrollment_store.clone(),
+                hosts.clone(),
+            )
+            .await
+            .map_err(ServerError::Listener)?,
+        )
+    } else {
+        None
+    };
+    if let (Some(service), Some(listeners)) = (&mut enrollment, &listeners) {
+        service.endpoint.endpoint = listeners.local_addr().map_err(ServerError::Listener)?;
+    }
+    let issuer = enrollment.clone().map(|service| {
+        crate::remote_http::InvitationIssuer::new(
+            auth.clone(),
+            pool.clone(),
+            enrollment_store.clone(),
+            service,
+        )
+    });
+    let remote_api = enrollment.map(|service| {
+        crate::remote_http::router_with_store(
+            auth.clone(),
+            pool.clone(),
+            enrollment_store.clone(),
+            service.source,
+            service.endpoint,
+        )
+    });
+    let removal = crate::remote_removal::Removal::new(
+        auth.clone(),
+        pool.clone(),
+        enrollment_store,
+        hosts.clone(),
+        trust,
+    );
+    Ok((
+        ca_api,
+        remote_api
+            .unwrap_or_else(crate::remote_http::unavailable_router)
+            .merge(crate::remote_removal_http::router(auth, removal)),
+        hosts,
+        listeners,
+        issuer,
+    ))
+}
+
+#[cfg(all(test, feature = "ssh"))]
+async fn build_router_with_key_setup(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+    factory: Option<BootstrapFactory>,
+    key_setup: Option<KeyInitialization>,
+) -> Result<(Router, Option<String>), ServerError> {
+    let (app, setup, _) =
+        build_router_core(config, supplied_agent, None, None, factory, key_setup, None).await?;
+    Ok((app, setup))
+}
+
+// Keep the runtime composition together; each optional plugin supplies its own router.
+#[allow(clippy::too_many_lines)]
+async fn build_router_core(
+    config: ServerConfig,
+    supplied_agent: Option<EmbeddedAgent>,
+    enrollment: Option<EnrollmentService>,
+    remote: Option<RemoteService>,
+    factory: Option<BootstrapFactory>,
+    key_setup: Option<KeyInitialization>,
+    catalog: Option<&'static [&'static PluginDescriptor]>,
+) -> Result<(Router, Option<String>, Option<RemoteListeners>), ServerError> {
+    #[cfg(not(feature = "remote"))]
+    let _ = (enrollment, remote);
+    #[cfg(not(feature = "ssh"))]
+    let _ = (factory, key_setup);
     validate_config(&config)?;
-    if let Some(web_root) = &config.web_root
-        && !web_root.is_dir()
-    {
+    if config.web_root.as_ref().is_some_and(|root| !root.is_dir()) {
         return Err(ServerError::WebRoot);
     }
 
@@ -275,6 +493,8 @@ async fn build_router_with_plugin_descriptors(
     let auth = Auth::new(pool.clone(), rp_id, &config.public_origin)
         .await
         .map_err(ServerError::Auth)?;
+    #[cfg(not(feature = "remote"))]
+    let ca_api = Router::new();
     let now = unix_seconds()?;
     websocket::recover_connections(&pool, now)
         .await
@@ -304,15 +524,52 @@ async fn build_router_with_plugin_descriptors(
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
         EmbeddedAgent::spawn(executable)
     };
+    #[cfg(feature = "remote")]
+    let (ca_api, remote_api, hosts, listeners, issuer) = remote_router(
+        auth.clone(),
+        pool.clone(),
+        enrollment,
+        remote,
+        config.data_dir.join("ssh-trust"),
+    )
+    .await?;
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    let integration = issuer.map(|issuer| (issuer, hosts.clone()));
+    #[cfg(all(feature = "ssh", not(feature = "remote")))]
+    let integration = None;
+    #[cfg(all(feature = "remote", not(feature = "ssh")))]
+    let _ = issuer;
+    // Compose SSH only after the shared CA ledger and admitted transport exist.
+    #[cfg(feature = "ssh")]
+    let (bootstrap, ssh_key) = crate::bootstrap_runtime::initialize(
+        &config.data_dir,
+        &auth,
+        &pool,
+        factory,
+        key_setup,
+        integration,
+    )
+    .await?;
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
         .await
         .map_err(|_| ServerError::InvalidConfiguration)?
-        .with_plugin_descriptors(plugin_descriptors);
+        .with_plugin_descriptors(catalog.unwrap_or_else(infraternal_agent::plugins::descriptors));
+    #[cfg(feature = "remote")]
+    let ws_state = ws_state.with_remote_hosts(hosts);
+    #[cfg(not(feature = "remote"))]
+    let listeners = None;
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
-        .merge(auth::router(auth))
-        .merge(websocket::router(ws_state));
+        .merge(auth::router(auth.clone()))
+        .merge(websocket::router(ws_state))
+        .merge(ca_api);
+    #[cfg(feature = "remote")]
+    let app = app.merge(remote_api);
+    #[cfg(feature = "ssh")]
+    let app = app.merge(crate::bootstrap_api::router_with_ssh_key(
+        auth, bootstrap, ssh_key,
+    ));
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
     } else {
@@ -326,6 +583,7 @@ async fn build_router_with_plugin_descriptors(
     Ok((
         app.layer(from_fn_with_state(admission, source_admission)),
         setup_token,
+        listeners,
     ))
 }
 
@@ -429,7 +687,13 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
     Ok(pool)
 }
 
-fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
+pub(crate) fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
+    if crate::compiled_plugins()
+        .iter()
+        .any(|descriptor| descriptor.validate().is_err())
+    {
+        return Err(ServerError::InvalidConfiguration);
+    }
     if config.behind_proxy == config.trusted_proxies.is_empty() {
         return Err(ServerError::InvalidConfiguration);
     }
@@ -446,10 +710,15 @@ fn validate_config(config: &ServerConfig) -> Result<(), ServerError> {
     {
         return Err(ServerError::InvalidConfiguration);
     }
+    if let Some(web_root) = &config.web_root
+        && !web_root.is_dir()
+    {
+        return Err(ServerError::WebRoot);
+    }
     Ok(())
 }
 
-fn unix_seconds() -> Result<i64, ServerError> {
+pub(crate) fn unix_seconds() -> Result<i64, ServerError> {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -459,12 +728,20 @@ fn unix_seconds() -> Result<i64, ServerError> {
     .map_err(|_| ServerError::Clock)
 }
 
-fn init_logging() {
+/// Select human diagnostics by default or JSON lines for machine callers.
+/// Repeated initialization leaves the process-wide subscriber selected by its caller.
+pub fn configure_logging(json: bool) {
+    use std::io::IsTerminal;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(filter)
-        .try_init();
+    let formatter = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter);
+    if json {
+        let _ = formatter.json().with_ansi(false).try_init();
+    } else {
+        let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        let _ = formatter.with_ansi(color).try_init();
+    }
 }
 
 async fn health(State(pool): State<SqlitePool>) -> Response {
@@ -478,7 +755,14 @@ async fn health(State(pool): State<SqlitePool>) -> Response {
     }
 }
 
-/// Per-source auth admission runs before JSON extraction and trusts forwarding data only from configured peers.
+/// Canonical client address from the listener and explicitly trusted proxy policy.
+/// Plugins may bound work by it; untrusted forwarding headers never set this value.
+#[derive(Clone, Copy)]
+pub(crate) struct ClientAddress(
+    #[cfg_attr(not(feature = "remote"), allow(dead_code))] pub(crate) IpAddr,
+);
+
+/// Per-source auth admission trusts forwarding data only from configured peers.
 #[derive(Clone)]
 struct SourceAdmission {
     behind_proxy: bool,
@@ -493,28 +777,22 @@ struct SourceBucket {
 
 async fn source_admission(
     State(policy): State<SourceAdmission>,
-    request: Request<axum::body::Body>,
+    mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let path = request.uri().path();
-    // Exact-Origin checking still runs in auth; source admission cannot deny revocation.
-    if !path.starts_with("/auth/") || path == "/auth/logout" {
-        return next.run(request).await;
-    }
-    let device = matches!(
-        path.trim_start_matches("/auth/"),
-        "device-start" | "device-redeem"
-    );
     let Some(peer) = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|address| address.0.ip())
     else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "request address unavailable",
-        )
-            .into_response();
+        if request.uri().path().starts_with("/auth/") && request.uri().path() != "/auth/logout" {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "request address unavailable",
+            )
+                .into_response();
+        }
+        return next.run(request).await;
     };
     let source = if policy.behind_proxy
         && policy
@@ -534,6 +812,17 @@ async fn source_admission(
     } else {
         peer
     };
+    request.extensions_mut().insert(ClientAddress(source));
+    let path = request.uri().path();
+    // Resolve trusted client metadata once for every plugin, before auth's own
+    // request-rate policy. Plugin-specific admission remains in its router.
+    if !path.starts_with("/auth/") || path == "/auth/logout" {
+        return next.run(request).await;
+    }
+    let device = matches!(
+        path.trim_start_matches("/auth/"),
+        "device-start" | "device-redeem"
+    );
     let Ok(now) = unix_seconds() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -646,6 +935,44 @@ mod tests {
         let ipv6 = ProxyNetwork::from_str("2001:db8::/32").expect("valid IPv6 network");
         assert!(ipv6.contains("2001:db8:1::1".parse().expect("valid IP")));
         assert!(ProxyNetwork::from_str("10.0.0.1/33").is_err());
+    }
+
+    /// The ordinary runtime, rather than a standalone plugin router, must expose admission.
+    #[cfg(feature = "ssh")]
+    #[tokio::test]
+    async fn production_router_exposes_bootstrap_owner_admission() {
+        use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
+        let data_dir =
+            PathBuf::from("target").join(format!("bootstrap-route-{}", uuid::Uuid::new_v4()));
+        let (socket, _peer) = tokio::net::UnixStream::pair().expect("fixture socket");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(socket),
+        )
+        .await
+        .expect("ordinary runtime router");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let serving = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("fixture serving");
+        });
+        let mut request = format!("ws://{address}/v1/bootstrap/ws")
+            .into_client_request()
+            .expect("WebSocket handshake");
+        request.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            "https://localhost:47361".parse().expect("fixture Origin"),
+        );
+        let result = connect_async(request).await;
+        serving.abort();
+        let _ = serving.await;
+        std::fs::remove_dir_all(data_dir).expect("remove fixture storage");
+        let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = result else {
+            panic!("unauthenticated bootstrap must be refused");
+        };
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -1011,3 +1338,11 @@ mod reviewer_admission {
         );
     }
 }
+
+#[cfg(all(test, feature = "remote"))]
+#[path = "remote_demo_tests.rs"]
+mod remote_demo_tests;
+
+#[cfg(all(test, feature = "ssh"))]
+#[path = "key_runtime_tests.rs"]
+mod key_runtime_tests;

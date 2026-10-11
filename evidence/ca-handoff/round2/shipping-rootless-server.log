@@ -1,0 +1,9 @@
+2026-10-11T00:12:40.714437Z  INFO infraternal::remote_server: server_ca_startup service_pid=1045319 outcome="warm"
+2026-10-11T00:12:40.788086Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:29471 public_origin=https://localhost behind_proxy=true
+2026-10-11T00:12:40.868180Z  INFO infraternal::restart: server_restart_request service_pid=1045319 request_pid=Some(1045315) request_uid=Some(1001) target=Some("/home/kayg/.cache/codex-scratch/ca-handoff/target/x86_64-unknown-linux-musl/release/infraternal") outcome="reply_failed" origin="socket"
+2026-10-11T00:12:40.868210Z  WARN infraternal::restart: server restart requester disconnected error_kind=BrokenPipe
+2026-10-11T00:12:41.130205Z  INFO infraternal::restart: server_restart_request service_pid=1045319 request_pid=Some(1045361) request_uid=Some(1001) target=Some("/home/kayg/.cache/codex-scratch/ca-handoff/target/x86_64-unknown-linux-musl/release/infraternal") outcome="cold" origin="socket"
+infraternal agent failed: unexpected end of file
+2026-10-11T00:12:41.148034Z  INFO infraternal::remote_server: server_ca_startup service_pid=1045319 outcome="cold"
+2026-10-11T00:12:41.158316Z  INFO infraternal_server::runtime: infraternal server started listen=127.0.0.1:29471 public_origin=https://localhost behind_proxy=true
+infraternal agent failed: unexpected end of file

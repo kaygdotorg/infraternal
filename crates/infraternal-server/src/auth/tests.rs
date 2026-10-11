@@ -42,7 +42,7 @@ use tokio_tungstenite::{
 };
 use tower::ServiceExt;
 
-pub(super) static SERIAL: Mutex<()> = Mutex::const_new(());
+pub(crate) static SERIAL: Mutex<()> = Mutex::const_new(());
 #[path = "socket_clock.rs"]
 mod socket_clock;
 use socket_clock::FrozenSocketTime;
@@ -55,6 +55,8 @@ struct Software {
     prf_key: PKey<Private>,
     counter: u32,
     aaguid: Uuid,
+    // Real listeners use localhost; existing in-process fixtures retain their pinned RP.
+    rp_id: &'static str,
 }
 impl Software {
     fn new() -> Self {
@@ -65,13 +67,14 @@ impl Software {
             prf_key: PKey::hmac(&rand::random::<[u8; 32]>()).unwrap(),
             counter: 0,
             aaguid: Uuid::nil(),
+            rp_id: "auth.example.test",
         }
     }
     fn client_data(start: &Value, kind: &str, origin: &str) -> Vec<u8> {
         serde_json::to_vec(&json!({"type":kind,"challenge":start["options"]["publicKey"]["challenge"],"origin":origin,"crossOrigin":false})).unwrap()
     }
     fn auth_data(&self, flags: u8) -> Vec<u8> {
-        let mut data = Sha256::digest(b"auth.example.test").to_vec();
+        let mut data = Sha256::digest(self.rp_id.as_bytes()).to_vec();
         data.push(flags);
         data.extend_from_slice(&self.counter.to_be_bytes());
         data
@@ -240,6 +243,10 @@ async fn fixture() -> Fixture {
 
 /// Complete the same real registration flow regardless of the SQLite pool.
 async fn fixture_with_bootstrap(auth: Auth, token: String) -> Fixture {
+    fixture_with_auth(auth, token).await
+}
+
+async fn fixture_with_auth(auth: Auth, token: String) -> Fixture {
     let start = auth.legacy_setup(&token, "owner", NOW).await.unwrap();
     let user = str_field(&start, "user_id").to_owned();
     let words = str_field(&start, "recovery_words").to_owned();
@@ -3096,7 +3103,7 @@ async fn recovery_audit_commits_once_with_start_cancel_and_complete() {
 impl Auth {
     async fn legacy_enrollment(&self, mut start: Value) -> Value {
         let words = bip39::Mnemonic::generate(24).unwrap().to_string();
-        let stored = recovery_hash(words.clone()).await.unwrap();
+        let stored = crypto::recovery_hash_fixture(words.clone()).await.unwrap();
         self.pending
             .lock()
             .await
@@ -3135,7 +3142,11 @@ fn recovery_verifier(words: &str) -> String {
 async fn fixture_v2() -> Fixture {
     let f = fixture().await;
     sqlx::query("UPDATE users SET recovery_hash=?,recovery_version=2 WHERE id=?")
-        .bind(recovery_hash(recovery_verifier(&f.words)).await.unwrap())
+        .bind(
+            crypto::recovery_hash_fixture(recovery_verifier(&f.words))
+                .await
+                .unwrap(),
+        )
         .bind(&f.user)
         .execute(&f.auth.pool)
         .await
@@ -3240,7 +3251,7 @@ async fn recovery_unknown_identity_pays_the_same_database_and_verifier_work() {
         .unwrap();
     let auth = Auth::new(pool, "auth.example.test", ORIGIN).await.unwrap();
     let user = uuid::Uuid::new_v4().to_string();
-    let stored = recovery_hash(random()).await.unwrap();
+    let stored = crypto::recovery_hash_fixture(random()).await.unwrap();
     sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name,recovery_version) VALUES (?,'owner',1,?,'owner','Owner',2)")
         .bind(&user).bind(stored).execute(&auth.pool).await.unwrap();
     let wrong_secret = random();
@@ -3273,5 +3284,23 @@ mod reviewer_tests;
 #[path = "rotation_tests.rs"]
 mod rotation_tests;
 
+#[cfg(feature = "remote")]
+#[path = "ca_membership_tests.rs"]
+mod ca_membership_tests;
 #[path = "host_facts_review_tests.rs"]
 mod host_facts_review_tests;
+
+#[path = "verified_passkey_tests.rs"]
+mod verified_passkey_tests;
+
+#[cfg(feature = "remote")]
+#[path = "ca_administration_tests.rs"]
+mod ca_administration_tests;
+
+#[cfg(feature = "remote")]
+#[path = "remote_removal_tests.rs"]
+mod remote_removal_tests;
+#[path = "terminal_refusal_tests.rs"]
+mod terminal_refusal_tests;
+#[path = "tls_tests.rs"]
+mod tls_tests;

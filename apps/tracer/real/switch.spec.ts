@@ -111,11 +111,18 @@ async function read(p: Page, way: string, settleMs: number): Promise<Timeline> {
   }, way);
 }
 
-/** The two sessions' ids (hex), taken from the attach frames while both have a window. */
+/** The two sessions' ids (hex), ordered by the markers printed in their actual windows. */
 let ids: string[] = [];
 /** The inventory's id form: a lowercase UUID with dashes. */
 const sessionOf = (index: number): string => ids[index]!.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
 
+
+/** Attach completion order can differ from window order; resolve only fixture-owned output markers. */
+const sessionWithMarker = (marker: string): string | undefined => {
+  const bridge = server.bridges.filter((item) => !item.closed).at(-1);
+  const stream = [...(bridge?.output.entries() ?? [])].find(([, text]) => text.includes(`\r\n${marker}\r\n`))?.[0];
+  return stream === undefined ? undefined : bridge?.attached.get(stream)?.at(-1);
+};
 
 test("setup: two sessions with different screens, the second left running without a window", async () => {
   test.setTimeout(120_000);
@@ -124,16 +131,18 @@ test("setup: two sessions with different screens, the second left running withou
   const a = windows(page).first();
   await a.locator(".terminal-host").click({ position: { x: 40, y: 40 } });
   await page.keyboard.type("clear; seq 1 14; echo FIRST-MARK\n", { delay: 5 });
-  await page.keyboard.press("Control+K");
+  await expect.poll(() => sessionWithMarker("FIRST-MARK")).toBeTruthy();
+  ids = [sessionWithMarker("FIRST-MARK")!];
+  await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("open shell on");
   await page.locator("#palette-results [role=option]").first().click();
   await expect(windows(page)).toHaveCount(2);
   await expect.poll(() => [...(server.bridges.filter((b) => !b.closed).at(-1)?.attached.values() ?? [])].flat().length, { timeout: 20_000 }).toBe(2);
-  ids = [...new Set([...(server.bridges.filter((b) => !b.closed).at(-1)?.attached.values() ?? [])].flat())];
-  expect(ids).toHaveLength(2);
-  await page.waitForTimeout(1500 + rtt * 3);
+  await windows(page).nth(1).locator(".terminal-host").click({ position: { x: 40, y: 40 } });
   await page.keyboard.type("clear; seq 200 214; echo SECOND-MARK\n", { delay: 5 });
-  await page.waitForTimeout(1200 + rtt * 2);
+  await expect.poll(() => sessionWithMarker("SECOND-MARK")).toBeTruthy();
+  ids.push(sessionWithMarker("SECOND-MARK")!);
+  expect(new Set(ids).size).toBe(2);
   await windows(page).nth(1).locator('[data-action="close"]').click({ force: true });
   await expect(windows(page)).toHaveCount(1);
   await windows(page).first().locator(".terminal-host").click({ position: { x: 40, y: 40 } });
@@ -196,7 +205,7 @@ test("the sidebar's session list and the palette open a detached session", async
         await arm(page);
         await page.locator(`#tree .bm-leaf[data-id$='/${target}']`).click();
       } else {
-        await page.keyboard.press("Control+K");
+        await page.keyboard.press("Control+Shift+K");
         await page.locator("#palette-input").fill("shell");
         await expect(page.locator(`#palette-results .result[data-action$='/${target}']`)).toBeVisible();
         await arm(page);

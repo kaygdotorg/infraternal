@@ -31,10 +31,10 @@ const closeAll = async (): Promise<void> => { await page.keyboard.press("Escape"
 const prepare: Record<string, () => Promise<void>> = {
   "sidebar-open": async () => { await page.locator("#sidebar-toggle").click(); await page.waitForTimeout(300); await page.locator("#sidebar-toggle").click(); await page.waitForTimeout(300); await aimAt("#sidebar-toggle"); },
   "sidebar-close": async () => { await page.locator("#sidebar-toggle").click(); await page.waitForTimeout(400); await aimAt("#sidebar-toggle"); },
-  "theme": async () => { await page.keyboard.press("Control+k"); await page.locator("#palette-input").fill("theme paper"); await page.waitForTimeout(200); },
+  "theme": async () => { await page.keyboard.press("Control+Shift+K"); await page.locator("#palette-input").fill("theme paper"); await page.waitForTimeout(200); },
   "activate": async () => { await aimAt(".ui-window:nth-child(2) .ui-window-body", { x: 100, y: 200 }); },
-  "palette-open": async () => { await page.keyboard.press("Control+k"); await page.waitForTimeout(300); await closeAll(); await page.waitForTimeout(300); },
-  "font-cold": async () => { await page.keyboard.press("Control+k"); await page.locator("#palette-input").fill("jetbrains"); await page.waitForTimeout(300); },
+  "palette-open": async () => { await page.keyboard.press("Control+Shift+K"); await page.waitForTimeout(300); await closeAll(); await page.waitForTimeout(300); },
+  "font-cold": async () => { await page.keyboard.press("Control+Shift+K"); await page.locator("#palette-input").fill("jetbrains"); await page.waitForTimeout(300); },
   "tab": async () => { await page.locator(".ui-window-pill").nth(1).click(); await page.waitForTimeout(400); await aimAt(".canvas-popover .ui-tab[data-tab='connection']"); },
   "popover-open": async () => { await page.locator(".ui-window-pill").nth(1).click(); await page.waitForTimeout(300); await closeAll(); await page.waitForTimeout(300); await aimAt(".ui-window:nth-child(2) .ui-window-pill"); },
 };
@@ -43,7 +43,7 @@ const act: Record<string, () => Promise<void>> = {
   "sidebar-close": () => page.mouse.click(aim.x, aim.y),
   "theme": () => page.keyboard.press("Enter"),
   "activate": () => page.mouse.click(aim.x, aim.y),
-  "palette-open": () => page.keyboard.press("Control+k"),
+  "palette-open": () => page.keyboard.press("Control+Shift+K"),
   "font-cold": () => page.keyboard.press("ArrowDown"),
   "tab": () => page.mouse.click(aim.x, aim.y),
   "popover-open": () => page.mouse.click(aim.x, aim.y),

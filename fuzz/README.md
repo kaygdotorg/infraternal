@@ -71,3 +71,23 @@ The first input byte selects an action; remaining bytes are its JSON input.
 The target checks parser robustness and validation boundaries, not database
 authorization or transaction behavior. The JSON shapes and action IDs are
 specified in contracts/mesh-api.md.
+
+## Auth capability cookies
+
+`auth_cookie` includes the production capability reader source. It feeds up to
+64 split fields, checks canonical 43-character values and asserts that a matching
+duplicate in any additional field is denied for both session and ceremony names.
+Inputs rejected by HeaderValue construction do not reach the cookie layer.
+Use a scratch target/corpus and the repository Zig/make/perl environment:
+
+```sh
+CARGO_TARGET_DIR="$HOME/.cache/codex-scratch/auth-cookie/target" \
+  CARGO_PROFILE_RELEASE_LTO=false cargo +nightly fuzz run auth_cookie \
+  "$HOME/.cache/codex-scratch/auth-cookie/corpus" -- \
+  -max_total_time=60 -max_len=4096 -rss_limit_mb=512
+```
+
+The #149 instrumented run completed 1,781,320 inputs in 61 seconds without a
+crash. Native/proxy TLS evidence and parser cost at 50 sessions are recorded in
+`docs/verification/tls-session.md`. Corpus seeds must be synthetic test values;
+never capture real browser cookies.

@@ -1,0 +1,23 @@
+Running as unit: run-p3941911-i50031925.scope; invocation ID: adb0878b400a4eedbb6b902519a3d8f0
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.21s
+     Running tests/remote_output.rs (/home/kayg/.cache/codex-scratch/dev-backmerge/target/debug/deps/remote_output-310481cc129ecc44)
+
+running 1 test
+test remote_refusal_matches_its_declared_cli_output ... FAILED
+
+failures:
+
+---- remote_refusal_matches_its_declared_cli_output stdout ----
+
+thread 'remote_refusal_matches_its_declared_cli_output' (3943034) panicked at crates/infraternal/tests/remote_output.rs:38:9:
+actual remote response lacks declared required field schema_version
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    remote_refusal_matches_its_declared_cli_output
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p infraternal --test remote_output`
