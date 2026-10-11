@@ -429,16 +429,19 @@ button { color: inherit; }
 .sidebar[data-foot] { overflow: hidden; }
 /* With a footer pinned at the bottom, only the host tree scrolls. */
 .sidebar[data-foot] #tree { flex: 0 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
-.sidebar-head { display: flex; align-items: center; gap: 8px; height: var(--pill-h); margin-bottom: 4px; padding: 0 calc(var(--pill-h) + 8px) 0 8px; }
+.sidebar-head { flex: none; display: flex; align-items: center; gap: 8px; height: var(--pill-h); margin-bottom: 4px; padding: 0 calc(var(--pill-h) + 8px) 0 8px; }
 .sidebar-title { font-weight: var(--fw-title); letter-spacing: -0.01em; }
 .bm { --bm-line: color-mix(in oklab, var(--fg) 16%, transparent); position: relative; margin-left: 4px; padding-left: 14px; }
-.bm-trunk { position: absolute; left: 0; top: -10px; bottom: -10px; width: 1.5px; }
-.bm-trunk::before {
-  content: ""; position: absolute; inset: 0; border-radius: 1px; background: var(--bm-line);
-  -webkit-mask-image: linear-gradient(transparent, #000 28px, #000 calc(100% - 28px), transparent);
-  mask-image: linear-gradient(transparent, #000 28px, #000 calc(100% - 28px), transparent);
-}
-.bm-marker { position: absolute; left: 0; top: 10px; width: 1.5px; height: calc(var(--row) - 12px); border-radius: 1px; background: var(--fg); will-change: transform; transition: opacity 150ms var(--ease-out); }
+/* The view-level line is drawn per section, in the section's own box, so it is as long as the content and never as long
+   as the scrollport: each section carries its own stretch, the stretches meet, and the last one ends at its head's centre
+   (its last child's connector). The first fades in from the top. */
+.bm-sec { position: relative; }
+.bm-sec::before { content: ""; position: absolute; left: -14px; top: 0; bottom: 0; width: 1.5px; background: var(--bm-line); }
+.bm > .bm-marker + .bm-sec::before { top: 0; -webkit-mask-image: linear-gradient(transparent, #000 28px); mask-image: linear-gradient(transparent, #000 28px); }
+.bm-sec.cl-divided::before { top: -8px; } /* the divider's gap is bridged: the trunk is one line */
+.bm > .bm-sec:last-child::before { bottom: auto; height: calc(var(--row) / 2 + 0.75px); border-radius: 0 0 1px 1px; }
+.bm > .bm-sec.cl-divided:last-child::before { height: calc(var(--row) / 2 + 8px + 8px + 0.75px); }
+.bm-marker { position: absolute; left: 0; top: 0; width: 1.5px; height: calc(var(--row) - 12px); border-radius: 1px; background: var(--fg); will-change: transform; transition: opacity 150ms var(--ease-out); }
 .bm-sec { list-style: none; }
 .bm-head, .bm-leaf {
   display: flex; align-items: center; gap: 8px; width: 100%; height: var(--row); padding: 0 8px; border-radius: 6px;

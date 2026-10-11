@@ -4,15 +4,16 @@
  * Locked: sign-in shows one persistent toast with Unlock; dismissing it moves the item to the sidebar card, and
  * while the sidebar is closed the toggle carries a dot. Unlock from the card clears the card and the dot. A reload
  * after unlocking (a new sign-in) shows nothing. A viewer who is not an administrator sees nothing at all.
- * Captures land in captures/inbox/ for the visual review.
+ * Captures land in captures/inbox-generic/ for the visual review.
  */
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 
-const CAPTURES = resolve(import.meta.dirname, "..", "captures", "inbox");
+const CAPTURES = resolve(import.meta.dirname, "..", "captures", "inbox-generic");
 mkdirSync(CAPTURES, { recursive: true });
 const TITLE = "Host connections are locked";
+const LINE = "Unlock host connections";
 
 async function signIn(page: Page, query: string, theme = "ink"): Promise<void> {
   await page.goto(`/?mock=1&proto=clusters&scene=${query.includes("role=") ? 5 : 3}&theme=${theme}&${query}`);
@@ -52,15 +53,35 @@ for (const [name, viewport, scale] of [["desktop", { width: 1440, height: 900 },
     await page.screenshot({ path: resolve(CAPTURES, `closed-dot-${name}.png`) });
 
     await openSidebar(page);
-    await expect(card(page)).toContainText(TITLE);
+    await expect(card(page)).toContainText("Inbox");
+    await expect(card(page).locator(".ui-inbox-count")).toHaveText("1");
+    // One compact line, collapsed by default: the explanation and the action are not on screen yet.
+    const row = card(page).getByRole("button", { name: LINE });
+    await expect(row).toHaveAttribute("aria-expanded", "false");
+    await expect(card(page).getByRole("button", { name: "Unlock", exact: true })).toHaveCount(0);
     const sidebar = await page.locator("#sidebar").boundingBox();
     const box = await card(page).boundingBox();
     expect(box && sidebar && box.x >= sidebar.x && box.x + box.width <= sidebar.x + sidebar.width && box.y + box.height <= sidebar.y + sidebar.height).toBeTruthy();
-    await page.screenshot({ path: resolve(CAPTURES, `card-${name}.png`) });
+    await page.screenshot({ path: resolve(CAPTURES, `collapsed-${name}.png`) });
+    // Expanding grows the card upward inside the sidebar; Enter and Escape work from the row.
+    await row.click();
+    await expect(row).toHaveAttribute("aria-expanded", "true");
+    await expect(card(page).locator(".ui-inbox-body")).toContainText("Confirm with your passkey");
+    await page.waitForTimeout(400);
+    const open = await card(page).boundingBox();
+    expect(open && sidebar && open.y >= sidebar.y && open.y + open.height <= sidebar.y + sidebar.height).toBeTruthy();
+    await page.screenshot({ path: resolve(CAPTURES, `expanded-${name}.png`) });
+    await row.focus();
+    await page.keyboard.press("Escape");
+    await expect(row).toHaveAttribute("aria-expanded", "false");
+    await expect(card(page).locator(".ui-inbox-panel[inert]")).toHaveCount(1);
+    await page.keyboard.press("Enter");
+    await expect(row).toHaveAttribute("aria-expanded", "true");
+    await page.waitForTimeout(300);
     // The toggle's dot yields to the card while the sidebar is open.
     await expect.poll(() => toggle(page).evaluate((el) => getComputedStyle(el, "::after").opacity)).toBe("0");
 
-    await card(page).getByRole("button", { name: "Unlock" }).click();
+    await card(page).getByRole("button", { name: "Unlock", exact: true }).click();
     await expect(card(page)).toHaveCount(0);
     await expect(toggle(page)).not.toHaveAttribute("data-pending", "");
     await expect(toast(page)).toContainText("Host connections unlocked");
@@ -126,6 +147,9 @@ test("paper theme: the card reads on light glass", async ({ page }) => {
   await signIn(page, "ca=locked", "paper");
   await toast(page).getByRole("button", { name: "Dismiss" }).click({ timeout: 8000 });
   await openSidebar(page);
-  await expect(card(page)).toContainText(TITLE);
-  await page.screenshot({ path: resolve(CAPTURES, "card-paper-desktop.png") });
+  await expect(card(page)).toContainText(LINE);
+  await page.screenshot({ path: resolve(CAPTURES, "collapsed-paper-desktop.png") });
+  await card(page).getByRole("button", { name: LINE }).click();
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: resolve(CAPTURES, "expanded-paper-desktop.png") });
 });
