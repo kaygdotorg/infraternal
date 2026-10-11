@@ -84,6 +84,9 @@ enum Command {
         /// Internal test/startup override, clamped to the production ceiling.
         #[arg(long, default_value_t = 600_000)]
         exit_retention_ms: u64,
+        /// Private fixed-command readiness probe; never reads login startup.
+        #[arg(long)]
+        readiness: bool,
     },
 }
 
@@ -261,6 +264,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             detach,
             ring_capacity,
             exit_retention_ms,
+            readiness,
         } => match run_shim(
             &session,
             uid,
@@ -270,6 +274,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             detach,
             ring_capacity,
             exit_retention_ms,
+            readiness,
         ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => output::refuse(
@@ -641,6 +646,7 @@ fn run_shim(
     detach: bool,
     ring_capacity: usize,
     exit_retention_ms: u64,
+    readiness: bool,
 ) -> std::io::Result<()> {
     if session.len() != 32 || !session.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(std::io::Error::new(
@@ -664,6 +670,7 @@ fn run_shim(
             rows,
             state,
             ring_capacity,
+            readiness,
         },
         std::time::Duration::from_millis(exit_retention_ms),
     )

@@ -284,6 +284,7 @@ async fn real_agent_open_uses_uid_and_character_dimensions() {
     assert!(
         process_command(
             Command::Open {
+                readiness: false,
                 size: TerminalSize {
                     cols: 80,
                     rows: 24,

@@ -26,7 +26,16 @@ fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }
 impl Pty {
+    #[cfg(test)]
     pub fn spawn(uid: u32, cols: u16, rows: u16) -> io::Result<Self> {
+        Self::spawn_with_readiness(uid, cols, rows, false)
+    }
+    pub fn spawn_with_readiness(
+        uid: u32,
+        cols: u16,
+        rows: u16,
+        readiness: bool,
+    ) -> io::Result<Self> {
         let user = User::from_uid(Uid::from_raw(uid))
             .map_err(errno)?
             .ok_or_else(|| io::Error::other("target uid has no login account"))?;
@@ -78,7 +87,7 @@ impl Pty {
         };
         let target_uid = user.uid;
         let group = user.gid;
-        let shell = if user.shell.as_os_str().is_empty() {
+        let shell = if readiness || user.shell.as_os_str().is_empty() {
             std::path::PathBuf::from("/bin/sh")
         } else {
             user.shell
@@ -88,8 +97,13 @@ impl Pty {
             "-{}",
             shell.file_name().unwrap_or_default().to_string_lossy()
         );
+        if readiness {
+            // Wait for attachment input without invoking any login rc files.
+            command.args(["-c", "read -r line; printf 'infraternal-ready\\n'"]);
+        } else {
+            command.arg0(login_name);
+        }
         command
-            .arg0(login_name)
             .env_clear()
             .env("HOME", &user.dir)
             .env("USER", &user.name)

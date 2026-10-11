@@ -119,7 +119,7 @@ impl Installation {
     pub async fn stage(&self, binary: &Path) -> Result<(), Failure> {
         let digest = binary_digest(binary)
             .await
-            .map_err(|error| error.at(InstallStep::Upload))?;
+            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
         self.session.run(&self.script(&format!(r#"
 # A retired fresh transaction still owns final cleanup outside the base.
 # Admit no replacement until its receipt is removed after successful cleanup.
@@ -145,7 +145,7 @@ fi
 cat > "$stage/payload"
 printf '%s  %s\n' {} "$stage/payload" | sha256sum -c - >/dev/null
 chmod 700 "$stage/payload"
-"#, shell_quote(&digest))), Input::File(binary)).await.map_err(|error| error.at(InstallStep::Upload))?;
+"#, shell_quote(&digest))), Input::File(binary)).await.map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
         Ok(())
     }
 
@@ -214,7 +214,7 @@ if [ -d "$base/state" ]; then cp -a "$base/state" "$stage/state"; fi
         self.session
             .run(&self.script(&join_body), Input::Bytes(join.stdin.expose()))
             .await
-            .map_err(|error| error.at(InstallStep::Join))?;
+            .map_err(|error| error.at(InstallStep::Join).in_mode(self.mode))?;
         // Never replace unrelated launcher/unit files. A previous installation is
         // recognizable only through the same host marker and exact launcher target.
         let start_body = r##"
@@ -265,7 +265,7 @@ mv -f "$unit.new" "$unit"
         self.session
             .run(&self.script(start_body), Input::Empty)
             .await
-            .map_err(|error| error.at(InstallStep::Install))?;
+            .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
         self.session
             .run(
                 &self.script(
@@ -279,7 +279,7 @@ $manager enable --now infraternal-agent.service
                 Input::Empty,
             )
             .await
-            .map_err(|error| error.at(InstallStep::Start))?;
+            .map_err(|error| error.at(InstallStep::Start).in_mode(self.mode))?;
         Ok(())
     }
 
@@ -312,7 +312,7 @@ case "$state" in
     no) rm -f "$stage/linger-requested"; printf 'no\n';;
     *) printf 'no\n';;
 esac
-"#), Input::Empty).await?;
+"#), Input::Empty).await.map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
         parse_linger(&output.stdout)
     }
 
@@ -322,7 +322,7 @@ esac
     pub async fn commit(&self) -> Result<(), Failure> {
         self.session.run(&self.script(r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
 rm -rf "$base/.bootstrap-lock"
-"#), Input::Empty).await?;
+"#), Input::Empty).await.map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
         Ok(())
     }
 

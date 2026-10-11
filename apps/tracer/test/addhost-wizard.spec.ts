@@ -258,6 +258,9 @@ test("an unsupported host cannot be retried; an install failure can", async ({ p
   await expect(page.getByRole("heading", { name: "Setting up broken.lab didn't finish" })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("Open the details, restore access to the host if needed, then try again.", { exact: false })).toBeVisible();
   await expect(page.getByText("Automatic cleanup may still need to finish.", { exact: false })).toHaveCount(0);
+  await page.locator(".ah-details summary").click();
+  await expect(page.locator(".ah-details pre")).toContainText("Failed step: Start the host service");
+  await page.screenshot({ path: "../../evidence/addhost-169/failure-details.png" });
   await inWizard(page, "Retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });

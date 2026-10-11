@@ -99,6 +99,17 @@ server's effective uid, never browser supplied. The daemon returns a canonical
 hyphenated UUID; the server accepts that or its legacy lowercase 32-hex spelling.
 Pixel dimensions are carried by later Resize frames, not daemon-open input.
 
+For private bootstrap proof (#169), leg B accepts optional `readiness: true`.
+It selects a fixed non-login `/bin/sh` command that waits for a newline, prints
+`infraternal-ready` and exits. No executable or shell text is accepted. Enrolled
+uid checks and terminal.open plugin admission are unchanged; ordinary opens omit
+the field and continue to use the target login shell. The private probe has a
+10-second absolute shim lifetime. Bootstrap retains its session id before
+attachment and finishes its fixed read through a separate writer on every exit,
+waiting for terminal.exited or session-gone. Cancellation cleanup precedes SSH
+service rollback. A lost transport still reaches the shim deadline; ordinary
+user terminals acquire no deadline or cleanup behavior.
+
 ## 4. Frames
 
 Ranges: `0x00–0x0F` connection, `0x10–0x2F` terminal hot path, `0x30–0x3F`

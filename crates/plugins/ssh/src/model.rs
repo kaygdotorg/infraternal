@@ -208,6 +208,9 @@ pub struct Failure {
     pub log_tail: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_step: Option<InstallStep>,
+    /// Public process status only; command output is never serialized.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_status: Option<u8>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub already_added: bool,
     /// Trusted server payload coordinates; never fields echoed from SSH stderr.
@@ -236,6 +239,7 @@ impl Failure {
             message,
             log_tail: Vec::new(),
             failed_step: None,
+            exit_status: None,
             already_added: false,
             missing_binary: None,
             fingerprints: Vec::new(),
@@ -249,14 +253,55 @@ impl Failure {
     #[must_use]
     pub fn at(mut self, step: InstallStep) -> Self {
         self.failed_step = Some(step);
-        if self.kind == FailureKind::Install && self.missing_binary.is_none() {
+        if self.kind == FailureKind::Install
+            && self.missing_binary.is_none()
+            && !self.already_added
+            && self.message != "The matching static infraternal binary is unavailable."
+        {
             self.message = match step {
-                InstallStep::Connect => "Connecting to the host failed.",
-                InstallStep::Upload => "Uploading the infraternal binary failed.",
-                InstallStep::Install => "Installing the infraternal agent failed.",
-                InstallStep::Join => "Joining the host to this server failed.",
-                InstallStep::Start => "Starting the infraternal agent service failed.",
+                InstallStep::Connect => {
+                    "Connecting to the host failed. Check SSH access and the host service, then try again."
+                }
+                InstallStep::Upload => {
+                    "Uploading the infraternal binary failed. Check SSH access and free space on the host, then try again."
+                }
+                InstallStep::Install => {
+                    "Installing the infraternal agent failed. Check the host service configuration and existing setup files, then try again."
+                }
+                InstallStep::Join => {
+                    "Joining the host to this server failed. Check the host can reach the server and resolve its address, then try again."
+                }
+                InstallStep::Start => {
+                    "Starting the infraternal agent service failed. Check the host service status and its configuration, then try again."
+                }
             };
+        }
+        self
+    }
+    /// Classify only our own fixed bootstrap exit codes using the approved path.
+    #[must_use]
+    pub fn in_mode(mut self, mode: InstallMode) -> Self {
+        if self.kind != FailureKind::Install {
+            return self;
+        }
+        match (self.exit_status, mode) {
+            (Some(71), InstallMode::Rootless) => {
+                self.message = "An existing folder ~/.local/share/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside, then try again.";
+            }
+            (Some(71), InstallMode::Root) => {
+                self.message = "An existing folder /var/lib/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside with administrator access, then try again.";
+            }
+            (Some(72), InstallMode::Rootless) => {
+                self.message = "Setup found a lock or unfinished rollback in ~/.local/share/infraternal on this host. Check whether setup is still running. Finish its cleanup, then try again.";
+            }
+            (Some(72), InstallMode::Root) => {
+                self.message = "Setup found a lock or unfinished rollback in /var/lib/infraternal on this host. Check whether setup is still running. Finish its cleanup with administrator access, then try again.";
+            }
+            _ => {}
+        }
+        if self.exit_status.is_some() {
+            self.log_tail
+                .retain(|line| !line.starts_with("Remote command returned"));
         }
         self
     }

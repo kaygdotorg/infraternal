@@ -20,6 +20,8 @@ pub struct Output {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub success: bool,
+    /// Exit code without any process text; signals have no numeric code.
+    pub exit_status: Option<u8>,
     pub ssh_failure: bool,
 }
 
@@ -152,6 +154,7 @@ async fn execute_inner(
             stdout,
             stderr,
             success: status.success(),
+            exit_status: status.code().and_then(|code| u8::try_from(code).ok()),
             ssh_failure: status.code() == Some(255),
         })
     };

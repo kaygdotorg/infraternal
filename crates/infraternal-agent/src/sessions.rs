@@ -467,6 +467,22 @@ pub async fn launch(
     cols: u16,
     rows: u16,
 ) -> io::Result<Session> {
+    launch_with_readiness(exe, state, manager, uid, cols, rows, false).await
+}
+
+/// Fixed readiness commands use the same account, scope and handshake as normal terminals.
+/// # Errors
+/// Returns the same admission and launch errors as `launch`.
+#[allow(clippy::too_many_arguments)]
+pub async fn launch_with_readiness(
+    exe: &Path,
+    state: &Path,
+    manager: Manager,
+    uid: u32,
+    cols: u16,
+    rows: u16,
+    readiness: bool,
+) -> io::Result<Session> {
     if cols == 0 || rows == 0 || usize::from(cols) * usize::from(rows) > 200_000 {
         return Err(invalid("invalid terminal dimensions"));
     }
@@ -507,6 +523,9 @@ pub async fn launch(
             "--state",
         ])
         .arg(state);
+    if readiness {
+        command.arg("--readiness");
+    }
     if matches!(manager, Manager::Detached) {
         command.arg("--detach");
     }

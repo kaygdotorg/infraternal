@@ -75,6 +75,8 @@ enum Message {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Open {
+    #[serde(default)]
+    readiness: bool,
     uid: u32,
     cols: u16,
     rows: u16,
@@ -429,7 +431,7 @@ async fn run_channel(
                                 match plugins.admit("terminal.open", registry.context()) {
                                     Ok(()) => {
                                         let exe = exe.clone(); let state = state.clone();
-                                        opens.spawn(async move { (stream, call_id, sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await) });
+                                        opens.spawn(async move { (stream, call_id, sessions::launch_with_readiness(&exe, &state, manager, input.uid, input.cols, input.rows, input.readiness).await) });
                                     }
                                     Err(reason) => reply(&control, Message::Result(stream, call_id, false, reason.json()?))?,
                                 }
