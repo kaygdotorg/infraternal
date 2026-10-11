@@ -54,7 +54,13 @@ export const STREAMS_PER_SOCKET = 28;
 const RECONNECT_FIRST_MS = 50;
 const RECONNECT_CEILING_MS = 5000;
 /** A socket that stayed welcomed this long ended for a new reason; the next reconnect is quick again. */
-const STABLE_SOCKET_MS = 10_000;
+export const STABLE_CONNECTION_MS = 10_000;
+
+/** Socket and shared-stream retries use the same bounded steps and positive jitter (#158). */
+export function reconnectDelay(attempt: number): number {
+  const step = Math.min(RECONNECT_CEILING_MS, RECONNECT_FIRST_MS * 2 ** Math.min(attempt, 10));
+  return step + Math.random() * (step / 2);
+}
 const MAX_SOCKETS = 12;
 const VERSION = 1;
 const SEND_BUFFER_SIZE = 32 * 1024;
@@ -342,7 +348,7 @@ export class MuxConnection {
     socket.onerror = () => this.status("Connection interrupted. Reconnecting…");
     socket.onclose = () => {
       if (this.socket !== socket || this.closed) return;
-      const lived = this.welcomed && performance.now() - this.welcomedAt >= STABLE_SOCKET_MS;
+      const lived = this.welcomed && performance.now() - this.welcomedAt >= STABLE_CONNECTION_MS;
       this.socket = undefined;
       this.decoder = undefined;
       this.welcomed = false;
@@ -441,8 +447,7 @@ export class MuxConnection {
     if (this.closed || this.retryTimer !== 0) return;
     // Jitter only lengthens a step (by up to half), so the first retry is never sooner than 50 ms and pages dropped
     // together do not return in step.
-    const step = Math.min(RECONNECT_CEILING_MS, RECONNECT_FIRST_MS * 2 ** Math.min(this.retryAttempt, 10));
-    const delay = step + Math.random() * (step / 2);
+    const delay = reconnectDelay(this.retryAttempt);
     this.retryAttempt += 1;
     this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, delay);
   }
