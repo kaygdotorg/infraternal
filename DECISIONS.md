@@ -2207,6 +2207,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        link + QR + code flow of D237 runs instead.
      - **Always running (Q34):** the loopback canvas stays up with the
        infraternal agent; onboarding starts there. Only the local OS user who
-       ran `up` can use it (one-time token in the opened URL turned into a
-       cookie, peer-UID check of each loopback connection where the OS allows
-       it).
+       ran `up` can use it. `up` (and `infra status --open`) asks the local
+       infraternal agent over its Unix socket, which checks the caller's UID,
+       for a single-use token valid about 60 s, and opens the loopback URL
+       with it. The first load swaps it for an HttpOnly, SameSite=Strict
+       cookie and strips it from the address bar; the token cannot be used
+       again. After sign-in the same cookie becomes the signed-in person's
+       session and renews while a tab is open; it expires when idle. The
+       loopback server refuses any Host other than its own loopback address
+       and port (DNS rebinding) and checks Origin on every state-changing
+       request.
