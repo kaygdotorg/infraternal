@@ -32,6 +32,7 @@ pub(crate) struct RemoteLink {
     authority: Option<crate::remote_guard::AuthorityGuard>,
     renewal: std::sync::atomic::AtomicBool,
     server_paths: bool,
+    greeting_sent: bool,
 }
 
 pub(crate) struct QuicLink {
@@ -118,9 +119,16 @@ impl RemoteLink {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn tcp(channel: TcpTls) -> io::Result<Self> {
+        Self::tcp_admitted(channel, None).await
+    }
+    pub(crate) async fn tcp_admitted(
+        channel: TcpTls,
+        admission: Option<&mut crate::remote_standby::Admission>,
+    ) -> io::Result<Self> {
         let mut receive = Receive::default();
-        let prefix = greeting(&channel, &mut receive).await?;
+        let (prefix, greeting_sent) = greeting(&channel, &mut receive, admission).await?;
         let server_paths = supports_server_paths(&prefix);
         // TLS losers in the outgoing dial race send no application greeting;
         // they must never supersede the winning host transport in the registry.
@@ -133,16 +141,24 @@ impl RemoteLink {
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
             server_paths,
+            greeting_sent,
         })
     }
+    #[cfg(test)]
     pub(crate) async fn quic(connection: quinn::Connection) -> io::Result<Self> {
+        Self::quic_admitted(connection, None).await
+    }
+    pub(crate) async fn quic_admitted(
+        connection: quinn::Connection,
+        admission: Option<&mut crate::remote_standby::Admission>,
+    ) -> io::Result<Self> {
         let (send, receive) = tokio::time::timeout(Duration::from_secs(5), connection.accept_bi())
             .await
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
             .map_err(io::Error::other)?;
         let control = Arc::new(NativeChannel::control(send, receive)?);
         let mut receive = Receive::default();
-        let prefix = greeting(control.as_ref(), &mut receive).await?;
+        let (prefix, greeting_sent) = greeting(control.as_ref(), &mut receive, admission).await?;
         let server_paths = supports_server_paths(&prefix);
         let hello = infraternal_protocol::decode_muxed_frame(&prefix).map_err(io::Error::other)?;
         remote_quic::negotiate_binding(&connection, &hello.frame)?;
@@ -175,6 +191,7 @@ impl RemoteLink {
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
             server_paths,
+            greeting_sent,
         })
     }
 
@@ -250,6 +267,9 @@ impl RemoteLink {
         frame: &Frame<'_>,
         muxed: &[u8],
     ) -> io::Result<()> {
+        if self.greeting_sent && stream == 0 && matches!(frame, Frame::Hello { version: 1, .. }) {
+            return Ok(());
+        }
         match &self.transport {
             LinkTransport::Tcp { channel, .. } => channel.write(muxed).await,
             LinkTransport::Quic(link) => {
@@ -302,9 +322,13 @@ fn supports_server_paths(prefix: &[u8]) -> bool {
 }
 
 /// A ledger-admitted candidate may prove liveness without replacing the host.
-/// One Ping precedes Hello at most; the original decoder retains every suffix.
-async fn greeting<C: Channel>(channel: &C, receive: &mut Receive) -> io::Result<Vec<u8>> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+/// Path proof remains bounded; only an admitted optional standby wait outlives it.
+async fn greeting<C: Channel>(
+    channel: &C,
+    receive: &mut Receive,
+    admission: Option<&mut crate::remote_standby::Admission>,
+) -> io::Result<(Vec<u8>, bool)> {
+    let prefix = tokio::time::timeout(Duration::from_secs(5), async {
         let first = receive.next(channel).await?;
         let probe = if first.stream_id == 0 {
             match first.frame {
@@ -319,21 +343,37 @@ async fn greeting<C: Channel>(channel: &C, receive: &mut Receive) -> io::Result<
             Transmit::default()
                 .send(channel, 0, &Frame::Pong { nonce, sent_us })
                 .await?;
-            let hello = receive.next(channel).await?;
-            if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
+            let next = receive.next(channel).await?;
+            if next.stream_id != 0 {
                 return Err(io::ErrorKind::InvalidData.into());
             }
-            encode_muxed_frame_into(0, &hello.frame, &mut prefix).map_err(io::Error::other)?;
+            match next.frame {
+                Frame::Hello { version: 1, .. } => {
+                    encode_muxed_frame_into(0, &next.frame, &mut prefix)
+                        .map_err(io::Error::other)?;
+                }
+                Frame::Call {
+                    call_id: 0,
+                    action_id: "transport.standby",
+                    input_json: b"{}",
+                } => return Ok::<Option<Vec<u8>>, io::Error>(None),
+                _ => return Err(io::ErrorKind::InvalidData.into()),
+            }
         } else {
             if first.stream_id != 0 || !matches!(first.frame, Frame::Hello { version: 1, .. }) {
                 return Err(io::ErrorKind::InvalidData.into());
             }
             encode_muxed_frame_into(0, &first.frame, &mut prefix).map_err(io::Error::other)?;
         }
-        Ok(prefix)
+        Ok::<Option<Vec<u8>>, io::Error>(Some(prefix))
     })
     .await
-    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    if let Some(prefix) = prefix {
+        return Ok((prefix, false));
+    }
+    let admission = admission.ok_or_else(|| io::Error::from(io::ErrorKind::PermissionDenied))?;
+    Ok((admission.hello(channel, receive).await?, true))
 }
 
 async fn pump(

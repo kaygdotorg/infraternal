@@ -441,7 +441,8 @@ impl Source {
                 let mut scratch = vec![0; READ_CHUNK];
                 let hello = Frame::Hello {
                     version: 1,
-                    caps: infraternal_agent::remote_quic::REMOTE_WRITER_BINDING,
+                    caps: infraternal_agent::remote_quic::REMOTE_WRITER_BINDING
+                        | infraternal_plugin_api::channel::REMOTE_STANDBY,
                     client_info: "infraternal-server/0.1",
                 };
                 let mut encode = Vec::new();
