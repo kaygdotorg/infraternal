@@ -16,6 +16,12 @@ use tokio::{
 pub(crate) struct Registry {
     sender: mpsc::Sender<Job>,
     events: tokio::sync::broadcast::Sender<Vec<u8>>,
+    pending: std::sync::Arc<std::sync::Mutex<Option<PendingWorker>>>,
+}
+type Factory = Box<dyn FnOnce() -> Result<PluginRegistry, PluginError> + Send>;
+struct PendingWorker {
+    factory: Factory,
+    incoming: mpsc::Receiver<Job>,
 }
 struct Job {
     public: bool,
@@ -24,30 +30,63 @@ struct Job {
     result: tokio::sync::oneshot::Sender<Result<Vec<u8>, PluginError>>,
 }
 impl Registry {
-    pub(crate) fn new(mut registry: PluginRegistry) -> io::Result<Self> {
-        let (sender, mut incoming) = mpsc::channel::<Job>(8);
+    #[cfg(test)]
+    pub(crate) fn new(registry: PluginRegistry) -> Self {
+        Self::from_factory(Box::new(move || Ok(registry)))
+    }
+    fn for_mode(state: PathBuf, mode: crate::plugins::ExecutionMode) -> Self {
+        Self::from_factory(Box::new(move || {
+            crate::plugins::registry_at(mode, Some(&state))
+        }))
+    }
+    fn from_factory(factory: Factory) -> Self {
+        let (sender, incoming) = mpsc::channel::<Job>(8);
         let (events, _) = tokio::sync::broadcast::channel(8);
-        let notifications = events.clone();
-        std::thread::Builder::new()
-            .name("node-plugins".into())
-            .spawn(move || {
-                while let Some(job) = incoming.blocking_recv() {
-                    let result = if job.public {
-                        registry.call_public(&job.action, &job.input)
-                    } else {
-                        registry.call(&job.action, &job.input)
+        Self {
+            sender,
+            events,
+            pending: std::sync::Arc::new(std::sync::Mutex::new(Some(PendingWorker {
+                factory,
+                incoming,
+            }))),
+        }
+    }
+    fn start(&self) -> Result<(), PluginError> {
+        // An inactive control surface needs no thread or its resident startup
+        // code. Serialize the first call so concurrent local/server callers
+        // share exactly one sleeping worker for the process lifetime.
+        let mut pending = self.pending.lock().map_err(|_| PluginError::Rejected)?;
+        if let Some(PendingWorker {
+            factory,
+            mut incoming,
+        }) = pending.take()
+        {
+            let notifications = self.events.clone();
+            std::thread::Builder::new()
+                .name("node-plugins".into())
+                .spawn(move || {
+                    let Ok(mut registry) = factory() else {
+                        return;
                     };
-                    if result.is_ok()
-                        && let Ok(events) = registry.events()
-                    {
-                        for event in events {
-                            let _ = notifications.send(event);
+                    while let Some(job) = incoming.blocking_recv() {
+                        let result = if job.public {
+                            registry.call_public(&job.action, &job.input)
+                        } else {
+                            registry.call(&job.action, &job.input)
+                        };
+                        if result.is_ok()
+                            && let Ok(events) = registry.events()
+                        {
+                            for event in events {
+                                let _ = notifications.send(event);
+                            }
                         }
+                        let _ = job.result.send(result);
                     }
-                    let _ = job.result.send(result);
-                }
-            })?;
-        Ok(Self { sender, events })
+                })
+                .map_err(|_| PluginError::Rejected)?;
+        }
+        Ok(())
     }
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
         self.events.subscribe()
@@ -71,6 +110,7 @@ impl Registry {
         if input.len() > MAX_ACTION_BYTES || action.len() > 128 {
             return Err(PluginError::MessageTooLarge);
         }
+        self.start()?;
         let (result, receive) = tokio::sync::oneshot::channel();
         self.sender
             .try_send(Job {
@@ -93,9 +133,9 @@ impl Service {
         state: &Path,
         mode: crate::plugins::ExecutionMode,
     ) -> io::Result<Self> {
-        let plugins = crate::plugins::registry_at(mode, Some(state))
-            .map_err(|_| io::ErrorKind::InvalidData)?;
-        let registry = Registry::new(plugins)?;
+        // Compiled metadata is validated by registry tests; construct its
+        // process-owned instances only when a caller needs an action.
+        let registry = Registry::for_mode(state.to_owned(), mode);
         let local = Local::bind(state, registry.clone()).await?;
         Ok(Self {
             registry,
@@ -385,7 +425,7 @@ mod tests {
                 release: receive,
             }))
             .unwrap();
-        (Registry::new(registry).unwrap(), started, release)
+        (Registry::new(registry), started, release)
     }
     struct Directory(PathBuf);
     impl Directory {
