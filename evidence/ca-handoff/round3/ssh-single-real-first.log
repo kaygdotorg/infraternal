@@ -1,0 +1,3 @@
+Running as unit: run-p3010793-i44909205.scope; invocation ID: 30a384ef00bb44cc8cd1a0357286e347
+ENVIRONMENT machine=infraternal-dev cores=8 load=25.08 24.10 25.27 fixture=rootless-real-sshd source_penalties=isolated
+[Errno 13] Permission denied: '.'

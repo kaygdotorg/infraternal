@@ -1,0 +1,12 @@
+Running as unit: run-p2923394-i44821808.scope; invocation ID: a0573604c70c4c078a1a37011dc24793
+    Blocking waiting for file lock on build directory
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ca-handoff/crates/infraternal-shim)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 18s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ca-handoff/target/debug/deps/infraternal_shim-197c4e7170e4b7b6)
+
+running 1 test
+test pty::child_signal_tests::child_signal_reset_spawn_cost_at_128_children ... METRIC name=child_signal_reset_spawn n=128 rounds=7 baseline_batch_p50_ms=462.582 reset_batch_p50_ms=509.044 delta_per_child_us=362.988 delta_at_128_children_ms=46.462 idle_wakeups=0 retained_bytes_per_child=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 75 filtered out; finished in 6.55s
+
