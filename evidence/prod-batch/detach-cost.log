@@ -1,0 +1,18 @@
+Running as unit: run-p153205-i46245282.scope; invocation ID: b63e85eace41495f99065b1bad37613f
+load_before=22.72 25.53 24.54 4/2949 153207
+{"round": 0, "label": "before", "launches": 200, "batch_ms": 371.994879}
+{"round": 0, "label": "after", "launches": 200, "batch_ms": 490.346872}
+{"round": 1, "label": "after", "launches": 200, "batch_ms": 447.016183}
+{"round": 1, "label": "before", "launches": 200, "batch_ms": 450.118447}
+{"round": 2, "label": "before", "launches": 200, "batch_ms": 407.638212}
+{"round": 2, "label": "after", "launches": 200, "batch_ms": 554.874078}
+{"round": 3, "label": "after", "launches": 200, "batch_ms": 447.193228}
+{"round": 3, "label": "before", "launches": 200, "batch_ms": 489.794495}
+{"round": 4, "label": "before", "launches": 200, "batch_ms": 450.729554}
+{"round": 4, "label": "after", "launches": 200, "batch_ms": 479.080426}
+{"round": 5, "label": "after", "launches": 200, "batch_ms": 502.731566}
+{"round": 5, "label": "before", "launches": 200, "batch_ms": 443.986792}
+{"round": 6, "label": "before", "launches": 200, "batch_ms": 446.576097}
+{"round": 6, "label": "after", "launches": 200, "batch_ms": 499.230224}
+METRIC name=double_fork_signal_reset launches=200 rounds=7 before_batch_p50_ms=446.576 after_batch_p50_ms=490.347 observed_delta_per_launch_us=218.854 observed_delta_at_200_launches_ms=43.771 profile=GNU-debug persistent_reset_state_bytes=0
+load_after=20.07 24.87 24.34 6/2955 161806

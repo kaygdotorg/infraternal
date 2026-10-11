@@ -1,0 +1,26 @@
+Running as unit: run-p432666-i46524713.scope; invocation ID: bb3e68e62bbb40e38d95e47def8e36e5
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/infraternal-shim)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/plugins/remote)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/infraternal-agent)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/plugins/ssh)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/prod-batch/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.35s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod-batch/target/debug/deps/infraternal_agent-c125bbd12d7c2678)
+
+running 1 test
+test lifecycle::tests::nondumpable_process_keeps_its_authenticated_lifetime ... 
+thread 'lifecycle::tests::nondumpable_process_keeps_its_authenticated_lifetime' (439376) panicked at crates/infraternal-agent/src/lifecycle.rs:183:9:
+assertion `left == right` failed: a protected live process must remain counted
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    lifecycle::tests::nondumpable_process_keeps_its_authenticated_lifetime
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 65 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p infraternal-agent --lib`
