@@ -354,6 +354,15 @@ impl Node {
         if self.config.as_ref() == Some(&config) {
             return Ok(true);
         }
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|old| old.version == config.version)
+        {
+            // Only a complete identical replay may reuse an accepted version.
+            // Compare after the final chunk so reconnect snapshots remain useful [166].
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         self.apply(config)?;
         Ok(true)
     }
