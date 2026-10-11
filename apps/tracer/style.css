@@ -565,11 +565,18 @@ button { color: inherit; }
 [data-focus-ring="on"] .keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .keybar button { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
 .keybar button svg { width: 24px; height: 24px; stroke-width: 1.75; }
+/* The selection circle is its own layer, inset from the 48 px target: the tray's rows are 46 px tall (the capsule's 48 px less
+   its hairline), so a circle as big as the target touched or crossed the capsule edge. 38 px leaves 4 px above and below
+   and 5 px at the sides (TASTE: toolbar selection stays inside the capsule). */
+.keybar button { isolation: isolate; }
+.keybar button::before { content: ""; position: absolute; z-index: -1; inset: 5px; border-radius: 50%; background: transparent; transition: background-color 140ms ease; }
 .keybar .key-word { font: var(--fw-title) 15px/1 var(--font-ui); letter-spacing: 0.01em; }
 /* Armed modifiers use a soft fill; locked modifiers add a small dot as a second cue. */
-.keybar button[data-mod-state="armed"], .keybar button[data-mod-state="locked"] { background: var(--accent-soft); color: var(--accent); }
+.keybar button[data-mod-state="armed"], .keybar button[data-mod-state="locked"] { color: var(--accent); }
+.keybar button[data-mod-state="armed"]::before, .keybar button[data-mod-state="locked"]::before { background: var(--accent-soft); }
 .keybar button[data-mod-state="locked"]::after { content: ""; position: absolute; right: 8px; bottom: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--overlay); }
-.keybar button[data-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.keybar button[data-pressed="true"] { color: var(--accent); }
+.keybar button[data-pressed="true"]::before { background: var(--accent-soft); }
 .keybar button[data-disabled] { opacity: 0.35; }
 .keybar button[data-instant] { transition: none; }
 .keybar .dpad[hidden] { display: none !important; }
@@ -610,7 +617,7 @@ button { color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .sidebar { transition: opacity 180ms ease; }
   .bm-fold { transition: none; }
-  .keybar button { transition: none; }
+  .keybar button, .keybar button::before { transition: none; }
   .sidebar[hidden] { transform: none; }
   .sidebar.instant, .sidebar-toggle { transition: none; }
   .top > .capsule, .top > .tabs > .tab-add { transition: none; }
