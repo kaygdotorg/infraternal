@@ -118,7 +118,7 @@ export function installPalette(cx: Ctx): () => void {
     else if (kind === "session" && value) { const [host, sid] = value.split("/"); if (host && sid) cx.win.openSession(host, sid); }
     else if (kind === "sessions") {
       const anchor = active?.card.header.querySelector<HTMLButtonElement>("[data-action='sessions']");
-      if (active && anchor) window.setTimeout(() => cx.sessionUi?.toggleManager(active, anchor, "pointer"), 60);
+      if (active) window.setTimeout(() => cx.sessionUi?.toggleManager(active, anchor, "pointer"), 60);
     }
     else if (kind === "ctr" && value && cx.adapters.containers) cx.win.open(cx.adapters.containers.host, value);
   };
