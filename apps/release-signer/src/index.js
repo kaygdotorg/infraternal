@@ -7,14 +7,18 @@
  * the owner's 1Password). Agents and the release pipeline can ask it to sign;
  * they can never see the key, and their Cloudflare token cannot change this code.
  *
- * POST /sign {"version":"0.4.2"}  (Authorization: Bearer <CALLER_TOKEN>)
+ * POST /sign {"version":"0.4.2" | "edge-20261011T071500Z"}  (Authorization: Bearer <CALLER_TOKEN>)
+ *   Two channels (D226): stable versions are x.y.z; edge versions are edge-<UTC timestamp>.
+ *   The channel is read from the version string, which the signed VERSION file carries,
+ *   so it is covered by the signature and never a separate unsigned field.
  *   1. Lists releases/<version>/ in the BUILDS R2 bucket and hashes every file
  *      itself (SHA-256) — it never trusts checksums sent by the caller.
  *   2. Writes releases/<version>/SHA256SUMS and an OpenSSH signature of it,
  *      releases/<version>/SHA256SUMS.sig (namespace "infraternal-release"),
  *      verifiable with: ssh-keygen -Y verify -f allowed_signers \
  *        -I release@infraternal.com -n infraternal-release -s SHA256SUMS.sig < SHA256SUMS
- *   3. Appends the release to releases/index.json (public, append-only list).
+ *   3. Appends the release to releases/index.json (public, append-only list) and
+ *      points releases/channels/<channel>.json at it (the newest release per channel).
  *   4. Optionally notifies the owner (NOTIFY_URL, an ntfy-style POST endpoint).
  * Refuses: a version already signed, an empty release, more than one signature
  * per minute, a bad caller token.
@@ -32,7 +36,9 @@
  */
 
 const NAMESPACE = "infraternal-release";
-const VERSION_RE = /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$/;
+// Stable: x.y.z. Edge: edge-YYYYMMDDTHHMMSSZ (UTC; sorts by time as text).
+const VERSION_RE = /^(?:[0-9]+\.[0-9]+\.[0-9]+|edge-[0-9]{8}T[0-9]{6}Z)$/;
+const channelOf = (version) => (version.startsWith("edge-") ? "edge" : "stable");
 const enc = new TextEncoder();
 
 export default {
@@ -96,9 +102,10 @@ async function signRelease(env, version) {
   await env.BUILDS.put(`${prefix}SHA256SUMS`, sums, { httpMetadata: { contentType: "text/plain" } });
   await env.BUILDS.put(`${prefix}SHA256SUMS.sig`, signature, { httpMetadata: { contentType: "text/plain" } });
 
-  const entry = { version, files: names, sums_sha256: hex(await digest(enc.encode(sums))), signed_at: new Date().toISOString() };
+  const entry = { version, channel: channelOf(version), files: names, sums_sha256: hex(await digest(enc.encode(sums))), signed_at: new Date().toISOString() };
   index.push(entry);
   await env.BUILDS.put("releases/index.json", JSON.stringify(index, null, 2), { httpMetadata: { contentType: "application/json" } });
+  await env.BUILDS.put(`releases/channels/${entry.channel}.json`, JSON.stringify(entry, null, 2), { httpMetadata: { contentType: "application/json" } });
   if (env.NOTIFY_URL) {
     try { await fetch(env.NOTIFY_URL, { method: "POST", body: `infraternal ${version} signed (${names.length} files)` }); } catch { /* notification is best effort */ }
   }

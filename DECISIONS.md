@@ -1948,3 +1948,21 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        is ever installed.
      - **Development builds** that are not on `builds.infraternal.com` fall
        back to a locally built payload next to the server, as before.
+226. **Two release channels, stable by default; edge is an explicit opt-in (owner, 2026-10-11; amends D224):**
+     - **Channels:** `stable` (versions `x.y.z`) and `edge` (versions
+       `edge-<UTC timestamp>`, written `edge-YYYYMMDDTHHMMSSZ`, for example
+       `edge-20261011T071500Z`; it sorts by time as text).
+     - **Default:** every install and update follows `stable`. Switching to
+       `edge` is a deliberate, explicit action that names what it means
+       (unreviewed builds, published as they are made); nothing switches to
+       it silently, and no prompt nudges toward it.
+     - **For now only edge is published.** Until a stable release exists, a
+       stable install reports that no stable release is available yet and
+       how to opt in to edge, instead of falling back to edge.
+     - **The channel comes from the version string,** which the signed
+       `VERSION` file carries, so it is covered by the release signature;
+       there is no separate unsigned channel field to trust. The signing
+       Worker also writes `releases/channels/<channel>.json` pointing at the
+       newest release of each channel.
+     - **Add-host** keeps D225: a new host gets the server's exact version,
+       whatever its channel.
