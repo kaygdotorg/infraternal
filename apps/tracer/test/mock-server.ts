@@ -85,6 +85,12 @@ interface TraceEvent {
 
 let owner: MockOwner | undefined;
 let activeAuthCookie: string | undefined;
+/**
+ * A preview signed out on purpose (#171). Loading a preview page normally hands out a fresh mock session; after the
+ * person signs out, a reload must stay on the sign-in screen, so the double stops handing one out until the page is
+ * opened with `fresh=1`, a sign-in completes or the double is reset.
+ */
+let previewSignedOut = false;
 let unlockPending = false;
 let pendingTransaction: string | undefined;
 let setupToken = newToken();
@@ -500,7 +506,8 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method !== "GET" && request.method !== "HEAD") {
     return sendJson(response, 404, { error: "not found" });
   }
-  if ((url.pathname === "/" || url.pathname === "/index.html") && ["windows", "addhost", "clusters"].includes(url.searchParams.get("proto") ?? "")) {
+  if ((url.pathname === "/" || url.pathname === "/index.html") && ["windows", "addhost", "clusters"].includes(url.searchParams.get("proto") ?? "") && (!previewSignedOut || url.searchParams.has("fresh"))) {
+    previewSignedOut = false;
     if (!owner) owner = makeMockOwner();
     activeAuthCookie = newToken();
     unlockPending = false;
@@ -590,6 +597,7 @@ async function authAction(
       };
       pendingRegistration = undefined;
       activeAuthCookie = newToken();
+      previewSignedOut = false;
       setAuthCookie(response, activeAuthCookie);
       return sendJson(response, 200, { ok: true });
     }
@@ -617,6 +625,7 @@ async function authAction(
       unlockPending = true;
       pendingTransaction = newToken();
       activeAuthCookie = newToken();
+      previewSignedOut = false;
       setAuthCookie(response, activeAuthCookie);
       return sendJson(response, 200, { ok: true, pending_transaction: pendingTransaction });
     }
@@ -633,6 +642,7 @@ async function authAction(
       if (body.pending_transaction !== undefined && (!unlockPending || body.pending_transaction !== pendingTransaction)) return sendJson(response, 401, { error: "authorization failed" });
       if (!isAuthenticated(request)) return sendJson(response, 401, { error: "authorization failed" });
       activeAuthCookie = undefined;
+      if (body.pending_transaction === undefined) previewSignedOut = true;
       response.setHeader("Set-Cookie", "__Host-infraternal=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
       return sendJson(response, 200, { ok: true });
     default:
@@ -938,7 +948,7 @@ function ensurePreviewSession(request: IncomingMessage, response: ServerResponse
   const referer = request.headers.referer ?? "";
   if (!/[?&]mock=1(&|$)/.test(referer) || !/[?&]proto=/.test(referer)) return;
   if (!request.url?.startsWith("/auth/") && !request.url?.startsWith("/__mock/")) return;
-  if (request.url.startsWith("/__mock/reset") || isAuthenticated(request)) return;
+  if (request.url.startsWith("/__mock/reset") || isAuthenticated(request) || previewSignedOut) return;
   if (!owner) owner = makeMockOwner();
   activeAuthCookie = newToken();
   setPreviewAuthCookie(response, activeAuthCookie);
@@ -990,6 +1000,7 @@ function resetMockState(): void {
   accountToolbar = undefined;
   owner = undefined;
   activeAuthCookie = undefined;
+  previewSignedOut = false;
   setupToken = newToken();
   pendingRegistration = undefined;
   pendingLogin = undefined;

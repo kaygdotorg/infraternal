@@ -1,5 +1,6 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
 import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
+import { registerSignOut } from "./sign-out";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
@@ -557,6 +558,34 @@ let canvasPrototype: { dispose(): void } | undefined;
 /** The product canvas: Console on real sessions (a lazy chunk, loaded after sign-in). */
 let productCanvas: { dispose(): void } | undefined;
 
+/**
+ * Lets go of the signed-in app and shows the sign-in screen: the terminals' connections, the canvas (with its inbox
+ * and overlays), the core screen, the frame meter and the test double's handle. Used when the server says the session
+ * is gone and when the person signs out (sign-out.ts). Local preferences stay.
+ */
+function endSession(message = ""): void {
+  welcomeEffect?.destroy();
+  welcomeEffect = undefined;
+  window.clearTimeout(welcomeTimer);
+  currentTerminal?.dispose();
+  currentTerminal = undefined;
+  canvasPrototype?.dispose();
+  canvasPrototype = undefined;
+  productCanvas?.dispose();
+  productCanvas = undefined;
+  performanceProbe?.dispose();
+  performanceProbe = undefined;
+  perfHudGeneration++;
+  perfHud?.dispose();
+  perfHud = undefined;
+  coreScreen?.dispose();
+  coreScreen = undefined;
+  delete window.__tracerTestDouble;
+  activeUserId = undefined;
+  renderAuth(false, message);
+}
+registerSignOut(() => endSession());
+
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
   checkingResume = true;
@@ -566,19 +595,7 @@ async function checkForegroundSession(): Promise<void> {
     // A delayed HTTP snapshot must not overwrite a newer WebSocket state event.
     if (session && noticeGeneration === recoveryNoticeGeneration) coreScreen?.setRecoveryPending(session.recovery_pending?.ready_at);
     if (!session && previewProto()) { location.reload(); return; }
-    if (!session) {
-      currentTerminal?.dispose();
-      currentTerminal = undefined;
-      productCanvas?.dispose();
-      productCanvas = undefined;
-      performanceProbe?.dispose();
-      performanceProbe = undefined;
-      coreScreen?.dispose();
-      coreScreen = undefined;
-      delete window.__tracerTestDouble;
-      activeUserId = undefined;
-      renderAuth(false, "Your session ended. Sign in again to reconnect.");
-    }
+    if (!session) endSession("Your session ended. Sign in again to reconnect.");
   } catch {
     // The session check is background housekeeping, not something the person asked for. When it
     // cannot complete (the server restarting, the link dropping, a proxy answering with a page)
