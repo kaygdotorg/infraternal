@@ -2161,3 +2161,30 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        days needs a passkey re-approval when it returns.
      - **Approval (Q17f).** Enterprise policy: each new machine waits in the
        administrators' inbox (D234) until approved.
+238. **Native apps (owner grill, 2026-10-11):**
+     - **All native on Apple, iOS first** (Q27): SwiftUI for the chrome
+       (sidebar, pills, palette, settings, inbox, sheets, approvals) and
+       Metal for the canvas, terminals and app-window frames. iPadOS and
+       macOS reuse it; tvOS is out. Linux and Windows keep the installable
+       web app; a native desktop UI is revisited only on demand.
+     - **A full Rust client core** (Q29 (a)): the mesh node (inside the iOS
+       network extension's memory limit), sign-in sessions, certificates and
+       links (D235), the codec and protocol, the layout tree and its sync
+       (Q20/Q21), actions (D16) and terminal state (D14, native Ghostty).
+       Swift calls it through generated bindings; hot paths cross as byte
+       buffers once per frame, never per byte or as strings. Android and
+       Windows can reuse it later.
+     - **The web stays TypeScript** (D88 unchanged): no WebAssembly bridge
+       for the client logic. The TypeScript and Rust cores stay identical
+       through shared golden vectors and differential tests.
+     - **Measured before building** (Q26): a spike draws 10/25/50 live
+       terminals with pan, zoom, snap and typing, twice (SwiftUI + Metal,
+       and the web canvas in a WebKit view), on the owner's iPhone 16 Pro
+       Max at 120 Hz: frame times, keystroke-to-paint, memory per session ×
+       50, and the Rust↔Swift boundary cost. If the boundary is too costly
+       on hot paths, layout state moves to Swift (scope (b)); the mesh and
+       security code stay in Rust regardless.
+     - **When:** after the mesh is stable and the control/data-plane split
+       (canvas nodes) is settled. Until then no iOS work starts; new
+       protocol and sync work keeps native clients in mind (intent-based
+       layout edits, byte-buffer frames).
