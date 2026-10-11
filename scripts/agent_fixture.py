@@ -214,6 +214,23 @@ class Binary:
             # travels exclusively over the fixture socket and is never logged.
             raise AssertionError(f'daemon exit {self.child.returncode}: {self.child.stderr.read().decode()}') from error
 
+    def read_without_inventory(self):
+        """Read the next reply while validating censuses within one socket budget."""
+        timeout = self.sock.gettimeout()
+        assert timeout is not None, 'reply requires a bounded socket'
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, 'reply exceeded the socket budget'
+                self.sock.settimeout(remaining)
+                frame = self.read()
+                if frame[:2] != (0, 0x33):
+                    return frame
+                self.process(frame=frame)
+        finally:
+            self.sock.settimeout(timeout)
+
     def inherit_scope_priority(self, weight=None):
         """Apply this test's CPU weight only to its own transient shim scope."""
         weight = fixture_cpu_weight() if weight is None else weight
