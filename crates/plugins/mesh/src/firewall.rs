@@ -245,8 +245,10 @@ pub fn render(config: &Config, replace: bool) -> String {
     }
     // Destination NAT has completed at input/forward. Check delivery before
     // policy or conntrack acceptance: an underlay packet has no mesh identity.
+    // Loopback delivery is node-local. Translation never turns an underlay
+    // incoming interface into lo, so this preserves the ingress refusal [231].
     let delivery = format!(
-        "iifname != \"{INTERFACE}\" ip daddr {} drop; iifname != \"{INTERFACE}\" ip6 daddr {} drop;",
+        "iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop;",
         config.addresses.ipv4, config.addresses.ipv6
     );
     for (name, hook, interface, direction) in [
