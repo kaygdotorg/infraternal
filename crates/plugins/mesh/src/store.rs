@@ -29,6 +29,26 @@ type Loaded = (
     DefaultPolicy,
     u64,
 );
+/// Workers retain the shared source of their acknowledged version. Recompiling
+/// its node view preserves exact deltas while idle memory stays proportional to
+/// shared inventory and policy, rather than the number of delivered peer maps.
+#[derive(Clone)]
+pub(crate) struct Snapshot(Loaded);
+impl Snapshot {
+    pub(crate) fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
+        use crate::{api::MeshApiError, policy::model::MeshError};
+        let (coordinator, endpoints, default, revision) = &self.0;
+        let mut config =
+            configuration::compile(coordinator, node, *default, endpoints).map_err(|error| {
+                match error {
+                    MeshError::UnknownNode => MeshApiError::NotFound,
+                    _ => MeshApiError::Storage,
+                }
+            })?;
+        config.version = *revision;
+        Ok(config)
+    }
+}
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
@@ -127,18 +147,14 @@ impl Store {
     /// # Errors
     /// Refuses absent server identity, invalid inventory, allocation exhaustion or storage errors.
     pub async fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
-        use crate::{api::MeshApiError, policy::model::MeshError};
-        let (coordinator, endpoints, default, revision) =
-            self.load().await.map_err(|_| MeshApiError::Storage)?;
-        let mut config =
-            configuration::compile(&coordinator, node, default, &endpoints).map_err(|error| {
-                match error {
-                    MeshError::UnknownNode => MeshApiError::NotFound,
-                    _ => MeshApiError::Storage,
-                }
-            })?;
-        config.version = revision;
-        Ok(config)
+        self.snapshot().await?.config(node)
+    }
+    /// Retain one shared immutable inventory/policy snapshot, rather than a peer map per node.
+    pub(crate) async fn snapshot(&self) -> Result<Snapshot, crate::api::MeshApiError> {
+        self.load()
+            .await
+            .map(Snapshot)
+            .map_err(|_| crate::api::MeshApiError::Storage)
     }
     /// Page directed reach losses at one revision without allocating the pair matrix.
     /// # Errors

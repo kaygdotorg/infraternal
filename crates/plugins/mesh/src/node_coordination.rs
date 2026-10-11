@@ -2,8 +2,8 @@
 use crate::{
     api::{MeshApiError, MeshService},
     configuration,
-    dataplane::{Config, Identity},
-    store::Store,
+    dataplane::Identity,
+    store::{Snapshot, Store},
 };
 use infraternal_plugin_api::node_channel::NodeChannel;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ pub async fn run(
     let mut revisions = service.subscribe();
     let mut notices = channel.changes();
     let mut binding = None;
-    let mut installed: Option<Config> = None;
+    let mut installed: Option<Snapshot> = None;
     let mut refresh_identity = true;
     loop {
         if refresh_identity || binding.is_none() {
@@ -71,7 +71,11 @@ pub async fn run(
         }
         let config = if let Some(node) = binding {
             match work.acquire().await {
-                Ok(_permit) => match store.config(node).await {
+                Ok(_permit) => match store
+                    .snapshot()
+                    .await
+                    .and_then(|snapshot| snapshot.config(node).map(|config| (config, snapshot)))
+                {
                     Ok(config) => Some(config),
                     Err(MeshApiError::NotFound) => {
                         // A deleted binding can be re-enrolled before this worker
@@ -88,19 +92,22 @@ pub async fn run(
         } else {
             None
         };
-        if let Some(config) = config {
+        if let Some((config, snapshot)) = config {
+            let old = installed
+                .as_ref()
+                .and_then(|snapshot| snapshot.config(config.node).ok());
             // Liveness and management-role edits advance inventory revision but
             // do not change packet policy. Keep the node's acknowledged version
             // as the delta base, avoiding an unchanged snapshot/fsync per node.
-            let changed = installed.as_ref().is_none_or(|old| {
+            let changed = old.as_ref().is_none_or(|old| {
                 old.node != config.node
                     || old.addresses != config.addresses
                     || old.default_policy != config.default_policy
                     || old.peers != config.peers
             });
             if changed {
-                let was_delta = installed.is_some();
-                let Ok(chunks) = configuration::chunks(installed.as_ref(), &config) else {
+                let was_delta = old.is_some();
+                let Ok(chunks) = configuration::chunks(old.as_ref(), &config) else {
                     return;
                 };
                 let mut failed = false;
@@ -121,7 +128,7 @@ pub async fn run(
                         break;
                     }
                 }
-                installed = if failed { None } else { Some(config) };
+                installed = if failed { None } else { Some(snapshot) };
                 // A refused delta needs a snapshot now, not a future unrelated
                 // edit. A failed snapshot waits for a source change rather than spinning.
                 if failed && was_delta {
