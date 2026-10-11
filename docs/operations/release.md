@@ -1,12 +1,15 @@
-<!-- Operator contract for immutable signed releases and architecture-specific bootstrap payloads [184,213,220,224,225]. -->
+<!-- Operator contract for immutable signed releases and architecture-specific bootstrap payloads [184,213,220,224,225,226]. -->
 # Signed releases
 
-The workspace version in `Cargo.toml` identifies a release. The public bucket
+Stable releases use the workspace `x.y.z` version in `Cargo.toml`. Edge releases
+use `edge-YYYYMMDDTHHMMSSZ`, stamped from UTC at build time [226]. The public bucket
 contains `releases/<version>/infraternal-{x86_64,aarch64}-musl`, the server
-`infraternal` copy, `VERSION`, `SHA256SUMS`, `SHA256SUMS.sig`, and `releases/index.json`.
+`infraternal` copy, `VERSION`, `SHA256SUMS`, `SHA256SUMS.sig`, `releases/index.json`, and `releases/channels/<channel>.json`.
 The release-signer Worker hashes R2 objects itself, signs the manifest and adds
-the index entry. The pipeline never holds the signing private key [224]. The signed `VERSION`
-file contains the workspace version followed by a newline. Both the downloader
+the index entry and channel pointer. The pipeline never holds the signing private key [224]. The signed `VERSION`
+file contains the build version followed by a newline. The channel comes from
+that signed version, never from a separate unsigned metadata field. `infraternal
+--version` shows the version and channel. Both the downloader
 and public verification compare it with the requested version: the signature
 on SHA256SUMS alone does not authenticate the URL and cannot prevent replay
 of a valid older release under another version path.
@@ -15,12 +18,15 @@ Build on Linux with the pinned Rust toolchain and both musl targets installed:
 
 ```sh
 export CARGO_TARGET_DIR="$HOME/.cache/codex-scratch/release-pipeline/target"
-scripts/release/build
+scripts/release/build --channel edge
 ```
 
 This reuses `scripts/package-release`, `.cargo/musl-{cc,ar}.sh` and
 `scripts/auth-toolchain` (checksum-pinned Zig 0.15.2 [213]). It produces the
-complete immutable bundle in `$CARGO_TARGET_DIR/releases/<workspace-version>`.
+complete immutable bundle in `$CARGO_TARGET_DIR/releases/<version>`.
+The build requires `--channel`; there is no default. Use `--channel stable`
+for the workspace version. Both architecture binaries and signed `VERSION`
+carry the same stamped identity.
 The build marks the binaries as release builds: missing public releases and
 verification failures cannot enable the development fallback.
 
@@ -28,7 +34,7 @@ The orchestrator supplies `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` and
 `RELEASE_CALLER_TOKEN` in the publishing process environment, then runs:
 
 ```sh
-scripts/release/publish <workspace-version>
+scripts/release/publish <version>
 ```
 
 Do not put tokens in shell arguments, checked-in environment files or logs.
@@ -60,6 +66,17 @@ and reject duplicate fields recursively, including nested objects. An
 ambiguous response stops publication with a plain reason; no provider
 diagnostics are echoed. This pipeline does not consume `releases/index.json`.
 
+For an edge publication, take the version from the completed bundle's directory
+name, then publish and verify that exact version:
+
+```sh
+scripts/release/publish edge-20261011T071500Z
+scripts/release/verify edge-20261011T071500Z
+```
+
+Replace the example timestamp with the build's actual UTC stamp. Both scripts
+accept only `x.y.z` or `edge-YYYYMMDDTHHMMSSZ`; prerelease suffixes are refused.
+
 Anyone can verify a published release, without credentials:
 
 ```sh
@@ -80,11 +97,52 @@ printf '%s\n' '0.1.0' | cmp - VERSION
 The checksum command requires the named payloads beside the manifest. Use
 the expected version in the `printf` comparison.
 
+# Server release channel
+
+Only edge builds are being published for now. A stable server reports `no stable release yet` until a stable release is published, with explicit opt-in instructions.
+
+Every existing server defaults to `stable`, including a server running an edge
+binary. The release plugin is removable with the Cargo `release` feature and
+switchable at runtime through `plugins.set_enabled`; it owns no polling task.
+Its channel is persisted in `plugin_settings.settings` alongside other server
+feature settings. Descriptor defaults apply until a setting is explicitly saved.
+
+```sh
+infraternal server --data /path/to/existing/private/data channel
+infraternal server --data /path/to/existing/private/data channel edge
+infraternal server --data /path/to/existing/private/data channel edge --yes
+infraternal server --data /path/to/existing/private/data channel stable
+infraternal server --data /path/to/existing/private/data release latest --json
+infraternal skill release.channel.set
+```
+
+Edge builds are published as they are made, unreviewed. Switching to edge
+requires typing `yes` on a TTY, or `--yes` for automation. Switching back to
+stable needs no confirmation. These local commands open only an existing
+private server database and never initialize a server. All support `--json`.
+The same declared WebSocket actions are `release.channel.get`,
+`release.channel.set` and `release.latest`. Channel writes require owner authority
+and a fresh session at the transaction boundary. An edge API request must
+include `{"channel":"edge","confirmed":true}`; omitting confirmation or sending
+false is refused even if the setting already reads edge.
+
+The latest action fetches only `releases/channels/<selected-channel>.json`.
+The pointer is untrusted: its version must match the selected channel grammar,
+and that release's manifest, signature and `VERSION` are downloaded and
+verified against both embedded keys before returning a verified identity.
+A signed VERSION replay from another release is refused. Only metadata is
+downloaded by this read-only action; payloads still need their own verification.
+No stable release has been published yet. A missing stable pointer reports
+“no stable release yet” and the explicit opt-in command, without requesting
+edge. Network, invalid pointer and signature failures remain failures.
+
 # Add-host payloads
 
 For the server's own architecture, bootstrap copies the running executable.
 For another architecture, it requests that exact server version from the
-public builds host and verifies before SSH uploads anything [225]. The existing
+public builds host and verifies before SSH uploads anything [225]. Channel
+settings never change this selection: an edge server installs its exact edge
+version on the new host, even while its future release channel remains stable. The existing
 configured server state directory determines the rootful/rootless location;
 verified files live under `releases/<version>/<architecture>/`. Each cache hit
 reverifies the signed manifest, exact version and payload. A cold miss makes
@@ -118,13 +176,27 @@ caller must prevent file writes until it uses the verified descriptor.
 
 ```sh
 python3 scripts/release/test.py
-TRACER_TEST_PORT=4299 bun test scripts/release/review.test.ts
+TRACER_TEST_PORT=4357 bun test scripts/release/review.test.ts scripts/release/worker.test.ts
+cargo build -p infraternal
+INFRATERNAL_BIN="$CARGO_TARGET_DIR/debug/infraternal" python3 scripts/release/channel_cli_test.py
 cargo test -p infraternal-server release_verify
 cargo test -p infraternal-server release_payload
+cargo test -p infraternal-server release_latest
+cargo test -p infraternal-plugin-release
+cargo test -p infraternal-plugin-api release_version
+systemd-run --user --scope -p CPUWeight=10000 \
+  cargo test --release -p infraternal-server bench_bounded_metadata_verification -- --ignored --nocapture
+systemd-run --user --scope -p CPUWeight=10000 \
+  cargo test --release -p infraternal-server bench_latest_fifty_callers -- --ignored --nocapture
+systemd-run --user --scope -p CPUWeight=10000 \
+  cargo test --release -p infraternal-plugin-release channel_reads_at_fifty_concurrent_callers -- --ignored --nocapture
 systemd-run --user --scope -p CPUWeight=10000 \
   cargo test --release -p infraternal-server verification_twenty_megabytes_fifty_runs -- --ignored --nocapture
 systemd-run --user --scope -p CPUWeight=10000 \
   cargo test --release -p infraternal-server cross_architecture_cold_and_warm_cache_measurements -- --ignored --nocapture
+ASAN_OPTIONS=detect_odr_violation=0 \
+CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_STRIP=none \
+  systemd-run --user --scope -p CPUWeight=30 cargo +nightly-2026-10-01 fuzz run release_channel -- -max_total_time=300 -max_len=70000 -rss_limit_mb=2048
 python3 fuzz/seed_release.py
 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_STRIP=none \
   systemd-run --user --scope -p CPUWeight=10000 cargo +nightly-2026-10-01 fuzz build release_verify
@@ -158,9 +230,16 @@ bucket or Worker.
   release work runs while the component is off.
 - Environment tokens reach curl through stdin, with tracing disabled. No signing
   key, credential file, secret argument or provider diagnostic is recorded.
-- R2 preflight and Worker JSON reject duplicate fields at every depth. The
+- Publisher decoding of R2 preflight and Worker responses rejects duplicate
+  fields at every depth. The
   fixed per-user flock refuses concurrent same-version publishers even with
   different build directories; cross-machine
   serialization is required because REST conditional PUT is not guaranteed.
-- Independent visual judgment remains a reviewer responsibility. Production-build
-  screenshots accompany the browser test evidence; no new UI primitive is added.
+- Stable defaults never depend on the running binary's channel. Edge requires
+  explicit confirmation in both adapters; returning to stable is one action.
+- Channel pointers are bounded strict objects; signed VERSION binds the exact
+  pointer version and selected channel. Missing stable never requests edge.
+- Release actions belong to a removable runtime-switchable plugin; construction
+  starts no network or polling work, and disable cancels in-flight socket work.
+- The channel CLI/API slice adds no UI; UI approval and screenshot review stay
+  with the owner’s separate UI work.
