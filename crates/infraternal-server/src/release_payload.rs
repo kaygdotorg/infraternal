@@ -27,10 +27,16 @@ impl ReleasePayload {
         local: infraternal_plugin_ssh::install::BinaryPaths,
         state: &Path,
     ) -> Arc<Self> {
+        let cache = state.join("releases");
+        // Restart cleanup precedes the first request. An unsafe/unavailable cache
+        // remains a plain acquisition failure when resolution is attempted.
+        if private_directory(&cache).is_ok() {
+            let _ = cleanup_downloads(&cache.join(env!("CARGO_PKG_VERSION")));
+        }
         Arc::new(Self {
             executable,
             local,
-            cache: state.join("releases"),
+            cache,
             version: env!("CARGO_PKG_VERSION").into(),
             development: env!("INFRATERNAL_RELEASE_BUILD") != "1",
             origin: "https://builds.infraternal.com".into(),
@@ -75,12 +81,12 @@ impl ReleasePayload {
             self.verify_cached(&ready, &name).await.map_err(fail)?;
             return Ok(ready.join(name));
         }
-        let staging = Staging(version_dir.join(format!("download-{}", uuid::Uuid::new_v4())));
-        private_directory(&staging.0).map_err(|_| fail("the release cache is unavailable."))?;
+        let staging =
+            Staging::new(&version_dir).map_err(|_| fail("the release cache is unavailable."))?;
         let base = format!("{}/releases/{}", self.origin, self.version);
         let result = crate::release_http::download(
             &format!("{base}/SHA256SUMS"),
-            &staging.0.join("SHA256SUMS"),
+            &staging.path.join("SHA256SUMS"),
             65_536,
         )
         .await;
@@ -93,17 +99,27 @@ impl ReleasePayload {
             ("VERSION", 128),
             (name.as_str(), 128 * 1024 * 1024),
         ] {
-            crate::release_http::download(&format!("{base}/{file}"), &staging.0.join(file), limit)
-                .await
-                .map_err(|error| fail(error.reason()))?;
+            crate::release_http::download(
+                &format!("{base}/{file}"),
+                &staging.path.join(file),
+                limit,
+            )
+            .await
+            .map_err(|error| fail(error.reason()))?;
         }
-        self.verify_cached(&staging.0, &name).await.map_err(fail)?;
+        self.verify_cached(&staging.path, &name)
+            .await
+            .map_err(fail)?;
+        // Also collect abandoned work when a resolver is reused after another
+        // process stops. Our staging lock keeps this verified candidate alive.
+        cleanup_downloads(&version_dir)
+            .map_err(|_| fail("the release cache could not be cleaned."))?;
         // A single atomic directory rename publishes payload and signed metadata together.
         // The resolver's lock bounds duplicate downloads to one per architecture/version.
-        std::fs::File::open(&staging.0)
+        std::fs::File::open(&staging.path)
             .and_then(|file| file.sync_all())
             .map_err(|_| fail("the release cache could not be saved."))?;
-        std::fs::rename(&staging.0, &ready)
+        std::fs::rename(&staging.path, &ready)
             .map_err(|_| fail("the verified binary could not be cached."))?;
         std::fs::File::open(&version_dir)
             .and_then(|file| file.sync_all())
@@ -116,10 +132,95 @@ impl PayloadSource for ReleasePayload {
         Box::pin(self.resolve(arch))
     }
 }
-struct Staging(PathBuf);
+struct Staging {
+    path: PathBuf,
+    _lock: nix::fcntl::Flock<std::fs::File>,
+}
+impl Staging {
+    fn new(version: &Path) -> std::io::Result<Self> {
+        // Serialize creation with cleanup so an empty directory cannot be
+        // collected in the gap before its lifetime lock is acquired.
+        let _version_lock = lock_directory(version, nix::fcntl::FlockArg::LockExclusive)?;
+        let path = version.join(format!("download-{}", uuid::Uuid::new_v4()));
+        private_directory(&path)?;
+        let lock = lock_directory(&path, nix::fcntl::FlockArg::LockExclusiveNonblock)?;
+        Ok(Self { path, _lock: lock })
+    }
+}
+
+fn lock_directory(
+    path: &Path,
+    mode: nix::fcntl::FlockArg,
+) -> std::io::Result<nix::fcntl::Flock<std::fs::File>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(path)?;
+    nix::fcntl::Flock::lock(file, mode).map_err(|(_, error)| error.into())
+}
+
+// Only our canonical UUID directories and private, single-link files are
+// eligible. A nonblocking lifetime lock distinguishes abandoned work from a
+// live downloader, including another process sharing this server state.
+// Keep the conventional group/other permission mask explicit for auditing.
+#[allow(clippy::verbose_bit_mask)]
+fn cleanup_downloads(version: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    private_directory(version)?;
+    let _version_lock = lock_directory(version, nix::fcntl::FlockArg::LockExclusive)?;
+    for entry in std::fs::read_dir(version)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("download-"))
+        else {
+            continue;
+        };
+        if !uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id) {
+            continue;
+        }
+        let path = entry.path();
+        if private_directory(&path).is_err() {
+            continue;
+        }
+        let _staging_lock = match lock_directory(&path, nix::fcntl::FlockArg::LockExclusiveNonblock)
+        {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(error),
+        };
+        let files = std::fs::read_dir(&path)?.collect::<Result<Vec<_>, _>>()?;
+        if !files.iter().all(|file| {
+            matches!(
+                file.file_name().to_str(),
+                Some(
+                    "SHA256SUMS"
+                        | "SHA256SUMS.sig"
+                        | "VERSION"
+                        | "infraternal-x86_64-musl"
+                        | "infraternal-aarch64-musl"
+                )
+            ) && std::fs::symlink_metadata(file.path()).is_ok_and(|m| {
+                m.is_file()
+                    && m.uid() == nix::unistd::geteuid().as_raw()
+                    && m.mode() & 0o077 == 0
+                    && m.nlink() == 1
+            })
+        }) {
+            continue;
+        }
+        for file in files {
+            std::fs::remove_file(file.path())?;
+        }
+        std::fs::remove_dir(path)?;
+    }
+    Ok(())
+}
 impl Drop for Staging {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
