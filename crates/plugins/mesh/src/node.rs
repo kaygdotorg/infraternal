@@ -442,6 +442,11 @@ impl Node {
                     .collect::<Vec<_>>(),
                 true,
             )?;
+            if self.config.is_none() {
+                // On restart no old in-memory addresses exist. Reconcile the
+                // owned host routes as well as orphan keys against durable intent.
+                Device::retain_routes(&proposed)?;
+            }
             self.firewall.apply(&config)?;
             self.save(Some(&config), true)
         })();
