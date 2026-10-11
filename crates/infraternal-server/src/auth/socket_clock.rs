@@ -38,6 +38,22 @@ impl FrozenSocketTime {
         ready.await.unwrap();
         Self { release, timed_out }
     }
+
+    /// Synchronize a SQLite observation with paused runtime time, without slack.
+    /// The blocking waiter leaves Tokio time stationary during real I/O; it
+    /// waits only until the exact first offline wall-clock second, never a
+    /// scheduling cushion. The caller explicitly advances its runtime timer.
+    pub(super) async fn reach_wall_deadline(&self, unix_seconds: i64) {
+        let deadline =
+            std::time::UNIX_EPOCH + Duration::from_secs(u64::try_from(unix_seconds).unwrap());
+        tokio::task::spawn_blocking(move || {
+            while let Ok(remaining) = deadline.duration_since(std::time::SystemTime::now()) {
+                std::thread::sleep(remaining);
+            }
+        })
+        .await
+        .unwrap();
+    }
 }
 
 impl Drop for FrozenSocketTime {
