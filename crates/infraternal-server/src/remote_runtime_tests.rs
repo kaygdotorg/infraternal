@@ -379,3 +379,6 @@ async fn claude_review_idle_anonymous_sockets_cannot_starve_host_handshakes() {
         "64 idle anonymous sockets exhausted every host handshake slot"
     );
 }
+
+#[path = "remote_probe_tests.rs"]
+mod candidate_proofs;

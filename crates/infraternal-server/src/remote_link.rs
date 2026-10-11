@@ -31,6 +31,7 @@ pub(crate) struct RemoteLink {
     transport: LinkTransport,
     authority: Option<crate::remote_guard::AuthorityGuard>,
     renewal: std::sync::atomic::AtomicBool,
+    server_paths: bool,
 }
 
 pub(crate) struct QuicLink {
@@ -119,14 +120,8 @@ impl RemoteLink {
 
     pub(crate) async fn tcp(channel: TcpTls) -> io::Result<Self> {
         let mut receive = Receive::default();
-        let hello = tokio::time::timeout(Duration::from_secs(5), receive.next(&channel))
-            .await
-            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-        if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        let mut prefix = Vec::new();
-        encode_muxed_frame_into(0, &hello.frame, &mut prefix).map_err(io::Error::other)?;
+        let prefix = greeting(&channel, &mut receive).await?;
+        let server_paths = supports_server_paths(&prefix);
         // TLS losers in the outgoing dial race send no application greeting;
         // they must never supersede the winning host transport in the registry.
         Ok(Self {
@@ -137,6 +132,7 @@ impl RemoteLink {
             },
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
+            server_paths,
         })
     }
     pub(crate) async fn quic(connection: quinn::Connection) -> io::Result<Self> {
@@ -145,8 +141,16 @@ impl RemoteLink {
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
             .map_err(io::Error::other)?;
         let control = Arc::new(NativeChannel::control(send, receive)?);
+        let mut receive = Receive::default();
+        let prefix = greeting(control.as_ref(), &mut receive).await?;
+        let server_paths = supports_server_paths(&prefix);
+        let hello = infraternal_protocol::decode_muxed_frame(&prefix).map_err(io::Error::other)?;
+        remote_quic::negotiate_binding(&connection, &hello.frame)?;
         let (output, bulk) = mpsc::channel(32);
         let (control_output, control_input) = mpsc::channel(8);
+        control_output
+            .try_send(Bytes::from(prefix))
+            .map_err(io::Error::other)?;
         let incoming = Incoming {
             control: control_input,
             bulk,
@@ -156,6 +160,7 @@ impl RemoteLink {
             control.clone(),
             control_output.clone(),
             connection.clone(),
+            receive,
         ));
         Ok(Self {
             transport: LinkTransport::Quic(QuicLink {
@@ -169,6 +174,7 @@ impl RemoteLink {
             }),
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
+            server_paths,
         })
     }
 
@@ -215,6 +221,10 @@ impl RemoteLink {
                 }
             }
         }
+    }
+
+    pub(crate) fn supports_server_paths(&self) -> bool {
+        self.server_paths
     }
 
     pub(crate) fn supports_renewal(&self) -> bool {
@@ -264,6 +274,7 @@ impl RemoteLink {
                         channel.clone(),
                         link.output.clone(),
                         link.connection.clone(),
+                        Receive::default(),
                     ));
                     entry.insert(channel);
                 }
@@ -285,13 +296,53 @@ impl RemoteLink {
     }
 }
 
+fn supports_server_paths(prefix: &[u8]) -> bool {
+    matches!(infraternal_protocol::decode_muxed_frame(prefix), Ok(infraternal_protocol::DecodedMuxedFrame { frame: Frame::Hello { caps, .. }, .. })
+        if caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS != 0)
+}
+
+/// A ledger-admitted candidate may prove liveness without replacing the host.
+/// One Ping precedes Hello at most; the original decoder retains every suffix.
+async fn greeting<C: Channel>(channel: &C, receive: &mut Receive) -> io::Result<Vec<u8>> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let first = receive.next(channel).await?;
+        let probe = if first.stream_id == 0 {
+            match first.frame {
+                Frame::Ping { nonce, sent_us } => Some((nonce, sent_us)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let mut prefix = Vec::new();
+        if let Some((nonce, sent_us)) = probe {
+            Transmit::default()
+                .send(channel, 0, &Frame::Pong { nonce, sent_us })
+                .await?;
+            let hello = receive.next(channel).await?;
+            if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            encode_muxed_frame_into(0, &hello.frame, &mut prefix).map_err(io::Error::other)?;
+        } else {
+            if first.stream_id != 0 || !matches!(first.frame, Frame::Hello { version: 1, .. }) {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            encode_muxed_frame_into(0, &first.frame, &mut prefix).map_err(io::Error::other)?;
+        }
+        Ok(prefix)
+    })
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
 async fn pump(
     channel: Arc<NativeChannel>,
     output: mpsc::Sender<Bytes>,
     connection: quinn::Connection,
+    mut receive: Receive,
 ) {
     let stream = channel.native_stream_id().unwrap_or(0);
-    let mut receive = Receive::default();
     loop {
         let Ok(decoded) = receive.next(channel.as_ref()).await else {
             if stream == 0 {

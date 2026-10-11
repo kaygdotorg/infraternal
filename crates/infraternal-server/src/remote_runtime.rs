@@ -40,6 +40,7 @@ struct Host {
     ip: std::net::IpAddr,
     channel: Option<Arc<dyn infraternal_plugin_api::node_channel::NodeChannel>>,
     uid: u32,
+    server_paths: bool,
     authority: AuthorityGuard,
     actor: EmbeddedAgent,
     accepts: mpsc::Sender<RemoteLink>,
@@ -98,6 +99,7 @@ impl RemoteHosts {
                 id: id.to_string(),
                 ip: host.ip,
                 server: false,
+                server_paths: host.server_paths,
                 actor: host.actor.clone(),
                 authority: Some(host.authority.clone()),
             });
@@ -125,6 +127,7 @@ impl RemoteHosts {
             return Err(io::ErrorKind::WouldBlock.into());
         }
         let generation = Uuid::new_v4();
+        let server_paths = link.supports_server_paths();
         if let Some(host) = hosts.get_mut(&id) {
             if host.uid != uid {
                 return Err(io::ErrorKind::PermissionDenied.into());
@@ -135,6 +138,7 @@ impl RemoteHosts {
             // Publish only after queue admission. A rejected replacement must
             // not alter a valid actor or cancel its existing retirement waiter.
             host.generation = generation;
+            host.server_paths = server_paths;
             host.retirement =
                 self.retirement(id, generation, authority.clone(), host.actor.clone());
             host.authority = authority;
@@ -151,6 +155,7 @@ impl RemoteHosts {
                     ip,
                     channel: None,
                     uid,
+                    server_paths,
                     authority,
                     actor,
                     accepts,

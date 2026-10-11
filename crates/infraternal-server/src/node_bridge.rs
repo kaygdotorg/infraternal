@@ -7,6 +7,7 @@ pub(crate) struct NodeBridge {
     pub id: String,
     pub ip: IpAddr,
     pub server: bool,
+    pub server_paths: bool,
     pub actor: EmbeddedAgent,
     #[cfg(feature = "remote")]
     pub authority: Option<crate::remote_guard::AuthorityGuard>,
@@ -20,6 +21,9 @@ impl NodeChannel for NodeBridge {
     }
     fn is_server(&self) -> bool {
         self.server
+    }
+    fn supports_server_paths(&self) -> bool {
+        self.server_paths
     }
     fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.actor.changes()
