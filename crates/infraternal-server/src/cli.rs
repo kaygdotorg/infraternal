@@ -229,6 +229,12 @@ fn server_setup_token_action() -> ActionDefinition {
         )],
         ["token".to_owned()],
     );
+    let mut output = JsonSchema::command_result_with(token);
+    // The additive alias preserves the deployed local reader without changing data.token.
+    output.properties.insert(
+        "token".to_owned(),
+        JsonSchema::string("Compatibility alias of the one-time capability in data.token."),
+    );
     ActionDefinition::new(
         ["server", "setup-token"],
         "Read the active one-time owner setup capability.",
@@ -245,7 +251,7 @@ fn server_setup_token_action() -> ActionDefinition {
             )],
             std::iter::empty(),
         ),
-        JsonSchema::command_result_with(token),
+        output,
         ActionContract::new(
             ActionTarget::Global,
             ActionEffect::Read,

@@ -132,8 +132,8 @@ impl RenderOptions {
     }
 }
 
-/// Serialize a command result with stable field ordering and a trailing newline.
-pub fn render_json<T: Serialize>(result: &CommandResult<T>) -> Result<String, serde_json::Error> {
+/// Serialize CLI output, including action-specific compatibility fields, with a trailing newline.
+pub fn render_json<T: Serialize>(result: &T) -> Result<String, serde_json::Error> {
     let mut output = serde_json::to_string_pretty(result)?;
     output.push('\n');
     Ok(output)

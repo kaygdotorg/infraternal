@@ -766,6 +766,15 @@ fn install_server(
 }
 
 #[cfg(feature = "plugin-server")]
+#[derive(Serialize)]
+/// Keeps the deployed private setup reader alongside the versioned CLI envelope.
+struct SetupTokenOutput<'a> {
+    #[serde(flatten)]
+    result: &'a CommandResult<serde_json::Value>,
+    token: &'a str,
+}
+
+#[cfg(feature = "plugin-server")]
 fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
     let data_dir = matches
         .get_one::<String>("data")
@@ -780,16 +789,24 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
     };
     match runtime.block_on(read_setup_token(&data_dir)) {
         Ok(token) => {
-            print_result(
-                &CommandResult::new(
-                    "server setup-token",
-                    CommandState::Ready,
-                    "A one-time setup capability is available.",
-                    json!({"token": token}),
-                ),
-                json_output,
-                false,
+            let result = CommandResult::new(
+                "server setup-token",
+                CommandState::Ready,
+                "A one-time setup capability is available.",
+                json!({"token": &token}),
             );
+            if json_output {
+                // Both private-pipe readers remain valid; the capability never enters logs or argv.
+                write_command_output(
+                    render_json(&SetupTokenOutput {
+                        result: &result,
+                        token: &token,
+                    }),
+                    false,
+                );
+            } else {
+                print_result(&result, false, false);
+            }
             ExitCode::SUCCESS
         }
         Err(error) => report_failure(
@@ -1059,6 +1076,11 @@ fn print_result<T: Serialize>(result: &CommandResult<T>, json_output: bool, to_s
     } else {
         render_pretty(result, RenderOptions::detect(terminal))
     };
+    write_command_output(output, to_stderr);
+}
+
+/// Shares formatting-error and destination handling for standard and compatibility output.
+fn write_command_output(output: Result<String, serde_json::Error>, to_stderr: bool) {
     let rendered = match output {
         Ok(output) => output,
         Err(error) => {
