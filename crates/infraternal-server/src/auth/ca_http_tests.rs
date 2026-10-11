@@ -387,3 +387,6 @@ async fn ca_status_distinguishes_initial_setup_from_locked_retained_trust() {
         assert_eq!(status.as_object().unwrap().len(), 2);
     }
 }
+
+#[path = "ca_http_audit_tests.rs"]
+mod audit_tests;
