@@ -100,7 +100,8 @@ pub async fn run(
             // do not change packet policy. Keep the node's acknowledged version
             // as the delta base, avoiding an unchanged snapshot/fsync per node.
             let changed = old.as_ref().is_none_or(|old| {
-                old.node != config.node
+                old.server != config.server
+                    || old.node != config.node
                     || old.addresses != config.addresses
                     || old.default_policy != config.default_policy
                     || old.peers != config.peers
@@ -111,7 +112,10 @@ pub async fn run(
                     return;
                 };
                 let mut failed = false;
-                for chunk in chunks {
+                for mut chunk in chunks {
+                    if !channel.supports_server_paths() {
+                        chunk.server = None;
+                    }
                     let Ok(input) = serde_json::to_vec(&chunk) else {
                         return;
                     };

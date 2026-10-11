@@ -33,3 +33,6 @@ pub const LIVE_RENEWAL: u64 = 1 << 2;
 pub const MAX_CONTROL_JSON: usize = 32_768;
 /// Per-host terminal bound shared by local dispatch and native transport credit.
 pub const MAX_TERMINAL_STREAMS: usize = 128;
+
+/// The peer accepts additive applied server-path proposals from its node plugins [215].
+pub const SERVER_PATH_PROPOSALS: u64 = 1 << 3;

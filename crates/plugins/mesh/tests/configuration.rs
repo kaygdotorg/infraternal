@@ -122,3 +122,17 @@ fn large_valid_port_policy_is_split_without_a_port_count_cap() {
     }
     assert_eq!(assembled, policy);
 }
+
+#[test]
+fn compiled_chunks_identify_the_server_and_old_snapshots_have_no_proposal() {
+    let coord = coordinator();
+    let config =
+        configuration::compile(&coord, NodeId(2), DefaultPolicy::Allow, &BTreeMap::new()).unwrap();
+    assert_eq!(config.server, Some(NodeId(1)));
+    let chunks = configuration::chunks(None, &config).unwrap();
+    assert!(chunks.iter().all(|chunk| chunk.server == config.server));
+    let mut old = serde_json::to_value(&config).unwrap();
+    old.as_object_mut().unwrap().remove("server");
+    let old: infraternal_plugin_mesh::dataplane::Config = serde_json::from_value(old).unwrap();
+    assert_eq!(old.server, None);
+}

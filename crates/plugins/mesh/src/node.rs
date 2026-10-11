@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, io};
 
 pub use crate::dataplane::Chunk;
 struct Pending {
+    server: Option<crate::policy::model::NodeId>,
     next: u32,
     version: u64,
     from_version: Option<u64>,
@@ -239,6 +240,7 @@ impl Node {
                 self.config.clone().ok_or(io::ErrorKind::InvalidData)?
             } else {
                 Config {
+                    server: chunk.server,
                     node: chunk.node,
                     version: chunk.version,
                     addresses: chunk.addresses,
@@ -247,6 +249,7 @@ impl Node {
                 }
             };
             self.pending = Some(Pending {
+                server: chunk.server,
                 next: 0,
                 version: chunk.version,
                 from_version: chunk.from_version,
@@ -255,7 +258,8 @@ impl Node {
             });
         }
         let pending = self.pending.as_mut().ok_or(io::ErrorKind::InvalidData)?;
-        if pending.next != chunk.index
+        if pending.server != chunk.server
+            || pending.next != chunk.index
             || pending.config.node != chunk.node
             || pending.config.addresses != chunk.addresses
             || pending.version != chunk.version
@@ -270,6 +274,7 @@ impl Node {
             .ok_or(io::ErrorKind::InvalidData)?;
         pending.config.version = chunk.version;
         pending.config.default_policy = chunk.default_policy;
+        pending.config.server = chunk.server;
         for node in chunk.removed {
             pending.config.peers.remove(&node);
         }
@@ -488,6 +493,38 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     #[test]
+    fn server_identity_cannot_change_inside_a_staged_snapshot() {
+        use crate::policy::model::{Addresses, NodeId, PublicKey};
+        let mut node = Node {
+            identity: Some(Identity {
+                public_key: PublicKey([1; 32]),
+                port: 44000,
+            }),
+            ..Node::default()
+        };
+        let config = Config {
+            server: Some(NodeId(1)),
+            node: NodeId(2),
+            version: 1,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().expect("IPv4"),
+                ipv6: "fd01::2".parse().expect("IPv6"),
+            },
+            default_policy: crate::dataplane::DefaultPolicy::default(),
+            peers: BTreeMap::new(),
+        };
+        let mut chunk = crate::configuration::chunks(None, &config)
+            .expect("snapshot")
+            .remove(0);
+        chunk.last = false;
+        assert!(!node.chunk(chunk.clone()).expect("staged header"));
+        chunk.index = 1;
+        chunk.server = Some(NodeId(3));
+        assert!(node.chunk(chunk).is_err());
+        assert!(node.config().is_none());
+    }
+
+    #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn explicit_up_recovers_disabled_intent_before_reusing_identity() {
         let mut node = Node::default();
@@ -527,6 +564,7 @@ mod tests {
             ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
         };
         let config = Config {
+            server: None,
             node: NodeId(1),
             version: 1,
             addresses: addresses(1),

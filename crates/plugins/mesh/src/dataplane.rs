@@ -49,6 +49,9 @@ pub struct PeerPolicy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Explicit server identity; older persisted snapshots cannot propose a route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<NodeId>,
     pub node: NodeId,
     pub version: u64,
     pub addresses: Addresses,
@@ -66,6 +69,9 @@ pub struct ServerPath {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Chunk {
+    /// Repeated on every chunk and checked before applying the complete policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<NodeId>,
     pub node: NodeId,
     pub from_version: Option<u64>,
     pub version: u64,

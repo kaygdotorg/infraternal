@@ -30,6 +30,7 @@ pub use crate::dataplane::Peer;
 /// Public kernel peer status, available even while the coordinator is unreachable.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Counters {
+    #[serde(default)]
     pub persistent_keepalive_secs: u16,
     pub handshake_secs: u64,
     pub received_bytes: u64,
