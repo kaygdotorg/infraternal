@@ -16,6 +16,7 @@
  * Every layout change measures, changes, then plays (layout/flip.ts); the terminal refits once at the new size.
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
+import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
 import { loadDroplet } from "../layout/droplet-handle";
@@ -27,6 +28,7 @@ import type { ViewId, WindowModel } from "../model/types";
 import { coarse, reduced } from "../dom";
 import { endActivity, setActivity } from "../../perf-activity";
 import { makeWindow, setActive } from "./frame";
+import { iconFor } from "../views/icons";
 import { isTerminal, makeBody } from "../views/body";
 import { SCALE_REST, restAt } from "../springs";
 
@@ -58,6 +60,8 @@ export interface WindowsModule {
   attach(rec: WinRec, sessionId: string): void;
   /** Brings a window's name and screen in line with its session in the inventory (a rename, a run again). */
   syncSession(rec: WinRec, reshow?: boolean): void;
+  /** The host said which system it runs: its terminals that had no mark yet take the system's (the pill's leading icon). */
+  setHostOs(host: string, os: HostPlatform): void;
   /** Shows a session: flies to its window, or opens one (a detached or exited session) in Console. */
   openSession(host: string, sessionId: string): WinRec | undefined;
   /** Opens a shell on `host` as a window in Console (or flies to the one that is already there). */
@@ -497,7 +501,15 @@ export function createWindows(cx: Ctx): WindowsModule {
   return {
     make: (c, m) => makeWindow(cx, c, m),
     setActive: (rec) => setActive(cx, rec),
-    addColumn, close, closeKey, split, newWindow, attach, syncSession, openSession, open, openFlow, pulse, flat,
+    addColumn, close, closeKey, split, newWindow, attach, syncSession,
+    setHostOs(host, os) {
+      for (const c of views.values()) for (const rec of c.wins.values()) {
+        if (!isTerminal(rec) || rec.model.host !== host || rec.model.hostId || (rec.model.os && rec.model.os !== "unknown")) continue;
+        rec.model.os = os;
+        rec.card.setIcon(iconFor(rec.model));
+      }
+    },
+    openSession, open, openFlow, pulse, flat,
     step(dir, instant = false) {
       const list = flat();
       if (!list.length) return;

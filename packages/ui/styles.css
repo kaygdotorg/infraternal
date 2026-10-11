@@ -378,7 +378,11 @@
   position: relative; display: grid; place-items: center; width: calc(var(--ui-control-h) - 6px); height: calc(var(--ui-control-h) - 6px); padding: 0; border: 0; border-radius: 50%;
   background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
+/* On touch there is no frame lock to leave room for, so the pill may use the whole header less the actions: the host's name is
+   never cut while there is room. The session name is secondary and goes whole (never as a lone "· …") in a phone-width card. */
 @media (pointer: coarse) {
+  .ui-window-pill { max-width: 100%; }
+  @container (max-width: 400px) { .ui-window-session { display: none; } }
   .ui-window-actions { gap: 0; padding: 0 3px; }
   .ui-window-action { width: 44px; }
   .ui-window-action::after { content: ""; position: absolute; inset: -3px 0; } /* 44 px tall around the 38 px button; the buttons sit on a 44 px pitch */
@@ -393,7 +397,9 @@
   .ui-window-actions[data-collapsible] > .ui-window-action.ui-window-more { display: grid; }
   /* The title's room is the pill's half of the header: the window's mark and session name give way first, at any narrow
      width (a half on a phone too), so the title is never squeezed out. */
-  .ui-window-mark, .ui-window-session { display: none; }
+  .ui-window-session { display: none; }
+  /* The mark names the machine's system and leads the pill on a phone, whatever the width (TASTE: the window pill names the machine by its system). */
+  @media (pointer: fine) { .ui-window-mark { display: none; } }
   /* On touch, a narrow card's actions are a compact circle (about 32 px visible, a 30 px button in a 32 px pill). The 44 px
      hit area is kept by padding around the button, so the title gets the room the wide pill took. */
   @media (pointer: coarse) {
