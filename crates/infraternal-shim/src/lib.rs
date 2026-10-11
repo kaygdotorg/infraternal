@@ -6,8 +6,17 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod ended;
 pub mod frame;
+mod locale;
 mod pty;
 pub mod ring;
+
+/// Resolve locale variables for a scrubbed login shell [#161].
+///
+/// The host locale files and installed locale list are read once per caller
+/// process, so a long-lived session launcher does not repeat discovery per PTY.
+pub fn session_locale_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    locale::environment()
+}
 
 /// Restore default child signal policy before exec, without changing the parent.
 /// Attach this before any caller-specific pre-exec setup.
