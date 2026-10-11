@@ -57,9 +57,15 @@ def run(binary, state, functional=False, seed=20):
         client.until(b'OPEN_OK\r\n')
         client.wait_ack()
         client.input(b'exit 7\n')
-        while not client.events:
+        # Attach emits terminal.replay_complete before this process exits.
+        while not any(event.get('type') == 'terminal.exited' for event in client.events):
             client.process()
-        assert client.events[-1] == dict(type='terminal.exited', session_id=str(session), status=7, final_seq=client.out)
+        terminal_exit = next(
+            event for event in reversed(client.events) if event.get('type') == 'terminal.exited'
+        )
+        assert terminal_exit == dict(
+            type='terminal.exited', session_id=str(session), status=7, final_seq=client.out
+        )
         print('real terminal.open/type/output and terminal.exited status=7: PASS', flush=True)
         client.send(1, 0x0f, struct.pack('<H', 0) + varint(4) + b'done')
         client.open()
