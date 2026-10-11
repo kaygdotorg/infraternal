@@ -89,15 +89,17 @@ async fn writer(
             0,
             &Frame::Hello {
                 version: 1,
-                caps: (if socket.native_stream_id().is_some() {
-                    infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
-                } else {
-                    0
-                }) | (if renewal {
-                    infraternal_plugin_api::channel::LIVE_RENEWAL
-                } else {
-                    0
-                }),
+                caps: infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+                    | (if socket.native_stream_id().is_some() {
+                        infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
+                    } else {
+                        0
+                    })
+                    | (if renewal {
+                        infraternal_plugin_api::channel::LIVE_RENEWAL
+                    } else {
+                        0
+                    }),
                 client_info: "infraternal agent",
             },
         )

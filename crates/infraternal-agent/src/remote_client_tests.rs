@@ -576,3 +576,73 @@ async fn proven_tcp_decoder_preserves_mux_envelopes_and_buffered_suffix() {
         }
     );
 }
+
+#[tokio::test]
+async fn server_path_capability_is_advertised_on_native_and_fallback_transports() {
+    let ca = root();
+    let server_identity = leaf(&ca, true);
+    let client_identity = leaf(&ca, false);
+    for native in [true, false] {
+        let server = quinn::Endpoint::server(
+            remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+                .unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let address = server.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+        let tls =
+            remote_tls::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+                .unwrap();
+        if !native {
+            server.close(0u32.into(), b"");
+        }
+        let identity = supervisor_identity(&ca, &client_identity, address);
+        let state = StateDirectory::new();
+        let path = state.0.clone();
+        let supervisor = tokio::spawn(async move { run(&identity, Some(path)).await });
+        let caps = tokio::time::timeout(Duration::from_secs(3), async {
+            if native {
+                let connection = server.accept().await.unwrap().await.unwrap();
+                let (send, receive) = connection.accept_bi().await.unwrap();
+                let channel = NativeChannel::control(send, receive).unwrap();
+                let mut receive = Receive::default();
+                let first = receive.next(&channel).await.unwrap();
+                let Frame::Hello {
+                    version: 1, caps, ..
+                } = first.frame
+                else {
+                    panic!("invalid greeting");
+                };
+                connection.close(0u32.into(), b"");
+                caps
+            } else {
+                loop {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let Ok(connection) = remote_tls::accept(socket, &tls).await else {
+                        continue;
+                    };
+                    let mut receive = Receive::default();
+                    let first = receive.next(&connection.channel).await.unwrap();
+                    let Frame::Hello {
+                        version: 1, caps, ..
+                    } = first.frame
+                    else {
+                        panic!("invalid greeting");
+                    };
+                    break caps;
+                }
+            }
+        })
+        .await;
+        supervisor.abort();
+        let _ = supervisor.await;
+        server.close(0u32.into(), b"");
+        let caps = caps.unwrap();
+        assert_ne!(
+            caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS,
+            0
+        );
+        assert_eq!(caps & remote_quic::REMOTE_WRITER_BINDING != 0, native);
+    }
+}
