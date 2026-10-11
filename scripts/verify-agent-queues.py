@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Saturate multiplexed terminal command queues against the real daemon [13][41]."""
 import argparse
+import json
 import sys
 
 # Keep fixture imports from creating untracked bytecode in the worktree.
@@ -12,6 +13,21 @@ import signal
 import socket
 
 from agent_fixture import AckBarrier, Binary, cleanup, exact, fixture_state
+
+
+def read_queue_frame(client, sessions):
+    """Skip only identity-matched replay markers from the attached sessions."""
+    while True:
+        stream, kind, body = client.read()
+        if kind != 0x33:
+            return stream, kind, body
+
+        assert body[:4] == bytes(4), (stream, kind)
+        event = json.loads(body[4:])
+        assert 1 <= stream <= len(sessions), (stream, event)
+        assert event.get('type') == 'terminal.replay_complete', (stream, event)
+        assert event.get('session_id') == str(sessions[stream - 1][0]), (stream, event)
+        assert isinstance(event.get('out_seq'), str) and event['out_seq'].isdecimal(), (stream, event)
 
 
 def run(binary):
@@ -51,7 +67,7 @@ def run(binary):
                 client.send(stream, 0x10, struct.pack('<Q', offset + begin) + payload[begin:end])
         closed = set()
         while len(closed) < len(payloads):
-            stream, kind, _ = client.read()
+            stream, kind, _ = read_queue_frame(client, sessions)
             assert kind == 0x0f and stream in payloads, (stream, kind)
             closed.add(stream)
         assert client.child.poll() is None
@@ -76,7 +92,7 @@ def run(binary):
                 ends[stream] = offset + end
                 client.send(stream, 0x10, struct.pack('<Q', offset + begin) + payload[begin:end])
             while any(acknowledgments[stream] < end for stream, end in ends.items()):
-                stream, kind, body = client.read()
+                stream, kind, body = read_queue_frame(client, sessions)
                 assert stream in outputs, (stream, kind)
                 if kind == 0x11:
                     seq = struct.unpack('<Q', body[:8])[0]
@@ -88,7 +104,7 @@ def run(binary):
                 else:
                     raise AssertionError((stream, kind, body))
         while any(len(outputs[stream]) < len(payload) for stream, (_, payload) in payloads.items()):
-            stream, kind, body = client.read()
+            stream, kind, body = read_queue_frame(client, sessions)
             if kind == 0x13:
                 continue
             assert kind == 0x11 and struct.unpack('<Q', body[:8])[0] == cursors[stream]
@@ -97,7 +113,7 @@ def run(binary):
         for stream, (_, payload) in payloads.items():
             assert outputs[stream] == payload
         client.send(0, 0x08, struct.pack('<QQ', 123, 456))
-        assert client.read() == (0, 0x09, struct.pack('<QQ', 123, 456))
+        assert read_queue_frame(client, sessions) == (0, 0x09, struct.pack('<QQ', 123, 456))
         # A genuinely dead shim must close its own stream, preserving siblings.
         dead = barriers[0]
         with socket.socket(socket.AF_UNIX) as peer:
@@ -105,11 +121,11 @@ def run(binary):
             hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
             os.kill(struct.unpack('<I', hello[27:31])[0], signal.SIGKILL)
         while True:
-            stream, kind, _ = client.read()
+            stream, kind, _ = read_queue_frame(client, sessions)
             if stream == 1 and kind == 0x0f:
                 break
         client.send(0, 0x08, struct.pack('<QQ', 789, 101))
-        assert client.read() == (0, 0x09, struct.pack('<QQ', 789, 101))
+        assert read_queue_frame(client, sessions) == (0, 0x09, struct.pack('<QQ', 789, 101))
         print(f'queue overload: 12 streams retired then replayed x 65 Input frames; {sum(len(p) for _, p in payloads.values())} payload bytes exactly once; dead shim isolated; daemon Ping: PASS', flush=True)
     finally:
         for barrier in barriers:
