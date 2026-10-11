@@ -464,3 +464,53 @@ fn partial_payload_bytes(version: &Path) -> u64 {
         .map(|metadata| metadata.len())
         .sum()
 }
+
+#[test]
+fn resolver_startup_removes_only_owned_inactive_private_staging() {
+    use nix::fcntl::{Flock, FlockArg};
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let release = Release::new(1024);
+    let resolver = release.resolver("http://127.0.0.1:1".into(), "startup", false);
+    private_directory(&resolver.cache).unwrap();
+    let version = resolver.cache.join("0.1.0");
+    private_directory(&version).unwrap();
+    let staging = |name: String| {
+        let directory = version.join(name);
+        private_directory(&directory).unwrap();
+        let payload = directory.join("infraternal-aarch64-musl");
+        std::fs::write(&payload, b"partial").unwrap();
+        std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o600)).unwrap();
+        directory
+    };
+    let abandoned = staging(format!("download-{}", uuid::Uuid::new_v4()));
+    let active = staging(format!("download-{}", uuid::Uuid::new_v4()));
+    let active_lock = Flock::lock(
+        std::fs::File::open(&active).unwrap(),
+        FlockArg::LockExclusiveNonblock,
+    )
+    .unwrap();
+    let unrelated = staging("download-unrelated".into());
+    let shared = staging(format!("download-{}", uuid::Uuid::new_v4()));
+    std::fs::hard_link(
+        shared.join("infraternal-aarch64-musl"),
+        release.root.join("retained"),
+    )
+    .unwrap();
+    let linked = version.join(format!("download-{}", uuid::Uuid::new_v4()));
+    symlink(&active, &linked).unwrap();
+    let unknown = staging(format!("download-{}", uuid::Uuid::new_v4()));
+    std::fs::write(unknown.join("unrelated"), b"keep").unwrap();
+    let _started = ReleasePayload::new(
+        resolver.executable.clone(),
+        resolver.local,
+        resolver.cache.parent().unwrap(),
+    );
+    assert!(
+        !abandoned.exists(),
+        "startup must remove abandoned staging before any network request"
+    );
+    for retained in [&active, &unrelated, &shared, &linked, &unknown] {
+        assert!(retained.exists(), "preserve {}", retained.display());
+    }
+    drop(active_lock);
+}
