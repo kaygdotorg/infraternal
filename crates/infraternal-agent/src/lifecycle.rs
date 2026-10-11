@@ -17,7 +17,7 @@ impl Live {
         // recorded lifetime; the birth parser also excludes dead states. Check
         // the executable link without following it: CA protection makes live
         // shims non-dumpable, denying ptrace-gated /proc/<pid>/exe traversal.
-        // These checks run on control reads and retirement events, with no idle timer.
+        // The 400 ms host census and control events share this check; no task or file watcher is kept per shim.
         self.path.exists()
             && birth(&self.process).is_ok_and(|value| value == Some(self.birth_ticks))
             && fs::symlink_metadata(self.process.join("exe"))
@@ -51,14 +51,23 @@ impl Registry {
             process,
             birth_ticks,
         };
-        if live.alive() {
-            self.0.insert(session.id, live);
+        if !live.alive() {
+            return Ok(());
         }
+        self.0.insert(session.id, live);
         Ok(())
     }
 
+    /// Removes shims whose process identity or rendezvous path has disappeared.
     pub(crate) fn refresh(&mut self) {
         self.0.retain(|_, live| live.alive());
+    }
+
+    /// Stable live-session snapshot for the server and plugin context.
+    pub(crate) fn session_ids(&self) -> Vec<[u8; 16]> {
+        let mut ids: Vec<_> = self.0.keys().copied().collect();
+        ids.sort_unstable();
+        ids
     }
     pub(crate) fn get(&self, id: &[u8; 16]) -> Option<&PathBuf> {
         self.0.get(id).map(|live| &live.path)

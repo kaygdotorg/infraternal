@@ -30,6 +30,8 @@ use std::{
 /// Process-wide count of approximate repaints written to the leg-B socket.
 /// Constant-space and content-free; metrics adapters can export this value.
 static APPROXIMATE_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
+/// One host-wide process census detects an abruptly stopped shim whose stale socket remains on disk.
+const LIVE_SESSION_SCAN: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Monotonic approximation counter for the infraternal agent metrics adapter.
 #[must_use]
@@ -242,6 +244,34 @@ async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
         .map_err(|_| io::ErrorKind::BrokenPipe.into())
 }
 
+/// Publishes the authoritative live-shim set without ever parking terminal dispatch on a slow writer.
+fn publish_session_snapshot(
+    tx: &mpsc::Sender<Message>,
+    registry: &crate::lifecycle::Registry,
+    published: &mut Option<Vec<[u8; 16]>>,
+) -> io::Result<()> {
+    let session_ids = registry.session_ids();
+    if published.as_ref() == Some(&session_ids) {
+        return Ok(());
+    }
+    let ids: Vec<String> = session_ids
+        .iter()
+        .map(|id| uuid::Uuid::from_bytes(*id).to_string())
+        .collect();
+    let json = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.sessions.snapshot",
+        "session_ids": ids,
+    }))?;
+    match tx.try_send(Message::Event(0, json)) {
+        Ok(()) => *published = Some(session_ids),
+        Err(mpsc::error::TrySendError::Full(_)) => {}
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+    }
+    Ok(())
+}
+
 /// Run until the trusted server closes its inherited channel.
 /// # Errors
 /// Rejects invalid fd, unsafe state, malformed wire requests and resource limits.
@@ -345,6 +375,12 @@ async fn run_channel(
     let (tx, rx) = mpsc::channel(8);
     let (control, control_rx) = mpsc::channel(8);
     let dispatch = async {
+        let mut published_sessions = None;
+        publish_session_snapshot(&tx, &registry, &mut published_sessions)?;
+        let mut live_scan = tokio::time::interval(LIVE_SESSION_SCAN);
+        live_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // interval's first tick is immediate; the startup snapshot above already covers it.
+        live_scan.tick().await;
         let mut receive = Receive::default();
         if execution_uid.is_some() {
             // The whole greeting has one deadline, including an entirely silent
@@ -365,7 +401,15 @@ async fn run_channel(
         let mut opens: JoinSet<(u32, u32, io::Result<Session>)> = JoinSet::new();
         loop {
             tokio::select! {
-                changed = retirements.changed() => { changed?; registry.refresh(); }
+                changed = retirements.changed() => {
+                    changed?;
+                    registry.refresh();
+                    publish_session_snapshot(&tx, &registry, &mut published_sessions)?;
+                }
+                _ = live_scan.tick() => {
+                    registry.refresh();
+                    publish_session_snapshot(&tx, &registry, &mut published_sessions)?;
+                }
                 result = jobs.join_next(), if !jobs.is_empty() => {
                     let (stream, result) = result.ok_or_else(|| sessions::invalid("missing relay task"))?.map_err(io::Error::other)?;
                     // Close/re-attach may reuse a stream before the old task exits.
@@ -376,6 +420,8 @@ async fn run_channel(
                             reply(&control, Message::Close(stream, "terminal shim disconnected"))?;
                         }
                     }
+                    registry.refresh();
+                    publish_session_snapshot(&tx, &registry, &mut published_sessions)?;
                 }
                 result = renewals.join_next(), if !renewals.is_empty() => {
                     let (call_id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| sessions::invalid("missing renewal task"))?.map_err(io::Error::other)?;
@@ -388,6 +434,7 @@ async fn run_channel(
                         Ok(session) => {
                             let json = serde_json::to_vec(&serde_json::json!({"session_id": uuid::Uuid::from_bytes(session.id)}))?;
                             registry.insert(&session)?;
+                            publish_session_snapshot(&tx, &registry, &mut published_sessions)?;
                             reply(&control, Message::Result(stream, call_id, true, json))?;
                         }
                         Err(error) => {
@@ -422,6 +469,7 @@ async fn run_channel(
                         Frame::Call {call_id, action_id: "terminal.open", input_json} if execution_uid.is_none() || stream == 0 => {
                             use infraternal_plugin_api::admission::OpenRefusal;
                             registry.refresh();
+                            publish_session_snapshot(&tx, &registry, &mut published_sessions)?;
                             let input = if input_json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON { serde_json::from_slice::<Open>(input_json).ok() } else { None };
                             if let Some(input) = input && execution_uid.is_none_or(|uid| input.uid == uid)
                                 && (nix::unistd::Uid::effective().is_root() || input.uid == nix::unistd::Uid::effective().as_raw())
@@ -439,6 +487,7 @@ async fn run_channel(
                         }
                         Frame::Call {call_id, action_id, input_json} if stream == 0 => {
                             registry.refresh();
+                            publish_session_snapshot(&tx, &registry, &mut published_sessions)?;
                             plugins.update_context(registry.context());
                             match plugins.call_with_reply(action_id, input_json) {
                                 Ok(result) => reply(&control, Message::Deferred(0, call_id, result))?,
