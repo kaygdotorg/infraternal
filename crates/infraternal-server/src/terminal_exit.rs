@@ -41,7 +41,9 @@ pub(crate) async fn record(
     }
     // The write and authority predicate serialize logout/ownership changes.
     // Transport Close never enters this path: disconnect is resumable.
-    let changed = sqlx::query("UPDATE terminal_sessions SET closed_at=COALESCE(closed_at,unixepoch()),exit_status=? WHERE id=? AND user_id=? AND (closed_at IS NULL OR exit_status=?) AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
+    // A census can establish closure before saved status arrives. Fill an unknown
+    // status once; conflicting later notices still cannot overwrite it.
+    let changed = sqlx::query("UPDATE terminal_sessions SET closed_at=COALESCE(closed_at,unixepoch()),exit_status=? WHERE id=? AND user_id=? AND (exit_status IS NULL OR exit_status=?) AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
         .bind(exit.status).bind(session.as_slice()).bind(user).bind(exit.status)
         .bind(crate::auth::hash(token)).bind(user).execute(pool).await.map_err(|_| ())?;
     if changed.rows_affected() != 1 {

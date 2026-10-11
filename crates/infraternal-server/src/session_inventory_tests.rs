@@ -25,6 +25,43 @@ async fn database() -> (SqlitePool, String) {
 }
 
 #[tokio::test]
+async fn reconciliation_before_saved_exit_keeps_the_authoritative_exit_status() {
+    let (pool, user) = database().await;
+    let session = [169; 16];
+    let token = "inventory-review-session-fixture";
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES(?,?,'fixture',unixepoch()+3600,unixepoch(),1)")
+        .bind(crate::auth::hash(token))
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES(?,?,1,1)")
+        .bind(session.as_slice())
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    reconcile_embedded_sessions(&pool, &[]).await.unwrap();
+    let event = serde_json::to_vec(&json!({
+        "type":"terminal.exited", "session_id":uuid::Uuid::from_bytes(session),
+        "status":7, "final_seq":42, "retired":true,
+    }))
+    .unwrap();
+    let recorded = crate::terminal_exit::record(&pool, &user, token, &session, 0, &event).await;
+    let status: Option<i32> =
+        sqlx::query_scalar("SELECT exit_status FROM terminal_sessions WHERE id=?")
+            .bind(session.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        status,
+        Some(7),
+        "census closure refused the later saved exit: {recorded:?}"
+    );
+}
+
+#[tokio::test]
 async fn restart_reconciliation_keeps_live_rows_and_closes_missing_rows() {
     let (pool, user) = database().await;
     let live = [1; 16];
