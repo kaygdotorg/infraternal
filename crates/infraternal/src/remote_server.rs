@@ -43,6 +43,7 @@ pub(crate) async fn serve(
 ) -> Result<Outcome, infraternal_server::ServerError> {
     #[cfg(feature = "remote")]
     {
+        infraternal_server::ca_memory::initialize_private_key_memory()?;
         // Detach private stdin before cold_start can return an error or perform
         // any configuration I/O; install only after retained trust is available.
         let inherited = infraternal_server::ca_handoff::receive_stdin();

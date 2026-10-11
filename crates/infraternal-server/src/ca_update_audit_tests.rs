@@ -25,7 +25,6 @@ fn locked_kib() -> u64 {
 }
 
 #[test]
-#[ignore = "unresolved P2 CA-01: persistent OpenSSL signer pages are not mlocked; run explicitly"]
 fn unlocked_signer_requires_persistent_locked_pages() {
     const NAME: &str = "ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages";
     if std::env::var_os("INFRATERNAL_CA_AUDIT_CHILD").is_some() {
@@ -36,11 +35,51 @@ fn unlocked_signer_requires_persistent_locked_pages() {
             0,
             "fixture must start without unrelated locks"
         );
+        let rss_before = resident_kib();
+        crate::ca_memory::initialize_private_key_memory().unwrap();
+        let used_before = infraternal_shim::openssl_secure::used_bytes();
         let material = crate::ca::tests::test_material();
-        let source = MemoryCaSource::cold_start(material.issuer().clone());
+        let wrapped = WrappedCa::seal(&material, "locked-pages", 1, &[3; 32], &[5; 32]).unwrap();
+        let issuer = material.issuer().clone();
+        drop(material);
+        let material = wrapped.open(&issuer, "locked-pages", 1, &[5; 32]).unwrap();
+        let source = MemoryCaSource::cold_start(issuer);
         source.unlock_from(&Unlocked(material)).unwrap();
         assert!(CertificateAuthority::from_source(&source).is_ok());
-        println!("METRIC unlocked_ca_vm_lck_kib={} servers=1", locked_kib());
+        println!(
+            "METRIC unlocked_ca_vm_lck_kib={} rss_before_kib={rss_before} rss_unlocked_kib={} secure_before_bytes={used_before} secure_unlocked_bytes={} servers=1 heap_bytes={}",
+            locked_kib(),
+            resident_kib(),
+            infraternal_shim::openssl_secure::used_bytes(),
+            infraternal_shim::openssl_secure::HEAP_BYTES
+        );
+        assert!(infraternal_shim::openssl_secure::used_bytes() >= used_before + 32);
+        // Measure raw Ed25519 import after RAND initialization, independently
+        // of its secure state. Clone handles share the original allocation.
+        let before_import = infraternal_shim::openssl_secure::used_bytes();
+        let seed = Zeroizing::new(
+            source
+                .load()
+                .unwrap()
+                .handoff_key()
+                .raw_private_key()
+                .unwrap(),
+        );
+        let imported = CaMaterial::key_from_seed(&seed).unwrap();
+        drop(seed);
+        assert_eq!(
+            infraternal_shim::openssl_secure::used_bytes(),
+            before_import + 32
+        );
+        drop(imported);
+        assert_eq!(
+            infraternal_shim::openssl_secure::used_bytes(),
+            before_import
+        );
+        let maps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+        assert!(maps.lines().any(|line| line.starts_with("VmFlags:")
+            && line.split_whitespace().any(|flag| flag == "lo")
+            && line.split_whitespace().any(|flag| flag == "dd")));
         assert!(
             locked_kib() >= 4,
             "persistent unlocked signer requires locked pages"
@@ -48,7 +87,7 @@ fn unlocked_signer_requires_persistent_locked_pages() {
         return;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", NAME, "--ignored", "--nocapture"])
+        .args(["--exact", NAME, "--nocapture"])
         .env("INFRATERNAL_CA_AUDIT_CHILD", "1")
         .stdin(std::process::Stdio::null())
         .output()
@@ -57,7 +96,8 @@ fn unlocked_signer_requires_persistent_locked_pages() {
     print!("{}", String::from_utf8_lossy(&output.stdout));
     assert!(
         output.status.success(),
-        "unlocked persistent signer is unprotected"
+        "unlocked persistent signer is unprotected: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -156,4 +196,65 @@ fn handoff_memory_protection_failure_keeps_the_existing_signer() {
         output.status.success(),
         "zero-lock-budget handoff must fail closed without relocking source"
     );
+}
+
+fn resident_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "isolated secure heap sizing at 10000 live keys; run with no own builds/browser overlap"]
+fn secure_heap_capacity_at_10000_live_keys() {
+    const NAME: &str = "ca_update_audit_tests::secure_heap_capacity_at_10000_live_keys";
+    if let Ok(mode) = std::env::var("INFRATERNAL_CA_HEAP_SCALE") {
+        if mode == "after" {
+            crate::ca_memory::initialize_private_key_memory().unwrap();
+        }
+        let rss_before = resident_kib();
+        let keys: Vec<_> = (0..10000)
+            .map(|_| openssl::pkey::PKey::generate_ed25519().unwrap())
+            .collect();
+        let used = infraternal_shim::openssl_secure::used_bytes();
+        println!(
+            "METRIC mode={mode} secure_heap_live_keys={} used_bytes={used} heap_bytes={} rss_before_kib={rss_before} rss_live_kib={} vm_lck_kib={} cores={} load={}",
+            keys.len(),
+            infraternal_shim::openssl_secure::HEAP_BYTES,
+            resident_kib(),
+            locked_kib(),
+            std::thread::available_parallelism().unwrap(),
+            std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+        );
+        if mode == "after" {
+            assert!(used >= 320_000);
+            assert!(used < infraternal_shim::openssl_secure::HEAP_BYTES / 2);
+            assert!(locked_kib() >= 1024);
+        } else {
+            assert_eq!(locked_kib(), 0);
+        }
+        drop(keys);
+        println!(
+            "METRIC secure_heap_after_drop_bytes={}",
+            infraternal_shim::openssl_secure::used_bytes()
+        );
+        return;
+    }
+    for mode in ["before", "after"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--ignored", "--nocapture"])
+            .env("INFRATERNAL_CA_HEAP_SCALE", mode)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        assert!(output.status.success());
+    }
 }

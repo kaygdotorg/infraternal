@@ -62,6 +62,25 @@ impl CaMaterial {
         Self { key, issuer }
     }
 
+    /// Import through the existing decoder, which allocates the Ed25519 seed
+    /// with `OPENSSL_secure_zalloc`. The pinned raw-key fromdata import instead
+    /// uses ordinary malloc even after secure-heap initialization (#154).
+    /// This fixed 48-byte PKCS#8 exists only in locked, dump-excluded pages;
+    /// it changes neither encrypted persistence nor the raw handoff format.
+    pub(crate) fn key_from_seed(seed: &[u8]) -> Result<PKey<Private>, CaError> {
+        if seed.len() != 32 {
+            return Err(CaError);
+        }
+        let mut encoded =
+            infraternal_shim::locked_bytes::LockedBytes::new(48).map_err(|_| CaError)?;
+        encoded[..16].copy_from_slice(&[
+            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
+            0x04, 0x20,
+        ]);
+        encoded[16..].copy_from_slice(seed);
+        PKey::private_key_from_der(&encoded).map_err(|_| CaError)
+    }
+
     /// Borrow the signer only for the private exec channel; never serialize to storage.
     pub(crate) fn handoff_key(&self) -> &PKey<Private> {
         &self.key
