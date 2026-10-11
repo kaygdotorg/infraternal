@@ -16,7 +16,7 @@ uses `Result { ok: true }` with the listed JSON value. A failure uses
 | Action ID | Input | Success value | Required action |
 |-----------|-------|---------------|-----------------|
 | `mesh.list` | `MeshFilter` | `MeshSnapshot` | Any assigned Mesh management action grants view access, subject to its tag scopes. |
-| `mesh.node.enroll` | `{"name":string,"public_key":[u8;32]}` | `{"node_id":u64,"revision":u64}` | Global `mesh.manage_nodes` |
+| `mesh.node.enroll` | `{"name":string,"public_key":[u8;32],"host_id"?:string}` | `{"node_id":u64,"revision":u64}` | Global `mesh.manage_nodes` |
 | `mesh.node.observe` | `{"node_id":u64,"last_rtt_us"?:u64\|null}` | `{"revision":u64}` | `mesh.manage_nodes` covering every current node tag |
 | `mesh.node.rename` | `{"node_id":u64,"name":string}` | `{"revision":u64}` | `mesh.manage_nodes` covering every current node tag |
 | `mesh.node.delete` | `{"node_id":u64}` | `{"revision":u64}` | `mesh.manage_nodes` covering every current node tag |
@@ -35,6 +35,21 @@ uses `Result { ok: true }` with the listed JSON value. A failure uses
 `MeshFilter` is `{"tag"?:string,"cursor"?:{"revision":u64,"offset":usize}}`. IDs are positive integers no
 greater than SQLite's signed 64-bit maximum. A node public key is exactly 32
 nonzero bytes; private keys are never accepted by this API.
+
+### Authenticated host binding (#173, D164/D166/D235)
+
+An optional `host_id` is a canonical lowercase hyphenated UUID of an existing,
+unrevoked `remote_hosts` identity. Global `mesh.manage_nodes` authorizes its
+binding to the new mesh node. Enrollment records that binding and clears that
+host's mesh removal tombstone in the same transaction; duplicate bindings are
+refused. A missing or revoked remote host is refused without a revision change.
+
+Legacy key-only enrollment remains unbound inventory. Its public key never
+permits an authenticated host to attach to that node or inherit its grants.
+Automatic joining allocates a fresh identity when no host binding exists; a
+conflicting public key or retained removal tombstone is refused. An already
+bound host retains its mesh node identity and addresses across key rotation.
+The reserved server identity is bound only through the trusted server channel.
 
 ## 2. Shared policy and inventory shapes
 
