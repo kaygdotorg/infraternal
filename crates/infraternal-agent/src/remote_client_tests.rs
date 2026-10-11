@@ -519,3 +519,6 @@ async fn expired_local_identity_stops_instead_of_retrying_forever() {
         "expired identity kept retrying"
     );
 }
+
+#[path = "remote_mesh_idle_tests.rs"]
+mod idle_timers;

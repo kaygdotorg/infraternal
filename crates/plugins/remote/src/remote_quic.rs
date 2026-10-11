@@ -2,7 +2,7 @@
 
 use crate::remote_tls::Identity;
 use openssl::x509::X509;
-use std::io;
+use std::{io, sync::Arc};
 
 /// Server-authorized writer identity plus its independent native QUIC stream.
 pub struct BoundStream {
@@ -90,9 +90,9 @@ fn transport_with_liveness(
     config.congestion_controller_factory(std::sync::Arc::new(
         quinn::congestion::BbrConfig::default(),
     ));
-    // A small transport-only probe preserves short NAT mappings. Four missed
-    // intervals allow a minute of transient loss before reconnect; healthy ACKs
-    // reset idle expiry. These probes never perform database or authority work.
+    // Transport probes preserve stateful mappings without database or authority
+    // work. The caller chooses its measured liveness profile; acknowledged
+    // traffic resets idle expiry, with QUIC retaining its minimum PTO bound.
     config
         .max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(
             u32::try_from(idle.as_millis()).unwrap_or(60_000),
@@ -120,7 +120,6 @@ pub fn server_config(
     endpoint: &Identity,
     certificates: &[X509],
 ) -> io::Result<quinn::ServerConfig> {
-    use std::sync::Arc;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
         Arc::new(roots(certificates)?),
@@ -150,7 +149,30 @@ pub fn client_config(
     endpoint: &Identity,
     certificates: &[X509],
 ) -> io::Result<quinn::ClientConfig> {
-    use std::sync::Arc;
+    client_config_with_liveness(
+        endpoint,
+        certificates,
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(60),
+    )
+}
+
+/// Configure transport-only liveness for a proven alternative path.
+/// The caller measures RTT; credential verification and all stream limits stay identical.
+/// # Errors
+/// Refuses invalid identity/trust or a zero, inverted, or excessive timer interval.
+pub fn client_config_with_liveness(
+    endpoint: &Identity,
+    certificates: &[X509],
+    keep_alive: std::time::Duration,
+    idle: std::time::Duration,
+) -> io::Result<quinn::ClientConfig> {
+    if keep_alive < std::time::Duration::from_millis(1)
+        || keep_alive >= idle
+        || idle > std::time::Duration::from_secs(60)
+    {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
     let (chain, key) = identity(endpoint)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut tls = rustls::ClientConfig::builder_with_provider(provider)
@@ -164,12 +186,96 @@ pub fn client_config(
     tls.enable_early_data = false;
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| denied())?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
-    config.transport_config(transport(
+    config.transport_config(transport_with_liveness(
         u32::try_from(infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS)
             .map_err(|_| denied())?,
+        keep_alive,
+        idle,
     ));
     Ok(config)
 }
+/// Samples authenticated frames after path proof; raw UDP arrivals cannot keep
+/// a failed path alive. Stream and flow-control frames also count, because a
+/// healthy one-way output stream need not acknowledge new client data.
+pub struct PeerFreshness {
+    frames: [u64; 24],
+    observed: tokio::time::Instant,
+}
+impl PeerFreshness {
+    /// Start only after the caller has proved the peer's enrolled identity.
+    #[must_use]
+    pub fn new(connection: &quinn::Connection) -> Self {
+        Self {
+            frames: authenticated_frames(connection),
+            observed: tokio::time::Instant::now(),
+        }
+    }
+    /// Return time without newly authenticated traffic. Counter wrap still
+    /// changes this signature; duplicate and invalid packets never advance it.
+    pub fn silence(&mut self, connection: &quinn::Connection) -> std::time::Duration {
+        let frames = authenticated_frames(connection);
+        if frames != self.frames {
+            self.frames = frames;
+            self.observed = tokio::time::Instant::now();
+        }
+        self.observed.elapsed()
+    }
+    /// Watch an established path without application traffic or ledger work.
+    /// The future owns no detached task; cancellation stops every observation.
+    /// # Errors
+    /// Returns a fixed interruption, expiry, or invalid interval error.
+    pub async fn interrupted(
+        &mut self,
+        connection: &quinn::Connection,
+        deadline: std::time::Duration,
+    ) -> io::Result<()> {
+        if deadline < std::time::Duration::from_millis(100)
+            || deadline > std::time::Duration::from_secs(60)
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let mut observations = tokio::time::interval(std::time::Duration::from_millis(50));
+        observations.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = connection.closed() => return Err(io::ErrorKind::BrokenPipe.into()),
+                _ = observations.tick() => if self.silence(connection) >= deadline { return Err(io::ErrorKind::TimedOut.into()); },
+            }
+        }
+    }
+}
+fn authenticated_frames(connection: &quinn::Connection) -> [u64; 24] {
+    // Quinn records these only after decryption and packet deduplication. Do
+    // not substitute udp_rx: unauthenticated datagrams can change that count.
+    let frames = connection.stats().frame_rx;
+    [
+        frames.acks,
+        frames.ack_frequency,
+        frames.crypto,
+        frames.connection_close,
+        frames.data_blocked,
+        frames.datagram,
+        u64::from(frames.handshake_done),
+        frames.immediate_ack,
+        frames.max_data,
+        frames.max_stream_data,
+        frames.max_streams_bidi,
+        frames.max_streams_uni,
+        frames.new_connection_id,
+        frames.new_token,
+        frames.path_challenge,
+        frames.path_response,
+        frames.ping,
+        frames.reset_stream,
+        frames.retire_connection_id,
+        frames.stream_data_blocked,
+        frames.streams_blocked_bidi,
+        frames.streams_blocked_uni,
+        frames.stop_sending,
+        frames.stream,
+    ]
+}
+
 /// Return verified leaf identity for durable server-side revocation admission.
 /// # Errors
 /// Refuses absent/non-certificate peer identity.
@@ -287,8 +393,10 @@ mod tests {
 
     /// Exercise acknowledged idle traffic and a lost NAT path using the same
     /// production configuration helper at accelerated transport-only intervals.
+    // Keep relay ownership and failure proof together so every socket retires at the fixture boundary.
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
-    async fn acknowledged_idle_survives_and_a_silent_path_times_out() {
+    async fn acknowledged_idle_survives_and_replayed_packets_cannot_mask_failure() {
         use std::sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -299,7 +407,7 @@ mod tests {
         let config = transport_with_liveness(
             1,
             std::time::Duration::from_millis(50),
-            std::time::Duration::from_millis(250),
+            std::time::Duration::from_secs(5),
         );
         let mut server_config =
             server_config(&server_identity, std::slice::from_ref(&ca.certificate)).unwrap();
@@ -307,15 +415,18 @@ mod tests {
         let server =
             quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
         let server_address = server.local_addr().unwrap();
-        let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let proxy = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let proxy_address = proxy.local_addr().unwrap();
         let forwarding = Arc::new(AtomicBool::new(true));
         let state = forwarding.clone();
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let last_reply = captured.clone();
+        let relay_socket = proxy.clone();
         let relay = tokio::spawn(async move {
             let mut bytes = vec![0; 65536];
             let mut client = None;
             loop {
-                let (count, source) = proxy.recv_from(&mut bytes).await.unwrap();
+                let (count, source) = relay_socket.recv_from(&mut bytes).await.unwrap();
                 let target = if source == server_address {
                     client
                 } else {
@@ -325,7 +436,10 @@ mod tests {
                 if state.load(Ordering::Relaxed)
                     && let Some(target) = target
                 {
-                    proxy.send_to(&bytes[..count], target).await.unwrap();
+                    if source == server_address {
+                        *last_reply.lock().unwrap() = Some((bytes[..count].to_vec(), target));
+                    }
+                    relay_socket.send_to(&bytes[..count], target).await.unwrap();
                 }
             }
         });
@@ -342,14 +456,86 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(750)).await;
         assert!(dial.close_reason().is_none());
         assert!(accept.close_reason().is_none());
+        let mut freshness = PeerFreshness::new(&dial);
         forwarding.store(false, Ordering::Relaxed);
-        let failure = tokio::time::timeout(std::time::Duration::from_secs(2), dial.closed())
-            .await
-            .unwrap();
-        assert!(matches!(failure, quinn::ConnectionError::TimedOut));
+        let (packet, target) = captured.lock().unwrap().clone().unwrap();
+        // Replay only an already delivered encrypted datagram. Neither valid
+        // duplicates nor arbitrary UDP arrivals prove fresh peer reachability.
+        let duplicate_packets = tokio::spawn(async move {
+            loop {
+                proxy.send_to(&packet, target).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        });
+        let failure = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            freshness.interrupted(&dial, std::time::Duration::from_millis(250)),
+        )
+        .await;
+        duplicate_packets.abort();
+        assert!(
+            matches!(failure, Ok(Err(error)) if error.kind() == io::ErrorKind::TimedOut),
+            "replayed packets must not keep the route alive"
+        );
+        assert!(
+            dial.close_reason().is_none(),
+            "freshness expiry precedes the handshake-safe transport deadline"
+        );
         relay.abort();
         client.close(0u32.into(), b"");
         server.close(0u32.into(), b"");
+    }
+
+    #[tokio::test]
+    async fn one_way_authenticated_output_keeps_the_path_fresh() {
+        let ca = root();
+        let server_identity = leaf(&ca, true);
+        let client_identity = leaf(&ca, false);
+        let server = quinn::Endpoint::server(
+            server_config(&server_identity, std::slice::from_ref(&ca.certificate)).unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        // Disable path-MTU probes in this fixture so unrelated ACKs cannot
+        // mask the one-way stream. Production retains its selected defaults.
+        let mut traffic = transport(1);
+        std::sync::Arc::get_mut(&mut traffic)
+            .unwrap()
+            .mtu_discovery_config(None);
+        let mut config = client_config(&client_identity, &[ca.certificate]).unwrap();
+        config.transport_config(traffic);
+        client.set_default_client_config(config);
+        let (dial, accept) = tokio::join!(
+            client
+                .connect(server.local_addr().unwrap(), "localhost")
+                .unwrap(),
+            async { server.accept().await.unwrap().await }
+        );
+        let dial = dial.unwrap();
+        let accept = accept.unwrap();
+        let writer = tokio::spawn(async move {
+            let (mut send, _) = accept.open_bi().await.unwrap();
+            for _ in 0..20 {
+                send.write_all(b"x").await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            send.finish().unwrap();
+            // Retain the transport until its receiver drains the stream.
+            let _ = send.stopped().await;
+        });
+        let (_, mut receive) = dial.accept_bi().await.unwrap();
+        let mut guard = PeerFreshness::new(&dial);
+        let watched = tokio::time::timeout(
+            std::time::Duration::from_millis(750),
+            guard.interrupted(&dial, std::time::Duration::from_millis(250)),
+        );
+        let (received, watched) = tokio::join!(receive.read_to_end(64), watched);
+        assert_eq!(received.unwrap(), vec![b'x'; 20]);
+        assert!(watched.is_err(), "one-way output must not trigger fallback");
+        writer.await.unwrap();
+        client.close(0_u32.into(), b"");
+        server.close(0_u32.into(), b"");
     }
 
     #[tokio::test]
@@ -470,5 +656,42 @@ mod tests {
         accepted.close(0u32.into(), b"");
         server.close(0u32.into(), b"");
         client.close(0u32.into(), b"");
+    }
+    #[test]
+    fn mesh_liveness_keeps_authentication_and_refuses_invalid_intervals() {
+        use std::time::Duration;
+        let ca = root();
+        let identity = leaf(&ca, false);
+        let roots = std::slice::from_ref(&ca.certificate);
+        for (keepalive, idle) in [
+            (Duration::ZERO, Duration::from_millis(200)),
+            (Duration::from_nanos(1), Duration::from_nanos(2)),
+            (Duration::from_millis(200), Duration::from_millis(200)),
+            (Duration::from_millis(300), Duration::from_millis(200)),
+            (Duration::from_millis(50), Duration::from_secs(61)),
+        ] {
+            assert!(
+                matches!(client_config_with_liveness(&identity, roots, keepalive, idle), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
+            );
+        }
+        assert!(
+            client_config_with_liveness(
+                &identity,
+                &[],
+                Duration::from_millis(50),
+                Duration::from_millis(200)
+            )
+            .is_err()
+        );
+        assert!(
+            client_config_with_liveness(
+                &identity,
+                roots,
+                Duration::from_millis(50),
+                Duration::from_millis(200)
+            )
+            .is_ok()
+        );
+        assert!(client_config(&identity, roots).is_ok());
     }
 }
