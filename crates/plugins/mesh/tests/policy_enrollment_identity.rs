@@ -7,7 +7,6 @@ use serde_json::json;
 use sqlx::sqlite::SqlitePoolOptions;
 
 #[tokio::test]
-#[ignore = "Phase-one P1 regression #173; must pass before this campaign is complete."]
 async fn unbound_enrollment_public_key_is_not_host_authority() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
