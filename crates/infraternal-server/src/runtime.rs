@@ -778,7 +778,7 @@ struct SourceAdmission {
     buckets: Arc<Mutex<HashMap<(IpAddr, bool), SourceBucket>>>,
 }
 
-struct SourceBucket {
+pub(crate) struct SourceBucket {
     window: i64,
     requests: u8,
 }
@@ -835,48 +835,64 @@ async fn source_admission(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let mut buckets = policy.buckets.lock().await;
-    buckets.retain(|_, bucket| now - bucket.window < 60);
-    let limit = if device { 10 } else { 30 };
-    let bucket = if let Some(bucket) = buckets.get_mut(&(source, device)) {
-        if now - bucket.window >= 60 {
-            *bucket = SourceBucket {
-                window: now,
-                requests: 0,
-            };
-        }
-        bucket
-    } else if buckets.len() < 4096 {
-        buckets.insert(
-            (source, device),
-            SourceBucket {
-                window: now,
-                requests: 0,
-            },
-        );
-        // The just-inserted key cannot disappear while this mutex is held.
-        if let Some(bucket) = buckets.get_mut(&(source, device)) {
-            bucket
-        } else {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-        }
-    } else {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            "source admission capacity exhausted",
-        )
-            .into_response();
-    };
-    if bucket.requests >= limit {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [(header::RETRY_AFTER, "60")],
-            "too many requests",
-        )
-            .into_response();
+    if let Err(response) = admit_temporal_request(
+        &mut buckets,
+        (source, device),
+        now,
+        if device { 10 } else { 30 },
+    ) {
+        return response.into_response();
     }
-    bucket.requests += 1;
     drop(buckets);
     next.run(request).await
+}
+
+/// Bounded refusal reasons share ordinary auth's exact HTTP response without
+/// allocating a boxed response for each refused request.
+pub(crate) enum TemporalRefusal {
+    Capacity,
+    Budget,
+}
+impl IntoResponse for TemporalRefusal {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Capacity => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "source admission capacity exhausted",
+            )
+                .into_response(),
+            Self::Budget => (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, "60")],
+                "too many requests",
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// Shared fixed-window auth budget. Expired entries are reclaimed without an
+/// idle worker; the bounded map refuses new principals when full. Keys must be
+/// server-attributed (trusted source address or live authenticated user ID).
+pub(crate) fn admit_temporal_request<K: Eq + std::hash::Hash>(
+    buckets: &mut HashMap<K, SourceBucket>,
+    principal: K,
+    now: i64,
+    limit: u8,
+) -> Result<(), TemporalRefusal> {
+    buckets.retain(|_, bucket| now.saturating_sub(bucket.window) < 60);
+    if !buckets.contains_key(&principal) && buckets.len() >= 4096 {
+        return Err(TemporalRefusal::Capacity);
+    }
+    let bucket = buckets.entry(principal).or_insert(SourceBucket {
+        window: now,
+        requests: 0,
+    });
+    if bucket.requests >= limit {
+        return Err(TemporalRefusal::Budget);
+    }
+    bucket.requests += 1;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1354,3 +1370,71 @@ mod remote_demo_tests;
 #[cfg(all(test, feature = "ssh"))]
 #[path = "key_runtime_tests.rs"]
 mod key_runtime_tests;
+/// Exercises the reused bounded auth window independently of HTTP clock timing.
+#[cfg(test)]
+mod temporal_admission_tests {
+    use super::*;
+
+    #[test]
+    fn windows_principals_and_capacity_remain_bounded() {
+        let mut buckets = HashMap::new();
+        for _ in 0..30 {
+            assert!(admit_temporal_request(&mut buckets, 1, 1, 30).is_ok());
+        }
+        for now in [0, 1, 60] {
+            let response = admit_temporal_request(&mut buckets, 1, now, 30)
+                .unwrap_err()
+                .into_response();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(response.headers()[header::RETRY_AFTER], "60");
+        }
+        assert!(admit_temporal_request(&mut buckets, 2, 1, 30).is_ok());
+        assert!(admit_temporal_request(&mut buckets, 1, 61, 30).is_ok());
+        assert_eq!(buckets.len(), 1);
+        buckets.clear();
+        for principal in 0..4096 {
+            assert!(admit_temporal_request(&mut buckets, principal, 1, 30).is_ok());
+        }
+        assert_eq!(
+            admit_temporal_request(&mut buckets, 4096, 1, 30)
+                .unwrap_err()
+                .into_response()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert!(admit_temporal_request(&mut buckets, 0, 1, 30).is_ok());
+        assert_eq!(buckets.len(), 4096);
+        assert!(admit_temporal_request(&mut buckets, 4096, 61, 30).is_ok());
+        assert_eq!(buckets.len(), 1);
+    }
+
+    #[test]
+    #[ignore = "isolated debug admission diagnostic at 4096 principals; run without own build overlap"]
+    fn ca_budget_cost_at_capacity() {
+        let mut buckets = HashMap::new();
+        for principal in 0..4096 {
+            assert!(
+                admit_temporal_request(&mut buckets, format!("principal-{principal:04}"), 1, 30)
+                    .is_ok()
+            );
+        }
+        let mut samples = Vec::with_capacity(1000);
+        for principal in 0..1000 {
+            let key = format!("principal-{principal:04}");
+            let start = std::time::Instant::now();
+            assert!(admit_temporal_request(&mut buckets, key, 1, 30).is_ok());
+            samples.push(start.elapsed().as_nanos());
+        }
+        samples.sort_unstable();
+        println!(
+            "METRIC ca_budget_principals={} requests={} wall_p50_ns={} wall_p99_ns={} max_starts_per_minute={} cores={} load={}",
+            buckets.len(),
+            samples.len(),
+            samples[500],
+            samples[990],
+            4096 * 30,
+            std::thread::available_parallelism().unwrap(),
+            std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+        );
+    }
+}
