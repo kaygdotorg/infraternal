@@ -138,22 +138,32 @@ impl TerminalAttachment {
 #[derive(Clone)]
 pub(crate) struct EmbeddedAgent {
     commands: mpsc::Sender<Command>,
+    changes: tokio::sync::watch::Receiver<()>,
     next_attachment_id: Arc<AtomicU64>,
 }
 
 impl EmbeddedAgent {
+    pub(crate) fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        let mut changes = self.changes.clone();
+        changes.borrow_and_update();
+        changes
+    }
+
     /// Start the on-demand agent supervisor for the server's own executable.
     pub fn spawn(executable: PathBuf) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (changes, notice) = tokio::sync::watch::channel(());
         tokio::spawn(run_actor(
             Source::Embedded {
                 executable,
                 initial: None,
             },
             receiver,
+            changes,
         ));
         Self {
             commands,
+            changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -162,9 +172,11 @@ impl EmbeddedAgent {
     #[cfg(all(test, feature = "remote"))]
     pub(crate) fn unavailable() -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (_changes, notice) = tokio::sync::watch::channel(());
         drop(receiver);
         Self {
             commands,
+            changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -173,6 +185,7 @@ impl EmbeddedAgent {
     #[cfg(feature = "remote")]
     pub(crate) fn remote(uid: u32) -> (Self, mpsc::Sender<RemoteLink>) {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (changes, notice) = tokio::sync::watch::channel(());
         let (accepts, incoming) = mpsc::channel(1);
         tokio::spawn(run_actor(
             Source::Remote {
@@ -181,10 +194,12 @@ impl EmbeddedAgent {
                 pending: None,
             },
             receiver,
+            changes,
         ));
         (
             Self {
                 commands,
+                changes: notice,
                 next_attachment_id: Arc::new(AtomicU64::new(1)),
             },
             accepts,
@@ -294,15 +309,18 @@ impl EmbeddedAgent {
     #[cfg(test)]
     pub(crate) fn from_test_socket(stream: UnixStream) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (changes, notice) = tokio::sync::watch::channel(());
         tokio::spawn(run_actor(
             Source::Embedded {
                 executable: PathBuf::new(),
                 initial: Some(stream),
             },
             receiver,
+            changes,
         ));
         Self {
             commands,
+            changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -567,7 +585,11 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
-async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
+async fn run_actor(
+    mut source: Source,
+    mut commands: mpsc::Receiver<Command>,
+    changes: tokio::sync::watch::Sender<()>,
+) {
     let mut attachments = HashMap::<u64, AttachmentState>::new();
     let mut routes = HashMap::<u32, u64>::new();
     let mut pending = HashMap::<u32, PendingCall>::new();
@@ -595,6 +617,7 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
                     continue;
                 }
                 connection = Some(fresh);
+                changes.send_replace(());
                 backoff = Duration::from_millis(200);
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
@@ -644,6 +667,12 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
                     }
                     continue;
                 };
+                // Public plugin events invalidate capability consumers; no feature
+                // payload is interpreted by terminal routing. A reconnect also invalidates.
+                if let Incoming::Event {stream_id:0,event_json}=&incoming
+                    && serde_json::from_slice::<serde_json::Value>(event_json).is_ok_and(|value|value["type"]=="plugin.event" || value["type"]=="plugins.resync") {
+                    changes.send_replace(());continue;
+                }
                 if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
                     let link = connection.take();
                     if let Some(link) = link {

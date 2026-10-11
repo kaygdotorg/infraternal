@@ -456,6 +456,9 @@ async fn build_router_with_key_setup(
     Ok((app, setup))
 }
 
+// Keep startup ordering visible: persisted switches load before node workers
+// attach, and admitted transports exist before their dependent server features.
+#[allow(clippy::too_many_lines)]
 async fn build_router_core(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
@@ -506,6 +509,17 @@ async fn build_router_core(
         remove_setup_token_socket_or_warn(&config.data_dir, "owner already exists at startup");
     }
 
+    // An injected actor's caller owns node-worker startup. Production starts
+    // the process and binds admitted node workers after persisted switches load.
+    let owns_node_workers = supplied_agent.is_none();
+    #[cfg(feature = "remote")]
+    let observed_server_ip = remote
+        .as_ref()
+        .map_or(std::net::Ipv4Addr::UNSPECIFIED.into(), |remote| {
+            remote.enrollment.endpoint.endpoint.ip()
+        });
+    #[cfg(not(feature = "remote"))]
+    let observed_server_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
     let agent = if let Some(agent) = supplied_agent {
         agent
     } else {
@@ -532,14 +546,34 @@ async fn build_router_core(
         integration,
     )
     .await?;
+    let local_node = agent.clone();
     let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
         .await
         .map_err(|_| ServerError::InvalidConfiguration)?
         .with_plugin_descriptors(catalog.unwrap_or_else(infraternal_agent::plugins::descriptors));
     #[cfg(feature = "remote")]
-    let ws_state = ws_state.with_remote_hosts(hosts);
+    let ws_state = ws_state.with_remote_hosts(hosts.clone());
     #[cfg(not(feature = "remote"))]
     let listeners = None;
+    if owns_node_workers {
+        ws_state
+            .plugins
+            .attach_node(std::sync::Arc::new(crate::node_bridge::NodeBridge {
+                id: "server".to_owned(),
+                ip: observed_server_ip,
+                server: true,
+                actor: local_node,
+                #[cfg(feature = "remote")]
+                authority: None,
+            }))
+            .await
+            .map_err(|_| ServerError::InvalidConfiguration)?;
+        #[cfg(feature = "remote")]
+        hosts
+            .bind_plugins(&ws_state.plugins)
+            .await
+            .map_err(ServerError::Listener)?;
+    }
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)

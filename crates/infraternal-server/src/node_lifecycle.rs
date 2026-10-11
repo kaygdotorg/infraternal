@@ -33,6 +33,7 @@ impl PluginRuntime {
         Ok(())
     }
     /// Retiring an old admission cannot detach a newer channel for the same host.
+    #[cfg(any(feature = "remote", test))]
     pub(crate) async fn detach_node_if(&self, channel: &Arc<dyn NodeChannel>) {
         let _switch = self.inner.switches.lock().await;
         let mut nodes = self.inner.nodes.lock().await;
@@ -168,7 +169,7 @@ mod tests {
     }
     struct Channel;
     impl NodeChannel for Channel {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             "host"
         }
         fn observed_ip(&self) -> std::net::IpAddr {
