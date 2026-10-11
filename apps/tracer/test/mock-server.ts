@@ -404,6 +404,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       socket_open_count: socketOpenCount,
       socket_close_count: socketCloseCount,
       attach_count: attachCount,
+      attached_stream_ids: [...connections].filter((connection) => connection.attached).map((connection) => connection.stream),
       session_id: session.sessionIdText,
       active_socket_count: connections.size,
     });
