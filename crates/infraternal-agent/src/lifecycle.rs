@@ -1,4 +1,4 @@
-//! Tracks authenticated surviving shims and attached windows without per-session descriptors or idle timers [D13,D178], #151.
+//! Tracks authenticated surviving shims and attached windows without per-session descriptors or idle timers [D13,D178,D217], #151/#154.
 
 use crate::sessions::Session;
 use infraternal_plugin_api::admission::NodeContext;
@@ -14,11 +14,14 @@ impl Live {
     fn alive(&self) -> bool {
         // A proc inode can change on cache eviction. The kernel birth clock is
         // stable across that change; a new PID incarnation cannot borrow the
-        // recorded lifetime. Executable presence also excludes zombies. These
-        // checks run on control reads and retirement events, with no idle timer.
+        // recorded lifetime; the birth parser also excludes dead states. Check
+        // the executable link without following it: CA protection makes live
+        // shims non-dumpable, denying ptrace-gated /proc/<pid>/exe traversal.
+        // These checks run on control reads and retirement events, with no idle timer.
         self.path.exists()
             && birth(&self.process).is_ok_and(|value| value == Some(self.birth_ticks))
-            && self.process.join("exe").exists()
+            && fs::symlink_metadata(self.process.join("exe"))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
     }
 }
 
@@ -118,6 +121,73 @@ pub(crate) mod windows {
 mod tests {
     //! Reference counts preserve background truth across multiple windows; stale process identities never count.
     use super::*;
+
+    #[tokio::test]
+    async fn nondumpable_process_keeps_its_authenticated_lifetime() {
+        use std::{io::Read as _, process::Stdio};
+        const CASE: &str = "lifecycle::tests::nondumpable_process_keeps_its_authenticated_lifetime";
+        const FIXTURE: &str = "INFRATERNAL_LIFETIME_FIXTURE";
+        if let Some(ready) = std::env::var_os(FIXTURE) {
+            // Protection changes only in this disposable process. Keep it alive
+            // on private stdin until the parent has inspected its registry.
+            nix::sys::prctl::set_dumpable(false).unwrap();
+            fs::write(ready, b"ready").unwrap();
+            let _ = std::io::stdin().read_exact(&mut [0]);
+            return;
+        }
+        let root =
+            PathBuf::from("../../target").join(format!("nondumpable-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let ready = root.join("ready");
+        let path = root.join("socket");
+        fs::write(&path, b"").unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        infraternal_shim::prepare_child(&mut command);
+        let mut child = command
+            .args(["--exact", CASE])
+            .env(FIXTURE, &ready)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let ready_observed = ready.exists();
+        let image = PathBuf::from(format!("/proc/{}/exe", child.id()));
+        let followed_image_denied = fs::metadata(&image)
+            .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied);
+        let image_link_exists =
+            fs::symlink_metadata(&image).is_ok_and(|metadata| metadata.file_type().is_symlink());
+        let (peer, _remote) = tokio::net::UnixStream::pair().unwrap();
+        let session = Session {
+            id: [154; 16],
+            path,
+            peer,
+            head: 0,
+            pid: child.id(),
+            caps: 0,
+            supports_owner: false,
+        };
+        let mut registry = Registry::default();
+        let inserted = registry.insert(&session);
+        registry.refresh();
+        let count = registry.context().session_count;
+        // Always release/reap the fixture before assertions, including the red
+        // regression path. No protected process outlives this test.
+        drop(child.stdin.take());
+        let status = child.wait().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert!(ready_observed && status.success());
+        // A privileged runner may follow the link; the lifetime contract holds
+        // under either ptrace policy without weakening process protection.
+        assert!(image_link_exists);
+        println!("protected_lifetime: followed_image_denied={followed_image_denied}");
+        inserted.unwrap();
+        assert_eq!(count, 1, "a protected live process must remain counted");
+    }
 
     #[tokio::test]
     async fn window_ownership_and_process_identity_bound_live_counts() {

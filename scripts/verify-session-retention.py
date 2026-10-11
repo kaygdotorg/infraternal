@@ -13,7 +13,7 @@ import time
 import uuid
 
 sys.dont_write_bytecode = True
-from agent_fixture import Binary, cleanup, exact, fixture_state
+from agent_fixture import Binary, cleanup, exact, fixture_state, shim_socket_count
 
 
 def shim_frame(peer):
@@ -61,12 +61,7 @@ def run(binary):
         # The prompt supplies output so the unfunded data link hits its deadline.
         deadline = time.monotonic() + 5
         while True:
-            sockets = 0
-            for fd in Path(f'/proc/{shim.pid}/fd').iterdir():
-                try:
-                    sockets += os.readlink(fd).startswith('socket:')
-                except FileNotFoundError:
-                    pass
+            sockets = shim_socket_count(shim.pid, path)
             if sockets == 2:
                 break
             assert time.monotonic() < deadline, 'data link did not detach'

@@ -10,7 +10,7 @@ import sys
 import time
 
 sys.dont_write_bytecode = True
-from agent_fixture import Binary, cleanup, exact, fixture_state
+from agent_fixture import Binary, cleanup, exact, fixture_state, shim_socket_count
 
 
 def run(binary, exit_after_detach=False):
@@ -46,12 +46,7 @@ def run(binary, exit_after_detach=False):
             # negotiated, the independent owner remain. The window is still open.
             deadline = time.monotonic() + 5
             while True:
-                sockets = 0
-                for fd in Path(f'/proc/{pid}/fd').iterdir():
-                    try:
-                        sockets += os.readlink(fd).startswith('socket:')
-                    except FileNotFoundError:
-                        pass
+                sockets = shim_socket_count(pid, path)
                 if sockets == (2 if retained_owner else 1):
                     break
                 assert time.monotonic() < deadline, 'relay did not detach'

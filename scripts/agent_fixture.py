@@ -34,6 +34,15 @@ def fixture_state(label):
     return state
 
 
+def shim_socket_count(pid, path):
+    """Count a fixture's bound endpoints without ptrace access to protected FDs [217]."""
+    # Accepted Unix sockets keep the listener's pathname in the kernel table.
+    # A unique private rendezvous excludes every unrelated namespace endpoint;
+    # count only that path, never weaken dumpability or replace detach with sleep.
+    return sum(len(fields := line.split(maxsplit=7)) == 8 and fields[7] == str(path)
+               for line in Path(f'/proc/{pid}/net/unix').read_text().splitlines())
+
+
 def process_cpu_weight(pid):
     """Read the actual cgroup weight for one fixture-owned process."""
     group = next(line[3:] for line in Path(f'/proc/{pid}/cgroup').read_text().splitlines()
