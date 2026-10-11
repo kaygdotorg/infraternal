@@ -10,7 +10,9 @@ export const ICONS = {
   views: '<rect x="3.5" y="4" width="17" height="6" rx="2"/><rect x="3.5" y="14" width="7.5" height="6" rx="2"/><rect x="14" y="14" width="6.5" height="6" rx="2"/>',
   previous: '<path d="M15 5l-7 7 7 7"/>',
   next: '<path d="M9 5l7 7-7 7"/>',
-  snap: '<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/>',
+  // Canvas lock (windows snap in place): a horseshoe magnet. Not a padlock (that is the input lock), not the overview's
+  // brackets, and not a window shape that could be taken for a split.
+  snap: '<path d="M6 4h3.5v8a2.5 2.5 0 0 0 5 0V4H18v8a6 6 0 0 1-12 0z"/><path d="M6 8h3.5M14.5 8H18"/>',
   overview: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/>',
   more: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>',
   lock: '<rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/>',
