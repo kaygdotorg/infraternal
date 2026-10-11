@@ -80,6 +80,8 @@ export interface OverlayMaterial {
   overlayLine: string;
   shadow: string;
   largeShadow: string;
+  /** The shadow of a window inside a scrolling column: it must end inside the column's 14 px padding and the viewport's edge (2 px on a full-width phone window), because the scroller clips whatever lies beyond it and a clipped shadow shows as a square backing behind the rounded card. */
+  columnShadow: string;
   surface: string;
 }
 
@@ -133,6 +135,9 @@ export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMat
     shadow: active.dark
       ? "0 1px 1px rgb(0 0 0 / 0.3), 0 12px 32px -8px rgb(0 0 0 / 0.6)"
       : "0 1px 1px rgb(0 0 0 / 0.04), 0 8px 24px -6px rgb(0 0 0 / 0.12)",
+    columnShadow: active.dark
+      ? "0 1px 1px rgb(0 0 0 / 0.3), 0 6px 12px -10px rgb(0 0 0 / 0.6)"
+      : "0 1px 1px rgb(0 0 0 / 0.04), 0 6px 12px -10px rgb(0 0 0 / 0.12)",
     largeShadow: active.dark
       ? "0 2px 3px rgb(0 0 0 / 0.34), 0 24px 56px -10px rgb(0 0 0 / 0.72)"
       : "0 2px 4px rgb(0 0 0 / 0.08), 0 20px 48px -8px rgb(0 0 0 / 0.24)",
@@ -212,6 +217,7 @@ export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT
   style.setProperty("--overlay-line", overlay.overlayLine);
   style.setProperty("--shadow", overlay.shadow);
   style.setProperty("--overlay-shadow-large", overlay.largeShadow);
+  style.setProperty("--shadow-column", overlay.columnShadow);
   // Elevation for lifted in-page cards (a flow card over its window): a tight contact
   // shadow plus a wide ambient one. Not glass: no highlight, no blur.
   style.setProperty("--elevation", active.dark
