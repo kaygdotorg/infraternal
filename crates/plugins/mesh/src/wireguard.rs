@@ -249,7 +249,7 @@ impl Device {
     /// # Errors
     /// Reports malformed route dumps or kernel deletion errors.
     pub fn retain_routes(addresses: &[Addresses]) -> io::Result<()> {
-        Self::retire_routes(None, addresses)
+        Self::retain_recorded_routes(&Self::peer_routes()?, addresses)
     }
     /// Retire only journaled peer host routes with the exact shape we install.
     /// # Errors
@@ -258,12 +258,9 @@ impl Device {
         inventory: &BTreeSet<IpAddr>,
         addresses: &[Addresses],
     ) -> io::Result<()> {
-        Self::retire_routes(Some(inventory), addresses)
+        Self::retire_routes(inventory, addresses)
     }
-    fn retire_routes(
-        inventory: Option<&BTreeSet<IpAddr>>,
-        addresses: &[Addresses],
-    ) -> io::Result<()> {
+    fn retire_routes(inventory: &BTreeSet<IpAddr>, addresses: &[Addresses]) -> io::Result<()> {
         let desired: BTreeSet<IpAddr> = addresses
             .iter()
             .flat_map(|address| [IpAddr::V4(address.ipv4), IpAddr::V6(address.ipv6)])
@@ -319,7 +316,7 @@ impl Device {
             };
             // Reuse the dumped attributes so route priority and IPv6 kernel
             // normalization remain exact. A replay may already have removed it.
-            if inventory.is_none_or(|recorded| recorded.contains(&address))
+            if inventory.contains(&address)
                 && !desired.contains(&address)
                 && let Err(error) = socket.request(25, 4, &reply)
                 && !matches!(error.raw_os_error(), Some(2 | 3))
