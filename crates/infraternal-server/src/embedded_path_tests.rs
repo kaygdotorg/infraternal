@@ -171,7 +171,7 @@ async fn input_retention_refuses_excess_before_advancing_the_cursor() {
         );
     }
     assert!(
-        !process_command(
+        process_command(
             input_command(MAX_FRAME_LEN as u64, b"x"),
             &mut link,
             &mut attachments,
@@ -180,8 +180,8 @@ async fn input_retention_refuses_excess_before_advancing_the_cursor() {
         )
         .await
     );
-    assert_eq!(attachments[&1].last_input_end, MAX_FRAME_LEN as u64);
-    assert_eq!(attachments[&1].unacknowledged.len(), MAX_FRAME_LEN);
+    assert!(!attachments.contains_key(&1));
+    assert!(!routes.contains_key(&2));
 }
 
 #[tokio::test]

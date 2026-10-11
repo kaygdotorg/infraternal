@@ -23,7 +23,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
 };
 
 const CONTROL_STREAM: u32 = 0;
@@ -99,6 +99,7 @@ struct AttachmentHandleInner {
     id: u64,
     stream_id: u32,
     input: mpsc::Sender<Bytes>,
+    input_acked: watch::Receiver<u64>,
     commands: mpsc::Sender<Command>,
 }
 
@@ -111,6 +112,21 @@ impl AttachmentHandle {
 
     /// Queue one complete leg-A muxed terminal frame for forwarding to leg B.
     pub async fn send_frame(&self, frame: Bytes) -> Result<(), AgentError> {
+        let decoded = decode_muxed_frame(&frame).map_err(|_| AgentError::Protocol)?;
+        if let Frame::Input { in_seq, bytes } = decoded.frame {
+            let end = in_seq
+                .checked_add(bytes.len() as u64)
+                .ok_or(AgentError::Protocol)?;
+            let mut acknowledged = self.0.input_acked.clone();
+            // The absolute shim cursor supplies byte credit, including across path
+            // replacement. Waiting here leaves the shared host actor runnable.
+            while end.saturating_sub(*acknowledged.borrow_and_update()) > MAX_FRAME_LEN as u64 {
+                acknowledged
+                    .changed()
+                    .await
+                    .map_err(|_| AgentError::Unavailable)?;
+            }
+        }
         self.0
             .input
             .send(frame)
@@ -273,6 +289,7 @@ impl EmbeddedAgent {
     ) -> Result<TerminalAttachment, AgentError> {
         let (output_tx, output) = mpsc::channel(OUTPUT_CAPACITY);
         let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
+        let (input_credit, input_acked) = watch::channel(last_in_seq);
         let id = self
             .next_attachment_id
             .fetch_add(1, Ordering::Relaxed)
@@ -286,6 +303,7 @@ impl EmbeddedAgent {
                 last_out_seq,
                 last_in_seq,
                 output: output_tx,
+                input_credit,
                 reply,
             })
             .await
@@ -300,6 +318,7 @@ impl EmbeddedAgent {
                 id,
                 stream_id,
                 input,
+                input_acked,
                 commands: self.commands.clone(),
             })),
             output,
@@ -349,6 +368,7 @@ enum Command {
         last_out_seq: u64,
         last_in_seq: u64,
         output: mpsc::Sender<TerminalOutput>,
+        input_credit: watch::Sender<u64>,
         reply: oneshot::Sender<Result<(u64, u32), AgentError>>,
     },
     Input {
@@ -369,6 +389,7 @@ struct AttachmentState {
     // Retained bytes span [last_in_seq, last_input_end); only a shim Ack releases them.
     // Allocate on input, cap at one protocol frame, and free after a full Ack.
     unacknowledged: BytesMut,
+    input_credit: watch::Sender<u64>,
     credit: u64,
     awaiting_ack: bool,
     // Initial attachment stays cut-through; only replacement orders replay behind an Ack.
@@ -903,6 +924,7 @@ async fn process_command(
             last_out_seq,
             last_in_seq,
             output,
+            input_credit,
             reply,
         } => {
             #[cfg(feature = "remote")]
@@ -943,6 +965,7 @@ async fn process_command(
                     last_in_seq,
                     last_input_end: last_in_seq,
                     unacknowledged: BytesMut::new(),
+                    input_credit,
                     credit: 0,
                     awaiting_ack: true,
                     replaying: false,
@@ -989,7 +1012,18 @@ async fn process_command(
                             .saturating_add(additional.len())
                             > MAX_FRAME_LEN
                         {
-                            return false;
+                            // Public handles wait for byte credit. A bypass or
+                            // invalid producer may retire only its own writer;
+                            // it cannot close the host transport or lose silently.
+                            return retire_stream(
+                                connection,
+                                attachments,
+                                routes,
+                                attachment_id,
+                                stream_id,
+                                "input credit exceeded; reattach",
+                            )
+                            .await;
                         }
                         attachment.unacknowledged.extend_from_slice(additional);
                     }
@@ -1248,12 +1282,13 @@ async fn process_incoming(
                 return true;
             }
             if out_seq != attachment.last_out_seq {
-                return retire_slow_stream(
+                return retire_stream(
                     connection,
                     attachments,
                     routes,
                     attachment_id,
                     stream_id,
+                    "reader fell behind; reattach",
                 )
                 .await;
             }
@@ -1265,12 +1300,13 @@ async fn process_incoming(
                 .try_send(TerminalOutput::Output { out_seq, bytes })
                 .is_err()
             {
-                return retire_slow_stream(
+                return retire_stream(
                     connection,
                     attachments,
                     routes,
                     attachment_id,
                     stream_id,
+                    "reader fell behind; reattach",
                 )
                 .await;
             }
@@ -1303,12 +1339,13 @@ async fn process_incoming(
                 .try_send(TerminalOutput::Snapshot { out_seq, bytes })
                 .is_err()
             {
-                return retire_slow_stream(
+                return retire_stream(
                     connection,
                     attachments,
                     routes,
                     attachment_id,
                     stream_id,
+                    "reader fell behind; reattach",
                 )
                 .await;
             }
@@ -1338,12 +1375,13 @@ async fn process_incoming(
                 .try_send(TerminalOutput::Event { event_json })
                 .is_err()
             {
-                return retire_slow_stream(
+                return retire_stream(
                     connection,
                     attachments,
                     routes,
                     attachment_id,
                     stream_id,
+                    "reader fell behind; reattach",
                 )
                 .await;
             }
@@ -1379,17 +1417,19 @@ async fn process_incoming(
             attachment.last_input_end = attachment.last_input_end.max(in_seq_acked);
             attachment.awaiting_ack = false;
             attachment.last_in_seq = in_seq_acked;
+            attachment.input_credit.send_replace(in_seq_acked);
             if attachment
                 .output
                 .try_send(TerminalOutput::Ack { in_seq_acked })
                 .is_err()
             {
-                return retire_slow_stream(
+                return retire_stream(
                     connection,
                     attachments,
                     routes,
                     attachment_id,
                     stream_id,
+                    "reader fell behind; reattach",
                 )
                 .await;
             }
@@ -1442,26 +1482,19 @@ async fn process_incoming(
     }
 }
 
-/// A full or disconnected consumer retires only its attachment. The PTY/ring remain
+/// A full reader or an invalid input producer retires only its attachment. The PTY/ring remain
 /// in the shim; reconnect can catch up from the browser's last delivered offset.
-async fn retire_slow_stream(
+async fn retire_stream(
     connection: &mut AgentConnection,
     attachments: &mut HashMap<u64, AttachmentState>,
     routes: &mut HashMap<u32, u64>,
     attachment_id: u64,
     stream_id: u32,
+    reason: &'static str,
 ) -> bool {
     attachments.remove(&attachment_id);
     routes.remove(&stream_id);
-    write_frame(
-        connection,
-        stream_id,
-        &Frame::Close {
-            code: 1013,
-            reason: "reader fell behind; reattach",
-        },
-    )
-    .await
+    write_frame(connection, stream_id, &Frame::Close { code: 1013, reason }).await
 }
 
 async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {

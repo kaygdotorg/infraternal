@@ -26,6 +26,7 @@ fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
         last_in_seq: 0,
         last_input_end: 0,
         unacknowledged: BytesMut::new(),
+        input_credit: watch::channel(0).0,
         credit: 0,
         awaiting_ack: false,
         replaying: false,
