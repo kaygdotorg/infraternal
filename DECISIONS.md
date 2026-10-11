@@ -1966,3 +1966,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        newest release of each channel.
      - **Add-host** keeps D225: a new host gets the server's exact version,
        whatever its channel.
+227. **Mesh build order after slice 1 (owner, 2026-10-11; amends D197 M6):**
+     1. **D215:** infraternal agents reach the server over the mesh, so
+        the product's own traffic travels through it.
+     2. **TCP/TLS on 443 (D196):** the fallback for networks that block UDP.
+     3. **SSH over the mesh (D197 M1):** hosts are reached over our own
+        mesh instead of NetBird SSH.
+     4. **Then the rest, by priority:** NAT traversal and router port
+        mapping (D196), subnet routes and exit nodes (D197 M2, M3), and Mac
+        nodes (D169).
