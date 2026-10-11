@@ -1,12 +1,16 @@
-<!-- Records the production integration of #151 and #158 under D206, including reproducible gate evidence. -->
+<!-- Records #149 production integration under D206, its auth audit, atomic history and measured gates. -->
 
-Merged `origin/session-bounds` into the production line: merge `026e471c`, fixture follow-up `f2d84235`. The shim’s authenticated saved exit uses `terminal.exited` with status, then the sole final Close 4404. Retired status preserves viewer cursors; live exits retain final-output paint ordering. Both branches’ tests remain; the native completion/drain and interrupted-answer races have regressions.
+Merged `origin/tls-session` in `1694e11f`, preserving #158 final Close 4404, #151 session bounds and every production auth path/test. Bootstrap follow-up `0e6899c5` removes its production-only Cookie field-count guard; the shared strict parser now serves every reader. Its real-passkey/SQLite/socket regression fails before (0/1, 1.07 s) and passes after (1/0, 0.70 s), accepting either field order and denying duplicates/malformed/non-text fields. Review tests `59c72a49` replayed as `abb80a05` verify split ceremony reuse and refusal without consuming signed proof.
 
-Validation: **601 Rust tests passed**, 0 failed, 63 ignored; SB-01 and DS-01..DS-04 pass. Tracer check and **142 src tests**, **36 protocol tests**, **7 production browser tests**, and **7 real-PTY switching tests** pass. Native final-response regressions: **5 passed in 1.05 s**. No load failure was waived.
+Validation: **608 Rust tests passed**, 0 failed, 64 ignored; auth **110 unit + 1 integration** passed; expanded native/proxy TLS **2 passed in 2.38 s** (registration/joined/split session all 200). Tracer check and **142 src tests**, protocol compiler and **36 tests / 34,462 assertions**, production build/transfer pass. Deferred Brotli **44,733 / 45,056 B**. Auth B1/S1/S2/N1 checklist completed; Origin, cookie flags, unlock/revocation, admission and ingress policy retained. Workspace lockfile regeneration is byte-identical; package/version/source sets unchanged.
 
-Three default builds: deferred Brotli **44,773 / 44,705 / 44,734 B**, below unchanged **45,056 B** (D188). Final static x86_64 binary: **19,992,480 B**, versus exact `b373cc4c` **19,904,832 B** (**+87,648 B**); no PT_INTERP. The known **16,404,816 B** limit remains unchanged.
+Static x86_64: exact `04cdc52a` **19,992,512 B** → **19,991,488 B** (**−1,024 B**), no PT_INTERP. The known **16,404,816 B** limit remains unchanged; the size row stops before aarch64.
 
-`scripts/verify fast` summary, verbatim:
+Local CPUWeight=10000 parser probes, infraternal-dev / 8 CPUs, 3 × 200,000 requests × 50 sessions: production `opt=s` median **287.49 → 313.39 ns/request**, **+1.295 µs/50 requests**; `opt=3` **110.27 → 219.53 ns/request**, **+5.463 µs/50**. Retained **0 B/session × 200 = 0 B**. `opt=s` load **22.76/18.03/17.24 → 24.41/18.72/17.49**. Parser averages, not end-to-end percentiles.
+
+The initial tracer timing failure passed its scoped rerun. One unchanged Mesh snapshot socket-close failure passed two isolated runs and the complete gate retry: **10,000 nodes / 30,000 grants**, **88 pages**, **64,612 B** maximum frame, shared socket Pong. No failure waived or timeout changed.
+
+`scripts/verify fast` summary, verbatim (exit 1 solely for known size):
 
 ```text
 +---------------------------+--------------+
@@ -21,8 +25,4 @@ Three default builds: deferred Brotli **44,773 / 44,705 / 44,734 B**, below unch
 +---------------------------+--------------+
 ```
 
-Scale on infraternal-dev, 8 CPUs, CPUWeight=10000, real 80×24 PTYs: **200 recovered / 201 admitted / 200 after reap**. Combined PSS: **341,851 KiB empty** (1,709.26 KiB/session × 200), **3,710,906 KiB filled** (18,554.53 KiB/session × 200); 200 independent owners add no measured PSS. Facts 101 samples: p50 **4.589 ms**, max **44.399 ms**. Load 25.68/27.04/25.28 → 33.93/28.81/25.88.
-
-Separate 200 sequential final replies: p50 **232 µs**, p99 **700 µs**, max **1,912 µs**, load 46.25/36.84/29.80. Production captures, read-only reviewed: [exit 0](apps/tracer/captures/dead-session/retired-exit-0-1440x900-ink.png), [exit 7](apps/tracer/captures/dead-session/retired-exit-7-1440x900-ink.png).
-
-Author checklist and raw findings: [#151](https://git.kayg.org/kayg/infraternal/issues/151), [#158](https://git.kayg.org/kayg/infraternal/issues/158). Logs and binary evidence remain under `$HOME/.cache/codex-scratch/session-bounds-prod/`; temporary targets/checkouts are removed.
+Every commit pushed to `tls-session-prod`; no deployment. Full evidence and final head: [#149](https://git.kayg.org/kayg/infraternal/issues/149). Raw logs remain under `$HOME/.cache/codex-scratch/tls-session-prod/`; temporary build targets/checkouts are removed at completion.
