@@ -195,11 +195,16 @@ pub fn detach() -> io::Result<bool> {
             Ok(false)
         }
         ForkResult::Child => {
+            // Raw fork does not run Command's pre-exec callbacks. Give each
+            // detached child the same default policy before normal shim code,
+            // without changing the original caller's reload mask [217].
+            reset_child_signals()?;
             unistd::setsid().map_err(errno)?;
             // SAFETY: same single-threaded startup boundary as the first fork.
             match unsafe { unistd::fork() }.map_err(errno)? {
                 ForkResult::Parent { .. } => std::process::exit(0),
                 ForkResult::Child => {
+                    reset_child_signals()?;
                     let null = File::options().read(true).write(true).open("/dev/null")?;
                     // Opening /dev/null can claim a closed standard descriptor.
                     // Move its ownership above stderr before dup2, so dropping the
