@@ -163,6 +163,11 @@
 .ui-toast-marker .tick svg { width: 14px; height: 14px; stroke: var(--bg); }
 .ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
 .ui-toast-marker .tick { width: 18px; height: 18px; }
+/* A glyph in place of the tick (toast icon): neutral, so a waiting state never reads as success. */
+.ui-toast-glyph { display: grid; width: 22px; height: 22px; flex: none; place-items: center; color: var(--fg-2); }
+.ui-toast-glyph[hidden] { display: none; }
+.ui-toast-glyph svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ui-toast[data-icon="true"] .ui-toast-marker { display: none; }
 /* The optional dismiss control: a quiet icon, the same height as the action. */
 .ui-toast-close { display: grid; width: 32px; min-height: 32px; flex: none; place-items: center; padding: 0; border-radius: 8px; color: var(--fg-3); }
 .ui-toast-close[hidden] { display: none; }

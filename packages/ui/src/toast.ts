@@ -1,5 +1,4 @@
 /** One reusable, accessible status toast with an optional action for product surfaces. */
-import { ICONS } from "./icons";
 import { tick } from "./tick";
 
 export interface ToastAction {
@@ -16,6 +15,11 @@ export interface ToastMessage {
   duration?: number;
   /** `error` drops the success tick: the message is a failure, not a confirmation. */
   tone?: "ok" | "error";
+  /**
+   * Inner SVG markup on the 24 px grid (the shared icons) shown in place of the success tick, for a message that is
+   * waiting or neutral rather than done. Without it the tick shows for "ok" and nothing for "error".
+   */
+  icon?: string;
   /** Adds a dismiss control: for a message that waits on the person and should not vanish unread. */
   dismissible?: boolean;
   /**
@@ -44,6 +48,11 @@ export function mountToast(parent: HTMLElement): ToastController {
   marker.setAttribute("aria-hidden", "true");
   tick(marker, true);
 
+  const glyph = document.createElement("span");
+  glyph.className = "ui-toast-glyph";
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.hidden = true;
+
   const label = document.createElement("span");
   label.className = "ui-toast-message";
   label.setAttribute("role", "status");
@@ -60,9 +69,9 @@ export function mountToast(parent: HTMLElement): ToastController {
   close.hidden = true;
   close.setAttribute("aria-label", "Dismiss");
   close.dataset.tip = "Dismiss";
-  close.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">${ICONS.close}</svg>`;
+  close.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>`;
 
-  host.append(marker, label, action, close);
+  host.append(marker, glyph, label, action, close);
   parent.append(host);
 
   let hideTimer = 0;
@@ -97,6 +106,9 @@ export function mountToast(parent: HTMLElement): ToastController {
       finish();
       closeHandler = value.onClose;
       close.hidden = !value.dismissible;
+      glyph.hidden = !value.icon;
+      host.dataset.icon = value.icon ? "true" : "false";
+      if (value.icon) glyph.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18">${value.icon}</svg>`;
       if (value.messageNode) label.replaceChildren(value.messageNode); else label.textContent = value.message;
       selectAction = value.action?.onSelect;
       action.textContent = value.action?.label ?? "";
