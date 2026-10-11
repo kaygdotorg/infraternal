@@ -7,6 +7,26 @@
 pub mod frame;
 mod pty;
 pub mod ring;
+
+/// Restore default child signal policy before exec, without changing the parent.
+/// Attach this before any caller-specific pre-exec setup.
+pub fn prepare_child(command: &mut std::process::Command) {
+    pty::prepare_child(command);
+}
+
+/// Apply the same default child signal policy to a POSIX spawn launcher.
+/// # Errors
+/// Returns errors while configuring the spawn attributes, before spawning.
+pub fn prepare_spawn(attributes: &mut nix::spawn::PosixSpawnAttr) -> nix::Result<()> {
+    attributes.set_sigmask(&nix::sys::signal::SigSet::empty())?;
+    attributes.set_sigdefault(&nix::sys::signal::SigSet::all())?;
+    attributes.set_flags(
+        attributes.flags()?
+            | nix::spawn::PosixSpawnFlags::POSIX_SPAWN_SETSIGMASK
+            | nix::spawn::PosixSpawnFlags::POSIX_SPAWN_SETSIGDEF,
+    )
+}
+
 /// Double-fork and setsid startup for hosts without an init scope.
 /// Call only during single-threaded startup, before threads or PTYs exist.
 /// # Errors

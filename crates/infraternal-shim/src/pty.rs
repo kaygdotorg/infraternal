@@ -108,12 +108,10 @@ impl Pty {
         // and existing immutable data, and neither allocates nor takes locks.
         // Descriptor 0 is Command's installed slave; privilege order prevents
         // retaining supplementary root groups after dropping uid.
+        prepare_child(&mut command);
         unsafe {
             command.pre_exec(move || {
                 unistd::setsid().map_err(errno)?;
-                nix::sys::signal::SigSet::empty()
-                    .thread_set_mask()
-                    .map_err(errno)?;
                 if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
                     return Err(io::Error::last_os_error());
                 }
@@ -221,3 +219,40 @@ pub fn detach() -> io::Result<bool> {
         }
     }
 }
+
+/// Install only async-signal-safe syscalls in the post-fork child. Ignored
+/// dispositions survive exec, so reset them as well as the inherited mask.
+pub(super) fn prepare_child(command: &mut Command) {
+    // SAFETY: no captured state, allocation or locks after fork. The reset uses
+    // only sigaction/sigprocmask and stack storage; errors abort this child's exec.
+    unsafe {
+        command.pre_exec(reset_child_signals);
+    }
+}
+
+fn reset_child_signals() -> io::Result<()> {
+    // SAFETY: zero initializes sigaction's storage; sigemptyset initializes its
+    // mask before any syscall consumes it. All pointers refer to live stack data.
+    let mut action: nix::libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = nix::libc::SIG_DFL;
+    unsafe { nix::libc::sigemptyset(&raw mut action.sa_mask) };
+    for signal in 1..=nix::libc::SIGRTMAX() {
+        if signal == nix::libc::SIGKILL || signal == nix::libc::SIGSTOP {
+            continue;
+        }
+        // SAFETY: action is initialized; null oldact requests no prior value.
+        if unsafe { nix::libc::sigaction(signal, &raw const action, std::ptr::null_mut()) } == -1 {
+            let error = io::Error::last_os_error();
+            // libc reserves internal thread signals, which sigaction refuses.
+            if error.raw_os_error() != Some(nix::libc::EINVAL) {
+                return Err(error);
+            }
+        }
+    }
+    // Reset dispositions before unblocking so a pending signal never runs an
+    // inherited runtime handler in the forked address space.
+    nix::sys::signal::SigSet::empty()
+        .thread_set_mask()
+        .map_err(errno)
+}
+
