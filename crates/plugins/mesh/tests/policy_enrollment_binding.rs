@@ -38,7 +38,7 @@ async fn enroll(
             actor,
             "mesh.node.enroll",
             &serde_json::to_vec(
-                &json!({"name":"bound-host","public_key":PublicKey([key;32]),"host_id":host}),
+                &json!({"name":format!("bound-host-{key}"),"public_key":PublicKey([key;32]),"host_id":host}),
             )
             .unwrap(),
             1_800_000_000,
@@ -121,4 +121,52 @@ async fn noncanonical_host_binding_is_refused() {
             MeshApiError::InvalidInput
         );
     }
+}
+
+#[tokio::test]
+async fn refused_enrollment_preserves_removal_and_revision() {
+    let (pool, service) = fixture().await;
+    sqlx::query("INSERT INTO mesh_dataplane_removed(host) VALUES(?)")
+        .bind(HOST)
+        .execute(&pool)
+        .await
+        .unwrap();
+    service
+        .execute(
+            "owner",
+            "mesh.node.enroll",
+            &serde_json::to_vec(&json!({
+                "name":"bound-host-2","public_key":PublicKey([9;32])
+            }))
+            .unwrap(),
+            1_800_000_000,
+        )
+        .await
+        .unwrap();
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        enroll(&service, "owner", HOST, 2).await.unwrap_err(),
+        MeshApiError::Conflict
+    );
+    let after: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after, revision);
+    let removed: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mesh_dataplane_removed WHERE host=?)")
+            .bind(HOST)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(removed);
+    let bindings: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM mesh_nodes WHERE dataplane_host IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(bindings, 0);
 }
