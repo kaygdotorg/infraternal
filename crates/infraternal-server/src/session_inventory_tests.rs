@@ -359,3 +359,60 @@ async fn census_waiting_for_database_does_not_close_a_newly_created_live_session
         "an earlier census closed a newly created live session"
     );
 }
+
+/// Measure the newly introduced reconciliation write path at the D170 server design point.
+#[tokio::test]
+#[ignore = "independent scale diagnostic; run in a weighted scope"]
+async fn inventory_reconciliation_at_200_sessions_and_50_accounts() {
+    let (pool, owner) = database().await;
+    let mut users = vec![owner];
+    for index in 1..50 {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES(?,?,?, ?,0,'unused-test-hash')")
+            .bind(&id)
+            .bind(format!("review-{index}"))
+            .bind(format!("review-{index}"))
+            .bind(format!("Review {index}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        users.push(id);
+    }
+    let mut live = Vec::new();
+    for index in 0..200 {
+        let id = *uuid::Uuid::new_v4().as_bytes();
+        sqlx::query(
+            "INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES(?,?,1,1)",
+        )
+        .bind(id.as_slice())
+        .bind(&users[index % users.len()])
+        .execute(&pool)
+        .await
+        .unwrap();
+        live.push(id);
+    }
+    let mut samples = Vec::new();
+    for _ in 0..100 {
+        let started = std::time::Instant::now();
+        reconcile_embedded_sessions(&pool, &live).await.unwrap();
+        samples.push(started.elapsed().as_micros());
+    }
+    samples.sort_unstable();
+    let started = std::time::Instant::now();
+    reconcile_embedded_sessions(&pool, &[]).await.unwrap();
+    let close_us = started.elapsed().as_micros();
+    let closed: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM terminal_sessions WHERE closed_at IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(closed, 200);
+    println!(
+        "inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us={} p99_us={} close_200_us={close_us} arch={} cores={} load={}",
+        samples[50],
+        samples[98],
+        std::env::consts::ARCH,
+        std::thread::available_parallelism().unwrap(),
+        std::fs::read_to_string("/proc/loadavg").unwrap().trim(),
+    );
+}
