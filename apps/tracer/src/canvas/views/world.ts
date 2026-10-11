@@ -15,7 +15,8 @@
 import { Spring } from "../../../../../packages/ui/src/spring";
 import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
-import { MARGIN, boxOf, contentSize, resolve, snapToGrid, type Box, type Rect } from "../layout/geometry";
+import { columnEls } from "../layout/column-els";
+import { MARGIN, boxOf, contentSize, defaultWidth, isDefaultWidth, resolve, snapToGrid, type Box, type Metrics, type Rect } from "../layout/geometry";
 import type { ColumnModel, ViewId, ViewModel, WindowModel } from "../model/types";
 import { el } from "../dom";
 import { restPx } from "../springs";
@@ -40,6 +41,13 @@ export interface ViewsModule {
   build(view: ViewModel): ViewRec;
   /** Writes a view's size from its content and keeps its label and region in step. */
   geometry(c: ViewRec): void;
+  /**
+   * Gives the columns the person never resized the default width for how many columns the view has: the full phone width
+   * alone, narrower with neighbours so a slice of each peeks in at the screen edge (TASTE). `was` is the metrics the columns'
+   * widths came from (a resize or a setting changed them), the current ones by default. Callers animate the change with a
+   * FLIP around it, as they do for any other reflow.
+   */
+  fitWidths(c: ViewRec, was?: Metrics): void;
   /** After a view changed size: push neighbours aside (never the changed one). */
   settle(fixedId: ViewId, at?: { x: number; y: number }): void;
   paintEmpty(c: ViewRec): void;
@@ -271,7 +279,21 @@ export function createViews(cx: Ctx): ViewsModule {
     return c;
   };
 
+  function fitWidths(c: ViewRec, was: Metrics = state.metrics): void {
+    if (c.view.layout !== "tiled") return;
+    const cols = columnEls(c.colsEl);
+    const target = defaultWidth(state.metrics, cols.length);
+    for (const colEl of cols) {
+      // A column the person resized keeps its width (`user`), and so does one whose width is none of the defaults.
+      if (colEl.dataset.user || !isDefaultWidth(Number(colEl.dataset.w), was) || colEl.dataset.half) continue;
+      if (colEl.dataset.w === String(target)) continue;
+      colEl.dataset.w = String(target);
+      colEl.style.setProperty("--w", `${target}px`);
+    }
+  }
+
   function geometry(c: ViewRec): void {
+    fitWidths(c);
     // Columns are the truth: read them back from the DOM so drags, resizes and moves persist, then make the DOM agree with
     // what was read (a group's grid, its bands and placements; D212).
     const grouped = groupsLoaded();
@@ -337,7 +359,7 @@ export function createViews(cx: Ctx): ViewsModule {
   };
 
   return {
-    contentRect, frameOf, boxes, newCol, build, geometry, settle, paintEmpty, hideSummary,
+    contentRect, frameOf, boxes, newCol, build, geometry, fitWidths, settle, paintEmpty, hideSummary,
     dragging: () => Boolean(clusterDrag),
     replace(id) {
       const old = views.get(id);

@@ -45,7 +45,7 @@ export function createNav(cx: Ctx): Nav {
     viewport.toggleAttribute("data-snap", state.canvasLock);
     for (const l of listeners) l();
   };
-  const stopsFor = (c: ViewRec): Stops => stops(c.view, cx.view.contentRect(c), camera.vw, camera.vh);
+  const stopsFor = (c: ViewRec): Stops => stops(c.view, cx.view.contentRect(c), camera.vw, camera.vh, state.metrics.narrow);
   const nearestStop = (c: ViewRec, x: number): number => nearest(stopsFor(c), x);
   const snapCam = (c: ViewRec, i: number): Cam => {
     const st = stopsFor(c);

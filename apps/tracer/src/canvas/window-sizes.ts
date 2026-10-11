@@ -53,3 +53,19 @@ export function columnWidth(width: number, narrow: boolean, sizes: WindowSizes):
  * the top bar's gutter, so a resting window never touches the screen edge (TASTE: windows keep the gutter on phones).
  */
 export const edgeToEdge = (narrow: boolean, sizes: WindowSizes): boolean => narrow && sizes.phone === "edge";
+
+/**
+ * How much of a neighbouring window shows at the screen edge on a phone (px). Ten pixels is enough to see that there is
+ * more to swipe to (a rounded corner and the hairline read clearly) and little enough that the window keeps its width:
+ * eight looked like a rendering fault, twelve cost a character column on a 375 px phone.
+ */
+export const PEEK = 10;
+
+/**
+ * The width of a column in a strip of several, on a phone: the screen less, on each side, the gap between columns and a
+ * slice of the neighbour (`PEEK`). It never exceeds the lone-window width. Desktop strips need none (columns already fit
+ * with neighbours beside them), so they keep `columnWidth`.
+ */
+export function peekWidth(width: number, narrow: boolean, alone: number, gap: number): number {
+  return narrow ? Math.min(alone, Math.round(width - 2 * (gap + PEEK))) : alone;
+}
