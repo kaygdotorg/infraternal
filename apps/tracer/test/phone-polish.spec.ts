@@ -212,38 +212,6 @@ for (const { w, h } of SIZES) for (const theme of THEMES) {
   });
 }
 
-// ---- the canvas-lock glyph ------------------------------------------------------------------------------------------------
-
-test("canvas lock glyph candidates, drawn on the toolbar's grid", async ({ browser }) => {
-  await mkdir(captures, { recursive: true });
-  const candidates: Array<[string, string]> = [
-    ["now: four squares", '<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/>'],
-    ["A: held window, neighbours peeking", '<rect x="7" y="4.5" width="10" height="15" rx="2.5"/><path d="M3.5 8.5v7M20.5 8.5v7"/>'],
-    ["B: magnet", '<path d="M6 4h3.5v8a2.5 2.5 0 0 0 5 0V4H18v8a6 6 0 0 1-12 0z"/><path d="M6 8h3.5M14.5 8H18"/>'],
-    ["C: frame with centre guides", '<rect x="4.5" y="4.5" width="15" height="15" rx="3"/><path d="M12 4.5v3.5M12 16v3.5M4.5 12H8M16 12h3.5"/>'],
-    ["input lock (not this)", '<rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V7.5a3.5 3.5 0 0 1 6.6-1.6"/>'],
-  ];
-  for (const theme of THEMES) {
-    const context = await browser.newContext({ viewport: { width: 760, height: 240 }, deviceScaleFactor: 3 });
-    const page = await context.newPage();
-    await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&bg=none`);
-    await page.waitForTimeout(1500);
-    await page.evaluate((items) => {
-      const bar = document.createElement("div");
-      bar.style.cssText = "position:fixed;inset:0;z-index:99;display:flex;gap:18px;align-items:center;justify-content:center;background:var(--bg);padding:12px;font:12px var(--font-ui)";
-      for (const [name, path] of items) {
-        const cell = document.createElement("div");
-        cell.style.cssText = "display:grid;justify-items:center;gap:10px;color:var(--fg)";
-        cell.innerHTML = `<div style="display:flex;gap:6px"><span style="display:grid;place-items:center;width:48px;height:48px"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span><span style="display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:var(--accent-soft);color:var(--accent);margin:5px"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span></div><span style="color:var(--fg-3);max-width:120px;text-align:center">${name}</span>`;
-        bar.append(cell);
-      }
-      document.body.append(bar);
-    }, candidates);
-    await page.screenshot({ path: `${captures}/lock-glyph-candidates-${theme}.png` });
-    await context.close();
-  }
-});
-
 // ---- the window pills ----------------------------------------------------------------------------------------------------
 
 async function pillMetrics(page: Page) {
