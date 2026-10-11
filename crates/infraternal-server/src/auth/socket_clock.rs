@@ -9,9 +9,14 @@ use std::{
     time::Duration,
 };
 
+enum ClockMessage {
+    Progress,
+    Release,
+}
+
 /// Keep production deadlines intact while the test controls when they expire.
 pub(super) struct FrozenSocketTime {
-    release: mpsc::Sender<()>,
+    release: mpsc::Sender<ClockMessage>,
     timed_out: Arc<AtomicBool>,
 }
 
@@ -19,7 +24,7 @@ impl FrozenSocketTime {
     // Call from a start_paused test: the runtime's timer epoch and clock then
     // share an exact origin, without sub-millisecond rounding at boundaries.
     pub(super) async fn new() -> Self {
-        let (release, wait) = mpsc::channel();
+        let (release, wait) = mpsc::channel::<ClockMessage>();
         let (started, ready) = tokio::sync::oneshot::channel();
         let timed_out = Arc::new(AtomicBool::new(false));
         let watchdog = timed_out.clone();
@@ -31,12 +36,24 @@ impl FrozenSocketTime {
             // Only a hang bound: on expiry automatic advancement resumes and
             // the test's ordinary timeouts fail. No assertion uses this duration.
             watchdog.store(
-                wait.recv_timeout(Duration::from_secs(90)).is_err(),
+                loop {
+                    match wait.recv_timeout(Duration::from_secs(90)) {
+                        Ok(ClockMessage::Release) => break false,
+                        Ok(ClockMessage::Progress) => {}
+                        Err(_) => break true,
+                    }
+                },
                 Ordering::Relaxed,
             );
         });
         ready.await.unwrap();
         Self { release, timed_out }
+    }
+
+    /// Renew only the hang bound after observed real I/O progress. Runtime
+    /// deadlines stay stationary; each stalled operation still has 90 seconds.
+    pub(super) fn progress(&self) {
+        self.release.send(ClockMessage::Progress).unwrap();
     }
 
     /// Synchronize a SQLite observation with paused runtime time, without slack.
@@ -59,7 +76,7 @@ impl FrozenSocketTime {
 impl Drop for FrozenSocketTime {
     fn drop(&mut self) {
         tokio::time::resume();
-        let _ = self.release.send(());
+        let _ = self.release.send(ClockMessage::Release);
         if !std::thread::panicking() {
             assert!(
                 !self.timed_out.load(Ordering::Relaxed),
