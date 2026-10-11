@@ -17,7 +17,7 @@ use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "infraternal")]
+#[command(name = "infraternal", version = build_version())]
 struct Cli {
     /// Print machine-readable result records.
     #[arg(long, global = true)]
@@ -180,6 +180,16 @@ fn run_skill(action: &str, json: bool) -> ExitCode {
             1,
         )
     }
+}
+
+/// Report the signed identity grammar instead of Cargo's development package version [226].
+fn build_version() -> String {
+    format!(
+        "{} ({})",
+        infraternal_server::VERSION,
+        infraternal_server::release_version::channel(infraternal_server::VERSION)
+            .unwrap_or("unknown")
+    )
 }
 
 fn main() -> ExitCode {

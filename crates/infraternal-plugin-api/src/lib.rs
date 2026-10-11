@@ -1,6 +1,11 @@
 //! Shares one descriptor between server socket work and node component lifecycle [15,16,28,198,201].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod channel;
+pub mod release_version;
+/// One pipeline-stamped identity shared by reported versions and lockstep downloads [225,226].
+pub const VERSION: &str = env!("INFRATERNAL_VERSION");
+/// Static header avoids a per-download formatting allocation [226].
+pub const RELEASE_USER_AGENT: &str = concat!("infraternal/", env!("INFRATERNAL_VERSION"));
 pub mod routing;
 
 use bytes::Bytes;

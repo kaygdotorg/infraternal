@@ -1,6 +1,8 @@
 //! Owns trusted identity, roles, audit, state, API, and routing; it relays host work through infraternal agents [8][9][10][19].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+/// Shared compiled release identity; channel policy remains in the release plugin [225,226].
+pub use infraternal_plugin_api::{VERSION, release_version};
 pub mod auth;
 #[cfg(feature = "remote")]
 pub mod ca;

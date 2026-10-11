@@ -31,13 +31,13 @@ impl ReleasePayload {
         // Restart cleanup precedes the first request. An unsafe/unavailable cache
         // remains a plain acquisition failure when resolution is attempted.
         if private_directory(&cache).is_ok() {
-            let _ = cleanup_downloads(&cache.join(env!("CARGO_PKG_VERSION")));
+            let _ = cleanup_downloads(&cache.join(infraternal_plugin_api::VERSION));
         }
         Arc::new(Self {
             executable,
             local,
             cache,
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: infraternal_plugin_api::VERSION.into(),
             development: env!("INFRATERNAL_RELEASE_BUILD") != "1",
             origin: "https://builds.infraternal.com".into(),
             lock: Mutex::new(()),

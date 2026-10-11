@@ -104,10 +104,7 @@ async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
             "host",
             &url[url::Position::BeforeHost..url::Position::AfterPort],
         )
-        .header(
-            "user-agent",
-            concat!("infraternal/", env!("CARGO_PKG_VERSION")),
-        )
+        .header("user-agent", infraternal_plugin_api::RELEASE_USER_AGENT)
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .map_err(|_| DownloadError::Http)?;
     let response = sender
