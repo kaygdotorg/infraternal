@@ -160,13 +160,25 @@ whose shim is live. An optional `ended_sessions` array carries `{session_id,
 status}` for at most the 128 most recently closed local rows with a saved exit
 status. This bounded sidecar lets an already-open window stop retries as soon
 as its row is retired while retaining the saved status; ended IDs never appear
-in `session_ids`. The browser resubscribes after each Welcome and does not
+in `session_ids`. Superseded unviewed status records are released on the device;
+windows already opened there retain their ended state. The browser resubscribes after each Welcome and does not
 expose cached local rows until the first snapshot arrives. Before a
 complete census arrives, and whenever the agent link is lost, the server pushes
 `{"topic":"terminal.sessions","type":"terminal.sessions.unavailable"}`.
 This hides cached rows while the inventory is unverifiable and does not mark
 them ended or close their database rows. After the agent reconnects, its next
 complete snapshot restores surviving shims and reconciles stale rows.
+
+Census Events and open Results share one ordered control lane on leg B. The
+census containing a newly registered session must precede its successful open
+Result; older censuses cannot overtake that Result. Reconciliation acquires the
+database writer before copying the latest census, and leg-A inventory reads
+acquire their database connection before copying it. This keeps a census that
+waited for storage from retiring a row persisted after it was captured. A new
+local browser record waits for its first positive census before absence can
+retire it; cached rows receive no such protection. An explicit saved exit or
+final Close remains conclusive even before that positive census, and no later
+census may revive a finally closed ID.
 
 Bodies of control frames are JSON. They are not on the hot path, and JSON
 lets the HTTP API, CLI, MCP and the wire share one schema per action. Terminal
