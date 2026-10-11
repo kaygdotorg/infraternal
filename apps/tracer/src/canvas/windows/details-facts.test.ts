@@ -29,6 +29,7 @@ test("host facts become plain-language details rows", () => {
       },
     },
     connection: { state: "connected" },
+    extended: true,
   });
   const rows = new Map(facts.sections[0]!.rows.map(({ key, value }) => [key, value]));
 
@@ -41,7 +42,7 @@ test("host facts become plain-language details rows", () => {
   expect(rows.get("Uptime")).toBe("1 day, 1 hour");
   expect(rows.get("Infraternal agent")).toBe("Embedded · user");
   expect(rows.get("Engines")).toBe("Docker");
-  expect(new Map(facts.sections.find((section) => section.id === "more")!.rows.map(({ key, value }) => [key, value])).get("Virtualization")).toBe("KVM");
+  expect(rows.get("Virtualization")).toBe("KVM");
 });
 
 test("unknown optional host facts stay absent instead of appearing as placeholders", () => {
@@ -61,6 +62,7 @@ test("unknown optional host facts stay absent instead of appearing as placeholde
       },
     },
     connection: { state: "connected" },
+    extended: true,
   });
   const rows = new Map(facts.sections[0]!.rows.map(({ key, value }) => [key, value]));
   expect(rows.get("System")).toBe("Linux");
@@ -71,27 +73,35 @@ test("unknown optional host facts stay absent instead of appearing as placeholde
   expect(rows.get("Engines")).toBe("None detected");
 });
 
-// D126 and #144 keep secondary identity fields behind the explicit more control.
-test("default Host rows keep secondary facts behind more", () => {
-  const facts = detailsFacts({
-    host: {
-      name: "build-01",
-      facts: {
-        os: "Linux", version: "", kernel: "6.12", architecture: "x86_64",
-        logicalCpus: 8, mode: "embedded", executionUid: 1000, engines: [],
-        init: "systemd", virtualization: "KVM", shell: "/bin/zsh", locale: "en_US.UTF-8",
-      },
+// "No More tab": the extra facts live in titled sections of the machine tab, shown only with extended info.
+const FULL = {
+  host: {
+    name: "build-01",
+    user: "kayg",
+    address: "10.0.0.7",
+    facts: {
+      os: "Linux", version: "", kernel: "6.12", architecture: "x86_64",
+      logicalCpus: 8, uptimeSeconds: 7_200, mode: "embedded" as const, executionUid: 1000, engines: [],
+      init: "systemd", virtualization: "KVM", shell: "/bin/zsh", locale: "en_US.UTF-8",
     },
-    connection: { state: "connected" },
-  });
-  const visibleKeys = facts.sections[0]!.rows.filter((row) => row.value.trim() !== "").map((row) => row.key);
-  expect(visibleKeys).not.toContain("Init");
-  expect(visibleKeys).not.toContain("Virtualization");
-  expect(visibleKeys).not.toContain("Shell");
-  expect(visibleKeys).not.toContain("Locale");
-  const more = facts.sections.find((section) => section.id === "more");
-  expect(more?.label).toBe("More");
-  expect(more?.rows.filter((row) => row.value.trim() !== "").map((row) => row.key)).toEqual([
-    "Init", "Virtualization", "Shell", "Locale",
-  ]);
+  },
+  connection: { state: "connected" as const },
+};
+
+test("extended info off: the machine tab shows only the essentials, ungrouped, and there is no More section", () => {
+  const facts = detailsFacts(FULL);
+  expect(facts.sections.map((section) => section.id)).toEqual(["host", "connection", "session"]);
+  const rows = facts.sections[0]!.rows.filter((row) => row.value.trim() !== "");
+  expect(rows.map((row) => row.key)).toEqual(["Name", "System", "Uptime", "Login", "Address"]);
+  expect(rows.some((row) => row.group)).toBe(false);
+});
+
+test("extended info on: every fact sits under System, Resources or Access", () => {
+  const rows = detailsFacts({ ...FULL, extended: true }).sections[0]!.rows.filter((row) => row.value.trim() !== "");
+  const groups = new Map<string, string[]>();
+  for (const row of rows) groups.set(row.group!, [...(groups.get(row.group!) ?? []), row.key]);
+  expect([...groups.keys()]).toEqual(["System", "Resources", "Access"]);
+  expect(groups.get("System")).toEqual(["Name", "System", "Kernel", "Architecture", "Init", "Virtualization"]);
+  expect(groups.get("Resources")).toEqual(["CPU", "Uptime"]);
+  expect(groups.get("Access")).toEqual(["Infraternal agent", "Engines", "Login", "Address", "Shell", "Locale"]);
 });

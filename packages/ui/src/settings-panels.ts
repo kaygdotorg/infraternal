@@ -12,6 +12,7 @@
  */
 import { createCapsuleTabs } from "./capsule-tabs";
 import { createKeyValueList } from "./kv-list";
+import { enhanceSwitch } from "./switch";
 import { mountConfirmTip } from "./tooltip";
 import { LEVEL_NAMES } from "./themes";
 
@@ -23,6 +24,20 @@ export interface AppearanceApi {
   /** Runs a palette action (`theme:ink`, `font:geist-mono`, `card:2`, `bg:mesh`). */
   act(action: string): void;
   /** Called after any appearance change; returns a remover. */
+  onChange(listener: () => void): () => void;
+  /** On/off preferences, each under its own title after the choices. */
+  switches?: SwitchPref[];
+}
+
+/** One on/off preference: a titled row with a label, a quiet subtitle and a switch. */
+export interface SwitchPref {
+  id: string;
+  title: string;
+  label: string;
+  hint?: string;
+  get(): boolean;
+  set(on: boolean): void;
+  /** Called after the value changes (here or elsewhere); returns a remover. */
   onChange(listener: () => void): () => void;
 }
 
@@ -65,6 +80,26 @@ function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: 
   return block;
 }
 
+/** A titled row with a switch for an on/off preference. */
+function switchBlock(pref: SwitchPref): { block: HTMLElement; sync(): void; dispose(): void } {
+  const block = document.createElement("section");
+  block.dataset.kind = pref.id;
+  block.append(heading(pref.title));
+  const row = document.createElement("label");
+  row.className = "ui-sp-row ui-sp-switch";
+  row.innerHTML = '<span class="ui-sp-label"></span><span class="ui-sp-hint"></span><input type="checkbox">';
+  (row.querySelector(".ui-sp-label") as HTMLElement).textContent = pref.label;
+  (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = pref.hint ?? "";
+  const input = row.querySelector<HTMLInputElement>("input")!;
+  input.setAttribute("aria-label", pref.label);
+  const toggle = enhanceSwitch(input);
+  input.addEventListener("change", () => pref.set(input.checked));
+  block.append(row);
+  const off = pref.onChange(() => toggle.set(pref.get()));
+  toggle.set(pref.get());
+  return { block, sync: () => toggle.set(pref.get()), dispose: () => { off(); toggle.dispose(); } };
+}
+
 /** Ticks the row of `current` in a choice block. */
 function paintChoice(block: HTMLElement, current: string): void {
   for (const row of block.querySelectorAll<HTMLElement>(".ui-sp-row")) {
@@ -96,7 +131,8 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
   windows.append(heading("Window transparency"));
   const windowTabs = createCapsuleTabs(levels, String(api.state().windows), (id) => api.act(`windows:${id}`), "Window transparency");
   windows.append(windowTabs.root);
-  root.append(theme, font, background, card, windows);
+  const switches = (api.switches ?? []).map(switchBlock);
+  root.append(theme, font, background, card, windows, ...switches.map((s) => s.block));
 
   const paint = (): void => {
     const s = api.state();
@@ -107,7 +143,7 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
   };
   paint();
   const off = api.onChange(paint);
-  return () => { off(); bgTabs.dispose(); cardTabs.dispose(); windowTabs.dispose(); root.remove(); };
+  return () => { off(); for (const s of switches) s.dispose(); bgTabs.dispose(); cardTabs.dispose(); windowTabs.dispose(); root.remove(); };
 }
 
 export interface WindowSizesApi {

@@ -15,6 +15,7 @@ import { renderAppearance, renderWindowSizes, type AppearanceApi, type WindowSiz
 import { SIZE_EVENT, readSizes, writeSize, type DesktopSize, type PhoneSize } from "../window-sizes";
 import type { Ctx } from "../context";
 import { el } from "../dom";
+import { EXTENDED_INFO_EVENT, readExtendedInfo, writeExtendedInfo } from "../windows/extended-info";
 
 /** Account- and instance-level panels. Each returns what to run when its window goes away. */
 export interface SettingsSource {
@@ -30,6 +31,11 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
     fonts: FONTS.map((f) => ({ id: f.id, label: f.label, hint: f.hint })),
     state: () => core.appearance(),
     act: (action) => core.act(action),
+    switches: [{
+      id: "extended-info", title: "Machine details", label: "Extended machine info",
+      get: readExtendedInfo, set: writeExtendedInfo,
+      onChange(listener) { window.addEventListener(EXTENDED_INFO_EVENT, listener); return () => window.removeEventListener(EXTENDED_INFO_EVENT, listener); },
+    }],
     onChange(listener) { window.addEventListener("tracer:appearance", listener); return () => window.removeEventListener("tracer:appearance", listener); },
   };
   // Plain names; the technical detail (the percentage) is in each option's subtitle (the plain-names rule).
