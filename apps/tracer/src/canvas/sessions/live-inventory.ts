@@ -35,6 +35,8 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const records = new Map<string, SessionRecord>();
   const listeners = new Set<() => void>();
   const owners = new Map<string, string>();
+  // Only windows opened on this device need status after its sidecar is superseded.
+  const opened = new Set<string>();
   const verifiedHosts = new Set<string>();
   let top = 0;
   const emit = (): void => { for (const l of listeners) l(); };
@@ -60,6 +62,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
     attach(host, id, hint) {
       if (owners.has(id) && !only(host, id)) return;
       owners.set(id, host);
+      opened.add(id);
       let s = records.get(id);
       // Selecting a remembered session is not proof that the host can attach it.
       // The final gone state survives another window's selection (#158).
@@ -109,6 +112,12 @@ export function createLiveInventory(options: { accountId: string; host: string }
       const live = new Set(ids);
       const statuses = new Map(ended.map(({ id, status }) => [id, status]));
       const retired = new Map<string, { id: string; status?: number }>();
+      for (const record of records.values()) {
+        if (only(host, record.id) && record.gone && !opened.has(record.id) && !statuses.has(record.id)) {
+          records.delete(record.id);
+          owners.delete(record.id);
+        }
+      }
       verifiedHosts.add(host);
       for (const record of records.values()) {
         if (only(host, record.id) && !live.has(record.id) && !record.gone) {

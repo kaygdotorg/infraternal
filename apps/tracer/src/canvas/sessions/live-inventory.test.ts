@@ -81,3 +81,32 @@ test("inventory remembers a remote session and refuses a cross-host attach", () 
     else Reflect.deleteProperty(globalThis, "window");
   }
 });
+
+test("superseded status snapshots release records for sessions this device never opened", () => {
+  const inventory = createLiveInventory({ accountId: "status-cache-review", host: "server" });
+  const statuses = (offset: number) => Array.from({ length: 128 }, (_, index) => ({
+    id: `00000000-0000-4000-8000-${(offset + index + 1).toString(16).padStart(12, "0")}`,
+    status: 7,
+  }));
+  const earlier = statuses(0), current = statuses(128);
+  // Neither snapshot describes a window ever opened here. Replacing a bounded
+  // sidecar must not accumulate inaccessible history in the device inventory.
+  inventory.reconcile("server", [], earlier);
+  inventory.reconcile("server", [], current);
+  const retained = [...earlier, ...current].filter(({ id }) => inventory.get("server", id));
+  expect(retained.length).toBeLessThanOrEqual(128);
+  expect(inventory.get("server", current[0]!.id)?.exit?.code).toBe(7);
+  inventory.dispose();
+});
+
+
+test("superseding a sidecar preserves status for a window opened on this device", () => {
+  const inventory = createLiveInventory({ accountId: "opened-retention", host: "server" });
+  inventory.attach("server", "opened");
+  inventory.reconcile("server", [], [{ id: "opened", status: 7 }]);
+  inventory.reconcile("server", [], [{ id: "unviewed", status: 9 }]);
+  expect(inventory.get("server", "opened")?.exit?.code).toBe(7);
+  expect(inventory.get("server", "opened")?.gone).toBe(true);
+  inventory.dispose();
+});
+
