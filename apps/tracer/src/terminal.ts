@@ -138,6 +138,8 @@ export interface TerminalConfig {
   hostId?: string;
   /** Reattach this tab's owned session using a new writer after a page reload. */
   initialSessionId?: string;
+  /** Recheck liveness before opening the stream so a snapshot racing font load cannot attach a retired ID. */
+  getEndedSession?: () => { status?: number } | undefined;
   /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
   scrollbackLimit?: number;
   /** Enables the explicit `?predict=1` opt-in; the production default remains off. */
@@ -257,6 +259,8 @@ export class TerminalClient {
   private exitReported = false;
   /** The server's final answer that the session is gone: no attach is ever sent for it again. */
   private sessionGone = false;
+  /** A later full census can add a saved exit code after this stream is already final. */
+  private sessionGoneStatus: number | undefined;
   /** Armed only after a transient shared-stream Close; live idle terminals have no retry timer. */
   private streamRetryTimer = 0;
   private streamRetryAttempt = 0;
@@ -342,6 +346,11 @@ export class TerminalClient {
       // session authorization validate this nonsecret convenience identifier.
       this.sessionId = uuidBytes(known);
     }
+    const ended = config.getEndedSession?.();
+    if (ended) {
+      this.sessionGone = true;
+      this.sessionGoneStatus = ended.status;
+    }
     this.scheduleFit();
     this.ownsConnection = config.connection === undefined;
     this.conn = config.connection ?? new MuxConnection({
@@ -355,6 +364,10 @@ export class TerminalClient {
       config.onRoundTrip?.(ms);
     });
     this.streamId = this.conn.openStream(this.streamHandler());
+    if (ended) {
+      if (config.hooks?.onSessionGone) config.hooks.onSessionGone(ended.status);
+      else this.setStatus("This session has ended. Open a new shell to continue.");
+    }
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
     config.host.addEventListener("focusin", () => { if (!this.openingFocus) this.setTypingReady(true); });
     config.host.addEventListener("focusout", (event) => {
@@ -906,6 +919,11 @@ export class TerminalClient {
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
+  /** A full host inventory retired this session; stop stream retries and retain any saved exit status. */
+  markSessionGone(status?: number): void {
+    this.endSession(status);
+  }
+
   /** The renderer's canvas, for a caller that keeps a picture of the last screen (the switch's ghost). */
   get canvas(): HTMLCanvasElement | undefined {
     return this.config.host.querySelector<HTMLCanvasElement>("canvas:not(.cl-ghost)") ?? undefined;
@@ -944,6 +962,7 @@ export class TerminalClient {
     this.pendingExit = undefined;
     this.exitReported = false;
     this.sessionGone = false;
+    this.sessionGoneStatus = undefined;
     this.snapshotWriteInFlight = false;
     this.outputWriteInFlight = false;
     this.sessionId = sessionId;
@@ -959,16 +978,23 @@ export class TerminalClient {
    * The server's final answer: the host no longer has this session. Stop for good (no reattach on this or any later
    * socket), release the stream, and let the window say so. Typing goes nowhere until a new session starts.
    */
-  private endSession(): void {
-    if (this.sessionGone || this.closed) return;
+  private endSession(status?: number): void {
+    if (this.sessionGone || this.closed) {
+      if (this.sessionGone && status !== undefined && this.sessionGoneStatus !== status) {
+        this.sessionGoneStatus = status;
+        this.config.hooks?.onSessionGone?.(status);
+      }
+      return;
+    }
     this.sessionGone = true;
+    this.sessionGoneStatus = this.pendingExit?.status ?? status;
     this.cancelStreamRetry();
     if (this.attached) this.conn.streamAttached(false);
     this.attached = false;
     this.attachRequested = false;
     // The server keeps absorbing this stream's in-flight frames until this Close (contracts/wire.md §4).
     this.conn.closeStream(this.streamId);
-    if (this.config.hooks?.onSessionGone) { this.setStatus(""); this.config.hooks.onSessionGone(this.pendingExit?.status); }
+    if (this.config.hooks?.onSessionGone) { this.setStatus(""); this.config.hooks.onSessionGone(this.sessionGoneStatus); }
     else this.setStatus("This session has ended. Open a new shell to continue.");
   }
 
