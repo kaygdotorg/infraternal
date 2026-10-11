@@ -9,6 +9,7 @@ import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform"
 import { bindTerminalFont, TERMINAL_FONT_SHORTCUTS } from "./terminal-font-shortcuts";
 import { bindShortcut, bindingLabel, keyCaps, PALETTE_KEYS, paletteAlternate, paletteCombo, platformCombo, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
+import { createInbox, type InboxController } from "../../../packages/ui/src/inbox";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
 import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
 import { toolbarSection } from "../../../packages/ui/src/toolbar-settings";
@@ -90,6 +91,8 @@ export interface CoreScreen {
   /** Replaces the host/session tree (the canvas lists its windows here); returns the new tree. */
   /** The one shared toast of the screen: every transient message (recovery, connection, flows) uses it. */
   readonly toast: ToastController;
+  /** The sidebar's inbox (D234): what waits on the person. Sources publish items; the card and the toggle's dot follow. */
+  readonly inbox: InboxController;
   /**
    * The key tray has two rows, one visible at a time: the keyboard row (always) and a canvas row
    * (when a canvas gives it items). Returns a controller to update item state and remove the row.
@@ -297,6 +300,15 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     })
     : undefined;
   if (sidebarFoot) { sidebar.append(sidebarFoot.root); sidebar.dataset.foot = ""; }
+  // The card sits above the footer. While the sidebar is closed the toggle carries a dot instead (style.css), and its
+  // name says why, so the pending item is never out of sight and never only a colour.
+  const inbox = createInbox({
+    parent: sidebar, before: sidebarFoot?.root ?? null,
+    onCount: (count) => {
+      sidebarToggle.toggleAttribute("data-pending", count > 0);
+      sidebarToggle.setAttribute("aria-label", `${sidebar.hidden ? "Show hosts" : "Hide hosts"}${count > 0 ? `, ${count} waiting for you` : ""}`);
+    },
+  });
   const capsule = get<HTMLButtonElement>("#capsule");
   const palette = get<HTMLElement>("#palette");
   const scrim = get<HTMLElement>("#scrim");
@@ -657,7 +669,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     else if (reducedMotion.matches) sidebarToggle.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
     sidebar.hidden = !open;
     sidebarToggle.setAttribute("aria-expanded", String(open));
-    sidebarToggle.setAttribute("aria-label", open ? "Hide hosts" : "Show hosts");
+    sidebarToggle.setAttribute("aria-label", `${open ? "Hide hosts" : "Show hosts"}${inbox.count() > 0 ? `, ${inbox.count()} waiting for you` : ""}`);
     sidebar.classList.toggle("instant", instant);
     if (instant) window.setTimeout(() => sidebar.classList.remove("instant"), 0);
   };
@@ -1452,6 +1464,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     showPalette(only) { setPalette(true, "pointer", only); },
     toast,
+    inbox,
     act(action) { runAction(action, "pointer"); },
     appearance: () => ({ theme: currentThemeId, font: committedFont.id, card: cardLevel, windows: windowLevel, background }),
     settingsPanels: { get toolbar() { return toolbarSettings; }, shortcuts: shortcutsPanel, about: aboutPanel },
@@ -1545,6 +1558,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     dispose() {
       toast.dispose();
+      inbox.dispose();
       overlayWatch.disconnect();
       cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
