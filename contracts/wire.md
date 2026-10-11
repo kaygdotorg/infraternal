@@ -145,6 +145,29 @@ stream as `terminal.exited` with `status`, `final_seq` and optional `retired: tr
 the viewer presents it in its ended state. Every other stream close is transient and may be retried
 (#158).
 
+The embedded infraternal agent sends a complete `Event` on control stream 0
+with `sub_id: 0` and `{"type":"terminal.sessions.snapshot","session_ids":[UUID...]}`
+after startup discovery and whenever its live-shim set changes. It refreshes
+process identities every 400 ms so an unlinked rendezvous or a killed shim is
+removed even when no terminal stream was attached. The server reconciles open
+local `terminal_sessions` rows against each snapshot and closes rows whose shim
+is absent; it never signals a shim to exit. On leg A, an authenticated browser
+may `Subscribe` with `{"topic":"terminal.sessions"}`. The server sends an
+account-filtered full snapshot as an `Event` on control stream 0 using that
+subscription's `sub_id`, then pushes a new snapshot after every reconciliation
+or persisted session change. `session_ids` contains only open persisted rows
+whose shim is live. An optional `ended_sessions` array carries `{session_id,
+status}` for at most the 128 most recently closed local rows with a saved exit
+status. This bounded sidecar lets an already-open window stop retries as soon
+as its row is retired while retaining the saved status; ended IDs never appear
+in `session_ids`. The browser resubscribes after each Welcome and does not
+expose cached local rows until the first snapshot arrives. Before a
+complete census arrives, and whenever the agent link is lost, the server pushes
+`{"topic":"terminal.sessions","type":"terminal.sessions.unavailable"}`.
+This hides cached rows while the inventory is unverifiable and does not mark
+them ended or close their database rows. After the agent reconnects, its next
+complete snapshot restores surviving shims and reconciles stale rows.
+
 Bodies of control frames are JSON. They are not on the hot path, and JSON
 lets the HTTP API, CLI, MCP and the wire share one schema per action. Terminal
 frames are binary, because they carry each keystroke and each output chunk.
