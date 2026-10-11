@@ -14,11 +14,11 @@ impl Live {
     fn alive(&self) -> bool {
         // A proc inode can change on cache eviction. The kernel birth clock is
         // stable across that change; a new PID incarnation cannot borrow the
-        // recorded lifetime. Executable presence also excludes zombies. These
-        // checks run on control reads and retirement events, with no idle timer.
+        // recorded lifetime. process_birth_ticks excludes zombies; /proc/PID/exe
+        // is unavailable for same-UID children after startup disables dumpability.
+        // These checks run on control reads and retirement events, with no idle timer.
         self.path.exists()
             && birth(&self.process).is_ok_and(|value| value == Some(self.birth_ticks))
-            && self.process.join("exe").exists()
     }
 }
 
