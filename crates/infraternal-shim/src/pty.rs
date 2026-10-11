@@ -256,3 +256,104 @@ fn reset_child_signals() -> io::Result<()> {
         .map_err(errno)
 }
 
+#[cfg(test)]
+mod child_signal_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn child_reset_restores_ignored_dispositions_and_leaves_parent_mask() {
+        const CASE: &str = "pty::child_signal_tests::child_reset_restores_ignored_dispositions_and_leaves_parent_mask";
+        const FIXTURE: &str = "INFRATERNAL_CHILD_SIGNAL_FIXTURE";
+        if std::env::var_os(FIXTURE).is_none() {
+            assert!(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", CASE])
+                    .env(FIXTURE, "1")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            return;
+        }
+        // Change signal policy only in this disposable fixture process.
+        let signal = nix::sys::signal::Signal::SIGHUP;
+        let mut blocked = nix::sys::signal::SigSet::empty();
+        blocked.add(signal);
+        blocked.thread_block().unwrap();
+        let ignored = nix::sys::signal::SigAction::new(
+            nix::sys::signal::SigHandler::SigIgn,
+            nix::sys::signal::SaFlags::empty(),
+            nix::sys::signal::SigSet::empty(),
+        );
+        // SAFETY: fixture-local disposition with no handler pointer.
+        unsafe {
+            nix::sys::signal::sigaction(signal, &ignored).unwrap();
+        }
+        let before = nix::sys::signal::SigSet::thread_get_mask().unwrap();
+        let mut child = Command::new("/bin/sh");
+        child.args(["-c", "kill -HUP $$; exit 42"]);
+        prepare_child(&mut child);
+        let status = child.status().unwrap();
+        assert_eq!(status.signal(), Some(nix::libc::SIGHUP));
+
+        let mut attributes = nix::spawn::PosixSpawnAttr::init().unwrap();
+        crate::prepare_spawn(&mut attributes).unwrap();
+        let actions = nix::spawn::PosixSpawnFileActions::init().unwrap();
+        let shell = CString::new("/bin/sh").unwrap();
+        let flag = CString::new("-c").unwrap();
+        let script = CString::new("kill -HUP $$; exit 42").unwrap();
+        let environment: [&std::ffi::CStr; 0] = [];
+        let pid = nix::spawn::posix_spawn(
+            shell.as_c_str(),
+            &actions,
+            &attributes,
+            &[shell.as_c_str(), flag.as_c_str(), script.as_c_str()],
+            &environment,
+        )
+        .unwrap();
+        assert_eq!(
+            nix::sys::wait::waitpid(pid, None).unwrap(),
+            nix::sys::wait::WaitStatus::Signaled(pid, signal, false),
+        );
+        assert_eq!(nix::sys::signal::SigSet::thread_get_mask().unwrap(), before);
+    }
+    #[test]
+    #[ignore = "child spawn diagnostic; run locally in a weighted scope without own build overlap"]
+    fn child_signal_reset_spawn_cost_at_128_children() {
+        let count = 128;
+        let mut baseline = Vec::new();
+        let mut reset = Vec::new();
+        for round in 0..7 {
+            for enabled in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let start = std::time::Instant::now();
+                for _ in 0..count {
+                    let mut command = Command::new("/bin/true");
+                    if enabled {
+                        prepare_child(&mut command);
+                    }
+                    assert!(command.status().unwrap().success());
+                }
+                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                if enabled {
+                    reset.push(elapsed);
+                } else {
+                    baseline.push(elapsed);
+                }
+            }
+        }
+        baseline.sort_by(f64::total_cmp);
+        reset.sort_by(f64::total_cmp);
+        println!(
+            "METRIC name=child_signal_reset_spawn n={count} rounds=7 baseline_batch_p50_ms={:.3} reset_batch_p50_ms={:.3} delta_per_child_us={:.3} delta_at_128_children_ms={:.3} idle_wakeups=0 retained_bytes_per_child=0",
+            baseline[3],
+            reset[3],
+            (reset[3] - baseline[3]) * 1000.0 / f64::from(count),
+            reset[3] - baseline[3]
+        );
+    }
+}
