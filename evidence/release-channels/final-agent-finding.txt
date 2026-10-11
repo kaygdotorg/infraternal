@@ -1,0 +1,2 @@
+Final fullfast stopped after agent_review: repeated_tiny_credit_pauses_preserve_shell_progress and stalled_terminal_never_delays_control_or_sibling_dispatch both refused terminal open before their timing assertions (scripts/agent_fixture.py:235, terminal open refused). No release source or assertions changed; preserving partial final-fast as final-agent-partial-fast.log. Detached dev comparison follows at currentload 47.71 32.74 29.88 49/3225 2186795
+; same test/fixture source hashes will be archived. All non-size rows must pass on a full retry; no waiver claimed.

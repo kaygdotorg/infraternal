@@ -1,0 +1,64 @@
+Running as unit: run-p1771661-i47863122.scope; invocation ID: b14cfce38eae4f259e4cf49a5359ea23
+    Finished `release` profile [optimized] target(s) in 0.58s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-channels/target/release/deps/infraternal_server-b0f5c417ce68f38f)
+
+running 1 test
+test release_latest::tests::bench_latest_fifty_callers ... METRIC latest callers=50 workers=4 manifest=near64KiB loopback=true verified_requests=200 p50=170814us p99=215482us batch=218710us rss_before=12192KiB rss_after=15852KiB hwm_before=12192KiB hwm_after=16648KiB peak_delta_per_caller=91258B lookup_handle=64B machine=infraternal-dev cores=8 load=29.18 24.82 22.59 24/3197 1772003
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.32s
+
+     Running tests/catalog_startup.rs (/home/kayg/.cache/codex-scratch/release-channels/target/release/deps/catalog_startup-a9e6f625cd44246b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/enrollment.rs (/home/kayg/.cache/codex-scratch/release-channels/target/release/deps/enrollment-fad83ca4eeba8f66)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/release-channels/target/release/deps/mesh_parser-5ec3108bbab97dea)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/release-channels/target/release/deps/mesh_review_plugin-964612d3c5b05317)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/release-channels/target/release/deps/mesh_review_policy-4b4de475d585c1b3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/release-channels/target/release/deps/mesh_review_role_scope-f551ccd6e38aa653)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/release-channels/target/release/deps/plugin_host_review-f07cc9e8b8e6afad)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/release-channels/target/release/deps/plugin_settings_review-8f92a96182e435f0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/remote_plugin_contract.rs (/home/kayg/.cache/codex-scratch/release-channels/target/release/deps/remote_plugin_contract-5f30a3d30142d7ac)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

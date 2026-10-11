@@ -1,0 +1,3 @@
+Sanitizer harness registry dependencies checked against repository Cargo.lock by name/version/source/checksum.
+registry_packages= 176 mismatches= 0
+All registry versions/checksums match. Server feature is disabled; actual repository version/pointer/harness sources are fuzzed.

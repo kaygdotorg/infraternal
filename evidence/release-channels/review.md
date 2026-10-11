@@ -1,0 +1,12 @@
+<!-- Independent read-only correctness and lifecycle review for release channels [198,224,225,226,#157]. -->
+# Read-only review
+
+The reviewer read the contracts, actual diff and draft plugin/server/CLI sources without builds or mutations.
+
+P2 finding: spawn_blocking verification could outlive a cancelled plugin task and race staging cleanup. A deterministic 250 ms verifier fixture failed before correction (cancellation-red.log) and passed afterwards (cancellation-green.log). Verification now stays inside the owning future, bounded to a 64 KiB manifest, 1 KiB signature and 128-byte VERSION; disable joins the future before returning. The reviewer confirmed this resolves the finding, preferring it to a blocking join-on-drop guard, conditional on the queued latency measurements.
+
+No further actionable correctness/security issue was found in stable defaults, explicit confirmation, commit-boundary authority checks, exact descriptor VERSION verification or draft CLI/server integration. Source/build/measurement evidence remains separately required; this review is not a gate receipt.
+
+Actual integration recheck: at server-adapter head d40108eae50fe5dd3383dd3065e43d3484b39a41, with the final CLI adapter present in the worktree, the reviewer found no new actionable security, correctness or lifecycle findings against 794ef45f. Confirmed stable defaults independent of binary version, explicit edge acknowledgement, transactional authority checks, signed VERSION equality through the same descriptor, cancellation ownership, feature-gated registration and existing-server-only CLI access. No builds, tests, writes or service access were performed. Performance assessment remains conditional on the optimized measurements.
+
+Optimized measurement assessment: no new correctness or lifecycle finding. Inline verification fixes D198 ownership and staging cleanup. Median is lower (122 vs 140 us at 165 bytes, 465 vs 664 us at 65,340 bytes), while near-limit tails and 50-call batches favor blocking (inline p99 32,971 us vs 6,096 us; batch 30,064 us vs 11,069 us). Those tails include scheduling under shared load and do not establish CPU occupation or terminal latency regression. Retain inline for cancellation correctness and document its measured concurrency cost; these component measurements do not certify D41 budgets. Loopback 50-caller cleanup succeeds. HWM delta 4,456 KiB includes fixture/transport; normalization over 50 is not isolated per-lookup memory. Read-only assessment; no builds, tests, mutations or service access.
