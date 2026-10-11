@@ -414,6 +414,7 @@
   background: none; color: var(--fg-2); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; text-align: left; cursor: pointer;
 }
 .ui-window-menu-item svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+@media (pointer: coarse) { .ui-window-menu-item { height: 44px; } }
 @media (hover: hover) and (pointer: fine) { .ui-window-menu-item:hover { background: var(--hover); color: var(--fg); } }
 .ui-window-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 calc(var(--r-lg, 18px) - 1px) calc(var(--r-lg, 18px) - 1px); }
 @media (hover: hover) and (pointer: fine) {

@@ -1,0 +1,289 @@
+/**
+ * Signing out of this device (#171, TASTE "You can always sign yourself out").
+ *
+ * Against the mock canvas: the profile pill's menu (pointer and keyboard), the palette row and Settings, Account each
+ * ask once with the compact confirmation (title, tick and cross icon buttons with tooltips), then land on the sign-in
+ * screen with no window, sidebar, overlay or live connection left, and a reload stays signed out. Cancel and a failed
+ * request leave the person signed in. A phone has 44 px targets. The product path (real cookie, product canvas) is
+ * signed out through the palette and stays signed out after a reload. Captures land in captures/signout/.
+ *
+ * The double keeps a preview signed out until the page is opened with `fresh=1` or it is reset, so every test resets it
+ * afterwards, and the page URLs here never carry `fresh=1` (a reload must stay signed out).
+ */
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
+import { expect, test, type Page } from "playwright/test";
+
+const OUT = resolve(import.meta.dirname, "..", "captures", "signout");
+mkdirSync(OUT, { recursive: true });
+
+test.afterEach(async ({ page }) => { await page.context().request.post("/__mock/reset"); });
+
+async function open(page: Page, theme = "ink"): Promise<void> {
+  await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}`);
+  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+}
+
+async function openSidebar(page: Page): Promise<void> {
+  await page.locator("#sidebar-toggle").click();
+  await expect(page.locator("#sidebar")).toBeVisible();
+  await page.waitForTimeout(500);
+}
+
+const pill = (page: Page) => page.locator(".ui-sidebar-user");
+const menu = (page: Page) => page.locator(".ui-anchored-popover[aria-label='Account']");
+const confirm = (page: Page) => page.locator(".ui-confirm-tip[data-open='true']");
+
+/** The person is back at the sign-in card and nothing of the session is left behind. */
+async function expectSignedOut(page: Page): Promise<void> {
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".ui-window, #sidebar, #palette, .ui-toast, .ui-confirm-tip, .ui-anchored-popover, .ui-settings")).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __tracerTestDouble?: unknown }).__tracerTestDouble)).toBeUndefined();
+}
+
+/** Every WebSocket the page opened is closed once the person has signed out. */
+function trackSockets(page: Page): () => number {
+  const sockets: Array<{ isClosed(): boolean }> = [];
+  page.on("websocket", (socket) => sockets.push(socket));
+  return () => sockets.filter((socket) => !socket.isClosed()).length;
+}
+
+async function reloadStaysSignedOut(page: Page): Promise<void> {
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(800);
+  await expect(page.locator(".ui-window, #sidebar")).toHaveCount(0);
+}
+
+test("profile pill: a menu with Settings and Sign out; the confirmation asks once and signs out", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const live = trackSockets(page);
+  await open(page);
+  await openSidebar(page);
+  await expect.poll(live).toBeGreaterThan(0);
+
+  await pill(page).click();
+  await expect(menu(page)).toBeVisible();
+  await expect(menu(page).getByRole("menuitem")).toHaveText(["Settings", "Sign out"]);
+  // It opens above the pill, inside the screen, and hugs its rows (not the sidebar's width).
+  const pillBox = (await pill(page).boundingBox())!;
+  const box = (await menu(page).boundingBox())!;
+  expect(box.y + box.height).toBeLessThanOrEqual(pillBox.y);
+  expect(pillBox.y - (box.y + box.height)).toBeLessThan(14);
+  expect(box.width).toBeLessThan(260);
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: resolve(OUT, "pill-menu-desktop-ink.png") });
+
+  // Escape closes it, a second press on the pill closes it too.
+  await page.keyboard.press("Escape");
+  await expect(menu(page)).toHaveCount(0);
+  await pill(page).click();
+  await expect(menu(page)).toBeVisible();
+  await pill(page).click();
+  await expect(menu(page)).toHaveCount(0);
+
+  await pill(page).click();
+  await menu(page).getByRole("menuitem", { name: "Sign out" }).click();
+  await expect(confirm(page)).toBeVisible();
+  await expect(confirm(page)).toContainText("Sign out of this device?");
+  // Two icon buttons, no text buttons; each is named and carries a tooltip.
+  const yes = confirm(page).getByRole("button", { name: "Sign out" });
+  const no = confirm(page).getByRole("button", { name: "Cancel" });
+  await expect(yes).toHaveAttribute("data-tip", "Sign out");
+  await expect(no).toHaveAttribute("data-tip", "Cancel");
+  await expect(confirm(page).locator("button svg")).toHaveCount(2);
+  await expect(yes).not.toContainText("Sign out");
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: resolve(OUT, "confirm-desktop-ink.png") });
+
+  // Cancel keeps the session.
+  await no.click();
+  await expect(confirm(page)).toHaveCount(0);
+  await expect(page.locator(".cl-mockup")).toBeVisible();
+
+  await pill(page).click();
+  await menu(page).getByRole("menuitem", { name: "Sign out" }).click();
+  await confirm(page).getByRole("button", { name: "Sign out" }).click();
+  await expectSignedOut(page);
+  await expect.poll(live).toBe(0);
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: resolve(OUT, "signed-out-desktop-ink.png") });
+  await reloadStaysSignedOut(page);
+});
+
+test("profile pill by keyboard: Enter opens the menu on its first row, arrows walk it, Escape returns to the pill", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page);
+  await openSidebar(page);
+  await pill(page).focus();
+  await page.keyboard.press("Enter");
+  await expect(menu(page)).toBeVisible();
+  await expect(menu(page).getByRole("menuitem", { name: "Settings" })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(menu(page).getByRole("menuitem", { name: "Sign out" })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(menu(page).getByRole("menuitem", { name: "Settings" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu(page)).toHaveCount(0);
+  await expect(pill(page)).toBeFocused();
+
+  await page.keyboard.press("Enter");
+  await expect(menu(page).getByRole("menuitem", { name: "Settings" })).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(menu(page).getByRole("menuitem", { name: "Sign out" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  // The confirmation takes focus (on Cancel); Tab reaches Sign out, and Enter signs out.
+  await expect(confirm(page)).toBeVisible();
+  await page.keyboard.press("Tab");
+  await expect(confirm(page).getByRole("button", { name: "Sign out" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expectSignedOut(page);
+});
+
+test("the palette has Sign out; it asks, then signs out", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const live = trackSockets(page);
+  await open(page);
+  await page.keyboard.press("Control+Shift+K");
+  await expect(page.locator("#palette")).toBeVisible();
+  await page.locator("#palette-input").fill("sign out");
+  const row = page.locator("#palette-results .result", { hasText: "Sign out" });
+  await expect(row).toHaveCount(1);
+  await expect(row).toContainText("this device");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#palette")).toBeHidden();
+  await expect(confirm(page)).toBeVisible();
+  await expect(confirm(page)).toContainText("Sign out of this device?");
+  await confirm(page).getByRole("button", { name: "Sign out" }).click();
+  await expectSignedOut(page);
+  await expect.poll(live).toBe(0);
+  await reloadStaysSignedOut(page);
+});
+
+test("Settings, Account has the row; it asks, then signs out", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page);
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:account", source: "pointer" } })));
+  const row = page.locator(".ui-sp-row", { hasText: "Sign out of this device" });
+  await expect(row).toBeVisible({ timeout: 10_000 });
+  await expect(row.locator("button[data-action='sign-out']")).toHaveAttribute("data-tip", "Sign out");
+  await page.waitForTimeout(900);
+  await page.screenshot({ path: resolve(OUT, "settings-account-desktop-ink.png") });
+  await row.locator("button[data-action='sign-out']").click();
+  await expect(confirm(page)).toContainText("Sign out of this device?");
+  await confirm(page).getByRole("button", { name: "Sign out" }).click();
+  await expectSignedOut(page);
+  await reloadStaysSignedOut(page);
+});
+
+test("a sign-out the server could not complete says so and leaves the person signed in", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page);
+  await page.route("**/auth/logout", (route) => route.abort());
+  await page.keyboard.press("Control+Shift+K");
+  await page.locator("#palette-input").fill("sign out");
+  await page.keyboard.press("Enter");
+  await confirm(page).getByRole("button", { name: "Sign out" }).click();
+  await expect(page.locator(".ui-toast:not([hidden])")).toContainText("Could not sign out");
+  await expect(page.locator(".cl-mockup")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toHaveCount(0);
+});
+
+for (const [name, viewport, scale] of [["phone", { width: 393, height: 852 }, 3], ["small", { width: 375, height: 667 }, 2]] as const) {
+  for (const theme of ["ink", "paper"]) {
+    test(`touch: 44 px targets, the menu and the confirmation fit (${name}, ${theme})`, async ({ browser }) => {
+      const context = await browser.newContext({ viewport, deviceScaleFactor: scale, hasTouch: true, isMobile: true });
+      const page = await context.newPage();
+      await open(page, theme);
+      await openSidebar(page);
+      await pill(page).tap();
+      await expect(menu(page)).toBeVisible();
+      await page.waitForTimeout(400); // the open animation scales the card; measure it at rest
+      for (const item of await menu(page).getByRole("menuitem").all()) expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      const stage = (await page.locator("#sidebar").boundingBox())!;
+      const box = (await menu(page).boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+      expect(box.y).toBeGreaterThanOrEqual(stage.y);
+      await page.waitForTimeout(300);
+      await page.screenshot({ path: resolve(OUT, `pill-menu-${name}-${theme}.png`) });
+      await menu(page).getByRole("menuitem", { name: "Sign out" }).tap();
+      await expect(confirm(page)).toBeVisible();
+      await page.waitForTimeout(400);
+      for (const button of await confirm(page).getByRole("button").all()) {
+        const b = (await button.boundingBox())!;
+        expect(b.width).toBeGreaterThanOrEqual(44);
+        expect(b.height).toBeGreaterThanOrEqual(44);
+      }
+      const tip = (await confirm(page).boundingBox())!;
+      expect(tip.x).toBeGreaterThanOrEqual(0);
+      expect(tip.x + tip.width).toBeLessThanOrEqual(viewport.width);
+      await page.waitForTimeout(300);
+      await page.screenshot({ path: resolve(OUT, `confirm-${name}-${theme}.png`) });
+      await confirm(page).getByRole("button", { name: "Sign out" }).tap();
+      await expectSignedOut(page);
+      await page.waitForTimeout(600);
+      await page.screenshot({ path: resolve(OUT, `signed-out-${name}-${theme}.png`) });
+      await context.close();
+    });
+  }
+}
+
+for (const theme of ["ink", "paper"]) {
+  test(`captures: desktop menu, confirmation and sign-in (${theme})`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await open(page, theme);
+    await openSidebar(page);
+    await pill(page).click();
+    await expect(menu(page)).toBeVisible();
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: resolve(OUT, `pill-menu-desktop-${theme}.png`) });
+    await menu(page).getByRole("menuitem", { name: "Sign out" }).click();
+    await expect(confirm(page)).toBeVisible();
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: resolve(OUT, `confirm-desktop-${theme}.png`) });
+    await confirm(page).getByRole("button", { name: "Sign out" }).click();
+    await expectSignedOut(page);
+    await page.waitForTimeout(600);
+    await page.screenshot({ path: resolve(OUT, `signed-out-desktop-${theme}.png`) });
+  });
+}
+
+test("the product canvas on the real cookie: sign out from the palette, a reload stays signed out", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const context = page.context();
+  await context.request.post("/__mock/reset");
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: { protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true },
+  });
+  await page.goto("/?mock=1");
+  const token = (await (await context.request.get("/__mock/setup-token")).json() as { setup_token: string }).setup_token;
+  await page.locator("#setup-token").fill(token);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.locator("#setup-username").fill("signout_test");
+  await page.locator("#setup-display-name").fill("Sign out test");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Create passkey" }).click();
+  await page.locator(".auth-check").click();
+  await page.getByRole("button", { name: "Open infraternal" }).click();
+  await expect(page.getByText("TEST DOUBLE")).toBeVisible();
+
+  // The product canvas, on the same session cookie.
+  await page.goto("/");
+  await expect(page.locator(".ui-window").first()).toBeVisible({ timeout: 30_000 });
+  const live = trackSockets(page);
+  await page.keyboard.press("Control+Shift+K");
+  await page.locator("#palette-input").fill("sign out");
+  await page.keyboard.press("Enter");
+  await expect(confirm(page)).toContainText("Sign out of this device?");
+  await confirm(page).getByRole("button", { name: "Sign out" }).click();
+  await expectSignedOut(page);
+  await expect.poll(live).toBe(0);
+  await reloadStaysSignedOut(page);
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible();
+  await expect(page.locator(".ui-window")).toHaveCount(0);
+});
