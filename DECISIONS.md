@@ -2135,3 +2135,29 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      home). The infraternal agent reads the foreground process and working
      directory from the operating system and reports changes (at most about
      once a second); it needs no shell configuration.
+237. **People add their own machines (owner grill, 2026-10-11; extends D235, D228, D215, D234):**
+     - **One flow (Q17a).** `infraternal join <server>` on any machine shows
+       the same screen as linking (D235): a plain-language description, a
+       link, a QR code and a short code; the person picks the code and
+       confirms with their passkey. The machine joins and the account that
+       ran the command is linked to that person. The app's add-host flow
+       offers a "copy command" with the server filled in; add-host over SSH
+       (D229) remains for machines you cannot sit at. No join tokens to copy.
+       Without root the machine joins in userspace mode automatically (D228
+       M5), with nothing asked (Q17g).
+     - **Ownership is a label, never access (Q17b).** A machine someone adds
+       is *personal* (they may remove it, and its accounts can be linked to
+       them); an administrator can make it *shared* by tagging it, which
+       removes person links. What any machine or person can reach always
+       comes from policies and grants, never from owning a machine.
+     - **Reach (Q17c).** Community default: the allow-all network policy
+       (D228). Enterprise can restrict personal machines to their owner's
+       machines plus grants.
+     - **Removal (Q17d).** People remove their own machines; administrators
+       remove any. Disabling a person removes their personal machines at
+       once; shared machines stay.
+     - **No routine key expiry (Q17e).** Seven-day node certificates renew
+       silently while online (D215); a machine offline for more than 90
+       days needs a passkey re-approval when it returns.
+     - **Approval (Q17f).** Enterprise policy: each new machine waits in the
+       administrators' inbox (D234) until approved.
