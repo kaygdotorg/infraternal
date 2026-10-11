@@ -1,0 +1,17 @@
+Running as unit: run-p2109905-i2110205.scope; invocation ID: 528b1a6654e84486b4cf6761074b273d
+
+running 1 test
+test shipping_mesh_down_1000_peers_finishes_within_one_second ... {"apply_us_including_fsync":506600,"chunks":32,"down_us":51187537,"idle_ticks_10s_off":0,"idle_ticks_10s_on":0,"load":"41.86 37.31 30.82 61/1545 2150637","one_endpoint_us_including_fsync":54465,"peer_count":1000,"public_cli":"pass","rss_bytes_at_1000_nodes":11399168000,"rss_bytes_off":10919936,"rss_bytes_on":11399168}
+
+thread 'shipping_mesh_down_1000_peers_finishes_within_one_second' (2113724) panicked at /home/kayg/.cache/codex-scratch/mesh-integrate/review_shutdown_budget.rs:34:5:
+Mesh down exceeds the one-second budget at 1,000 peers: {"apply_us_including_fsync":506600,"chunks":32,"down_us":51187537,"idle_ticks_10s_off":0,"idle_ticks_10s_on":0,"load":"41.86 37.31 30.82 61/1545 2150637","one_endpoint_us_including_fsync":54465,"peer_count":1000,"public_cli":"pass","rss_bytes_at_1000_nodes":11399168000,"rss_bytes_off":10919936,"rss_bytes_on":11399168}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    shipping_mesh_down_1000_peers_finishes_within_one_second
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 122.96s
+

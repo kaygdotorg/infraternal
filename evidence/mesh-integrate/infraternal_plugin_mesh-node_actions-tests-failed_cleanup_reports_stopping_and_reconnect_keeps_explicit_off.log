@@ -1,0 +1,9 @@
+LOAD_START 50.91 54.31 49.87 25/1552 2905391
+Running as unit: run-p2905392-i2905692.scope; invocation ID: 79b9fdacb95f4e80a1dfffb6dd5dac3f
+
+running 1 test
+test node_actions::tests::failed_cleanup_reports_stopping_and_reconnect_keeps_explicit_off ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.62s
+
+LOAD_END 50.04 54.07 49.82 32/1548 2905897

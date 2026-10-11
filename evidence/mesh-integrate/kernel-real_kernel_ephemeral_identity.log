@@ -1,0 +1,9 @@
+LOAD_START 35.57 48.83 48.33 29/1617 2946408
+Running as unit: run-p2946409-i2946709.scope; invocation ID: a0be567cc2534a9b95bda46792558488
+
+running 1 test
+test real_kernel_ephemeral_identity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.40s
+
+LOAD_END 35.57 48.83 48.33 37/1616 2946634

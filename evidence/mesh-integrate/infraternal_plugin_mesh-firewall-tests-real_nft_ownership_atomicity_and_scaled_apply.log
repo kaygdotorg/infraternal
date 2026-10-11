@@ -1,0 +1,10 @@
+LOAD_START 52.73 54.72 49.98 29/1572 2901851
+Running as unit: run-p2901852-i2902152.scope; invocation ID: debc39a845e347359a2fee2eb95677b8
+
+running 1 test
+test firewall::tests::real_nft_ownership_atomicity_and_scaled_apply ... METRIC nft_policy machine=infraternal-dev peers=1000 apply_us=68165 single_peer_us=98217 load=52.73 54.72 49.98 27/1569 2902042
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.38s
+
+LOAD_END 52.73 54.72 49.98 27/1565 2902074

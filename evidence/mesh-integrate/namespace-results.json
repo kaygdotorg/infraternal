@@ -1,0 +1,41 @@
+{
+  "fixture_sha256": "4f96d5a22ae5a9fd32ac0f87d18b3da2119e90920781bf5f35339ccf392a692f",
+  "fixture": "current-head debug all-features kernel_node",
+  "cases": [
+    {
+      "name": "ingress-nft-v4",
+      "exit": 0,
+      "log": "ingress-nft-v4.log"
+    },
+    {
+      "name": "ingress-nft-v6",
+      "exit": 0,
+      "log": "ingress-nft-v6.log"
+    },
+    {
+      "name": "transit-nft",
+      "exit": 0,
+      "log": "transit-nft.log"
+    },
+    {
+      "name": "ingress-nf_tables-v4",
+      "exit": 0,
+      "log": "ingress-nf_tables-v4.log"
+    },
+    {
+      "name": "ingress-nf_tables-v6",
+      "exit": 0,
+      "log": "ingress-nf_tables-v6.log"
+    },
+    {
+      "name": "transit-nf_tables",
+      "exit": 0,
+      "log": "transit-nf_tables.log"
+    },
+    {
+      "name": "fallback-namespace",
+      "exit": 0,
+      "log": "fallback-namespace.log"
+    }
+  ]
+}

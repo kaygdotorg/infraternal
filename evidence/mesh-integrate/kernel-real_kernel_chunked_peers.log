@@ -1,0 +1,10 @@
+LOAD_START 43.84 52.17 49.32 28/1542 2922661
+Running as unit: run-p2922662-i2922962.scope; invocation ID: 03c0b1955587482aa6b0d2cfb8e9c430
+
+running 1 test
+test real_kernel_chunked_peers ... METRIC kernel_peers machine=infraternal-dev peers=1000 apply_us=68228 single_peer_us=37 load=43.84 52.17 49.32 30/1541 2922724
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 47.10s
+
+LOAD_END 35.57 48.83 48.33 30/1617 2946408

@@ -1,0 +1,9 @@
+LOAD_START 44.52 52.44 49.39 28/1549 2922192
+Running as unit: run-p2922193-i2922493.scope; invocation ID: 1496bc6aef354720bba8e36f316eeae6
+
+running 1 test
+test created_interface_is_marked_for_restart_adoption ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.23s
+
+LOAD_END 44.52 52.44 49.39 37/1548 2922401

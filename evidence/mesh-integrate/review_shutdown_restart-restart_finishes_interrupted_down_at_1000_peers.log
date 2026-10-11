@@ -1,0 +1,17 @@
+LOAD_START 48.75 53.74 49.74 40/1533 2911442
+Running as unit: run-p2911443-i2911743.scope; invocation ID: 89f8b0de873645a8b0c31dd10b7b849d
+
+running 1 test
+test restart_finishes_interrupted_down_at_1000_peers ... RECOVERY_PASS backend=nft boundary=intent peers=1000 routes=2000 abrupt_stop=SIGKILL journal_replay=idempotent
+RECOVERY_PASS backend=nft boundary=peers peers=1000 routes=2000 abrupt_stop=SIGKILL journal_replay=idempotent
+RECOVERY_PASS backend=nft boundary=link peers=1000 routes=2000 abrupt_stop=SIGKILL journal_replay=idempotent
+RECOVERY_PASS backend=nft boundary=policy peers=1000 routes=2000 abrupt_stop=SIGKILL journal_replay=idempotent
+RECOVERY_PASS backend=nf_tables boundary=intent peers=1000 routes=2000 abrupt_stop=SIGKILL journal_replay=idempotent
+RECOVERY_PASS backend=nf_tables boundary=peers peers=1000 routes=2000 abrupt_stop=SIGKILL journal_replay=idempotent
+RECOVERY_PASS backend=nf_tables boundary=link peers=1000 routes=2000 abrupt_stop=SIGKILL journal_replay=idempotent
+RECOVERY_PASS backend=nf_tables boundary=policy peers=1000 routes=2000 abrupt_stop=SIGKILL journal_replay=idempotent
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 19.20s
+
+LOAD_END 44.52 52.44 49.39 25/1559 2921685

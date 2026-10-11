@@ -1,0 +1,9 @@
+LOAD_START 35.57 48.83 48.33 50/1607 2946810
+Running as unit: run-p2946811-i2947111.scope; invocation ID: 1d122667284a48eeafc0c29eb3ee3149
+
+running 1 test
+test orphan_route_retirement_preserves_foreign_routes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.78s
+
+LOAD_END 35.76 48.65 48.27 32/1634 2947432

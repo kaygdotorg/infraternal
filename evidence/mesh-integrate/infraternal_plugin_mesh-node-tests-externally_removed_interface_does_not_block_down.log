@@ -1,0 +1,9 @@
+LOAD_START 50.91 54.31 49.87 39/1585 2904746
+Running as unit: run-p2904747-i2905047.scope; invocation ID: a2f1c382501a4570b951a20e54a80079
+
+running 1 test
+test node::tests::externally_removed_interface_does_not_block_down ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.35s
+
+LOAD_END 50.91 54.31 49.87 40/1534 2905291

@@ -1,0 +1,9 @@
+LOAD_START 35.76 48.65 48.27 45/1636 2947436
+Running as unit: run-p2947437-i2947737.scope; invocation ID: 1cb5544ad504470d9eaf5b572d2dc8dc
+
+running 1 test
+test refused_endpoint_persistence_preserves_kernel_endpoint ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+LOAD_END 35.76 48.65 48.27 49/1647 2947791

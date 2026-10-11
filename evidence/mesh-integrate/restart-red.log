@@ -1,0 +1,16 @@
+Running as unit: run-p2426138-i2426438.scope; invocation ID: 32792e7e0f56484f8a110194c7659d2f
+
+running 1 test
+test restart_finishes_interrupted_down_at_1000_peers ... 
+thread 'restart_finishes_interrupted_down_at_1000_peers' (2426199) panicked at crates/plugins/mesh/tests/review_shutdown_restart.rs:205:5:
+replay must durably retire the route journal at nft/intent
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    restart_finishes_interrupted_down_at_1000_peers
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 53.48s
+

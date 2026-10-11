@@ -1,0 +1,9 @@
+LOAD_START 48.75 53.74 49.74 39/1544 2908943
+Running as unit: run-p2908977-i2909277.scope; invocation ID: d878bb33be8d4d569249b31ccb45b370
+
+running 1 test
+test restart_preserves_unrecorded_direct_host_routes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.90s
+
+LOAD_END 48.75 53.74 49.74 40/1550 2909443

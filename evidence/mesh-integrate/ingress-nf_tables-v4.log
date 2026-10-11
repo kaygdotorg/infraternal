@@ -1,0 +1,3 @@
+LOAD_START 79.56 57.51 49.97 73/1742 3057280
+Running as unit: run-p3057281-i3057581.scope; invocation ID: aba6ab307332435f88f1cc216a594d97
+{"denied_mesh_address_plaintext": "BLOCKED", "ipv6": false, "backend": "nf_tables", "load": "79.92 57.95 50.16 76/1728 3058243"}
