@@ -18,7 +18,7 @@ fn action(
         definition.summary,
         definition.instructions.iter().copied(),
         inputs,
-        JsonSchema::command_result(),
+        operator_output(definition),
         ActionContract::new(
             match definition.target {
                 infraternal_plugin_api::Target::Global | infraternal_plugin_api::Target::Node => {
@@ -56,6 +56,40 @@ fn action(
     }
     action.hosted = Some(definition);
     action
+}
+
+/// Operator records keep the deployed format, while removal can print a hosted challenge/result.
+fn operator_output(definition: infraternal_plugin_api::ActionDef) -> JsonSchema {
+    let required = if definition.id == super::REMOVE.id {
+        Vec::new()
+    } else {
+        vec!["state".to_owned(), "message".to_owned()]
+    };
+    let mut schema = JsonSchema::object(
+        [
+            (
+                "state".to_owned(),
+                JsonSchema::string("Confirmed operator state."),
+            ),
+            (
+                "message".to_owned(),
+                JsonSchema::string("Operator result summary."),
+            ),
+            (
+                "next".to_owned(),
+                JsonSchema::string("Recommended follow-up."),
+            ),
+        ],
+        required,
+    )
+    .with_description(format!(
+        "Operator records for {}. Hosted response schema: {}.",
+        definition.id, definition.output.0
+    ));
+    // Hosted schemas remain authoritative for challenge/result fields. Local CLI
+    // errors may also use the versioned envelope; neither requires rewriting deployed output.
+    schema.additional_properties = Some(true);
+    schema
 }
 
 /// Enrollment and reconnect remain actions owned by the infraternal agent component.

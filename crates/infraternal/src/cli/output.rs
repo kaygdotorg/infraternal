@@ -701,10 +701,11 @@ mod tests {
                 let has_allowed_keys = schema.additional_properties != Some(false)
                     || object.keys().all(|key| schema.properties.contains_key(key));
                 let has_valid_values = object.iter().all(|(key, value)| {
-                    schema
-                        .properties
-                        .get(key)
-                        .is_some_and(|property| matches_schema(property, value))
+                    // Only declared fields have value constraints; extra fields follow the schema policy.
+                    match schema.properties.get(key) {
+                        Some(property) => matches_schema(property, value),
+                        None => schema.additional_properties != Some(false),
+                    }
                 });
                 has_required && has_allowed_keys && has_valid_values
             }),

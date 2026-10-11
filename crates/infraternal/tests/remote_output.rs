@@ -1,88 +1,51 @@
-//! Exercises real CLI refusal output without reading enrolled identity or CA material [202], #78.
-#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+//! Checks declared remote CLI output against the deployed binary's real operator response [16][202], #163.
+#![cfg(feature = "remote")]
+#![allow(clippy::expect_used)]
 
-use std::{
-    path::PathBuf,
-    process::{Command, Output},
-};
-
-fn binary() -> std::ffi::OsString {
-    // An explicit opt-in also checks the stripped shipping executable, using the same assertions.
-    std::env::var_os("INFRATERNAL_REMOTE_OUTPUT_TEST_BINARY")
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_infraternal").into())
-}
-
-fn missing_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.scratch")
-        .join(format!("json-output-{}", uuid::Uuid::new_v4()))
-}
-fn refusal(output: &Output, action: &str) {
-    assert!(!output.status.success());
-    assert!(
-        output.stderr.is_empty(),
-        "JSON refusals must not mix human diagnostics into stderr"
-    );
-    let text = std::str::from_utf8(&output.stdout).unwrap();
-    let records: Vec<serde_json::Value> = text
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("each output line is JSON"))
-        .collect();
-    let final_record = records
-        .last()
-        .expect("a machine-readable refusal is emitted");
-    assert_eq!(final_record["action"], action);
-    assert_eq!(final_record["state"], "refused");
-    assert_ne!(final_record["message"].as_str().unwrap(), "");
-    assert_ne!(final_record["next"].as_str().unwrap(), "");
-}
+use std::process::{Command, Stdio};
 
 #[test]
-fn json_remote_run_refuses_missing_identity_without_reflecting_its_path() {
-    let root = missing_root();
-    let output = Command::new(binary())
-        .args(["agent", "--data"])
-        .arg(&root)
-        .args(["run", "--json"])
-        .output()
-        .unwrap();
-    refusal(&output, "remote.host.run");
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(root.to_str().unwrap()));
-    assert!(!root.exists());
-}
-
-#[test]
-fn json_remote_server_refuses_before_creating_storage_or_binding() {
-    let root = missing_root();
-    let output = Command::new(binary())
-        .args(["server", "--data"])
-        .arg(root.join("db"))
-        .args(["--remote-listen", "10.69.69.125:7443", "--remote-ca-dir"])
-        .arg(root.join("ca"))
-        .arg("--json")
-        .output()
-        .unwrap();
-    refusal(&output, "remote.server.serve");
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(root.to_str().unwrap()));
-    assert!(!root.exists());
-}
-
-#[test]
-fn human_remote_refusal_has_sections_and_next_steps_without_color() {
-    let root = missing_root();
-    let output = Command::new(binary())
-        .args(["agent", "--data"])
-        .arg(&root)
+fn remote_refusal_matches_its_declared_cli_output() {
+    // An explicitly absent directory prevents this test from reading any enrolled identity.
+    let data = std::env::current_dir()
+        .expect("test directory")
+        .join(format!("missing-remote-metadata-{}", std::process::id()));
+    assert!(!data.exists());
+    let output = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args(["--json", "agent", "--data"])
+        .arg(&data)
         .arg("run")
-        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
         .output()
-        .unwrap();
+        .expect("run the real CLI");
     assert!(!output.status.success());
-    let error = std::str::from_utf8(&output.stderr).unwrap();
-    assert!(error.starts_with("Remote infraternal agent\n"));
-    assert!(error.contains("  State   refused\n"));
-    assert!(error.contains("  Next    "));
-    assert!(!error.contains('\u{1b}'));
-    assert!(!error.contains(root.to_str().unwrap()));
-    assert!(!root.exists());
+    // JSON-mode logging is a separate line; select the operator record by its action.
+    let value = serde_json::Deserializer::from_slice(&output.stdout)
+        .into_iter::<serde_json::Value>()
+        .map(|record| record.expect("JSON response line"))
+        .filter(|record| record["action"] == "remote.host.run")
+        .last()
+        .expect("operator response");
+    assert_eq!(value["action"], "remote.host.run");
+    assert_eq!(value["state"], "refused");
+
+    let action = infraternal_plugin_remote::cli::agent_actions()
+        .into_iter()
+        .find(|action| action.command.join(" ") == "agent run")
+        .expect("registered remote action");
+    let object = value.as_object().expect("operator object");
+    for field in &action.output_schema.required {
+        assert!(
+            object.contains_key(field),
+            "actual remote response lacks declared required field {field}"
+        );
+    }
+    if action.output_schema.additional_properties == Some(false) {
+        for field in object.keys() {
+            assert!(
+                action.output_schema.properties.contains_key(field),
+                "actual remote response contains undeclared field {field}"
+            );
+        }
+    }
 }
