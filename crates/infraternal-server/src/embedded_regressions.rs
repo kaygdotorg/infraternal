@@ -673,3 +673,6 @@ async fn credited_output_queue_at_stream_capacity() {
 
 #[path = "embedded_path_tests.rs"]
 mod path_tests;
+
+#[path = "embedded_credit_tests.rs"]
+mod credit_tests;

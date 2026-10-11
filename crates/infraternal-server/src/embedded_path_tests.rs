@@ -355,3 +355,54 @@ async fn full_retention_replays_as_legal_frames_with_contiguous_offsets() {
     assert_eq!(offset, MAX_FRAME_LEN as u64);
     assert_eq!(attachments[&1].unacknowledged.len(), MAX_FRAME_LEN);
 }
+
+/// Resource exhaustion on one writer must preserve other people's attachments
+/// on the same infraternal host transport (wire contract section 6).
+#[tokio::test]
+async fn review_pending_input_limit_retires_only_its_attachment() {
+    let (mut link, _peer) = connection();
+    let (tx, _output) = mpsc::channel(8);
+    let (sibling_tx, _sibling_output) = mpsc::channel(8);
+    let mut first = attachment(tx);
+    first.awaiting_ack = true;
+    first.replaying = true;
+    let mut sibling = attachment(sibling_tx);
+    sibling.stream_id = 4;
+    let mut attachments = HashMap::from([(1, first), (2, sibling)]);
+    let mut routes = HashMap::from([(2, 1), (4, 2)]);
+    let mut pending = HashMap::new();
+    let bytes = vec![b'x'; MAX_FRAME_LEN / 2];
+    for sequence in [0, (MAX_FRAME_LEN / 2) as u64] {
+        assert!(
+            process_command(
+                input_command(sequence, &bytes),
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut pending,
+            )
+            .await
+        );
+    }
+    let healthy = process_command(
+        input_command(MAX_FRAME_LEN as u64, b"x"),
+        &mut link,
+        &mut attachments,
+        &mut routes,
+        &mut pending,
+    )
+    .await;
+    assert!(
+        healthy,
+        "pending-input exhaustion must keep the shared host transport live"
+    );
+    assert!(
+        !attachments.contains_key(&1),
+        "the full writer must be retired"
+    );
+    assert!(
+        attachments.contains_key(&2),
+        "the sibling writer must remain attached"
+    );
+    assert_eq!(routes.get(&4), Some(&2));
+}
