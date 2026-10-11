@@ -6,6 +6,8 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     routing::post,
 };
+use futures_util::StreamExt;
+use infraternal_shim::locked_bytes::LockedBytes;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -246,11 +248,10 @@ async fn finish_request(
     // through reading and proof verification; cancellation or the single
     // request deadline releases it. A stalled sender cannot hold all slots.
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let body = axum::body::to_bytes(body, 32768)
-            .await
-            .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+        let intake = locked_intake(body).await?;
         // Parser errors remain static: wrapping material is never reflected.
-        let body = decode_unlock(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let body = decode_unlock(&intake).map_err(|_| StatusCode::BAD_REQUEST)?;
+        drop(intake);
         if bootstrap {
             api.administration
                 .bootstrap_finish(token, &body.ceremony, body.proof, body.scoped_key, now)
@@ -286,4 +287,55 @@ async fn status(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value
         .initialized()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({"locked":locked,"initialized":initialized})))
+}
+
+/// Copy each transport chunk into protected pages immediately after admission.
+/// Transport/kernel chunks remain outside our allocator; never aggregate them
+/// into another ordinary heap buffer containing the scoped wrapping key.
+async fn locked_intake(body: axum::body::Body) -> Result<LockedBytes, StatusCode> {
+    let mut intake = LockedBytes::new(32768).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut stream = body.into_data_stream();
+    let mut length = 0usize;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+        let end = length
+            .checked_add(chunk.len())
+            .filter(|end| *end <= intake.len())
+            .ok_or(StatusCode::PAYLOAD_TOO_LARGE)?;
+        intake[length..end].copy_from_slice(&chunk);
+        length = end;
+    }
+    intake.truncate(length);
+    Ok(intake)
+}
+
+#[cfg(test)]
+mod intake_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn chunked_intake_is_bounded_before_parsing() {
+        let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = vec![
+            Ok(bytes::Bytes::from(vec![b'x'; 16384])),
+            Ok(bytes::Bytes::from(vec![b'y'; 16384])),
+        ];
+        let intake = locked_intake(axum::body::Body::from_stream(futures_util::stream::iter(
+            chunks,
+        )))
+        .await
+        .unwrap();
+        assert_eq!(intake.len(), 32768);
+        assert_eq!(intake[16383], b'x');
+        assert_eq!(intake[16384], b'y');
+        drop(intake);
+        let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = vec![
+            Ok(bytes::Bytes::from(vec![b'x'; 32768])),
+            Ok(bytes::Bytes::from_static(b"x")),
+        ];
+        let result = locked_intake(axum::body::Body::from_stream(futures_util::stream::iter(
+            chunks,
+        )))
+        .await;
+        assert!(matches!(result, Err(StatusCode::PAYLOAD_TOO_LARGE)));
+    }
 }
