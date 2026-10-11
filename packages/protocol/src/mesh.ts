@@ -228,8 +228,12 @@ export class MeshClient {
     throw new Error("mesh unavailable");
   }
 
-  /** Enroll a public-key identity. */
-  enrollNode(input: { name: string; public_key: readonly number[] }): Promise<MeshNodeEnrollResult> {
+  /** Enroll public inventory; host_id explicitly binds an authenticated remote host. */
+  enrollNode(input: {
+    name: string;
+    public_key: readonly number[];
+    host_id?: string;
+  }): Promise<MeshNodeEnrollResult> {
     return this.transport.call("mesh.node.enroll", input);
   }
 
