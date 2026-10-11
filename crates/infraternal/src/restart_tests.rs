@@ -417,3 +417,70 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
     assert!(logs.contains("cold"));
     assert!(!logs.contains("seed") && !logs.contains("key_bytes") && !logs.contains("key_length"));
 }
+
+#[test]
+fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
+    const NAME: &str =
+        "restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null";
+    if let Ok(stage) = std::env::var("INFRATERNAL_CLOSED_STDIN_TEST") {
+        let path = PathBuf::from(std::env::var_os("INFRATERNAL_CLOSED_STDIN_BINARY").unwrap());
+        let mut opened = if stage == "before" {
+            Some(crate::restart_binary::Opened::open(path.clone()).unwrap())
+        } else {
+            None
+        };
+        nix::unistd::close(0).unwrap();
+        let opened = opened
+            .take()
+            .unwrap_or_else(|| crate::restart_binary::Opened::open(path).unwrap());
+        let error = Replacement::new(opened, None).exec();
+        panic!(
+            "closed stdin must not overwrite the checked executable fd: {}",
+            error.kind()
+        );
+    }
+    let mut failures = Vec::new();
+    for stage in ["before", "after"] {
+        let directory = Directory::new();
+        let target = directory.0.join("cold-exec-successor");
+        // A native probe observes inherited descriptors before the Rust runtime
+        // can repair closed standard input and mask the exec boundary failure.
+        let source = directory.0.join("stdin-probe.c");
+        std::fs::write(&source, r#"/* Tests null stdin at the actual exec boundary, before runtime repair [217], #154. */
+#include <sys/stat.h>
+#include <unistd.h>
+int main(void) {
+    struct stat input, expected;
+    return fstat(STDIN_FILENO, &input) != 0 || stat("/dev/null", &expected) != 0
+        || input.st_dev != expected.st_dev || input.st_ino != expected.st_ino;
+}
+"#).unwrap();
+        let compiled = std::process::Command::new("cc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&target)
+            .env("TMPDIR", &directory.0)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "native stdin probe compile failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env("INFRATERNAL_CLOSED_STDIN_TEST", stage)
+            .env("INFRATERNAL_CLOSED_STDIN_BINARY", &target)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        if !output.status.success() {
+            failures.push(format!(
+                "stage={stage}\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

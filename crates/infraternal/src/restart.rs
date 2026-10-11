@@ -278,11 +278,25 @@ impl Replacement {
                     CString::new(entry).map_err(|_| io::ErrorKind::InvalidInput.into())
                 })
                 .collect::<io::Result<Vec<_>>>()?;
+            // Retain ownership through exec: open may itself return fd0 when
+            // cleanup previously closed stdin. Dropping that File would close it.
+            let null = if self.input.is_none() {
+                Some(std::fs::File::open("/dev/null")?)
+            } else {
+                None
+            };
             if let Some(input) = &self.input {
                 nix::unistd::dup2_stdin(input)?;
             } else {
-                nix::unistd::dup2_stdin(std::fs::File::open("/dev/null")?)?;
+                nix::unistd::dup2_stdin(null.as_ref().ok_or(io::ErrorKind::Other)?)?;
             }
+            // dup2(oldfd, oldfd) preserves CLOEXEC. Stdin must survive even when
+            // the newly opened null input was already descriptor zero.
+            nix::fcntl::fcntl(
+                std::io::stdin(),
+                nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+            )?;
+
             // Execute exactly the checked inode; no pathname lookup occurs after
             // exporting the CA. O_CLOEXEC closes this fd in the successor.
             queue_reload()?;
