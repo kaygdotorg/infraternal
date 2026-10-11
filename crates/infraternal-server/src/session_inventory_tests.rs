@@ -24,6 +24,15 @@ async fn database() -> (SqlitePool, String) {
     (pool, user)
 }
 
+/// Supply a stable full census for tests that do not exercise publication races.
+async fn reconcile_embedded_sessions(
+    pool: &SqlitePool,
+    ids: &[[u8; 16]],
+) -> Result<(), sqlx::Error> {
+    let (_, inventory) = watch::channel(SessionInventoryState::Available(Arc::from(ids)));
+    reconcile_embedded_inventory(pool, &inventory).await
+}
+
 #[tokio::test]
 async fn reconciliation_before_saved_exit_keeps_the_authoritative_exit_status() {
     let (pool, user) = database().await;
@@ -298,5 +307,55 @@ async fn available_snapshot_reports_live_rows_and_bounded_saved_exit_statuses() 
     assert_eq!(
         event["ended_sessions"][0],
         json!({"session_id": newest.to_string(), "status": 129})
+    );
+}
+
+#[tokio::test]
+async fn census_waiting_for_database_does_not_close_a_newly_created_live_session() {
+    let (pool, user) = database().await;
+    let session = [168; 16];
+    let mut writer = pool.acquire().await.unwrap();
+    let reconcile_pool = pool.clone();
+    let (published, inventory) = watch::channel(SessionInventoryState::Available(Arc::from([])));
+    let (waiting, started) = tokio::sync::oneshot::channel();
+    let reconciliation = tokio::spawn(async move {
+        // The watch task already copied an empty census. Poll until it parks
+        // behind another database operation, as can happen during an open.
+        let future = reconcile_embedded_inventory(&reconcile_pool, &inventory);
+        tokio::pin!(future);
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(future.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        waiting.send(()).unwrap();
+        future.await.unwrap();
+    });
+    started.await.unwrap();
+    // On the ordered leg-B lane, this live census arrives before the open Result
+    // can persist its row. An old copied census is still parked behind storage.
+    published.send_replace(SessionInventoryState::Available(Arc::from([session])));
+    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES(?,?,unixepoch(),unixepoch())")
+        .bind(session.as_slice())
+        .bind(&user)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    drop(writer);
+    reconciliation.await.unwrap();
+    // The next full census includes the new shim. A delayed older census must
+    // not leave it permanently closed after this authoritative update.
+    reconcile_embedded_sessions(&pool, &[session])
+        .await
+        .unwrap();
+    let closed: bool =
+        sqlx::query_scalar("SELECT closed_at IS NOT NULL FROM terminal_sessions WHERE id=?")
+            .bind(session.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        !closed,
+        "an earlier census closed a newly created live session"
     );
 }

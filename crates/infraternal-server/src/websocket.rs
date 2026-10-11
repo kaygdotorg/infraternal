@@ -114,8 +114,8 @@ impl WebSocketState {
                     SessionInventoryState::Unavailable => {
                         inventory_changes.send_modify(|version| *version = version.wrapping_add(1));
                     }
-                    SessionInventoryState::Available(ids) => {
-                        if reconcile_embedded_sessions(&inventory_pool, &ids)
+                    SessionInventoryState::Available(_) => {
+                        if reconcile_embedded_inventory(&inventory_pool, &inventory)
                             .await
                             .is_ok()
                         {
@@ -227,12 +227,18 @@ impl WebSocketState {
 }
 
 /// Close stale embedded session rows after an agent restart or a shim retirement.
-async fn reconcile_embedded_sessions(
+async fn reconcile_embedded_inventory(
     pool: &SqlitePool,
-    session_ids: &[[u8; 16]],
+    inventory: &watch::Receiver<SessionInventoryState>,
 ) -> Result<(), sqlx::Error> {
-    let live: HashSet<[u8; 16]> = session_ids.iter().copied().collect();
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    // The ordered leg-B census precedes its open Result. Read the current watch
+    // only after the writer lock: a newly persisted row then has a known live ID,
+    // even if an earlier census caused this task to wait for the connection.
+    let SessionInventoryState::Available(session_ids) = inventory.borrow().clone() else {
+        return Ok(());
+    };
+    let live: HashSet<[u8; 16]> = session_ids.iter().copied().collect();
     let rows: Vec<Vec<u8>> = sqlx::query_scalar(
         "SELECT id FROM terminal_sessions WHERE remote_host_id IS NULL AND closed_at IS NULL",
     )
@@ -668,18 +674,29 @@ async fn send_terminal_sessions_snapshot<K>(
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
-    let inventory = state.agent.session_inventory().borrow().clone();
-    let event = match inventory {
-        SessionInventoryState::Pending | SessionInventoryState::Unavailable => json!({
+    let source = state.agent.session_inventory();
+    let mut inventory = source.borrow().clone();
+    // Unavailability needs no storage. For a census, acquire first and refresh
+    // the watch so storage contention cannot leave us publishing an older set.
+    let database = if matches!(inventory, SessionInventoryState::Available(_)) {
+        let connection = state.pool.acquire().await.map_err(|_| ())?;
+        inventory = source.borrow().clone();
+        Some(connection)
+    } else {
+        None
+    };
+    let event = match (inventory, database) {
+        (SessionInventoryState::Pending | SessionInventoryState::Unavailable, _)
+        | (SessionInventoryState::Available(_), None) => json!({
             "topic":"terminal.sessions",
             "type":"terminal.sessions.unavailable",
         }),
-        SessionInventoryState::Available(live) => {
+        (SessionInventoryState::Available(live), Some(mut database)) => {
             let rows: Vec<Vec<u8>> = sqlx::query_scalar(
                 "SELECT id FROM terminal_sessions WHERE user_id=? AND remote_host_id IS NULL AND closed_at IS NULL",
             )
             .bind(user)
-            .fetch_all(&state.pool)
+            .fetch_all(&mut *database)
             .await
             .map_err(|_| ())?;
             let live: HashSet<[u8; 16]> = live.iter().copied().collect();
@@ -695,7 +712,7 @@ where
             )
             .bind(user)
             .bind(MAX_ENDED_SESSION_STATUSES)
-            .fetch_all(&state.pool)
+            .fetch_all(&mut *database)
             .await
             .map_err(|_| ())?;
             let ended_sessions: Vec<serde_json::Value> = ended_rows
