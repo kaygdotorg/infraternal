@@ -1,0 +1,28 @@
+
+running 1 test
+test ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages ... 
+running 1 test
+METRIC unlocked_ca_vm_lck_kib=1024 rss_before_kib=11432 rss_unlocked_kib=18516 secure_before_bytes=0 secure_unlocked_bytes=544 servers=1 heap_bytes=1048576
+test ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages ... FAILED
+
+failures:
+
+failures:
+    ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 334 filtered out; finished in 0.01s
+
+FAILED
+
+failures:
+
+failures:
+    ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 334 filtered out; finished in 0.01s
+
+Running as unit: run-p837839-i51121412.scope; invocation ID: 8f74f1f546ac4f209411ac91c4ccceda
+
+thread 'ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages' (837840) panicked at crates/infraternal-server/src/ca_update_audit_tests.rs:95:5:
+unlocked persistent signer is unprotected
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

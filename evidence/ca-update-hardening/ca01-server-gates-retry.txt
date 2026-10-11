@@ -1,0 +1,76 @@
+    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 28.12s
+   Compiling getrandom v0.4.3
+   Compiling openssl v0.10.81
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-shim)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/mesh)
+   Compiling uuid v1.27.0
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/ssh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-agent)
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling tokio-openssl v0.6.5
+   Compiling axum-server v0.8.0
+   Compiling webauthn-rs-core v0.5.5
+   Compiling webauthn-rs v0.5.5
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 24s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_server-f3b5ce2272ed86ee)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 197 filtered out; finished in 0.00s
+
+     Running tests/catalog_startup.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/catalog_startup-0dfcae4efa1a44be)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/enrollment.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/enrollment-44243a8357877a23)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_parser-37b710f34c85d28e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_plugin-2ef882ad7a1a14b7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_policy-b034523c0a9c78ab)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_role_scope-2cba02085d5b3211)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/plugin_host_review-701126dbcf571ce7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/plugin_settings_review-05155b5c3022c6a0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/remote_plugin_contract.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/remote_plugin_contract-0edf4d55c0abfc68)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

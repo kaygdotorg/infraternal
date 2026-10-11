@@ -1,0 +1,2963 @@
+Running as unit: run-p328315-i328615.scope; invocation ID: fe93f3bb121b47688067bb537df97991
+METRIC name=network_rtt_selftest configured_rtt_ms=300 jitter_ms=30 loss=unsupported transport=tcp-stream n=3 p50_ms=295.81 p99_ms=302.09 result=PASS
+
+==> fmt
+
+==> VT native fmt
+
+==> clippy
+    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+    Checking infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal)
+    Checking infraternal-fuzz v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/fuzz)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.98s
+
+==> test
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 28s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal-90fe82a6b3d59be8)
+
+running 41 tests
+test embedded_cli::tests::dispatch_keeps_public_help_operator_modes_and_foreign_commands ... ok
+test embedded_cli::tests::inherited_flags_keep_public_parser_validation_and_values ... ok
+test install::tests::dry_run_prints_a_process_surviving_user_unit ... ok
+test remote::tests::join_dns_failure_reports_resolution_instead_of_generic_refusal ... ok
+test remote::tests::local_identity_load_refuses_symlink_and_shared_file ... ok
+test remote::tests::ordinary_join_keeps_the_foreground_connection_default ... ok
+test remote::tests::oversized_or_invalid_invitation_fails_before_local_state_is_created ... ok
+test remote::tests::preparation_refuses_shared_and_symlinked_data_directories ... ok
+test remote::tests::publication_is_private_and_never_replaces_existing_identity ... ok
+test remote::tests::renewal_publication_replaces_only_certificate_and_preserves_private_metadata ... ok
+test remote::tests::ssh_installation_can_enroll_before_starting_the_service ... ok
+test remote::tests::uid_and_privilege_mismatch_fails_before_key_generation ... ok
+test remote_server::tests::failed_cold_configuration_still_disposes_handoff_stdin ... ok
+test remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving ... ok
+test remote_server::tests::independent_review_remote_operator_commands_accept_json_output ... ok
+test remote_server::tests::missing_ca_refuses_before_database_or_listener_creation ... ok
+test remote_server::tests::remote_activation_is_explicit_and_ca_override_requires_listener ... ok
+test remote_server::tests::service_dry_run_preserves_remote_listener_and_private_trust_path ... ok
+test restart::tests::closed_reply_and_missing_reload_target_do_not_end_restart_control ... ok
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... ok
+test restart::tests::default_restart_opens_the_receiver_target_exactly_once ... ok
+test restart::tests::early_hangup_is_queued_until_control_installs_its_handler ... ok
+test restart::tests::private_control_endpoint_cannot_be_stolen_or_created_by_a_client ... ok
+test restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape ... ok
+test restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin ... ok
+test restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced ... ok
+test restart::tests::replacement_never_exports_to_a_general_purpose_binary ... ok
+test restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome ... ok
+test restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths ... ok
+test restart::tests::reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer ... ok
+test restart::tests::root_owned_marked_target_requires_protected_root_parents ... ok
+test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode ... ok
+test restart::tests::runtime_directory_symlinks_and_public_permissions_are_refused ... ok
+test restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter ... ok
+test restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution ... ignored, unresolved P2 UP-02: opened inode can be rewritten before exec; run explicitly
+test restart_binary::audit_tests::pathname_replacement_keeps_the_admitted_inode ... ok
+test restart_binary::audit_tests::symlink_parent_escape_and_writable_candidates_are_refused ... ok
+test restart_binary::audit_tests::unsigned_or_tampered_replacement_is_refused_before_exec ... ignored, unresolved P1 UP-01: signature hook accepts unsigned replacement; run explicitly
+test restart_binary::audit_tests::unusable_admitted_image_keeps_the_existing_service_running ... ignored, unresolved P1 UP-03: exec failure shuts down the running service; run explicitly
+test setup_token_tests::setup_token_command_reads_only_the_expected_socket_response ... ok
+test startup_tests::process_dumpability_is_disabled_before_dispatch ... ok
+
+test result: ok. 38 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 7.56s
+
+     Running tests/agent_daemon.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/agent_daemon-d42d86a1fe9be4ef)
+
+running 1 test
+test real_binary_preserves_input_and_output_across_24_abrupt_stops ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.36s
+
+     Running tests/agent_queues.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/agent_queues-a021ec1acb3b3974)
+
+running 1 test
+test saturated_terminal_queues_preserve_every_byte_and_daemon_liveness ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.24s
+
+     Running tests/agent_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/agent_review-b109dc8c0ea4448a)
+
+running 8 tests
+test initial_attach_requires_explicit_credit_before_replay ... ok
+test last_typist_selects_its_own_real_pty_dimensions ... ok
+test local_session_counts_and_memory_refusals_follow_real_lifecycle ... ok
+test reaped_shim_exit_survives_credit_after_starvation_deadline ... ok
+test repeated_tiny_credit_pauses_preserve_shell_progress ... ok
+test retained_unwritten_input_survives_interleaved_ack_restart ... ok
+test stalled_terminal_never_delays_control_or_sibling_dispatch ... ok
+test two_writers_keep_independent_ack_and_exact_input_after_restart ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.68s
+
+     Running tests/agent_sessions.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/agent_sessions-51194cc1ad11f060)
+
+running 1 test
+test detached_shim_is_discovered_and_replays_from_the_last_observed_offset ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/idle_canary.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/idle_canary-2954b36cc04b68cf)
+
+running 1 test
+test one_hertz_wakeup_is_detected_past_the_legacy_half_second_window ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.18s
+
+     Running tests/remote_output.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/remote_output-7a63ec36fdc42d04)
+
+running 3 tests
+test human_remote_refusal_has_sections_and_next_steps_without_color ... ok
+test json_remote_run_refuses_missing_identity_without_reflecting_its_path ... ok
+test json_remote_server_refuses_before_creating_storage_or_binding ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/session_bounds_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/session_bounds_review-f381e04914a71be3)
+
+running 1 test
+test attached_window_recovers_final_output_and_exit_after_shim_link_detaches ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.69s
+
+     Running tests/session_retention.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/session_retention-872dbdc68c802169)
+
+running 1 test
+test bounded_owned_exit_reconnects_as_ended_with_status ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.85s
+
+     Running tests/shim.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/shim-6f50c01a34844ce2)
+
+running 13 tests
+test attached_backpressure_and_detached_progress ... ok
+test delivered_exit_cannot_release_another_owning_window ... ok
+test detached_shell_exit_reaps_even_with_a_live_background_descendant ... ok
+test detached_shell_exit_reaps_shim_within_one_second ... ok
+test disallowed_signal_only_disconnects_peer ... ok
+test double_fork_survives_parent_death ... ok
+test owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer ... ok
+test owned_exit_releases_promptly_on_window_close ... ok
+test real_shell_reconnect_resize_and_delivered_exit ... ok
+test replacement_connection_and_malformed_limit ... ok
+test ring_wrap_snapshot_repaints_real_vim ... ok
+test unowned_normal_exit_retires_promptly_and_records_status ... ok
+test user_scope_survives_parent_unit_stop ... active
+ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.95s
+
+     Running tests/ssh_askpass.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/ssh_askpass-157e04a7fc7a4e10)
+
+running 3 tests
+test encrypted_key_without_passphrase_never_prompts_on_a_controlling_terminal ... ignored, run under the disposable controlling-terminal harness
+test real_cli_askpass_refuses_unregistered_parent_and_cleans_helper ... ok
+test real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/vt_credit.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/vt_credit-1abd0a7d7cdd2cf3)
+
+running 1 test
+test unaffordable_repaints_park_until_sufficient_credit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.05s
+
+     Running tests/vt_reconnect.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/vt_reconnect-5711ec4b49249e36)
+
+running 1 test
+test snapshot_limits_never_close_live_reconnect ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.75s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_agent-3f7a0f2ea26ce26b)
+
+running 66 tests
+test daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up ... ok
+test daemon::gone_tests::scale_review::two_hundred_vanished_sessions_preserve_the_same_channel ... ignored, scale measurement; run alone under CPUWeight=10000
+test daemon::readiness_tests::control_precedes_bulk_without_reordering_snapshot_notice ... ok
+test daemon::readiness_tests::reply_lane_memory_at_1000_channels ... ignored, queue-only scale diagnostic; run alone without build/browser overlap, not whole-daemon memory
+test daemon::readiness_tests::saturated_replies_retire_connection_without_awaiting_writer_capacity ... ok
+test daemon::readiness_tests::uninstall_handoff_runs_only_after_a_successful_real_socket_write ... ok
+test daemon::remote_tests::cancelling_remote_dispatch_retires_the_borrowed_authenticated_channel ... ok
+test daemon::remote_tests::control_greeting_precedes_actions_and_odd_writers_are_refused ... ok
+test daemon::remote_tests::silent_authenticated_peer_has_a_greeting_deadline ... ok
+test daemon::remote_tests::wrong_enrolled_uid_is_refused_before_state_creation ... ok
+test daemon::remote_tests::wrong_open_uid_is_rejected_while_control_remains_usable ... ok
+test daemon::session_commands::measurements::command_coordination_cost_against_existing_fifo ... ignored, release command coordination diagnostic, not end-to-end throughput; run without own build overlap
+test daemon::session_commands::tests::credit_above_one_wire_word_is_exact_and_idle_after_drain ... ok
+test daemon::session_commands::tests::credit_allowance_does_not_cross_ordered_command_barriers ... ok
+test daemon::session_commands::tests::credit_bursts_do_not_consume_ordered_input_capacity ... ok
+test daemon::session_commands::tests::input_and_resize_keep_their_shared_fifo_order_around_credit ... ok
+test daemon::session_commands::tests::zero_credit_is_idle_and_overflow_refuses_without_mutating_accounting ... ok
+test daemon::stream_memory_tests::terminal_stream_memory_at_200 ... ignored, weighted release measurement of 200 idle relay tasks
+test lifecycle::tests::directory_inode_changes_do_not_retire_the_same_process ... ok
+test lifecycle::tests::nondumpable_process_keeps_its_authenticated_lifetime ... ok
+test lifecycle::tests::process_birth_parser_handles_command_bytes_and_numeric_bounds ... ok
+test lifecycle::tests::window_ownership_and_process_identity_bound_live_counts ... ok
+test relay::tests::attachment_has_no_implicit_output_or_snapshot_credit ... ok
+test relay::tests::expired_credit_resumes_retained_bytes_at_the_same_cursor ... ok
+test relay::tests::input_overlap_gap_and_restart_from_confirmed_offset ... ok
+test relay::tests::output_partial_credit_and_dedup ... ok
+test relay::tests::output_payload_move_measurement ... ignored, release ownership versus payload-copy measurement
+test relay::tests::overflowing_ranges_never_mutate_cursors ... ok
+test relay::tests::positive_insufficient_credit_arms_a_one_shot_deadline ... ok
+test relay::tests::returned_credit_cancels_starvation_and_state_has_no_payload_buffer ... ok
+test relay::tests::starvation_is_one_shot_and_snapshot_length_does_not_advance_sequence ... ok
+test remote_client::tests::delayed_proxy_keeps_replies_bound_to_the_original_udp_client ... ok
+test remote_client::tests::expired_local_identity_stops_instead_of_retrying_forever ... ok
+test remote_client::tests::prefixed_control_keeps_coalesced_suffix_and_suppresses_only_its_greeting ... ok
+test remote_client::tests::rootless_uid_mismatch_is_refused_before_dial ... ok
+test remote_client::tests::supervisor_300ms_quic_and_blocked_udp_fallback ... ignored, supervisor establishment diagnostic; run alone without builds or browsers
+test remote_client::tests::tcp_proxy_flushes_bounded_flood_before_half_close ... ok
+test remote_client::tests::tcp_proxy_preserves_spacing_between_packets_already_in_flight ... ok
+test remote_client::tests::tcp_winner_cancels_silent_udp_drivers_without_waiting_for_drain ... ok
+test remote_client::tests::unavailable_udp_does_not_add_seconds_before_tcp_admission ... ok
+test remote_client::tests::winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch ... ok
+test remote_native_tests::bound_writer_uses_raw_frames_and_rejects_cross_writer_transmit ... ok
+test remote_native_tests::control_must_be_host_initiated_stream_zero_and_terminal_halves_cannot_impersonate_it ... ok
+test remote_native_tests::partial_native_write_cancellation_retires_both_directions ... ok
+test remote_native_tests::terminal::credits::private_credit_burst_waits_for_its_shim_without_retiring_native_stream ... ok
+test remote_native_tests::terminal::gone_review::retired_native_session_delivers_saved_status_then_final_close_before_retirement ... ok
+test remote_native_tests::terminal::gone_review::retired_native_status_bounds_final_reply_drain_for_a_stuck_peer ... ok
+test remote_native_tests::terminal::gone_review::retiring_native_handshake_preserves_final_answer_with_inflight_commands ... ok
+test remote_native_tests::terminal::gone_review::vanished_native_session_bounds_final_reply_drain_for_a_stuck_peer ... ok
+test remote_native_tests::terminal::gone_review::vanished_native_session_delivers_final_close_before_stream_retirement ... ok
+test remote_native_tests::terminal::real_pty_resumes_native_writer_after_25_connection_replacements ... ignored, real CLI/shim oracle; set INFRATERNAL_TEST_BINARY and run alone under CPUWeight10000
+test sessions::tests::borrowed_reader_payload_uses_reusable_cancel_safe_storage ... ok
+test sessions::tests::bounds::discovery_recovers_more_than_128_authenticated_sockets ... ok
+test sessions::tests::cancelled_fragmented_shim_read_retains_header_and_body_progress ... ok
+test sessions::tests::post_listen_chmod_wakes_a_connection_refused_at_bind ... ok
+test sessions::tests::reader_borrow_measurement ... ignored, release borrowed versus owned asynchronous receive measurement
+test sessions::tests::refused_socket_is_removed_but_insecure_directory_is_rejected ... ok
+test sessions::tests::sequenced_attach_intersects_caps_and_legacy_attach_stays_zero ... ok
+test sessions::tests::symlink_state_cannot_redirect_private_runtime_storage ... ok
+test transport::remote_deadline_tests::coalesced_partial_suffix_keeps_its_arrival_deadline ... ok
+test transport::remote_deadline_tests::queued_suffix_cannot_complete_an_expired_cancelled_frame ... ok
+test transport::remote_deadline_tests::remote_partial_frame_deadline_survives_receive_cancellation ... ok
+test transport::remote_deadline_tests::wholly_idle_remote_channel_has_no_frame_expiry ... ok
+test transport_diagnostics::quic_300ms_and_1000_connection_pairs ... ignored, diagnostic only; run alone without build or browser overlap
+test transport_diagnostics::quic_bulk_50m_exact_bytes ... ignored, size investigation diagnostic; run alone without build or browser overlap
+test transport_diagnostics::tcp_300ms_and_1000_connection_pairs ... ignored, diagnostic only; run alone without build or browser overlap
+
+test result: ok. 55 passed; 0 failed; 11 ignored; 0 measured; 0 filtered out; finished in 11.79s
+
+     Running tests/transport.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/transport-7aefc420416659fc)
+
+running 2 tests
+test fragmented_headers_coalesced_frames_and_reusable_transmit ... ok
+test oversized_header_and_truncated_frame_are_rejected ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_mesh-3f967587718407e9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/default_arrow.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/default_arrow-312553ba19630584)
+
+running 1 test
+test omitted_arrow_ports_default_to_all_services ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/properties.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/properties-78f35bbe1b57dcd5)
+
+running 14 tests
+test addresses_are_unique_stable_and_not_recycled ... ok
+test arrow_replacement_is_atomic_and_unrelated_nodes_keep_their_versions ... ok
+test checkpoint_after_suffix_change_restores_without_reallocating_addresses ... ok
+test directional_grants_union_and_minimal_updates ... ok
+test exhausted_versions_reject_mutations_without_changing_state ... ok
+test join_to_same_tag_grants_both_initiation_directions ... ok
+test names_versions_and_backend_status ... ok
+test overlaps_are_reported_without_silent_range_changes ... ok
+test private_material_never_enters_debug_or_coordination_serialization ... ok
+test protocol_port_unions_never_grant_an_unlisted_service ... ok
+test public_checkpoint_preserves_addresses_rules_versions_and_overlap ... ok
+test rotation_waits_for_overlap_and_delivery_and_removal_drops_every_key ... ok
+test seeded_random_sequences_equal_full_compile_and_deny_without_grants ... ok
+test server_rotation_has_continuous_keys_for_every_node_during_delivery ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.59s
+
+     Running tests/rotation_time.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/rotation_time-a58dd287253d611d)
+
+running 1 test
+test unrepresentable_rotation_overlap_rejects_before_mutation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_api-5c728191785f01c7)
+
+running 8 tests
+test admission::tests::memory_refusal_round_trips_without_losing_legacy_error ... ok
+test component_tests::component_declarations_cannot_create_servers ... ok
+test component_tests::destructive_actions_require_a_dry_run_and_every_action_has_instructions ... ok
+test routing::tests::invalid_or_oversized_topics_are_refused ... ok
+test routing::tests::topic_is_borrowed_and_other_filter_fields_are_left_to_the_plugin ... ok
+test tests::deferred_plugin_effect_waits_for_successful_reply_and_drops_on_cancellation ... ok
+test tests::registry_rejects_oversized_json_before_plugin_dispatch ... ok
+test tests::registry_routes_only_declared_actions ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/routing_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/routing_review-9a16e71abd7f4bdb)
+
+running 2 tests
+test review_topic_borrows_plain_and_owns_escaped ... ok
+test review_topic_refuses_oversize_duplicate_and_deep_input ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_host_facts-92fb8980e23d63eb)
+
+running 13 tests
+test memory::tests::custom_policy_rounds_up_and_validates_all_settings_before_use ... ok
+test memory::tests::default_floor_refuses_only_below_headroom_even_above_128_sessions ... ok
+test session_counts_tests::host_owned_session_counts_are_additive_and_refresh_on_request ... ok
+test tests::action_decoders_reject_unknown_and_oversized_fields ... ok
+test tests::compatibility_fields_are_kept_in_the_rust_shape_and_architecture_on_wire ... ok
+test tests::configured_memory_floor_refuses_with_current_host_counters ... ok
+test tests::descriptor_declares_default_settings_actions_and_no_hidden_role_dependency ... ok
+test tests::linux_load_average_text_ignores_proc_metadata_and_rejects_invalid_values ... ok
+test tests::macos_load_average_decodes_the_bounded_64_bit_sysctl_shape ... ok
+test tests::os_release_parser_rejects_unbounded_input_and_ignores_untrusted_lines ... ok
+test tests::os_release_uses_distribution_name_and_version_without_shell_evaluation ... ok
+test tests::runtime_disable_drops_cached_facts_and_reenable_collects_them_again ... ok
+test tests::static_facts_are_cached_and_live_counters_are_collected_only_when_requested ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_mesh-65b6dee3ae44f8e9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_remote-dbc730f0a98d7ae8)
+
+running 12 tests
+test remote_quic::tests::acknowledged_idle_survives_and_a_silent_path_times_out ... ok
+test remote_quic::tests::host_cannot_open_a_second_server_control_stream ... ok
+test remote_quic::tests::repeated_native_id_has_distinct_server_writer_authority_and_preserves_suffix ... ok
+test remote_quic::tests::wrong_server_name_never_yields_authenticated_connection ... ok
+test remote_tls::tests::cancelled_partial_write_cannot_reuse_the_channel ... ok
+test remote_tls::tests::mutual_tls_delivers_exact_bytes_and_verified_leaf_fingerprints ... ok
+test remote_tls::tests::stalled_write_retires_both_directions_without_idle_polling ... ok
+test remote_tls::tests::untrusted_client_never_reaches_server_admission ... ok
+test remote_tls::tests::untrusted_server_or_wrong_server_name_is_refused_before_bytes ... ok
+test uninstall::tests::bootstrap_lock_delays_uninstall_without_omitting_its_handler ... ok
+test uninstall::tests::retirement_signals_the_shell_after_its_foreground_job_exits ... ok
+test uninstall::tests::uninstall_never_accepts_request_selected_paths_or_foreign_identity ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.16s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_ssh-22c74ae6b401f3c9)
+
+running 12 tests
+test auth_once::tests::caller_cannot_choose_or_extend_the_expiry_clock ... ok
+test auth_once::tests::each_method_consumes_once_and_expiry_erases_both_methods ... ok
+test auth_once::tests::invalid_material_is_refused_before_any_helper_or_scheduling ... ok
+test config::tests::configured_private_sources_are_excluded_and_public_trust_is_retained ... ok
+test config::tests::flattened_quoted_public_filenames_are_refused_when_existing_trust_would_be_lost ... ok
+test config::tests::malformed_public_policy_is_refused_before_it_can_change_command_arguments ... ok
+test config::tests::trust_lookup_uses_every_explicit_alias_verbatim ... ok
+test config::tests::unresolved_or_relative_public_paths_cannot_admit_first_contact ... ok
+test manifest::tests::node_provisioning_declares_an_existing_server_and_only_node_components ... ok
+test prompt::tests::helper_reply_requires_the_registered_parent_and_is_served_once ... 
+running 1 test
+test prompt::tests::reply_fixture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+ok
+test prompt::tests::reply_fixture ... ignored, private subprocess for the one-reply peer oracle
+test transport::secret_tests::secret_input_has_a_fixed_bound_and_accepts_only_strings ... ok
+
+test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/auth_order.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/auth_order-744d04f93707f5ba)
+
+running 6 tests
+test authentication_never_replays_a_mutating_first_command_or_reuses_a_failed_scope ... ok
+test cancelling_authentication_consumes_the_attempt_without_requesting_secrets ... ok
+test later_command_auth_errors_never_restart_the_selected_method_sequence ... ok
+test only_exhausted_auth_returns_typed_choose_method ... ok
+test successful_authentication_is_reported_and_later_secrets_are_never_requested ... ok
+test trust_network_and_remote_command_failures_stop_without_loading_local_secrets ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/build_removal.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/build_removal-dba195f2ccd51d46)
+
+running 1 test
+test build_without_default_plugins_excludes_ssh_dependency ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.24s
+
+     Running tests/concurrency.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/concurrency-567f2b3209b3d51a)
+
+running 7 tests
+test a_thousand_admitted_targets_keep_eight_active_backend_calls ... ignored, explicit CPUWeight10000 scale measurement with a controlled unavailable backend
+test an_interrupted_disable_keeps_admission_closed_until_its_adapter_retires ... ok
+test authenticated_batches_retain_an_opaque_session_for_trusted_issuance ... ok
+test component_off_retires_a_real_native_helper ... ok
+test concurrency_is_eight_across_batches_and_all_ten_hosts_fail_independently ... ok
+test entire_batch_validates_before_start_and_duplicates_are_refused ... ok
+test turning_off_drains_queued_work_and_reenable_never_resumes_old_batches ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/config_isolation.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/config_isolation-c8555d6ef13a9d9c)
+
+running 1 test
+test configured_identity_paths_are_not_inherited_by_the_command_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/credentials.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/credentials-a02d677719e12c57)
+
+running 3 tests
+test credential_helper_refuses_host_trust_and_permission_prompts ... ok
+test password_helpers_prepare_a_fresh_private_root_and_remove_only_their_directory ... ok
+test password_socket_refuses_an_unrelated_same_user_process ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/diagnostics.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/diagnostics-a642b26a9490dbef)
+
+running 5 tests
+test dynamic_public_trust_is_retained_without_becoming_file_only_admission ... ok
+test effective_configuration_never_scans_a_proxy_or_invalid_endpoint ... ok
+test failed_join_retains_only_the_allowlisted_host_dns_error ... ok
+test mesh_policy_requires_both_discovery_facts_and_a_transport_refusal ... ok
+test remote_command_text_is_not_ssh_authority_and_never_enters_logs ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/event_metadata.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/event_metadata-c5bbe67ae20be921)
+
+running 1 test
+test unsupported_host_reports_method_and_retry_never_replays_it_as_current ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/foreground.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/foreground-22ec946b08d93ce7)
+
+running 1 test
+test configured_backgrounding_is_overridden_for_owned_bootstrap_commands ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/host_trust.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/host_trust-dcf5ed7cf6caf11b)
+
+running 2 tests
+test configured_known_hosts_command_revocation_cannot_offer_first_contact ... ignored, run through research/ssh-client/measure.py with its synthetic public host key
+test first_contact_needs_fresh_authority_and_never_replaces_existing_trust ... ignored, run through research/ssh-client/measure.py --negative-trust-oracle with its memory-held synthetic key
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/install-bf33190c5e4a8f5b)
+
+running 29 tests
+test acknowledged_linger_noop_does_not_own_later_external_enable ... ok
+test active_service_stop_failure_never_replaces_live_artifacts ... ok
+test cleanup_receipt_cannot_authorize_a_replaced_unowned_directory ... ok
+test command_failure_names_upload_join_install_and_start_separately ... ok
+test denied_linger_request_does_not_undo_a_later_external_enable ... ok
+test failed_upgrade_preserves_previous_binary_state_and_unit ... ok
+test foreign_files_and_another_attempt_lock_are_never_removed ... ok
+test fresh_cleanup_refuses_a_shared_writable_receipt_parent_before_mutation ... ok
+test fresh_cleanup_resumes_after_base_removal_and_retires_its_receipt ... ok
+test fresh_cleanup_resumes_after_owner_marker_removal_with_a_fresh_session ... ok
+test fresh_failure_removes_owned_artifacts_and_success_can_rejoin ... ok
+test fresh_receipt_is_removed_before_transaction_rollback ... ok
+test fresh_rollback_resumes_after_transaction_directory_removal ... ok
+test fresh_runtime_empty_directories_do_not_block_rollback_and_retry ... ok
+test fresh_runtime_symlink_never_removes_foreign_empty_directories ... ok
+test fresh_runtime_unexpected_data_keeps_ownership_and_cleanup_receipt ... ok
+test interrupted_linger_reply_retains_intent_for_cleanup ... ok
+test interrupted_restore_recreates_links_without_deleting_the_original ... ok
+test interrupted_rollback_never_deletes_already_restored_state_on_retry ... ok
+test interrupted_upgrade_after_acknowledged_stop_restarts_the_previous_service ... ok
+test linger_policy_denial_is_a_warning_and_owned_changes_are_reversible ... ok
+test linked_owner_marker_is_refused_before_retiring_the_transaction ... ok
+test malformed_or_exposed_cleanup_receipts_never_remove_the_owned_root ... ok
+test pending_fresh_cleanup_refuses_replacement_staging_until_finished ... ok
+test refused_previous_service_stop_only_removes_staging ... ok
+test rejoin_preserves_existing_host_identity_in_the_private_staging_state ... ok
+test retry_cleanup_uses_fresh_session_and_preserves_privilege_consent ... ok
+test rollback_stop_refusal_retains_artifacts_for_later_cleanup ... ok
+test writable_installation_is_refused_before_upload_or_cleanup ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.54s
+
+     Running tests/model.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/model-1a416449815ab54c)
+
+running 4 tests
+test addresses_never_become_options_or_shell_syntax ... ok
+test check_is_exact_bounded_and_rejects_every_truncation ... ok
+test consent_and_credential_references_are_the_only_request_authority ... ok
+test root_consent_is_required_before_ssh_and_uid_zero_cannot_be_rootless ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/probe_check.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/probe_check-493058442c42e74a)
+
+running 1 test
+test manager_availability_does_not_request_its_private_environment ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/process.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/process-4491e71fb8358cf3)
+
+running 5 tests
+test cancellation_retires_the_helper_descendant_too ... ok
+test completed_helper_retires_descendants_with_closed_pipes ... ok
+test group_identity_is_retained_until_inherited_pipes_finish ... ok
+test oversized_remote_output_is_bounded_and_active_timeout_is_enforced ... ok
+test reviewer_ssh_helper_does_not_inherit_server_reload_mask ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests/proxy_policy.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/proxy_policy-30b27e9a0eaf7feb)
+
+running 1 test
+test unchecked_proxy_hops_are_refused_before_credential_helpers_or_network ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/real_ssh.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/real_ssh-2b6f699fa75f5e16)
+
+running 1 test
+test actual_ssh_authentication_check_and_strict_host_key_rejection ... ignored, run through research/ssh-client/measure.py with the synthetic rootless sshd fixture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/single_connection.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/single_connection-e97d45463f57ad78)
+
+running 1 test
+test one_physical_connection_erases_helpers_and_refuses_reconnect ... ignored, run through the rootless real-sshd fixture, selecting this test only
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/source_completeness.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/source_completeness-0d8606df6a5ada25)
+
+running 1 test
+test declared_public_modules_have_committed_sources ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/trust_round2.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/trust_round2-a58eb97831fbeafe)
+
+running 2 tests
+test long_data_directory_does_not_bound_the_ssh_helper_socket ... ignored, scripts/test-ssh-host-trust.py supplies the real multi-key target
+test multi_key_target_trusts_once_and_reconnects_without_a_loop ... ignored, scripts/test-ssh-host-trust.py supplies a real multi-key sshd and memory-held credentials
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_protocol-e4eeb92d35d69a68)
+
+running 7 tests
+test stream_tests::all_short_frame_splits_match_direct_decoding ... ok
+test stream_tests::maximum_sized_fragmented_frame_is_not_rejected ... ok
+test stream_tests::split_mux_header_preserves_trailing_close ... ok
+test tests::golden_vectors_encode_and_decode_every_contract_frame ... ok
+test tests::mux_round_trip_and_incremental_decoders_preserve_frame_order ... ok
+test tests::oversized_encode_keeps_the_reusable_output_unchanged ... ok
+test tests::rejects_oversized_noncanonical_and_malformed_frames_before_buffering_body ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_server-685b52a1e40e250a)
+
+running 338 tests
+test auth::cookies::measurement::cookie_latency_at_50_sessions ... ignored, local optimized cookie reader measurement at 50 browser sessions
+test auth::cookies::tests::duplicates_missing_invalid_and_nontext_fail_closed ... ok
+test auth::cookies::tests::joined_split_reordered_and_other_cookies ... ok
+test auth::crypto::verifier_tests::browser_secret_hashing_is_canonical_and_bounded ... ok
+test auth::crypto::verifier_tests::fixture_waits_while_production_hashing_refuses_capacity ... ok
+test auth::crypto::verifier_tests::recovery_capacity_denial_is_not_a_legacy_credential_signal ... ok
+test auth::http::hostname_tests::authenticated_session_response_includes_system_hostname ... ok
+test auth::http::tests::admission_partitions_reset_without_trusting_forwarded_headers ... ok
+test auth::tests::aaguid_migration_preserves_legacy_credentials_and_sessions ... ok
+test auth::tests::aaguid_projection_rejects_malformed_cbor_corpus ... ok
+test auth::tests::account_identity_migration_backfills_legacy_users ... ok
+test auth::tests::account_identity_schema_has_unique_usernames_and_display_names ... ok
+test auth::tests::audit_ceremony_browser_binding ... ok
+test auth::tests::audit_logout_survives_admission_exhaustion ... ok
+test auth::tests::audit_no_public_credential_listing ... ok
+test auth::tests::audit_recovery_after_page_discard_can_resume_at_original_deadline ... ok
+test auth::tests::audit_recovery_pending_is_visible_to_signed_in_device ... ok
+test auth::tests::audit_recovery_session_expiring_during_verification_keeps_delay ... ok
+test auth::tests::authenticated_prf_metadata_preserves_legacy_envelopes ... ok
+test auth::tests::ca_administration_tests::actual_ca_unlock_cost_at_1000_administrator_records ... ignored, release real authority diagnostic at1000 memberships/copies; no concurrent own build/browser
+test auth::tests::ca_administration_tests::actual_passkey_unlocks_cold_ca_once_and_leaves_no_extra_browser_session ... ok
+test auth::tests::ca_administration_tests::administrator_with_stale_tap_must_make_a_new_verified_proof_to_unlock ... ok
+test auth::tests::ca_administration_tests::audit_tests::private_copy_persistence_contains_only_ciphertext_and_public_metadata ... ok
+test auth::tests::ca_administration_tests::audit_tests::unlock_audit_cost_at_1000_memberships ... ignored, real 100-unlock/1000-membership audit formatting diagnostic; no own builds or browsers
+test auth::tests::ca_administration_tests::audit_tests::unlock_audit_records_principal_time_outcome_without_material ... ok
+test auth::tests::ca_administration_tests::bootstrap_requires_a_fresh_real_proof_and_publishes_only_wrapped_ca_material ... ok
+test auth::tests::ca_administration_tests::changed_generation_expired_session_or_removed_credential_cannot_unlock ... ok
+test auth::tests::ca_administration_tests::concurrent_bootstrap_ceremonies_retain_one_issuer_and_replay_is_refused ... ok
+test auth::tests::ca_administration_tests::foreign_browser_cannot_consume_the_original_ca_unlock_ceremony ... ok
+test auth::tests::ca_administration_tests::http_tests::audit_tests::ca_start_budget_is_shared_by_routes_and_cookies_but_not_status_or_finish ... ok
+test auth::tests::ca_administration_tests::http_tests::audit_tests::sequential_unlock_starts_require_a_temporal_budget ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_body_admission_at_1000_requests ... ignored, 1000-request body admission diagnostic; run alone without builds
+test auth::tests::ca_administration_tests::http_tests::ca_finish_body_deadline_returns_its_admission_slot ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_http_exact_origin_and_live_cookie_are_required ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_http_parser_is_bounded_and_errors_do_not_reflect_wrapping_material ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_http_real_passkey_unlock_returns_only_lock_status_without_a_session_cookie ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_http_refuses_origin_and_cookie_before_decoding_wrapping_material ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_status_distinguishes_initial_setup_from_locked_retained_trust ... ok
+test auth::tests::ca_administration_tests::http_tests::first_machine_certificate_setup_starts_a_fresh_passkey_ceremony ... ok
+test auth::tests::ca_administration_tests::http_tests::independent_review_ca_body_reads_share_the_eight_request_admission_limit ... ok
+test auth::tests::ca_administration_tests::http_tests::independent_review_ca_headers_are_refused_before_reading_an_unfinished_body ... ok
+test auth::tests::ca_administration_tests::new_administrator_device_rewraps_pending_copy_and_role_generation_never_resurrects_it ... ok
+test auth::tests::ca_administration_tests::ordinary_login_ceremony_has_no_ca_unlock_purpose ... ok
+test auth::tests::ca_administration_tests::pending_administrator_cannot_replace_the_last_retained_wrapped_copy ... ok
+test auth::tests::ca_administration_tests::published_issuer_without_memory_projection_is_recovered_as_locked_trust ... ok
+test auth::tests::ca_administration_tests::revoked_membership_or_original_session_cannot_finish_an_existing_ca_ceremony ... ok
+test auth::tests::ca_administration_tests::role_changes_require_fresh_purpose_bound_proofs_and_recheck_owner_permission ... ok
+test auth::tests::ca_administration_tests::role_grant_is_pending_and_revoke_removes_old_copy_without_restoring_old_authority ... ok
+test auth::tests::ca_administration_tests::shipping_cli_tests::bootstrap_cli::fresh_release_bootstrap_join_renew_revoke_cuts_a_live_connection ... ignored, configured release E2E requires INFRATERNAL_REMOTE_TEST_BINARY and exclusive4701/7443
+test auth::tests::ca_administration_tests::shipping_cli_tests::configured_release_cli_cold_lock_real_passkey_unlock_and_cold_restart ... ignored, configured release CLI proof needs INFRATERNAL_REMOTE_TEST_BINARY and exclusive4701/7443
+test auth::tests::ca_administration_tests::wrong_wrapping_key_or_missing_user_verification_leaves_ca_locked ... ok
+test auth::tests::ca_membership_tests::administrator_bootstrap_is_explicit_and_owner_flag_cannot_replace_revoked_role ... ok
+test auth::tests::ca_membership_tests::administrator_copy_refuses_deleted_passkey_or_session ... ok
+test auth::tests::ca_membership_tests::administrator_copy_refuses_pending_expired_stale_or_future_session ... ok
+test auth::tests::ca_membership_tests::administrator_guard_cost_at_1000_memberships ... ignored, optimized administrator guard diagnostic at1000 memberships; no own build/browser overlap
+test auth::tests::ceremony_prf_wraps_and_optional_second_passkey ... ok
+test auth::tests::concurrent_owner_and_optional_passkey_enrollment_fail_closed ... ok
+test auth::tests::discoverable_latency_at_pending_capacity ... ignored, run --release --ignored --nocapture without concurrent builds
+test auth::tests::discoverable_login_handle_credential_counter_and_replay ... ok
+test auth::tests::enrollment_prf_input_matches_discoverable_login ... ok
+test auth::tests::host_facts_review_tests::pending_host_facts_read_keeps_control_ping_responsive ... ok
+test auth::tests::http_csrf_cookie_flags_body_limit_and_latency_evidence ... ok
+test auth::tests::pending_unlock_expires_without_terminal_authority ... ok
+test auth::tests::provider_labels_cover_the_cited_registry_without_guessing ... ok
+test auth::tests::provider_session_latency_at_50_devices ... ignored, local auth session scale measurement; run without concurrent builds
+test auth::tests::public_status_and_discoverable_http_login ... ok
+test auth::tests::recovery_audit_commits_once_with_start_cancel_and_complete ... ok
+test auth::tests::recovery_delay_cancel_and_replacement_revokes_every_capability ... ok
+test auth::tests::recovery_expiry_revocation_and_cross_user_isolation ... ok
+test auth::tests::recovery_http_live_same_account_is_immediate ... ok
+test auth::tests::recovery_http_other_expired_pending_and_missing_sessions_wait ... ok
+test auth::tests::recovery_live_session_cannot_accelerate_an_active_delayed_request ... ok
+test auth::tests::recovery_live_session_revoked_during_verification_cannot_waive_delay ... ok
+test auth::tests::recovery_session_delay_latency_at_capacity ... ignored, release-only recovery measurement at 50 live sessions; run without concurrent compilation
+test auth::tests::recovery_unknown_identity_pays_the_same_database_and_verifier_work ... ok
+test auth::tests::recovery_username_identity_is_additive_and_ambiguous_forms_fail ... ok
+test auth::tests::recovery_verifier_latency_at_capacity ... ignored, release-only v2 diagnostic at 50 live session rows; record host load separately
+test auth::tests::redacted_unknown_and_failed_registrations_do_not_claim_a_provider ... ok
+test auth::tests::registration_aaguid_survives_none_attestation_and_binds_session_provider ... ok
+test auth::tests::rejected_origin_uv_challenge_signature_prf_and_expired_ceremonies ... ok
+test auth::tests::remote_removal_tests::fresh_removal_revokes_offline_host_and_cannot_replay ... ok
+test auth::tests::remote_removal_tests::logout_or_role_loss_after_removal_start_preserves_host ... ok
+test auth::tests::review3_tests::review3_backend_reply_has_a_deadline ... ok
+test auth::tests::review3_tests::review3_busy_expiry ... ok
+test auth::tests::review3_tests::review3_busy_logout ... ok
+test auth::tests::review3_tests::review3_busy_recovery ... ok
+test auth::tests::review3_tests::review3_completion_and_cleanup_are_transaction_bound ... ok
+test auth::tests::review3_tests::review3_expired_handshake_must_not_welcome ... ok
+test auth::tests::review3_tests::review3_identified_privacy_timing_and_binding_replays ... ok
+test auth::tests::review3_tests::review3_pending_routes_and_idle_expiry_recovery ... ok
+test auth::tests::review3_tests::review3_revoked_handshake_must_not_welcome ... ok
+test auth::tests::review3_tests::review3_revoked_resume_must_not_welcome ... ok
+test auth::tests::review3_tests::review3_unwrap_cannot_be_skipped ... ok
+test auth::tests::review3_tests::review3_waiting_handshake_loses_authority ... ok
+test auth::tests::review3_tests::review4_open_reply_and_revocation_preserve_authority ... ok
+test auth::tests::review3_tests::review4_slow_open_at_user_capacity ... ignored, release-only connect scale measurement; run without concurrent builds
+test auth::tests::review_invalid_device_polling_exhausts_browser_budget ... ok
+test auth::tests::review_old_words_race_rotation ... ok
+test auth::tests::reviewer_tests::reviewer_disk_cancel_complete_races ... ok
+test auth::tests::reviewer_tests::reviewer_disk_restart_and_concurrent_resume ... ok
+test auth::tests::reviewer_tests::reviewer_http_denials_and_recovery_admission ... ok
+test auth::tests::reviewer_tests::reviewer_http_expired_capability_cannot_complete_after_writer_wait ... ok
+test auth::tests::reviewer_tests::reviewer_http_expired_ceremony_cannot_complete_after_writer_wait ... ok
+test auth::tests::reviewer_tests::reviewer_server_clock_rollback_retains_deadline_and_reports_more_than_day ... ok
+test auth::tests::rotation_tests::recovery_phrase_routes_are_removed_and_words_fail_closed ... ok
+test auth::tests::rotation_tests::recovery_rotation_cannot_follow_a_cookie_account_switch ... ok
+test auth::tests::rotation_tests::recovery_rotation_denies_pending_expired_and_stale_sessions ... ok
+test auth::tests::rotation_tests::recovery_rotation_requires_session_and_replaces_legacy_envelope ... ok
+test auth::tests::rotation_tests::reviewer_concurrent_signed_in_rotations_commit_once ... ok
+test auth::tests::server_setup_terminal_echo_and_resume_preserve_offsets_once ... ok
+test auth::tests::sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped ... ok
+test auth::tests::setup_check_is_non_consuming_and_closes_after_owner_creation ... ok
+test auth::tests::setup_identity_validation_and_uniqueness ... ok
+test auth::tests::setup_restart_rotation_expiry_and_parallel_redemption ... ok
+test auth::tests::setup_start_accepts_username_and_display_name ... ok
+test auth::tests::socket_tests::authenticated_idle_socket_survives_the_former_read_timeout ... ok
+test auth::tests::socket_tests::claude_review_visible_liveness::claude_review_watch_expires_host_made_visible_by_membership_edit ... ok
+test auth::tests::socket_tests::clean_control_close_is_not_an_internal_error ... ok
+test auth::tests::socket_tests::expired_handshake_releases_user_permits ... ok
+test auth::tests::socket_tests::fragmented_wire_frame_has_a_completion_deadline ... ok
+test auth::tests::socket_tests::fresh_delete::review_mesh_delete_requires_fresh_passkey_tap ... ok
+test auth::tests::socket_tests::half_open_sockets_obey_user_limit ... ok
+test auth::tests::socket_tests::incomplete_rfc_message_still_loses_authority_on_revocation ... ok
+test auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory ... ok
+test auth::tests::socket_tests::mesh_latency::mesh_snapshot_keystroke_latency_at_10000_nodes ... ignored, weighted real-binary 300 ms Mesh/PTY measurement
+test auth::tests::socket_tests::non_owner_without_host_configure_permission_is_refused_before_leg_b ... ok
+test auth::tests::socket_tests::plugin_lifecycle::disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_coordinator_requires_an_existing_server_role ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_destructive_metadata_matches_frozen_confirmation_requirements ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_lifecycle_withdrawals_survive_calls_but_never_end_a_replacement ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_plugin_discovery_disable_and_restart_preserve_control_socket ... ok
+test auth::tests::socket_tests::recovery_subscription_updates_every_signed_in_socket ... ok
+test auth::tests::socket_tests::review_control::pending_mesh_writers_preserve_authority_pool_capacity ... ok
+test auth::tests::socket_tests::review_control::review_pending_mesh_write_keeps_control_dispatch_available ... ok
+test auth::tests::socket_tests::review_fresh_wait::review_mesh_delete_refused_when_freshness_expires_during_writer_wait ... ok
+test auth::tests::socket_tests::review_liveness::review_mesh_watch_reports_liveness_expiry_without_another_edit ... ok
+test auth::tests::socket_tests::review_subscription_refusal::oversized_refusal_cannot_reinstall_a_queued_mesh_subscription ... ok
+test auth::tests::socket_tests::review_subscription_refusal::review_oversized_replacement_ends_the_previous_mesh_subscription ... ok
+test auth::tests::socket_tests::review_subscription_refusal::saturated_refusal_cannot_reinstall_a_queued_mesh_subscription ... ok
+test auth::tests::socket_tests::revoked_idle_socket_loses_all_authority ... ok
+test auth::tests::socket_tests::scale::review_mesh_headroom_snapshot_does_not_close_shared_socket ... ok
+test auth::tests::socket_tests::session_gone::an_ended_or_unknown_session_gets_the_final_close_without_losing_the_socket ... ok
+test auth::tests::socket_tests::session_gone::the_infraternal_agent_saying_gone_reaches_the_browser_as_the_final_close ... ok
+test auth::tests::socket_tests::socket_authority_latency_at_user_capacity ... ignored, release-only measurement without concurrent compilation
+test auth::tests::socket_tests::terminal_exit::retired_exit_preserves_status_without_claiming_final_output_delivery ... ok
+test auth::tests::socket_tests::terminal_exit::terminal_exit_persists_once_under_current_ownership_and_session ... ok
+test auth::tests::stale_counters_recovery_cancellation_and_wrap_tampering ... ok
+test auth::tests::terminal_refusal_tests::memory_refusal_preserves_reason_and_counters_to_browser ... ok
+test auth::tests::tls_tests::proxy_tls_registration_session_split_cookies ... ok
+test auth::tests::tls_tests::standalone_tls_registration_session_split_cookies ... ok
+test auth::tests::verified_passkey_tests::canceled_proof_before_writer_admission_leaves_no_new_session_or_pending_ceremony ... ok
+test auth::tests::verified_passkey_tests::proof_only_ceremony_expiring_during_writer_wait_cannot_commit_a_counter_or_session ... ok
+test auth::tests::verified_passkey_tests::proof_only_verification_preserves_monotone_registered_credential_counter ... ok
+test auth::tests::verified_passkey_tests::proof_only_verification_refuses_missing_uv_or_deleted_credential ... ok
+test auth::tests::verified_passkey_tests::verified_passkey_has_live_registered_identity_and_creates_no_session ... ok
+test bootstrap_api::tests::a_client_request_during_a_pending_confirmation_keeps_the_batch ... ok
+test bootstrap_api::tests::admission_stream_is_ordered_and_logout_retires_an_idle_socket ... ok
+test bootstrap_api::tests::component_off_interrupts_a_stalled_host_key_confirmation_lookup ... ok
+test bootstrap_api::tests::component_off_interrupts_a_stalled_progress_send ... ok
+test bootstrap_api::tests::component_off_retires_idle_sockets_and_refuses_new_admission ... ok
+test bootstrap_api::tests::control_frames_do_not_cancel_bootstrap_or_starve_progress ... ok
+test bootstrap_api::tests::host_key_confirmation_rechecks_the_exact_live_owner_capability ... ok
+test bootstrap_api::tests::logout_interrupts_a_stalled_host_key_confirmation_lookup ... ok
+test bootstrap_api::tests::origin_owner_unlock_and_whole_request_consent_are_required ... ok
+test bootstrap_api::tests::revocation_interrupts_a_stalled_progress_send ... ok
+test bootstrap_api::tests::settings_public_key_requires_exact_origin_and_live_unlocked_owner ... ok
+test bootstrap_api::tests::split_cookie_fields_preserve_bootstrap_owner_authority ... ok
+test bootstrap_runtime::key_authority_tests::key_export_rechecks_role_session_and_cold_lock ... ok
+test bootstrap_runtime::remote_backend::canary_tests::readiness_accepts_authoritative_snapshot_output ... ok
+test bootstrap_runtime::remote_backend::canary_tests::readiness_input_preserves_the_terminal_actor_and_host_connection ... ok
+test bootstrap_runtime::remote_backend::tests::cold_ca_refuses_before_invitation_or_upload ... ok
+test bootstrap_runtime::remote_backend::tests::failed_upload_retires_only_the_new_host ... ok
+test bootstrap_runtime::remote_backend::tests::foreign_or_revoked_authority_never_opens_ssh ... ok
+test bootstrap_runtime::remote_backend::tests::readding_a_live_host_reports_already_added_before_issuing_a_certificate ... ok
+test bootstrap_runtime::remote_backend::tests::unpublished_attempt_drop_releases_only_its_ownership ... ok
+test bootstrap_runtime::tests::pending_integration_refuses_enrollment_vault_and_discovery ... ok
+test ca::tests::signed_identity_has_only_server_constructed_host_authority_and_seven_days ... ok
+test ca::tests::signing_boundary_at_1000_public_identities ... ignored, explicit signing-boundary diagnostic; not live renewal or connected-agent RSS
+test ca::tests::source_mismatch_locked_and_uncovered_validity_fail_closed ... ok
+test ca::wrapping::tests::bounded_decoder_rejects_duplicate_unknown_fields_and_exact_oversize ... ok
+test ca::wrapping::tests::ciphertext_nonce_salt_and_issuer_tampering_fail_authenticated_decryption ... ok
+test ca::wrapping::tests::creation_rejects_unbound_membership_and_malformed_copies_cannot_open ... ok
+test ca::wrapping::tests::encrypted_copy_cost_at_1000_administrators ... ignored, optimized CA copy diagnostic; no own builds/browser overlap
+test ca::wrapping::tests::invalid_issuer_key_binding_is_refused_before_a_copy_is_persisted ... ok
+test ca::wrapping::tests::wrapped_seed_roundtrip_validates_the_same_issuer_key ... ok
+test ca::wrapping::tests::wrong_key_member_epoch_or_issuer_cannot_unwrap_a_copy ... ok
+test ca_bootstrap::tests::generated_remote_leaf_is_verifiable_after_cold_restart ... ok
+test ca_copies::tests::copy_store_cost_at_1000_administrators ... ignored, release-only private CA-copy disk diagnostic; no own build/browser overlap
+test ca_copies::tests::encrypted_copy_is_private_durable_and_bound_to_member_generation ... ok
+test ca_copies::tests::removal_is_member_generation_scoped_and_idempotent ... ok
+test ca_copies::tests::unsafe_copy_directory_or_file_is_refused_without_following_symlinks ... ok
+test ca_handoff::shipping_tests::shipping_child ... ok
+test ca_handoff::shipping_tests::shipping_restart_reload_rollback_and_cold_start ... ignored, explicit shipping-binary integration/benchmark; set INFRATERNAL_TEST_BINARY
+test ca_handoff::tests::exec_child ... ok
+test ca_handoff::tests::failed_null_open_or_duplication_closes_private_stdin ... ok
+test ca_handoff::tests::parser_property_corpus_is_bounded_and_never_accepts_trailing_bytes ... ok
+test ca_handoff::tests::real_exec_failures_and_killed_receiver_never_unlock_a_cold_successor ... ok
+test ca_handoff::tests::real_exec_retains_unlock_but_another_process_cannot_import_the_channel ... ok
+test ca_handoff::tests::serialized_seed_frame_is_locked_and_excluded_from_core_dumps ... ok
+test ca_handoff::tests::socketpair_preserves_unlock_and_cold_start_still_locks ... ok
+test ca_handoff::tests::truncated_wrong_generation_and_wrong_version_leave_successor_locked ... ok
+test ca_handoff_binary::tests::marker_is_an_exact_versioned_note_not_a_byte_substring ... ok
+test ca_http::intake_tests::chunked_intake_is_bounded_before_parsing ... ok
+test ca_memory::tests::accepted_unlock_notifies_and_memory_handoff_preserves_signing_without_a_timer ... ok
+test ca_memory::tests::cold_start_retains_public_trust_and_denied_unlock_leaves_signing_locked ... ok
+test ca_memory::tests::unavailable_secure_heap_refuses_root_and_warns_for_nonroot ... ok
+test ca_update_audit_tests::every_ciphertext_byte_and_tag_mutation_refuses_without_material_in_errors ... ok
+test ca_update_audit_tests::handoff_descriptor_is_close_on_exec_and_prepare_failure_preserves_source ... ok
+test ca_update_audit_tests::handoff_memory_protection_failure_keeps_the_existing_signer ... ok
+test ca_update_audit_tests::no_timer_locks_signing_and_wrong_issuer_cannot_replace_the_unlocked_source ... ok
+test ca_update_audit_tests::secure_heap_capacity_at_10000_live_keys ... ignored, isolated secure heap sizing at 10000 live keys; run with no own builds/browser overlap
+test ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages ... ok
+test csr::tests::incomplete_suffix_oversized_forged_and_wrong_algorithm_requests_are_refused ... ok
+test csr::tests::nonminimal_outer_lengths_and_real_oversized_requests_are_refused ... ok
+test csr::tests::signed_cached_noncanonical_or_incomplete_shapes_are_refused ... ok
+test csr::tests::signed_constructed_primitive_attribute_is_refused ... ok
+test csr::tests::signed_noncanonical_ignored_values_are_refused ... ok
+test csr::tests::verified_host_key_is_admitted_without_trusting_requested_identity ... ok
+test embedded::regressions::child_spawn_disposes_inherited_stdin ... ok
+test embedded::regressions::credited_bulk_output_survives_forwarder_io_pause ... ok
+test embedded::regressions::credited_output_queue_at_stream_capacity ... ignored, debug actor memory/scheduling measurement; run without concurrent builds
+test embedded::regressions::full_output_queue_must_not_block_shared_actor ... ok
+test embedded::regressions::healthy_receiver_survives_ready_native_output_burst ... ok
+test embedded::regressions::healthy_streams_progress_at_user_attachment_capacity ... ok
+test embedded::regressions::output_and_snapshot_spend_remaining_restart_credit ... ok
+test embedded::regressions::real_agent_canonical_uuid_result_is_accepted ... ok
+test embedded::regressions::real_agent_open_uses_uid_and_character_dimensions ... ok
+test embedded::regressions::reattach_must_restore_output_credit ... ok
+test embedded::regressions::recovery_event_then_snapshot_keeps_embedded_connection_live ... ok
+test embedded::regressions::recovery_notices_preserve_order_credit_and_session_isolation ... ok
+test embedded::regressions::server_reload_mask_is_not_inherited_by_embedded_children ... ok
+test embedded::regressions::stream_close_must_not_restart_all_sessions ... ok
+test embedded::regressions::uncredited_output_or_repaint_is_rejected_before_queueing ... ok
+test embedded::regressions::unresponsive_child_is_killed_and_reaped_within_the_shutdown_bound ... ok
+test enrollment::authority::tests::admission_uses_enrolled_uid_and_exact_public_identity_validity ... ok
+test enrollment::authority::tests::renewal_preserves_overlap_and_refuses_changed_key_or_expired_predecessor ... ok
+test enrollment::authority::tests::revocation_is_owner_bound_and_denies_admission_and_renewal_after_commit ... ok
+test enrollment::migration_tests::remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent ... ok
+test mesh_api_tests::claude_review::claude_review_late_committing_observation_does_not_rewind_last_seen ... ok
+test mesh_api_tests::claude_review::claude_review_scoped_grant_cannot_target_node_in_unscoped_tag ... ok
+test mesh_api_tests::concurrent_tag_edits_serialize_revisions_and_unique_names ... ok
+test mesh_api_tests::identity::identity_migration_preserves_inventory_and_retired_audit_ids ... ok
+test mesh_api_tests::identity::retired_identity_survives_database_reopen_and_exhaustion_is_atomic ... ok
+test mesh_api_tests::identity::review_deleted_node_identity_is_not_reused ... ok
+test mesh_api_tests::invalidation::filtered_view_invalidations_follow_every_affected_host_tag ... ok
+test mesh_api_tests::invalidation::review_membership_change_notifies_other_visible_tag ... ok
+test mesh_api_tests::inventory_lifecycle_preserves_policy_identity_and_audits_every_edit ... ok
+test mesh_api_tests::membership::review_scoped_membership_cannot_claim_hidden_node ... ok
+test mesh_api_tests::membership::scoped_membership_checks_pre_edit_host_scope ... ok
+test mesh_api_tests::mesh_api_scale_benchmark ... ignored, scale measurement; run on infraternal-dev under the weighted user scope
+test mesh_api_tests::pagination::an_unsendable_object_returns_a_sanitized_service_error ... ok
+test mesh_api_tests::pagination::continuation_restarts_on_change_and_rechecks_permissions ... ok
+test mesh_api_tests::parser_rejects_unknown_fields_user_endpoints_and_invalid_bounds ... ok
+test mesh_api_tests::review_filtered::review_global_viewers_do_not_refresh_unrelated_filtered_inventory ... ok
+test mesh_api_tests::review_frame_budget::review_mesh_design_point_frames_fit_shared_socket_budget ... ok
+test mesh_api_tests::review_null_policy::review_null_port_policy_does_not_create_unrestricted_grant ... ok
+test mesh_api_tests::review_null_scope::review_null_role_scopes_preserve_denied_inventory_access ... ok
+test mesh_api_tests::scoped_grant_role_filters_inventory_and_cannot_cross_tags ... ok
+test mesh_api_tests::shared_mesh_vectors_cover_each_production_action_and_wire_shape ... ok
+test mesh_api_tests::watch_deadline::watch_deadline_matches_complete_filtered_snapshots ... ok
+test mesh_api_tests::watch_deadline::watch_deadline_scale_benchmark ... ignored, weighted local scale measurement; run optimized without concurrent compilation
+test remote_accept::tests::anonymous_capacity_and_single_source_cannot_consume_known_reserve ... ok
+test remote_admission::tests::ports_do_not_change_source_capacity_and_mapped_addresses_share_it ... ok
+test remote_admission::tests::source_admission_cost_at_1000_sources ... ignored, optimized source admission diagnostic; no own build overlap
+test remote_enrollment::tests::cold_locked_signer_preserves_admission_and_token_until_authenticated_unlock ... ok
+test remote_enrollment::tests::invalid_csr_does_not_burn_token_and_join_returns_only_committed_authority ... ok
+test remote_enrollment::tests::invalid_invitations_never_load_the_private_signer ... ok
+test remote_http::tests::enrollment_api_at_1000_hosts ... ignored, explicit real HTTP-adapter/SQLite signing measurement at 1000 hosts; not transport or whole-daemon evidence
+test remote_http::tests::enrollment_http_is_bound_single_use_and_preserves_token_while_locked ... ok
+test remote_http::tests::invitation_publication_rechecks_session_after_host_creation ... ok
+test remote_http::tests::revocation::abandoned_revocation_write_cannot_leave_committed_authority_live ... ok
+test remote_http::tests::revocation::claude_review_anonymous_stalled_joins_cannot_block_owner_revocation ... ok
+test remote_http::tests::revocation::cold_signer_does_not_block_owner_revocation_or_cancellation ... ok
+test remote_http::tests::revocation::permission_revoked_while_waiting_for_sqlite_writer_refuses_tombstone ... ok
+test remote_http::tests::revocation::revocation_rechecks_locked_expired_logged_out_and_wrong_owner_sessions ... ok
+test remote_removal_http::tests::removal_parsers_refuse_positional_duplicate_and_unbounded_inputs ... ok
+test remote_runtime::tests::claude_review_idle_anonymous_sockets_cannot_starve_host_handshakes ... ok
+test remote_runtime::tests::ephemeral_listener_pair_retries_real_udp_collision_without_leaking_tcp ... ok
+test remote_runtime::tests::explicit_listener_pair_never_moves_an_occupied_operator_port ... ok
+test remote_runtime::tests::independent_review::admitted_frame_write_fence_cost ... ignored, write-fence CPU diagnostic; run release alone, not whole-transport evidence
+test remote_runtime::tests::independent_review::committed_tombstone_cannot_forward_input_before_finalizer_returns ... ok
+test remote_runtime::tests::independent_review::review_expired_identity_must_refuse_new_attachment_on_existing_transport ... ok
+test remote_runtime::tests::independent_review::review_revocation_must_cancel_input_on_existing_tls_transport ... ok
+test remote_runtime::tests::quic_actor_binds_durable_writer_and_recovery_offsets ... ok
+test remote_runtime::tests::renewal_checks::renewal_refuses_same_issuer_wrong_key_purpose_or_lifetime_before_publication ... ok
+test remote_runtime::tests::renewal_checks::renewal_validates_host_dates_json_and_durable_publication_before_ack ... ok
+test remote_runtime::tests::revocation::admitted_guard_expires_and_prior_revocation_cannot_reregister ... ok
+test remote_runtime::tests::revocation::expired_identity_must_refuse_new_attachment_on_existing_transport ... ok
+test remote_runtime::tests::revocation::guard_bookkeeping_at_1000_hosts ... ignored, guard component diagnostic; run alone without builds or browser measurements
+test remote_runtime::tests::revocation::retirement::old_expiry_cannot_remove_a_fresh_tls_replacement ... ok
+test remote_runtime::tests::revocation::retirement::registry_retention_at_1000_actual_tls_hosts ... ignored, 1000-host registry diagnostic; optimized, FD limit8192, no own build/browser overlap
+test remote_runtime::tests::revocation::retirement::revoked_host_releases_its_registry_entry_and_retained_actor ... ok
+test remote_runtime::tests::revocation::revocation_closes_admitted_idle_quic_connection ... ok
+test remote_runtime::tests::revocation::revocation_must_cancel_input_on_existing_tls_transport ... ok
+test remote_runtime::tests::tcp_actor_uses_enrolled_uid_and_replays_admission_hello ... ok
+test remote_startup::tests::normal_cold_start_uses_public_trust_without_loading_or_generating_ca_key ... ok
+test remote_startup::tests::symlink_shared_oversized_or_special_trust_files_fail_closed ... ok
+test remote_startup::tests::wrong_issuer_key_name_or_unpinned_https_refuses_startup ... ok
+test runtime::key_runtime_tests::configured_startup_generates_once_and_settings_shares_its_cold_lock ... ok
+test runtime::remote_demo_tests::cold_start::normal_cli_cold_start_keeps_enrolled_remote_terminal_while_signing_locked ... ignored, normal CLI cold-start proof requires static INFRATERNAL_REMOTE_TEST_BINARY and exclusive 4701/7443
+test runtime::remote_demo_tests::real_host::o1_rootless_join_terminal_and_cleanup ... ignored, authorised o1 proof requires pinned INFRATERNAL_O1_KNOWN_HOSTS and aarch64 INFRATERNAL_REMOTE_TEST_BINARY; exclusive 4701/7443
+test runtime::remote_demo_tests::real_host::o1_runtime_path_admits_real_unix_socket_address ... ok
+test runtime::remote_demo_tests::remote_cli_enrollment_and_browser_terminal_two_processes ... ignored, two-process proof requires INFRATERNAL_REMOTE_TEST_BINARY and exclusive port 4701
+test runtime::remote_demo_tests::renewal::half_life_requests_proof_on_live_authenticated_control ... ok
+test runtime::remote_demo_tests::renewal_ack::failed_publication_retains_original_admission_without_interrupting_terminal ... ok
+test runtime::remote_demo_tests::renewal_ack::unlock_renews_live_identity_only_after_publication_ack_with_terminal_intact ... ok
+test runtime::remote_demo_tests::renewal_cli::cli_live_renewal_cost_and_durable_identity_on_unchanged_transport ... ignored, real CLI renewal measurement requires release binary and exclusive port4701; no own compilation/browser overlap
+test runtime::remote_demo_tests::renewal_cli::flood::remote_cli_renewal_under_50m_load_preserves_every_byte_and_writer ... ignored, real CLI 50MiB renewal proof: exclusive4701 and release binary; no own build/browser overlap
+test runtime::remote_demo_tests::shipping_route::independent_review_configured_server_mounts_ca_unlock_routes ... ok
+test runtime::remote_demo_tests::shipping_route::review_default_server_must_register_remote_join ... ok
+test runtime::reviewer_admission::reviewer_recovery_source_limit_covers_all_routes_without_forwarding_bypass ... ok
+test runtime::temporal_admission_tests::ca_budget_cost_at_capacity ... ignored, isolated debug admission diagnostic at 4096 principals; run without own build overlap
+test runtime::temporal_admission_tests::windows_principals_and_capacity_remain_bounded ... ok
+test runtime::tests::production_router_exposes_bootstrap_owner_admission ... ok
+test runtime::tests::proxy_mode_requires_an_explicit_peer_allowlist ... ok
+test runtime::tests::proxy_networks_match_only_their_address_family_and_prefix ... ok
+test runtime::tests::restart_serves_fresh_setup_token_and_completes_owner_enrollment ... ok
+test runtime::tests::router_migrates_private_storage_and_serves_health ... ok
+test runtime::tests::setup_socket_cleanup_preserves_symlinks_and_regular_files ... ok
+test runtime::tests::setup_token_socket_is_private_and_requires_explicit_request ... ok
+test runtime::tests::startup_with_owner_unlinks_stale_setup_token_socket ... ok
+test server_tls::tests::standalone_https_disables_nagle_before_application_bytes ... ok
+test ssh_key::tests::concurrent_initialization_retains_one_identity_and_unwrap_cannot_replace_it ... ok
+test ssh_key::tests::first_start_is_wrapped_once_and_every_cold_start_is_locked ... ok
+test ssh_key::tests::lock_during_administrator_unwrap_cannot_reinstall_private_material ... ok
+test ssh_key::tests::lock_generation_exhaustion_never_wraps_into_an_unlocked_source ... ok
+test ssh_key::tests::malformed_existing_storage_is_refused_without_generating_a_replacement ... ok
+test ssh_key::tests::material_refuses_invalid_pem_and_non_ed25519_algorithms ... ok
+test ssh_key::tests::unavailable_or_empty_custody_publishes_no_key ... ok
+test ssh_key::tests::update_handoff_preserves_unlocked_identity_but_cold_restart_does_not ... ok
+test web_assets::tests::encodings_and_identity_have_correct_headers_and_sizes ... ok
+test web_assets::tests::spa_and_mutable_assets_revalidate_and_missing_brotli_uses_gzip ... ok
+test websocket::cookie_tests::duplicate_cookie_fields_deny_socket_session ... ok
+test websocket::cookie_tests::split_cookie_fields_preserve_socket_session ... ok
+test websocket::recovery_notification_bench::recovery_notification_state_at_socket_capacity ... ignored, notification state sizing diagnostic, not allocator-inclusive RSS certification
+test websocket::writer_tests::second_device_does_not_inherit_first_device_input_ack ... ok
+test websocket::writer_tests::writer_admission_at_user_capacity ... ignored, release-only scale measurement; run without concurrent builds
+test websocket::writer_tests::writer_ownership_capacity_unsigned_offsets_and_identity_reuse ... ok
+
+test result: ok. 303 passed; 0 failed; 35 ignored; 0 measured; 0 filtered out; finished in 441.26s
+
+     Running tests/catalog_startup.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/catalog_startup-a9efe034d9f2a261)
+
+running 1 test
+test explicit_catalog_startup_remains_public_and_validates_before_storage ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/enrollment.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/enrollment-af272401b8c9d4f0)
+
+running 6 tests
+test concurrent_redemption_has_one_winner_and_one_certificate ... ok
+test enrollment_storage_at_500_hosts ... ignored, explicit 500-host storage measurement; not a remote transport budget
+test invalid_certificate_and_failed_insert_preserve_the_invitation ... ok
+test invitation_is_hashed_replaced_and_bound_to_owner_host_mode_and_exact_expiry ... ok
+test malformed_capabilities_and_certificate_overflow_are_refused_before_mutation ... ok
+test revocation_tombstone_refuses_existing_and_new_invitations_after_restart ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.83s
+
+     Running tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_parser-8a67b2a39f6f7035)
+
+running 2 tests
+test nested_endpoint_and_policy_fields_are_strict_without_rejecting_valid_ports ... ok
+test review_grant_parser_rejects_unknown_nested_port_fields ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_plugin-90d8c709cba8975d)
+
+running 1 test
+test review_mesh_dependency_is_removable_at_build_time ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_policy-fc28f342e279d379)
+
+running 1 test
+test review_null_port_policy_is_refused ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_role_scope-1953c5dedb623e17)
+
+running 2 tests
+test review_explicit_null_role_scopes_do_not_become_global_authority ... ok
+test role_scopes_require_an_array_when_provided ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/plugin_host_review-59b0efd5d2c41a33)
+
+running 7 tests
+test review_completed_call_survives_normal_worker_exit ... ok
+test review_core_topic_remains_core_owned_even_when_declared ... ok
+test review_disable_answers_inflight_call ... ok
+test review_disable_withdraws_view_and_keeps_socket ... ok
+test review_exited_worker_ends_its_subscriptions ... ok
+test review_reenable_preserves_cancelled_calls_until_delivery ... ok
+test review_undeclared_topic_is_left_to_the_core ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.52s
+
+     Running tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/plugin_settings_review-8eff33044b5ef657)
+
+running 3 tests
+test failed_plugin_save_restores_previous_state_without_workers ... ok
+test plugin_settings_enforce_boolean_and_role_plugin_identity ... ok
+test plugin_switches_survive_database_reopen ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+     Running tests/remote_plugin_contract.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/remote_plugin_contract-65fddbff582d4e39)
+
+running 1 test
+test independent_review_core_build_without_features_omits_remote_transport ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_shim-8bfb29dafc6ac962)
+
+running 78 tests
+test ended::tests::bounded_record_preserves_status_and_rejects_malformed_or_linked_data ... ok
+test frame::checks::approximate_snapshot_codec_is_bounded_and_canonical ... ok
+test frame::checks::borrowed_and_owned_decoders_agree_at_every_fragment_boundary ... ok
+test frame::checks::codec_reuse_measurement ... ignored, release codec and allocation-path measurement
+test frame::checks::golden::every_frozen_message ... ok
+test frame::checks::golden::exact_maximum_and_coalesced_frames ... ok
+test frame::checks::tests::golden_and_fragmented ... ok
+test frame::checks::tests::invalid_lengths_types_and_utf8 ... ok
+test locked_bytes::tests::anonymous_transfer_pages_are_locked_and_excluded_from_core_dumps ... ok
+test pty::child_signal_tests::child_reset_restores_ignored_dispositions_and_leaves_parent_mask ... 
+running 1 test
+test pty::child_signal_tests::child_reset_restores_ignored_dispositions_and_leaves_parent_mask ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.00s
+
+ok
+test pty::child_signal_tests::child_signal_reset_spawn_cost_at_128_children ... ignored, child spawn diagnostic; run locally in a weighted scope without own build overlap
+test ring::checks::tests::wrap_and_exact_offsets ... ok
+test session::inputs::tests::identity_cap_preserves_all_existing_cursors ... ok
+test session::inputs::tests::partial_writes_credit_only_the_owner_and_replay_trims_per_writer ... ok
+test session::measurements::budgets::allowlisted_signal_after_real_pty_exit_keeps_exit_ack_available ... ok
+test session::measurements::budgets::input_to_pty_write ... ignored, real-PTY performance measurement; set ZDOTDIR to tests/profile
+test session::measurements::poll_storage_measurement ... ignored, release poll-storage allocation measurement
+test session::resize_checks::native_resize_refusal_preserves_peer_and_pty ... ok
+test session::resize_checks::resize_refusal_session_probe ... ignored, isolated session probe invoked by its parent with a controlled shell profile
+test session::sequenced_checks::coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss ... ok
+test session::sequenced_checks::new_frames_roundtrip_and_refuse_noncanonical_payloads ... ok
+test session::sequenced_checks::reusable_encoder_retains_capacity_and_refuses_growth_before_mutation ... ok
+test session::sequenced_checks::trim_duplicates_gaps_overflow_and_capacity_are_transactional ... ok
+test session::sequenced_checks::writer_selection_has_a_frozen_little_endian_layout ... ok
+test terminal::checks::approximate_repaint_is_bounded_clips_at_complete_cells_and_preserves_source ... ok
+test terminal::checks::approximate_repaint_keeps_complete_pending_syntax_or_omits_it_whole ... ok
+test terminal::checks::tests::alternate_variants_and_nested_switches_repaint ... ok
+test terminal::checks::tests::byte_budget_prunes_history_and_resize_remains_repaintable ... ok
+test terminal::checks::tests::fixtures_and_continuations_repaint ... ok
+test terminal::checks::tests::implicit_hyperlinks_retain_groups_across_rows_and_continuation ... ok
+test terminal::checks::tests::long_unfinished_hyperlink_and_control_strings_continue ... ok
+test terminal::checks::tests::margins_tabs_charsets_and_modes_continue ... ok
+test terminal::checks::tests::partial_csi_and_utf8_continue ... ok
+test terminal::checks::tests::pending_wrap_and_saved_wrap_continue_with_wide_cells ... ok
+test terminal::checks::tests::retained_alternate_saved_cursor_and_keyboard_stack_continue ... ok
+test terminal::checks::tests::saved_origin_survives_changed_margins ... ok
+test terminal::checks::tests::unfinished_sequence_over_frame_limit_fails_without_losing_runtime_state ... ok
+test terminal::fidelity::fidelity_charset_mapped_wide_space_is_explicitly_rejected ... ok
+test terminal::fidelity::fidelity_cursor ... ok
+test terminal::fidelity::fidelity_diagnostic_fixture ... ignored, diagnostic replay of an explicitly selected fixture file
+test terminal::fidelity::fidelity_edge ... ok
+test terminal::fidelity::fidelity_extended_nightly ... ignored, nightly expanded differential corpus: 20,000 deterministic cases
+test terminal::fidelity::fidelity_extended_smoke ... ok
+test terminal::fidelity::fidelity_f1_rep ... ok
+test terminal::fidelity::fidelity_fresh_c_redraw_default_is_explicitly_rejected ... ok
+test terminal::fidelity::fidelity_handwritten ... ok
+test terminal::fidelity::fidelity_inherited_protection_off_mode_is_explicitly_rejected ... ok
+test terminal::fidelity::fidelity_iso_protection_does_not_keep_rep_scratch ... ok
+test terminal::fidelity::fidelity_iso_protection_erase ... ok
+test terminal::fidelity::fidelity_mouse_effective_fields_follow_order_independently_of_booleans ... ok
+test terminal::fidelity::fidelity_oracle_detects_hidden_state ... ok
+test terminal::fidelity::fidelity_oracle_observes_archived_cells_with_equal_active_screens ... ok
+test terminal::fidelity::fidelity_orphaned_spacer_head ... ok
+test terminal::fidelity::fidelity_prompt_resize_requires_explicit_rejection ... ok
+test terminal::fidelity::fidelity_recorded_corpus ... ok
+test terminal::fidelity::fidelity_rejects_unrepresentable_rep_without_mutating_source ... ok
+test terminal::fidelity::fidelity_saved_cursor_over_changed_edge ... ok
+test terminal::fidelity::fidelity_saved_modes_future_restore ... ok
+test terminal::fidelity::fidelity_screen_entry_consumes_inherited_shift_before_saving ... ok
+test terminal::fidelity::fidelity_seeded_nightly ... ignored, nightly differential corpus: 20,000 deterministic cases
+test terminal::fidelity::fidelity_seeded_smoke ... ok
+test terminal::fidelity::fidelity_semantic_validation_matches_exported_history_extent ... ok
+test terminal::fidelity::fidelity_single_shift_survives_rep_seed ... ok
+test terminal::fidelity::fidelity_snapshot_history_tail_contains_no_padding_rows ... ok
+test terminal::fidelity::fidelity_snapshot_resets_stale_viewer_color_overrides ... ok
+test terminal::fidelity::fidelity_spacer_head_attributes ... ok
+test terminal::fidelity::fidelity_variation_tail_attributes ... ok
+test terminal::fidelity::fidelity_variation_wrap_attributes ... ok
+test terminal::fidelity::fresh_captures::fidelity_fresh_real_program_captures ... ignored, manual fresh capture oracle; set VT_CAPTURE_DIR after real program capture
+test terminal::measurements::budgets::snapshot_200x60 ... ignored, performance measurement; run release on the perf host
+test terminal::measurements::memory::measured_terminal_rss ... ignored, RSS measurement; run this filter alone in a fresh release process
+test terminal::measurements::throughput::measured_parser ... ignored, VT observer and history throughput measurement
+test terminal::recovery_measurements::measured_full_ring_reconstruction ... ignored, release reconstruction measurement; old healthy handles permit repeated cleanup
+test terminal::resize_recovery::absent_ring_keeps_last_good_size_and_later_output_usable ... ok
+test terminal::resize_recovery::complete_ring_restores_screens_mouse_and_unfinished_syntax ... ok
+test terminal::resize_recovery::earlier_geometry_changes_require_approximation_even_with_origin_coverage ... ok
+test terminal::resize_recovery::ring_gap_requires_clean_approximate_recovery ... ok
+test terminal_native::allocation::resize_allocation_refusal_retires_native_handle ... ok
+
+test result: ok. 65 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 87.49s
+
+     Running tests/detach.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/detach-faf5ac0ef89968b5)
+
+running 2 tests
+test closed_standard_descriptors_become_dev_null ... ok
+test detached_child_restores_default_signals_without_changing_parent ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.41s
+
+     Running tests/mouse.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mouse-b7389260a793b88e)
+
+running 1 test
+test faithful_snapshot_preserves_public_mouse_encoder_reports ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+
+   Doc-tests infraternal_agent
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests infraternal_mesh
+
+running 1 test
+test crates/infraternal-mesh/src/model.rs - model::LocalPrivateKey (line 20) - compile fail ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+   Doc-tests infraternal_plugin_api
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests infraternal_plugin_host_facts
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests infraternal_plugin_mesh
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests infraternal_plugin_remote
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests infraternal_plugin_ssh
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests infraternal_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests infraternal_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests infraternal_shim
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+==> cargo-deny
+warning[duplicate]: found 2 duplicate entries for crate 'base64'
+   ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:24:1
+   │  
+24 │ ╭ base64 0.21.7 registry+https://github.com/rust-lang/crates.io-index
+25 │ │ base64 0.22.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰───────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ base64 v0.21.7
+     ├── base64urlsafedata v0.5.5
+     │   ├── webauthn-attestation-ca v0.5.5
+     │   │   └── webauthn-rs-core v0.5.5
+     │   │       └── webauthn-rs v0.5.5
+     │   │           └── infraternal-server v0.1.0
+     │   │               ├── infraternal v0.1.0
+     │   │               └── infraternal-fuzz v0.1.0
+     │   ├── webauthn-rs v0.5.5 (*)
+     │   ├── webauthn-rs-core v0.5.5 (*)
+     │   └── webauthn-rs-proto v0.5.5
+     │       └── webauthn-rs-core v0.5.5 (*)
+     ├── webauthn-rs-core v0.5.5 (*)
+     └── webauthn-rs-proto v0.5.5 (*)
+   ├ base64 v0.22.1
+     ├── axum v0.8.9
+     │   ├── infraternal-fuzz v0.1.0
+     │   └── infraternal-server v0.1.0
+     │       ├── infraternal v0.1.0
+     │       └── infraternal-fuzz v0.1.0 (*)
+     ├── infraternal v0.1.0 (*)
+     ├── infraternal-server v0.1.0 (*)
+     └── sqlx-core v0.8.6
+         ├── sqlx v0.8.6
+         │   ├── infraternal v0.1.0 (*)
+         │   ├── infraternal-plugin-api v0.1.0
+         │   │   ├── infraternal-agent v0.1.0
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   ├── infraternal-plugin-host-facts v0.1.0
+         │   │   │   ├── infraternal-agent v0.1.0 (*)
+         │   │   │   └── infraternal-fuzz v0.1.0 (*)
+         │   │   ├── infraternal-plugin-mesh v0.1.0
+         │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   ├── infraternal-plugin-remote v0.1.0
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   ├── infraternal-agent v0.1.0 (*)
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   ├── infraternal-plugin-ssh v0.1.0
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   └── infraternal-server v0.1.0 (*)
+         │   ├── infraternal-plugin-mesh v0.1.0 (*)
+         │   └── infraternal-server v0.1.0 (*)
+         ├── sqlx-macros v0.8.6
+         │   └── sqlx v0.8.6 (*)
+         ├── sqlx-macros-core v0.8.6
+         │   └── sqlx-macros v0.8.6 (*)
+         └── sqlx-sqlite v0.8.6
+             ├── sqlx v0.8.6 (*)
+             └── sqlx-macros-core v0.8.6 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'cpufeatures'
+   ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:50:1
+   │  
+50 │ ╭ cpufeatures 0.2.17 registry+https://github.com/rust-lang/crates.io-index
+51 │ │ cpufeatures 0.3.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰───────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ cpufeatures v0.2.17
+     ├── aes v0.8.4
+     │   └── aes-gcm v0.10.3
+     │       └── (dev) infraternal-server v0.1.0
+     │           ├── infraternal v0.1.0
+     │           └── infraternal-fuzz v0.1.0
+     ├── argon2 v0.5.3
+     │   └── infraternal-server v0.1.0 (*)
+     ├── polyval v0.6.2
+     │   └── ghash v0.5.1
+     │       └── aes-gcm v0.10.3 (*)
+     ├── sha1 v0.10.7
+     │   ├── axum v0.8.9
+     │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   └── infraternal-server v0.1.0 (*)
+     │   └── tungstenite v0.29.0
+     │       └── tokio-tungstenite v0.29.0
+     │           ├── axum v0.8.9 (*)
+     │           └── (dev) infraternal-server v0.1.0 (*)
+     └── sha2 v0.10.9
+         ├── infraternal-plugin-ssh v0.1.0
+         │   ├── infraternal v0.1.0 (*)
+         │   ├── infraternal-fuzz v0.1.0 (*)
+         │   └── infraternal-server v0.1.0 (*)
+         ├── infraternal-server v0.1.0 (*)
+         ├── sqlx-core v0.8.6
+         │   ├── sqlx v0.8.6
+         │   │   ├── infraternal v0.1.0 (*)
+         │   │   ├── infraternal-plugin-api v0.1.0
+         │   │   │   ├── infraternal-agent v0.1.0
+         │   │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+         │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+         │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+         │   │   │   ├── infraternal-plugin-mesh v0.1.0
+         │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   │   ├── infraternal-plugin-remote v0.1.0
+         │   │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+         │   │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+         │   │   └── infraternal-server v0.1.0 (*)
+         │   ├── sqlx-macros v0.8.6
+         │   │   └── sqlx v0.8.6 (*)
+         │   ├── sqlx-macros-core v0.8.6
+         │   │   └── sqlx-macros v0.8.6 (*)
+         │   └── sqlx-sqlite v0.8.6
+         │       ├── sqlx v0.8.6 (*)
+         │       └── sqlx-macros-core v0.8.6 (*)
+         └── sqlx-macros-core v0.8.6 (*)
+   ├ cpufeatures v0.3.1
+     └── chacha20 v0.10.2
+         └── rand v0.10.3
+             └── quinn-proto v0.11.19
+                 └── quinn v0.11.12
+                     ├── infraternal-agent v0.1.0
+                     │   ├── infraternal v0.1.0
+                     │   ├── infraternal-fuzz v0.1.0
+                     │   └── infraternal-server v0.1.0
+                     │       ├── infraternal v0.1.0 (*)
+                     │       └── infraternal-fuzz v0.1.0 (*)
+                     ├── infraternal-plugin-remote v0.1.0
+                     │   ├── infraternal v0.1.0 (*)
+                     │   ├── infraternal-agent v0.1.0 (*)
+                     │   └── infraternal-server v0.1.0 (*)
+                     └── infraternal-server v0.1.0 (*)
+
+warning[duplicate]: found 3 duplicate entries for crate 'getrandom'
+   ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:92:1
+   │  
+92 │ ╭ getrandom 0.2.17 registry+https://github.com/rust-lang/crates.io-index
+93 │ │ getrandom 0.3.4 registry+https://github.com/rust-lang/crates.io-index
+94 │ │ getrandom 0.4.3 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰─────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ getrandom v0.2.17
+     ├── rand_core v0.6.4
+     │   ├── bip39 v2.2.2
+     │   │   └── infraternal-server v0.1.0
+     │   │       ├── infraternal v0.1.0
+     │   │       └── infraternal-fuzz v0.1.0
+     │   ├── crypto-common v0.1.7
+     │   │   ├── aead v0.5.2
+     │   │   │   └── aes-gcm v0.10.3
+     │   │   │       └── (dev) infraternal-server v0.1.0 (*)
+     │   │   ├── cipher v0.4.4
+     │   │   │   ├── aes v0.8.4
+     │   │   │   │   └── aes-gcm v0.10.3 (*)
+     │   │   │   ├── aes-gcm v0.10.3 (*)
+     │   │   │   └── ctr v0.9.2
+     │   │   │       └── aes-gcm v0.10.3 (*)
+     │   │   ├── digest v0.10.7
+     │   │   │   ├── blake2 v0.10.6
+     │   │   │   │   └── argon2 v0.5.3
+     │   │   │   │       └── infraternal-server v0.1.0 (*)
+     │   │   │   ├── hmac v0.12.1
+     │   │   │   │   └── hkdf v0.12.4
+     │   │   │   │       └── (dev) infraternal-server v0.1.0 (*)
+     │   │   │   ├── sha1 v0.10.7
+     │   │   │   │   ├── axum v0.8.9
+     │   │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   │   │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │   │   └── tungstenite v0.29.0
+     │   │   │   │       └── tokio-tungstenite v0.29.0
+     │   │   │   │           ├── axum v0.8.9 (*)
+     │   │   │   │           └── (dev) infraternal-server v0.1.0 (*)
+     │   │   │   └── sha2 v0.10.9
+     │   │   │       ├── infraternal-plugin-ssh v0.1.0
+     │   │   │       │   ├── infraternal v0.1.0 (*)
+     │   │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   │       │   └── infraternal-server v0.1.0 (*)
+     │   │   │       ├── infraternal-server v0.1.0 (*)
+     │   │   │       ├── sqlx-core v0.8.6
+     │   │   │       │   ├── sqlx v0.8.6
+     │   │   │       │   │   ├── infraternal v0.1.0 (*)
+     │   │   │       │   │   ├── infraternal-plugin-api v0.1.0
+     │   │   │       │   │   │   ├── infraternal-agent v0.1.0
+     │   │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+     │   │   │       │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+     │   │   │       │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │   │   │       │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-plugin-mesh v0.1.0
+     │   │   │       │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-plugin-remote v0.1.0
+     │   │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+     │   │   │       │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │   │   │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+     │   │   │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │       │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+     │   │   │       │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │       │   ├── sqlx-macros v0.8.6
+     │   │   │       │   │   └── sqlx v0.8.6 (*)
+     │   │   │       │   ├── sqlx-macros-core v0.8.6
+     │   │   │       │   │   └── sqlx-macros v0.8.6 (*)
+     │   │   │       │   └── sqlx-sqlite v0.8.6
+     │   │   │       │       ├── sqlx v0.8.6 (*)
+     │   │   │       │       └── sqlx-macros-core v0.8.6 (*)
+     │   │   │       └── sqlx-macros-core v0.8.6 (*)
+     │   │   └── universal-hash v0.5.1
+     │   │       └── polyval v0.6.2
+     │   │           └── ghash v0.5.1
+     │   │               └── aes-gcm v0.10.3 (*)
+     │   ├── password-hash v0.5.0
+     │   │   └── argon2 v0.5.3 (*)
+     │   ├── rand v0.8.8
+     │   │   └── bip39 v2.2.2 (*)
+     │   └── rand_chacha v0.3.1
+     │       └── rand v0.8.8 (*)
+     └── ring v0.17.14
+         ├── quinn-proto v0.11.19
+         │   └── quinn v0.11.12
+         │       ├── infraternal-agent v0.1.0 (*)
+         │       ├── infraternal-plugin-remote v0.1.0 (*)
+         │       └── infraternal-server v0.1.0 (*)
+         ├── rustls v0.23.45
+         │   ├── infraternal-plugin-remote v0.1.0 (*)
+         │   ├── quinn v0.11.12 (*)
+         │   └── quinn-proto v0.11.19 (*)
+         └── rustls-webpki v0.103.15
+             └── rustls v0.23.45 (*)
+   ├ getrandom v0.3.4
+     └── rand_core v0.9.5
+         ├── rand v0.9.5
+         │   ├── infraternal-server v0.1.0
+         │   │   ├── infraternal v0.1.0
+         │   │   └── infraternal-fuzz v0.1.0
+         │   ├── tungstenite v0.29.0
+         │   │   └── tokio-tungstenite v0.29.0
+         │   │       ├── axum v0.8.9
+         │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │       │   └── infraternal-server v0.1.0 (*)
+         │   │       └── (dev) infraternal-server v0.1.0 (*)
+         │   └── webauthn-rs-core v0.5.5
+         │       └── webauthn-rs v0.5.5
+         │           └── infraternal-server v0.1.0 (*)
+         └── rand_chacha v0.9.0
+             ├── rand v0.9.5 (*)
+             └── webauthn-rs-core v0.5.5 (*)
+   ├ getrandom v0.4.3
+     ├── jobserver v0.1.35
+     │   └── cc v1.6.0
+     │       ├── (build) libfuzzer-sys v0.4.13
+     │       │   └── infraternal-fuzz v0.1.0
+     │       ├── (build) libsqlite3-sys v0.30.1
+     │       │   └── sqlx-sqlite v0.8.6
+     │       │       ├── sqlx v0.8.6
+     │       │       │   ├── infraternal v0.1.0
+     │       │       │   ├── infraternal-plugin-api v0.1.0
+     │       │       │   │   ├── infraternal-agent v0.1.0
+     │       │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   │   └── infraternal-server v0.1.0
+     │       │       │   │   │       ├── infraternal v0.1.0 (*)
+     │       │       │   │   │       └── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-host-facts v0.1.0
+     │       │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │       │   │   │   └── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-mesh v0.1.0
+     │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-remote v0.1.0
+     │       │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-ssh v0.1.0
+     │       │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │       │       │   │   └── infraternal-server v0.1.0 (*)
+     │       │       │   ├── infraternal-plugin-mesh v0.1.0 (*)
+     │       │       │   └── infraternal-server v0.1.0 (*)
+     │       │       └── sqlx-macros-core v0.8.6
+     │       │           └── sqlx-macros v0.8.6
+     │       │               └── sqlx v0.8.6 (*)
+     │       ├── openssl-src v300.6.1+3.6.3
+     │       │   └── (build) openssl-sys v0.9.117
+     │       │       ├── axum-server v0.8.0
+     │       │       │   └── infraternal-server v0.1.0 (*)
+     │       │       ├── openssl v0.10.81
+     │       │       │   ├── axum-server v0.8.0 (*)
+     │       │       │   ├── infraternal v0.1.0 (*)
+     │       │       │   ├── infraternal-agent v0.1.0 (*)
+     │       │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+     │       │       │   ├── infraternal-server v0.1.0 (*)
+     │       │       │   ├── infraternal-shim v0.1.0
+     │       │       │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+     │       │       │   │   └── infraternal-server v0.1.0 (*)
+     │       │       │   ├── tokio-openssl v0.6.5
+     │       │       │   │   ├── axum-server v0.8.0 (*)
+     │       │       │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+     │       │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+     │       │       │   ├── webauthn-attestation-ca v0.5.5
+     │       │       │   │   └── webauthn-rs-core v0.5.5
+     │       │       │   │       └── webauthn-rs v0.5.5
+     │       │       │   │           └── infraternal-server v0.1.0 (*)
+     │       │       │   └── webauthn-rs-core v0.5.5 (*)
+     │       │       ├── tokio-openssl v0.6.5 (*)
+     │       │       ├── webauthn-attestation-ca v0.5.5 (*)
+     │       │       └── webauthn-rs-core v0.5.5 (*)
+     │       ├── (build) openssl-sys v0.9.117 (*)
+     │       └── (build) ring v0.17.14
+     │           ├── quinn-proto v0.11.19
+     │           │   └── quinn v0.11.12
+     │           │       ├── infraternal-agent v0.1.0 (*)
+     │           │       ├── infraternal-plugin-remote v0.1.0 (*)
+     │           │       └── infraternal-server v0.1.0 (*)
+     │           ├── rustls v0.23.45
+     │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+     │           │   ├── quinn v0.11.12 (*)
+     │           │   └── quinn-proto v0.11.19 (*)
+     │           └── rustls-webpki v0.103.15
+     │               └── rustls v0.23.45 (*)
+     ├── quinn-proto v0.11.19 (*)
+     ├── rand v0.10.3
+     │   └── quinn-proto v0.11.19 (*)
+     └── uuid v1.27.0
+         ├── infraternal v0.1.0 (*)
+         ├── infraternal-agent v0.1.0 (*)
+         ├── infraternal-plugin-ssh v0.1.0 (*)
+         ├── infraternal-server v0.1.0 (*)
+         ├── webauthn-attestation-ca v0.5.5 (*)
+         ├── webauthn-rs v0.5.5 (*)
+         └── webauthn-rs-core v0.5.5 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'hashbrown'
+   ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:98:1
+   │  
+98 │ ╭ hashbrown 0.15.5 registry+https://github.com/rust-lang/crates.io-index
+99 │ │ hashbrown 0.17.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ hashbrown v0.15.5
+     ├── hashlink v0.10.0
+     │   └── sqlx-core v0.8.6
+     │       ├── sqlx v0.8.6
+     │       │   ├── infraternal v0.1.0
+     │       │   ├── infraternal-plugin-api v0.1.0
+     │       │   │   ├── infraternal-agent v0.1.0
+     │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │   │   │   ├── infraternal-fuzz v0.1.0
+     │       │   │   │   └── infraternal-server v0.1.0
+     │       │   │   │       ├── infraternal v0.1.0 (*)
+     │       │   │   │       └── infraternal-fuzz v0.1.0 (*)
+     │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │   │   ├── infraternal-plugin-host-facts v0.1.0
+     │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │   │   │   └── infraternal-fuzz v0.1.0 (*)
+     │       │   │   ├── infraternal-plugin-mesh v0.1.0
+     │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │       │   │   ├── infraternal-plugin-remote v0.1.0
+     │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │       │   │   ├── infraternal-plugin-ssh v0.1.0
+     │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │       │   │   └── infraternal-server v0.1.0 (*)
+     │       │   ├── infraternal-plugin-mesh v0.1.0 (*)
+     │       │   └── infraternal-server v0.1.0 (*)
+     │       ├── sqlx-macros v0.8.6
+     │       │   └── sqlx v0.8.6 (*)
+     │       ├── sqlx-macros-core v0.8.6
+     │       │   └── sqlx-macros v0.8.6 (*)
+     │       └── sqlx-sqlite v0.8.6
+     │           ├── sqlx v0.8.6 (*)
+     │           └── sqlx-macros-core v0.8.6 (*)
+     └── sqlx-core v0.8.6 (*)
+   ├ hashbrown v0.17.1
+     └── indexmap v2.14.2
+         ├── h2 v0.4.19
+         │   ├── hyper v1.11.1
+         │   │   ├── axum v0.8.9
+         │   │   │   ├── infraternal-fuzz v0.1.0
+         │   │   │   └── infraternal-server v0.1.0
+         │   │   │       ├── infraternal v0.1.0
+         │   │   │       └── infraternal-fuzz v0.1.0 (*)
+         │   │   ├── axum-server v0.8.0
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   ├── hyper-util v0.1.21
+         │   │   │   ├── axum v0.8.9 (*)
+         │   │   │   ├── axum-server v0.8.0 (*)
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   └── (dev) infraternal-server v0.1.0 (*)
+         │   │   ├── infraternal v0.1.0 (*)
+         │   │   └── (dev) infraternal-server v0.1.0 (*)
+         │   └── (dev) infraternal-server v0.1.0 (*)
+         └── sqlx-core v0.8.6
+             ├── sqlx v0.8.6
+             │   ├── infraternal v0.1.0 (*)
+             │   ├── infraternal-plugin-api v0.1.0
+             │   │   ├── infraternal-agent v0.1.0
+             │   │   │   ├── infraternal v0.1.0 (*)
+             │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+             │   │   │   └── infraternal-server v0.1.0 (*)
+             │   │   ├── infraternal-fuzz v0.1.0 (*)
+             │   │   ├── infraternal-plugin-host-facts v0.1.0
+             │   │   │   ├── infraternal-agent v0.1.0 (*)
+             │   │   │   └── infraternal-fuzz v0.1.0 (*)
+             │   │   ├── infraternal-plugin-mesh v0.1.0
+             │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+             │   │   │   └── infraternal-server v0.1.0 (*)
+             │   │   ├── infraternal-plugin-remote v0.1.0
+             │   │   │   ├── infraternal v0.1.0 (*)
+             │   │   │   ├── infraternal-agent v0.1.0 (*)
+             │   │   │   └── infraternal-server v0.1.0 (*)
+             │   │   ├── infraternal-plugin-ssh v0.1.0
+             │   │   │   ├── infraternal v0.1.0 (*)
+             │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+             │   │   │   └── infraternal-server v0.1.0 (*)
+             │   │   └── infraternal-server v0.1.0 (*)
+             │   ├── infraternal-plugin-mesh v0.1.0 (*)
+             │   └── infraternal-server v0.1.0 (*)
+             ├── sqlx-macros v0.8.6
+             │   └── sqlx v0.8.6 (*)
+             ├── sqlx-macros-core v0.8.6
+             │   └── sqlx-macros v0.8.6 (*)
+             └── sqlx-sqlite v0.8.6
+                 ├── sqlx v0.8.6 (*)
+                 └── sqlx-macros-core v0.8.6 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'r-efi'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:194:1
+    │  
+194 │ ╭ r-efi 5.3.0 registry+https://github.com/rust-lang/crates.io-index
+195 │ │ r-efi 6.0.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ r-efi v5.3.0
+      └── getrandom v0.3.4
+          └── rand_core v0.9.5
+              ├── rand v0.9.5
+              │   ├── infraternal-server v0.1.0
+              │   │   ├── infraternal v0.1.0
+              │   │   └── infraternal-fuzz v0.1.0
+              │   ├── tungstenite v0.29.0
+              │   │   └── tokio-tungstenite v0.29.0
+              │   │       ├── axum v0.8.9
+              │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+              │   │       │   └── infraternal-server v0.1.0 (*)
+              │   │       └── (dev) infraternal-server v0.1.0 (*)
+              │   └── webauthn-rs-core v0.5.5
+              │       └── webauthn-rs v0.5.5
+              │           └── infraternal-server v0.1.0 (*)
+              └── rand_chacha v0.9.0
+                  ├── rand v0.9.5 (*)
+                  └── webauthn-rs-core v0.5.5 (*)
+    ├ r-efi v6.0.0
+      └── getrandom v0.4.3
+          ├── jobserver v0.1.35
+          │   └── cc v1.6.0
+          │       ├── (build) libfuzzer-sys v0.4.13
+          │       │   └── infraternal-fuzz v0.1.0
+          │       ├── (build) libsqlite3-sys v0.30.1
+          │       │   └── sqlx-sqlite v0.8.6
+          │       │       ├── sqlx v0.8.6
+          │       │       │   ├── infraternal v0.1.0
+          │       │       │   ├── infraternal-plugin-api v0.1.0
+          │       │       │   │   ├── infraternal-agent v0.1.0
+          │       │       │   │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   │   └── infraternal-server v0.1.0
+          │       │       │   │   │       ├── infraternal v0.1.0 (*)
+          │       │       │   │   │       └── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-host-facts v0.1.0
+          │       │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+          │       │       │   │   │   └── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-mesh v0.1.0
+          │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-remote v0.1.0
+          │       │       │   │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+          │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-ssh v0.1.0
+          │       │       │   │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+          │       │       │   │   └── infraternal-server v0.1.0 (*)
+          │       │       │   ├── infraternal-plugin-mesh v0.1.0 (*)
+          │       │       │   └── infraternal-server v0.1.0 (*)
+          │       │       └── sqlx-macros-core v0.8.6
+          │       │           └── sqlx-macros v0.8.6
+          │       │               └── sqlx v0.8.6 (*)
+          │       ├── openssl-src v300.6.1+3.6.3
+          │       │   └── (build) openssl-sys v0.9.117
+          │       │       ├── axum-server v0.8.0
+          │       │       │   └── infraternal-server v0.1.0 (*)
+          │       │       ├── openssl v0.10.81
+          │       │       │   ├── axum-server v0.8.0 (*)
+          │       │       │   ├── infraternal v0.1.0 (*)
+          │       │       │   ├── infraternal-agent v0.1.0 (*)
+          │       │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │       │       │   ├── infraternal-server v0.1.0 (*)
+          │       │       │   ├── infraternal-shim v0.1.0
+          │       │       │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+          │       │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+          │       │       │   │   └── infraternal-server v0.1.0 (*)
+          │       │       │   ├── tokio-openssl v0.6.5
+          │       │       │   │   ├── axum-server v0.8.0 (*)
+          │       │       │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │       │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+          │       │       │   ├── webauthn-attestation-ca v0.5.5
+          │       │       │   │   └── webauthn-rs-core v0.5.5
+          │       │       │   │       └── webauthn-rs v0.5.5
+          │       │       │   │           └── infraternal-server v0.1.0 (*)
+          │       │       │   └── webauthn-rs-core v0.5.5 (*)
+          │       │       ├── tokio-openssl v0.6.5 (*)
+          │       │       ├── webauthn-attestation-ca v0.5.5 (*)
+          │       │       └── webauthn-rs-core v0.5.5 (*)
+          │       ├── (build) openssl-sys v0.9.117 (*)
+          │       └── (build) ring v0.17.14
+          │           ├── quinn-proto v0.11.19
+          │           │   └── quinn v0.11.12
+          │           │       ├── infraternal-agent v0.1.0 (*)
+          │           │       ├── infraternal-plugin-remote v0.1.0 (*)
+          │           │       └── infraternal-server v0.1.0 (*)
+          │           ├── rustls v0.23.45
+          │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │           │   ├── quinn v0.11.12 (*)
+          │           │   └── quinn-proto v0.11.19 (*)
+          │           └── rustls-webpki v0.103.15
+          │               └── rustls v0.23.45 (*)
+          ├── quinn-proto v0.11.19 (*)
+          ├── rand v0.10.3
+          │   └── quinn-proto v0.11.19 (*)
+          └── uuid v1.27.0
+              ├── infraternal v0.1.0 (*)
+              ├── infraternal-agent v0.1.0 (*)
+              ├── infraternal-plugin-ssh v0.1.0 (*)
+              ├── infraternal-server v0.1.0 (*)
+              ├── webauthn-attestation-ca v0.5.5 (*)
+              ├── webauthn-rs v0.5.5 (*)
+              └── webauthn-rs-core v0.5.5 (*)
+
+warning[duplicate]: found 3 duplicate entries for crate 'rand'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:196:1
+    │  
+196 │ ╭ rand 0.8.8 registry+https://github.com/rust-lang/crates.io-index
+197 │ │ rand 0.9.5 registry+https://github.com/rust-lang/crates.io-index
+198 │ │ rand 0.10.3 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ rand v0.8.8
+      └── bip39 v2.2.2
+          └── infraternal-server v0.1.0
+              ├── infraternal v0.1.0
+              └── infraternal-fuzz v0.1.0
+    ├ rand v0.9.5
+      ├── infraternal-server v0.1.0
+      │   ├── infraternal v0.1.0
+      │   └── infraternal-fuzz v0.1.0
+      ├── tungstenite v0.29.0
+      │   └── tokio-tungstenite v0.29.0
+      │       ├── axum v0.8.9
+      │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       └── (dev) infraternal-server v0.1.0 (*)
+      └── webauthn-rs-core v0.5.5
+          └── webauthn-rs v0.5.5
+              └── infraternal-server v0.1.0 (*)
+    ├ rand v0.10.3
+      └── quinn-proto v0.11.19
+          └── quinn v0.11.12
+              ├── infraternal-agent v0.1.0
+              │   ├── infraternal v0.1.0
+              │   ├── infraternal-fuzz v0.1.0
+              │   └── infraternal-server v0.1.0
+              │       ├── infraternal v0.1.0 (*)
+              │       └── infraternal-fuzz v0.1.0 (*)
+              ├── infraternal-plugin-remote v0.1.0
+              │   ├── infraternal v0.1.0 (*)
+              │   ├── infraternal-agent v0.1.0 (*)
+              │   └── infraternal-server v0.1.0 (*)
+              └── infraternal-server v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'rand_chacha'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:199:1
+    │  
+199 │ ╭ rand_chacha 0.3.1 registry+https://github.com/rust-lang/crates.io-index
+200 │ │ rand_chacha 0.9.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ rand_chacha v0.3.1
+      └── rand v0.8.8
+          └── bip39 v2.2.2
+              └── infraternal-server v0.1.0
+                  ├── infraternal v0.1.0
+                  └── infraternal-fuzz v0.1.0
+    ├ rand_chacha v0.9.0
+      ├── rand v0.9.5
+      │   ├── infraternal-server v0.1.0
+      │   │   ├── infraternal v0.1.0
+      │   │   └── infraternal-fuzz v0.1.0
+      │   ├── tungstenite v0.29.0
+      │   │   └── tokio-tungstenite v0.29.0
+      │   │       ├── axum v0.8.9
+      │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   └── infraternal-server v0.1.0 (*)
+      │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │   └── webauthn-rs-core v0.5.5
+      │       └── webauthn-rs v0.5.5
+      │           └── infraternal-server v0.1.0 (*)
+      └── webauthn-rs-core v0.5.5 (*)
+
+warning[duplicate]: found 3 duplicate entries for crate 'rand_core'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:201:1
+    │  
+201 │ ╭ rand_core 0.6.4 registry+https://github.com/rust-lang/crates.io-index
+202 │ │ rand_core 0.9.5 registry+https://github.com/rust-lang/crates.io-index
+203 │ │ rand_core 0.10.1 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ rand_core v0.6.4
+      ├── bip39 v2.2.2
+      │   └── infraternal-server v0.1.0
+      │       ├── infraternal v0.1.0
+      │       └── infraternal-fuzz v0.1.0
+      ├── crypto-common v0.1.7
+      │   ├── aead v0.5.2
+      │   │   └── aes-gcm v0.10.3
+      │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │   ├── cipher v0.4.4
+      │   │   ├── aes v0.8.4
+      │   │   │   └── aes-gcm v0.10.3 (*)
+      │   │   ├── aes-gcm v0.10.3 (*)
+      │   │   └── ctr v0.9.2
+      │   │       └── aes-gcm v0.10.3 (*)
+      │   ├── digest v0.10.7
+      │   │   ├── blake2 v0.10.6
+      │   │   │   └── argon2 v0.5.3
+      │   │   │       └── infraternal-server v0.1.0 (*)
+      │   │   ├── hmac v0.12.1
+      │   │   │   └── hkdf v0.12.4
+      │   │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │   │   ├── sha1 v0.10.7
+      │   │   │   ├── axum v0.8.9
+      │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │   │   └── tungstenite v0.29.0
+      │   │   │       └── tokio-tungstenite v0.29.0
+      │   │   │           ├── axum v0.8.9 (*)
+      │   │   │           └── (dev) infraternal-server v0.1.0 (*)
+      │   │   └── sha2 v0.10.9
+      │   │       ├── infraternal-plugin-ssh v0.1.0
+      │   │       │   ├── infraternal v0.1.0 (*)
+      │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   └── infraternal-server v0.1.0 (*)
+      │   │       ├── infraternal-server v0.1.0 (*)
+      │   │       ├── sqlx-core v0.8.6
+      │   │       │   ├── sqlx v0.8.6
+      │   │       │   │   ├── infraternal v0.1.0 (*)
+      │   │       │   │   ├── infraternal-plugin-api v0.1.0
+      │   │       │   │   │   ├── infraternal-agent v0.1.0
+      │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+      │   │       │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-plugin-mesh v0.1.0
+      │   │       │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-plugin-remote v0.1.0
+      │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │   │       │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │       │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │   ├── sqlx-macros v0.8.6
+      │   │       │   │   └── sqlx v0.8.6 (*)
+      │   │       │   ├── sqlx-macros-core v0.8.6
+      │   │       │   │   └── sqlx-macros v0.8.6 (*)
+      │   │       │   └── sqlx-sqlite v0.8.6
+      │   │       │       ├── sqlx v0.8.6 (*)
+      │   │       │       └── sqlx-macros-core v0.8.6 (*)
+      │   │       └── sqlx-macros-core v0.8.6 (*)
+      │   └── universal-hash v0.5.1
+      │       └── polyval v0.6.2
+      │           └── ghash v0.5.1
+      │               └── aes-gcm v0.10.3 (*)
+      ├── password-hash v0.5.0
+      │   └── argon2 v0.5.3 (*)
+      ├── rand v0.8.8
+      │   └── bip39 v2.2.2 (*)
+      └── rand_chacha v0.3.1
+          └── rand v0.8.8 (*)
+    ├ rand_core v0.9.5
+      ├── rand v0.9.5
+      │   ├── infraternal-server v0.1.0
+      │   │   ├── infraternal v0.1.0
+      │   │   └── infraternal-fuzz v0.1.0
+      │   ├── tungstenite v0.29.0
+      │   │   └── tokio-tungstenite v0.29.0
+      │   │       ├── axum v0.8.9
+      │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   └── infraternal-server v0.1.0 (*)
+      │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │   └── webauthn-rs-core v0.5.5
+      │       └── webauthn-rs v0.5.5
+      │           └── infraternal-server v0.1.0 (*)
+      └── rand_chacha v0.9.0
+          ├── rand v0.9.5 (*)
+          └── webauthn-rs-core v0.5.5 (*)
+    ├ rand_core v0.10.1
+      ├── chacha20 v0.10.2
+      │   └── rand v0.10.3
+      │       └── quinn-proto v0.11.19
+      │           └── quinn v0.11.12
+      │               ├── infraternal-agent v0.1.0
+      │               │   ├── infraternal v0.1.0
+      │               │   ├── infraternal-fuzz v0.1.0
+      │               │   └── infraternal-server v0.1.0
+      │               │       ├── infraternal v0.1.0 (*)
+      │               │       └── infraternal-fuzz v0.1.0 (*)
+      │               ├── infraternal-plugin-remote v0.1.0
+      │               │   ├── infraternal v0.1.0 (*)
+      │               │   ├── infraternal-agent v0.1.0 (*)
+      │               │   └── infraternal-server v0.1.0 (*)
+      │               └── infraternal-server v0.1.0 (*)
+      ├── getrandom v0.4.3
+      │   ├── jobserver v0.1.35
+      │   │   └── cc v1.6.0
+      │   │       ├── (build) libfuzzer-sys v0.4.13
+      │   │       │   └── infraternal-fuzz v0.1.0 (*)
+      │   │       ├── (build) libsqlite3-sys v0.30.1
+      │   │       │   └── sqlx-sqlite v0.8.6
+      │   │       │       ├── sqlx v0.8.6
+      │   │       │       │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   ├── infraternal-plugin-api v0.1.0
+      │   │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-host-facts v0.1.0
+      │   │       │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │       │   │   │   └── infraternal-fuzz v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-mesh v0.1.0
+      │   │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-ssh v0.1.0
+      │   │       │       │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │       │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │       │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │       │       │   └── infraternal-server v0.1.0 (*)
+      │   │       │       └── sqlx-macros-core v0.8.6
+      │   │       │           └── sqlx-macros v0.8.6
+      │   │       │               └── sqlx v0.8.6 (*)
+      │   │       ├── openssl-src v300.6.1+3.6.3
+      │   │       │   └── (build) openssl-sys v0.9.117
+      │   │       │       ├── axum-server v0.8.0
+      │   │       │       │   └── infraternal-server v0.1.0 (*)
+      │   │       │       ├── openssl v0.10.81
+      │   │       │       │   ├── axum-server v0.8.0 (*)
+      │   │       │       │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │       │       │   ├── infraternal-server v0.1.0 (*)
+      │   │       │       │   ├── infraternal-shim v0.1.0
+      │   │       │       │   │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │   │       │       │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │       │   ├── tokio-openssl v0.6.5
+      │   │       │       │   │   ├── axum-server v0.8.0 (*)
+      │   │       │       │   │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │       │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │   │       │       │   ├── webauthn-attestation-ca v0.5.5
+      │   │       │       │   │   └── webauthn-rs-core v0.5.5
+      │   │       │       │   │       └── webauthn-rs v0.5.5
+      │   │       │       │   │           └── infraternal-server v0.1.0 (*)
+      │   │       │       │   └── webauthn-rs-core v0.5.5 (*)
+      │   │       │       ├── tokio-openssl v0.6.5 (*)
+      │   │       │       ├── webauthn-attestation-ca v0.5.5 (*)
+      │   │       │       └── webauthn-rs-core v0.5.5 (*)
+      │   │       ├── (build) openssl-sys v0.9.117 (*)
+      │   │       └── (build) ring v0.17.14
+      │   │           ├── quinn-proto v0.11.19 (*)
+      │   │           ├── rustls v0.23.45
+      │   │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │           │   ├── quinn v0.11.12 (*)
+      │   │           │   └── quinn-proto v0.11.19 (*)
+      │   │           └── rustls-webpki v0.103.15
+      │   │               └── rustls v0.23.45 (*)
+      │   ├── quinn-proto v0.11.19 (*)
+      │   ├── rand v0.10.3 (*)
+      │   └── uuid v1.27.0
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-agent v0.1.0 (*)
+      │       ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       ├── infraternal-server v0.1.0 (*)
+      │       ├── webauthn-attestation-ca v0.5.5 (*)
+      │       ├── webauthn-rs v0.5.5 (*)
+      │       └── webauthn-rs-core v0.5.5 (*)
+      ├── rand v0.10.3 (*)
+      └── rand_pcg v0.10.2
+          └── quinn-proto v0.11.19 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'syn'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:245:1
+    │  
+245 │ ╭ syn 2.0.119 registry+https://github.com/rust-lang/crates.io-index
+246 │ │ syn 3.0.6 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ syn v2.0.119
+      ├── asn1-rs-derive v0.5.1
+      │   └── asn1-rs v0.6.2
+      │       ├── der-parser v9.0.0
+      │       │   ├── webauthn-rs-core v0.5.5
+      │       │   │   └── webauthn-rs v0.5.5
+      │       │   │       └── infraternal-server v0.1.0
+      │       │   │           ├── infraternal v0.1.0
+      │       │   │           └── infraternal-fuzz v0.1.0
+      │       │   └── x509-parser v0.16.0
+      │       │       └── webauthn-rs-core v0.5.5 (*)
+      │       ├── oid-registry v0.7.1
+      │       │   └── x509-parser v0.16.0 (*)
+      │       └── x509-parser v0.16.0 (*)
+      ├── asn1-rs-impl v0.2.0
+      │   └── asn1-rs v0.6.2 (*)
+      ├── enum-as-inner v0.6.1
+      │   └── sysctl v0.7.1
+      │       └── infraternal-plugin-host-facts v0.1.0
+      │           ├── infraternal-agent v0.1.0
+      │           │   ├── infraternal v0.1.0 (*)
+      │           │   ├── infraternal-fuzz v0.1.0 (*)
+      │           │   └── infraternal-server v0.1.0 (*)
+      │           └── infraternal-fuzz v0.1.0 (*)
+      ├── openssl-macros v0.1.1
+      │   └── openssl v0.10.81
+      │       ├── axum-server v0.8.0
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-agent v0.1.0 (*)
+      │       ├── infraternal-plugin-remote v0.1.0
+      │       │   ├── infraternal v0.1.0 (*)
+      │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── infraternal-server v0.1.0 (*)
+      │       ├── infraternal-shim v0.1.0
+      │       │   ├── infraternal v0.1.0 (*)
+      │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   ├── infraternal-plugin-ssh v0.1.0
+      │       │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │   └── infraternal-server v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── tokio-openssl v0.6.5
+      │       │   ├── axum-server v0.8.0 (*)
+      │       │   ├── infraternal v0.1.0 (*)
+      │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   └── (dev) infraternal-server v0.1.0 (*)
+      │       ├── webauthn-attestation-ca v0.5.5
+      │       │   └── webauthn-rs-core v0.5.5 (*)
+      │       └── webauthn-rs-core v0.5.5 (*)
+      ├── sqlx-macros v0.8.6
+      │   └── sqlx v0.8.6
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-plugin-api v0.1.0
+      │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   ├── infraternal-plugin-host-facts v0.1.0 (*)
+      │       │   ├── infraternal-plugin-mesh v0.1.0
+      │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │   └── infraternal-server v0.1.0 (*)
+      │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── infraternal-plugin-mesh v0.1.0 (*)
+      │       └── infraternal-server v0.1.0 (*)
+      ├── sqlx-macros-core v0.8.6
+      │   └── sqlx-macros v0.8.6 (*)
+      ├── synstructure v0.13.2
+      │   └── asn1-rs-derive v0.5.1 (*)
+      ├── thiserror-impl v1.0.69
+      │   └── thiserror v1.0.69
+      │       ├── asn1-rs v0.6.2 (*)
+      │       ├── webauthn-rs-core v0.5.5 (*)
+      │       └── x509-parser v0.16.0 (*)
+      ├── tracing-attributes v0.1.31
+      │   └── tracing v0.1.44
+      │       ├── axum v0.8.9
+      │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── axum-core v0.5.6
+      │       │   └── axum v0.8.9 (*)
+      │       ├── h2 v0.4.19
+      │       │   ├── hyper v1.11.1
+      │       │   │   ├── axum v0.8.9 (*)
+      │       │   │   ├── axum-server v0.8.0 (*)
+      │       │   │   ├── hyper-util v0.1.21
+      │       │   │   │   ├── axum v0.8.9 (*)
+      │       │   │   │   ├── axum-server v0.8.0 (*)
+      │       │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │       │   └── (dev) infraternal-server v0.1.0 (*)
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-server v0.1.0 (*)
+      │       ├── quinn v0.11.12
+      │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── quinn-proto v0.11.19
+      │       │   └── quinn v0.11.12 (*)
+      │       ├── quinn-udp v0.5.16
+      │       │   └── quinn v0.11.12 (*)
+      │       ├── sqlx-core v0.8.6
+      │       │   ├── sqlx v0.8.6 (*)
+      │       │   ├── sqlx-macros v0.8.6 (*)
+      │       │   ├── sqlx-macros-core v0.8.6 (*)
+      │       │   └── sqlx-sqlite v0.8.6
+      │       │       ├── sqlx v0.8.6 (*)
+      │       │       └── sqlx-macros-core v0.8.6 (*)
+      │       ├── sqlx-sqlite v0.8.6 (*)
+      │       ├── tower v0.5.3
+      │       │   ├── axum v0.8.9 (*)
+      │       │   └── (dev) infraternal-server v0.1.0 (*)
+      │       ├── tracing-subscriber v0.3.23
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── webauthn-attestation-ca v0.5.5 (*)
+      │       ├── webauthn-rs v0.5.5 (*)
+      │       └── webauthn-rs-core v0.5.5 (*)
+      └── zerocopy-derive v0.8.60
+          └── zerocopy v0.8.60
+              ├── half v2.7.1
+              │   ├── ciborium-ll v0.2.2
+              │   │   └── ciborium v0.2.2
+              │   │       └── criterion v0.7.0
+              │   │           └── (dev) infraternal-protocol v0.1.0
+              │   │               ├── infraternal-agent v0.1.0 (*)
+              │   │               ├── infraternal-fuzz v0.1.0 (*)
+              │   │               ├── (dev) infraternal-plugin-host-facts v0.1.0 (*)
+              │   │               ├── infraternal-plugin-mesh v0.1.0 (*)
+              │   │               ├── infraternal-plugin-remote v0.1.0 (*)
+              │   │               └── infraternal-server v0.1.0 (*)
+              │   └── serde_cbor_2 v0.13.0
+              │       ├── infraternal-server v0.1.0 (*)
+              │       └── webauthn-rs-core v0.5.5 (*)
+              └── ppv-lite86 v0.2.21
+                  ├── rand_chacha v0.3.1
+                  │   └── rand v0.8.8
+                  │       └── bip39 v2.2.2
+                  │           └── infraternal-server v0.1.0 (*)
+                  └── rand_chacha v0.9.0
+                      ├── rand v0.9.5
+                      │   ├── infraternal-server v0.1.0 (*)
+                      │   ├── tungstenite v0.29.0
+                      │   │   └── tokio-tungstenite v0.29.0
+                      │   │       ├── axum v0.8.9 (*)
+                      │   │       └── (dev) infraternal-server v0.1.0 (*)
+                      │   └── webauthn-rs-core v0.5.5 (*)
+                      └── webauthn-rs-core v0.5.5 (*)
+    ├ syn v3.0.6
+      ├── clap_derive v4.6.7
+      │   └── clap v4.6.7
+      │       ├── criterion v0.7.0
+      │       │   └── (dev) infraternal-protocol v0.1.0
+      │       │       ├── infraternal-agent v0.1.0
+      │       │       │   ├── infraternal v0.1.0
+      │       │       │   ├── infraternal-fuzz v0.1.0
+      │       │       │   └── infraternal-server v0.1.0
+      │       │       │       ├── infraternal v0.1.0 (*)
+      │       │       │       └── infraternal-fuzz v0.1.0 (*)
+      │       │       ├── infraternal-fuzz v0.1.0 (*)
+      │       │       ├── (dev) infraternal-plugin-host-facts v0.1.0
+      │       │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │       │   └── infraternal-fuzz v0.1.0 (*)
+      │       │       ├── infraternal-plugin-mesh v0.1.0
+      │       │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │       │   └── infraternal-server v0.1.0 (*)
+      │       │       ├── infraternal-plugin-remote v0.1.0
+      │       │       │   ├── infraternal v0.1.0 (*)
+      │       │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │       │   └── infraternal-server v0.1.0 (*)
+      │       │       └── infraternal-server v0.1.0 (*)
+      │       └── infraternal v0.1.0 (*)
+      ├── displaydoc v0.2.7
+      │   ├── asn1-rs v0.6.2
+      │   │   ├── der-parser v9.0.0
+      │   │   │   ├── webauthn-rs-core v0.5.5
+      │   │   │   │   └── webauthn-rs v0.5.5
+      │   │   │   │       └── infraternal-server v0.1.0 (*)
+      │   │   │   └── x509-parser v0.16.0
+      │   │   │       └── webauthn-rs-core v0.5.5 (*)
+      │   │   ├── oid-registry v0.7.1
+      │   │   │   └── x509-parser v0.16.0 (*)
+      │   │   └── x509-parser v0.16.0 (*)
+      │   ├── der-parser v9.0.0 (*)
+      │   ├── icu_collections v2.3.0
+      │   │   ├── icu_normalizer v2.3.0
+      │   │   │   └── idna_adapter v1.2.2
+      │   │   │       └── idna v1.1.0
+      │   │   │           └── url v2.5.8
+      │   │   │               ├── infraternal v0.1.0 (*)
+      │   │   │               ├── infraternal-plugin-ssh v0.1.0
+      │   │   │               │   ├── infraternal v0.1.0 (*)
+      │   │   │               │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   │               │   └── infraternal-server v0.1.0 (*)
+      │   │   │               ├── infraternal-server v0.1.0 (*)
+      │   │   │               ├── sqlx-core v0.8.6
+      │   │   │               │   ├── sqlx v0.8.6
+      │   │   │               │   │   ├── infraternal v0.1.0 (*)
+      │   │   │               │   │   ├── infraternal-plugin-api v0.1.0
+      │   │   │               │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-plugin-host-facts v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │   │   │               │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │   │               │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   │               │   │   └── infraternal-server v0.1.0 (*)
+      │   │   │               │   ├── sqlx-macros v0.8.6
+      │   │   │               │   │   └── sqlx v0.8.6 (*)
+      │   │   │               │   ├── sqlx-macros-core v0.8.6
+      │   │   │               │   │   └── sqlx-macros v0.8.6 (*)
+      │   │   │               │   └── sqlx-sqlite v0.8.6
+      │   │   │               │       ├── sqlx v0.8.6 (*)
+      │   │   │               │       └── sqlx-macros-core v0.8.6 (*)
+      │   │   │               ├── sqlx-macros-core v0.8.6 (*)
+      │   │   │               ├── sqlx-sqlite v0.8.6 (*)
+      │   │   │               ├── webauthn-rs v0.5.5 (*)
+      │   │   │               ├── webauthn-rs-core v0.5.5 (*)
+      │   │   │               └── webauthn-rs-proto v0.5.5
+      │   │   │                   └── webauthn-rs-core v0.5.5 (*)
+      │   │   └── icu_properties v2.3.0
+      │   │       └── idna_adapter v1.2.2 (*)
+      │   ├── icu_locale_core v2.3.0
+      │   │   ├── icu_properties v2.3.0 (*)
+      │   │   └── icu_provider v2.3.1
+      │   │       ├── icu_normalizer v2.3.0 (*)
+      │   │       └── icu_properties v2.3.0 (*)
+      │   ├── icu_properties v2.3.0 (*)
+      │   ├── icu_provider v2.3.1 (*)
+      │   ├── tinystr v0.8.4
+      │   │   └── icu_locale_core v2.3.0 (*)
+      │   └── zerotrie v0.2.5
+      │       ├── icu_properties v2.3.0 (*)
+      │       └── icu_provider v2.3.1 (*)
+      ├── futures-macro v0.3.34
+      │   └── futures-util v0.3.34
+      │       ├── axum v0.8.9
+      │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── futures-executor v0.3.34
+      │       │   └── sqlx-sqlite v0.8.6 (*)
+      │       ├── infraternal-plugin-mesh v0.1.0 (*)
+      │       ├── (dev) infraternal-plugin-ssh v0.1.0 (*)
+      │       ├── infraternal-server v0.1.0 (*)
+      │       ├── js-sys v0.3.106
+      │       │   ├── getrandom v0.2.17
+      │       │   │   ├── rand_core v0.6.4
+      │       │   │   │   ├── bip39 v2.2.2
+      │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │   │   ├── crypto-common v0.1.7
+      │       │   │   │   │   ├── aead v0.5.2
+      │       │   │   │   │   │   └── aes-gcm v0.10.3
+      │       │   │   │   │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   │   │   ├── cipher v0.4.4
+      │       │   │   │   │   │   ├── aes v0.8.4
+      │       │   │   │   │   │   │   └── aes-gcm v0.10.3 (*)
+      │       │   │   │   │   │   ├── aes-gcm v0.10.3 (*)
+      │       │   │   │   │   │   └── ctr v0.9.2
+      │       │   │   │   │   │       └── aes-gcm v0.10.3 (*)
+      │       │   │   │   │   ├── digest v0.10.7
+      │       │   │   │   │   │   ├── blake2 v0.10.6
+      │       │   │   │   │   │   │   └── argon2 v0.5.3
+      │       │   │   │   │   │   │       └── infraternal-server v0.1.0 (*)
+      │       │   │   │   │   │   ├── hmac v0.12.1
+      │       │   │   │   │   │   │   └── hkdf v0.12.4
+      │       │   │   │   │   │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   │   │   │   ├── sha1 v0.10.7
+      │       │   │   │   │   │   │   ├── axum v0.8.9 (*)
+      │       │   │   │   │   │   │   └── tungstenite v0.29.0
+      │       │   │   │   │   │   │       └── tokio-tungstenite v0.29.0
+      │       │   │   │   │   │   │           ├── axum v0.8.9 (*)
+      │       │   │   │   │   │   │           └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   │   │   │   └── sha2 v0.10.9
+      │       │   │   │   │   │       ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       │   │   │   │   │       ├── infraternal-server v0.1.0 (*)
+      │       │   │   │   │   │       ├── sqlx-core v0.8.6 (*)
+      │       │   │   │   │   │       └── sqlx-macros-core v0.8.6 (*)
+      │       │   │   │   │   └── universal-hash v0.5.1
+      │       │   │   │   │       └── polyval v0.6.2
+      │       │   │   │   │           └── ghash v0.5.1
+      │       │   │   │   │               └── aes-gcm v0.10.3 (*)
+      │       │   │   │   ├── password-hash v0.5.0
+      │       │   │   │   │   └── argon2 v0.5.3 (*)
+      │       │   │   │   ├── rand v0.8.8
+      │       │   │   │   │   └── bip39 v2.2.2 (*)
+      │       │   │   │   └── rand_chacha v0.3.1
+      │       │   │   │       └── rand v0.8.8 (*)
+      │       │   │   └── ring v0.17.14
+      │       │   │       ├── quinn-proto v0.11.19
+      │       │   │       │   └── quinn v0.11.12
+      │       │   │       │       ├── infraternal-agent v0.1.0 (*)
+      │       │   │       │       ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   │       │       └── infraternal-server v0.1.0 (*)
+      │       │   │       ├── rustls v0.23.45
+      │       │   │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   │       │   ├── quinn v0.11.12 (*)
+      │       │   │       │   └── quinn-proto v0.11.19 (*)
+      │       │   │       └── rustls-webpki v0.103.15
+      │       │   │           └── rustls v0.23.45 (*)
+      │       │   ├── getrandom v0.4.3
+      │       │   │   ├── jobserver v0.1.35
+      │       │   │   │   └── cc v1.6.0
+      │       │   │   │       ├── (build) libfuzzer-sys v0.4.13
+      │       │   │   │       │   └── infraternal-fuzz v0.1.0 (*)
+      │       │   │   │       ├── (build) libsqlite3-sys v0.30.1
+      │       │   │   │       │   └── sqlx-sqlite v0.8.6 (*)
+      │       │   │   │       ├── openssl-src v300.6.1+3.6.3
+      │       │   │   │       │   └── (build) openssl-sys v0.9.117
+      │       │   │   │       │       ├── axum-server v0.8.0
+      │       │   │   │       │       │   └── infraternal-server v0.1.0 (*)
+      │       │   │   │       │       ├── openssl v0.10.81
+      │       │   │   │       │       │   ├── axum-server v0.8.0 (*)
+      │       │   │   │       │       │   ├── infraternal v0.1.0 (*)
+      │       │   │   │       │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   │   │       │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   │   │       │       │   ├── infraternal-server v0.1.0 (*)
+      │       │   │   │       │       │   ├── infraternal-shim v0.1.0
+      │       │   │   │       │       │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+      │       │   │   │       │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │   │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   │   │       │       │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       │   │   │       │       │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │   │       │       │   ├── tokio-openssl v0.6.5
+      │       │   │   │       │       │   │   ├── axum-server v0.8.0 (*)
+      │       │   │   │       │       │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+      │       │   │   │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   │   │       │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   │       │       │   ├── webauthn-attestation-ca v0.5.5
+      │       │   │   │       │       │   │   └── webauthn-rs-core v0.5.5 (*)
+      │       │   │   │       │       │   └── webauthn-rs-core v0.5.5 (*)
+      │       │   │   │       │       ├── tokio-openssl v0.6.5 (*)
+      │       │   │   │       │       ├── webauthn-attestation-ca v0.5.5 (*)
+      │       │   │   │       │       └── webauthn-rs-core v0.5.5 (*)
+      │       │   │   │       ├── (build) openssl-sys v0.9.117 (*)
+      │       │   │   │       └── (build) ring v0.17.14 (*)
+      │       │   │   ├── quinn-proto v0.11.19 (*)
+      │       │   │   ├── rand v0.10.3
+      │       │   │   │   └── quinn-proto v0.11.19 (*)
+      │       │   │   └── uuid v1.27.0
+      │       │   │       ├── infraternal v0.1.0 (*)
+      │       │   │       ├── infraternal-agent v0.1.0 (*)
+      │       │   │       ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       │   │       ├── infraternal-server v0.1.0 (*)
+      │       │   │       ├── webauthn-attestation-ca v0.5.5 (*)
+      │       │   │       ├── webauthn-rs v0.5.5 (*)
+      │       │   │       └── webauthn-rs-core v0.5.5 (*)
+      │       │   ├── web-sys v0.3.106
+      │       │   │   └── plotters v0.3.7
+      │       │   │       └── criterion v0.7.0 (*)
+      │       │   └── web-time v1.1.0
+      │       │       ├── quinn v0.11.12 (*)
+      │       │       ├── quinn-proto v0.11.19 (*)
+      │       │       └── rustls-pki-types v1.15.1
+      │       │           ├── quinn-proto v0.11.19 (*)
+      │       │           ├── rustls v0.23.45 (*)
+      │       │           └── rustls-webpki v0.103.15 (*)
+      │       ├── sqlx-core v0.8.6 (*)
+      │       ├── sqlx-sqlite v0.8.6 (*)
+      │       ├── tokio-tungstenite v0.29.0 (*)
+      │       ├── tower v0.5.3
+      │       │   ├── axum v0.8.9 (*)
+      │       │   └── (dev) infraternal-server v0.1.0 (*)
+      │       └── tower-http v0.6.11
+      │           └── infraternal-server v0.1.0 (*)
+      ├── serde_derive v1.0.229
+      │   ├── serde v1.0.229
+      │   │   ├── base64urlsafedata v0.5.5
+      │   │   │   ├── webauthn-attestation-ca v0.5.5 (*)
+      │   │   │   ├── webauthn-rs v0.5.5 (*)
+      │   │   │   ├── webauthn-rs-core v0.5.5 (*)
+      │   │   │   └── webauthn-rs-proto v0.5.5 (*)
+      │   │   ├── bip39 v2.2.2 (*)
+      │   │   ├── ciborium v0.2.2
+      │   │   │   └── criterion v0.7.0 (*)
+      │   │   ├── criterion v0.7.0 (*)
+      │   │   ├── either v1.18.0
+      │   │   │   ├── axum-server v0.8.0 (*)
+      │   │   │   ├── itertools v0.13.0
+      │   │   │   │   ├── criterion v0.7.0 (*)
+      │   │   │   │   └── criterion-plot v0.6.0
+      │   │   │   │       └── criterion v0.7.0 (*)
+      │   │   │   ├── rayon v1.12.0
+      │   │   │   │   └── criterion v0.7.0 (*)
+      │   │   │   ├── sqlx-core v0.8.6 (*)
+      │   │   │   └── sqlx-macros-core v0.8.6 (*)
+      │   │   ├── infraternal v0.1.0 (*)
+      │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │   ├── infraternal-mesh v0.1.0
+      │   │   │   └── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   ├── infraternal-plugin-api v0.1.0 (*)
+      │   │   ├── infraternal-plugin-host-facts v0.1.0 (*)
+      │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │   │   ├── infraternal-server v0.1.0 (*)
+      │   │   ├── serde_cbor_2 v0.13.0
+      │   │   │   ├── infraternal-server v0.1.0 (*)
+      │   │   │   └── webauthn-rs-core v0.5.5 (*)
+      │   │   ├── serde_urlencoded v0.7.1
+      │   │   │   ├── axum v0.8.9 (*)
+      │   │   │   └── sqlx-sqlite v0.8.6 (*)
+      │   │   ├── sqlx-core v0.8.6 (*)
+      │   │   ├── sqlx-macros-core v0.8.6 (*)
+      │   │   ├── sqlx-sqlite v0.8.6 (*)
+      │   │   ├── tinytemplate v1.2.1
+      │   │   │   └── criterion v0.7.0 (*)
+      │   │   ├── tracing-serde v0.2.0
+      │   │   │   └── tracing-subscriber v0.3.23
+      │   │   │       └── infraternal-server v0.1.0 (*)
+      │   │   ├── tracing-subscriber v0.3.23 (*)
+      │   │   ├── url v2.5.8 (*)
+      │   │   ├── webauthn-attestation-ca v0.5.5 (*)
+      │   │   ├── webauthn-rs v0.5.5 (*)
+      │   │   ├── webauthn-rs-core v0.5.5 (*)
+      │   │   ├── webauthn-rs-proto v0.5.5 (*)
+      │   │   └── zeroize v1.9.0
+      │   │       ├── infraternal-plugin-ssh v0.1.0 (*)
+      │   │       ├── infraternal-server v0.1.0 (*)
+      │   │       ├── rustls v0.23.45 (*)
+      │   │       └── rustls-pki-types v1.15.1 (*)
+      │   └── url v2.5.8 (*)
+      ├── synstructure v0.14.0
+      │   ├── yoke-derive v0.8.4
+      │   │   └── yoke v0.8.3
+      │   │       ├── icu_collections v2.3.0 (*)
+      │   │       ├── icu_provider v2.3.1 (*)
+      │   │       ├── zerotrie v0.2.5 (*)
+      │   │       └── zerovec v0.11.8
+      │   │           ├── icu_collections v2.3.0 (*)
+      │   │           ├── icu_locale_core v2.3.0 (*)
+      │   │           ├── icu_normalizer v2.3.0 (*)
+      │   │           ├── icu_properties v2.3.0 (*)
+      │   │           ├── icu_provider v2.3.1 (*)
+      │   │           ├── potential_utf v0.1.6
+      │   │           │   └── icu_collections v2.3.0 (*)
+      │   │           └── tinystr v0.8.4 (*)
+      │   └── zerofrom-derive v0.1.8
+      │       └── zerofrom v0.1.8
+      │           ├── icu_collections v2.3.0 (*)
+      │           ├── icu_provider v2.3.1 (*)
+      │           ├── yoke v0.8.3 (*)
+      │           ├── zerotrie v0.2.5 (*)
+      │           └── zerovec v0.11.8 (*)
+      ├── thiserror-impl v2.0.21
+      │   └── thiserror v2.0.21
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-mesh v0.1.0 (*)
+      │       ├── infraternal-server v0.1.0 (*)
+      │       ├── quinn v0.11.12 (*)
+      │       ├── quinn-proto v0.11.19 (*)
+      │       ├── sqlx-core v0.8.6 (*)
+      │       ├── sqlx-sqlite v0.8.6 (*)
+      │       ├── sysctl v0.7.1
+      │       │   └── infraternal-plugin-host-facts v0.1.0 (*)
+      │       └── tungstenite v0.29.0 (*)
+      ├── tokio-macros v2.7.2
+      │   └── tokio v1.53.2
+      │       ├── axum v0.8.9 (*)
+      │       ├── axum-server v0.8.0 (*)
+      │       ├── fs-err v3.3.2
+      │       │   └── axum-server v0.8.0 (*)
+      │       ├── h2 v0.4.19
+      │       │   ├── hyper v1.11.1
+      │       │   │   ├── axum v0.8.9 (*)
+      │       │   │   ├── axum-server v0.8.0 (*)
+      │       │   │   ├── hyper-util v0.1.21
+      │       │   │   │   ├── axum v0.8.9 (*)
+      │       │   │   │   ├── axum-server v0.8.0 (*)
+      │       │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │       │   └── (dev) infraternal-server v0.1.0 (*)
+      │       ├── hyper v1.11.1 (*)
+      │       ├── hyper-util v0.1.21 (*)
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-agent v0.1.0 (*)
+      │       ├── infraternal-plugin-api v0.1.0 (*)
+      │       ├── infraternal-plugin-mesh v0.1.0 (*)
+      │       ├── infraternal-plugin-remote v0.1.0 (*)
+      │       ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       ├── (dev) infraternal-server v0.1.0 (*)
+      │       ├── quinn v0.11.12 (*)
+      │       ├── sqlx-core v0.8.6 (*)
+      │       ├── sqlx-macros-core v0.8.6 (*)
+      │       ├── tokio-openssl v0.6.5 (*)
+      │       ├── tokio-stream v0.1.19
+      │       │   └── sqlx-core v0.8.6 (*)
+      │       ├── tokio-tungstenite v0.29.0 (*)
+      │       ├── tokio-util v0.7.19
+      │       │   ├── h2 v0.4.19 (*)
+      │       │   └── tower-http v0.6.11 (*)
+      │       ├── tower v0.5.3 (*)
+      │       └── tower-http v0.6.11 (*)
+      ├── wasm-bindgen-macro-support v0.2.129
+      │   └── wasm-bindgen-macro v0.2.129
+      │       └── wasm-bindgen v0.2.129
+      │           ├── getrandom v0.2.17 (*)
+      │           ├── getrandom v0.4.3 (*)
+      │           ├── js-sys v0.3.106 (*)
+      │           ├── plotters v0.3.7 (*)
+      │           ├── web-sys v0.3.106 (*)
+      │           └── web-time v1.1.0 (*)
+      ├── yoke-derive v0.8.4 (*)
+      ├── zerofrom-derive v0.1.8 (*)
+      └── zerovec-derive v0.11.6
+          └── zerovec v0.11.8 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'synstructure'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:248:1
+    │  
+248 │ ╭ synstructure 0.13.2 registry+https://github.com/rust-lang/crates.io-index
+249 │ │ synstructure 0.14.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ synstructure v0.13.2
+      └── asn1-rs-derive v0.5.1
+          └── asn1-rs v0.6.2
+              ├── der-parser v9.0.0
+              │   ├── webauthn-rs-core v0.5.5
+              │   │   └── webauthn-rs v0.5.5
+              │   │       └── infraternal-server v0.1.0
+              │   │           ├── infraternal v0.1.0
+              │   │           └── infraternal-fuzz v0.1.0
+              │   └── x509-parser v0.16.0
+              │       └── webauthn-rs-core v0.5.5 (*)
+              ├── oid-registry v0.7.1
+              │   └── x509-parser v0.16.0 (*)
+              └── x509-parser v0.16.0 (*)
+    ├ synstructure v0.14.0
+      ├── yoke-derive v0.8.4
+      │   └── yoke v0.8.3
+      │       ├── icu_collections v2.3.0
+      │       │   ├── icu_normalizer v2.3.0
+      │       │   │   └── idna_adapter v1.2.2
+      │       │   │       └── idna v1.1.0
+      │       │   │           └── url v2.5.8
+      │       │   │               ├── infraternal v0.1.0
+      │       │   │               ├── infraternal-plugin-ssh v0.1.0
+      │       │   │               │   ├── infraternal v0.1.0 (*)
+      │       │   │               │   ├── infraternal-fuzz v0.1.0
+      │       │   │               │   └── infraternal-server v0.1.0
+      │       │   │               │       ├── infraternal v0.1.0 (*)
+      │       │   │               │       └── infraternal-fuzz v0.1.0 (*)
+      │       │   │               ├── infraternal-server v0.1.0 (*)
+      │       │   │               ├── sqlx-core v0.8.6
+      │       │   │               │   ├── sqlx v0.8.6
+      │       │   │               │   │   ├── infraternal v0.1.0 (*)
+      │       │   │               │   │   ├── infraternal-plugin-api v0.1.0
+      │       │   │               │   │   │   ├── infraternal-agent v0.1.0
+      │       │   │               │   │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │               │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │               │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+      │       │   │               │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │       │   │               │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-plugin-mesh v0.1.0
+      │       │   │               │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │               │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-plugin-remote v0.1.0
+      │       │   │               │   │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │               │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │       │   │               │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       │   │               │   │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │               │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │       │   │               │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │               │   ├── sqlx-macros v0.8.6
+      │       │   │               │   │   └── sqlx v0.8.6 (*)
+      │       │   │               │   ├── sqlx-macros-core v0.8.6
+      │       │   │               │   │   └── sqlx-macros v0.8.6 (*)
+      │       │   │               │   └── sqlx-sqlite v0.8.6
+      │       │   │               │       ├── sqlx v0.8.6 (*)
+      │       │   │               │       └── sqlx-macros-core v0.8.6 (*)
+      │       │   │               ├── sqlx-macros-core v0.8.6 (*)
+      │       │   │               ├── sqlx-sqlite v0.8.6 (*)
+      │       │   │               ├── webauthn-rs v0.5.5
+      │       │   │               │   └── infraternal-server v0.1.0 (*)
+      │       │   │               ├── webauthn-rs-core v0.5.5
+      │       │   │               │   └── webauthn-rs v0.5.5 (*)
+      │       │   │               └── webauthn-rs-proto v0.5.5
+      │       │   │                   └── webauthn-rs-core v0.5.5 (*)
+      │       │   └── icu_properties v2.3.0
+      │       │       └── idna_adapter v1.2.2 (*)
+      │       ├── icu_provider v2.3.1
+      │       │   ├── icu_normalizer v2.3.0 (*)
+      │       │   └── icu_properties v2.3.0 (*)
+      │       ├── zerotrie v0.2.5
+      │       │   ├── icu_properties v2.3.0 (*)
+      │       │   └── icu_provider v2.3.1 (*)
+      │       └── zerovec v0.11.8
+      │           ├── icu_collections v2.3.0 (*)
+      │           ├── icu_locale_core v2.3.0
+      │           │   ├── icu_properties v2.3.0 (*)
+      │           │   └── icu_provider v2.3.1 (*)
+      │           ├── icu_normalizer v2.3.0 (*)
+      │           ├── icu_properties v2.3.0 (*)
+      │           ├── icu_provider v2.3.1 (*)
+      │           ├── potential_utf v0.1.6
+      │           │   └── icu_collections v2.3.0 (*)
+      │           └── tinystr v0.8.4
+      │               └── icu_locale_core v2.3.0 (*)
+      └── zerofrom-derive v0.1.8
+          └── zerofrom v0.1.8
+              ├── icu_collections v2.3.0 (*)
+              ├── icu_provider v2.3.1 (*)
+              ├── yoke v0.8.3 (*)
+              ├── zerotrie v0.2.5 (*)
+              └── zerovec v0.11.8 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'thiserror'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:251:1
+    │  
+251 │ ╭ thiserror 1.0.69 registry+https://github.com/rust-lang/crates.io-index
+252 │ │ thiserror 2.0.21 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ thiserror v1.0.69
+      ├── asn1-rs v0.6.2
+      │   ├── der-parser v9.0.0
+      │   │   ├── webauthn-rs-core v0.5.5
+      │   │   │   └── webauthn-rs v0.5.5
+      │   │   │       └── infraternal-server v0.1.0
+      │   │   │           ├── infraternal v0.1.0
+      │   │   │           └── infraternal-fuzz v0.1.0
+      │   │   └── x509-parser v0.16.0
+      │   │       └── webauthn-rs-core v0.5.5 (*)
+      │   ├── oid-registry v0.7.1
+      │   │   └── x509-parser v0.16.0 (*)
+      │   └── x509-parser v0.16.0 (*)
+      ├── webauthn-rs-core v0.5.5 (*)
+      └── x509-parser v0.16.0 (*)
+    ├ thiserror v2.0.21
+      ├── infraternal v0.1.0
+      ├── infraternal-mesh v0.1.0
+      │   └── infraternal-plugin-mesh v0.1.0
+      │       ├── infraternal-fuzz v0.1.0
+      │       └── infraternal-server v0.1.0
+      │           ├── infraternal v0.1.0 (*)
+      │           └── infraternal-fuzz v0.1.0 (*)
+      ├── infraternal-server v0.1.0 (*)
+      ├── quinn v0.11.12
+      │   ├── infraternal-agent v0.1.0
+      │   │   ├── infraternal v0.1.0 (*)
+      │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   └── infraternal-server v0.1.0 (*)
+      │   ├── infraternal-plugin-remote v0.1.0
+      │   │   ├── infraternal v0.1.0 (*)
+      │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │   └── infraternal-server v0.1.0 (*)
+      │   └── infraternal-server v0.1.0 (*)
+      ├── quinn-proto v0.11.19
+      │   └── quinn v0.11.12 (*)
+      ├── sqlx-core v0.8.6
+      │   ├── sqlx v0.8.6
+      │   │   ├── infraternal v0.1.0 (*)
+      │   │   ├── infraternal-plugin-api v0.1.0
+      │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+      │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+      │   │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │   │   ├── infraternal-plugin-ssh v0.1.0
+      │   │   │   │   ├── infraternal v0.1.0 (*)
+      │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   └── infraternal-server v0.1.0 (*)
+      │   ├── sqlx-macros v0.8.6
+      │   │   └── sqlx v0.8.6 (*)
+      │   ├── sqlx-macros-core v0.8.6
+      │   │   └── sqlx-macros v0.8.6 (*)
+      │   └── sqlx-sqlite v0.8.6
+      │       ├── sqlx v0.8.6 (*)
+      │       └── sqlx-macros-core v0.8.6 (*)
+      ├── sqlx-sqlite v0.8.6 (*)
+      ├── sysctl v0.7.1
+      │   └── infraternal-plugin-host-facts v0.1.0 (*)
+      └── tungstenite v0.29.0
+          └── tokio-tungstenite v0.29.0
+              ├── axum v0.8.9
+              │   ├── infraternal-fuzz v0.1.0 (*)
+              │   └── infraternal-server v0.1.0 (*)
+              └── (dev) infraternal-server v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'thiserror-impl'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:253:1
+    │  
+253 │ ╭ thiserror-impl 1.0.69 registry+https://github.com/rust-lang/crates.io-index
+254 │ │ thiserror-impl 2.0.21 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ thiserror-impl v1.0.69
+      └── thiserror v1.0.69
+          ├── asn1-rs v0.6.2
+          │   ├── der-parser v9.0.0
+          │   │   ├── webauthn-rs-core v0.5.5
+          │   │   │   └── webauthn-rs v0.5.5
+          │   │   │       └── infraternal-server v0.1.0
+          │   │   │           ├── infraternal v0.1.0
+          │   │   │           └── infraternal-fuzz v0.1.0
+          │   │   └── x509-parser v0.16.0
+          │   │       └── webauthn-rs-core v0.5.5 (*)
+          │   ├── oid-registry v0.7.1
+          │   │   └── x509-parser v0.16.0 (*)
+          │   └── x509-parser v0.16.0 (*)
+          ├── webauthn-rs-core v0.5.5 (*)
+          └── x509-parser v0.16.0 (*)
+    ├ thiserror-impl v2.0.21
+      └── thiserror v2.0.21
+          ├── infraternal v0.1.0
+          ├── infraternal-mesh v0.1.0
+          │   └── infraternal-plugin-mesh v0.1.0
+          │       ├── infraternal-fuzz v0.1.0
+          │       └── infraternal-server v0.1.0
+          │           ├── infraternal v0.1.0 (*)
+          │           └── infraternal-fuzz v0.1.0 (*)
+          ├── infraternal-server v0.1.0 (*)
+          ├── quinn v0.11.12
+          │   ├── infraternal-agent v0.1.0
+          │   │   ├── infraternal v0.1.0 (*)
+          │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │   │   └── infraternal-server v0.1.0 (*)
+          │   ├── infraternal-plugin-remote v0.1.0
+          │   │   ├── infraternal v0.1.0 (*)
+          │   │   ├── infraternal-agent v0.1.0 (*)
+          │   │   └── infraternal-server v0.1.0 (*)
+          │   └── infraternal-server v0.1.0 (*)
+          ├── quinn-proto v0.11.19
+          │   └── quinn v0.11.12 (*)
+          ├── sqlx-core v0.8.6
+          │   ├── sqlx v0.8.6
+          │   │   ├── infraternal v0.1.0 (*)
+          │   │   ├── infraternal-plugin-api v0.1.0
+          │   │   │   ├── infraternal-agent v0.1.0 (*)
+          │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+          │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+          │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+          │   │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+          │   │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │   │   │   ├── infraternal-plugin-ssh v0.1.0
+          │   │   │   │   ├── infraternal v0.1.0 (*)
+          │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │   │   │   │   └── infraternal-server v0.1.0 (*)
+          │   │   │   └── infraternal-server v0.1.0 (*)
+          │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+          │   │   └── infraternal-server v0.1.0 (*)
+          │   ├── sqlx-macros v0.8.6
+          │   │   └── sqlx v0.8.6 (*)
+          │   ├── sqlx-macros-core v0.8.6
+          │   │   └── sqlx-macros v0.8.6 (*)
+          │   └── sqlx-sqlite v0.8.6
+          │       ├── sqlx v0.8.6 (*)
+          │       └── sqlx-macros-core v0.8.6 (*)
+          ├── sqlx-sqlite v0.8.6 (*)
+          ├── sysctl v0.7.1
+          │   └── infraternal-plugin-host-facts v0.1.0 (*)
+          └── tungstenite v0.29.0
+              └── tokio-tungstenite v0.29.0
+                  ├── axum v0.8.9
+                  │   ├── infraternal-fuzz v0.1.0 (*)
+                  │   └── infraternal-server v0.1.0 (*)
+                  └── (dev) infraternal-server v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'windows-sys'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/audit-ca-update/Cargo.lock:311:1
+    │  
+311 │ ╭ windows-sys 0.52.0 registry+https://github.com/rust-lang/crates.io-index
+312 │ │ windows-sys 0.61.2 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ windows-sys v0.52.0
+      └── ring v0.17.14
+          ├── quinn-proto v0.11.19
+          │   └── quinn v0.11.12
+          │       ├── infraternal-agent v0.1.0
+          │       │   ├── infraternal v0.1.0
+          │       │   ├── infraternal-fuzz v0.1.0
+          │       │   └── infraternal-server v0.1.0
+          │       │       ├── infraternal v0.1.0 (*)
+          │       │       └── infraternal-fuzz v0.1.0 (*)
+          │       ├── infraternal-plugin-remote v0.1.0
+          │       │   ├── infraternal v0.1.0 (*)
+          │       │   ├── infraternal-agent v0.1.0 (*)
+          │       │   └── infraternal-server v0.1.0 (*)
+          │       └── infraternal-server v0.1.0 (*)
+          ├── rustls v0.23.45
+          │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │   ├── quinn v0.11.12 (*)
+          │   └── quinn-proto v0.11.19 (*)
+          └── rustls-webpki v0.103.15
+              └── rustls v0.23.45 (*)
+    ├ windows-sys v0.61.2
+      ├── anstyle-query v1.1.5
+      │   └── anstream v1.0.0
+      │       └── clap_builder v4.6.7
+      │           └── clap v4.6.7
+      │               ├── criterion v0.7.0
+      │               │   └── (dev) infraternal-protocol v0.1.0
+      │               │       ├── infraternal-agent v0.1.0
+      │               │       │   ├── infraternal v0.1.0
+      │               │       │   ├── infraternal-fuzz v0.1.0
+      │               │       │   └── infraternal-server v0.1.0
+      │               │       │       ├── infraternal v0.1.0 (*)
+      │               │       │       └── infraternal-fuzz v0.1.0 (*)
+      │               │       ├── infraternal-fuzz v0.1.0 (*)
+      │               │       ├── (dev) infraternal-plugin-host-facts v0.1.0
+      │               │       │   ├── infraternal-agent v0.1.0 (*)
+      │               │       │   └── infraternal-fuzz v0.1.0 (*)
+      │               │       ├── infraternal-plugin-mesh v0.1.0
+      │               │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │               │       │   └── infraternal-server v0.1.0 (*)
+      │               │       ├── infraternal-plugin-remote v0.1.0
+      │               │       │   ├── infraternal v0.1.0 (*)
+      │               │       │   ├── infraternal-agent v0.1.0 (*)
+      │               │       │   └── infraternal-server v0.1.0 (*)
+      │               │       └── infraternal-server v0.1.0 (*)
+      │               └── infraternal v0.1.0 (*)
+      ├── anstyle-wincon v3.0.11
+      │   └── anstream v1.0.0 (*)
+      ├── errno v0.3.14
+      │   └── signal-hook-registry v1.4.8
+      │       └── tokio v1.53.2
+      │           ├── axum v0.8.9
+      │           │   ├── infraternal-fuzz v0.1.0 (*)
+      │           │   └── infraternal-server v0.1.0 (*)
+      │           ├── axum-server v0.8.0
+      │           │   └── infraternal-server v0.1.0 (*)
+      │           ├── fs-err v3.3.2
+      │           │   └── axum-server v0.8.0 (*)
+      │           ├── h2 v0.4.19
+      │           │   ├── hyper v1.11.1
+      │           │   │   ├── axum v0.8.9 (*)
+      │           │   │   ├── axum-server v0.8.0 (*)
+      │           │   │   ├── hyper-util v0.1.21
+      │           │   │   │   ├── axum v0.8.9 (*)
+      │           │   │   │   ├── axum-server v0.8.0 (*)
+      │           │   │   │   ├── infraternal v0.1.0 (*)
+      │           │   │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │           │   │   ├── infraternal v0.1.0 (*)
+      │           │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │           │   └── (dev) infraternal-server v0.1.0 (*)
+      │           ├── hyper v1.11.1 (*)
+      │           ├── hyper-util v0.1.21 (*)
+      │           ├── infraternal v0.1.0 (*)
+      │           ├── infraternal-agent v0.1.0 (*)
+      │           ├── infraternal-plugin-api v0.1.0
+      │           │   ├── infraternal-agent v0.1.0 (*)
+      │           │   ├── infraternal-fuzz v0.1.0 (*)
+      │           │   ├── infraternal-plugin-host-facts v0.1.0 (*)
+      │           │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │           │   ├── infraternal-plugin-ssh v0.1.0
+      │           │   │   ├── infraternal v0.1.0 (*)
+      │           │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │           │   │   └── infraternal-server v0.1.0 (*)
+      │           │   └── infraternal-server v0.1.0 (*)
+      │           ├── infraternal-plugin-mesh v0.1.0 (*)
+      │           ├── infraternal-plugin-remote v0.1.0 (*)
+      │           ├── infraternal-plugin-ssh v0.1.0 (*)
+      │           ├── (dev) infraternal-server v0.1.0 (*)
+      │           ├── quinn v0.11.12
+      │           │   ├── infraternal-agent v0.1.0 (*)
+      │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │           │   └── infraternal-server v0.1.0 (*)
+      │           ├── sqlx-core v0.8.6
+      │           │   ├── sqlx v0.8.6
+      │           │   │   ├── infraternal v0.1.0 (*)
+      │           │   │   ├── infraternal-plugin-api v0.1.0 (*)
+      │           │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │           │   │   └── infraternal-server v0.1.0 (*)
+      │           │   ├── sqlx-macros v0.8.6
+      │           │   │   └── sqlx v0.8.6 (*)
+      │           │   ├── sqlx-macros-core v0.8.6
+      │           │   │   └── sqlx-macros v0.8.6 (*)
+      │           │   └── sqlx-sqlite v0.8.6
+      │           │       ├── sqlx v0.8.6 (*)
+      │           │       └── sqlx-macros-core v0.8.6 (*)
+      │           ├── sqlx-macros-core v0.8.6 (*)
+      │           ├── tokio-openssl v0.6.5
+      │           │   ├── axum-server v0.8.0 (*)
+      │           │   ├── infraternal v0.1.0 (*)
+      │           │   ├── infraternal-agent v0.1.0 (*)
+      │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │           │   └── (dev) infraternal-server v0.1.0 (*)
+      │           ├── tokio-stream v0.1.19
+      │           │   └── sqlx-core v0.8.6 (*)
+      │           ├── tokio-tungstenite v0.29.0
+      │           │   ├── axum v0.8.9 (*)
+      │           │   └── (dev) infraternal-server v0.1.0 (*)
+      │           ├── tokio-util v0.7.19
+      │           │   ├── h2 v0.4.19 (*)
+      │           │   └── tower-http v0.6.11
+      │           │       └── infraternal-server v0.1.0 (*)
+      │           ├── tower v0.5.3
+      │           │   ├── axum v0.8.9 (*)
+      │           │   └── (dev) infraternal-server v0.1.0 (*)
+      │           └── tower-http v0.6.11 (*)
+      ├── mio v1.2.4
+      │   └── tokio v1.53.2 (*)
+      ├── nu-ansi-term v0.50.3
+      │   └── tracing-subscriber v0.3.23
+      │       └── infraternal-server v0.1.0 (*)
+      ├── quinn-udp v0.5.16
+      │   └── quinn v0.11.12 (*)
+      ├── socket2 v0.6.5
+      │   ├── quinn v0.11.12 (*)
+      │   ├── quinn-udp v0.5.16 (*)
+      │   └── tokio v1.53.2 (*)
+      ├── tokio v1.53.2 (*)
+      └── winapi-util v0.1.11
+          ├── same-file v1.0.6
+          │   └── walkdir v2.5.0
+          │       ├── criterion v0.7.0 (*)
+          │       └── sysctl v0.7.1
+          │           └── infraternal-plugin-host-facts v0.1.0 (*)
+          └── walkdir v2.5.0 (*)
+
+advisories ok, bans ok, licenses ok, sources ok
+
+==> static builds
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal)
+    Finished `release` profile [optimized] target(s) in 10m 04s
+/home/kayg/.cache/codex-scratch/audit-ca-update/target/x86_64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+PT_INTERP: absent; size: 20090448 bytes (baseline 16142672 + allowance 262144 = max 16404816)
+binary exceeds the 16404816-byte size budget: 20090448 bytes
+
++---------------------------+--------------+
+| Rust gate                 | Result       |
++---------------------------+--------------+
+| fmt                       | PASS         |
+| VT native fmt             | PASS         |
+| clippy                    | PASS         |
+| test                      | PASS         |
+| cargo-deny                | PASS         |
+| static builds             | FAIL (1)     |
++---------------------------+--------------+

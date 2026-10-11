@@ -1,0 +1,9 @@
+Running as unit: run-p310315-i310615.scope; invocation ID: 9e5cfe345c154416ac9b2f9476de6f4b
+
+running 2 tests
+test auth::tests::ca_administration_tests::http_tests::audit_tests::ca_start_budget_is_shared_by_routes_and_cookies_but_not_status_or_finish ... ok
+test auth::tests::ca_administration_tests::http_tests::audit_tests::sequential_unlock_starts_require_a_temporal_budget ... METRIC sequential_unlock_start_requests=31 accepted=30 elapsed_ms=155
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 336 filtered out; finished in 2.28s
+
