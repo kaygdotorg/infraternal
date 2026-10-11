@@ -11,7 +11,7 @@
  */
 import { FONTS } from "../../../../../packages/ui/src/fonts";
 import { THEMES } from "../../../../../packages/ui/src/themes";
-import { renderAppearance, renderWindowSizes, type AppearanceApi, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
+import { renderAppearance, renderHosts, renderWindowSizes, type AppearanceApi, type HostsApi, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
 import { SIZE_EVENT, readSizes, writeSize, type DesktopSize, type PhoneSize } from "../window-sizes";
 import type { Ctx } from "../context";
 import { el } from "../dom";
@@ -31,11 +31,6 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
     fonts: FONTS.map((f) => ({ id: f.id, label: f.label, hint: f.hint })),
     state: () => core.appearance(),
     act: (action) => core.act(action),
-    switches: [{
-      id: "extended-info", title: "Machine details", label: "Extended machine info",
-      get: readExtendedInfo, set: writeExtendedInfo,
-      onChange(listener) { window.addEventListener(EXTENDED_INFO_EVENT, listener); return () => window.removeEventListener(EXTENDED_INFO_EVENT, listener); },
-    }],
     onChange(listener) { window.addEventListener("tracer:appearance", listener); return () => window.removeEventListener("tracer:appearance", listener); },
   };
   // Plain names; the technical detail (the percentage) is in each option's subtitle (the plain-names rule).
@@ -56,6 +51,13 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
     set: (group, option) => { if (group === "phone") writeSize("phone", option as PhoneSize); else writeSize("desktop", option as DesktopSize); },
     onChange(listener) { window.addEventListener(SIZE_EVENT, listener); return () => window.removeEventListener(SIZE_EVENT, listener); },
   };
+  const hosts: HostsApi = {
+    switches: [{
+      id: "extended-info", title: "Details", label: "Extended info", hint: "System, resources and access facts in each window's details",
+      get: readExtendedInfo, set: writeExtendedInfo,
+      onChange(listener) { window.addEventListener(EXTENDED_INFO_EVENT, listener); return () => window.removeEventListener(EXTENDED_INFO_EVENT, listener); },
+    }],
+  };
   const pane = el("div", "ui-settings-pane");
   pane.setAttribute("role", "region");
   pane.setAttribute("aria-label", section);
@@ -64,6 +66,7 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
     switch (section) {
       case "appearance": return renderAppearance(pane, appearance);
       case "windows": return renderWindowSizes(pane, windowSizes);
+      case "hosts": return renderHosts(pane, hosts);
       case "toolbar": return core.settingsPanels.toolbar.render(pane);
       case "shortcuts": return core.settingsPanels.shortcuts.render(pane);
       case "about": return core.settingsPanels.about.render(pane);

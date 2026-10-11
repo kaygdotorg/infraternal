@@ -47,23 +47,26 @@ for (const [name, viewport, mobile] of SIZES) {
   }
 }
 
-test("Settings has the Extended machine info switch, off by default, persisted when turned on", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft");
-  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
-  await page.waitForTimeout(1200);
-  await page.evaluate(() => {
-    const p = (window as unknown as { __tracerClusters: { views(): Array<{ id: string; x: number; y: number }>; setCamera(x: number, y: number, z: number): void } }).__tracerClusters;
-    const v = p.views().find((view) => view.id === "settings")!;
-    p.setCamera(v.x + 40, v.y + 700, 1);
+for (const [name, viewport] of [["desktop", { width: 1440, height: 900 }], ["phone", { width: 393, height: 852 }]] as const) {
+  test(`${name}: the Hosts section has the Extended info switch, off by default, persisted when turned on`, async ({ browser }) => {
+    const context = await browser.newContext(name === "phone" ? { viewport, deviceScaleFactor: 3, hasTouch: true, isMobile: true } : { viewport, deviceScaleFactor: 1 });
+    const page = await context.newPage();
+    await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft");
+    await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+    await page.waitForTimeout(1200);
+    // Settings is a view of tiled windows; focus the Hosts window.
+    const input = page.getByRole("switch", { name: "Extended info" });
+    await page.evaluate(() => (window as unknown as { __tracerClusters: { openSettings(section: string): void } }).__tracerClusters.openSettings("hosts"));
+    await page.waitForTimeout(900);
+    await expect(input).toHaveCount(1);
+    await expect(page.locator('.ui-window[data-window-id="s-hosts"]')).toContainText("Details");
+    // It is not in Appearance.
+    await expect(page.locator('.ui-window[data-window-id="s-appearance"]').getByRole("switch")).toHaveCount(0);
+    await expect(input).not.toBeChecked();
+    await page.screenshot({ path: `${SHOTS}/settings-hosts-${name}.png` });
+    await input.click();
+    await expect(input).toBeChecked();
+    expect(await page.evaluate(() => localStorage.getItem("tracer.extended-info"))).toBe("1");
+    await context.close();
   });
-  await page.waitForTimeout(900);
-  const input = page.getByRole("switch", { name: "Extended machine info" });
-  await expect(input).toHaveCount(1);
-  await input.scrollIntoViewIfNeeded();
-  await expect(input).not.toBeChecked();
-  await page.screenshot({ path: `${SHOTS}/settings-switch.png` });
-  await input.click();
-  await expect(input).toBeChecked();
-  expect(await page.evaluate(() => localStorage.getItem("tracer.extended-info"))).toBe("1");
-});
+}

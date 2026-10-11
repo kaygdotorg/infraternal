@@ -25,8 +25,6 @@ export interface AppearanceApi {
   act(action: string): void;
   /** Called after any appearance change; returns a remover. */
   onChange(listener: () => void): () => void;
-  /** On/off preferences, each under its own title after the choices. */
-  switches?: SwitchPref[];
 }
 
 /** One on/off preference: a titled row with a label, a quiet subtitle and a switch. */
@@ -87,7 +85,7 @@ function switchBlock(pref: SwitchPref): { block: HTMLElement; sync(): void; disp
   block.append(heading(pref.title));
   const row = document.createElement("label");
   row.className = "ui-sp-row ui-sp-switch";
-  row.innerHTML = '<span class="ui-sp-label"></span><span class="ui-sp-hint"></span><input type="checkbox">';
+  row.innerHTML = '<span class="ui-sp-names"><span class="ui-sp-label"></span><span class="ui-sp-hint"></span></span><input type="checkbox">';
   (row.querySelector(".ui-sp-label") as HTMLElement).textContent = pref.label;
   (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = pref.hint ?? "";
   const input = row.querySelector<HTMLInputElement>("input")!;
@@ -98,6 +96,21 @@ function switchBlock(pref: SwitchPref): { block: HTMLElement; sync(): void; disp
   const off = pref.onChange(() => toggle.set(pref.get()));
   toggle.set(pref.get());
   return { block, sync: () => toggle.set(pref.get()), dispose: () => { off(); toggle.dispose(); } };
+}
+
+export interface HostsApi {
+  /** Switches grouped under one title each; `title` is the group's heading. */
+  switches: SwitchPref[];
+}
+
+/** Settings, Hosts: what the product shows and does for machines. One titled group per concern; today the details popover's facts. */
+export function renderHosts(container: HTMLElement, api: HostsApi): () => void {
+  const root = document.createElement("div");
+  root.className = "ui-sp";
+  container.append(root);
+  const blocks = api.switches.map(switchBlock);
+  root.append(...blocks.map((b) => b.block));
+  return () => { for (const b of blocks) b.dispose(); root.remove(); };
 }
 
 /** Ticks the row of `current` in a choice block. */
@@ -131,8 +144,7 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
   windows.append(heading("Window transparency"));
   const windowTabs = createCapsuleTabs(levels, String(api.state().windows), (id) => api.act(`windows:${id}`), "Window transparency");
   windows.append(windowTabs.root);
-  const switches = (api.switches ?? []).map(switchBlock);
-  root.append(theme, font, background, card, windows, ...switches.map((s) => s.block));
+  root.append(theme, font, background, card, windows);
 
   const paint = (): void => {
     const s = api.state();
@@ -143,7 +155,7 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
   };
   paint();
   const off = api.onChange(paint);
-  return () => { off(); for (const s of switches) s.dispose(); bgTabs.dispose(); cardTabs.dispose(); windowTabs.dispose(); root.remove(); };
+  return () => { off(); bgTabs.dispose(); cardTabs.dispose(); windowTabs.dispose(); root.remove(); };
 }
 
 export interface WindowSizesApi {
