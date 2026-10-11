@@ -1,0 +1,15 @@
+
+running 1 test
+test restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution ... FAILED
+
+failures:
+
+failures:
+    restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.01s
+
+
+thread 'restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution' (4007857) panicked at crates/infraternal/src/restart_signature_audit_tests.rs:75:5:
+pinned descriptor exposes changed bytes before exec
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

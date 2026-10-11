@@ -1,0 +1,14 @@
+Running as unit: run-p4043000-i50132947.scope; invocation ID: e5fd3ee4dbb54f95b346bacece90553b
+machine=infraternal-dev cpus=8 phase=after load_before=24.50 17.17 19.18 34/3279 4043027
+test=ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages exit=101 elapsed_s=0.075 expected=FAIL matched=True evidence=evidence/ca-update-audit/after-unlocked_signer_requires_persistent_locked_pages.txt
+test=auth::tests::ca_administration_tests::http_tests::audit_tests::sequential_unlock_starts_require_a_temporal_budget exit=101 elapsed_s=1.385 expected=FAIL matched=True evidence=evidence/ca-update-audit/after-sequential_unlock_starts_require_a_temporal_budget.txt
+test=restart_binary::audit_tests::unsigned_or_tampered_replacement_is_refused_before_exec exit=101 elapsed_s=0.039 expected=FAIL matched=True evidence=evidence/ca-update-audit/after-unsigned_or_tampered_replacement_is_refused_before_exec.txt
+test=restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution exit=101 elapsed_s=0.011 expected=FAIL matched=True evidence=evidence/ca-update-audit/after-admitted_inode_cannot_change_in_place_before_execution.txt
+test=restart_binary::audit_tests::unusable_admitted_image_keeps_the_existing_service_running exit=101 elapsed_s=0.032 expected=FAIL matched=True evidence=evidence/ca-update-audit/after-unusable_admitted_image_keeps_the_existing_service_running.txt
+test=auth::tests::ca_administration_tests::audit_tests::unlock_audit_records_principal_time_outcome_without_material exit=0 elapsed_s=1.380 expected=PASS matched=True evidence=evidence/ca-update-audit/after-unlock_audit_records_principal_time_outcome_without_material.txt
+test=ca_update_audit_tests exit=0 elapsed_s=0.511 expected=PASS matched=True evidence=evidence/ca-update-audit/after-ca_update_audit_tests.txt
+test=restart_binary::audit_tests exit=0 elapsed_s=0.006 expected=PASS matched=True evidence=evidence/ca-update-audit/after-audit_tests.txt
+test=ca_handoff::tests exit=0 elapsed_s=1.411 expected=PASS matched=True evidence=evidence/ca-update-audit/after-tests.txt
+test=auth::tests::ca_administration_tests exit=0 elapsed_s=36.696 expected=PASS matched=True evidence=evidence/ca-update-audit/after-ca_administration_tests.txt
+test=startup_tests::process_dumpability_is_disabled_before_dispatch exit=0 elapsed_s=0.017 expected=PASS matched=True evidence=evidence/ca-update-audit/after-process_dumpability_is_disabled_before_dispatch.txt
+load_after=28.31 19.05 19.73 24/3327 4049477
