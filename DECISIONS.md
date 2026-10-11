@@ -2224,3 +2224,20 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        (signing in needs the server anyway).
      - **Address (Q36):** a fixed default loopback port, configurable; if it
        is taken, the next free one, printed by `infra status`.
+240. **Real logins, one per person per account per host (L1, owner 2026-10-11; settles D229/D231 login mechanics; measured on #159):**
+     - Terminals run inside a real PAM login (limits, environment, login
+       records, the user's systemd session). The first terminal of a person
+       using an account on a host opens that login; later terminals start
+       inside it. Each terminal stays its own process. The login ends a short
+       grace period after its last terminal closes, and ends at once when the
+       person's access is revoked.
+     - Logins are never shared between people: Alice and kayg both using
+       `deploy` on o1 get two logins, so `who`/`last` and the connection log
+       (D235) show the person.
+     - The preferred user's login (D229) is opened in advance.
+     - The per-terminal `systemd-run` scope is replaced by the login's own
+       session.
+     - Measured on the perf VM (median, real rc files): today 49 ms per
+       terminal; full PAM login per terminal 63–65 ms (rejected); reused login
+       6–8 ms per later terminal, 19–24 ms for the first; opened in advance
+       about 6 ms.
