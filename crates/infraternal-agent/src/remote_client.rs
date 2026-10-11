@@ -98,12 +98,13 @@ async fn run_inner(
         let connected = dial_preferred(&endpoint, identity, &tls).await;
         match connected {
             Ok(Connected::Quic(connection)) => {
-                let _ = quic_session(
+                let _ = quic_session_on(
                     connection,
                     identity,
                     state.clone(),
                     renewal,
                     service.registry.clone(),
+                    None,
                 )
                 .await;
             }
@@ -113,8 +114,14 @@ async fn run_inner(
                 // the authenticated TCP channel and rootless shims are independent.
                 drop(endpoint);
                 drop(quic);
+                let control = PrefixedControl {
+                    channel: ControlChannel::Tcp(&connection.channel),
+                    prefix: Mutex::new(Vec::new()),
+                    sent_greeting: Mutex::new(None),
+                    receive: Mutex::new(Receive::default()),
+                };
                 let _ = daemon::run_authenticated_with_plugins(
-                    &connection.channel,
+                    &control,
                     state.clone(),
                     identity.execution_uid,
                     renewal,
@@ -167,17 +174,55 @@ enum Connected {
     Tcp(remote_tls::Connection),
 }
 
+// A proven TCP decoder and a native QUIC decoder retain their buffered frames.
+enum ControlChannel<'a> {
+    Quic(NativeChannel),
+    Tcp(&'a crate::remote_tls::TcpTls),
+}
+impl Channel for ControlChannel<'_> {
+    fn native_stream_id(&self) -> Option<u32> {
+        match self {
+            Self::Quic(channel) => channel.native_stream_id(),
+            Self::Tcp(channel) => channel.native_stream_id(),
+        }
+    }
+    fn frame_timeout(&self) -> Option<Duration> {
+        match self {
+            Self::Quic(channel) => channel.frame_timeout(),
+            Self::Tcp(channel) => channel.frame_timeout(),
+        }
+    }
+    fn retire(&self) {
+        match self {
+            Self::Quic(channel) => channel.retire(),
+            Self::Tcp(channel) => channel.retire(),
+        }
+    }
+    async fn read(&self, target: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Quic(channel) => channel.read(target).await,
+            Self::Tcp(channel) => channel.read(target).await,
+        }
+    }
+    async fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        match self {
+            Self::Quic(channel) => channel.write(bytes).await,
+            Self::Tcp(channel) => channel.write(bytes).await,
+        }
+    }
+}
+
 // Replay the negotiated Hello into common dispatch while retaining the same
 // decoder: its first read may also contain the following control frame.
-struct PrefixedControl {
-    channel: NativeChannel,
+struct PrefixedControl<'a> {
+    channel: ControlChannel<'a>,
     prefix: Mutex<Vec<u8>>,
     sent_greeting: Mutex<Option<Vec<u8>>>,
     receive: Mutex<Receive>,
 }
-impl Channel for PrefixedControl {
+impl Channel for PrefixedControl<'_> {
     fn native_stream_id(&self) -> Option<u32> {
-        Some(0)
+        self.channel.native_stream_id()
     }
     fn frame_timeout(&self) -> Option<Duration> {
         self.channel.frame_timeout()
@@ -190,7 +235,16 @@ impl Channel for PrefixedControl {
         if prefix.is_empty() {
             let mut receive = self.receive.lock().await;
             let frame = receive.next(&self.channel).await?;
-            encode_frame_into(&frame.frame, &mut prefix).map_err(io::Error::other)?;
+            if self.channel.native_stream_id().is_some() {
+                encode_frame_into(&frame.frame, &mut prefix).map_err(io::Error::other)?;
+            } else {
+                infraternal_protocol::encode_muxed_frame_into(
+                    frame.stream_id,
+                    &frame.frame,
+                    &mut prefix,
+                )
+                .map_err(io::Error::other)?;
+            }
         }
         let count = target.len().min(prefix.len());
         target[..count].copy_from_slice(&prefix[..count]);
@@ -224,16 +278,19 @@ async fn quic_connect(
     .map_err(io::Error::other)
 }
 
-async fn quic_session(
+async fn quic_session_on(
     connection: quinn::Connection,
     identity: &RemoteIdentity,
     state: PathBuf,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     plugins: crate::plugin_control::Registry,
+    proof: Option<(NativeChannel, Receive)>,
 ) -> io::Result<()> {
     let result = async {
-        let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
-        let control = NativeChannel::control(send, receive)?;
+        let (control, mut rx) = if let Some(proof) = proof { proof } else {
+            let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
+            (NativeChannel::control(send, receive)?, Receive::default())
+        };
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
         let mut tx = crate::transport::Transmit::default();
@@ -241,12 +298,11 @@ async fn quic_session(
         tx.send(&control, 0, &greeting).await?;
         let mut sent_greeting = Vec::new();
         encode_frame_into(&greeting, &mut sent_greeting).map_err(io::Error::other)?;
-        let mut rx = Receive::default();
         let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control)).await.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
         let binding = remote_quic::negotiate_binding(&connection, &hello.frame)?;
         let mut prefix = Vec::new();
         encode_frame_into(&hello.frame, &mut prefix).map_err(io::Error::other)?;
-        let control = PrefixedControl { channel:control, prefix:Mutex::new(prefix), sent_greeting:Mutex::new(Some(sent_greeting)), receive:Mutex::new(rx) };
+        let control = PrefixedControl { channel:ControlChannel::Quic(control), prefix:Mutex::new(prefix), sent_greeting:Mutex::new(Some(sent_greeting)), receive:Mutex::new(rx) };
         let mut terminals = JoinSet::new();
         let dispatch = daemon::run_authenticated_with_plugins(&control, state.clone(), identity.execution_uid, renewal,plugins);
         tokio::pin!(dispatch);
