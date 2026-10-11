@@ -341,23 +341,42 @@ impl Node {
                     })
                 });
             if endpoints_only {
+                let mut updates = Vec::new();
                 for (id, peer) in &config.peers {
-                    if old.peers[id].peer.endpoint != peer.peer.endpoint {
-                        if let Some(endpoint) = peer.peer.endpoint {
-                            self.client
-                                .as_mut()
-                                .ok_or(io::ErrorKind::NotConnected)?
-                                .endpoint(peer.peer.key, endpoint)?;
-                        } else {
-                            return Err(io::ErrorKind::Unsupported.into());
-                        }
+                    let previous = &old.peers[id].peer;
+                    if previous.endpoint != peer.peer.endpoint {
+                        updates.push((
+                            previous,
+                            peer.peer.endpoint.ok_or(io::ErrorKind::Unsupported)?,
+                        ));
                     }
                 }
+                self.client.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+                // Persist intent before installing endpoints. Restore replays it
+                // if the process stops between the save and kernel installation.
                 self.save(Some(&config), true)?;
+                let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+                let installed = updates
+                    .iter()
+                    .try_for_each(|(previous, endpoint)| client.endpoint(previous.key, *endpoint));
+                if let Err(error) = installed {
+                    for (previous, _) in &updates {
+                        if let Some(endpoint) = previous.endpoint {
+                            client.endpoint(previous.key, endpoint)?;
+                        } else {
+                            // Omitting the endpoint attribute cannot clear one.
+                            // Recreate only this peer to restore the saved absence.
+                            client.peers(std::slice::from_ref(*previous), &[previous.key])?;
+                        }
+                    }
+                    self.save(Some(old), true)?;
+                    return Err(error);
+                }
                 self.config = Some(config);
                 return Ok(());
             }
         }
+
         let proposed: Vec<_> = std::iter::once(config.addresses)
             .chain(config.peers.values().map(|peer| peer.peer.addresses))
             .collect();
