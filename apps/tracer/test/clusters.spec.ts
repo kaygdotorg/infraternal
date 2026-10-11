@@ -1109,8 +1109,12 @@ test("window header actions are one pill: as tall as the title pill, on its line
     // TASTE "Phone window headers carry two actions": on a touch device the header holds Close only; the splits and the
     // session manager are in the canvas row while a terminal is focused, and in ⌘K.
     expect(pd.buttons).toEqual(["close"]);
-    expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(0.5);
+    // Header pills are one size (TASTE): on touch both are 36 px visible; the 44 px target is invisible padding (checked below).
+    expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(1);
+    expect(pd.aH).toBeLessThanOrEqual(38);
     expect(Math.abs(pd.aTop - pd.tTop)).toBeLessThan(0.5);
+    // The test double's "Mockup" tag sits over the top right of the first window; it is not the product's chrome.
+    await p.addStyleTag({ content: ".cl-mockup { display: none !important; }" });
     const hits = await p.evaluate(() => {
       const w = document.querySelector('.ui-window[data-window-id="w-build-01"]')!;
       return [...w.querySelectorAll<HTMLElement>(".ui-window-action")].map((b) => {

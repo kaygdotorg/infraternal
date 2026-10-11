@@ -7,7 +7,7 @@ import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import type { WindowModel } from "../model/types";
 
 export const ICON = {
-  close: '<path d="m7 7 10 10M17 7 7 17"/>',
+  close: '<path d="m6 6 12 12M18 6 6 18"/>',
   splitRight: ICONS.splitRight,
   splitDown: ICONS.splitDown,
   terminal: '<path d="m5 8 4 4-4 4M12 16h7"/>',

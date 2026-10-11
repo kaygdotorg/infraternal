@@ -368,7 +368,7 @@
 .ui-window[data-status="offline"] .ui-window-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
 /* The header's actions are one pill (the shared material, without its blur: windows stay cheap) holding icon
    buttons, the same height as the title pill and on the same line. The pill never shrinks (the title truncates
-   first). On touch the pill is as tall as the title pill (44 px) and each button is 44 px wide and reaches 44 px tall with a transparent hit area. */
+   first). On touch both pills are 36 px tall and each button reaches a 44 px square through an invisible hit area (see below). */
 .ui-window-actions {
   display: flex; flex: none; align-items: center; gap: 2px; margin-left: auto; height: var(--ui-control-h); padding: 0 2px;
   border: 1px solid var(--overlay-line); border-radius: 999px; background: var(--overlay); box-shadow: none;
@@ -383,9 +383,14 @@
 @media (pointer: coarse) {
   .ui-window-pill { max-width: 100%; }
   @container (max-width: 400px) { .ui-window-session { display: none; } }
-  .ui-window-actions { gap: 0; padding: 0 3px; }
-  .ui-window-action { width: 44px; }
-  .ui-window-action::after { content: ""; position: absolute; inset: -3px 0; } /* 44 px tall around the 38 px button; the buttons sit on a 44 px pitch */
+  /* One visible size for every header pill (TASTE: window header pills are one size): the title pill and the actions pill are
+     36 px tall, and the 44 px touch target comes from invisible padding around each (::after), never from a bigger pill. */
+  .ui-window-pill, .ui-window-actions { height: 36px; }
+  .ui-window-pill { position: relative; }
+  .ui-window-pill::after { content: ""; position: absolute; inset: -4px 0; }
+  .ui-window-actions { gap: 0; padding: 0 3px; position: relative; z-index: 1; } /* above the body, so the hit area below the pill is not covered by it */
+  .ui-window-action { width: 30px; height: 30px; }
+  .ui-window-action::after { content: ""; position: absolute; inset: -7px; } /* 44 px square around the 30 px button */
 }
 .ui-window-action:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -400,13 +405,6 @@
   .ui-window-session { display: none; }
   /* The mark names the machine's system and leads the pill on a phone, whatever the width (TASTE: the window pill names the machine by its system). */
   @media (pointer: fine) { .ui-window-mark { display: none; } }
-  /* On touch, a narrow card's actions are a compact circle (about 32 px visible, a 30 px button in a 32 px pill). The 44 px
-     hit area is kept by padding around the button, so the title gets the room the wide pill took. */
-  @media (pointer: coarse) {
-    .ui-window-actions { height: 32px; padding: 0; gap: 0; }
-    .ui-window-action { width: 30px; height: 30px; }
-    .ui-window-action::after { inset: -7px; }
-  }
 }
 .ui-window-menu { display: flex; flex-direction: column; gap: 2px; min-width: 168px; padding: 6px; }
 .ui-window-menu-item {
