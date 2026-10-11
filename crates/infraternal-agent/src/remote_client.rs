@@ -201,18 +201,26 @@ async fn quic_connect(
     .map_err(io::Error::other)
 }
 
+/// A proved stream retains its decoder and an optional parked server greeting.
+struct ProvedControl {
+    control: NativeChannel,
+    receive: Receive,
+    greeting: Option<Vec<u8>>,
+}
+
 async fn quic_session_on(
     connection: quinn::Connection,
     identity: &RemoteIdentity,
     state: PathBuf,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     plugins: crate::plugin_control::Registry,
-    proof: Option<(NativeChannel, Receive)>,
+    proof: Option<ProvedControl>,
+    standby: &tokio::sync::watch::Sender<bool>,
 ) -> io::Result<()> {
     let result = async {
-        let (control, mut rx) = if let Some(proof) = proof { proof } else {
+        let ProvedControl { control, receive: mut rx, greeting: cached } = if let Some(proof) = proof { proof } else {
             let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
-            (NativeChannel::control(send, receive)?, Receive::default())
+            ProvedControl { control: NativeChannel::control(send, receive)?, receive: Receive::default(), greeting: None }
         };
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
@@ -221,10 +229,15 @@ async fn quic_session_on(
         tx.send(&control, 0, &greeting).await?;
         let mut sent_greeting = Vec::new();
         encode_frame_into(&greeting, &mut sent_greeting).map_err(io::Error::other)?;
-        let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control)).await.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        let prefix = if let Some(cached) = cached { cached } else {
+            let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control)).await.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+            let mut encoded = Vec::new();
+            encode_frame_into(&hello.frame, &mut encoded).map_err(io::Error::other)?;
+            encoded
+        };
+        let hello = infraternal_protocol::decode_frame(&prefix).map_err(io::Error::other)?;
         let binding = remote_quic::negotiate_binding(&connection, &hello.frame)?;
-        let mut prefix = Vec::new();
-        encode_frame_into(&hello.frame, &mut prefix).map_err(io::Error::other)?;
+        standby.send_replace(matches!(hello.frame, infraternal_protocol::Frame::Hello { caps, .. } if caps & infraternal_plugin_api::channel::REMOTE_STANDBY != 0));
         let control = PrefixedControl { channel:ControlChannel::Quic(control), prefix:Mutex::new(prefix), sent_greeting:Mutex::new(Some(sent_greeting)), receive:Mutex::new(rx) };
         let mut terminals = JoinSet::new();
         let dispatch = daemon::run_authenticated_with_plugins(&control, state.clone(), identity.execution_uid, renewal,plugins);

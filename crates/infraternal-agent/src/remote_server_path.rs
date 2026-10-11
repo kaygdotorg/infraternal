@@ -9,11 +9,11 @@ use std::{io, net::SocketAddr, path::PathBuf, time::Duration};
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum Proof {
-    Quic(
-        crate::remote_native::NativeChannel,
-        crate::transport::Receive,
-    ),
-    Tcp(crate::transport::Receive),
+    Quic(super::ProvedControl),
+    Tcp {
+        receive: crate::transport::Receive,
+        greeting: Option<Vec<u8>>,
+    },
 }
 
 /// The dial drivers belong to a single transport, including losing probes.
@@ -24,6 +24,7 @@ struct Link {
     address: SocketAddr,
     kind: ServerLinkKind,
     proof: tokio::sync::Mutex<Option<Proof>>,
+    standby: tokio::sync::watch::Sender<bool>,
 }
 impl Drop for Link {
     fn drop(&mut self) {
@@ -117,6 +118,7 @@ async fn connect(
         address,
         kind,
         proof: tokio::sync::Mutex::new(None),
+        standby: tokio::sync::watch::channel(false).0,
     };
     if prove {
         let proof = tokio::time::timeout(PROBE_TIMEOUT, async {
@@ -126,12 +128,19 @@ async fn connect(
                     let control = crate::remote_native::NativeChannel::control(send, receive)?;
                     let mut receive = crate::transport::Receive::default();
                     prove_channel(&control, &mut receive).await?;
-                    Ok::<_, io::Error>(Proof::Quic(control, receive))
+                    Ok::<_, io::Error>(Proof::Quic(super::ProvedControl {
+                        control,
+                        receive,
+                        greeting: None,
+                    }))
                 }
                 Connected::Tcp(connection) => {
                     let mut receive = crate::transport::Receive::default();
                     prove_channel(&connection.channel, &mut receive).await?;
-                    Ok(Proof::Tcp(receive))
+                    Ok(Proof::Tcp {
+                        receive,
+                        greeting: None,
+                    })
                 }
             }
         })
@@ -189,7 +198,7 @@ async fn session(
     match &link.connected {
         Connected::Quic(connection) => {
             let proof = match link.proof.lock().await.take() {
-                Some(Proof::Quic(control, receive)) => Some((control, receive)),
+                Some(Proof::Quic(proof)) => Some(proof),
                 _ => None,
             };
             let session = quic_session_on(
@@ -199,30 +208,25 @@ async fn session(
                 renewal,
                 registry,
                 proof,
+                &link.standby,
             );
             if link.kind == ServerLinkKind::Mesh {
-                // The 1,000-connection measurement observed 1.18 seconds of
-                // authenticated silence under host load. Avoid false fallback
-                // while bounding a failed path independently of QUIC's idle PTO.
-                let deadline = Duration::from_secs(2)
-                    + connection
-                        .rtt()
-                        .min(Duration::from_secs(5))
-                        .saturating_mul(3);
+                // Existing authenticated transport traffic supplies liveness;
+                // current RTT adjusts the guard through changing network delay.
                 let mut freshness = remote_quic::PeerFreshness::new(connection);
                 tokio::select! {
                     result = session => result,
-                    result = freshness.interrupted(connection, deadline) => result,
+                    result = freshness.interrupted_adaptive(connection) => result,
                 }
             } else {
                 session.await
             }
         }
         Connected::Tcp(connection) => {
-            if let Some(Proof::Tcp(receive)) = link.proof.lock().await.take() {
+            if let Some(Proof::Tcp { receive, greeting }) = link.proof.lock().await.take() {
                 let channel = super::PrefixedControl {
                     channel: super::ControlChannel::Tcp(&connection.channel),
-                    prefix: tokio::sync::Mutex::new(Vec::new()),
+                    prefix: tokio::sync::Mutex::new(greeting.unwrap_or_default()),
                     sent_greeting: tokio::sync::Mutex::new(None),
                     receive: tokio::sync::Mutex::new(receive),
                 };
@@ -245,6 +249,116 @@ async fn session(
                 .await
             }
         }
+    }
+}
+
+/// Parking never replaces the active session. Legacy server greetings leave
+/// this future asleep; failed warm probes retry without retiring the live mesh.
+async fn warming(
+    live: &Link,
+    identity: &RemoteIdentity,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+) -> io::Result<Link> {
+    let mut support = live.standby.subscribe();
+    while !*support.borrow_and_update() {
+        support
+            .changed()
+            .await
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+    }
+    let mut retry = Duration::from_secs(1);
+    loop {
+        if let Ok(link) = connect(
+            identity,
+            renewal,
+            identity.endpoint,
+            ServerLinkKind::Fallback,
+            true,
+            Duration::ZERO,
+        )
+        .await
+        {
+            let result = tokio::time::timeout(PROBE_TIMEOUT, async {
+                let mut proof = link.proof.lock().await;
+                match proof.as_mut().ok_or(io::ErrorKind::InvalidData)? {
+                    Proof::Quic(proof) => {
+                        proof.greeting =
+                            Some(park_channel(&proof.control, &mut proof.receive).await?);
+                    }
+                    Proof::Tcp { receive, greeting } => {
+                        let Connected::Tcp(connection) = &link.connected else {
+                            return Err(io::ErrorKind::InvalidData.into());
+                        };
+                        *greeting = Some(park_channel(&connection.channel, receive).await?);
+                    }
+                }
+                Ok::<(), io::Error>(())
+            })
+            .await;
+            if matches!(result, Ok(Ok(()))) {
+                return Ok(link);
+            }
+        }
+        current(identity, renewal, identity.endpoint)?;
+        tokio::time::sleep(retry).await;
+        retry = (retry * 2).min(Duration::from_secs(30));
+    }
+}
+
+async fn park_channel<C: Channel>(
+    channel: &C,
+    receive: &mut crate::transport::Receive,
+) -> io::Result<Vec<u8>> {
+    crate::transport::Transmit::default()
+        .send(
+            channel,
+            0,
+            &infraternal_protocol::Frame::Call {
+                call_id: 0,
+                action_id: "transport.standby",
+                input_json: b"{}",
+            },
+        )
+        .await?;
+    let result = receive.next(channel).await?;
+    if result.stream_id != 0
+        || !matches!(
+            result.frame,
+            infraternal_protocol::Frame::Result {
+                call_id: 0,
+                ok: true,
+                ..
+            }
+        )
+    {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let hello = receive.next(channel).await?;
+    if hello.stream_id != 0
+        || !matches!(hello.frame, infraternal_protocol::Frame::Hello { version: 1, caps, .. } if caps & infraternal_plugin_api::channel::REMOTE_STANDBY != 0)
+    {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut prefix = Vec::new();
+    if channel.native_stream_id().is_some() {
+        infraternal_protocol::encode_frame_into(&hello.frame, &mut prefix)
+            .map_err(io::Error::other)?;
+    } else {
+        infraternal_protocol::encode_muxed_frame_into(0, &hello.frame, &mut prefix)
+            .map_err(io::Error::other)?;
+    }
+    Ok(prefix)
+}
+
+async fn warm_closed(warm: Option<&Link>) {
+    match warm.map(|link| &link.connected) {
+        Some(Connected::Quic(connection)) => {
+            connection.closed().await;
+        }
+        Some(Connected::Tcp(connection)) => {
+            let _ = connection.channel.read(&mut [0; 1]).await;
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -373,6 +487,7 @@ pub(super) async fn run(
         .await
         .map_err(|_| io::ErrorKind::Other)?;
     let mut live = None;
+    let mut warm = None;
     let mut force_fallback = false;
     let mut reason = ServerLinkReason::MeshUnavailable;
     let mut backoff = Duration::from_millis(200);
@@ -410,14 +525,42 @@ pub(super) async fn run(
         report(&registry, Some(&link), reason);
         // Both futures leave scope before retiring the old transport. Aborting
         // a partial write is safe only because Link closes that entire channel.
-        let moved = tokio::select! {
-            result = replacement(&link, identity, renewal, &registry, cooling) => result.ok(),
-            _ = session(&link, identity, state.clone(), renewal, registry.clone()) => None,
+        let moved = {
+            let active = session(&link, identity, state.clone(), renewal, registry.clone());
+            let replacing = replacement(&link, identity, renewal, &registry, cooling);
+            let mut preparing = (link.kind == ServerLinkKind::Mesh)
+                .then(|| Box::pin(warming(&link, identity, renewal)));
+            tokio::pin!(active, replacing);
+            loop {
+                tokio::select! {
+                    result = &mut replacing => break result.ok(),
+                    _ = &mut active => break None,
+                    result = async { preparing.as_mut().ok_or(io::ErrorKind::BrokenPipe)?.await },
+                        if preparing.is_some() && warm.is_none() => {
+                        warm = result.ok();
+                        if warm.is_none() { preparing = Some(Box::pin(warming(&link, identity, renewal))); }
+                    }
+                    () = warm_closed(warm.as_ref()), if warm.is_some() => {
+                        warm = None;
+                        preparing = Some(Box::pin(warming(&link, identity, renewal)));
+                    }
+                }
+            }
+        };
+        let moved = match moved {
+            Some((next, why)) if next.kind == ServerLinkKind::Fallback && warm.is_some() => {
+                Some((warm.take().ok_or(io::ErrorKind::BrokenPipe)?, why))
+            }
+            None if link.kind == ServerLinkKind::Mesh && warm.is_some() => Some((
+                warm.take().ok_or(io::ErrorKind::BrokenPipe)?,
+                ServerLinkReason::MeshInterrupted,
+            )),
+            other => other,
         };
         if let Some((next, why)) = moved {
             live = Some(next);
             reason = why;
-            cooling = false;
+            cooling = why == ServerLinkReason::MeshInterrupted;
         } else {
             reason = if link.kind == ServerLinkKind::Mesh {
                 ServerLinkReason::MeshInterrupted
