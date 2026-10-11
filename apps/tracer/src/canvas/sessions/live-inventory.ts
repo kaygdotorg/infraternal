@@ -54,6 +54,9 @@ export function createLiveInventory(options: { accountId: string; host: string }
       if (owners.has(id) && !only(host, id)) return;
       owners.set(id, host);
       let s = records.get(id);
+      // Selecting a remembered session is not proof that the host can attach it.
+      // The final gone state survives another window's selection (#158).
+      if (s?.gone) return;
       if (!s) { s = blank(id, hint?.name ?? "shell"); records.set(id, s); }
       else if (hint?.name && !s.pinned) s.name = hint.name;
       if (s.state === "open") { if (hint?.name && s.name !== hint.name && !s.pinned) emit(); return; }
@@ -81,7 +84,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
     end() { /* not offered: the shim cannot be asked yet (#100) */ },
     runAgain() { /* not offered */ },
     dismiss() { /* not offered: an ended session is forgotten at the next load (it is not saved) */ },
-    // A window that shows an ended session again attaches (open, above) and is told again, landing here.
+    // A final host answer stays exited even when another window selects the session.
     gone(host, id) {
       const s = only(host, id) && records.get(id);
       if (s) { s.state = "exited"; s.gone = true; save(); emit(); }
