@@ -1,10 +1,11 @@
 //! Independent review: a live host that becomes visible to a watch must still expire there [D164, #108].
 use super::*;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)]
 async fn claude_review_watch_expires_host_made_visible_by_membership_edit() {
     let _guard = SERIAL.lock().await;
+    let clock = FrozenSocketTime::new().await;
     let (f, address, server) =
         socket_fixture_from_fixture(fixture().await, Some(Duration::from_secs(2))).await;
     sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,last_seen) VALUES (1,'late-host',?,unixepoch()-20)")
@@ -46,7 +47,7 @@ async fn claude_review_watch_expires_host_made_visible_by_membership_edit() {
         panic!("missing initial snapshot");
     };
     let initial: Value = serde_json::from_slice(event_json).unwrap();
-    assert_eq!(initial["type"], "snapshot");
+    assert_eq!(initial["type"], "snapshot", "initial event: {initial}");
     assert_eq!(initial["snapshot"]["nodes"].as_array().unwrap().len(), 0);
     // The host's last heartbeat leaves ~8 s of its live window; it sends no more.
     sqlx::query("UPDATE mesh_nodes SET last_seen=unixepoch()-22")
@@ -113,8 +114,17 @@ async fn claude_review_watch_expires_host_made_visible_by_membership_edit() {
     };
     let listed: Value = serde_json::from_slice(json).unwrap();
     assert_eq!(listed["nodes"][0]["live"], true);
-    // The host's window ends within ~9 s with no further edit. The watch must
-    // publish an authoritative resync showing it offline.
+    // The stored observation uses SQLite wall time, while Tokio controls all
+    // pool, authority and expiry timers. Wait for exactly that observation's
+    // first offline second, then drive the armed timer with the existing frozen
+    // runtime clock. Real SQLite/network I/O cannot consume timeout authority.
+    let offline_at: i64 = sqlx::query_scalar("SELECT last_seen+31 FROM mesh_nodes WHERE id=1")
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    clock.reach_wall_deadline(offline_at).await;
+    tokio::time::advance(Duration::from_secs(31)).await;
+    // No membership edit or heartbeat wakes the watch after the live list.
     let expiry_event = tokio::time::timeout(Duration::from_secs(25), socket.next()).await;
     let still_live: bool =
         sqlx::query_scalar("SELECT last_seen >= unixepoch()-30 FROM mesh_nodes WHERE id=1")
@@ -134,6 +144,6 @@ async fn claude_review_watch_expires_host_made_visible_by_membership_edit() {
         panic!("expiry must publish a watch event");
     };
     let event: Value = serde_json::from_slice(event_json).unwrap();
-    assert_eq!(event["type"], "resync");
+    assert_eq!(event["type"], "resync", "expiry event: {event}");
     assert_eq!(event["snapshot"]["nodes"][0]["live"], false);
 }

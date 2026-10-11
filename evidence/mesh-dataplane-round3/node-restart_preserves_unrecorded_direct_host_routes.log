@@ -1,0 +1,8 @@
+load=26.62 15.65 7.23 18/1525 99853
+Running as unit: run-p99854-i100154.scope; invocation ID: 9daff0a4e11e4bdaa12ce5fd3af1e2d2
+
+running 1 test
+test restart_preserves_unrecorded_direct_host_routes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.04s
+

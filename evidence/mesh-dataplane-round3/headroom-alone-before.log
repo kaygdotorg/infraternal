@@ -1,0 +1,10 @@
+Running as unit: run-p589976-i50873589.scope; invocation ID: e7bcba8b95aa4bc483b119aec46bf2b2
+
+running 1 test
+test auth::tests::socket_tests::scale::review_mesh_headroom_snapshot_does_not_close_shared_socket ... nodes=10000 grants=30000 snapshot_event_bytes=64595 frame_limit=4194304 load=49.81 38.53 32.78 22/3138 593413
+liveness_resyncs=1 expiry_frame_bytes=64602
+assembled_nodes=10000 assembled_grants=30000 pages=88 max_frame_bytes=64612 total_frame_bytes=5632444 shared_socket_pong=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 292 filtered out; finished in 111.85s
+

@@ -10,6 +10,7 @@ use nix::sys::socket::{
 };
 use std::{
     io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     os::fd::{AsRawFd, OwnedFd},
 };
 
@@ -54,6 +55,44 @@ pub fn attributes(mut bytes: &[u8]) -> io::Result<Vec<Attribute<'_>>> {
         bytes = &bytes[aligned..];
     }
     Ok(result)
+}
+/// Decode one `WireGuard` `AllowedIP`; only host prefixes can own peer routes.
+/// # Errors
+/// Refuses missing/duplicate fields, invalid scalar widths and family/prefix mismatches.
+pub fn host_address(bytes: &[u8]) -> io::Result<Option<IpAddr>> {
+    let mut family = None;
+    let mut address = None;
+    let mut prefix = None;
+    for field in attributes(bytes)? {
+        match field.kind {
+            1 if family.is_none() => {
+                family = Some(u16::from_ne_bytes(
+                    field.payload.try_into().map_err(io::Error::other)?,
+                ));
+            }
+            2 if address.is_none() => address = Some(field.payload),
+            3 if prefix.is_none() => {
+                prefix = Some(<[u8; 1]>::try_from(field.payload).map_err(io::Error::other)?[0]);
+            }
+            1..=3 => return invalid(),
+            _ => {}
+        }
+    }
+    match (family, prefix, address) {
+        (Some(2), Some(prefix @ 0..=32), Some(bytes)) => {
+            let address = IpAddr::V4(Ipv4Addr::from(
+                <[u8; 4]>::try_from(bytes).map_err(io::Error::other)?,
+            ));
+            Ok((prefix == 32).then_some(address))
+        }
+        (Some(10), Some(prefix @ 0..=128), Some(bytes)) => {
+            let address = IpAddr::V6(Ipv6Addr::from(
+                <[u8; 16]>::try_from(bytes).map_err(io::Error::other)?,
+            ));
+            Ok((prefix == 128).then_some(address))
+        }
+        _ => invalid(),
+    }
 }
 /// Parsed kernel message. Unknown types remain available for generic families.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,5 +306,49 @@ mod tests {
         let attr = attributes(&outer).unwrap();
         assert!(attr[0].nested);
         assert_eq!(attributes(attr[0].payload).unwrap()[0].payload, &[1, 2, 3]);
+    }
+    fn allowed_ip(family: u16, address: &[u8], prefix: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        attribute(&mut bytes, 1, &family.to_ne_bytes()).unwrap();
+        attribute(&mut bytes, 2, address).unwrap();
+        attribute(&mut bytes, 3, &[prefix]).unwrap();
+        bytes
+    }
+    #[test]
+    fn public_host_prefixes_decode_both_families_without_claiming_subnets() {
+        let ipv4 = [10, 254, 0, 2];
+        let ipv6 = "fd01::2".parse::<Ipv6Addr>().unwrap().octets();
+        assert_eq!(
+            host_address(&allowed_ip(2, &ipv4, 32)).unwrap(),
+            Some("10.254.0.2".parse().unwrap())
+        );
+        assert_eq!(
+            host_address(&allowed_ip(10, &ipv6, 128)).unwrap(),
+            Some("fd01::2".parse().unwrap())
+        );
+        assert_eq!(host_address(&allowed_ip(2, &ipv4, 24)).unwrap(), None);
+        assert_eq!(host_address(&allowed_ip(10, &ipv6, 64)).unwrap(), None);
+    }
+    #[test]
+    fn host_prefix_decoder_refuses_ambiguous_or_malformed_ownership() {
+        for bytes in [
+            allowed_ip(2, &[10, 254, 0], 32),
+            allowed_ip(10, &[0; 4], 128),
+            allowed_ip(2, &[10, 254, 0, 2], 33),
+            allowed_ip(10, &[0; 16], 129),
+            allowed_ip(1, &[0; 4], 32),
+        ] {
+            assert!(host_address(&bytes).is_err());
+        }
+        let mut duplicate = allowed_ip(2, &[10, 254, 0, 2], 32);
+        attribute(&mut duplicate, 1, &2_u16.to_ne_bytes()).unwrap();
+        assert!(host_address(&duplicate).is_err());
+        let mut short_family = Vec::new();
+        attribute(&mut short_family, 1, &[2]).unwrap();
+        assert!(host_address(&short_family).is_err());
+        let mut missing_prefix = Vec::new();
+        attribute(&mut missing_prefix, 1, &2_u16.to_ne_bytes()).unwrap();
+        attribute(&mut missing_prefix, 2, &[10, 254, 0, 2]).unwrap();
+        assert!(host_address(&missing_prefix).is_err());
     }
 }

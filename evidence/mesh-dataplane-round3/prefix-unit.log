@@ -1,0 +1,78 @@
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/mesh-dataplane/crates/plugins/mesh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 05s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/infraternal_plugin_mesh-c70820883dfe93a0)
+
+running 4 tests
+test netlink::tests::host_prefix_decoder_refuses_ambiguous_or_malformed_ownership ... ok
+test netlink::tests::malformed_lengths_and_padding_are_rejected ... ok
+test netlink::tests::nested_attributes_roundtrip_without_copying_payloads ... ok
+test netlink::tests::public_host_prefixes_decode_both_families_without_claiming_subnets ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s
+
+     Running tests/configuration.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/configuration-7fa6da56d2640841)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/kernel.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/kernel-73c077636a8739a4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/restart_route_ownership.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/restart_route_ownership-b5af3cc2d58d5ae3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/review_endpoint_transaction.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_endpoint_transaction-d3242410fee0f431)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/review_ingress_translation.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_ingress_translation-ab275ab52666b303)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/review_local_delivery.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_local_delivery-4ebb54516bc0d463)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/review_restart_routes.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_restart_routes-9d2921265144199e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/review_route_inventory.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_route_inventory-410d7d005cea07fc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/review_route_scope.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_route_scope-d89760d0d5aed745)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/settings.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/settings-713863dcaf458772)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/store.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/store-e20a8e2e0afe0262)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+

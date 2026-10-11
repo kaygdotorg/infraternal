@@ -4,7 +4,11 @@ use crate::{
     firewall::Firewall,
     wireguard::{Client, Device, Key},
 };
-use std::{collections::BTreeMap, io};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    net::IpAddr,
+};
 
 pub use crate::dataplane::Chunk;
 struct Pending {
@@ -24,6 +28,7 @@ pub struct Node {
     store: Option<crate::node_state::Store>,
     config: Option<Config>,
     pending: Option<Pending>,
+    routes: BTreeSet<IpAddr>,
     firewall: Firewall,
     owned: bool,
     client: Option<Client>,
@@ -36,6 +41,7 @@ impl Default for Node {
             store: None,
             config: None,
             pending: None,
+            routes: BTreeSet::new(),
             firewall: Firewall::default(),
             owned: false,
             client: None,
@@ -57,7 +63,19 @@ impl Node {
     /// Refuses unsafe state, unrelated interface ownership or failed policy recovery.
     pub fn restore(path: &std::path::Path) -> io::Result<Self> {
         let (store, state) = crate::node_state::Store::open(path)?;
+        let mut routes = store.route_inventory()?;
+        // A crash may leave the accepted snapshot older than a pruned journal.
+        // Union its peer addresses before replay; never claim arbitrary routes.
+        if let Some(config) = &state.config {
+            routes.extend(config.peers.values().flat_map(|peer| {
+                [
+                    IpAddr::V4(peer.peer.addresses.ipv4),
+                    IpAddr::V6(peer.peer.addresses.ipv6),
+                ]
+            }));
+        }
         let mut node = Self {
+            routes,
             enabled: state.enabled,
             store: Some(store),
             firewall: state
@@ -99,8 +117,16 @@ impl Node {
             if !node.enabled {
                 node.down()?;
             } else if let Some(config) = state.config {
+                // Recover public ownership while retained orphan keys still
+                // exist. Prove both durable writes before replay can retire any
+                // peer, route or policy. This republishes only accepted intent.
+                node.routes.extend(Device::peer_routes()?);
+                node.save(Some(&config), true)?;
                 node.apply(config)?;
             }
+        }
+        if !node.owned {
+            node.routes.clear();
         }
         if !node.owned && !node.enabled {
             node.firewall.remove()?;
@@ -134,6 +160,7 @@ impl Node {
     }
     fn save(&self, config: Option<&Config>, enabled: bool) -> io::Result<()> {
         if let Some(store) = &self.store {
+            store.record_routes(&self.routes)?;
             store.save(&crate::node_state::State {
                 enabled,
                 config: config.cloned(),
@@ -169,6 +196,8 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
             let client = Client::new()?;
+            // A fresh interface cannot inherit ownership from an older lifetime.
+            self.routes.clear();
             self.save(None, true)?;
             Ok((Identity { public_key, port }, client))
         })();
@@ -206,6 +235,7 @@ impl Node {
         self.identity = None;
         self.config = None;
         self.pending = None;
+        self.routes.clear();
         Ok(())
     }
     /// Read the retained applied configuration, never partial incoming chunks.
@@ -351,23 +381,42 @@ impl Node {
                     })
                 });
             if endpoints_only {
+                let mut updates = Vec::new();
                 for (id, peer) in &config.peers {
-                    if old.peers[id].peer.endpoint != peer.peer.endpoint {
-                        if let Some(endpoint) = peer.peer.endpoint {
-                            self.client
-                                .as_mut()
-                                .ok_or(io::ErrorKind::NotConnected)?
-                                .endpoint(peer.peer.key, endpoint)?;
-                        } else {
-                            return Err(io::ErrorKind::Unsupported.into());
-                        }
+                    let previous = &old.peers[id].peer;
+                    if previous.endpoint != peer.peer.endpoint {
+                        updates.push((
+                            previous,
+                            peer.peer.endpoint.ok_or(io::ErrorKind::Unsupported)?,
+                        ));
                     }
                 }
+                self.client.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+                // Persist intent before installing endpoints. Restore replays it
+                // if the process stops between the save and kernel installation.
                 self.save(Some(&config), true)?;
+                let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+                let installed = updates
+                    .iter()
+                    .try_for_each(|(previous, endpoint)| client.endpoint(previous.key, *endpoint));
+                if let Err(error) = installed {
+                    for (previous, _) in &updates {
+                        if let Some(endpoint) = previous.endpoint {
+                            client.endpoint(previous.key, endpoint)?;
+                        } else {
+                            // Omitting the endpoint attribute cannot clear one.
+                            // Recreate only this peer to restore the saved absence.
+                            client.peers(std::slice::from_ref(*previous), &[previous.key])?;
+                        }
+                    }
+                    self.save(Some(old), true)?;
+                    return Err(error);
+                }
                 self.config = Some(config);
                 return Ok(());
             }
         }
+
         let proposed: Vec<_> = std::iter::once(config.addresses)
             .chain(config.peers.values().map(|peer| peer.peer.addresses))
             .collect();
@@ -383,17 +432,6 @@ impl Node {
             })
             .map(|(_, peer)| peer.peer.clone())
             .collect();
-        let retired: Vec<_> = old_peers
-            .into_iter()
-            .flat_map(|peers| peers.iter())
-            .filter(|(node, peer)| {
-                config
-                    .peers
-                    .get(node)
-                    .is_none_or(|new| new.peer.key != peer.peer.key)
-            })
-            .map(|(_, peer)| peer.peer.clone())
-            .collect();
         // Kernel state can be newer than the saved public snapshot after a crash.
         // Retire orphan keys as well as keys removed from the retained configuration.
         let desired: std::collections::BTreeSet<_> =
@@ -403,6 +441,27 @@ impl Node {
             .filter(|key| !desired.contains(key))
             .copied()
             .collect();
+        let desired_routes: BTreeSet<IpAddr> = config
+            .peers
+            .values()
+            .flat_map(|peer| {
+                [
+                    IpAddr::V4(peer.peer.addresses.ipv4),
+                    IpAddr::V6(peer.peer.addresses.ipv6),
+                ]
+            })
+            .collect();
+        let mut recorded = self.routes.clone();
+        if self.config.is_none() {
+            // Read retained AllowedIPs while orphan keys still exist. Persist
+            // their public ownership before touching peers, routes or policy.
+            recorded.extend(Device::peer_routes()?);
+        }
+        recorded.extend(&desired_routes);
+        if let Some(store) = &self.store {
+            store.record_routes(&recorded)?;
+        }
+        self.routes = recorded;
         // Fence all NEW traffic while multi-datagram kernel state changes. Established
         // sessions keep flowing. A failed apply restores the old view before removing the fence.
         let mut fence = config.clone();
@@ -420,21 +479,23 @@ impl Node {
                 .ok_or(io::ErrorKind::NotConnected)?
                 .peers(&changed, &retired_keys)?;
             Device::routes(&changed, false)?;
-            Device::routes(
-                &retired
+            if self.config.is_none()
+                || self
+                    .routes
                     .iter()
-                    .filter(|old| {
-                        !config
-                            .peers
-                            .values()
-                            .any(|new| new.peer.addresses == old.addresses)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                true,
-            )?;
+                    .any(|route| !desired_routes.contains(route))
+            {
+                Device::retain_recorded_routes(&self.routes, &proposed)?;
+            }
             self.firewall.apply(&config)?;
-            self.save(Some(&config), true)
+            // Retire inventory only after kernel cleanup. If accepted-state
+            // persistence fails, keep the union available for rollback/restart.
+            let recorded = std::mem::replace(&mut self.routes, desired_routes);
+            let saved = self.save(Some(&config), true);
+            if saved.is_err() {
+                self.routes = recorded;
+            }
+            saved
         })();
         if let Err(error) = result {
             // Saving can fail after the permissive policy transaction. Reinstall
@@ -455,20 +516,10 @@ impl Node {
                             .collect::<Vec<_>>(),
                     )?;
                 Device::routes(&restore, false)?;
-                let retained: std::collections::BTreeSet<_> = restore
-                    .iter()
-                    .map(|peer| (peer.addresses.ipv4, peer.addresses.ipv6))
+                let retained: Vec<_> = std::iter::once(old.addresses)
+                    .chain(restore.iter().map(|peer| peer.addresses))
                     .collect();
-                Device::routes(
-                    &changed
-                        .iter()
-                        .filter(|peer| {
-                            !retained.contains(&(peer.addresses.ipv4, peer.addresses.ipv6))
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    true,
-                )?;
+                Device::retain_recorded_routes(&self.routes, &retained)?;
                 self.firewall.apply(old)?;
             } else {
                 self.client
@@ -478,7 +529,7 @@ impl Node {
                         &[],
                         &changed.iter().map(|peer| peer.key).collect::<Vec<_>>(),
                     )?;
-                Device::routes(&changed, true)?;
+                Device::retain_recorded_routes(&self.routes, &[])?;
             }
             return Err(error);
         }

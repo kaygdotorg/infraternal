@@ -6,7 +6,11 @@ use crate::{
 use nix::sys::socket::SockProtocol;
 use openssl::pkey::PKey;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, io, net::SocketAddr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+};
 use zeroize::Zeroizing;
 
 /// A node-local ephemeral secret. It cannot be serialized, cloned or debug printed.
@@ -234,6 +238,119 @@ impl Device {
                 {
                     return Err(error);
                 }
+            }
+        }
+        Ok(())
+    }
+    /// Recover public host prefixes from retained peers before removing orphan keys.
+    /// # Errors
+    /// Refuses malformed `AllowedIPs`. All dump buffers, including unparsed secret
+    /// fields in later replies, are zeroized together even on an early error.
+    pub fn peer_routes() -> io::Result<BTreeSet<IpAddr>> {
+        let mut socket = Socket::open(SockProtocol::NetlinkGeneric)?;
+        let family = socket.family("wireguard")?;
+        let mut payload = header();
+        payload[0] = 0;
+        let replies = Zeroizing::new(socket.request(family, 0x300, &payload)?);
+        let mut routes = BTreeSet::new();
+        for reply in replies.iter() {
+            for device in netlink::attributes(reply.get(4..).ok_or(io::ErrorKind::InvalidData)?)? {
+                if device.kind != 8 {
+                    continue;
+                }
+                for peer in netlink::attributes(device.payload)? {
+                    for field in netlink::attributes(peer.payload)? {
+                        if field.kind != 9 {
+                            continue;
+                        }
+                        for prefix in netlink::attributes(field.payload)? {
+                            if let Some(address) = netlink::host_address(prefix.payload)? {
+                                routes.insert(address);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(routes)
+    }
+    /// Retire orphan static host routes after adopting durable peer state [206,228].
+    /// # Errors
+    /// Reports malformed route dumps or kernel deletion errors.
+    pub fn retain_routes(addresses: &[Addresses]) -> io::Result<()> {
+        Self::retain_recorded_routes(&Self::peer_routes()?, addresses)
+    }
+    /// Retire only journaled peer host routes with the exact shape we install.
+    /// # Errors
+    /// Reports checked dump or deletion failures, preserving foreign route shapes.
+    pub fn retain_recorded_routes(
+        inventory: &BTreeSet<IpAddr>,
+        addresses: &[Addresses],
+    ) -> io::Result<()> {
+        Self::retire_routes(inventory, addresses)
+    }
+    fn retire_routes(inventory: &BTreeSet<IpAddr>, addresses: &[Addresses]) -> io::Result<()> {
+        let desired: BTreeSet<IpAddr> = addresses
+            .iter()
+            .flat_map(|address| [IpAddr::V4(address.ipv4), IpAddr::V6(address.ipv6)])
+            .collect();
+        let owned = index()?;
+        let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        for reply in socket.request(26, 0x300, &[0; 12])? {
+            let header = reply.get(..12).ok_or(io::ErrorKind::InvalidData)?;
+            // Linux normalizes IPv6 scope-link host routes to universe scope.
+            // IPv4 keeps link scope. Reject source/TOS/flags and every routing
+            // modifier: a gateway, onlink or multipath static route is foreign.
+            if header[4] != 254
+                || header[5] != 4
+                || header[7] != 1
+                || header[2] != 0
+                || header[3] != 0
+                || header[8..12] != [0; 4]
+                || !matches!(
+                    (header[0], header[1], header[6]),
+                    (2, 32, 253) | (10, 128, 0)
+                )
+            {
+                continue;
+            }
+            let mut interface = None;
+            let mut destination = None;
+            let mut table = 254;
+            let mut exact_shape = true;
+            for field in netlink::attributes(&reply[12..])? {
+                match field.kind {
+                    1 => destination = Some(field.payload),
+                    4 => interface = Some(netlink::u32_at(field.payload, 0)?),
+                    15 => table = netlink::u32_at(field.payload, 0)?,
+                    6 if header[0] == 10 && field.payload == 1024_u32.to_ne_bytes() => {}
+                    12 if header[0] == 10 && field.payload.len() == 32 => {}
+                    20 if header[0] == 10 && field.payload == [0] => {}
+                    _ => exact_shape = false,
+                }
+            }
+            if !exact_shape || interface != Some(owned) || table != 254 {
+                continue;
+            }
+            let address = match (header[0], header[1]) {
+                (2, 32) => IpAddr::V4(Ipv4Addr::from(
+                    <[u8; 4]>::try_from(destination.ok_or(io::ErrorKind::InvalidData)?)
+                        .map_err(io::Error::other)?,
+                )),
+                (10, 128) => IpAddr::V6(Ipv6Addr::from(
+                    <[u8; 16]>::try_from(destination.ok_or(io::ErrorKind::InvalidData)?)
+                        .map_err(io::Error::other)?,
+                )),
+                _ => continue,
+            };
+            // Reuse the dumped attributes so route priority and IPv6 kernel
+            // normalization remain exact. A replay may already have removed it.
+            if inventory.contains(&address)
+                && !desired.contains(&address)
+                && let Err(error) = socket.request(25, 4, &reply)
+                && !matches!(error.raw_os_error(), Some(2 | 3))
+            {
+                return Err(error);
             }
         }
         Ok(())

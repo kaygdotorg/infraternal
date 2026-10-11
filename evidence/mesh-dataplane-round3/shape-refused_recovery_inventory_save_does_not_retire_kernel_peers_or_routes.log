@@ -1,0 +1,17 @@
+load=18.43 20.27 21.89 16/3191 937466
+Running as unit: run-p937467-i51221016.scope; invocation ID: a5932f5b9a5b4bd099472621724696a4
+
+running 1 test
+test refused_recovery_inventory_save_does_not_retire_kernel_peers_or_routes ... 
+thread 'refused_recovery_inventory_save_does_not_retire_kernel_peers_or_routes' (937477) panicked at crates/plugins/mesh/tests/review_route_inventory.rs:150:5:
+recovery retired a peer before recording route ownership
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    refused_recovery_inventory_save_does_not_retire_kernel_peers_or_routes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.96s
+

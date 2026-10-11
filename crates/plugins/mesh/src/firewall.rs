@@ -243,22 +243,31 @@ pub fn render(config: &Config, replace: bool) -> String {
         // ICMP errors are RELATED; unsolicited ICMP and all other protocols obey All or deny.
         let _ = writeln!(script, "  drop\n }}");
     }
+    // Destination NAT has completed at input/forward. Check delivery before
+    // policy or conntrack acceptance: an underlay packet has no mesh identity.
+    // Loopback delivery is node-local. Translation never turns an underlay
+    // incoming interface into lo, so this preserves the ingress refusal [231].
+    let delivery = format!(
+        "iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop;",
+        config.addresses.ipv4, config.addresses.ipv6
+    );
     for (name, hook, interface, direction) in [
         ("input", "input", "iifname", "incoming"),
         ("output", "output", "oifname", "outgoing"),
     ] {
+        let guard = if hook == "input" { &delivery } else { "" };
         let _ = writeln!(
             script,
-            " chain {name} {{ type filter hook {hook} priority -10; policy accept; {interface} \"{INTERFACE}\" jump {direction}; }}"
+            " chain {name} {{ type filter hook {hook} priority -10; policy accept; {guard} {interface} \"{INTERFACE}\" jump {direction}; }}"
         );
     }
     let _ = writeln!(
         script,
-        " chain forward {{ type filter hook forward priority -10; policy accept; iifname \"{INTERFACE}\" drop; oifname \"{INTERFACE}\" drop; }}"
+        " chain forward {{ type filter hook forward priority -10; policy accept; {delivery} iifname \"{INTERFACE}\" drop; oifname \"{INTERFACE}\" drop; }}"
     );
     // Mesh-bound services must receive authenticated tunnel packets. Fence
-    // underlay delivery before destination NAT, independently of conntrack.
-    // Loopback remains available for the node's own services. Subnet transit
+    // underlay delivery early as well as at the final destination check above.
+    // Subnet transit
     // has no owner in this slice, even when a host enables IP forwarding.
     let _ = writeln!(
         script,
@@ -310,7 +319,7 @@ mod tests {
         let mut config = config();
         let rules = render(&config, false);
         assert_eq!(rules.matches(" accept").count(), 18);
-        assert_eq!(rules.matches(" drop").count(), 6);
+        assert_eq!(rules.matches(" drop").count(), 10);
         let peer = config.peers.get_mut(&NodeId(2)).expect("member");
         peer.outbound = TrafficPolicy::Ports(std::collections::BTreeSet::from([
             crate::policy::rules::Port {

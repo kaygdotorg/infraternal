@@ -311,18 +311,26 @@ mod remote_deadline_tests {
         }
         panic!("cancellation must not extend the first-byte deadline");
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn queued_suffix_cannot_complete_an_expired_cancelled_frame() {
         let (_owned, mut peer, channel) = pair();
         let wire = ping(7);
         peer.write_all(&wire[..1]).await.unwrap();
+        drop(channel.socket.descriptor.readable().await.unwrap());
         let mut receive = Receive::default();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), receive.next(&channel))
-                .await
-                .is_err()
-        );
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        {
+            let mut pending = std::pin::pin!(receive.next(&channel));
+            // Consume the first byte and cancel exactly at Pending. Paused time
+            // prevents executor scheduling from racing cancellation with expiry.
+            std::future::poll_fn(|context| {
+                assert!(std::future::Future::poll(pending.as_mut(), context).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        assert_eq!(receive.bytes, wire[..1]);
+        assert!(receive.deadline.is_some());
+        tokio::time::advance(Duration::from_millis(150)).await;
         // Tokio polls a ready inner read before its timeout. Supplying the
         // suffix before resuming proves an expired frame cannot use that order.
         peer.write_all(&wire[1..]).await.unwrap();

@@ -1,0 +1,8 @@
+load=20.36 28.75 33.25 15/3205 3795410
+Running as unit: run-p3795411-i49885440.scope; invocation ID: d290f5c45de6465dbbd2a5266c70e267
+
+running 1 test
+test nft_node_local_mesh_delivery_remains_available ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.46s
+

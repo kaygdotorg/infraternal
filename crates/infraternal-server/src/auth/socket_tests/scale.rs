@@ -1,10 +1,13 @@
 //! Reproduce an unsendable Mesh subscription at D170's ten-thousand-node headroom scale.
 use super::*;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)] // Keep the complete headroom exchange on one real shared socket.
 async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
     let _guard = SERIAL.lock().await;
+    // Pagination correctness must not spend runtime authority while real
+    // SQLite workers and the shared socket await a loaded host.
+    let clock = FrozenSocketTime::new().await;
     // The auth unit fixture has one connection. A long inventory transaction
     // would monopolize it and park the independent authority watchdog. Use a
     // real disk-backed eight-connection pool, matching the deployed runtime.
@@ -28,11 +31,14 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
     let f = fixture_with_bootstrap(auth, token).await;
     // Inventory correctness is independent of loaded-host authority-read latency.
     let (f, address, server) = socket_fixture_from_fixture(f, Some(Duration::from_secs(2))).await;
+    clock.progress();
     // Retain the author's measured design-point ratios: three named grants per node.
     sqlx::query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO mesh_nodes(id,name,public_key,last_seen,last_rtt_us) SELECT i,printf('node-%05d',i),CAST(printf('%032d',i) AS BLOB),unixepoch(),1000 FROM n")
         .execute(&f.auth.pool).await.unwrap();
+    clock.progress();
     sqlx::query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<30000) INSERT INTO mesh_grants(name,from_kind,from_value,to_kind,to_value,both_ways,ports_json) SELECT printf('grant-%05d',i),'node',CAST((i-1)%10000+1 AS TEXT),'node',CAST(i%10000+1 AS TEXT),0,'\"All\"' FROM n")
         .execute(&f.auth.pool).await.unwrap();
+    clock.progress();
     let owner: String = sqlx::query_scalar("SELECT id FROM users WHERE owner=1")
         .fetch_one(&f.auth.pool)
         .await
@@ -46,6 +52,7 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
         )
         .await
         .unwrap();
+    clock.progress();
     let event = serde_json::to_vec(&json!({"type":"snapshot","snapshot":snapshot})).unwrap();
     println!(
         "nodes=10000 grants=30000 snapshot_event_bytes={} frame_limit={} load={}",
@@ -100,6 +107,7 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
     let mut total_bytes = 0;
     let mut expirations = 0;
     loop {
+        clock.progress();
         assert!(wire.len() <= 65_536);
         max_frame = max_frame.max(wire.len());
         total_bytes += wire.len();
