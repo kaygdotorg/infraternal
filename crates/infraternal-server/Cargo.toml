@@ -11,6 +11,7 @@ workspace = true
 [features]
 default = ["mesh", "ssh"]
 mesh = ["dep:infraternal-plugin-mesh"]
+ee = ["infraternal-plugin-mesh?/ee", "infraternal-agent/ee"]
 remote = ["dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn"]
 
 ssh = ["dep:infraternal-plugin-ssh"]

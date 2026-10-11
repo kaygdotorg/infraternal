@@ -1328,6 +1328,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infraternal-agent",
+ "infraternal-plugin-api",
  "infraternal-plugin-remote",
  "infraternal-plugin-ssh",
  "infraternal-server",
@@ -1351,6 +1352,7 @@ version = "0.1.0"
 dependencies = [
  "infraternal-plugin-api",
  "infraternal-plugin-host-facts",
+ "infraternal-plugin-mesh",
  "infraternal-plugin-remote",
  "infraternal-protocol",
  "infraternal-shim",
