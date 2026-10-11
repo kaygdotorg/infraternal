@@ -331,3 +331,48 @@ async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() 
         .await;
     }
 }
+
+#[test]
+fn latency_fixture_accepts_the_unsolicited_startup_inventory() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    // Use the real shared verification fixture. Construct it separately from
+    // initialization so a refused greeting still releases its owned daemon.
+    let script = r#"
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path('scripts').resolve()))
+from agent_fixture import Binary, fixture_state, cleanup
+state = fixture_state('ir')
+state.mkdir(mode=0o700)
+client = Binary.__new__(Binary)
+try:
+    client.__init__(Path(sys.argv[1]), state)
+    client.open()
+    assert str(client.id) in client.inventory['session_ids'], 'open Result overtook its live census'
+    client.attach()
+    client.input(b"printf 'CENSUS_FIXTURE_OK\\n'\n")
+    client.until(b'CENSUS_FIXTURE_OK')
+    client.ping(168, 0)
+finally:
+    if hasattr(client, 'child'):
+        client.kill()
+    cleanup(state)
+"#;
+    let result = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(env!("CARGO_BIN_EXE_infraternal"))
+        .current_dir(root)
+        .env("INFRATERNAL_TEST_RTT", "0")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "the existing latency fixture refused startup inventory: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

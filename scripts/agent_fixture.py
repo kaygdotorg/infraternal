@@ -154,6 +154,7 @@ class Binary:
         self.fence_nonce = 0
         self.cpu_weight = fixture_cpu_weight()
         self.events = []
+        self.inventory = None
         self.snapshots = []
         self.link = None
         self.start()
@@ -192,9 +193,7 @@ class Binary:
         self.send(0, 0, struct.pack('<HQ', 1, 0) + varint(6) + b'tracer')
         # Hello is an inbound startup request. Fence it with a real Pong before
         # the scheduler canary starts; otherwise its wakeup is counted as idle.
-        self.send(0, 0x08, struct.pack('<QQ', 0, 0))
-        stream, kind, _ = self.read()
-        assert (stream, kind) == (0, 0x09)
+        self.ping(0, 0)
 
     def send(self, stream, kind, body=b''):
         self.sock.sendall(varint(stream) + varint(1 + len(body)) + bytes([kind]) + body)
@@ -240,7 +239,10 @@ class Binary:
             stream, kind, body = self.read()
             if (stream, kind) == (0, 0x31):
                 break
-            assert stream == 1
+            if stream == 0:
+                self.process(frame=(stream, kind, body))
+            else:
+                assert stream == 1
         assert (stream, kind) == (0, 0x31) and body[4] == 1, body
         self.id = uuid.UUID(json.loads(body[5:])['session_id'])
         self.benchmark_scope()
@@ -294,6 +296,12 @@ class Binary:
 
     def process(self, credit=True, frame=None):
         stream, kind, body = self.read() if frame is None else frame
+        if stream == 0 and kind == 0x33:
+            # Full host censuses are unsolicited control frames, independent of
+            # the one terminal writer. Retain only the latest bounded snapshot.
+            assert body[:4] == bytes(4)
+            self.inventory = json.loads(body[4:])
+            return kind
         assert stream == 1, (stream, kind)
         if kind == 0x11:
             seq = struct.unpack('<Q', body[:8])[0]
