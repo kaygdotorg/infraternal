@@ -22,6 +22,8 @@ import { offerMeshView } from "../mesh/offer";
 import { DEFAULT_SESSION, createMockInventory } from "./inventory";
 import { createAddHost } from "../addhost";
 import { createAuthorityControl } from "../addhost/authority-unlock";
+import { mockInboxItems } from "./inbox-items";
+import { inboxFor } from "../inbox-host";
 import { createOverlayFlowHost } from "../addhost/flow-host";
 import { createWindowFlowHost } from "../addhost/window-host";
 import type { EnrolledHost } from "../addhost/service";
@@ -57,6 +59,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const provisioning = createMockProvisioning({ savedKey: new URLSearchParams(location.search).get("savedkey") === "1", authority: new URLSearchParams(location.search).get("ca") ?? "ready" });
   // The lock on host connections: administrators (the operator role) can unlock it, anyone else only sees the state.
   const authority = createAuthorityControl(core, { service: async () => provisioning, canUnlock: () => world.role === "operator" });
+  // `?inbox=3` adds two more kinds of waiting item, to see the card with several lines (test double only).
+  if (new URLSearchParams(location.search).get("inbox") === "3") inboxFor(core).set("mock-extra", mockInboxItems());
   const addHost = createAddHost(core, {
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
     service: provisioning,
