@@ -366,8 +366,13 @@ struct AttachmentState {
     last_out_seq: u64,
     last_in_seq: u64,
     last_input_end: u64,
+    // Retained bytes span [last_in_seq, last_input_end); only a shim Ack releases them.
+    // Allocate on input, cap at one protocol frame, and free after a full Ack.
+    unacknowledged: BytesMut,
     credit: u64,
     awaiting_ack: bool,
+    // Initial attachment stays cut-through; only replacement orders replay behind an Ack.
+    replaying: bool,
     output: mpsc::Sender<TerminalOutput>,
 }
 
@@ -937,8 +942,10 @@ async fn process_command(
                     last_out_seq,
                     last_in_seq,
                     last_input_end: last_in_seq,
+                    unacknowledged: BytesMut::new(),
                     credit: 0,
                     awaiting_ack: true,
+                    replaying: false,
                     output,
                 },
             );
@@ -970,7 +977,28 @@ async fn process_command(
                     if in_seq > attachment.last_input_end {
                         return false;
                     }
+                    let append_from = in_seq.max(attachment.last_input_end);
+                    if end > append_from {
+                        let Ok(skip) = usize::try_from(append_from - in_seq) else {
+                            return false;
+                        };
+                        let additional = &bytes[skip..];
+                        if attachment
+                            .unacknowledged
+                            .len()
+                            .saturating_add(additional.len())
+                            > MAX_FRAME_LEN
+                        {
+                            return false;
+                        }
+                        attachment.unacknowledged.extend_from_slice(additional);
+                    }
                     attachment.last_input_end = attachment.last_input_end.max(end);
+                    // A replacement must learn the authoritative cursor before it
+                    // forwards queued input, including input accepted during the move.
+                    if attachment.replaying {
+                        return true;
+                    }
                     let forward_from = in_seq.max(attachment.last_in_seq);
                     if end <= forward_from {
                         return true;
@@ -1076,6 +1104,7 @@ async fn reattach_all(
     for (id, attachment) in attachments.iter_mut() {
         let stream_id = attachment.stream_id;
         attachment.awaiting_ack = true;
+        attachment.replaying = true;
         if !send_attach(
             connection,
             stream_id,
@@ -1338,6 +1367,15 @@ async fn process_incoming(
             }
             // The backend may have accepted input whose Ack died with the old browser.
             // Its first reattach Ack is authoritative for this same durable writer.
+            let replay = attachment.replaying;
+            attachment.replaying = false;
+            let acknowledged = usize::try_from(in_seq_acked - attachment.last_in_seq)
+                .unwrap_or(usize::MAX)
+                .min(attachment.unacknowledged.len());
+            let _ = attachment.unacknowledged.split_to(acknowledged);
+            if attachment.unacknowledged.is_empty() {
+                attachment.unacknowledged = BytesMut::new();
+            }
             attachment.last_input_end = attachment.last_input_end.max(in_seq_acked);
             attachment.awaiting_ack = false;
             attachment.last_in_seq = in_seq_acked;
@@ -1352,6 +1390,17 @@ async fn process_incoming(
                     routes,
                     attachment_id,
                     stream_id,
+                )
+                .await;
+            }
+            if replay && !attachment.unacknowledged.is_empty() {
+                return write_frame(
+                    connection,
+                    stream_id,
+                    &Frame::Input {
+                        in_seq: in_seq_acked,
+                        bytes: &attachment.unacknowledged,
+                    },
                 )
                 .await;
             }

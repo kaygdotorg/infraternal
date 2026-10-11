@@ -25,8 +25,10 @@ fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
         last_out_seq: 0,
         last_in_seq: 0,
         last_input_end: 0,
+        unacknowledged: BytesMut::new(),
         credit: 0,
         awaiting_ack: false,
+        replaying: false,
         output,
     }
 }
@@ -667,3 +669,6 @@ async fn credited_output_queue_at_stream_capacity() {
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
+
+#[path = "embedded_path_tests.rs"]
+mod path_tests;
