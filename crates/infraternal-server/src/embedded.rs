@@ -23,7 +23,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
 };
 
 const CONTROL_STREAM: u32 = 0;
@@ -142,27 +142,42 @@ impl TerminalAttachment {
     }
 }
 
+/// Full inventory availability from the infraternal agent, separate from session liveness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SessionInventoryState {
+    /// No agent census has arrived during this server run; subscribers must hide cached rows.
+    Pending,
+    /// The agent link dropped; cached rows cannot be offered until a fresh census arrives.
+    Unavailable,
+    /// Authoritative shim identities from one complete agent census.
+    Available(Arc<[[u8; 16]]>),
+}
+
 /// Bounded command sender for the embedded agent actor.
 #[derive(Clone)]
 pub(crate) struct EmbeddedAgent {
     commands: mpsc::Sender<Command>,
     next_attachment_id: Arc<AtomicU64>,
+    session_inventory: watch::Sender<SessionInventoryState>,
 }
 
 impl EmbeddedAgent {
     /// Start the on-demand agent supervisor for the server's own executable.
     pub fn spawn(executable: PathBuf) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Embedded {
                 executable,
                 initial: None,
             },
             receiver,
+            session_inventory.clone(),
         ));
         Self {
             commands,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
+            session_inventory,
         }
     }
 
@@ -171,9 +186,11 @@ impl EmbeddedAgent {
     pub(crate) fn unavailable() -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         drop(receiver);
+        let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         Self {
             commands,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
+            session_inventory,
         }
     }
 
@@ -182,6 +199,7 @@ impl EmbeddedAgent {
     pub(crate) fn remote(uid: u32) -> (Self, mpsc::Sender<RemoteLink>) {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (accepts, incoming) = mpsc::channel(1);
+        let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Remote {
                 incoming,
@@ -189,11 +207,13 @@ impl EmbeddedAgent {
                 pending: None,
             },
             receiver,
+            session_inventory.clone(),
         ));
         (
             Self {
                 commands,
                 next_attachment_id: Arc::new(AtomicU64::new(1)),
+                session_inventory,
             },
             accepts,
         )
@@ -256,6 +276,11 @@ impl EmbeddedAgent {
         result.await.map_err(|_| AgentError::Unavailable)?
     }
 
+    /// Watch the latest authoritative live-shim set reported by this infraternal agent.
+    pub(crate) fn session_inventory(&self) -> watch::Receiver<SessionInventoryState> {
+        self.session_inventory.subscribe()
+    }
+
     /// Attach one device to a user-owned terminal session and request replay from its last offsets.
     pub async fn attach(
         &self,
@@ -302,16 +327,19 @@ impl EmbeddedAgent {
     #[cfg(test)]
     pub(crate) fn from_test_socket(stream: UnixStream) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Embedded {
                 executable: PathBuf::new(),
                 initial: Some(stream),
             },
             receiver,
+            session_inventory.clone(),
         ));
         Self {
             commands,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
+            session_inventory,
         }
     }
 }
@@ -511,6 +539,8 @@ enum Incoming {
         stream_id: u32,
         event_json: Bytes,
     },
+    ControlEvent,
+    SessionInventory(Vec<[u8; 16]>),
     Ack {
         stream_id: u32,
         in_seq_acked: u64,
@@ -575,7 +605,11 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
-async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
+async fn run_actor(
+    mut source: Source,
+    mut commands: mpsc::Receiver<Command>,
+    session_inventory: watch::Sender<SessionInventoryState>,
+) {
     let mut attachments = HashMap::<u64, AttachmentState>::new();
     let mut routes = HashMap::<u32, u64>::new();
     let mut pending = HashMap::<u32, PendingCall>::new();
@@ -623,7 +657,10 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
                 let Some(()) = replacement else { return; };
                 #[cfg(feature = "remote")]
                 if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
-                if let Some(old) = connection.take() { connection_lost(old,&mut attachments,&mut routes,&mut pending).await; }
+                if let Some(old) = connection.take() {
+                    connection_lost(old, &mut attachments, &mut routes, &mut pending).await;
+                    session_inventory.send_replace(SessionInventoryState::Unavailable);
+                }
             }
             command = commands.recv() => {
                 let Some(command) = command else { return; };
@@ -638,6 +675,7 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
@@ -648,15 +686,22 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
                     continue;
                 };
+                if let Incoming::SessionInventory(ids) = incoming {
+                    session_inventory
+                        .send_replace(SessionInventoryState::Available(Arc::from(ids)));
+                    continue;
+                }
                 if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
@@ -1374,6 +1419,7 @@ async fn process_incoming(
         Incoming::Ping { nonce, sent_us } => {
             write_frame(connection, CONTROL_STREAM, &Frame::Pong { nonce, sent_us }).await
         }
+        Incoming::ControlEvent | Incoming::SessionInventory(_) => true,
         Incoming::Disconnected | Incoming::Hello { .. } => false,
     }
 }
@@ -1398,6 +1444,56 @@ async fn retire_slow_stream(
         },
     )
     .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionInventoryEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    session_ids: Vec<uuid::Uuid>,
+}
+
+/// Accept only the agent's bounded, full live-shim snapshot on the control stream.
+fn decode_session_inventory(event: &[u8]) -> Option<Vec<[u8; 16]>> {
+    let snapshot: SessionInventoryEvent = serde_json::from_slice(event).ok()?;
+    if snapshot.kind != "terminal.sessions.snapshot" {
+        return None;
+    }
+    let ids: Vec<[u8; 16]> = snapshot
+        .session_ids
+        .into_iter()
+        .map(|id| *id.as_bytes())
+        .collect();
+    let unique: std::collections::HashSet<[u8; 16]> = ids.iter().copied().collect();
+    (unique.len() == ids.len()).then_some(ids)
+}
+
+/// Leave other bounded control Events available for protocol extensions.
+fn is_session_inventory_event(event: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(event).is_ok_and(|value| {
+        value.get("type").and_then(serde_json::Value::as_str) == Some("terminal.sessions.snapshot")
+    })
+}
+
+/// Keep inventory Events separate from bounded terminal notices on the data streams.
+fn decode_event(stream_id: u32, sub_id: u32, event_json: &[u8], wire: &Bytes) -> Option<Incoming> {
+    if sub_id != 0 {
+        return None;
+    }
+    if stream_id == CONTROL_STREAM {
+        if is_session_inventory_event(event_json) {
+            return decode_session_inventory(event_json).map(Incoming::SessionInventory);
+        }
+        return (event_json.len() <= 1024).then_some(Incoming::ControlEvent);
+    }
+    if event_json.len() > 1024 {
+        return None;
+    }
+    Some(Incoming::Event {
+        stream_id,
+        event_json: share_payload(wire, event_json)?,
+    })
 }
 
 async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
@@ -1430,13 +1526,9 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                         out_seq,
                         bytes: share_payload(&wire, bytes)?,
                     },
-                    Frame::Event {
-                        sub_id: 0,
-                        event_json,
-                    } if event_json.len() <= 1024 => Incoming::Event {
-                        stream_id,
-                        event_json: share_payload(&wire, event_json)?,
-                    },
+                    Frame::Event { sub_id, event_json } => {
+                        decode_event(stream_id, sub_id, event_json, &wire)?
+                    }
                     Frame::Ack { in_seq_acked } => Incoming::Ack {
                         stream_id,
                         in_seq_acked,

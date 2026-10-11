@@ -23,13 +23,13 @@ pub(crate) async fn record(
     session: &[u8; 16],
     cursor: u64,
     event: &[u8],
-) -> Result<(), ()> {
+) -> Result<bool, ()> {
     if event.len() > 1024 {
         return Err(());
     }
     let value: serde_json::Value = serde_json::from_slice(event).map_err(|_| ())?;
     if value["type"] != "terminal.exited" {
-        return Ok(());
+        return Ok(false);
     }
     let exit: Exit = serde_json::from_value(value).map_err(|_| ())?;
     if exit.kind != "terminal.exited"
@@ -47,5 +47,5 @@ pub(crate) async fn record(
     if changed.rows_affected() != 1 {
         return Err(());
     }
-    Ok(())
+    Ok(true)
 }

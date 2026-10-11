@@ -1,6 +1,9 @@
 //! Authenticates browser sockets, resumes connections, and relays user-owned terminal streams [19][41][50].
 
-use crate::embedded::{AgentError, AttachmentHandle, EmbeddedAgent, TerminalOutput, TerminalSize};
+use crate::embedded::{
+    AgentError, AttachmentHandle, EmbeddedAgent, SessionInventoryState, TerminalOutput,
+    TerminalSize,
+};
 use crate::{
     auth::Auth,
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
@@ -34,7 +37,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, watch};
 
 const CONTROL_STREAM: u32 = 0;
 const RESUME_NEXT: u64 = 1;
@@ -58,6 +61,8 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
 const MAX_RESUME_ROWS: i64 = 4096;
 // Reject further AttachTerm requests on a socket at this bound.
 const MAX_ATTACHMENTS: usize = 32;
+// Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
+const MAX_ENDED_SESSION_STATUSES: i64 = 128;
 // One slow host-facts poll per second can queue only a small bounded number per socket.
 const MAX_PENDING_PLUGIN_CALLS: usize = 4;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
@@ -86,6 +91,7 @@ pub(crate) struct WebSocketState {
     terminal_connect_timeout: Duration,
     connections: Arc<Semaphore>,
     users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
+    session_changes: watch::Sender<u64>,
 }
 
 impl WebSocketState {
@@ -96,6 +102,35 @@ impl WebSocketState {
         agent: EmbeddedAgent,
     ) -> Result<Self, crate::plugins::PluginError> {
         let plugins = crate::plugins::compiled(&pool).await?;
+        let (session_changes, _) = watch::channel(0_u64);
+        let mut inventory = agent.session_inventory();
+        let inventory_pool = pool.clone();
+        let inventory_changes = session_changes.clone();
+        tokio::spawn(async move {
+            loop {
+                let snapshot = inventory.borrow_and_update().clone();
+                match snapshot {
+                    SessionInventoryState::Pending => {}
+                    SessionInventoryState::Unavailable => {
+                        inventory_changes.send_modify(|version| *version = version.wrapping_add(1));
+                    }
+                    SessionInventoryState::Available(ids) => {
+                        if reconcile_embedded_sessions(&inventory_pool, &ids)
+                            .await
+                            .is_ok()
+                        {
+                            inventory_changes
+                                .send_modify(|version| *version = version.wrapping_add(1));
+                        } else {
+                            tracing::warn!("could not reconcile embedded terminal sessions");
+                        }
+                    }
+                }
+                if inventory.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
         Ok(Self {
             auth,
             pool,
@@ -112,6 +147,7 @@ impl WebSocketState {
             terminal_connect_timeout: TERMINAL_CONNECT_TIMEOUT,
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             users: Arc::default(),
+            session_changes,
         })
     }
 
@@ -133,6 +169,12 @@ impl WebSocketState {
     ) -> Self {
         self.plugin_descriptors = plugin_descriptors;
         self
+    }
+
+    /// Wake authenticated session-list subscribers after the local host changes its live set.
+    fn sessions_changed(&self) {
+        self.session_changes
+            .send_modify(|version| *version = version.wrapping_add(1));
     }
 
     fn action(&self, action_id: &str) -> Option<ActionDef> {
@@ -182,6 +224,33 @@ impl WebSocketState {
         users.insert(user.to_owned(), Arc::downgrade(&semaphore));
         Some(permit)
     }
+}
+
+/// Close stale embedded session rows after an agent restart or a shim retirement.
+async fn reconcile_embedded_sessions(
+    pool: &SqlitePool,
+    session_ids: &[[u8; 16]],
+) -> Result<(), sqlx::Error> {
+    let live: HashSet<[u8; 16]> = session_ids.iter().copied().collect();
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT id FROM terminal_sessions WHERE remote_host_id IS NULL AND closed_at IS NULL",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for id in rows {
+        let Ok(id_array) = <[u8; 16]>::try_from(id.as_slice()) else {
+            continue;
+        };
+        if live.contains(&id_array) {
+            continue;
+        }
+        sqlx::query("UPDATE terminal_sessions SET closed_at=COALESCE(closed_at,unixepoch()) WHERE id=? AND remote_host_id IS NULL AND closed_at IS NULL")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    transaction.commit().await
 }
 
 /// Mount the authenticated leg-A WebSocket endpoint.
@@ -253,6 +322,8 @@ async fn run_socket(
     let mut recovery_events = state.auth.recovery_events();
     let mut recovery_subscribed = false;
     let mut recovery_snapshot = RecoverySnapshot::Unread;
+    let mut session_changes = state.session_changes.subscribe();
+    let mut terminal_sessions_subscribed = None;
     let mut revocations = state.auth.revocation_events();
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
@@ -344,6 +415,13 @@ async fn run_socket(
                     send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
                 ).await.is_err() { break; }
             }
+            changed = session_changes.changed(), if terminal_sessions_subscribed.is_some() => {
+                if changed.is_err() { break; }
+                if let Some(sub_id) = terminal_sessions_subscribed
+                    && while_authorized(&state, &user_id, &session_token, false,
+                        send_terminal_sessions_snapshot(&state, &user_id, sub_id, &mut sink, &mut encode)
+                    ).await.is_err() { break; }
+            }
             changed = revocations.changed() => {
                 if changed.is_err() { break; }
                 let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
@@ -378,6 +456,18 @@ async fn run_socket(
                         recovery_snapshot = RecoverySnapshot::Unread;
                         if while_authorized(&state, &user_id, &session_token, true,
                             send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
+                        ).await.is_err() { break; }
+                        continue;
+                    }
+                    if let Ok(decoded) = decode_muxed_frame(&wire)
+                        && decoded.stream_id == CONTROL_STREAM
+                        && let Frame::Subscribe { sub_id, filter_json } = decoded.frame
+                        && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
+                            == Some(json!({"topic":"terminal.sessions"})) {
+                        // Install the watch before reading the snapshot so an intervening update is sent too.
+                        terminal_sessions_subscribed = Some(sub_id);
+                        if while_authorized(&state, &user_id, &session_token, true,
+                            send_terminal_sessions_snapshot(&state, &user_id, sub_id, &mut sink, &mut encode)
                         ).await.is_err() { break; }
                         continue;
                     }
@@ -567,6 +657,79 @@ where
     Ok(())
 }
 
+/// Send only this account's open rows that the embedded infraternal agent reports live.
+async fn send_terminal_sessions_snapshot<K>(
+    state: &WebSocketState,
+    user: &str,
+    sub_id: u32,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let inventory = state.agent.session_inventory().borrow().clone();
+    let event = match inventory {
+        SessionInventoryState::Pending | SessionInventoryState::Unavailable => json!({
+            "topic":"terminal.sessions",
+            "type":"terminal.sessions.unavailable",
+        }),
+        SessionInventoryState::Available(live) => {
+            let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+                "SELECT id FROM terminal_sessions WHERE user_id=? AND remote_host_id IS NULL AND closed_at IS NULL",
+            )
+            .bind(user)
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|_| ())?;
+            let live: HashSet<[u8; 16]> = live.iter().copied().collect();
+            let mut session_ids: Vec<String> = rows
+                .iter()
+                .filter_map(|id| <[u8; 16]>::try_from(id.as_slice()).ok())
+                .filter(|id| live.contains(id))
+                .map(|id| uuid::Uuid::from_bytes(id).to_string())
+                .collect();
+            session_ids.sort_unstable();
+            let ended_rows: Vec<(Vec<u8>, i64)> = sqlx::query_as(
+                "SELECT id,exit_status FROM terminal_sessions WHERE user_id=? AND remote_host_id IS NULL AND closed_at IS NOT NULL AND exit_status IS NOT NULL ORDER BY closed_at DESC,id DESC LIMIT ?",
+            )
+            .bind(user)
+            .bind(MAX_ENDED_SESSION_STATUSES)
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|_| ())?;
+            let ended_sessions: Vec<serde_json::Value> = ended_rows
+                .into_iter()
+                .filter_map(|(id, status)| {
+                    let id = <[u8; 16]>::try_from(id.as_slice()).ok()?;
+                    let status = i32::try_from(status).ok()?;
+                    Some(json!({
+                        "session_id": uuid::Uuid::from_bytes(id),
+                        "status": status,
+                    }))
+                })
+                .collect();
+            json!({
+                "topic":"terminal.sessions",
+                "type":"terminal.sessions.snapshot",
+                "session_ids":session_ids,
+                "ended_sessions":ended_sessions,
+            })
+        }
+    };
+    let event = serde_json::to_vec(&event).map_err(|_| ())?;
+    send_frame(
+        sink,
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id,
+            event_json: &event,
+        },
+        encode,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn handle_terminal_output<K>(
     state: &WebSocketState,
@@ -643,7 +806,7 @@ where
             .is_ok()
         }
         TerminalOutput::Event { event_json } => {
-            crate::terminal_exit::record(
+            let ended = crate::terminal_exit::record(
                 &state.pool,
                 user_id,
                 session_token,
@@ -652,6 +815,9 @@ where
                 &event_json,
             )
             .await?;
+            if ended {
+                state.sessions_changed();
+            }
             send_frame(
                 sink,
                 stream_id,
@@ -1436,6 +1602,7 @@ async fn open_terminal(
     if changed.rows_affected() != 1 {
         return Err(crate::embedded::AgentError::Unavailable);
     }
+    state.sessions_changed();
     Ok(session_id)
 }
 
