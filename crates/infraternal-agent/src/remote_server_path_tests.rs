@@ -508,3 +508,103 @@ async fn component_down_proves_tcp_fallback_when_enrolled_udp_is_unavailable() {
     tcp.abort();
     let _ = tcp.await;
 }
+
+/// The live path is interrupted by discarding UDP, without sending a close or
+/// removing the interface. This measures the silent-failure case seen on a
+/// network change; the enrolled fallback remains reachable throughout.
+#[tokio::test]
+#[ignore = "Run alone in the local CPUWeight scope for silent-path recovery measurements."]
+async fn review_silent_mesh_interruption_returns_to_fallback_within_local_reconnect_budget() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let ca = root();
+    let server = leaf(&ca, true);
+    let mut fallback = Server::new(
+        &server,
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let address = fallback.endpoint.local_addr().unwrap();
+    let mut mesh = Server::new(
+        &server,
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.3:0".parse().unwrap(),
+    );
+    let upstream = mesh.endpoint.local_addr().unwrap();
+    let socket = tokio::net::UdpSocket::bind(SocketAddr::new(
+        "127.0.0.2".parse().unwrap(),
+        address.port(),
+    ))
+    .await
+    .unwrap();
+    let cut = Arc::new(AtomicBool::new(false));
+    let refused = cut.clone();
+    let relay = tokio::spawn(async move {
+        let mut client = None;
+        let mut packet = vec![0; 65536];
+        loop {
+            let (count, source) = socket.recv_from(&mut packet).await.unwrap();
+            if refused.load(Ordering::Acquire) {
+                continue;
+            }
+            let destination = if source == upstream {
+                let Some(client) = client else {
+                    continue;
+                };
+                client
+            } else {
+                client = Some(source);
+                upstream
+            };
+            socket.send_to(&packet[..count], destination).await.unwrap();
+        }
+    });
+    let identity = RemoteIdentity {
+        identity: leaf(&ca, false),
+        roots: vec![ca.certificate],
+        endpoint: address,
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    let parent = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
+        .join(format!("review-path-{}", uuid::Uuid::new_v4().simple()));
+    let directory = Directory(crate::sessions::state(Some(parent)).unwrap());
+    let registry = registry();
+    let control = registry.clone();
+    let state = directory.0.clone();
+    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
+    fallback.admitted().await;
+    preference(&registry, Some("127.0.0.2".parse().unwrap())).await;
+    mesh.admitted().await;
+    assert_eq!(status(&registry).await.kind, ServerLinkKind::Mesh);
+    // Allow healthy keepalives before the cut so failure detection begins from
+    // an established path rather than from negotiation or initial scheduling.
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    cut.store(true, Ordering::Release);
+    let started = tokio::time::Instant::now();
+    let recovered = tokio::time::timeout(Duration::from_secs(6), fallback.accepted.recv()).await;
+    let elapsed = started.elapsed();
+    let observed = status(&registry).await;
+    supervisor.abort();
+    let _ = supervisor.await;
+    relay.abort();
+    let _ = relay.await;
+    assert!(
+        matches!(recovered, Ok(Some(()))),
+        "reachable fallback must recover"
+    );
+    assert_eq!(observed.kind, ServerLinkKind::Fallback);
+    // Local authenticated handshake RTT is negligible. D41 also supplies the
+    // less strict 300 ms reconnect reference at zero network overhead.
+    println!(
+        "METRIC review_silent_mesh_cut fallback_us={} budget_us=300000 load={}",
+        elapsed.as_micros(),
+        std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+    );
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "silent mesh interruption exceeded the local reconnect budget: {elapsed:?}"
+    );
+}
