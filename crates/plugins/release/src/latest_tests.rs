@@ -44,7 +44,7 @@ fn startup_reclaims_only_owned_inactive_private_metadata() {
         .mode(0o700)
         .create(&state)
         .unwrap();
-    let stale = private_stage(
+    let abandoned = private_stage(
         &state,
         &uuid::Uuid::new_v4().hyphenated().to_string(),
         "SHA256SUMS",
@@ -97,7 +97,7 @@ fn startup_reclaims_only_owned_inactive_private_metadata() {
     );
 
     assert!(
-        !stale.exists(),
+        !abandoned.exists(),
         "owned abandoned metadata must be reclaimed"
     );
     for retained in [&active, &unrelated, &linked, &unsafe_mode, &unknown] {
@@ -154,7 +154,11 @@ impl ReleaseEngine for Engine {
 async fn cancellation_joins_verification() {
     let state = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
         .join(format!("release-cancel-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&state).unwrap();
+    // Staging requires its existing state parent to be service-private.
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&state)
+        .unwrap();
     let running = Arc::new(AtomicBool::new(false));
     let started = Arc::new(tokio::sync::Notify::new());
     let lookup = VerifiedLookup::new(
@@ -165,8 +169,12 @@ async fn cancellation_joins_verification() {
             started: started.clone(),
         }),
     );
-    let task = tokio::spawn(async move { lookup.latest("stable").await });
-    started.notified().await;
+    let mut task = tokio::spawn(async move { lookup.latest("stable").await });
+    tokio::select! {
+        biased;
+        () = started.notified() => (),
+        result = &mut task => panic!("lookup ended before verifier: {result:?}"),
+    }
     task.abort();
     let _ = task.await;
     let detached = running.load(Ordering::SeqCst);

@@ -247,7 +247,7 @@ fn cleanup_abandoned_staging(state: &Path) -> std::io::Result<()> {
             continue;
         }
         let Ok(files) =
-            std::fs::read_dir(&path).and_then(|files| files.collect::<Result<Vec<_>, _>>())
+            std::fs::read_dir(&path).and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)
         else {
             continue;
         };
