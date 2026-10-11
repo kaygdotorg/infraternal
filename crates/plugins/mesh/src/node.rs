@@ -278,6 +278,15 @@ impl Node {
         if self.identity.is_none() {
             return Err(io::ErrorKind::NotConnected.into());
         }
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.node != chunk.node)
+        {
+            // A reconnect snapshot may replace peer inventory, never the local
+            // identity whose addresses and grants were already accepted [164,166].
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         if chunk.index == 0 {
             let current = self.config.as_ref().map(|config| config.version);
             if chunk.from_version.is_some() && chunk.from_version != current
